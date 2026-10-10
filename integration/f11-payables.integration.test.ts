@@ -257,6 +257,10 @@ describe("expense «پرداخت بعدی»", () => {
       credit: 7_500_000,
       balance: 7_500_000,
       sourceType: "expense",
+      // Issue #825: the line also carries the journal entry it came from, so
+      // the screen can open the voucher rather than guess a URL out of the
+      // Persian description.
+      journalEntryId: expect.any(String),
     });
 
     // Settled later through the existing A/P payment path, from a chosen bank account with a reference.

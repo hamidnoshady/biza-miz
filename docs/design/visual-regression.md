@@ -230,3 +230,33 @@ If you cannot reach Playwright's CDN, set `VISUAL_CHROMIUM_PATH` to a Chromium
 you obtained another way — but it must be the **same major**, or the check above
 will stop you. (`@sparticuz/chromium@141.0.0` on npm is one such source, and is
 how the committed baselines were produced.)
+
+## Focused local review (without weakening CI)
+
+For an already-inspected, intended change, select only the affected screens:
+
+```sh
+npm run test:visual -- --screens=accounting-receivables,accounting-expenses
+npm run test:visual:update -- --screens=accounting-receivables
+```
+
+The selection is local-only: CI rejects `--screens`, and commands without it
+still run the complete suite. Unknown/empty screen names fail rather than
+silently skipping coverage. This avoids recording unrelated baselines during a
+review. All browser, viewport, locale, loaded-state, comparison and tolerance
+rules above remain unchanged. Local development captures are diagnostic evidence;
+only the exact-head production CI comparison can establish that they also match
+production rendering.
+
+`npm run test:a11y:subledger` checks the seeded receivables surface with the same
+Chromium major and locale, in light/dark at 1440 and 390 pixels. It requests a
+one-row window from the real API to exercise pagination in the two-customer
+fixture, tests keyboard entry/exit and focus containment/restoration, and runs
+axe WCAG A/AA checks on search/summary/paging, statement and journal detail.
+Actual violations fail. For axe's indeterminate transparent-cell contrast in
+stacked mobile dialogs, it additionally measures rendered foreground/opaque
+background colors, verifies text is not occluded, and requires at least 4.5:1;
+unsupported compositing fails rather than being waived. Raw indeterminate
+results and direct measurements remain in the log. Set `A11Y_SCREENSHOT_DIR`
+locally to retain review screenshots. This focused audit is not a claim of
+whole-application WCAG conformance.

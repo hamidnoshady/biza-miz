@@ -1,10 +1,24 @@
+import { subledgerNextOffset, validateSubledgerWindow } from "./subledger-pagination";
 /**
  * Accounts Payable subledger and supplier-payment workflows.
  *
  * The subledger is reconstructed from journal lines on the control account;
  * no mutable/shadow balance is stored. Liability balances are credit minus
- * debit. All reads share the canonical source attribution in ap-attribution.ts
- * and keep the unattributed bucket visible so the total reconciles to GL 2100.
+ * debit — the opposite sign convention from A/R's debit-minus-credit — so "an
+ * open item" is a credit line here and "a payment" is a debit line. All reads
+ * share the canonical source attribution in ap-attribution.ts and keep the
+ * unattributed bucket visible so the total reconciles to GL 2100.
+ *
+ * Like its A/R mirror (ar-service.ts), the report reads happen where the rows
+ * are: the balance list is one grouped row per supplier alias with the search,
+ * the window and the pre-window count done in SQL, and the aging report
+ * returns one row per supplier with the buckets already summed. Nothing loads
+ * the business's A/P history into Node to draw a screen.
+ *
+ * The statement is the one read that walks lines (a statement is a list), and
+ * it asks for a single supplier's lines only. DB-touching, so per repo
+ * convention it has no direct unit test; covered by integration/ap
+ * .integration.test.ts.
  */
 import { createHash } from "node:crypto";
 import { getPool, query } from "./db";
@@ -13,8 +27,9 @@ import { isUuid } from "./uuid";
 import { isValidIsoDate } from "./iso-date";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
-import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
-import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apAttributionStatus } from "./ap-attribution";
+import { agingBucketCaseSql, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
+import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apSupplierAttributionSql, apAttributionStatus } from "./ap-attribution";
+import { foldForSearch, searchPattern } from "./sql-search";
 import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
 import { normalizeBankReference, PayablesInputError } from "./payables-input";
 import { resolveVoucherCashAccount } from "./voucher-cash-account";
@@ -36,6 +51,28 @@ async function apAccountId(businessId: string): Promise<string | null> {
     [businessId, WELL_KNOWN_CODES.accountsPayable],
   );
   return rows[0]?.id ?? null;
+}
+
+/** How a supplier alias with no name yet is shown — one copy, for the same reason A/R keeps one. */
+const UNATTRIBUTED_SUPPLIER_NAME = "بدون تأمین‌کننده مشخص";
+
+/**
+ * The display identity a grouped supplier alias is read through: the party
+ * behind the branch alias, else the alias's own copy, else the bucket's name.
+ */
+const AP_SUPPLIER_NAME_SQL = `coalesce(pa.name, s.name, '${UNATTRIBUTED_SUPPLIER_NAME}')`;
+
+/**
+ * The joins that give an already-grouped supplier id its display identity and
+ * branch label. Takes the id expression because the two shapes that need it
+ * name it differently — `g.supplier_id` under the grouped subquery,
+ * `p.supplier_id` under the aging CTE.
+ */
+function apSupplierIdentityJoins(idExpression: string): string {
+  return `
+  LEFT JOIN suppliers s ON s.id = ${idExpression}
+  LEFT JOIN parties pa ON pa.id = s.party_id
+  LEFT JOIN locations supplier_location ON supplier_location.id = s.location_id`;
 }
 
 interface ApLineRow extends Record<string, unknown> {
@@ -66,36 +103,11 @@ interface ApLineRow extends Record<string, unknown> {
   installment_plan_id: string | null;
 }
 
-interface ApLineFilters {
-  businessId: string;
-  accountId: string;
-  supplierId?: string;
-  asOfDate?: string;
-}
-
-/**
- * Line-level A/P activity for statement/aging calculations. Unlike the old
- * whole-history helper, this pushes both supplier selection and the as-of date
- * into PostgreSQL before any rows reach Node.
- */
-async function queryApLines(filters: ApLineFilters): Promise<ApLineRow[]> {
-  const values: unknown[] = [filters.businessId, filters.accountId];
-  const predicates = ["je.business_id = $1", "jl.account_id = $2"];
-  if (filters.asOfDate) {
-    values.push(filters.asOfDate);
-    predicates.push(`je.entry_date <= $${values.length}::date`);
-  }
-  if (filters.supplierId !== undefined) {
-    values.push(filters.supplierId);
-    const supplierParameter = `$${values.length}::text`;
-    predicates.push(
-      `CASE WHEN ${supplierParameter} = '${UNKNOWN_SUPPLIER_KEY}'
-            THEN ${AP_SUPPLIER_ID_SQL} IS NULL
-            ELSE ${AP_SUPPLIER_ID_SQL}::text = ${supplierParameter}
-       END`,
-    );
-  }
-
+/** A statement's sources are filtered inside the canonical relation, before
+ * the journal join. Unknown statements use its full LEFT JOIN to retain gaps. */
+async function queryApLines(filters: { businessId: string; accountId: string; supplierId: string }): Promise<ApLineRow[]> {
+  const known = filters.supplierId !== UNKNOWN_SUPPLIER_KEY;
+  const values = known ? [filters.businessId, filters.accountId, filters.supplierId] : [filters.businessId, filters.accountId];
   const { rows } = await query<ApLineRow>(
     `SELECT s.id AS supplier_id,
             COALESCE(pa.name, s.name) AS supplier_name,
@@ -110,20 +122,17 @@ async function queryApLines(filters: ApLineFilters): Promise<ApLineRow[]> {
             je.entry_date::text AS entry_date,
             je.source_type,
             je.source_id::text AS source_id,
-            COALESCE(p.note, p2.note, ip.note, ipr.note, exp.memo) AS note,
-            COALESCE(sr.reason, isr.reason) AS return_reason,
+            ap_source.note,
+            ap_source.return_reason,
             je.memo,
             jl.debit::text AS debit,
             jl.credit::text AS credit,
-            COALESCE(p.id, p2.id)::text AS purchase_id,
-            COALESCE(ip.id, ipr.id)::text AS item_purchase_id,
-            sr.id::text AS supplier_return_id,
-            isr.id::text AS item_supplier_return_id,
-            ap.id::text AS payment_id,
-            ch.id::text AS cheque_id,
-            ins.id::text AS installment_plan_id
-       ${AP_SUPPLIER_ATTRIBUTION_SQL}
-      WHERE ${predicates.join(" AND ")}
+            ap_source.purchase_id, ap_source.item_purchase_id,
+            ap_source.supplier_return_id, ap_source.item_supplier_return_id,
+            ap_source.payment_id, ap_source.cheque_id, ap_source.installment_plan_id
+       ${known ? apSupplierAttributionSql("$3::uuid") : AP_SUPPLIER_ATTRIBUTION_SQL}
+      WHERE je.business_id = $1 AND jl.account_id = $2
+        AND ${known ? `${AP_SUPPLIER_ID_SQL} = $3::uuid` : `${AP_SUPPLIER_ID_SQL} IS NULL`}
       ORDER BY je.entry_date, je.posted_at, je.id, jl.id`,
     values,
   );
@@ -184,11 +193,22 @@ export async function listSupplierDirectory(businessId: string): Promise<Supplie
   }));
 }
 
-/** Supplier balances aggregated in PostgreSQL; no journal history is copied into application memory. */
-export async function listSupplierBalances(businessId: string): Promise<SupplierBalance[]> {
-  const accountId = await apAccountId(businessId);
-  if (!accountId) return [];
-
+/**
+ * The balance list, grouped in SQL and bounded by the caller's window — the
+ * A/P twin of `customerBalanceRows`, with the liability sign (credit − debit),
+ * the supplier alias as the group key, and the same three search fields
+ * (name, phone, accounting code) the A/R list searches.
+ *
+ * `$3` is the folded pattern or NULL; `$4`/`$5` are the window, both NULL for
+ * the whole list. A counted filtered CTE retains the total even for an empty
+ * page, in the same SQL snapshot and round trip as the rows.
+ */
+async function supplierBalanceRows(
+  businessId: string,
+  accountId: string,
+  options: { q: string | null; limit: number | null; offset: number },
+): Promise<{ suppliers: SupplierBalance[]; total: number }> {
+  const pattern = searchPattern(options.q);
   const { rows } = await query<{
     supplier_id: string | null;
     supplier_name: string | null;
@@ -197,35 +217,174 @@ export async function listSupplierBalances(businessId: string): Promise<Supplier
     location_id: string | null;
     location_name: string | null;
     balance: string;
+    total: string;
+    present: boolean | null;
   }>(
-    `SELECT ${AP_SUPPLIER_ID_SQL} AS supplier_id,
-            COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص') AS supplier_name,
-            COALESCE(pa.phone, s.phone) AS supplier_phone,
+    `WITH filtered AS (
+     SELECT g.supplier_id,
+            ${AP_SUPPLIER_NAME_SQL} AS supplier_name,
+            coalesce(pa.phone, s.phone) AS supplier_phone,
             s.party_id AS party_id,
             supplier_location.id AS location_id,
             supplier_location.name AS location_name,
-            SUM(jl.credit - jl.debit)::text AS balance
-       ${AP_SUPPLIER_ATTRIBUTION_SQL}
-      WHERE je.business_id = $1 AND jl.account_id = $2
-      GROUP BY ${AP_SUPPLIER_ID_SQL}, pa.name, s.name, pa.phone, s.phone, s.party_id,
-               supplier_location.id, supplier_location.name
-     HAVING SUM(jl.credit - jl.debit) <> 0
-      ORDER BY SUM(jl.credit - jl.debit) DESC,
-               COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص'),
-               supplier_location.name NULLS FIRST,
-               ${AP_SUPPLIER_ID_SQL} NULLS FIRST`,
-    [businessId, accountId],
+            g.balance AS balance
+       FROM (
+         SELECT ${AP_SUPPLIER_ID_SQL} AS supplier_id,
+                sum(jl.credit - jl.debit) AS balance
+         ${AP_SUPPLIER_ATTRIBUTION_SQL}
+          WHERE je.business_id = $1 AND jl.account_id = $2
+          GROUP BY ${AP_SUPPLIER_ID_SQL}
+         HAVING sum(jl.credit - jl.debit) <> 0
+       ) g
+       ${apSupplierIdentityJoins("g.supplier_id")}
+      WHERE $3::text IS NULL
+         OR ${foldForSearch(AP_SUPPLIER_NAME_SQL)} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(pa.phone, s.phone, '')")} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(pa.accounting_code, '')")} ILIKE $3 ESCAPE '\\'
+     )
+     SELECT page.*, counts.total
+       FROM (SELECT count(*)::text AS total FROM filtered) counts
+       LEFT JOIN LATERAL (
+         SELECT *, true AS present FROM filtered
+          ORDER BY balance DESC, supplier_name, location_name NULLS FIRST, supplier_id NULLS FIRST
+          LIMIT $4::int OFFSET $5::bigint
+       ) page ON true
+      ORDER BY balance DESC, supplier_name, location_name NULLS FIRST, supplier_id NULLS FIRST`,
+    [businessId, accountId, pattern, options.limit, options.offset],
   );
 
-  return rows.map((row) => ({
-    supplierId: row.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
-    supplierName: row.supplier_name ?? "بدون تأمین‌کننده مشخص",
-    supplierPhone: row.supplier_phone,
-    supplierPartyId: row.party_id,
-    locationId: row.location_id,
-    locationName: row.location_name,
-    balance: Number(row.balance),
-  }));
+  return {
+    suppliers: rows.filter((row) => row.present).map((row) => ({
+      supplierId: row.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
+      supplierName: row.supplier_name ?? UNATTRIBUTED_SUPPLIER_NAME,
+      supplierPhone: row.supplier_phone,
+      supplierPartyId: row.party_id,
+      locationId: row.location_id,
+      locationName: row.location_name,
+      balance: Number(row.balance),
+    })),
+    total: rows[0] ? Number(rows[0].total) : 0,
+  };
+}
+
+/** Supplier balances aggregated in PostgreSQL; no journal history is copied into application memory. */
+export async function listSupplierBalances(businessId: string): Promise<SupplierBalance[]> {
+  const accountId = await apAccountId(businessId);
+  if (!accountId) return [];
+  const { suppliers } = await supplierBalanceRows(businessId, accountId, { q: null, limit: null, offset: 0 });
+  return suppliers;
+}
+
+/**
+ * What the whole A/P subledger adds up to — the mirror of
+ * `ArReconciliationSummary`, with the liability signs: `payableTotal` is what
+ * the business owes, `advanceTotal` the prepayments it has made, and
+ * `controlBalance` the A/P control account read credit-positive (the way the
+ * trial balance reads accounts of this type).
+ */
+export interface ApReconciliationSummary {
+  payableTotal: number;
+  advanceTotal: number;
+  netTotal: number;
+  controlBalance: number;
+  difference: number;
+  reconciles: boolean;
+  parties: number;
+  unattributedBalance: number;
+}
+
+const EMPTY_AP_SUMMARY: ApReconciliationSummary = {
+  payableTotal: 0,
+  advanceTotal: 0,
+  netTotal: 0,
+  controlBalance: 0,
+  difference: 0,
+  reconciles: true,
+  parties: 0,
+  unattributedBalance: 0,
+};
+
+/** The whole-subledger totals, in one round trip, over the same attribution as every row. */
+export async function getApReconciliationSummary(businessId: string): Promise<ApReconciliationSummary> {
+  const accountId = await apAccountId(businessId);
+  if (!accountId) return { ...EMPTY_AP_SUMMARY };
+  const { rows } = await query<{
+    payable: string;
+    advances: string;
+    net: string;
+    control: string;
+    parties: number;
+    unattributed: string;
+  }>(
+    `WITH grouped AS (
+       SELECT ${AP_SUPPLIER_ID_SQL} AS supplier_id,
+              sum(jl.credit - jl.debit) AS balance
+       ${AP_SUPPLIER_ATTRIBUTION_SQL}
+        WHERE je.business_id = $1 AND jl.account_id = $2
+        GROUP BY ${AP_SUPPLIER_ID_SQL}
+     ),
+     subledger AS (
+       SELECT coalesce(sum(balance) FILTER (WHERE balance > 0), 0) AS payable,
+              coalesce(sum(-balance) FILTER (WHERE balance < 0), 0) AS advances,
+              coalesce(sum(balance), 0) AS net,
+              count(*) FILTER (WHERE balance <> 0)::int AS parties,
+              coalesce(sum(balance) FILTER (WHERE supplier_id IS NULL), 0) AS unattributed
+         FROM grouped
+     ),
+     control AS (
+       -- A liability's own sign: credit-positive, the way the trial balance
+       -- reads accounts of this type.
+       SELECT coalesce(sum(jl.credit - jl.debit), 0) AS balance
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+        WHERE je.business_id = $1 AND jl.account_id = $2
+     )
+     SELECT s.payable::text AS payable, s.advances::text AS advances, s.net::text AS net,
+            s.parties, s.unattributed::text AS unattributed, c.balance::text AS control
+       FROM subledger s, control c`,
+    [businessId, accountId],
+  );
+  const row = rows[0];
+  if (!row) return { ...EMPTY_AP_SUMMARY };
+  const netTotal = Number(row.net);
+  const controlBalance = Number(row.control);
+  return {
+    payableTotal: Number(row.payable),
+    advanceTotal: Number(row.advances),
+    netTotal,
+    controlBalance,
+    difference: netTotal - controlBalance,
+    reconciles: netTotal === controlBalance,
+    parties: Number(row.parties),
+    unattributedBalance: Number(row.unattributed),
+  };
+}
+
+/** One page of the A/P balances list, with the totals the page must not change. */
+export interface SupplierBalancePage {
+  nextOffset: number | null;
+  suppliers: SupplierBalance[];
+  total: number;
+  summary: ApReconciliationSummary;
+}
+
+/** The A/P twin of `listCustomerBalancePage`: the page in SQL, the totals in the same answer. */
+export async function listSupplierBalancePage(
+  businessId: string,
+  options: { q?: string | null; limit: number; offset: number },
+): Promise<SupplierBalancePage> {
+  validateSubledgerWindow(options.limit, options.offset);
+  const accountId = await apAccountId(businessId);
+  if (!accountId) return { suppliers: [], total: 0, nextOffset: null, summary: { ...EMPTY_AP_SUMMARY } };
+  const [{ suppliers, total }, summary] = await Promise.all([
+    supplierBalanceRows(businessId, accountId, {
+      q: options.q?.trim() || null,
+      limit: options.limit,
+      offset: options.offset,
+    }),
+    getApReconciliationSummary(businessId),
+  ]);
+  return { suppliers, total, summary, nextOffset: subledgerNextOffset(options.offset, suppliers.length, total) };
 }
 
 export type ApStatementType =
@@ -353,57 +512,150 @@ export interface AgingReport {
   totals: AgingSummary;
 }
 
-/** Standard 30/60/90-day A/P aging; SQL applies the as-of bound before FIFO math. */
+/**
+ * Standard 30/60/90-day A/P aging, per supplier alias, as of `asOfDate`
+ * (defaults to the *business's* today — see `getArAging` for why a UTC date
+ * slice would put the late shift's documents in the wrong bucket).
+ *
+ * Aggregated in PostgreSQL like its A/R mirror: bills are the credits,
+ * payments and returns the debits, and the database returns one row per
+ * supplier with the buckets already summed and the as-of date already applied.
+ *
+ * The FIFO allocation is one pass of window functions rather than a join per
+ * party: the earlier null-tolerant join planned as a nested loop that compared
+ * every party against every line (2.7M comparisons at 300 suppliers × 9,000
+ * lines, with `Rows Removed by Join Filter` in the plan — see aging.ts's note).
+ * Carrying the party's payments as a window over the rows being scanned turns
+ * every join into a hash join: `EXPLAIN ANALYZE` on a seeded 138k-line ledger
+ * went from 441 ms to ~100 ms on the same data, all hash joins.
+ */
 export async function getApAging(businessId: string, asOfDate?: string): Promise<AgingReport> {
   if (asOfDate !== undefined && !isValidIsoDate(asOfDate)) throw new ApError("invalid_date");
   const effectiveAsOf = asOfDate ?? (await businessToday(businessId));
   const accountId = await apAccountId(businessId);
-  if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
-
-  const lines = await queryApLines({ businessId, accountId, asOfDate: effectiveAsOf });
-  const bySupplier = new Map<string, {
-    name: string;
-    locationId: string | null;
-    locationName: string | null;
-    bills: { id: string; date: string; amount: number }[];
-    payments: { id: string; date: string; amount: number }[];
-  }>();
-  for (const line of lines) {
-    const key = line.supplier_id ?? UNKNOWN_SUPPLIER_KEY;
-    const entry = bySupplier.get(key) ?? {
-      name: line.supplier_name ?? "بدون تأمین‌کننده مشخص",
-      locationId: line.supplier_location_id,
-      locationName: line.supplier_location_name,
-      bills: [],
-      payments: [],
-    };
-    const debit = Number(line.debit);
-    const credit = Number(line.credit);
-    // Liability: credit raises the balance; a debit pays down a bill/records a return.
-    if (credit > 0) entry.bills.push({ id: line.journal_line_id, date: line.entry_date, amount: credit });
-    if (debit > 0) entry.payments.push({ id: line.journal_line_id, date: line.entry_date, amount: debit });
-    bySupplier.set(key, entry);
+  if (!accountId) {
+    return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
   }
 
-  const rows: AgingRow[] = [];
-  const totals: AgingSummary = { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 };
-  for (const [supplierId, { name, locationId, locationName, bills, payments }] of bySupplier) {
-    const summary = summarizeAging(ageOpenItems(bills, payments, effectiveAsOf));
-    // Supplier advances/overpayments have no bill to age; retain the debit
-    // balance as negative current so the report reconciles to control account 2100.
-    const credit = unappliedCredit(bills, payments);
-    summary.current -= credit;
-    summary.total -= credit;
-    if (summary.total === 0) continue;
-    rows.push({ supplierId, supplierName: name, locationId, locationName, ...summary });
-    totals.current += summary.current;
-    totals.d31_60 += summary.d31_60;
-    totals.d61_90 += summary.d61_90;
-    totals.over90 += summary.over90;
-    totals.total += summary.total;
-  }
-  rows.sort((a, b) => b.total - a.total || a.supplierName.localeCompare(b.supplierName) || (a.locationName ?? "").localeCompare(b.locationName ?? "") || a.supplierId.localeCompare(b.supplierId));
-  return { asOfDate: effectiveAsOf, rows, totals };
+  const { rows } = await query<{
+    supplier_id: string | null;
+    supplier_name: string;
+    location_id: string | null;
+    location_name: string | null;
+    current: string;
+    d31_60: string;
+    d61_90: string;
+    over90: string;
+    total: string;
+  }>(
+    `WITH scoped AS (
+       -- The bucket key is the attribution, normalised to text so the
+       -- unattributed lines have a key of their own instead of the NULL that
+       -- no join can match (an empty string cannot collide with any supplier id).
+       SELECT coalesce(${AP_SUPPLIER_ID_SQL}::text, '') AS supplier_key,
+              ${AP_SUPPLIER_ID_SQL} AS supplier_id,
+              je.entry_date,
+              je.posted_at,
+              jl.id AS line_id,
+              jl.debit AS debit,
+              jl.credit AS credit,
+              -- The supplier's payments, carried as a window over the rows
+              -- being scanned rather than joined back on a per-party total.
+              sum(jl.debit) OVER (PARTITION BY coalesce(${AP_SUPPLIER_ID_SQL}::text, '')) AS paid
+       ${AP_SUPPLIER_ATTRIBUTION_SQL}
+        WHERE je.business_id = $1 AND jl.account_id = $2 AND je.entry_date <= $3::date
+     ),
+     totals AS (
+       SELECT supplier_key, supplier_id, sum(credit) AS owed, sum(debit) AS paid
+         FROM scoped GROUP BY supplier_key, supplier_id
+     ),
+     items AS (
+       SELECT supplier_key, entry_date, posted_at, line_id, paid,
+              sum(credit) OVER (
+                PARTITION BY supplier_key ORDER BY entry_date, posted_at, line_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+              ) AS cumulative
+         FROM scoped
+        WHERE credit > 0
+     ),
+     open_items AS (
+       SELECT supplier_key, bucket, outstanding
+         FROM (
+           SELECT supplier_key,
+                  ${agingBucketCaseSql("($3::date - entry_date)")} AS bucket,
+                  greatest(0, cumulative - paid)
+                    - coalesce(
+                        greatest(0, lag(cumulative) OVER (
+                          PARTITION BY supplier_key ORDER BY entry_date, posted_at, line_id
+                        ) - paid),
+                        0
+                      ) AS outstanding
+             FROM items
+         ) x
+        WHERE outstanding > 0
+     ),
+     buckets AS (
+       SELECT supplier_key,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'current'), 0) AS current,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'd31_60'), 0) AS d31_60,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'd61_90'), 0) AS d61_90,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'over90'), 0) AS over90
+         FROM open_items GROUP BY supplier_key
+     ),
+     per_party AS (
+       SELECT t.supplier_key,
+              t.supplier_id,
+              -- Advance payments to a supplier have no open bill to age; carry
+              -- them as negative «current» so the report still agrees with the
+              -- control account (the mirror of the same rule in getArAging).
+              coalesce(b.current, 0) - greatest(0, t.paid - t.owed) AS current,
+              coalesce(b.d31_60, 0) AS d31_60,
+              coalesce(b.d61_90, 0) AS d61_90,
+              coalesce(b.over90, 0) AS over90
+         FROM totals t
+         LEFT JOIN buckets b ON b.supplier_key = t.supplier_key
+     )
+     SELECT p.supplier_id,
+            ${AP_SUPPLIER_NAME_SQL} AS supplier_name,
+            supplier_location.id AS location_id,
+            supplier_location.name AS location_name,
+            p.current::text AS current,
+            p.d31_60::text AS d31_60,
+            p.d61_90::text AS d61_90,
+            p.over90::text AS over90,
+            (p.current + p.d31_60 + p.d61_90 + p.over90)::text AS total
+       FROM per_party p
+       ${apSupplierIdentityJoins("p.supplier_id")}
+      WHERE (p.current + p.d31_60 + p.d61_90 + p.over90) <> 0
+      ORDER BY (p.current + p.d31_60 + p.d61_90 + p.over90) DESC,
+               ${AP_SUPPLIER_NAME_SQL},
+               supplier_location.name NULLS FIRST,
+               p.supplier_id NULLS FIRST`,
+    [businessId, accountId, effectiveAsOf],
+  );
+
+  const agingRows: AgingRow[] = rows.map((row) => ({
+    supplierId: row.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
+    supplierName: row.supplier_name,
+    locationId: row.location_id,
+    locationName: row.location_name,
+    current: Number(row.current),
+    d31_60: Number(row.d31_60),
+    d61_90: Number(row.d61_90),
+    over90: Number(row.over90),
+    total: Number(row.total),
+  }));
+  const totals = agingRows.reduce<AgingSummary>(
+    (sum, row) => ({
+      current: sum.current + row.current,
+      d31_60: sum.d31_60 + row.d31_60,
+      d61_90: sum.d61_90 + row.d61_90,
+      over90: sum.over90 + row.over90,
+      total: sum.total + row.total,
+    }),
+    { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 },
+  );
+  return { asOfDate: effectiveAsOf, rows: agingRows, totals };
 }
 
 export interface ApPayment {

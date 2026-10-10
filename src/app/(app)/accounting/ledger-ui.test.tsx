@@ -1,135 +1,99 @@
 // @vitest-environment jsdom
-
-/**
- * The shared ledger overlay is what every hand-rolled accounting panel renders.
- * These pin its keyboard contract: Escape closes it (and only the busy guard
- * may stop that), focus moves in on open and returns to the opener on close,
- * and Tab cannot leave a modal panel.
- */
-import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverlayDialog } from "./ledger-ui";
 
-afterEach(() => cleanup());
+afterEach(cleanup);
+it("uses the shared Escape handler but never dismisses an in-flight mutation", () => {
+  const onClose = vi.fn();
+  const { rerender } = render(<OverlayDialog headingId="heading" onClose={onClose} dismissible={false}><h2 id="heading">Payment</h2></OverlayDialog>);
+  fireEvent.keyDown(window, { key: "Escape" });
+  fireEvent.click(screen.getByRole("dialog").parentElement!);
+  expect(onClose).not.toHaveBeenCalled();
+  rerender(<OverlayDialog headingId="heading" onClose={onClose}><h2 id="heading">Payment</h2></OverlayDialog>);
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(onClose).toHaveBeenCalledOnce();
+});
 
-function Harness({
-  dismissible = true,
-  onClose,
-  autoFocusField = false,
-}: {
-  dismissible?: boolean;
-  onClose: () => void;
-  autoFocusField?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button type="button" onClick={() => setOpen(true)}>
-        باز کردن
-      </button>
-      {open ? (
-        <OverlayDialog
-          headingId="harness-heading"
-          dismissible={dismissible}
-          onClose={() => {
-            onClose();
-            setOpen(false);
-          }}
-        >
-          <h2 id="harness-heading">پنل آزمایشی</h2>
-          {autoFocusField ? <input aria-label="مبلغ" autoFocus /> : null}
-          <button type="button">اول</button>
-          <button type="button">آخر</button>
-        </OverlayDialog>
-      ) : null}
-    </>
-  );
-}
 
-describe("the ledger overlay's keyboard contract", () => {
-  it("closes on Escape", async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    render(<Harness onClose={onClose} />);
-    await user.click(screen.getByRole("button", { name: "باز کردن" }));
-    await screen.findByRole("dialog");
+it("contains Tab/Shift+Tab and programmatic focus, then restores the opener", async () => {
+  function Harness() {
+    const [open, setOpen] = useState(false);
+    return <><button onClick={() => setOpen(true)}>Open statement</button><button>Outside</button>
+      {open ? <OverlayDialog headingId="statement" onClose={() => setOpen(false)}>
+        <h2 id="statement">Statement</h2><button>First</button><button>Last</button>
+      </OverlayDialog> : null}</>;
+  }
+  const user = userEvent.setup();
+  render(<Harness />);
+  const opener = screen.getByRole("button", { name: "Open statement" });
+  const outside = screen.getByRole("button", { name: "Outside" });
+  await user.click(opener);
+  expect(screen.queryByRole("button", { name: "Outside" })).toBeNull();
+  const first = screen.getByRole("button", { name: "First" });
+  const last = screen.getByRole("button", { name: "Last" });
+  expect(document.activeElement).toBe(first);
+  await user.tab({ shift: true });
+  expect(document.activeElement).toBe(last);
+  await user.tab();
+  expect(document.activeElement).toBe(first);
+  outside.focus();
+  expect(document.activeElement).toBe(first);
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(opener));
+});
 
-    await user.keyboard("{Escape}");
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
+it("dismisses only the top entry, restores its trigger, then restores the statement opener", async () => {
+  function Harness() {
+    const [statement, setStatement] = useState(false);
+    const [entry, setEntry] = useState(false);
+    return <><button onClick={() => setStatement(true)}>Open statement</button>
+      {statement ? <OverlayDialog headingId="statement" onClose={() => setStatement(false)}>
+        <h2 id="statement">Statement</h2><button onClick={() => setEntry(true)}>Open entry</button>
+        {entry ? <OverlayDialog headingId="entry" onClose={() => setEntry(false)}>
+          <h2 id="entry">Entry</h2><button>Entry action</button>
+        </OverlayDialog> : null}
+      </OverlayDialog> : null}</>;
+  }
+  const user = userEvent.setup();
+  render(<Harness />);
+  const opener = screen.getByRole("button", { name: "Open statement" });
+  await user.click(opener);
+  const entryTrigger = screen.getByRole("button", { name: "Open entry" });
+  await user.click(entryTrigger);
+  await user.tab();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Entry action" }));
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "Entry" })).toBeNull();
+  expect(screen.getByRole("dialog", { name: "Statement" })).toBeTruthy();
+  await waitFor(() => expect(document.activeElement).toBe(entryTrigger));
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(document.activeElement).toBe(opener));
+});
 
-  it("does not close on Escape while it is not dismissible (a submit in flight)", async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    render(<Harness onClose={onClose} dismissible={false} />);
-    await user.click(screen.getByRole("button", { name: "باز کردن" }));
-    await screen.findByRole("dialog");
+it("focuses a loading panel with no controls and honors prevented Escape", async () => {
+  const onClose = vi.fn();
+  render(<OverlayDialog headingId="heading" onClose={onClose}><h2 id="heading">Loading</h2></OverlayDialog>);
+  expect(document.activeElement).toBe(screen.getByRole("dialog"));
+  const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true, bubbles: true });
+  event.preventDefault();
+  window.dispatchEvent(event);
+  expect(onClose).not.toHaveBeenCalled();
+});
 
-    await user.keyboard("{Escape}");
-    expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole("dialog")).toBeTruthy();
-  });
-
-  it("moves focus into the panel when it opens", async () => {
-    const user = userEvent.setup();
-    render(<Harness onClose={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: "باز کردن" }));
-    const dialog = await screen.findByRole("dialog");
-
-    expect(dialog.contains(document.activeElement)).toBe(true);
-  });
-
-  it("leaves focus on a field that asked for it, rather than taking it back", async () => {
-    const user = userEvent.setup();
-    render(<Harness onClose={vi.fn()} autoFocusField />);
-    await user.click(screen.getByRole("button", { name: "باز کردن" }));
-    await screen.findByRole("dialog");
-
-    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "مبلغ" }));
-  });
-
-  it("returns focus to the control that opened it when it closes", async () => {
-    const user = userEvent.setup();
-    render(<Harness onClose={vi.fn()} />);
-    const opener = screen.getByRole("button", { name: "باز کردن" });
-    opener.focus();
-    await user.keyboard("{Enter}");
-    await screen.findByRole("dialog");
-
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(opener));
-  });
-
-  it("keeps Tab and Shift+Tab inside the panel, wrapping at either end", async () => {
-    const user = userEvent.setup();
-    render(<Harness onClose={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: "باز کردن" }));
-    const dialog = await screen.findByRole("dialog");
-    const last = screen.getByRole("button", { name: "آخر" });
-    const first = screen.getByRole("button", { name: "اول" });
-
-    last.focus();
-    await user.tab();
-    expect(document.activeElement).toBe(first);
-
-    await user.tab({ shift: true });
-    expect(document.activeElement).toBe(last);
-    expect(dialog.contains(document.activeElement)).toBe(true);
-  });
-
-  it("closes on a backdrop click but not a click inside the panel", async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    render(<Harness onClose={onClose} />);
-    await user.click(screen.getByRole("button", { name: "باز کردن" }));
-    const dialog = await screen.findByRole("dialog");
-
-    fireEvent.click(dialog);
-    expect(onClose).not.toHaveBeenCalled();
-    fireEvent.click(dialog.parentElement as HTMLElement);
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
+it("a busy top layer consumes Escape without closing its parent", () => {
+  const parentClose = vi.fn();
+  const childClose = vi.fn();
+  render(<OverlayDialog headingId="parent" onClose={parentClose}>
+    <h2 id="parent">Statement</h2>
+    <OverlayDialog headingId="busy" onClose={childClose} dismissible={false}>
+      <h2 id="busy">Saving</h2>
+    </OverlayDialog>
+  </OverlayDialog>);
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(parentClose).not.toHaveBeenCalled();
+  expect(childClose).not.toHaveBeenCalled();
 });

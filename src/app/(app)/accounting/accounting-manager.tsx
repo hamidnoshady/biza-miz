@@ -259,6 +259,18 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
+  /*
+   * The two subledger screens are readable on `ledger.view` — a read-only
+   * viewer or an auditor reaches /accounting/receivables legitimately — but
+   * settling a balance is `finance.receivables_manage` / `finance.payables_manage`,
+   * the permissions the receipts and payments endpoints enforce. Handing the
+   * sections their own capability (rather than letting them guess) is what
+   * keeps a live «دریافت وجه» button off an auditor's screen: the shared
+   * subledger component takes one boolean per side, exactly as
+   * `ChartOfAccountsSection` takes `canEdit`.
+   */
+  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
 
   /*
    * Whether this member may run a reconciliation at all.
@@ -267,13 +279,9 @@ export function AccountingManager({
    * mutation behind it — start, tick, complete, discard — requires
    * `finance.reconciliation_manage`. The screen used to draw all of those
    * controls for whoever could open it, so a read-only accountant's every click
-   * came back 403 under a generic error. `undefined` when the page could not
-   * read the member's effective permissions: the section then draws the
-   * controls and the API stays the gate, exactly like `canApproveLedger`.
+   * came back 403 under a generic error.
    */
-  const canManageReconciliation = permissions
-    ? permissions.includes(PERMISSIONS.financeReconciliationManage)
-    : undefined;
+  const canManageReconciliation = permissions.includes(PERMISSIONS.financeReconciliationManage);
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -393,12 +401,12 @@ export function AccountingManager({
               permissions={permissions}
             />
           ) : null}
-          {section === "receivables" ? <ArSection canSettle={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)} /> : null}
-          {section === "payables" ? <ApSection canSettle={!!permissions?.includes(PERMISSIONS.financePayablesManage)} /> : null}
+          {section === "receivables" ? <ArSection canSettle={canManageReceivables} /> : null}
+          {section === "payables" ? <ApSection canSettle={canManagePayables} /> : null}
           {section === "receipts" ? <ReceiptsPaymentsSection
-            canManageReceivables={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)}
-            canManagePayables={!!permissions?.includes(PERMISSIONS.financePayablesManage)}
-            canReversePayments={!!permissions?.includes(PERMISSIONS.ledgerApprove)}
+            canManageReceivables={canManageReceivables}
+            canManagePayables={canManagePayables}
+            canReversePayments={canApproveLedger}
           /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? (

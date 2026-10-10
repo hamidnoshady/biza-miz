@@ -40,112 +40,75 @@ export function apAttributionStatus(sourceType: string | null, supplierId: strin
   return "automatic_missing";
 }
 
-/**
- * Shared A/P source joins. `$1` is supplied by the caller as business id only
- * when needed; tenant/account/date filters stay in the caller's WHERE clause.
- * Every join is on the source type as well as source id, so an unrelated table
- * cannot accidentally claim another source's UUID.
- */
-export const AP_SUPPLIER_ATTRIBUTION_SQL = `
+
+// The source relation is also the statement's access path. Each source's
+// supplier rule and metadata are declared once; a named statement applies its
+// predicate here, before joining journal_entries. Unknown sources still survive
+// the LEFT JOIN used by full-book reads. No cached attribution/balance table.
+type Source = {
+  type: string;
+  from: string;
+  scope: string;
+  id: string;
+  supplier: string;
+  fields?: Partial<Record<"note" | "return_reason" | "purchase_id" | "item_purchase_id" |
+    "supplier_return_id" | "item_supplier_return_id" | "payment_id" | "cheque_id" | "installment_plan_id", string>>;
+};
+const sources: Source[] = [
+  { type: "purchase", from: "purchases p JOIN locations l ON l.id = p.location_id", scope: "l.business_id = $1",
+    id: "p.id", supplier: "p.supplier_id", fields: { note: "p.note", purchase_id: "p.id" } },
+  { type: "supplier_return", from: "supplier_returns sr JOIN purchases p ON p.id = sr.purchase_id JOIN locations l ON l.id = p.location_id",
+    scope: "sr.business_id = $1 AND l.business_id = $1 AND sr.settlement_method = 'accounts_payable'",
+    id: "sr.id", supplier: "p.supplier_id", fields: { note: "p.note", return_reason: "sr.reason", purchase_id: "p.id", supplier_return_id: "sr.id" } },
+  { type: "item_purchase", from: "item_purchases ip", scope: "ip.business_id = $1",
+    id: "ip.id", supplier: "ip.supplier_id", fields: { note: "ip.note", item_purchase_id: "ip.id" } },
+  { type: "item_supplier_return", from: "item_supplier_returns sr JOIN item_purchases ip ON ip.id = sr.purchase_id",
+    scope: "sr.business_id = $1 AND ip.business_id = $1 AND sr.settlement_method = 'accounts_payable'",
+    id: "sr.id", supplier: "ip.supplier_id", fields: { note: "ip.note", return_reason: "sr.reason", item_purchase_id: "ip.id", item_supplier_return_id: "sr.id" } },
+  { type: "expense", from: "expenses exp", scope: "exp.business_id = $1 AND exp.settlement = 'credit'",
+    id: "exp.id", supplier: "exp.supplier_id", fields: { note: "exp.memo" } },
+  ...["ap_payment", "ap_payment_reversal"].map((type): Source => ({ type, from: "ap_payments ap", scope: "ap.business_id = $1",
+    id: "ap.id", supplier: "ap.supplier_id", fields: { payment_id: "ap.id" } })),
+  { type: "cheque", from: `cheques ch LEFT JOIN LATERAL (
+      SELECT ce.endorsed_to_supplier_id FROM cheque_events ce
+       WHERE ce.cheque_id = ch.id AND ce.endorsed_to_supplier_id IS NOT NULL
+       ORDER BY ce.created_at, ce.id LIMIT 1
+    ) endorsed ON true`, scope: "ch.business_id = $1", id: "ch.id",
+    supplier: "COALESCE(ch.supplier_id, endorsed.endorsed_to_supplier_id)", fields: { cheque_id: "ch.id" } },
+  { type: "installment_interest", from: `installments ins LEFT JOIN LATERAL (
+      SELECT si.id FROM suppliers si JOIN locations l ON l.id = si.location_id
+       WHERE l.business_id = ins.business_id AND si.party_id = ins.party_id
+         AND ((ins.location_id IS NOT NULL AND si.location_id = ins.location_id)
+           OR (ins.location_id IS NULL AND (
+             SELECT count(*) FROM suppliers sx JOIN locations lx ON lx.id = sx.location_id
+              WHERE sx.party_id = ins.party_id AND lx.business_id = ins.business_id
+           ) = 1))
+       ORDER BY si.id LIMIT 1
+    ) alias ON true`, scope: "ins.business_id = $1 AND ins.direction = 'payable'",
+    id: "ins.id", supplier: "alias.id", fields: { installment_plan_id: "ins.id" } },
+];
+
+export function apSupplierAttributionSql(supplierParameter?: "$3::uuid"): string {
+  const fields = ["note", "return_reason", "purchase_id", "item_purchase_id", "supplier_return_id",
+    "item_supplier_return_id", "payment_id", "cheque_id", "installment_plan_id"] as const;
+  const relation = sources.map((source) => `
+    SELECT '${source.type}'::text AS source_type, ${source.id} AS source_id,
+           ${source.supplier} AS supplier_id,
+           ${fields.map((key) => `${source.fields?.[key] ?? "NULL"}::text AS ${key}`).join(", ")}
+      FROM ${source.from}
+     WHERE ${source.scope}${supplierParameter ? ` AND ${source.supplier} = ${supplierParameter}` : ""}
+  `).join("UNION ALL");
+  return `
   FROM journal_lines jl
   JOIN journal_entries je ON je.id = jl.entry_id
-  LEFT JOIN purchases p
-         ON je.source_type = 'purchase' AND p.id = je.source_id
-        AND EXISTS (SELECT 1 FROM locations pl WHERE pl.id = p.location_id AND pl.business_id = je.business_id)
-  LEFT JOIN supplier_returns sr
-         ON je.source_type = 'supplier_return'
-        AND sr.id = je.source_id
-        AND sr.business_id = je.business_id
-        AND sr.settlement_method = 'accounts_payable'
-  LEFT JOIN purchases p2
-         ON p2.id = sr.purchase_id
-        AND EXISTS (SELECT 1 FROM locations p2l WHERE p2l.id = p2.location_id AND p2l.business_id = je.business_id)
-  LEFT JOIN item_purchases ip
-         ON je.source_type = 'item_purchase' AND ip.id = je.source_id AND ip.business_id = je.business_id
-  LEFT JOIN item_supplier_returns isr
-         ON je.source_type = 'item_supplier_return'
-        AND isr.id = je.source_id
-        AND isr.business_id = je.business_id
-        AND isr.settlement_method = 'accounts_payable'
-  LEFT JOIN item_purchases ipr
-         ON ipr.id = isr.purchase_id AND ipr.business_id = je.business_id
-  LEFT JOIN expenses exp
-         ON je.source_type = 'expense'
-        AND exp.id = je.source_id
-        AND exp.business_id = je.business_id
-        AND exp.settlement = 'credit'
-  LEFT JOIN ap_payments ap
-         ON je.source_type IN ('ap_payment', 'ap_payment_reversal')
-        AND ap.id = je.source_id AND ap.business_id = je.business_id
-  LEFT JOIN cheques ch ON je.source_type = 'cheque' AND ch.id = je.source_id AND ch.business_id = je.business_id
-  -- An endorsed received cheque has no supplier_id on its original row. Its
-  -- endorsement identifies the counterparty; the same identity is used for a
-  -- later bounce so both sides stay on one statement.
-  LEFT JOIN LATERAL (
-    SELECT ce.endorsed_to_supplier_id
-      FROM cheque_events ce
-     WHERE ce.cheque_id = ch.id AND ce.endorsed_to_supplier_id IS NOT NULL
-     ORDER BY ce.created_at, ce.id
-     LIMIT 1
-  ) endorsed ON ch.id IS NOT NULL
-  LEFT JOIN installments ins
-         ON je.source_type = 'installment_interest'
-        AND ins.id = je.source_id
-        AND ins.business_id = je.business_id
-        AND ins.direction = 'payable'
-  -- A location-bound plan uses only its branch alias. A legacy/business-wide
-  -- plan is attributed only when the party has exactly one alias in the
-  -- business; with multiple aliases, choosing one would be arbitrary.
-  LEFT JOIN LATERAL (
-    SELECT si.id AS supplier_id
-      FROM suppliers si
-      JOIN locations sil ON sil.id = si.location_id AND sil.business_id = ins.business_id
-     WHERE ins.party_id IS NOT NULL
-       AND si.party_id = ins.party_id
-       AND (
-         (ins.location_id IS NOT NULL AND si.location_id = ins.location_id)
-         OR
-         (ins.location_id IS NULL AND (
-           SELECT count(*)
-             FROM suppliers sx
-             JOIN locations sxl ON sxl.id = sx.location_id
-            WHERE sx.party_id = ins.party_id
-              AND sxl.business_id = ins.business_id
-         ) = 1)
-       )
-     ORDER BY si.id
-     LIMIT 1
-  ) interest_supplier ON ins.id IS NOT NULL
-  LEFT JOIN suppliers s ON s.id = COALESCE(
-    p.supplier_id,
-    p2.supplier_id,
-    ip.supplier_id,
-    ipr.supplier_id,
-    exp.supplier_id,
-    ap.supplier_id,
-    ch.supplier_id,
-    endorsed.endorsed_to_supplier_id,
-    interest_supplier.supplier_id
-  ) AND EXISTS (
-    SELECT 1 FROM locations supplier_business_location
-     WHERE supplier_business_location.id = s.location_id
-       AND supplier_business_location.business_id = je.business_id
-  )
+  ${supplierParameter ? "JOIN" : "LEFT JOIN"} (${relation}) ap_source
+    ON ap_source.source_type = je.source_type AND ap_source.source_id = je.source_id
+  LEFT JOIN suppliers s ON s.id = ap_source.supplier_id
+    AND EXISTS (SELECT 1 FROM locations l WHERE l.id = s.location_id AND l.business_id = je.business_id)
   LEFT JOIN parties pa ON pa.id = s.party_id AND pa.business_id = je.business_id
-  LEFT JOIN locations supplier_location
-         ON supplier_location.id = s.location_id AND supplier_location.business_id = je.business_id
-  LEFT JOIN locations entry_location
-         ON entry_location.id = je.location_id AND entry_location.business_id = je.business_id`;
+  LEFT JOIN locations supplier_location ON supplier_location.id = s.location_id AND supplier_location.business_id = je.business_id
+  LEFT JOIN locations entry_location ON entry_location.id = je.location_id AND entry_location.business_id = je.business_id`;
+}
 
-/** The one canonical A/P supplier alias expression paired with the joins above. */
-export const AP_SUPPLIER_ID_SQL = `COALESCE(
-  p.supplier_id,
-  p2.supplier_id,
-  ip.supplier_id,
-  ipr.supplier_id,
-  exp.supplier_id,
-  ap.supplier_id,
-  ch.supplier_id,
-  endorsed.endorsed_to_supplier_id,
-  interest_supplier.supplier_id
-)`;
+export const AP_SUPPLIER_ATTRIBUTION_SQL = apSupplierAttributionSql();
+export const AP_SUPPLIER_ID_SQL = "ap_source.supplier_id";

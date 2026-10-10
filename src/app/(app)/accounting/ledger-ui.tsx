@@ -17,14 +17,16 @@
  *
  * They live together here because they are used together: a ledger overlay
  * almost always shows a Jalali date and can fail to load. `OverlayDialog`
- * composes `use-overlay-escape.tsx` (the hook the hand-rolled panels already
- * shared) rather than re-implementing it, and stays presentation-only — no
- * focus trapping, no scroll locking, exactly the plain panel these screens
- * already were. A panel that needs the full dialog behaviour uses the shadcn
- * `<Dialog>` the cheques register uses instead.
+ * keeps the ledger's panel styling while composing Radix FocusScope for
+ * initial focus, Tab containment and restoration. Portals avoid ancestor
+ * clipping; inactive content is hidden from assistive technology. Nested scopes
+ * pause their parent; Escape dismisses only the top ledger layer.
  */
 
-import { useCallback, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { FocusScope } from "@radix-ui/react-focus-scope";
+import { Portal } from "radix-ui";
+import { hideOthers } from "aria-hidden";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { SecondaryButton } from "@/app/dashboard/ui";
@@ -76,10 +78,6 @@ export function fmtJalali(iso: string | null): string {
  * composes `overlayPanelClass` into `className` itself — this component owns
  * only what every one of those overlays spelled identically.
  */
-/** Everything a Tab stop can land on inside a panel. */
-const FOCUSABLE =
-  'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-
 export function OverlayDialog({
   headingId,
   describedById,
@@ -104,66 +102,42 @@ export function OverlayDialog({
   className?: string;
   children: ReactNode;
 }) {
-  const panelRef = useRef<HTMLElement>(null);
   const requestClose = useCallback(() => {
     if (dismissible) onClose();
   }, [dismissible, onClose]);
-
-  // Escape closes the panel, as the comment above promises. The hook is the
-  // one every hand-rolled panel shares; this component had never called it.
-  useOverlayEscape(requestClose);
-
-  // A modal takes focus when it opens — unless a field inside already has it,
-  // as an `autoFocus` field does — and gives it back to the control that
-  // opened it when it closes, if that control is still on the page.
-  useEffect(() => {
-    const active = document.activeElement;
-    const opener = active instanceof HTMLElement && active !== document.body ? active : null;
-    const panel = panelRef.current;
-    if (panel && !panel.contains(active)) panel.focus();
-    return () => {
-      if (opener?.isConnected) opener.focus();
-    };
+  const panelRef = useRef<HTMLElement>(null);
+  const [panel, setPanel] = useState<HTMLElement | null>(null);
+  const attachPanel = useCallback((node: HTMLElement | null) => {
+    panelRef.current = node;
+    setPanel(node);
   }, []);
-
-  // Tab and Shift+Tab stay inside the panel, wrapping at either end.
-  const keepFocusInside = (event: ReactKeyboardEvent<HTMLElement>) => {
-    const panel = panelRef.current;
-    if (event.key !== "Tab" || !panel) return;
-    const stops = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
-    if (stops.length === 0) return;
-    const first = stops[0];
-    const last = stops[stops.length - 1];
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || active === panel)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
+  useEffect(() => panel ? hideOthers(panel) : undefined, [panel]);
+  useOverlayEscape(requestClose, true, panelRef);
 
   return (
-    <div
-      className={`fixed inset-0 z-50 flex items-end justify-center bg-black/40 ${
-        sheet ? "p-0 sm:items-center sm:p-4" : "p-3 sm:items-center sm:p-4"
-      }`}
-      onClick={requestClose}
-    >
-      <section
-        ref={panelRef}
-        tabIndex={-1}
-        role={role}
-        aria-modal="true"
-        aria-labelledby={headingId}
-        aria-describedby={describedById}
-        className={`${className ?? ""} focus:outline-none`}
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={keepFocusInside}
+    <Portal.Root asChild>
+      <div
+        className={`fixed inset-0 z-50 flex items-end justify-center bg-black/40 ${
+          sheet ? "p-0 sm:items-center sm:p-4" : "p-3 sm:items-center sm:p-4"
+        }`}
+        onClick={requestClose}
       >
-        {children}
-      </section>
-    </div>
+        <FocusScope asChild trapped loop>
+          <section
+            ref={attachPanel}
+            data-ledger-dialog=""
+            tabIndex={-1}
+            role={role}
+            aria-modal="true"
+            aria-labelledby={headingId}
+            aria-describedby={describedById}
+            className={className}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {children}
+          </section>
+        </FocusScope>
+      </div>
+    </Portal.Root>
   );
 }

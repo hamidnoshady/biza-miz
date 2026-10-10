@@ -107,6 +107,12 @@ npm run test:db           # vitest — integration tests in integration/, needs 
 npm run build             # production build (JWT_SECRET only needs to be set to *something*)
 ```
 
+For subledger UI changes, also run `npm run test:a11y:subledger` against the running,
+visual-seeded application (the same setup as `npm run test:visual`). It checks
+keyboard/focus behavior and focused WCAG/RTL/contrast in both themes and widths;
+see [the visual verification guide](docs/design/visual-regression.md). The visual
+CI job runs this check independently of whether its pixel comparison passed.
+
 If you added or changed anything under `src/lib/`, add or update its `*.test.ts` alongside
 it (see `src/lib/orders.test.ts` for the pattern: pure functions, integer-Rial fixtures, no
 DB). If you changed the schema, add a new forward-only `migrations/NNNN_name.sql` file —
