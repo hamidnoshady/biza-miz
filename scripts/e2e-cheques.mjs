@@ -86,10 +86,32 @@ async function api(page, method, path, body) {
         headers: body === undefined ? {} : { "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      return { status: response.status, text: await response.text() };
+      return {
+        status: response.status,
+        text: await response.text(),
+        retryAfter: response.headers.get("retry-after"),
+      };
     },
     { method, path, body },
   );
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The API allows a business 300 requests a minute, and this job's media tests
+ * spend part of that budget on the same business before this script starts.
+ * A 429 is therefore waited out for the `Retry-After` the server gives, and
+ * retried a bounded number of times — a real refusal still fails the run.
+ */
+async function apiPaced(page, method, path, body) {
+  let response = await api(page, method, path, body);
+  for (let attempt = 1; response.status === 429 && attempt <= 4; attempt += 1) {
+    const seconds = Number(response.retryAfter ?? 5);
+    await sleep((Number.isFinite(seconds) ? seconds : 5) * 1000 + 250);
+    response = await api(page, method, path, body);
+  }
+  return response;
 }
 
 /**
@@ -124,15 +146,17 @@ async function seedCheques(page) {
     };
   };
   const indexes = Array.from({ length: TOTAL }, (_, i) => i + 1);
-  for (let i = 0; i < indexes.length; i += 5) {
+  // Three at a time with a pause between: about 170 requests a minute, under the budget.
+  for (let i = 0; i < indexes.length; i += 3) {
     await Promise.all(
-      indexes.slice(i, i + 5).map(async (index) => {
-        const response = await api(page, "POST", "/api/ledger/cheques", bodyFor(index));
+      indexes.slice(i, i + 3).map(async (index) => {
+        const response = await apiPaced(page, "POST", "/api/ledger/cheques", bodyFor(index));
         if (response.status >= 300) {
           throw new Error(`registering ${serialOf(index)} failed (${response.status}): ${response.text}`);
         }
       }),
     );
+    await sleep(1000);
   }
   const list = JSON.parse((await api(page, "GET", "/api/ledger/cheques?direction=receivable&limit=1")).text);
   if (list.total < TOTAL) throw new Error(`register holds ${list.total}, expected at least ${TOTAL}`);
@@ -145,7 +169,7 @@ async function bounceBySerial(page, serial) {
   );
   const cheque = list.cheques.find((c) => c.serialNumber === serial);
   if (!cheque) throw new Error(`no cheque ${serial}`);
-  const response = await api(page, "POST", `/api/ledger/cheques/${cheque.id}/bounce`, {
+  const response = await apiPaced(page, "POST", `/api/ledger/cheques/${cheque.id}/bounce`, {
     occurredOn: "2026-02-01",
   });
   if (response.status >= 300) throw new Error(`bouncing ${serial} failed (${response.status}): ${response.text}`);
