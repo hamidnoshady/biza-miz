@@ -619,8 +619,23 @@ const expensesAdapter: EntityAdapter = {
       },
       2,
     );
+    // Dimension attribution is part of identity (issue #868): two rows that are
+    // identical on every other field but carry different cost-centre/profit-centre
+    // codes are different expenses. This comparison is appended to the operator's
+    // chosen rule rather than offered as a selectable field, because an imported
+    // cell that names a dimension code always resolves before duplicate detection.
+    const dimStart = duplicate.params.length + 2; // $1 is business_id; base uses $2..
+    const dimParts = ["cost_center_id", "profit_center_id", "department_id", "detail_dimension_id"]
+      .map((col, i) => `COALESCE(${col}::text, '') = COALESCE($${dimStart + i}::uuid::text, '')`)
+      .join(" AND ");
+    duplicate.params.push(
+      dimensions.cost_center ?? null,
+      dimensions.profit_center ?? null,
+      dimensions.department ?? null,
+      dimensions.detail ?? null,
+    );
     const { rows: existingRows } = await query<{ id: string }>(
-      `SELECT id FROM expenses WHERE business_id = $1 AND ${duplicate.sql} LIMIT 1`,
+      `SELECT id FROM expenses WHERE business_id = $1 AND ${duplicate.sql} AND ${dimParts} LIMIT 1`,
       [context.businessId, ...duplicate.params],
     );
     const existing = existingRows[0];

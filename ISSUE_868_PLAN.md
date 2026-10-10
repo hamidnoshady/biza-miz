@@ -132,7 +132,7 @@ Each of these is a real part of the issue. None is a silent omission: each has i
 7. **Bulk assignment.** Attribution is allowed on a draft and refused on a posted line. Bulk assignment on unposted drafts only is the safe version; it is not built.
 8. **Hybrid sync.** Dimension master data is cloud-authoritative, like the chart of accounts, and is not in `MASTER_SYNC_TABLES`. Site events do not yet carry attribution, so a site-originated attributed posting needs the sync contract extended. The ledger's replication domain (`accounting_journals`) is unchanged.
 9. **Rollup reports** over a parent value's children. Parents are refused as posting targets, so no report double counts; a rollup view is additive.
-10. **Journal CSV export with attribution columns.** The journal's export still omits the new columns; the screen shows them.
+10. ~~Journal CSV export with attribution columns.~~ **Done in this pass.** `src/lib/journal-export.ts` now writes eight columns (کد + نام for each of the four dimension kinds, in `DIMENSION_KINDS` order), positioned between the project column and ثبت‌کننده. Lines without attribution get blank cells. Covered by `journal-export.test.ts` (8 cases).
 
 ## §8 Data and history, stated plainly
 
@@ -152,7 +152,7 @@ Environment: the sandbox has 4 GB of RAM and 2 vCPUs, and runs Node 22.22.3, whi
 | --- | --- | --- |
 | Type check | `npx tsc --noEmit` (with the heap setting above) | exit 0 |
 | Unit suite | `npm test` | 709 files, 9,334 tests passed, exit 0 |
-| Migrations | `DATABASE_URL=postgres://pos:pos@localhost:55432/pos npm run db:migrate` | up to date (303 applied, including `0216_accounting_dimensions.sql`), exit 0 |
+| Migrations | `DATABASE_URL=postgres://pos:pos@localhost:55432/pos npm run db:migrate` | up to date (305 applied, including `0216` dimensions, `0217` deferred cycle trigger, `0218` parent advisory lock), exit 0 |
 | Database suite | `DATABASE_URL=… npm run test:db` | 199 of 199 files, 2,745 tests passed, 1 skipped, exit 0 |
 | Design suite | `npm run test:design` | 5 files, 38 tests, exit 0 |
 | Lint | `npm run lint` (`--max-warnings=0`) | exit 0 |
@@ -210,8 +210,10 @@ Delivered as draft PR #898 from `arena/10b8596c-biza-miz`. The PR refs #868 and 
 
 Delivered (§6):
 
-- The line-level model, migration `0216`, the pure rules, the services, and the posting guard on manual journals, drafts and expenses. Reversals mirror the original attribution, including after an archive.
-- The expense importer: four optional code columns, resolved to this business's own values and refused by name when unknown or archived.
+- The line-level model, migration `0216`, the pure rules, the services, and the posting guard on manual journals, drafts and expenses. Reversals mirror the original attribution, including after an archive (`postExactMirrorEntry` carries all four dimension columns through `dimensionMirror: true`).
+- The expense importer: four optional code columns, resolved to this business's own values and refused by name when unknown or archived. Expense duplicate detection now keys on the four dimension IDs too (SQL adapter, not the generic rule registry).
+- Concurrency hardening (migrations `0217` and `0218`): a deferred `CONSTRAINT TRIGGER` re-walks the ancestor chain at COMMIT for cross-row cycles, and a `BEFORE` trigger takes an xact-level advisory lock keyed on (business, kind) so concurrent parent changes serialise; under REPEATABLE READ a deferred trigger alone is not enough. Covered by new tests in `accounting-dimensions.integration.test.ts`.
+- Journal CSV/XLSX export now carries eight dimension columns (کد + نام per kind) with blank cells on unattributed lines (`journal-export.ts`), covered by `journal-export.test.ts`.
 - Reads and reports: the journal's per-kind filters, the trial balance filter, the cost-centre account card, the account × dimension matrix, profit by profit centre, CSV export and print. A non-zero matrix cell drills into the journal lines behind it.
 - Screens: dimension management at `/accounting/dimensions` and the report panel, with searchable selectors and the Project / Cost centre distinction kept in the labels.
 - The desktop size budgets pass on the PR head with the first version's growth removed. The growth was one import: the report panel reached the codec module's spreadsheet and PDF libraries. The fix, the measurements and the follow-ups are in the Desktop payload section above. The staged runtime is 198.150 MiB against 200, and the installed payload 618.583 MiB against 620.

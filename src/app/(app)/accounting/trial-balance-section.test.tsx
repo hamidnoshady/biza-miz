@@ -229,6 +229,7 @@ describe("TrialBalanceSection — stale responses, errors and retry", () => {
     let shouldFail = true;
     const { calls } = stubFetch((url) => {
       if (url.startsWith("/api/ledger/fiscal-years")) return fiscalYearsResponse();
+      if (url.startsWith("/api/ledger/dimensions")) return { settings: [], values: [] };
       return shouldFail ? { __failed: true, error: "boom" } : report();
     });
 
@@ -242,7 +243,7 @@ describe("TrialBalanceSection — stale responses, errors and retry", () => {
 
     shouldFail = false;
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "تلاش دوباره" })[0]);
     });
 
     await waitFor(() => expect(calls).toHaveLength(2));
@@ -253,7 +254,9 @@ describe("TrialBalanceSection — stale responses, errors and retry", () => {
     stubFetch((url) =>
       url.startsWith("/api/ledger/fiscal-years")
         ? fiscalYearsResponse()
-        : new Error("network down"),
+        : url.startsWith("/api/ledger/dimensions")
+          ? { settings: [], values: [] }
+          : new Error("network down"),
     );
 
     await renderSection();

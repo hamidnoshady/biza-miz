@@ -113,32 +113,38 @@ describe("dimensionPayload", () => {
 });
 
 describe("loadDimensionCatalog", () => {
-  it("keeps only active values, so an archived one is never offered", async () => {
-    const catalog = await loadDimensionCatalog(async () => ({
+  it("splits postable (active-only) and historical (all) values", async () => {
+    const result = await loadDimensionCatalog(async () => ({
       ok: true,
       data: {
         settings: [setting("cost_center", true)],
         values: [value({ id: HQ, code: "CC-HQ", name: "HQ" }), value({ id: SALES, code: "CC-OLD", name: "Old", isActive: false })],
       },
     }));
-    expect(catalog.values.map((v) => v.id)).toEqual([HQ]);
-    expect(catalog.settings).toHaveLength(1);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.catalog.postableValues.map((v) => v.id)).toEqual([HQ]);
+      expect(result.catalog.allValues.map((v) => v.id).sort()).toEqual([HQ, SALES].sort());
+      expect(result.catalog.settings).toHaveLength(1);
+    }
   });
 
-  it("answers an empty catalogue when the read fails, so the form still opens", async () => {
-    expect(await loadDimensionCatalog(async () => ({ ok: false, data: { error: "x" } }))).toEqual({ settings: [], values: [] });
-    expect(await loadDimensionCatalog(async () => ({ ok: true, data: null }))).toEqual({ settings: [], values: [] });
+  it("returns ok=false on failure so the caller can surface an error, not silently empty", async () => {
+    const fail1 = await loadDimensionCatalog(async () => ({ ok: false, data: { error: "x" }, status: 500 }));
+    expect(fail1.ok).toBe(false);
+    const fail2 = await loadDimensionCatalog(async () => ({ ok: true, data: null }));
+    expect(fail2.ok).toBe(false);
   });
 });
 
 describe("dimensionFilterOptionsFor", () => {
-  it("offers every branch's active leaf values, since a filter reads the whole book", () => {
+  it("offers every leaf value across branches, archived included, so historical filters keep working", () => {
     const values = [
       value({ id: HQ, code: "CC-HQ", name: "HQ" }),
       value({ id: NORTH_ONLY, code: "CC-NORTH", name: "North", locationId: OTHER_BRANCH }),
       value({ id: GROUP, code: "CC-GROUP", name: "Group", hasChildren: true }),
       value({ id: SALES, code: "CC-OLD", name: "Old", isActive: false }),
     ];
-    expect(dimensionFilterOptionsFor(values, "cost_center").map((o) => o.value)).toEqual([HQ, NORTH_ONLY]);
+    expect(dimensionFilterOptionsFor(values, "cost_center").map((o) => o.value)).toEqual([HQ, NORTH_ONLY, SALES]);
   });
 });

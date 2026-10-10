@@ -9,6 +9,17 @@
  * The server stays the authority: it re-checks every choice (kind, active, leaf,
  * branch, effective date). Filtering the list here is a courtesy that spares a
  * person a refusal, never the only check.
+ *
+ * Two catalogues (issue #868):
+ *   - **postable** catalogue (active leaf values of enabled kinds) for forms and
+ *     new postings — never offers an archived or disabled value.
+ *   - **historical** catalogue (every value, archived included, for every kind
+ *     the business has ever used) for filters, reports and historical drill-down
+ *     so a past report keeps showing after archive or kind-disable.
+ *
+ * A load failure is surfaced rather than silently swallowed: the caller shows
+ * an error with a retry button instead of rendering an empty catalogue that
+ * pretends every business has no dimensions.
  */
 import {
   DIMENSION_KINDS,
@@ -25,13 +36,34 @@ import { toPersianDigits } from "@/lib/digits";
 export interface DimensionCatalog {
   settings: DimensionSettingRecord[];
   /** Active values only: a form offers nothing that the posting guard would refuse for being archived. */
-  values: DimensionValueRecord[];
+  postableValues: DimensionValueRecord[];
+  /** All values (archived included) for historical filters and reports. */
+  allValues: DimensionValueRecord[];
 }
+
+export type DimensionCatalogLoadResult =
+  | { ok: true; catalog: DimensionCatalog }
+  | { ok: false; error: string };
 
 /** The kinds the business has switched on, in product order. Empty for a business that never has. */
 export function enabledDimensionKinds(settings: readonly DimensionSettingRecord[] | undefined): DimensionKind[] {
   const on = new Set((settings ?? []).filter((s) => s.isEnabled).map((s) => s.kind));
   return DIMENSION_KINDS.filter((kind) => on.has(kind));
+}
+
+/**
+ * The kinds the business has EVER used — enabled now OR has any value
+ * (including archived), so a historical report keeps its filter even after the
+ * kind is switched off.
+ */
+export function historicalKinds(
+  settings: readonly DimensionSettingRecord[] | undefined,
+  values: readonly DimensionValueRecord[] | undefined,
+): DimensionKind[] {
+  const kinds = new Set<DimensionKind>();
+  for (const s of settings ?? []) if (s.isEnabled) kinds.add(s.kind);
+  for (const v of values ?? []) kinds.add(v.kind);
+  return DIMENSION_KINDS.filter((kind) => kinds.has(kind));
 }
 
 /** The name a kind is shown with on a screen, honouring the business's own name for the detail kind. */
@@ -47,6 +79,8 @@ export function enabledKindLabel(settings: readonly DimensionSettingRecord[] | u
  * as a posting target. A value restricted to another branch is left out, and a
  * business-wide value is always offered. The list is sorted by code, which is
  * how the chart and the reports sort their rows.
+ *
+ * Uses the POSTABLE (active-only) list.
  */
 export function dimensionOptionsFor(
   values: readonly DimensionValueRecord[] | undefined,
@@ -66,17 +100,27 @@ export function dimensionOptionsFor(
 
 /**
  * The values a FILTER offers for one kind. A filter reads the whole book, so it
- * offers every branch's leaf values, not only the ones that could be posted at
- * one branch. The archived values stay out of a filter's list.
+ * must include archived values and values of currently-disabled kinds (so past
+ * reports remain readable). Archived values are suffixed «(بایگانی)» and
+ * disabled-kind values are still listed (filtering by them still works — the
+ * kind was on when the line was posted).
  */
 export function dimensionFilterOptionsFor(
   values: readonly DimensionValueRecord[] | undefined,
   kind: DimensionKind,
 ): SelectOption[] {
+  // Parents are never posting targets, so they never appear as line
+  // attributions. They group leaves in rollup reports, but a filter on a parent
+  // would mean "sum every child" which is rollup, not a single-value filter —
+  // that is deferred (ISSUE_868_PLAN.md §7).
   return (values ?? [])
-    .filter((v) => v.kind === kind && v.isActive && !v.hasChildren)
+    .filter((v) => v.kind === kind && !v.hasChildren)
     .sort((a, b) => a.code.localeCompare(b.code))
-    .map((v) => ({ value: v.id, label: `${toPersianDigits(v.code)} · ${v.name}`, searchString: `${v.code} ${v.name}` }));
+    .map((v) => ({
+      value: v.id,
+      label: `${toPersianDigits(v.code)} · ${v.name}${v.isActive ? "" : " (بایگانی)"}`,
+      searchString: `${v.code} ${v.name}`,
+    }));
 }
 
 /** A picker's state for one line or one form: a value id per kind, or «» for none. */
@@ -99,19 +143,38 @@ export function hasDimensionDraft(draft: DimensionDraft | undefined): boolean {
 }
 
 /**
- * Reads the catalogue from the API. A failed read yields an empty catalogue, so a
- * form opens without attribution rather than failing to open at all; the server
- * still accepts a document with none.
+ * Reads the catalogue from the API. A failure returns `ok: false` so the caller
+ * can surface a visible error with a retry button instead of silently rendering
+ * every business as having no dimensions.
  */
 export async function loadDimensionCatalog(
-  fetcher: (url: string) => Promise<{ ok: boolean; data: unknown }>,
-): Promise<DimensionCatalog> {
-  const result = await fetcher("/api/ledger/dimensions");
-  if (!result.ok || !result.data || typeof result.data !== "object") return { settings: [], values: [] };
+  fetcher: (url: string) => Promise<{ ok: boolean; data: unknown; status?: number }>,
+): Promise<DimensionCatalogLoadResult> {
+  let result: { ok: boolean; data: unknown; status?: number };
+  try {
+    result = await fetcher("/api/ledger/dimensions?includeArchived=true");
+  } catch {
+    return { ok: false, error: "network" };
+  }
+  if (!result.ok) {
+    return { ok: false, error: `http_${result.status ?? "unknown"}` };
+  }
+  if (!result.data || typeof result.data !== "object") {
+    return { ok: false, error: "bad_shape" };
+  }
   const data = result.data as { settings?: unknown; values?: unknown };
-  const settings = Array.isArray(data.settings) ? (data.settings as DimensionSettingRecord[]) : [];
-  const values = Array.isArray(data.values) ? (data.values as DimensionValueRecord[]) : [];
-  return { settings, values: values.filter((v) => v.isActive) };
+  if (!Array.isArray(data.settings) || !Array.isArray(data.values)) {
+    return { ok: false, error: "bad_shape" };
+  }
+  const allValues = data.values as DimensionValueRecord[];
+  return {
+    ok: true,
+    catalog: {
+      settings: data.settings as DimensionSettingRecord[],
+      postableValues: allValues.filter((v) => v.isActive),
+      allValues,
+    },
+  };
 }
 
 /** The first day of the current Shamsi month, as ISO: the period a business reads by default. */
@@ -128,7 +191,6 @@ export function isoToJalaliText(iso: string): string {
   return `${jalali.jy}/${String(jalali.jm).padStart(2, "0")}/${String(jalali.jd).padStart(2, "0")}`;
 }
 
-
 /**
  * The values a management list shows: one kind, optionally narrowed by a search
  * over code and name, and with archived values left out unless asked for.
@@ -144,4 +206,19 @@ export function filterDimensionValues(
     .filter((v) => options.includeArchived || v.isActive)
     .filter((v) => !needle || `${v.code} ${v.name}`.toLowerCase().includes(needle))
     .sort((a, b) => a.code.localeCompare(b.code));
+}
+
+/**
+ * Resolves a value's display label, preserving historical names after rename by
+ * joining the report's id set against the catalogue. An unknown id (deleted
+ * without cascade) falls back to the id so a report never renders blank.
+ */
+export function dimensionValueLabel(
+  values: readonly DimensionValueRecord[] | undefined,
+  id: string | null | undefined,
+): string {
+  if (!id) return "—";
+  const v = (values ?? []).find((candidate) => candidate.id === id);
+  if (!v) return id;
+  return `${toPersianDigits(v.code)} · ${v.name}${v.isActive ? "" : " (بایگانی)"}`;
 }

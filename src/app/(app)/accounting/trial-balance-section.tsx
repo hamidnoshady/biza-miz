@@ -7,8 +7,8 @@ import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { FilterChip } from "@/app/dashboard/filters";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { useDimensionCatalog } from "./dimension-fields";
-import { dimensionFilterOptionsFor, enabledDimensionKinds, enabledKindLabel } from "./dimension-catalog";
+import { useDimensionCatalog, DimensionCatalogError } from "./dimension-fields";
+import { dimensionFilterOptionsFor, enabledDimensionKinds, enabledKindLabel, historicalKinds } from "./dimension-catalog";
 import { UNASSIGNED_DIMENSION, type DimensionKind } from "@/lib/accounting-dimensions";
 import {
   CardEyebrow,
@@ -169,17 +169,19 @@ export function TrialBalanceSection({
   const [includeZeroBalances, setIncludeZeroBalances] = useState(false);
   // Issue #868: the report can be read for one dimension value. Off until a kind
   // and a value are both chosen, and then every figure is that subset.
-  const dimensionCatalog = useDimensionCatalog();
+  const { catalog: dimensionCatalog, error: dimensionCatalogError, retry: retryDimensionCatalog } = useDimensionCatalog();
+  const dimSettings = dimensionCatalog?.settings ?? [];
+  const dimAllValues = dimensionCatalog?.allValues ?? [];
   const [dimensionKind, setDimensionKind] = useState<DimensionKind | "">("");
   const [dimensionValue, setDimensionValue] = useState("");
   const dimensionActive = dimensionKind !== "" && dimensionValue !== "";
   const dimensionScopeLabel = !dimensionActive
     ? ""
     : dimensionValue === UNASSIGNED_DIMENSION
-      ? `${enabledKindLabel(dimensionCatalog.settings, dimensionKind)}: بدون بُعد`
+      ? `${enabledKindLabel(dimSettings, dimensionKind)}: بدون بُعد`
       : (() => {
-          const chosen = dimensionCatalog.values.find((v) => v.id === dimensionValue);
-          return `${enabledKindLabel(dimensionCatalog.settings, dimensionKind)}: ${chosen ? `${toPersianDigits(chosen.code)} · ${chosen.name}` : "مقدار انتخاب‌شده"}`;
+          const chosen = dimAllValues.find((v) => v.id === dimensionValue);
+          return `${enabledKindLabel(dimSettings, dimensionKind)}: ${chosen ? `${toPersianDigits(chosen.code)} · ${chosen.name}${chosen.isActive ? "" : " (بایگانی)"}` : "مقدار انتخاب‌شده"}`;
         })();
   const [drillTarget, setDrillTarget] = useState<DrillDownTarget | null>(null);
   // The print sheet is portalled onto <body>; there is no body to portal onto
@@ -634,7 +636,9 @@ export function TrialBalanceSection({
                 <option value="archived">فقط بایگانی‌شده</option>
               </select>
             </label>
-            {enabledDimensionKinds(dimensionCatalog.settings).length > 0 ? (
+            {dimensionCatalogError ? (
+              <DimensionCatalogError error={dimensionCatalogError} onRetry={retryDimensionCatalog} />
+            ) : historicalKinds(dimSettings, dimAllValues).length > 0 ? (
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block min-w-0">
                   <span className="mb-1.5 block text-xs text-muted-foreground">بُعد</span>
@@ -647,9 +651,9 @@ export function TrialBalanceSection({
                     ariaLabel="بُعد تراز آزمایشی"
                     options={[
                       { value: "", label: "همهٔ سندها" },
-                      ...enabledDimensionKinds(dimensionCatalog.settings).map((k) => ({
+                      ...historicalKinds(dimSettings, dimAllValues).map((k) => ({
                         value: k,
-                        label: enabledKindLabel(dimensionCatalog.settings, k),
+                        label: enabledKindLabel(dimSettings, k),
                       })),
                     ]}
                   />
@@ -657,15 +661,15 @@ export function TrialBalanceSection({
                 {dimensionKind ? (
                   <label className="block min-w-0">
                     <span className="mb-1.5 block text-xs text-muted-foreground">
-                      {enabledKindLabel(dimensionCatalog.settings, dimensionKind)}
+                      {enabledKindLabel(dimSettings, dimensionKind)}
                     </span>
                     <SearchableSelect
                       value={dimensionValue}
                       onChange={setDimensionValue}
-                      ariaLabel={`${enabledKindLabel(dimensionCatalog.settings, dimensionKind)} تراز آزمایشی`}
+                      ariaLabel={`${enabledKindLabel(dimSettings, dimensionKind)} تراز آزمایشی`}
                       options={[
                         { value: UNASSIGNED_DIMENSION, label: "بدون بُعد" },
-                        ...dimensionFilterOptionsFor(dimensionCatalog.values, dimensionKind),
+                        ...dimensionFilterOptionsFor(dimAllValues, dimensionKind),
                       ]}
                     />
                   </label>

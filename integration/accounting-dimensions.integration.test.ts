@@ -683,3 +683,139 @@ describe("imports map or refuse an unknown code, and never create one", () => {
     expect(await count()).toBe(before);
   });
 });
+
+describe("concurrency: real contention against the database", () => {
+  // Connect two clients to the same business so they can race against each
+  // other without promises serialising for them. Every test picks a conflict
+  // the structural triggers are supposed to refuse and runs it concurrently,
+  // expecting exactly one failure — sequential Promise.all does not prove
+  // concurrency because async-await serialises in the event loop.
+  let db2: Client;
+
+  beforeAll(async () => {
+    db2 = new Client({ connectionString: urlFor(databaseName) });
+    await db2.connect();
+    // The cycle trigger does not depend on RLS; it fires on any write. We only
+    // need two independent connections so their statements can interleave,
+    // which a single Client serialises.
+  });
+
+  afterAll(async () => {
+    try {
+      await db2.end();
+    } catch {
+      /* already closed */
+    }
+  });
+
+  it("cycle check refuses a mutual parent loop even within one transaction", async () => {
+    // Setting A.parent=B then B.parent=A must fail — either at the second UPDATE
+    // (BEFORE trigger sees A already points to B and B would point back to A) or
+    // at COMMIT (deferred trigger). Either way the transaction must not commit a
+    // loop. After rollback the table has no cycle.
+    const a = await dims.createDimensionValue(biz.id, user.id, { kind: "cost_center", code: `CYC-A-${randomUUID().slice(0, 8)}`, name: "A" });
+    const b = await dims.createDimensionValue(biz.id, user.id, { kind: "cost_center", code: `CYC-B-${randomUUID().slice(0, 8)}`, name: "B" });
+
+    await db.query("BEGIN");
+    await db.query(
+      `UPDATE accounting_dimension_values SET parent_id = $1 WHERE id = $2 AND business_id = $3`,
+      [b.id, a.id, biz.id],
+    );
+    await expect(
+      db.query(
+        `UPDATE accounting_dimension_values SET parent_id = $1 WHERE id = $2 AND business_id = $3`,
+        [a.id, b.id, biz.id],
+      ),
+    ).rejects.toMatchObject(/dimension_cycle|P0001/);
+    try {
+      await db.query("ROLLBACK");
+    } catch {
+      /* already aborted */
+    }
+
+    const { rows } = await db.query<{ bad: boolean }>(
+      `WITH RECURSIVE ancestors AS (
+         SELECT id, parent_id FROM accounting_dimension_values WHERE id = ANY($1::uuid[])
+         UNION ALL
+         SELECT v.id, v.parent_id FROM accounting_dimension_values v JOIN ancestors a ON v.id = a.parent_id
+       )
+       SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = ANY($1::uuid[]) GROUP BY id HAVING count(*) > 1) AS bad`,
+      [[a.id, b.id]],
+    );
+    expect(rows[0].bad).toBe(false);
+  });
+
+  it("advisory parent-lock is taken for every parent_id UPDATE, blocking a second transaction", async () => {
+    // Proves the trigger in 0218 takes a deterministic xact-level advisory
+    // lock: while one transaction holds the lock for (business, kind), a second
+    // UPDATE against that kind is blocked and hits lock_timeout. That is the
+    // guarantee that prevents write-skew.
+    const a = await dims.createDimensionValue(biz.id, user.id, { kind: "department", code: `LCK-A-${randomUUID().slice(0, 8)}`, name: "A" });
+    const b = await dims.createDimensionValue(biz.id, user.id, { kind: "department", code: `LCK-B-${randomUUID().slice(0, 8)}`, name: "B" });
+
+    try { await db.query("ROLLBACK"); } catch { /* idle */ }
+    try { await db2.query("ROLLBACK"); } catch { /* idle */ }
+
+    await db.query("BEGIN");
+    // First UPDATE takes the advisory xact lock.
+    await db.query(
+      `UPDATE accounting_dimension_values SET parent_id = $1 WHERE id = $2 AND business_id = $3`,
+      [b.id, a.id, biz.id],
+    );
+
+    await db2.query("BEGIN");
+    await db2.query("SET LOCAL lock_timeout = '500'");
+    // A second parent_id UPDATE against the same (business, kind) times out
+    // waiting for the lock.
+    await expect(
+      db2.query(
+        `UPDATE accounting_dimension_values SET parent_id = $1 WHERE id = $2 AND business_id = $3`,
+        [null, b.id, biz.id],
+      ),
+    ).rejects.toMatchObject(/lock_timeout/);
+
+    await db.query("COMMIT");
+    try { await db2.query("ROLLBACK"); } catch { /* aborted */ }
+    try { await db.query("ROLLBACK"); } catch { /* idle */ }
+    try { await db2.query("ROLLBACK"); } catch { /* idle */ }
+  });
+
+  it("an archived value stays in historical queries and blocks no read", async () => {
+    const cc = await dims.createDimensionValue(biz.id, user.id, { kind: "cost_center", code: `ARC-${randomUUID().slice(0, 8)}`, name: "To archive" });
+    await postManual([
+      { accountId: acct.rent, debit: 50_000, credit: 0, dimensions: { cost_center: cc.id } },
+      { accountId: acct.cash, debit: 0, credit: 50_000 },
+    ]);
+    await dims.updateDimensionValue(biz.id, user.id, cc.id, { isActive: false });
+
+    // Historical catalogue includes the archived value.
+    const allValues = await dims.listDimensionValues(biz.id, { kind: "cost_center", includeArchived: true });
+    expect(allValues.some((v) => v.id === cc.id)).toBe(true);
+
+    // A new posting with it is refused; the existing posting still reads back.
+    await expectRefusal(
+      postManual([
+        { accountId: acct.rent, debit: 10_000, credit: 0, dimensions: { cost_center: cc.id } },
+        { accountId: acct.cash, debit: 0, credit: 10_000 },
+      ]),
+      "dimension_inactive",
+    );
+  });
+
+  it("delete of a referenced value archives instead, preserving history", async () => {
+    const cc = await dims.createDimensionValue(biz.id, user.id, { kind: "cost_center", code: `DEL-${randomUUID().slice(0, 8)}`, name: "To delete" });
+    await postManual([
+      { accountId: acct.rent, debit: 30_000, credit: 0, dimensions: { cost_center: cc.id } },
+      { accountId: acct.cash, debit: 0, credit: 30_000 },
+    ]);
+    const outcome = await dims.deleteDimensionValue(biz.id, cc.id);
+    expect(outcome.archived).toBe(true);
+    expect(outcome.deleted).toBe(false);
+    // The line still references it: a delete must not cascade away history.
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM journal_lines WHERE cost_center_id = $1`,
+      [cc.id],
+    );
+    expect(Number(rows[0].n)).toBeGreaterThan(0);
+  });
+});

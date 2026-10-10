@@ -74,12 +74,13 @@ import {
   type JournalFilterState,
 } from "./journal-view";
 import { JOURNAL_EXPORT_ROW_CAP } from "@/lib/journal-filters";
-import { useDimensionCatalog } from "./dimension-fields";
+import { useDimensionCatalog, DimensionCatalogError } from "./dimension-fields";
 import type { DimensionKind } from "@/lib/accounting-dimensions";
 import {
   dimensionFilterOptionsFor,
   enabledDimensionKinds,
   enabledKindLabel,
+  historicalKinds,
 } from "./dimension-catalog";
 
 interface JournalPageResponse {
@@ -152,10 +153,12 @@ export function EntriesSection({
   const [optionsFailed, setOptionsFailed] = useState(false);
   const [optionsKey, setOptionsKey] = useState(0);
   // Issue #868: the dimension filters, and the labels a line's attribution shows with.
-  const dimensionCatalog = useDimensionCatalog();
+  const { catalog: dimensionCatalog, error: dimensionCatalogError, retry: retryDimensionCatalog } = useDimensionCatalog();
+  const dimSettings = dimensionCatalog?.settings ?? [];
+  const dimAllValues = dimensionCatalog?.allValues ?? [];
   const lineKindLabel = useCallback(
-    (kind: DimensionKind) => enabledKindLabel(dimensionCatalog.settings, kind),
-    [dimensionCatalog.settings],
+    (kind: DimensionKind) => enabledKindLabel(dimSettings, kind),
+    [dimSettings],
   );
 
   const [showMoreFilters, setShowMoreFilters] = useState(false);
@@ -500,8 +503,8 @@ export function EntriesSection({
                   ]}
                 />
               </label>
-              {enabledDimensionKinds(dimensionCatalog.settings).map((kind) => {
-                const label = enabledKindLabel(dimensionCatalog.settings, kind);
+              {historicalKinds(dimSettings, dimAllValues).map((kind) => {
+                const label = enabledKindLabel(dimSettings, kind);
                 return (
                   <label key={kind} className="block">
                     <span className="mb-1.5 block text-xs text-muted-foreground">{label}</span>
@@ -511,12 +514,15 @@ export function EntriesSection({
                       ariaLabel={label}
                       options={[
                         { value: "", label: `همهٔ ${label}` },
-                        ...dimensionFilterOptionsFor(dimensionCatalog.values, kind),
+                        ...dimensionFilterOptionsFor(dimAllValues, kind),
                       ]}
                     />
                   </label>
                 );
               })}
+              {dimensionCatalogError ? (
+                <DimensionCatalogError error={dimensionCatalogError} onRetry={retryDimensionCatalog} />
+              ) : null}
               <label className="block">
                 <span className="mb-1.5 block text-xs text-muted-foreground">وضعیت برگشت</span>
                 <SearchableSelect
