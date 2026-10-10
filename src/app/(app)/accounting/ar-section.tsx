@@ -10,6 +10,12 @@
  * the same id the one directory opens a file with — which is why every row's
  * `partyId` is the row's own id here, and why a negative balance wears
  * «بستانکار»: a customer who paid ahead has a credit, not a debt.
+ *
+ * The side also knows where its source records live: an A/R line raised by an
+ * order can open that order (`/accounting/orders?order=<id>`, the deep link the
+ * order queue already answers). A receipt or a cheque has no screen of its
+ * own, so those lines drill into the journal entry instead — see
+ * `SubledgerStatementPanel`.
  */
 
 import { UNKNOWN_CUSTOMER_KEY } from "@/lib/aging";
@@ -39,6 +45,22 @@ interface AgingReport {
   totals: Omit<AgingRow, "customerId" | "customerName">;
 }
 
+interface ReconciliationSummaryPayload {
+  receivableTotal: number;
+  advanceTotal: number;
+  netTotal: number;
+  controlBalance: number;
+  difference: number;
+  reconciles: boolean;
+}
+
+interface BalancesPayload {
+  customers?: CustomerBalance[];
+  total?: number;
+  nextOffset?: number | null;
+  summary?: ReconciliationSummaryPayload | null;
+}
+
 /** The receivables side — shared with the directory's statement overlay (`ar-statement-panel.tsx`). */
 export const RECEIVABLES_SIDE: SubledgerSide = {
   eyebrow: "مطالبات مشتریان",
@@ -49,23 +71,42 @@ export const RECEIVABLES_SIDE: SubledgerSide = {
   agingCaption: "نمای سنی بدهی مشتریان",
   emptyBalances: "هیچ حساب دریافتنی بازی وجود ندارد.",
   loadBalancesFailed: "بارگذاری مانده‌های دریافتنی ناموفق بود.",
+  noSearchMatches: "مشتری‌ای با این جست‌وجو پیدا نشد.",
   agingTotalLabel: "جمع کل حساب‌های دریافتنی",
   directoryHref: accountingCustomersHref(),
   directoryLinkLabel: "مشتریان در حسابداری",
+  searchLabel: "جست‌وجوی مشتری",
 
   unknownKey: UNKNOWN_CUSTOMER_KEY,
   listEndpoint: "/api/ledger/ar/customers",
   agingEndpoint: "/api/ledger/ar/aging",
-  readParties: (raw) => {
-    const data = raw as { customers?: CustomerBalance[] };
-    return (data.customers ?? []).map((c) => ({
-      id: c.customerId,
-      name: c.customerName,
-      phone: c.customerPhone,
-      balance: c.balance,
-      // A/R's id *is* the party's id in the one directory.
-      partyId: c.customerId,
-    }));
+  readBalances: (raw) => {
+    const data = raw as BalancesPayload;
+    const rows = data.customers ?? [];
+    return {
+      rows: rows.map((c) => ({
+        id: c.customerId,
+        name: c.customerName,
+        phone: c.customerPhone,
+        balance: c.balance,
+        // A/R's id *is* the party's id in the one directory.
+        partyId: c.customerId,
+      })),
+      // An endpoint that answered without a window (an older caller, a mock)
+      // still yields a usable total rather than «۰ از ۰».
+      total: data.total ?? rows.length,
+      nextOffset: data.nextOffset ?? null,
+      summary: data.summary
+        ? {
+            primaryTotal: data.summary.receivableTotal,
+            advanceTotal: data.summary.advanceTotal,
+            netTotal: data.summary.netTotal,
+            controlBalance: data.summary.controlBalance,
+            difference: data.summary.difference,
+            reconciles: data.summary.reconciles,
+          }
+        : null,
+    };
   },
   readAging: (raw) => {
     const data = raw as AgingReport;
@@ -85,7 +126,16 @@ export const RECEIVABLES_SIDE: SubledgerSide = {
     };
   },
 
-  marksCreditBalances: true,
+  negativeBalanceLabel: "بستانکار / پیش‌پرداخت مشتری",
+
+  summary: {
+    primaryLabel: "جمع مطالبات",
+    advanceLabel: "پیش‌دریافت و بستانکاری مشتریان",
+    netLabel: "خالص مطالبات",
+    controlLabel: "مانده حساب کنترل دریافتنی",
+    reconciled: "با حساب کنترل مطابقت دارد",
+    difference: "تفاوت با حساب کنترل",
+  },
 
   settle: {
     actionLabel: "دریافت وجه",
@@ -110,13 +160,28 @@ export const RECEIVABLES_SIDE: SubledgerSide = {
     },
     caption: "گردش حساب این مشتری",
     empty: "هنوز فعالیتی برای این مشتری ثبت نشده است.",
-    failed: "بارگذاری صورتحساب این مشتری ناموفق بود.",
+    failed: "بارگذاری صورت‌حساب این مشتری ناموفق بود.",
     directoryLabel: "مشتریان در حسابداری",
     directoryHrefFor: (id, partyId) =>
       id !== UNKNOWN_CUSTOMER_KEY && partyId ? accountingCustomerHref(partyId) : null,
+    sourceColumnLabel: "منبع",
+    entryLinkLabel: "نمایش سند",
+    entryFailed: "بارگذاری سند حسابداری این ردیف ناموفق بود.",
+    // The order queue answers `?order=<id>` (see `orders/[id]/page.tsx`), so
+    // an invoice line can open the sale it came from. The amendment bridge is
+    // resolved server-side, so a corrected order still links to itself.
+    orderHrefFor: (source) => (source?.orderId ? `/accounting/orders?order=${encodeURIComponent(source.orderId)}` : null),
+    orderLinkLabel: "مشاهدهٔ سفارش",
   },
 };
 
-export function ArSection() {
-  return <SubledgerSection side={RECEIVABLES_SIDE} />;
+/**
+ * The receivables screen. `canSettle` is the member's effective
+ * `finance.receivables_manage` — the same permission the receipts endpoint
+ * enforces — and nothing is drawn from it here: a member holding only
+ * `ledger.view` reads the balances, the aging and the statements, and sees no
+ * receive action at all.
+ */
+export function ArSection({ canSettle }: { canSettle: boolean }) {
+  return <SubledgerSection side={RECEIVABLES_SIDE} canSettle={canSettle} />;
 }

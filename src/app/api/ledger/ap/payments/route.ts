@@ -23,9 +23,8 @@ interface PaymentBody {
   amount?: number;
   paymentDate?: string;
   memo?: string;
-  /** Audit F11 — the cash/bank account (an active cash or bank account of the chosen method); omitted = the method's default. */
+  clientRequestId?: string;
   cashAccountId?: string | null;
-  /** Audit F11 — the bank's tracking/reference number. */
   bankReference?: string | null;
 }
 
@@ -45,6 +44,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const supplierId = body.supplierId?.trim();
   if (!supplierId) return NextResponse.json({ error: "supplier_required" }, { status: 400 });
+  const clientRequestId = body.clientRequestId?.trim();
+  if (!clientRequestId || clientRequestId.length > 200) {
+    return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
+  }
   if (!METHODS.includes(body.method as (typeof METHODS)[number])) {
     return NextResponse.json({ error: "invalid_method" }, { status: 400 });
   }
@@ -70,11 +73,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       amount,
       paymentDate,
       memo: body.memo,
+      clientRequestId,
       createdBy: session.sub,
       cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
       bankReference: typeof body.bankReference === "string" ? body.bankReference : null,
     });
-    return NextResponse.json({ payment }, { status: 201 });
+    return NextResponse.json({ payment }, { status: payment.duplicate ? 200 : 201 });
   } catch (err) {
     if (err instanceof ApError) return NextResponse.json({ error: err.message }, { status: err.status });
     if (err instanceof PayablesInputError) return NextResponse.json({ error: err.code }, { status: 400 });

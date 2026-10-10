@@ -64,7 +64,9 @@ export default async function RootLayout({
     <html lang="fa" dir="rtl" className={vazirmatn.variable} suppressHydrationWarning>
       <body className="font-sans">
         {/* Phase 46: inside the desktop's cloud pane, hide this page's own sidebar before it paints. */}
-        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: CLOUD_EMBED_MARKER_SCRIPT }} />
+        {/* Browsers hide the nonce attribute after parsing (script.nonce stays intact).
+            Suppress only that expected hydration difference, not page content. */}
+        <script nonce={nonce} suppressHydrationWarning dangerouslySetInnerHTML={{ __html: CLOUD_EMBED_MARKER_SCRIPT }} />
         <ThemeProvider nonce={nonce}>
           {children}
           <Toaster position="bottom-center" dir="rtl" />

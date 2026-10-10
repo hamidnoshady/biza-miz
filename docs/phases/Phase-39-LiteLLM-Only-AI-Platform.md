@@ -88,23 +88,62 @@ database and runtime:**
 2. Run `npm run db:encrypt-ai-secrets`; it is resumable, decrypt-verifies each ciphertext against
    the configured encryption key, then clears the legacy plaintext copies.
 3. Run `npm run db:encrypt-ai-secrets -- --verify-only`; it must pass with no legacy plaintext.
-4. Deploy the ciphertext-only application with `AI_GATEWAY_SECRET_CUTOVER_DEFER=true`. The
-   entrypoint applies earlier migrations but explicitly leaves 0209 pending, so the new runtime
-   can start while the old columns still exist.
+4. Deploy the ciphertext-only application. While any credential is stored and
+   `AI_GATEWAY_SECRET_CUTOVER_VERIFIED` is not `true`, the migration runner defers 0209 on its own
+   (as it always does with `AI_GATEWAY_SECRET_CUTOVER_DEFER=true`) and still applies every later
+   migration that does **not** name a legacy plaintext column, so the new runtime starts while the
+   old columns still exist. Before starting the server the container entrypoint runs
+   `encrypt-ai-gateway-secrets.ts --keep-plaintext`, which writes and decrypt-verifies any missing
+   ciphertext with the container's own key and leaves plaintext alone; a failure there is logged,
+   not fatal. (Before this, a deployment that skipped steps 1–3 restarted forever on 0209's
+   `ai_gateway_secret_backfill_required`, and the defer flag could not help because migrations
+   `0209_online_sale_facts` onward sort after the cutover.) A later migration that *does* name a
+   legacy column cannot jump the deferred cutover: the runner refuses to defer at all in that case
+   (`ai_gateway_secret_cutover_deferred_blocks_later_migration:<file>`).
 5. Verify a production runtime read/probe using ciphertext-backed credentials and the current
    `INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`) on every deployment/instance. Do not advance
-   if any probe fails.
+   if any probe fails. A probe that succeeds with one business or branch key does not prove that
+   every business/branch key — or every running instance — works.
 6. Drain older app instances that could still select the plaintext columns.
 7. Only after those checks, remove the defer setting and run
    `AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true npm run db:migrate` (or set that flag for the
    controlled entrypoint run). The runner scopes a confirmation setting to its DB session, and
    migration 0209 independently checks it before dropping either column. Remove the temporary
    flags after it is recorded in `schema_migrations`.
+8. Confirm the record (`0209_ai_gateway_secret_cutover.sql` in `schema_migrations`, both legacy
+   columns gone) and recheck runtime reads/probes on every instance now that only ciphertext
+   remains.
+
+**A bare `npm run db:migrate` will defer 0209 again** while a credential is still stored. That is
+the intended behaviour, not a failure: the deferral is the safety net that keeps a deployment from
+dropping columns it still reads. `/platform/system` reports the deferral as a *gated cleanup
+awaiting verification*, with the exact sequence above — it is deliberately not the generic
+"running code is ahead of the database" warning, which would send an operator to re-run a command
+that changes nothing.
+
+**`AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true` is a one-time operator confirmation, never a
+deployment default.** The platform health surfaces report the flag but never treat it as evidence
+that verification happened: the cutover counts as complete only once 0209 is recorded in
+`schema_migrations` and the legacy columns are gone.
+
+**Reporting.** `src/lib/migration-status-service.ts` is the single source of migration health for
+both `/api/platform/system` and `/api/platform/overview`. It distinguishes applied migrations,
+ordinary pending migrations, the gated cutover awaiting operator verification, and an
+unreadable/unknown inventory (which is reported as unknown — never as zero pending). The
+execution policy it mirrors lives in `src/lib/ai-gateway-secret-cutover-policy.ts`, shared with
+`scripts/migrate.ts` so the runner and the console cannot disagree about the gate. The health
+surfaces also expose redacted secret state (rows still holding plaintext, rows lacking a
+ciphertext twin) so a failed startup backfill is visible to an operator; they never return
+plaintext, ciphertext or a decrypted credential, and they never run a billable provider probe.
 
 The local checkout cannot establish that production backfill, key consistency, or runtime
 verification has happened. The migration fails closed without the backfill and explicit
 confirmation; do not bypass either guard or treat them as substitutes for the production-read
 checks above.
+
+The managed-knowledge credential (`knowledge_api_key` / `knowledge_api_key_ciphertext`) is a
+**separate** transition with its own legacy read fallback in `ai-gateway-service.ts`. Migration
+0209 does not cover it; do not remove that fallback on the assumption that it does.
 
 ## Current related documentation
 

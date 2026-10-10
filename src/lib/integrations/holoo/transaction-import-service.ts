@@ -11,6 +11,7 @@
  * reporting (transaction-plan.ts), and one mapping row per imported document.
  */
 import Decimal from "decimal.js";
+import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, query } from "../../db";
 import { getBusinessIndustry } from "../../industry-guard";
@@ -412,6 +413,7 @@ export async function applyTransactions(
         method: "cash",
         amount: tx.amountRial ? Number(tx.amountRial) : 0,
         paymentDate: tx.occurredAt.slice(0, 10),
+        clientRequestId: `holoo-payment:${createHash("sha256").update(`${connectionId}:${tx.remoteId}`).digest("hex")}`,
         createdBy,
         skipHolooPush: true,
       });

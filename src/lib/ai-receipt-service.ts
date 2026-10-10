@@ -32,7 +32,9 @@ import type { AiTokenUsage } from "./ai-billing";
 import {
   RECEIPT_EXTRACTION_SYSTEM_PROMPT,
   RECEIPT_EXTRACTION_USER_PROMPT,
+  buildReceiptExtractionPrompt,
   parseReceiptExtractionReply,
+  type ReceiptAccountCandidate,
   type ReceiptDraftFields,
 } from "./ai-receipt";
 import { runAiVisionExtraction } from "./ai-vision-extraction";
@@ -61,11 +63,23 @@ export interface ReceiptOcrResult {
  * One isolated, non-streaming, tool-less vision call. Throws `ReceiptOcrError`
  * on a provider/network/timeout failure or an unparseable reply — the caller
  * settles the wallet only when this resolves, never on a throw.
+ *
+ * `expenseAccounts` is the tenant's own active expense chart. It is passed to
+ * the model as the only vocabulary it may answer with *and* used to filter the
+ * answer on the way back, so a suggested code can never be a chart entry this
+ * business does not own (issue #832 §13). Omitting it leaves the suggestion
+ * unfiltered but still harmless: whoever posts it re-validates the account.
  */
-export async function runReceiptOcr(input: { config: AiConfig; dataUrl: string }): Promise<ReceiptOcrResult> {
+export async function runReceiptOcr(input: {
+  config: AiConfig;
+  dataUrl: string;
+  expenseAccounts?: readonly ReceiptAccountCandidate[];
+}): Promise<ReceiptOcrResult> {
   const { text, usage, costUsd } = await runAiVisionExtraction({
     config: input.config,
-    systemPrompt: RECEIPT_EXTRACTION_SYSTEM_PROMPT,
+    systemPrompt: input.expenseAccounts
+      ? buildReceiptExtractionPrompt(input.expenseAccounts)
+      : RECEIPT_EXTRACTION_SYSTEM_PROMPT,
     userPrompt: RECEIPT_EXTRACTION_USER_PROMPT,
     dataUrl: input.dataUrl,
     timeoutMs: REQUEST_TIMEOUT_MS,
@@ -73,7 +87,7 @@ export async function runReceiptOcr(input: { config: AiConfig; dataUrl: string }
     createError: (code, message, detail) => new ReceiptOcrError(code, message, detail),
   });
 
-  const fields = parseReceiptExtractionReply(text);
+  const fields = parseReceiptExtractionReply(text, input.expenseAccounts?.map((account) => account.code));
   if (!fields) {
     throw new ReceiptOcrError(
       "extraction_failed",

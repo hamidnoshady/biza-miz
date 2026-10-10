@@ -18,6 +18,13 @@
  *     `online-platforms-calculation.ts` already follow — so the preview, the
  *     stored run line and the journal agree to the Rial.
  *
+ *     Amounts go in and come out as `bigint` (issue #835 §10): the database
+ *     columns are `bigint`, and a `Number` in between rounds past 2^53 — which
+ *     is how a total can stop balancing. Callers hold Rial as integer text and
+ *     convert with `BigInt(...)` at the edge. Only the *settings document*
+ *     keeps JSON numbers (percentages, and the business-entered ceiling,
+ *     threshold and bracket bounds, none of which approach 2^53).
+ *
  * The order of deductions is fixed and stated, because it decides the answer:
  *
  *   gross          = base + taxable allowances + non-taxable allowances + overtime
@@ -36,6 +43,8 @@
  * deduction must fit inside gross, and a month where it does not is refused
  * rather than posted as a negative salary.
  */
+
+import { MAX_RIAL } from "./inventory-exact";
 
 /** One income-tax band: income up to `upToRial` (absolute, monthly) is taxed at `ratePercent`. `null` = no upper bound. */
 export interface PayrollTaxBracket {
@@ -199,34 +208,34 @@ export function payrollSettingsApplyDeductions(s: PayrollSettings): boolean {
 // ---------------------------------------------------------------------------
 
 export interface GrossToNetInput {
-  baseSalaryRial: number;
-  taxableAllowancesRial?: number;
-  nonTaxableAllowancesRial?: number;
-  overtimeRial?: number;
+  baseSalaryRial: bigint;
+  taxableAllowancesRial?: bigint;
+  nonTaxableAllowancesRial?: bigint;
+  overtimeRial?: bigint;
   /** What the employee still owes from salary advances; recovered up to this month's remaining pay. */
-  advanceOutstandingRial?: number;
+  advanceOutstandingRial?: bigint;
   /** Other fixed monthly deductions (e.g. a loan instalment owed to a third party). */
-  otherDeductionsRial?: number;
+  otherDeductionsRial?: bigint;
 }
 
 export interface GrossToNetBreakdown {
-  baseSalaryRial: number;
-  taxableAllowancesRial: number;
-  nonTaxableAllowancesRial: number;
-  overtimeRial: number;
-  grossRial: number;
-  insuranceBaseRial: number;
-  employeeInsuranceRial: number;
-  employerInsuranceRial: number;
-  unemploymentInsuranceRial: number;
-  taxableIncomeRial: number;
-  incomeTaxRial: number;
-  otherDeductionsRial: number;
-  advanceRecoveryRial: number;
+  baseSalaryRial: bigint;
+  taxableAllowancesRial: bigint;
+  nonTaxableAllowancesRial: bigint;
+  overtimeRial: bigint;
+  grossRial: bigint;
+  insuranceBaseRial: bigint;
+  employeeInsuranceRial: bigint;
+  employerInsuranceRial: bigint;
+  unemploymentInsuranceRial: bigint;
+  taxableIncomeRial: bigint;
+  incomeTaxRial: bigint;
+  otherDeductionsRial: bigint;
+  advanceRecoveryRial: bigint;
   /** Advance balance still owed after this month's recovery. */
-  advanceCarriedRial: number;
-  netPayRial: number;
-  employerCostRial: number;
+  advanceCarriedRial: bigint;
+  netPayRial: bigint;
+  employerCostRial: bigint;
 }
 
 export type GrossToNetError = "invalid_amount" | "deductions_exceed_gross" | "amount_too_large";
@@ -276,13 +285,12 @@ export function progressiveIncomeTax(
   return roundBasis(numerator);
 }
 
-function amount(value: number | undefined): bigint | null {
+/** An input amount: absent is 0, a non-negative bigint is itself, anything else (a `Number`, a negative) is refused. */
+function amount(value: bigint | undefined): bigint | null {
   if (value === undefined) return 0n;
-  if (!isRial(value)) return null;
-  return BigInt(value);
+  if (typeof value !== "bigint" || value < 0n) return null;
+  return value;
 }
-
-const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 
 export function computeGrossToNet(input: GrossToNetInput, settings: PayrollSettings): GrossToNetResult {
   const base = amount(input.baseSalaryRial);
@@ -332,26 +340,28 @@ export function computeGrossToNet(input: GrossToNetInput, settings: PayrollSetti
   const net = remaining - advanceRecovery;
   const employerCost = gross + employerInsurance + unemploymentInsurance;
 
-  if (employerCost > MAX_SAFE || advanceOutstanding > MAX_SAFE) return { ok: false, error: "amount_too_large" };
+  // The employer cost is the largest figure a line stores (it contains gross and both
+  // employer shares); past what a `bigint` column holds it would abort the INSERT.
+  if (employerCost > MAX_RIAL || advanceOutstanding > MAX_RIAL) return { ok: false, error: "amount_too_large" };
 
   return {
     ok: true,
-    baseSalaryRial: Number(base),
-    taxableAllowancesRial: Number(taxableAllowances),
-    nonTaxableAllowancesRial: Number(nonTaxableAllowances),
-    overtimeRial: Number(overtime),
-    grossRial: Number(gross),
-    insuranceBaseRial: Number(insuranceBase),
-    employeeInsuranceRial: Number(employeeInsurance),
-    employerInsuranceRial: Number(employerInsurance),
-    unemploymentInsuranceRial: Number(unemploymentInsurance),
-    taxableIncomeRial: Number(taxableIncome),
-    incomeTaxRial: Number(incomeTax),
-    otherDeductionsRial: Number(otherDeductions),
-    advanceRecoveryRial: Number(advanceRecovery),
-    advanceCarriedRial: Number(advanceOutstanding - advanceRecovery),
-    netPayRial: Number(net),
-    employerCostRial: Number(employerCost),
+    baseSalaryRial: base,
+    taxableAllowancesRial: taxableAllowances,
+    nonTaxableAllowancesRial: nonTaxableAllowances,
+    overtimeRial: overtime,
+    grossRial: gross,
+    insuranceBaseRial: insuranceBase,
+    employeeInsuranceRial: employeeInsurance,
+    employerInsuranceRial: employerInsurance,
+    unemploymentInsuranceRial: unemploymentInsurance,
+    taxableIncomeRial: taxableIncome,
+    incomeTaxRial: incomeTax,
+    otherDeductionsRial: otherDeductions,
+    advanceRecoveryRial: advanceRecovery,
+    advanceCarriedRial: advanceOutstanding - advanceRecovery,
+    netPayRial: net,
+    employerCostRial: employerCost,
   };
 }
 
@@ -365,13 +375,13 @@ export function computeGrossToNet(input: GrossToNetInput, settings: PayrollSetti
  *   + Cr payroll tax payable + Cr staff advances (recovered) + Cr other deductions payable
  */
 export interface PayrollAccrualTotals {
-  grossRial: number;
-  employerInsuranceExpenseRial: number;
-  netPayableRial: number;
-  insurancePayableRial: number;
-  incomeTaxPayableRial: number;
-  advanceRecoveryRial: number;
-  otherDeductionsPayableRial: number;
+  grossRial: bigint;
+  employerInsuranceExpenseRial: bigint;
+  netPayableRial: bigint;
+  insurancePayableRial: bigint;
+  incomeTaxPayableRial: bigint;
+  advanceRecoveryRial: bigint;
+  otherDeductionsPayableRial: bigint;
 }
 
 export function payrollAccrualTotals(lines: readonly GrossToNetBreakdown[]): PayrollAccrualTotals {
@@ -383,21 +393,21 @@ export function payrollAccrualTotals(lines: readonly GrossToNetBreakdown[]): Pay
   let advance = 0n;
   let other = 0n;
   for (const l of lines) {
-    gross += BigInt(l.grossRial);
-    employerExpense += BigInt(l.employerInsuranceRial) + BigInt(l.unemploymentInsuranceRial);
-    net += BigInt(l.netPayRial);
-    insurance += BigInt(l.employeeInsuranceRial) + BigInt(l.employerInsuranceRial) + BigInt(l.unemploymentInsuranceRial);
-    tax += BigInt(l.incomeTaxRial);
-    advance += BigInt(l.advanceRecoveryRial);
-    other += BigInt(l.otherDeductionsRial);
+    gross += l.grossRial;
+    employerExpense += l.employerInsuranceRial + l.unemploymentInsuranceRial;
+    net += l.netPayRial;
+    insurance += l.employeeInsuranceRial + l.employerInsuranceRial + l.unemploymentInsuranceRial;
+    tax += l.incomeTaxRial;
+    advance += l.advanceRecoveryRial;
+    other += l.otherDeductionsRial;
   }
   return {
-    grossRial: Number(gross),
-    employerInsuranceExpenseRial: Number(employerExpense),
-    netPayableRial: Number(net),
-    insurancePayableRial: Number(insurance),
-    incomeTaxPayableRial: Number(tax),
-    advanceRecoveryRial: Number(advance),
-    otherDeductionsPayableRial: Number(other),
+    grossRial: gross,
+    employerInsuranceExpenseRial: employerExpense,
+    netPayableRial: net,
+    insurancePayableRial: insurance,
+    incomeTaxPayableRial: tax,
+    advanceRecoveryRial: advance,
+    otherDeductionsPayableRial: other,
   };
 }

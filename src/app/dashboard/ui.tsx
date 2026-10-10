@@ -5,6 +5,7 @@ import { CircleAlertIcon, InfoIcon } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
+import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 
 /**
  * The dashboard's fetch wrapper.
@@ -78,6 +79,9 @@ export async function api<T = Record<string, unknown>>(
 
 /** Persian messages for the API's error codes. */
 const ERROR_MESSAGES: Record<string, string> = {
+    // The fixed-asset register's domain errors live in their own dictionary
+    // (fixed-assets-errors.ts) — spread here so every screen shares them.
+    ...FIXED_ASSET_ERROR_TRANSLATIONS,
     unauthorized: "وارد نشده‌اید.",
     forbidden: "دسترسی مجاز نیست.",
     bad_request: "درخواست نامعتبر بود.",
@@ -495,12 +499,17 @@ const ERROR_MESSAGES: Record<string, string> = {
       "بازیافت پیش‌پرداخت از ماندهٔ پیش‌پرداخت قرارداد بیشتر است؛ پیش‌پرداخت پرداخت‌شده را بررسی کنید.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
+    supplier_location_mismatch: "تأمین‌کننده به شعبهٔ دیگری تعلق دارد؛ شعبهٔ درست را انتخاب کنید.",
+    supplier_record_missing: "برای این شخص در شعبهٔ انتخاب‌شده، پروندهٔ تأمین‌کننده وجود ندارد.",
+    installment_location_required: "این برنامهٔ پرداختنی به شعبه مشخصی وابسته نیست و چند پروندهٔ تأمین‌کننده دارد؛ ابتدا شعبهٔ آن را تعیین کنید.",
+    idempotency_key_required: "شناسهٔ یکتای درخواست پرداخت معتبر نیست؛ فرم را تازه‌سازی و دوباره تلاش کنید.",
+    idempotency_conflict: "شناسهٔ درخواست قبلاً با جزئیات دیگری استفاده شده است؛ برای این پرداخت درخواست تازه‌ای بسازید.",
+    payment_not_found: "پرداخت موردنظر پیدا نشد.",
+    payment_not_reversible: "این پرداخت سند قابل برگشت ندارد یا از این مسیر قابل برگشت نیست.",
     // Phase 22 — fixed assets & depreciation
-    fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-    fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
-    period_already_depreciated: "استهلاک این دوره قبلاً برای این دارایی ثبت شده است.",
-    fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است.",
     salvage_value_invalid: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
+    // Issue #833 — fixed-asset lifecycle
+    location_required: "انتخاب شعبه الزامی است.",
     // Phase 16 — bank & cash reconciliation
     invalid_account: "حساب انتخاب‌شده معتبر نیست.",
     statement_date_required: "تاریخ صورتحساب الزامی است.",
@@ -521,7 +530,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     // after it, so the server refuses it rather than warning about it.
     statement_date_in_future:
       "تاریخ صورتحساب نمی‌تواند در آینده باشد؛ تاریخ پایان صورتحسابی را وارد کنید که دریافت کرده‌اید.",
-    invalid_cursor: "نشانی صفحهٔ درخواستی معتبر نیست؛ فهرست را از نو بارگذاری کنید.",
     // Phase 17 — plan limits / feature gating
     feature_disabled: "این امکان برای کسب‌وکار شما فعال نیست.",
     branch_limit_exceeded: "به سقف تعداد شعبه در پلن فعلی رسیده‌اید. برای افزودن شعبهٔ بیشتر، پلن را ارتقا دهید.",
@@ -663,7 +671,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_domain_mode: "نوع تأمین دامنه معتبر نیست.",
     invalid_cdn_provider: "ارائه‌دهندهٔ CDN معتبر نیست.",
     invalid_cdn_status: "وضعیت CDN معتبر نیست.",
-    invalid_period: "مدت ثبت دامنه باید بین ۱ تا ۵ سال باشد.",
     invalid_operation: "نوع عملیات دامنه معتبر نیست.",
     // `invalid_status` is already mapped above (the floor-plan's table status)
     // and the CMS order select only ever submits one of its four options, so
@@ -721,15 +728,12 @@ const ERROR_MESSAGES: Record<string, string> = {
     run_voided: "این تعهد ابطال شده و قابل پرداخت نیست.",
     run_not_found: "تعهد حقوق پیدا نشد.",
     no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
-    period_label_required: "عنوان دوره الزامی است.",
-    period_label_too_long: "عنوان دوره بیش از حد طولانی است.",
     invalid_accrual_date: "تاریخ تعهد معتبر نیست.",
     invalid_paid_date: "تاریخ پرداخت معتبر نیست.",
     // «حقوق ماهانه» is saved through ui.tsx's own errorMessage, so the wage
     // screen's 404 needs a message here too — without it a wage saved against
     // a member who was just deactivated reported «خطای غیرمنتظره».
     user_not_found: "عضو موردنظر پیدا نشد.",
-    supplier_record_missing: "این شخص در فهرست تأمین‌کنندگان ثبت نشده است؛ ابتدا او را به‌عنوان تأمین‌کننده ثبت کنید.",
     installment_amount_too_small: "مبلغ هر قسط بسیار کم است؛ تعداد اقساط را کاهش دهید.",
     item_required: "قسط را انتخاب کنید.",
 };

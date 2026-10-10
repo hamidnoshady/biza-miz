@@ -25,6 +25,8 @@ import {
   type WizardProgress,
 } from "./settings";
 import type { Industry } from "./industries";
+import { setupReadiness, type SetupReadiness } from "./setup-readiness";
+export { setupReadiness, type SetupReadiness } from "./setup-readiness";
 // Re-exported for this module's existing importers (the wizard step list
 // used to live here) -- moved to wizard-steps.ts because it's also imported
 // from client components (src/app/setup/steps.ts), which can't pull in this
@@ -134,67 +136,12 @@ export interface SetupState {
   missingForCompletion: string[];
 }
 
-export interface SetupReadiness {
-  /** Required step id → is its domain prerequisite actually present? */
-  steps: Record<string, boolean>;
-  /** Owner-facing messages for whatever is still missing, in wizard order. */
-  missing: string[];
-  ready: boolean;
-}
-
-/**
- * Readiness derived from persisted domain data, per industry — the "are the
- * required prerequisites actually present?" question, kept deliberately
- * separate from "has the wizard formally ended?" (`progress.completedAt`).
- *
- * Pure (no db/next imports) so the decision table is pinned by
- * setup-readiness.test.ts, and so a step's own marker can never be the only
- * evidence for its readiness: a menu whose only progress entry came from
- * creating a category with no items is *not* ready, however the marker reads.
- */
-export function setupReadiness(input: {
-  industry: Industry;
-  hasBusiness: boolean;
-  hasLocation: boolean;
-  hasPrefs: boolean;
-  hasCosting: boolean;
-  hasTax: boolean;
-  accounts: number;
-  /** Active items in menu_items across the business's branches. F&B only. */
-  sellableMenuItems: number;
-}): SetupReadiness {
-  const required = requiredStepsForIndustry(input.industry);
-  const satisfied: Record<string, boolean> = {
-    business: input.hasBusiness && input.hasLocation && input.hasPrefs,
-    accounts: input.accounts > 0,
-    costing: input.hasCosting,
-    tax: input.hasTax,
-    menu: input.sellableMenuItems > 0,
-  };
-
-  const messages: Record<string, string> = {
-    business: "اطلاعات کسب‌وکار ثبت نشده است.",
-    accounts: "سرفصل حساب‌ها ایجاد نشده است.",
-    costing: "روش قیمت‌گذاری موجودی انتخاب نشده است.",
-    tax: "نرخ مالیات تنظیم نشده است.",
-    menu: "منو باید حداقل یک آیتم فعال و قابل فروش داشته باشد.",
-  };
-
-  const steps: Record<string, boolean> = {};
-  const missing: string[] = [];
-  for (const step of required) {
-    steps[step] = satisfied[step] ?? false;
-    if (!steps[step]) missing.push(messages[step] ?? step);
-  }
-  return { steps, missing, ready: missing.length === 0 };
-}
-
 /**
  * The reconciliation a `progress.steps` map needs against derived readiness:
  * required markers the data supports but that are absent (a progress write
  * failed after the domain write committed) and required markers the data does
- * not support (an older, weaker completion rule — e.g. the menu step once
- * completed on creating a category). Optional steps are never touched.
+ * not support (an older, weaker completion rule — e.g. the menu step on a
+ * category alone). Optional steps are never touched.
  */
 export function wizardStepReconciliation(
   progressSteps: Record<string, string>,

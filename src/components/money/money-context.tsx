@@ -6,6 +6,7 @@ import {
   formatMoneyText,
   moneyFromInput,
   moneyToInput,
+  moneyToInputText,
   parseMoneyToRial,
   parseToRialText,
   type MoneyUnit,
@@ -33,6 +34,8 @@ export interface MoneyApi {
   parseText: (input: string) => string;
   /** Rial → the number a numeric input should show in the business's unit. */
   toInput: (rial: Rial) => number;
+  /** Rial *text* (BigInt-safe) → the integer text a money input should show in the business's unit. */
+  toInputText: (rialText: string) => string;
   /** A numeric input's value → Rial in the business's unit. */
   fromInput: (value: number) => Rial;
 }
@@ -46,6 +49,7 @@ function apiFor(unit: MoneyUnit): MoneyApi {
     parse: (input) => parseMoneyToRial(input, unit),
     parseText: (input) => parseToRialText(input, unit),
     toInput: (rial) => moneyToInput(rial, unit),
+    toInputText: (rialText) => moneyToInputText(rialText, unit),
     fromInput: (value) => moneyFromInput(value, unit),
   };
 }

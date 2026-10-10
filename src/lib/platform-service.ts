@@ -15,10 +15,15 @@
  */
 import { getPool, query, withoutTenantScope, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
+import type { MigrationStatus } from "./migration-status-service";
 import type { PoolClient } from "pg";
 import { disableFeatures, seedChartOfAccounts } from "./business-provisioning";
+import { reconcilePaymentMethodsForIndustry } from "./payment-methods-service";
+import { SETTING_KEYS } from "./settings";
+import { setupReadiness } from "./setup-readiness";
 import type { Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
+import { wizardStepsForIndustry } from "./wizard-steps";
 import { clampImpersonationMinutes, platformCan } from "./platform-admin";
 import type { PlatformAdminRole } from "./platform-auth-edge";
 import { platformAudit, revokeAllPlatformAdminSessions } from "./platform-auth";
@@ -561,9 +566,51 @@ export async function industryDataCounts(businessId: string): Promise<IndustryDa
   });
 }
 
+/** Read just the persisted fields used by the canonical Finish readiness contract. */
+async function setupReadinessForIndustryChange(
+  client: PoolClient,
+  businessId: string,
+  industry: Industry,
+) {
+  const { rows } = await client.query<{
+    has_business: boolean;
+    has_location: boolean;
+    has_prefs: boolean;
+    has_costing: boolean;
+    has_tax: boolean;
+    accounts: number;
+    sellable_menu_items: number;
+  }>(
+    `SELECT
+       EXISTS (SELECT 1 FROM businesses WHERE id = $1) AS has_business,
+       EXISTS (SELECT 1 FROM locations WHERE business_id = $1) AS has_location,
+       EXISTS (SELECT 1 FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2) AS has_prefs,
+       EXISTS (SELECT 1 FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $3) AS has_costing,
+       EXISTS (SELECT 1 FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $4) AS has_tax,
+       (SELECT count(*)::int FROM accounts WHERE business_id = $1) AS accounts,
+       (SELECT count(*)::int
+          FROM menu_items mi
+          JOIN locations l ON l.id = mi.location_id
+         WHERE l.business_id = $1 AND mi.is_active) AS sellable_menu_items`,
+    [businessId, SETTING_KEYS.businessPrefs, SETTING_KEYS.costing, SETTING_KEYS.tax],
+  );
+  const row = rows[0];
+  return setupReadiness({
+    industry,
+    hasBusiness: row?.has_business ?? false,
+    hasLocation: row?.has_location ?? false,
+    hasPrefs: row?.has_prefs ?? false,
+    hasCosting: row?.has_costing ?? false,
+    hasTax: row?.has_tax ?? false,
+    accounts: Number(row?.accounts ?? 0),
+    sellableMenuItems: Number(row?.sellable_menu_items ?? 0),
+  });
+}
+
 /**
- * Change which industry a business operates in, and top up its chart of
- * accounts so the new industry's posting rules have the accounts they need.
+ * Change which industry a business operates in, and reconcile its industry-
+ * shaped accounts, feature defaults, built-in payment methods, and setup
+ * lifecycle in the same transaction.
  *
  * Migration 0048 originally made `industry` immutable *by omission* — no update
  * route existed — because the chart of accounts is seeded from it at creation
@@ -576,10 +623,11 @@ export async function industryDataCounts(businessId: string): Promise<IndustryDa
  * `seedChartOfAccounts` skips every code the business already has — so existing
  * accounts, their names, and every journal entry posted against them survive
  * untouched. Data belonging to the old industry's model (`menu_items` for an
- * ex-F&B business, `items` for an ex-retail one) is likewise left alone: it
- * simply stops being reachable from the new industry's UI. Reconciling it is
- * the operator's call, which is why `industryDataCounts` exists to tell them
- * what they are leaving behind before they confirm.
+ * ex-F&B business, `items` for an ex-retail one) is likewise left alone. Custom
+ * payment methods and historical payments remain intact; SnapFood is retired
+ * by deactivation, not deletion. When switching into food_service, the canonical
+ * setup-readiness contract reopens a completed lifecycle only if F&B-required
+ * data is missing.
  */
 export async function changeBusinessIndustry(
   businessId: string,
@@ -622,6 +670,29 @@ export async function changeBusinessIndustry(
       }
       await disableFeatures(client, businessId, industryProfile(industry).defaultDisabledFeatures);
 
+      // Phase 25 industry changes also reconcile built-in payment ways. The
+      // service preserves custom/user-configured rows and retires SnapFood by
+      // deactivating its row, never deleting the payment history that points to it.
+      await reconcilePaymentMethodsForIndustry(client, businessId, previous[0].industry, industry);
+
+      // A completed retail/service business may lack the F&B-only menu and
+      // costing prerequisites. Re-open its canonical setup marker when those
+      // requirements are introduced; the normal setup-state read then reconciles
+      // step markers from the same readiness contract the Finish API uses.
+      if (previous[0].industry !== industry && wizardStepsForIndustry(industry).includes("menu")) {
+        const readiness = await setupReadinessForIndustryChange(client, businessId, industry);
+        if (!readiness.ready) {
+          await client.query(
+            `UPDATE settings
+                SET value = jsonb_set(COALESCE(value, '{}'::jsonb), '{completedAt}', 'null'::jsonb, true),
+                    updated_at = now()
+              WHERE business_id = $1 AND location_id IS NULL AND key = $2
+                AND value ->> 'completedAt' IS NOT NULL`,
+            [businessId, SETTING_KEYS.wizardProgress],
+          );
+        }
+      }
+
       await client.query("COMMIT");
       return seeded;
     } catch (err) {
@@ -638,15 +709,50 @@ export async function changeBusinessIndustry(
 }
 
 /**
- * A reset preserves the tenant's stable identity (id, slug, plan and timezone)
- * plus one active owner identity, but removes every tenant-owned row by
- * deleting and recreating the business in one transaction. Cascade handles
- * ordinary tenant records; the deliberately restrictive accounting and inventory
- * records are cleared first in one auditable, transaction-scoped helper.
+ * Factory reset (issue #822) — clears the tenant's OPERATIONAL data while the
+ * business row itself, and every commercial/control-plane record attached to
+ * it, stays put.
  *
- * The recreated tenant begins with exactly one blank primary branch and owner
- * membership. It has no settings, chart of accounts, users, feature overrides
- * or operational data, so the owner returns to the initial setup wizard.
+ * The old implementation deleted the root `businesses` row and re-inserted it,
+ * letting `ON DELETE CASCADE` decide what "reset" meant. That silently swept
+ * away everything cascading from the business id — including the subscription,
+ * the wallet and its ledger, payments, invoices, entitlements, usage meters,
+ * spend policies and billing overrides the reset API contract promised would
+ * survive — and minted a fresh `created_at` and (unless copied) a fresh
+ * subdomain on the way back in.
+ *
+ * The semantics are now explicit and split into two named scopes:
+ *
+ *  - PRESERVED (commercial/control-plane): `RESET_PRESERVED_TABLES` below.
+ *    These direct children of `businesses` are never touched by a reset, and
+ *    nothing cascades into them because the business row is never deleted.
+ *  - OPERATIONAL: every other table that references `businesses(id)` —
+ *    discovered from the live catalog, so a future tenant table is cleared by
+ *    a reset without anyone having to remember a second list — deleted for
+ *    this one business in FK-safe order, with cascades clearing their
+ *    descendants (locations, users, orders, inventory, settings, AI data…).
+ *
+ * What a reset therefore changes and what it keeps:
+ *
+ *  - keeps: business id, name, slug, subdomain, industry, timezone, plan,
+ *    lifecycle status (a suspended tenant is NOT silently reactivated),
+ *    original `created_at`, owner/global login identity, subscriptions,
+ *    wallet + ledger, invoices/payments/adjustments, entitlements and feature
+ *    usage, spend policy, billing overrides, website-service commercial state,
+ *    the AI gateway/billing state, and platform-company CRM/accounting
+ *    mappings (the `platform_company_customer_tenants` row that RESTRICT-
+ *    references this tenant — a reset must never break it).
+ *  - clears: every operational row (orders, accounting documents, inventory,
+ *    menu/items, CRM parties, website operational state, AI conversations/
+ *    projects/memory, settings, feature overrides, staff memberships,
+ *    branches), then reseeds exactly one blank default branch and exactly one
+ *    active owner membership, so the owner returns to the first-run wizard.
+ *
+ * Memberships are a product rule, not a side effect (issue #822): a reset
+ * clears every membership and recreates exactly the earliest active owner's;
+ * it never purges a `platform_users` login identity — not the owner's, and
+ * not a former staff member's — because a reset keeps the tenant alive and
+ * purging logins belongs to hard delete alone.
  */
 export class ResetBusinessNotPossibleError extends Error {
   constructor() {
@@ -657,10 +763,422 @@ export class ResetBusinessNotPossibleError extends Error {
 const RESET_DEFAULT_LOCATION_NAME = "شعبه مرکزی";
 
 /**
+ * The commercial / control-plane scope of a factory reset — direct children
+ * of `businesses` a reset must NOT touch. Deliberately an explicit,
+ * commented allowlist: "reset" is defined by what it preserves, and the
+ * operational sweep deletes everything else. A new commercial table belongs
+ * here; a new operational table deliberately does not.
+ */
+const RESET_PRESERVED_TABLES: ReadonlySet<string> = new Set([
+  // The root itself — a reset never deletes/recreates it (issue #822 P0).
+  "businesses",
+  // Subscription lifecycle (migration 0176).
+  "business_subscriptions",
+  // Wallet balance + the immutable money history (migration 0130).
+  "business_wallets",
+  "wallet_ledger",
+  // Payments, invoices and the auditable commercial overrides/adjustments.
+  "billing_payments",
+  "billing_invoices",
+  "business_billing_overrides",
+  "billing_adjustments",
+  // Entitlements + per-feature usage meters.
+  "business_entitlements",
+  "feature_usage",
+  // Metered-usage commercial records (migration 0177).
+  "billing_usage_events",
+  "billing_usage_ratings",
+  "billing_usage_rollups_daily",
+  "billing_usage_rollups_hourly",
+  "billing_usage_rollups_cycle",
+  // Spend policy + vendor cost evidence.
+  "business_spend_policies",
+  "billing_vendor_cost_events",
+  // Media storage charges — the storage-billing record behind the wallet's
+  // preserved media debits.
+  "media_usage_charges",
+  // AI billing state: the plan allowance meter and the per-business gateway
+  // (virtual key) — not AI *conversation* data, which is operational.
+  "ai_plan_allowance_usage",
+  "ai_business_gateway",
+  "ai_gateway_usage",
+  // Website-service commercial state (subscription + charges), not the
+  // website's operational sync/setup rows.
+  "website_service_subscriptions",
+  "website_service_charges",
+  // CMS entitlement projections/outbox derived from the preserved
+  // entitlements — the CMS keeps agreeing with billing across a reset.
+  "cms_entitlement_projections",
+  "cms_entitlement_outbox",
+  // Platform-company control plane: the CRM customer record and the mapping
+  // that RESTRICT-references this tenant. Reset must never break them.
+  "platform_company_customers",
+  "platform_company_customer_tenants",
+  "platform_company_billing_events",
+  // Platform-owned side tables that merely point at the business.
+  "platform_cms_sites",
+  "platform_audit_log",
+]);
+
+interface BusinessChildReference {
+  table: string;
+  column: string;
+}
+
+/**
+ * Every table holding a single-column foreign key into `businesses(id)`,
+ * straight from the live catalog. Reading the schema instead of a static list
+ * is what keeps the operational sweep honest: a migration that adds a new
+ * tenant table is covered by reset automatically, and a table can only join
+ * the preserved scope by being named in `RESET_PRESERVED_TABLES`.
+ */
+async function directBusinessChildReferences(
+  client: PoolClient,
+): Promise<BusinessChildReference[]> {
+  const { rows } = await client.query<{ table: string; column: string; keys: number }>(
+    `SELECT c.relname AS "table",
+            a.attname AS "column",
+            cardinality(con.conkey) AS keys
+       FROM pg_constraint con
+       JOIN pg_class c  ON c.oid  = con.conrelid
+       JOIN pg_class rc ON rc.oid = con.confrelid
+       JOIN pg_namespace n  ON n.oid  = c.relnamespace
+       JOIN pg_attribute a  ON a.attrelid = con.conrelid
+                           AND a.attnum = con.conkey[1]
+       JOIN pg_attribute ra ON ra.attrelid = con.confrelid
+                           AND ra.attnum = con.confkey[1]
+      WHERE con.contype = 'f'
+        AND rc.relname = 'businesses'
+        AND ra.attname = 'id'
+        AND n.nspname = current_schema()
+        AND c.relname <> 'businesses'
+      ORDER BY c.relname`,
+  );
+  // Multi-column FKs into businesses(id) do not exist in this schema; if one
+  // ever appears, fail closed here instead of sweeping it with half a key.
+  const unexpected = rows.filter((r) => r.keys !== 1);
+  if (unexpected.length > 0) {
+    throw new Error(
+      `reset_scope_unsupported_fk: ${unexpected.map((r) => r.table).join(", ")}`,
+    );
+  }
+  return rows.map((r) => ({ table: r.table, column: r.column }));
+}
+
+interface OperationalEdge {
+  src: string;
+  srcColumn: string;
+  dst: string;
+  /** 'r' = RESTRICT (checked immediately), 'n' = NO ACTION (at statement end). */
+  onDelete: "r" | "n";
+}
+
+/**
+ * RESTRICT / NO ACTION FK edges between the given tables. Deleting a row that
+ * is still referenced through one of these fails, so the referencing side
+ * (`src`) must be cleared before the referenced side (`dst`) — either by an
+ * earlier statement or inside the same statement (NO ACTION checks run at
+ * statement end). CASCADE and SET NULL/DEFAULT edges impose no ordering.
+ */
+async function orderingEdgesBetween(
+  client: PoolClient,
+  tables: string[],
+): Promise<OperationalEdge[]> {
+  if (tables.length === 0) return [];
+  const { rows } = await client.query<{
+    src: string;
+    src_column: string;
+    dst: string;
+    on_delete: string;
+  }>(
+    `SELECT c.relname AS src,
+            a.attname AS src_column,
+            rc.relname AS dst,
+            con.confdeltype AS on_delete
+       FROM pg_constraint con
+       JOIN pg_class c  ON c.oid  = con.conrelid
+       JOIN pg_class rc ON rc.oid = con.confrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_attribute a ON a.attrelid = con.conrelid
+                          AND a.attnum = con.conkey[1]
+      WHERE con.contype = 'f'
+        AND con.confdeltype IN ('r', 'n')
+        AND cardinality(con.conkey) = 1
+        AND n.nspname = current_schema()
+        AND c.relname <> rc.relname
+        AND c.relname = ANY($1)
+        AND rc.relname = ANY($1)`,
+    [tables],
+  );
+  return rows.map((row) => ({
+    src: row.src,
+    srcColumn: row.src_column,
+    dst: row.dst,
+    onDelete: row.on_delete as "r" | "n",
+  }));
+}
+
+/** Tarjan strongly-connected components — iterative, small graphs anyway. */
+function stronglyConnectedComponents(
+  tables: string[],
+  edges: { src: string; dst: string }[],
+): string[][] {
+  const adjacency = new Map<string, string[]>();
+  for (const table of tables) adjacency.set(table, []);
+  for (const { src, dst } of edges) {
+    if (src === dst) continue;
+    adjacency.get(src)?.push(dst);
+  }
+  let index = 0;
+  const indices = new Map<string, number>();
+  const lowlinks = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const components: string[][] = [];
+
+  const strongConnect = (root: string): void => {
+    // Iterative DFS so a long chain cannot blow the JS call stack.
+    const work: { node: string; next: number }[] = [{ node: root, next: 0 }];
+    indices.set(root, index);
+    lowlinks.set(root, index);
+    index += 1;
+    stack.push(root);
+    onStack.add(root);
+    while (work.length > 0) {
+      const frame = work[work.length - 1];
+      const neighbors = adjacency.get(frame.node) ?? [];
+      if (frame.next < neighbors.length) {
+        const neighbor = neighbors[frame.next];
+        frame.next += 1;
+        if (!indices.has(neighbor)) {
+          indices.set(neighbor, index);
+          lowlinks.set(neighbor, index);
+          index += 1;
+          stack.push(neighbor);
+          onStack.add(neighbor);
+          work.push({ node: neighbor, next: 0 });
+        } else if (onStack.has(neighbor)) {
+          lowlinks.set(frame.node, Math.min(lowlinks.get(frame.node)!, indices.get(neighbor)!));
+        }
+      } else {
+        work.pop();
+        if (lowlinks.get(frame.node) === indices.get(frame.node)) {
+          const component: string[] = [];
+          for (;;) {
+            const member = stack.pop()!;
+            onStack.delete(member);
+            component.push(member);
+            if (member === frame.node) break;
+          }
+          components.push(component);
+        }
+        if (work.length > 0) {
+          const parent = work[work.length - 1];
+          lowlinks.set(
+            parent.node,
+            Math.min(lowlinks.get(parent.node)!, lowlinks.get(frame.node)!),
+          );
+        }
+      }
+    }
+  };
+
+  for (const table of tables) {
+    if (!indices.has(table)) strongConnect(table);
+  }
+  return components;
+}
+
+/** Kahn topological sort; `edges` mean "src must be deleted before dst". */
+function topologicalOrder(tables: string[], edges: { src: string; dst: string }[]): string[] {
+  const remaining = new Set(tables);
+  const blockedBy = new Map<string, Set<string>>();
+  for (const table of tables) blockedBy.set(table, new Set());
+  for (const { src, dst } of edges) {
+    if (src === dst || !remaining.has(src) || !remaining.has(dst)) continue;
+    blockedBy.get(dst)?.add(src);
+  }
+  const ordered: string[] = [];
+  let progressed = true;
+  while (remaining.size > 0 && progressed) {
+    progressed = false;
+    for (const table of [...remaining]) {
+      const blockers = blockedBy.get(table);
+      if (!blockers || blockers.size === 0) {
+        ordered.push(table);
+        remaining.delete(table);
+        for (const other of remaining) blockedBy.get(other)?.delete(table);
+        progressed = true;
+      }
+    }
+  }
+  if (remaining.size > 0) {
+    throw new Error(`reset_scope_cycle: ${[...remaining].sort().join(", ")}`);
+  }
+  return ordered;
+}
+
+function tenantPredicate(table: string, columns: string[]): string {
+  return columns.map((column) => `"${table}"."${column}" = $1`).join(" OR ");
+}
+
+/**
+ * Deletes this business's rows from every OPERATIONAL direct child of
+ * `businesses` — everything the catalog lists minus the preserved commercial
+ * scope — without ever touching the business row itself.
+ *
+ * Ordering is worked out from the live FK graph, because the schema really
+ * does contain both directions of trouble:
+ *
+ *  - RESTRICT edges fail immediately if the referenced rows go first, and
+ *    NO ACTION edges fail at statement end the same way — so either one
+ *    means the referencing table must be cleared before the referenced one;
+ *  - some table pairs reference each other (`crm_deals` ↔ `crm_leads`,
+ *    `users` ↔ `tenant_roles`), which no sequential order can satisfy.
+ *
+ * The sweep therefore groups the tables into strongly-connected components:
+ * ordinary components are deleted one table at a time in topological order,
+ * and a mutually-referencing component is cleared in ONE statement (a
+ * data-modifying CTE), where NO ACTION checks run after every side is gone.
+ * A cycle held together by a RESTRICT edge is released first by NULLing the
+ * referencing column (reset is about to delete those rows anyway) — checked
+ * for nullability so a NOT NULL pin fails the reset instead of corrupting.
+ *
+ * Cascades carry each deletion into its deep tenant subtree (order items,
+ * journal lines, inventory layers…). Hard delete runs this same sweep before
+ * removing the business row, so both destructive paths share one explicit
+ * operational scope.
+ */
+async function deleteBusinessOperationalChildren(
+  client: PoolClient,
+  businessId: string,
+): Promise<void> {
+  const children = await directBusinessChildReferences(client);
+  const columnsByTable = new Map<string, string[]>();
+  for (const child of children) {
+    if (RESET_PRESERVED_TABLES.has(child.table)) continue;
+    const columns = columnsByTable.get(child.table) ?? [];
+    columns.push(child.column);
+    columnsByTable.set(child.table, columns);
+  }
+  const tables = [...columnsByTable.keys()];
+  const edges = await orderingEdgesBetween(client, tables);
+
+  const components = stronglyConnectedComponents(tables, edges);
+  const componentOf = new Map<string, number>();
+  components.forEach((component, componentIndex) => {
+    for (const table of component) componentOf.set(table, componentIndex);
+  });
+
+  // One node per component, ordered so referencing components go first.
+  const componentEdges: { src: string; dst: string }[] = [];
+  for (const { src, dst } of edges) {
+    const srcComponent = String(componentOf.get(src));
+    const dstComponent = String(componentOf.get(dst));
+    if (srcComponent !== dstComponent) {
+      componentEdges.push({ src: srcComponent, dst: dstComponent });
+    }
+  }
+  const orderedComponentIds = topologicalOrder(
+    components.map((_, componentIndex) => String(componentIndex)),
+    componentEdges,
+  );
+
+  for (const componentId of orderedComponentIds) {
+    const component = components[Number(componentId)];
+    if (component.length === 1) {
+      const table = component[0];
+      const columns = columnsByTable.get(table) ?? [];
+      await client.query(
+        `DELETE FROM "${table}" WHERE ${tenantPredicate(table, columns)}`,
+        [businessId],
+      );
+      continue;
+    }
+
+    // Mutually-referencing component. RESTRICT edges inside it are released
+    // by NULLing the referencing column; the rows are being deleted in this
+    // same transaction, so the NULL can never be observed by live traffic.
+    const insideEdges = edges.filter(
+      (edge) =>
+        component.includes(edge.src) &&
+        component.includes(edge.dst),
+    );
+    for (const edge of insideEdges) {
+      if (edge.onDelete !== "r") continue;
+      const { rows: nullability } = await client.query<{ not_null: boolean }>(
+        `SELECT a.attnotnull AS not_null
+           FROM pg_attribute a
+           JOIN pg_class c ON c.oid = a.attrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relname = $1 AND a.attname = $2 AND n.nspname = current_schema()`,
+        [edge.src, edge.srcColumn],
+      );
+      if (nullability[0]?.not_null) {
+        throw new Error(`reset_scope_pinned: ${edge.src}.${edge.srcColumn}`);
+      }
+      const scopeColumns = columnsByTable.get(edge.src) ?? [];
+      await client.query(
+        `UPDATE "${edge.src}" SET "${edge.srcColumn}" = NULL
+          WHERE "${edge.srcColumn}" IS NOT NULL AND (${tenantPredicate(edge.src, scopeColumns)})`,
+        [businessId],
+      );
+    }
+
+    // Clear every table of the component in ONE statement: with no RESTRICT
+    // pins left inside it, the remaining NO ACTION checks all pass because
+    // they run after every side is deleted.
+    const ctes = component
+      .map((table, tableIndex) => {
+        const columns = columnsByTable.get(table) ?? [];
+        return `"d${tableIndex}" AS (DELETE FROM "${table}" WHERE ${tenantPredicate(table, columns)} RETURNING 1)`;
+      })
+      .join(",\n     ");
+    await client.query(`WITH ${ctes}\nSELECT 1`, [businessId]);
+  }
+}
+
+/**
+ * Safety net after the sweep: no operational direct child may still hold a
+ * row for this business. Reaching this means the schema drifted past the
+ * plan above, and the honest response is to fail the reset — a rollback is
+ * cheaper than a tenant left half-empty.
+ */
+async function assertNoOperationalChildrenRemain(
+  client: PoolClient,
+  businessId: string,
+): Promise<void> {
+  const children = await directBusinessChildReferences(client);
+  for (const child of children) {
+    if (RESET_PRESERVED_TABLES.has(child.table)) continue;
+    const { rows } = await client.query<{ leftover: string }>(
+      `SELECT $2::text AS leftover FROM "${child.table}" WHERE "${child.column}" = $1 LIMIT 1`,
+      [businessId, child.table],
+    );
+    if (rows.length > 0) {
+      throw new Error(`reset_incomplete: ${child.table}`);
+    }
+  }
+}
+
+/**
  * Removes the rows that intentionally use RESTRICT or immutable delete guards
- * before deleting a business root. The caller has already confirmed the
- * destructive action and opened a transaction; every statement is scoped to
- * the one locked business and the transaction rolls back as a unit on error.
+ * before a business's operational data is swept. The caller has already
+ * confirmed the destructive action and opened a transaction; every statement
+ * is scoped to the one locked business and the transaction rolls back as a
+ * unit on error.
+ *
+ * Two kinds of guards live here:
+ *  - trigger-level immutability (orders closed for amendment, posted
+ *    inventory events…), bypassed for this transaction by the
+ *    `app.factory_reset` escape hatch the migrations check; and
+ *  - tables whose FK into `businesses` or `locations` is RESTRICT, which
+ *    must be emptied by hand before anything above them can go. The
+ *    accounting/inventory set was the original list; production, warehouse
+ *    documents, period closings, visual counts and the media library are the
+ *    same kind of guard and are cleared the same way (issue #822 — they used
+ *    to make both reset and hard delete fail with a raw FK error once a
+ *    tenant had any of them).
  */
 async function clearBusinessDeleteBlockers(client: PoolClient, businessId: string): Promise<void> {
   // The migration-only escape hatch is transaction-local. It lets the
@@ -755,6 +1273,42 @@ async function clearBusinessDeleteBlockers(client: PoolClient, businessId: strin
     "DELETE FROM stock_movements WHERE location_id IN (SELECT id FROM locations WHERE business_id = $1)",
     "DELETE FROM inventory_lots WHERE location_id IN (SELECT id FROM locations WHERE business_id = $1)",
     "DELETE FROM inventory_events WHERE business_id = $1",
+
+    // Production runs RESTRICT-reference both `businesses` and `locations`,
+    // pin their own reversals, and are pinned in turn by their inputs — so
+    // the self-reference is released, the inputs go, then the runs. The
+    // formulas go AFTER the runs (runs pin their formula with RESTRICT) and
+    // before the branch sweep reaches the inventory items they output.
+    "UPDATE production_runs SET reversal_of = NULL WHERE business_id = $1",
+    `DELETE FROM production_run_inputs
+       WHERE production_run_id IN (SELECT id FROM production_runs WHERE business_id = $1)`,
+    "DELETE FROM production_runs WHERE business_id = $1",
+    `DELETE FROM production_formula_inputs
+       WHERE formula_id IN (SELECT id FROM production_formulas WHERE business_id = $1)`,
+    "DELETE FROM production_formulas WHERE business_id = $1",
+
+    // Warehouse documents RESTRICT-reference `businesses` and `locations`
+    // (their lines cascade; the negative-layer settlements pointing at them
+    // were already cleared above).
+    "DELETE FROM retail_warehouse_documents WHERE business_id = $1",
+    "DELETE FROM warehouse_documents WHERE business_id = $1",
+
+    // Period closings are immutable once posted and RESTRICT-reference the
+    // business and branch (their lines cascade).
+    "DELETE FROM periodic_closings WHERE business_id = $1",
+
+    // Visual counting RESTRICT-references the business and branch.
+    "DELETE FROM inventory_count_scans WHERE business_id = $1",
+    "DELETE FROM inventory_item_visual_profiles WHERE business_id = $1",
+
+    // The media library RESTRICT-references the business root; the mapping
+    // and collection items point at assets with CASCADE but are cleared first
+    // to keep the order explicit.
+    "DELETE FROM wordpress_media_mapping WHERE business_id = $1",
+    "DELETE FROM media_collection_items WHERE business_id = $1",
+    "DELETE FROM media_assets WHERE business_id = $1",
+    "DELETE FROM media_collections WHERE business_id = $1",
+    "DELETE FROM media_folders WHERE business_id = $1",
   ];
 
   for (const statement of statements) {
@@ -769,45 +1323,26 @@ export async function resetBusiness(businessId: string): Promise<void> {
       await client.query("BEGIN");
       // Refuse before touching anything, inside the same transaction that
       // would have done the damage, so a concurrent call cannot slip between
-      // the check and the first DELETE.
-      const { rows: guardRows } = await client.query<{ ownership_kind: string }>(
-        `SELECT ownership_kind FROM businesses WHERE id = $1 FOR UPDATE`,
+      // the check and the first DELETE. The row lock also serializes a reset
+      // against a concurrent hard delete of the same tenant.
+      const { rows: guardRows } = await client.query<{
+        ownership_kind: string;
+        timezone: string;
+      }>(
+        `SELECT ownership_kind, timezone FROM businesses WHERE id = $1 FOR UPDATE`,
         [businessId],
       );
-      if (guardRows[0]?.ownership_kind === "platform_internal") {
-        await client.query("ROLLBACK");
+      const guarded = guardRows[0];
+      if (!guarded) throw new ResetBusinessNotPossibleError();
+      if (guarded.ownership_kind === "platform_internal") {
         throw new ProtectedInternalBusinessError();
       }
 
-      const { rows: businessRows } = await client.query<{
-        id: string;
-        name: string;
-        slug: string;
-        plan: string;
-        timezone: string;
-        industry: string;
-        subdomain: string;
-      }>(
-        // `subdomain` is as load-bearing here as `slug`: since Phase 23 it *is*
-        // the tenant's origin, and the column defaults to a random
-        // 'biz-<random>' (migration 0066). Re-inserting without it therefore
-        // does not keep the old host — it silently mints a new one, and because
-        // middleware compares the host's label against the session's
-        // businessSubdomain claim and fails closed, everyone is locked out of
-        // the address they had bookmarked with nothing to explain why.
-        `SELECT id, name, slug::text AS slug, plan, timezone, industry,
-                subdomain::text AS subdomain
-           FROM businesses
-          WHERE id = $1
-          FOR UPDATE`,
-        [businessId],
-      );
-      const business = businessRows[0];
-      if (!business) throw new ResetBusinessNotPossibleError();
-
-      // A reset must leave someone who can log in and finish setup. The
-      // platform identity is intentionally retained because it may also hold
-      // memberships in other businesses; all other memberships are deleted.
+      // A reset must leave someone who can log in and finish setup — that is
+      // the product rule for memberships, not an accident of row deletion:
+      // the earliest active owner membership is recreated (its global platform
+      // identity untouched, because it may also belong to other businesses);
+      // every other membership is cleared with the operational sweep below.
       const { rows: ownerRows } = await client.query<{
         platform_user_id: string;
         full_name: string;
@@ -827,32 +1362,23 @@ export async function resetBusiness(businessId: string): Promise<void> {
       const owner = ownerRows[0];
       if (!owner) throw new ResetBusinessNotPossibleError();
 
-      // Most tenant tables cascade from the business root. A small set of
-      // accounting/inventory records deliberately uses RESTRICT and immutable
-      // delete guards, so clear those reset-only blockers first.
-      await clearBusinessDeleteBlockers(client, business.id);
-      await client.query(`DELETE FROM businesses WHERE id = $1`, [businessId]);
+      // Clear the RESTRICT/immutability-guarded operational records first,
+      // then sweep every remaining operational child of the business root.
+      // The business row itself is never deleted: id, name, slug, subdomain,
+      // industry, timezone, plan, status, suspended_at/archived_at and the
+      // original created_at all survive untouched, and nothing cascades into
+      // the preserved commercial scope.
+      await clearBusinessDeleteBlockers(client, businessId);
+      await deleteBusinessOperationalChildren(client, businessId);
+      await assertNoOperationalChildrenRemain(client, businessId);
 
-      await client.query(
-        `INSERT INTO businesses
-           (id, name, slug, subdomain, status, plan, timezone, industry, suspended_at, archived_at)
-         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, NULL, NULL)`,
-        [
-          business.id,
-          business.name,
-          business.slug,
-          business.subdomain,
-          business.plan,
-          business.timezone,
-          business.industry,
-        ],
-      );
-
+      // First-run operational state: one blank default branch and the one
+      // owner membership, exactly as provisioning would create them.
       const { rows: locationRows } = await client.query<{ id: string }>(
         `INSERT INTO locations (business_id, name, timezone)
          VALUES ($1, $2, $3)
          RETURNING id`,
-        [business.id, RESET_DEFAULT_LOCATION_NAME, business.timezone],
+        [businessId, RESET_DEFAULT_LOCATION_NAME, guarded.timezone],
       );
       const locationId = locationRows[0].id;
 
@@ -861,7 +1387,7 @@ export async function resetBusiness(businessId: string): Promise<void> {
            (business_id, platform_user_id, role, full_name, email, location_id)
          VALUES ($1, $2, 'owner', $3, $4, NULL)
          RETURNING id`,
-        [business.id, owner.platform_user_id, owner.full_name, owner.email],
+        [businessId, owner.platform_user_id, owner.full_name, owner.email],
       );
       const ownerId = ownerMembershipRows[0].id;
 
@@ -872,7 +1398,9 @@ export async function resetBusiness(businessId: string): Promise<void> {
 
       await client.query("COMMIT");
     } catch (err) {
-      await client.query("ROLLBACK");
+      // One transaction: a failure here leaves the tenant exactly as it was,
+      // commercial state included.
+      await client.query("ROLLBACK").catch(() => {});
       throw err;
     } finally {
       client.release();
@@ -888,24 +1416,65 @@ export class BusinessNotFoundError extends Error {
 }
 
 /**
+ * Raised when a hard delete is refused by a live reference the service does
+ * not have a deliberate rule for (a foreign-key violation). The route turns
+ * it into the operator-facing `delete_blocked` error naming the reference,
+ * instead of surfacing a raw database failure (issue #822).
+ */
+export class BusinessDeleteBlockedError extends Error {
+  constructor(readonly reference: string) {
+    super("delete_blocked");
+  }
+}
+
+function foreignKeyConstraintOf(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+  const pgErr = err as { code?: string; constraint?: string };
+  return pgErr.code === "23503" ? (pgErr.constraint ?? "unknown_reference") : null;
+}
+
+/** What a hard delete reports back so the route can audit exactly what went. */
+export interface HardDeleteBusinessResult {
+  /**
+   * Platform-company customer-tenant mappings deliberately detached by the
+   * delete (see the rule in `hardDeleteBusiness`).
+   */
+  detachedCustomerTenantMappings: number;
+}
+
+/**
  * Hard-delete a business, immediately — no archive step, no grace window.
  * The caller must hold `business.delete` (owner-only) and the route requires
- * a fixed confirmation phrase; that pairing is the only safety net left once
- * this is immediate, so both are enforced before this is ever called.
+ * the target-specific typed confirmation phrase; that pairing is the only
+ * safety net left once this is immediate, so both are enforced before this
+ * is ever called.
  *
- * Normal tenant records cascade from `businesses(id)`; restrictive
- * accounting/inventory descendants are cleared in the same transaction first.
+ * Unlike factory reset, a hard delete removes *everything* — operational and
+ * commercial alike: the row deletion cascades through the wallet, invoices,
+ * payments and subscription on purpose. Restrictive accounting/inventory
+ * descendants are cleared in the same transaction first.
  * `platform_audit_log.business_id` is `ON DELETE SET NULL`, so the *record
  * that it happened* survives the business it happened to — which is the point.
  *
- * A hard delete is meant to remove *everything*, including the login: any
- * `platform_users` identity whose only membership was in this business is
- * purged along with it, so its email is free to sign up again. An identity
- * still holding a membership in another business is left alone — that's the
- * cross-business-owner case, not an orphan.
+ * The platform-company mapping rule (issue #822): a tenant mapped into the
+ * platform company's CRM/accounting domain is referenced by
+ * `platform_company_customer_tenants.customer_tenant_id` with RESTRICT.
+ * Hard delete DETACHES that mapping deliberately and transactionally — the
+ * CRM customer record itself (the party, the billing customer) lives in the
+ * platform company's scope and survives; only the link to the deleted tenant
+ * goes, and the count rides the result so the route audits the severance.
+ * Nothing about this may be left to an unexplained FK failure.
+ *
+ * A hard delete also removes the login: any `platform_users` identity whose
+ * only membership was in this business is purged along with it, so its email
+ * is free to sign up again. An identity still holding a membership in
+ * another business is left alone — that's the cross-business-owner case,
+ * not an orphan.
  */
-export async function hardDeleteBusiness(businessId: string): Promise<void> {
-  await withoutTenantScope("platform", async () => {
+export async function hardDeleteBusiness(
+  businessId: string,
+): Promise<HardDeleteBusinessResult> {
+  return withoutTenantScope("platform", async () => {
     const client = await getPool().connect();
     try {
       await client.query("BEGIN");
@@ -917,7 +1486,6 @@ export async function hardDeleteBusiness(businessId: string): Promise<void> {
       );
       if (!rows[0]) throw new BusinessNotFoundError();
       if (rows[0].ownership_kind === "platform_internal") {
-        await client.query("ROLLBACK");
         throw new ProtectedInternalBusinessError();
       }
 
@@ -927,7 +1495,23 @@ export async function hardDeleteBusiness(businessId: string): Promise<void> {
         [businessId],
       );
 
+      // The explicit mapping rule: detach, count, audit — never cascade
+      // silently and never crash on the RESTRICT.
+      const detached = await client.query<{ customer_id: string }>(
+        `DELETE FROM platform_company_customer_tenants
+          WHERE customer_tenant_id = $1
+          RETURNING customer_id`,
+        [businessId],
+      );
+
+      // Clear the operational scope explicitly — the same sweep reset uses —
+      // before the root row goes. A bare cascade from the root would hit the
+      // same mutually-referencing operational pairs in whatever order the
+      // queue liked; the sweep removes them first, and the row deletion then
+      // only cascades through the preserved commercial tables (which is what
+      // makes a hard delete hard).
       await clearBusinessDeleteBlockers(client, businessId);
+      await deleteBusinessOperationalChildren(client, businessId);
       await client.query(`DELETE FROM businesses WHERE id = $1`, [businessId]);
 
       if (memberIdentities.length > 0) {
@@ -940,8 +1524,11 @@ export async function hardDeleteBusiness(businessId: string): Promise<void> {
       }
 
       await client.query("COMMIT");
+      return { detachedCustomerTenantMappings: detached.rowCount ?? 0 };
     } catch (err) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => {});
+      const blockedBy = foreignKeyConstraintOf(err);
+      if (blockedBy) throw new BusinessDeleteBlockedError(blockedBy);
       throw err;
     } finally {
       client.release();
@@ -2592,7 +3179,18 @@ export async function queryAudit(q: AuditQuery = {}): Promise<AuditListResult> {
 
 export interface SystemStatus {
   migrations: { filename: string; appliedAt: string }[];
-  pendingMigrations: number;
+  /**
+   * Retained for existing consumers: ordinary pending + gated/deferred, or null
+   * when the migration inventory could not be read. Never a confident zero
+   * standing in for "unknown" — see `migrationStatus`.
+   */
+  pendingMigrations: number | null;
+  /**
+   * The canonical migration status from `getMigrationStatus()`. Carries the
+   * ordinary/gated split, the stable reason codes and the redacted AI gateway
+   * secret-cutover state that `pendingMigrations` cannot express.
+   */
+  migrationStatus: MigrationStatus;
   pool: { total: number; idle: number; waiting: number };
   rlsEffective: boolean;
   backups: { businessId: string; businessName: string; status: string; ranAt: string | null }[];
@@ -2621,15 +3219,17 @@ export interface PlatformBackupLine {
  * connection pool's live figures, whether RLS is actually being enforced, and
  * the most recent backup run per business. Read-only and cheap — this is a
  * dashboard, not a control surface.
+ *
+ * `migrations` is the canonical status from `getMigrationStatus()` (see
+ * `src/lib/migration-status-service.ts`); the applied-migration list is derived
+ * from it rather than queried again, so the page cannot show two different
+ * answers about the same table.
  */
-export async function systemStatus(pendingMigrations: number): Promise<SystemStatus> {
+export async function systemStatus(migrations: MigrationStatus): Promise<SystemStatus> {
   const pool = getPool();
 
-  const [migrations, backups, counts, rls, backupHealth] = await withoutTenantScope("platform", () =>
+  const [backups, counts, rls, backupHealth] = await withoutTenantScope("platform", () =>
     Promise.all([
-      query<{ filename: string; applied_at: string }>(
-        `SELECT filename, applied_at FROM schema_migrations ORDER BY filename DESC LIMIT 30`,
-      ),
       query<{ business_id: string; business_name: string; status: string; ran_at: string | null }>(
         `SELECT DISTINCT ON (br.business_id)
                 br.business_id, b.name AS business_name, br.status, br.started_at AS ran_at
@@ -2653,8 +3253,12 @@ export async function systemStatus(pendingMigrations: number): Promise<SystemSta
   );
 
   return {
-    migrations: migrations.rows.map((m) => ({ filename: m.filename, appliedAt: m.applied_at })),
-    pendingMigrations,
+    migrations: migrations.applied.map((m) => ({
+      filename: m.filename,
+      appliedAt: m.appliedAt ?? "",
+    })),
+    pendingMigrations: migrations.pendingTotal,
+    migrationStatus: migrations,
     pool: {
       total: pool.totalCount,
       idle: pool.idleCount,

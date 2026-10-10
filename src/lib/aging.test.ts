@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { ageOpenItems, bucketForAge, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, UNKNOWN_SUPPLIER_KEY } from "./aging";
+import {
+  AGING_BUCKET_MAX_AGE_DAYS,
+  ageOpenItems,
+  agingBucketCaseSql,
+  bucketForAge,
+  summarizeAging,
+  unappliedCredit,
+  UNKNOWN_CUSTOMER_KEY,
+  UNKNOWN_SUPPLIER_KEY,
+} from "./aging";
 
 describe("bucketForAge", () => {
   it("buckets in 30-day steps, current through 90+", () => {
@@ -11,6 +20,33 @@ describe("bucketForAge", () => {
     expect(bucketForAge(90)).toBe("d61_90");
     expect(bucketForAge(91)).toBe("over90");
     expect(bucketForAge(400)).toBe("over90");
+  });
+});
+
+describe("agingBucketCaseSql", () => {
+  it("generates the same boundaries bucketForAge applies, from one definition", () => {
+    // The A/R and A/P aging reports aggregate in SQL now. If the SQL had its
+    // own transcribed «<= 30 / <= 60 / <= 90», moving a boundary in
+    // `bucketForAge` would silently stop applying to the reports an accountant
+    // actually reads. Building the CASE from the same table is what keeps the
+    // two one implementation.
+    const sql = agingBucketCaseSql("($3::date - entry_date)");
+    expect(AGING_BUCKET_MAX_AGE_DAYS.current).toBe(30);
+    expect(sql).toBe(
+      "CASE WHEN ($3::date - entry_date) <= 30 THEN 'current' WHEN ($3::date - entry_date) <= 60 THEN 'd31_60' WHEN ($3::date - entry_date) <= 90 THEN 'd61_90' ELSE 'over90' END",
+    );
+    // Every bucket bucketForAge can return has a branch, and only the
+    // open-ended one is the ELSE.
+    for (const bucket of ["current", "d31_60", "d61_90"] as const) {
+      expect(sql).toContain(`THEN '${bucket}'`);
+    }
+    expect(sql).toContain("ELSE 'over90'");
+  });
+
+  it("keeps the open-ended bucket out of the numbered branches", () => {
+    // `over90` is Infinity in the definition table: emitting `<= Infinity`
+    // would be the kind of SQL that parses and then never matches.
+    expect(agingBucketCaseSql("age")).not.toContain("Infinity");
   });
 });
 
@@ -43,6 +79,32 @@ describe("ageOpenItems", () => {
     expect(aged).toHaveLength(1);
     expect(aged[0].id).toBe("i2");
     expect(aged[0].outstanding).toBe(50_000);
+  });
+
+  it("uses a stable id tie-breaker for same-date FIFO items regardless of input order", () => {
+    const aged = ageOpenItems(
+      [
+        { id: "z-line", date: "2025-01-01", amount: 100_000 },
+        { id: "a-line", date: "2025-01-01", amount: 100_000 },
+      ],
+      [{ id: "r1", date: "2025-01-02", amount: 150_000 }],
+      "2025-01-10",
+    );
+    expect(aged).toEqual([
+      { id: "z-line", date: "2025-01-01", amount: 100_000, outstanding: 50_000, ageDays: 9, bucket: "current" },
+    ]);
+  });
+
+  it("returns same-date open items in stable id order", () => {
+    const aged = ageOpenItems(
+      [
+        { id: "z-line", date: "2025-01-01", amount: 10_000 },
+        { id: "a-line", date: "2025-01-01", amount: 20_000 },
+      ],
+      [],
+      "2025-01-10",
+    );
+    expect(aged.map((item) => item.id)).toEqual(["a-line", "z-line"]);
   });
 
   it("leaves everything outstanding when there are no receipts", () => {

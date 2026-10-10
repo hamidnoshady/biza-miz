@@ -36,6 +36,8 @@ import { ChartOfAccountsSection } from "./chart-of-accounts-section";
 import { canEditChartOfAccounts } from "@/lib/coa-tree";
 import { ExpenseSection } from "./expense-section";
 import { PayrollSection } from "./payroll-section";
+import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
+import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
 import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
@@ -49,6 +51,13 @@ export interface AccountRow {
   name: string;
   type: "asset" | "liability" | "equity" | "revenue" | "expense";
   parent_code: string | null;
+  /**
+   * Present on the picker response (`GET /api/ledger/accounts` without `?all`),
+   * which is what the Expenses screen's payment-source rule needs — account
+   * meaning is inherited through the parent (issue #832 §2). Optional because
+   * the `?all=1` management rows carry their own tree shape instead.
+   */
+  parent_id?: string | null;
   /**
    * Whether a manual journal may post to this account, as the server computes
    * it over the *whole* chart. Optional because this row type is also built by
@@ -162,11 +171,66 @@ export function AccountingManager({
    */
   const canProposeLedger = permissions.includes(PERMISSIONS.ledgerPropose);
 
+  /**
+   * Whether this member may *write* in the expense register (issue #832 §3).
+   *
+   * «هزینه‌ها» opens with `ledger.view`, which is right: a read-only accountant,
+   * an auditor and a viewer all came to read a book. What was wrong is that the
+   * screen then drew «ثبت هزینه», the receipt upload and every other mutating
+   * control for them too, so the only honest answer they could get was a 403
+   * after a form they were not entitled to fill. Same three-state convention as
+   * `canApproveLedger`: `undefined` when the member's effective permissions could
+   * not be read, and then the controls are drawn and the API stays the gate.
+   *
+   * `canBrowseMedia` is narrower than it looks. A receipt photo lives in the
+   * canonical Media Library, and its bytes are readable by anyone who may read
+   * the expense they belong to (`/api/media/[id]/file`) — but the library
+   * *page* is `media.view`, so «باز کردن در کتابخانهٔ رسانه» is offered only to
+   * the members for whom it is a door rather than a redirect.
+   */
+  const canManageExpenses = permissions ? permissions.includes(PERMISSIONS.financeExpensesManage) : undefined;
+  const canBrowseMedia = permissions ? permissions.includes(PERMISSIONS.mediaView) : undefined;
+
+  /**
+   * Whether this member may mutate the fixed-asset register — create,
+   * depreciate, reverse, dispose, transfer, archive, delete (issue #833).
+   *
+   * The page opens with `ledger.view`, but every mutation route checks
+   * `finance.assets_manage`; a ledger-only member used to see apparently
+   * live buttons and discover the 403 only after pressing one. `undefined`
+   * when effective permissions could not be read: the section is then
+   * READ-ONLY until the capability is affirmatively known — fail-closed,
+   * never "draw the controls and let the API say no" (the API stays the
+   * authority either way).
+   *
+   * `finance.assets_manage` is *the* authority for this register's
+   * controlled auto-postings too (depreciation, reversal, disposal): it is
+   * the operational finance capability the owner, manager and accountant
+   * presets all carry, and it is what the routes check — there is
+   * deliberately no second, separate posting permission here.
+   */
+  const canManageFixedAssets = permissions ? permissions.includes(PERMISSIONS.financeAssetsManage) : undefined;
+
+  /**
+   * Whether this member may change payroll. Reading it (`payroll.view`) is what
+   * opens the section; accruing, paying, voiding and setting wages need
+   * `payroll.manage`, a capability a custom role can hold without the other. As
+   * with `canApproveLedger`, `undefined` (permissions unknown) draws the
+   * controls and leaves the API as the gate.
+   */
+  const canManagePayroll = permissions ? permissions.includes(PERMISSIONS.payrollManage) : undefined;
+
   // Every section is a route now, so the rail navigates rather than switching
   // local state — a section a person lands on is a URL they can keep.
+  //
+  // The chips below the page are buttons, not links, so the navigation guard's
+  // click listener cannot see them: they hand their `router.push` to
+  // `guardedNavigate`, which asks first when a screen (the payroll wage list)
+  // has unsaved work and goes straight through otherwise.
   const goToSection = useCallback(
     (key: AccountingSectionKey) => {
-      router.push(accountingSectionHref(key));
+      const href = accountingSectionHref(key);
+      guardedNavigate(href, () => router.push(href));
     },
     [router],
   );
@@ -195,6 +259,18 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
+  /*
+   * The two subledger screens are readable on `ledger.view` — a read-only
+   * viewer or an auditor reaches /accounting/receivables legitimately — but
+   * settling a balance is `finance.receivables_manage` / `finance.payables_manage`,
+   * the permissions the receipts and payments endpoints enforce. Handing the
+   * sections their own capability (rather than letting them guess) is what
+   * keeps a live «دریافت وجه» button off an auditor's screen: the shared
+   * subledger component takes one boolean per side, exactly as
+   * `ChartOfAccountsSection` takes `canEdit`.
+   */
+  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
 
   /*
    * Whether this member may run a reconciliation at all.
@@ -203,13 +279,9 @@ export function AccountingManager({
    * mutation behind it — start, tick, complete, discard — requires
    * `finance.reconciliation_manage`. The screen used to draw all of those
    * controls for whoever could open it, so a read-only accountant's every click
-   * came back 403 under a generic error. `undefined` when the page could not
-   * read the member's effective permissions: the section then draws the
-   * controls and the API stays the gate, exactly like `canApproveLedger`.
+   * came back 403 under a generic error.
    */
-  const canManageReconciliation = permissions
-    ? permissions.includes(PERMISSIONS.financeReconciliationManage)
-    : undefined;
+  const canManageReconciliation = permissions.includes(PERMISSIONS.financeReconciliationManage);
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -308,7 +380,16 @@ export function AccountingManager({
               currentUserId={currentUserId}
             />
           ) : null}
-          {section === "expenses" ? <ExpenseSection accounts={accounts ?? []} busy={busy} run={run} refreshKey={refreshKey} /> : null}
+          {section === "expenses" ? (
+            <ExpenseSection
+              accounts={accounts ?? []}
+              busy={busy}
+              run={run}
+              refreshKey={refreshKey}
+              canManageExpenses={canManageExpenses}
+              canBrowseMedia={canBrowseMedia}
+            />
+          ) : null}
           {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
           {section === "directory" ? (
             <PartiesSection
@@ -320,9 +401,13 @@ export function AccountingManager({
               permissions={permissions}
             />
           ) : null}
-          {section === "receivables" ? <ArSection /> : null}
-          {section === "payables" ? <ApSection /> : null}
-          {section === "receipts" ? <ReceiptsPaymentsSection /> : null}
+          {section === "receivables" ? <ArSection canSettle={canManageReceivables} /> : null}
+          {section === "payables" ? <ApSection canSettle={canManagePayables} /> : null}
+          {section === "receipts" ? <ReceiptsPaymentsSection
+            canManageReceivables={canManageReceivables}
+            canManagePayables={canManagePayables}
+            canReversePayments={canApproveLedger}
+          /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
           {section === "reconciliation" ? (
@@ -331,9 +416,24 @@ export function AccountingManager({
           {section === "chart-of-accounts" ? (
             <ChartOfAccountsSection busy={busy} run={run} canEdit={canEditAccounts} />
           ) : null}
-          {section === "payroll" ? <PayrollSection busy={busy} run={run} refreshKey={refreshKey} /> : null}
+          {section === "payroll" ? (
+            <PayrollSection
+              busy={busy}
+              run={run}
+              refreshKey={refreshKey}
+              canManage={canManagePayroll}
+              ownerKey={currentUserId}
+            />
+          ) : null}
           {section === "vat" ? <VatReportSection refreshKey={refreshKey} /> : null}
-          {section === "fixed-assets" ? <FixedAssetsSection busy={busy} refreshKey={refreshKey} /> : null}
+          {section === "fixed-assets" ? (
+            <FixedAssetsSection
+              busy={busy}
+              refreshKey={refreshKey}
+              canManage={canManageFixedAssets}
+              accounts={accounts ?? []}
+            />
+          ) : null}
           {section === "financial-reports" ? <AccountingReportsSection /> : null}
           {section === "settings" ? <AccountingSettingsSection /> : null}
           {section === "growth" ? <GrowthAccountingView /> : null}
@@ -368,137 +468,3 @@ export function AccountingManager({
 }
 
 export type Runner = (fn: () => Promise<{ ok: boolean; data: { error?: string } }>) => Promise<boolean>;
-
-function errorMessage(code: string | undefined): string {
-  const map: Record<string, string> = {
-    memo_required: "شرح سند الزامی است.",
-    memo_too_long: "شرح سند بیش از حد طولانی است؛ آن را کوتاه‌تر بنویسید.",
-    no_lines: "حداقل یک سطر با مبلغ لازم است.",
-    too_few_lines: "سند باید حداقل دو ردیف داشته باشد.",
-    too_many_lines: "تعداد ردیف‌های سند بیش از حد مجاز است.",
-    single_account_entry: "سند باید حداقل به دو حساب متفاوت بخورد.",
-    invalid_line: "یکی از سطرها معتبر نیست (حساب، یا فقط بدهکار یا بستانکار).",
-    invalid_entry_date: "تاریخ سند معتبر نیست.",
-    not_balanced: "مجموع بدهکار و بستانکار برابر نیست.",
-    unknown_account: "یکی از حساب‌های انتخاب‌شده معتبر نیست.",
-    not_a_leaf_account: "به حساب گروه یا کل نمی‌توان سند زد؛ حساب معین یا تفصیلی را انتخاب کنید.",
-    ledger_account_missing: "یکی از حساب‌های مورد نیاز سیستم در سرفصل حساب‌ها یافت نشد.",
-    unauthorized: "وارد نشده‌اید.",
-    forbidden: "دسترسی مجاز نیست.",
-    network_error: "ارتباط با سرور برقرار نشد. اتصال اینترنت یا شبکه را بررسی و دوباره تلاش کنید.",
-    bad_request: "درخواست نامعتبر بود.",
-    // Phase 16 — AR subledger
-    customer_required: "انتخاب مشتری الزامی است.",
-    customer_not_found: "مشتری انتخاب‌شده معتبر نیست.",
-    invalid_amount: "مبلغ معتبر نیست.",
-    invalid_method: "روش دریافت/پرداخت معتبر نیست.",
-    // A date parameter the caller sent could not be used (not YYYY-MM-DD, or
-    // not a real calendar date) — the A/R and A/P routes reject rather than
-    // guessing what was meant.
-    invalid_date: "تاریخ واردشده معتبر نیست.",
-    // Phase 16 — AP subledger
-    supplier_required: "انتخاب تأمین‌کننده الزامی است.",
-    supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
-    // Phase 30 — cheques
-    invalid_direction: "نوع چک معتبر نیست.",
-    invalid_action: "این عملیات روی چک تعریف نشده است.",
-    invalid_cheque_transition: "این تغییر وضعیت برای چک ممکن نیست؛ ممکن است وضعیت چک را کسی دیگر تغییر داده باشد.",
-    cheque_not_found: "چک پیدا نشد.",
-    duplicate_cheque: "چکی با همین شماره و بانک (یا همین شناسه صیاد) قبلاً ثبت شده است.",
-    invalid_sayad_id: "شناسه صیاد باید ۱۶ رقم باشد.",
-    serial_number_required: "شماره چک الزامی است.",
-    bank_name_required: "نام بانک الزامی است.",
-    counterparty_name_required: "نام صاحب چک الزامی است.",
-    due_date_required: "تاریخ سررسید الزامی است.",
-    invalid_issue_date: "تاریخ دریافت/صدور معتبر نیست.",
-    invalid_due_date: "تاریخ سررسید معتبر نیست.",
-    due_date_before_issue: "سررسید نمی‌تواند پیش از تاریخ دریافت/صدور باشد.",
-    invalid_occurred_on: "تاریخ وقوع معتبر نیست.",
-    action_before_issue: "تاریخ این اقدام نمی‌تواند پیش از تاریخ دریافت/صدور باشد.",
-    invalid_counterparty_for_direction: "طرف حساب انتخاب‌شده با نوع چک هم‌خوانی ندارد.",
-    // Phase 16 — bank & cash reconciliation
-    invalid_account: "حساب انتخاب‌شده معتبر نیست.",
-    statement_date_required: "تاریخ صورتحساب الزامی است.",
-    invalid_statement_date: "تاریخ صورتحساب معتبر نیست؛ تاریخ را از تقویم انتخاب کنید.",
-    statement_date_already_reconciled:
-      "برای این حساب، تطبیقی با تاریخ مساوی یا جدیدتر قبلاً قفل شده است؛ تاریخ صورتحساب باید بعد از آخرین تطبیق قفل‌شده باشد.",
-    reconciliation_in_progress:
-      "یک تطبیق ناتمام برای این حساب وجود دارد؛ ابتدا آن را تکمیل یا حذف کنید.",
-    reconciliation_not_found: "تطبیق پیدا نشد.",
-    reconciliation_completed: "این تطبیق قبلاً قفل شده و قابل تغییر نیست.",
-    negative_statement_balance:
-      "مانده صورتحساب صندوق یا کارت‌خوان نمی‌تواند منفی باشد؛ مانده پایانی را وارد کنید، نه گردش دوره.",
-    journal_line_not_found: "سند انتخاب‌شده معتبر نیست.",
-    journal_line_already_reconciled: "این سند در یک تطبیق قفل‌شدهٔ دیگر ثبت شده و دوباره قابل تطبیق نیست.",
-    balance_mismatch: "مانده محاسبه‌شده با مانده صورتحساب برابر نیست.",
-    fiscal_period_locked: "دوره مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد.",
-    fiscal_period_soft_closed: "دوره مالی این تاریخ بسته‌ی موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند.",
-    // Phase 16 — manual journal workflow
-    draft_not_found: "پیش‌نویس پیدا نشد.",
-    entry_not_found: "سند پیدا نشد.",
-    not_reversible: "فقط اسناد دستی قابل برگشت هستند.",
-    cannot_reverse_a_reversal: "سند برگشتی را نمی‌توان دوباره برگشت زد.",
-    already_reversed: "این سند قبلاً برگشت خورده است.",
-    entry_has_no_lines: "این سند ردیف حسابداری ندارد و قابل برگشت نیست.",
-    // Phase 16 — chart of accounts customisation
-    well_known_account: "این حساب برای عملکرد سیستم لازم است و قابل غیرفعال یا حذف نیست.",
-    account_not_found: "حساب پیدا نشد.",
-    // Phase 16 — expense management
-    invalid_expense_account: "دسته هزینه انتخاب‌شده یک حساب هزینه معتبر نیست.",
-    invalid_payment_account: "حساب پرداخت انتخاب‌شده معتبر نیست.",
-    same_account: "دسته هزینه و حساب پرداخت نمی‌توانند یکسان باشند.",
-    invalid_expense_date: "تاریخ هزینه معتبر نیست.",
-    // Chart of accounts (accounts-service.ts) — these reach here whenever a
-    // section routes an accounts error through `run` rather than its own map.
-    code_required: "کد حساب الزامی است.",
-    invalid_code: "کد حساب باید فقط شامل عدد باشد (مثل ۶۱۰۰).",
-    name_required: "نام حساب الزامی است.",
-    invalid_type: "نوع حساب معتبر نیست.",
-    code_in_use: "این کد حساب قبلاً استفاده شده است.",
-    parent_not_found: "حساب والد پیدا نشد.",
-    parent_cycle: "حساب نمی‌تواند والد خودش یا زیرمجموعه‌اش باشد.",
-    parent_too_deep: "حساب والد از سطح «تفصیلی» است و نمی‌تواند زیرمجموعه داشته باشد.",
-    hierarchy_too_deep: "این جابه‌جایی باعث می‌شود ساختار حساب از سطح «تفصیلی» عمیق‌تر شود.",
-    account_has_postings: "این حساب سند خورده و قابل حذف نیست؛ می‌توانید آن را غیرفعال کنید.",
-    account_has_draft_postings: "این حساب در یک پیش‌نویس استفاده شده و قابل حذف نیست.",
-    account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
-    // Fiscal years and periods (fiscal-periods-service.ts)
-    invalid_year: "سال شمسی نامعتبر است.",
-    fiscal_year_exists: "این سال مالی قبلاً تعریف شده است.",
-    fiscal_year_not_found: "سال مالی یافت نشد.",
-    fiscal_year_closed: "سال مالی این دوره بسته شده و دیگر قابل بازگشایی نیست.",
-    fiscal_year_already_closed: "این سال مالی قبلاً بسته شده است.",
-    periods_not_ready: "برای بستن سال مالی، ابتدا همه دوره‌های آن را به‌صورت موقت ببندید.",
-    periods_incomplete: "فهرست دوره‌های سال مالی کامل نیست و سال قابل بستن نیست.",
-    fiscal_period_overlap: "بازهٔ این سال با یک دورهٔ مالی موجود هم‌پوشانی دارد؛ دوره‌ها را بررسی کنید.",
-    period_locked_for_closing: "دوره پایانی سال قفل است؛ ابتدا آن را بازگشایی و دوباره بسته‌ی موقت کنید.",
-    period_not_found: "دوره یافت نشد.",
-    invalid_transition: "این تغییر وضعیت مجاز نیست.",
-    // Phase 16 — payroll entries
-    user_not_found: "عضو موردنظر پیدا نشد.",
-    no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
-    // Audit F11 — a run is a Jalali month, computed gross-to-net.
-    invalid_period: "ماه حقوق معتبر نیست.",
-    period_in_future: "این ماه هنوز شروع نشده است و حقوق آن قابل ثبت نیست.",
-    period_already_accrued: "برای این ماه قبلاً تعهد حقوق ثبت شده است؛ برای ثبت دوباره ابتدا آن را ابطال کنید.",
-    invalid_overtime: "مبلغ اضافه‌کار معتبر نیست.",
-    deductions_exceed_gross: "کسور یکی از کارکنان از حقوق ناخالص او بیشتر است؛ کسور ثابت یا نرخ‌ها را بررسی کنید.",
-    amount_too_large: "مبلغ حقوق بیش از حد بزرگ است.",
-    advance_not_found: "مساعده پیدا نشد.",
-    advance_already_recovered: "بخشی از این مساعده در حقوق کسر شده است؛ ابتدا تعهد حقوق آن ماه را ابطال کنید.",
-    invalid_advance_date: "تاریخ مساعده معتبر نیست.",
-    note_too_long: "توضیح مساعده بیش از حد طولانی است.",
-    invalid_accrual_date: "تاریخ تعهد معتبر نیست.",
-    invalid_paid_date: "تاریخ پرداخت معتبر نیست.",
-    run_not_found: "تعهد حقوق پیدا نشد.",
-    already_paid: "این تعهد قبلاً پرداخت شده است.",
-    already_voided: "این تعهد قبلاً ابطال شده است.",
-    run_voided: "این تعهد ابطال شده و قابل پرداخت نیست.",
-    // Phase 22 — fixed assets & depreciation
-    fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-    fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
-    period_already_depreciated: "استهلاک این دوره قبلاً ثبت شده است.",
-    fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است.",
-  };
-  return map[code ?? ""] ?? "خطای غیرمنتظره. دوباره تلاش کنید.";
-}

@@ -11,7 +11,9 @@
  * reach every branch of the revoke/rotate contract.
  */
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -527,6 +529,101 @@ describe("secrets at rest (issue #748 P0-2)", () => {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
+    }
+  });
+
+  it("defers 0209 by itself while credentials exist, still applying later migrations, and lets the entrypoint backfill keep plaintext", async () => {
+    const envNames = [
+      "INTEGRATIONS_ENCRYPTION_KEY",
+      "AI_GATEWAY_SECRET_CUTOVER_DEFER",
+      "AI_GATEWAY_SECRET_CUTOVER_VERIFIED",
+    ] as const;
+    const previousEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
+    process.env.INTEGRATIONS_ENCRYPTION_KEY = "71".repeat(32);
+    delete process.env.AI_GATEWAY_SECRET_CUTOVER_DEFER;
+    delete process.env.AI_GATEWAY_SECRET_CUTOVER_VERIFIED;
+
+    // The production state the crash loop came from: 0209 pending behind
+    // plaintext-only credentials, with unrelated migrations after it.
+    const migrationsDir = await mkdtemp(join(tmpdir(), "ai-cutover-"));
+    const dependentDir = await mkdtemp(join(tmpdir(), "ai-cutover-dependent-"));
+    await cp(new URL("../migrations", import.meta.url), migrationsDir, { recursive: true });
+    await writeFile(join(migrationsDir, "9999_after_cutover_probe.sql"), "CREATE TABLE after_cutover_probe (id int);\n");
+    await cp(migrationsDir, dependentDir, { recursive: true });
+    await writeFile(join(dependentDir, "9998_reads_master_key.sql"), "SELECT master_key FROM platform_ai_gateway LIMIT 0;\n");
+
+    try {
+      await db.query("ALTER TABLE platform_ai_gateway ADD COLUMN IF NOT EXISTS master_key text");
+      await db.query("ALTER TABLE ai_business_gateway ADD COLUMN IF NOT EXISTS virtual_key text");
+      await db.query("DELETE FROM ai_business_gateway WHERE business_id = $1", [alpha.businessId]);
+      await db.query("DELETE FROM platform_ai_gateway WHERE id = true");
+      await db.query(
+        `INSERT INTO platform_ai_gateway (id, base_url, master_key)
+         VALUES (true, 'http://litellm:4000/v1', 'sk-auto-master')`,
+      );
+      await db.query(
+        `INSERT INTO ai_business_gateway (business_id, virtual_key)
+         VALUES ($1, 'sk-auto-tenant')`,
+        [alpha.businessId],
+      );
+      await db.query("DELETE FROM schema_migrations WHERE filename = '0209_ai_gateway_secret_cutover.sql'");
+
+      const deferred = await runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir, quiet: true });
+      expect(deferred).toMatchObject({ applied: 1, deferredMigrations: ["0209_ai_gateway_secret_cutover.sql"] });
+      expect((await db.query("SELECT to_regclass('after_cutover_probe') IS NOT NULL AS present")).rows[0].present).toBe(true);
+
+      await runAiSecretBackfill(["--keep-plaintext"]);
+      const key = resolveEncryptionKey(process.env);
+      const { rows } = await db.query<{
+        master_key: string;
+        master_key_ciphertext: string;
+        virtual_key: string;
+        virtual_key_ciphertext: string;
+      }>(
+        `SELECT p.master_key, p.master_key_ciphertext, b.virtual_key, b.virtual_key_ciphertext
+           FROM platform_ai_gateway p CROSS JOIN ai_business_gateway b
+          WHERE p.id = true AND b.business_id = $1`,
+        [alpha.businessId],
+      );
+      expect(rows[0]).toMatchObject({ master_key: "sk-auto-master", virtual_key: "sk-auto-tenant" });
+      expect(decryptSecret(rows[0].master_key_ciphertext, key)).toBe("sk-auto-master");
+      expect(decryptSecret(rows[0].virtual_key_ciphertext, key)).toBe("sk-auto-tenant");
+
+      // Still deferred on the next boot: only the explicit confirmation drops columns.
+      const reboot = await runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir, quiet: true });
+      expect(reboot).toMatchObject({ applied: 0, deferredMigrations: ["0209_ai_gateway_secret_cutover.sql"] });
+
+      // A later migration that names a legacy column cannot jump the deferred cutover.
+      await expect(runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir: dependentDir, quiet: true }))
+        .rejects.toThrow("ai_gateway_secret_cutover_deferred_blocks_later_migration:9998_reads_master_key.sql");
+
+      process.env.AI_GATEWAY_SECRET_CUTOVER_VERIFIED = "true";
+      const confirmed = await runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir, quiet: true });
+      expect(confirmed).toMatchObject({ applied: 1, deferredMigrations: [] });
+      const { rows: remainingColumns } = await db.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND ((table_name = 'platform_ai_gateway' AND column_name = 'master_key')
+              OR (table_name = 'ai_business_gateway' AND column_name = 'virtual_key'))`,
+      );
+      expect(remainingColumns).toEqual([]);
+
+      // After the cutover the entrypoint's backfill is a quiet no-op.
+      await expect(runAiSecretBackfill(["--keep-plaintext"])).resolves.toBeUndefined();
+    } finally {
+      for (const name of envNames) {
+        const value = previousEnv[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await db.query("DELETE FROM ai_business_gateway WHERE business_id = $1", [alpha.businessId]);
+      await db.query("DELETE FROM platform_ai_gateway WHERE id = true");
+      await db.query("DROP TABLE IF EXISTS after_cutover_probe");
+      await db.query("DELETE FROM schema_migrations WHERE filename = '9999_after_cutover_probe.sql'");
+      await db.query("ALTER TABLE platform_ai_gateway DROP COLUMN IF EXISTS master_key");
+      await db.query("ALTER TABLE ai_business_gateway DROP COLUMN IF EXISTS virtual_key");
+      await rm(migrationsDir, { recursive: true, force: true });
+      await rm(dependentDir, { recursive: true, force: true });
     }
   });
 

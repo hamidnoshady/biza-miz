@@ -18,7 +18,7 @@
  * a «تغییر اتصال» escape hatch) and reconnects legacy rows (it opens at step
  * 1). It is reused verbatim by the first-run setup wizard.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2Icon, MonitorIcon, NetworkIcon, PrinterIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -39,9 +39,16 @@ import {
   type WindowsPrinter,
 } from "@/lib/printing/client";
 import { printerErrorMessage, type PrinterErrorCode } from "@/lib/printing/errors";
-import { isValidIpv4, normalizeStoredConnection, printerTargetOf, type PrinterTarget } from "@/lib/printing/types";
-import { BUILT_IN_TEMPLATES } from "@/lib/print-template";
-import type { PrinterRow, SavedTemplateRow } from "./use-printing";
+import {
+  isValidIpv4,
+  normalizeStoredConnection,
+  printerTargetOf,
+  type PrinterPurpose,
+  type PrinterTarget,
+} from "@/lib/printing/types";
+import { PAPERS_FOR_PURPOSE, printerClassFor } from "@/lib/printing/routing";
+import { PAPERS, type PaperKey } from "@/lib/print-template";
+import type { PrinterRow } from "./use-printing";
 import { ConnectorInstallCard, type ConnectorState } from "./connector-status";
 
 /**
@@ -74,49 +81,71 @@ function useConnectorGate(active: boolean) {
 
 type Step = "where" | "windows" | "network" | "config";
 
+/** The four things a printer can be for — the same vocabulary the rules use. */
+const PURPOSE_CHOICES: { key: PrinterPurpose; title: string; description: string }[] = [
+  { key: "receipt", title: "رسید مشتری", description: "چاپ فیش فروش در صندوق" },
+  { key: "kitchen", title: "بلیت آشپزخانه", description: "چاپ سفارش برای آشپزخانه" },
+  { key: "document", title: "فاکتور (A4/A5)", description: "چاپ فاکتور رسمی روی چاپگر صفحه‌ای ویندوز" },
+  { key: "label", title: "برچسب", description: "چاپ برچسب قیمت و بارکد" },
+];
+
+const DEFAULT_LABELS: Record<PrinterPurpose, string> = {
+  receipt: "چاپگر پیش‌فرض رسید",
+  kitchen: "چاپگر پیش‌فرض آشپزخانه",
+  document: "چاپگر پیش‌فرض فاکتور",
+  label: "چاپگر پیش‌فرض برچسب",
+};
+
 interface ConfigDraft {
   name: string;
-  kind: "receipt" | "kitchen";
-  paperWidthMm: 58 | 80;
+  kind: PrinterPurpose;
+  paper: PaperKey;
   openDrawer: boolean;
   isDefault: boolean;
   isActive: boolean;
-  templateKey: string;
 }
 
 const EMPTY_CONFIG: ConfigDraft = {
   name: "",
   kind: "receipt",
-  paperWidthMm: 80,
+  paper: "thermal80",
   openDrawer: false,
   isDefault: false,
   isActive: true,
-  templateKey: "",
 };
 
+/**
+ * A printer's purpose and paper as the wizard edits them. Purpose and paper
+ * come from the row's own columns (`kind`, `paper`) — not from the
+ * `connection` jsonb, which from this migration on carries the hardware
+ * target and nothing else.
+ */
 function configOf(printer: PrinterRow): ConfigDraft {
-  const c = normalizeStoredConnection(printer.connection);
+  const kind: PrinterPurpose = printer.kind;
+  const allowed = PAPERS_FOR_PURPOSE[kind];
+  const stored = typeof printer.paper === "string" && storedPaper(printer.paper) ? (printer.paper as PaperKey) : null;
   return {
     name: printer.name,
-    kind: printer.kind,
-    paperWidthMm: c.paperWidthMm === 58 ? 58 : 80,
-    openDrawer: c.openDrawer === true,
-    isDefault: c.isDefault === true,
+    kind,
+    paper: stored && allowed.includes(stored) ? stored : allowed[0],
+    openDrawer: printer.supports_drawer === true,
+    isDefault: printer.is_default === true,
     isActive: printer.is_active,
-    templateKey: c.templateKey ?? "",
   };
+}
+
+function storedPaper(value: string): value is PaperKey {
+  return value in PAPERS;
 }
 
 export function AddPrinterDialog({
   open,
   onOpenChange,
-  templates,
   editing = null,
   onSaved,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  templates: SavedTemplateRow[];
   /** A saved printer being edited/reconnected; null for a new pairing. */
   editing?: PrinterRow | null;
   onSaved: () => Promise<void> | void;
@@ -127,7 +156,6 @@ export function AddPrinterDialog({
   const [error, setError] = useState("");
   const [test, setTest] = useState<{ state: "idle" | "testing" | "ok" | "failed"; message?: string }>({ state: "idle" });
   const [saving, setSaving] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Legacy rows open at step 1: they must be re-paired, not edited in place.
   const reconnecting = editing ? normalizeStoredConnection(editing.connection).needsReconnect === true : false;
@@ -136,7 +164,6 @@ export function AddPrinterDialog({
     if (!open) return;
     setError("");
     setTest({ state: "idle" });
-    setShowAdvanced(false);
     if (editing && !reconnecting) {
       setTarget(printerTargetOf(editing.connection));
       setConfig(configOf(editing));
@@ -156,19 +183,10 @@ export function AddPrinterDialog({
     setStep("config");
   }
 
-  const templateOptions = useMemo(
-    () => [
-      { value: "", label: "پیش‌فرض این نوع سند" },
-      ...BUILT_IN_TEMPLATES.map((t) => ({ value: t.key, label: `${t.name} (آماده)` })),
-      ...templates.map((t) => ({ value: t.id, label: t.name })),
-    ],
-    [templates],
-  );
-
   async function runTest(): Promise<boolean> {
     if (!target) return false;
     setTest({ state: "testing" });
-    const result = await testPrintDraft(target, config.kind, config.paperWidthMm);
+    const result = await testPrintDraft(target, config.kind, config.paper);
     if (result.ok) {
       setTest({ state: "ok" });
       return true;
@@ -199,8 +217,7 @@ export function AddPrinterDialog({
       name: config.name.trim(),
       kind: config.kind,
       connection: target,
-      paperWidthMm: config.paperWidthMm,
-      templateKey: config.templateKey || null,
+      paper: config.paper,
       openDrawer: config.openDrawer,
       isDefault: config.isDefault,
       isActive: config.isActive,
@@ -247,12 +264,9 @@ export function AddPrinterDialog({
             config={config}
             onChange={setConfig}
             target={target}
-            templateOptions={templateOptions}
             test={test}
             onTest={() => void runTest()}
             onRetarget={() => setStep("where")}
-            showAdvanced={showAdvanced}
-            onToggleAdvanced={() => setShowAdvanced((prev) => !prev)}
             editing={editing}
             saving={saving}
             onSave={(skipTest) => void save(skipTest)}
@@ -540,12 +554,9 @@ function ConfigStep({
   config,
   onChange,
   target,
-  templateOptions,
   test,
   onTest,
   onRetarget,
-  showAdvanced,
-  onToggleAdvanced,
   editing,
   saving,
   onSave,
@@ -554,12 +565,9 @@ function ConfigStep({
   config: ConfigDraft;
   onChange: (config: ConfigDraft) => void;
   target: PrinterTarget | null;
-  templateOptions: { value: string; label: string }[];
   test: { state: "idle" | "testing" | "ok" | "failed"; message?: string };
   onTest: () => void;
   onRetarget: () => void;
-  showAdvanced: boolean;
-  onToggleAdvanced: () => void;
   editing: PrinterRow | null;
   saving: boolean;
   onSave: (skipTest: boolean) => void;
@@ -567,9 +575,31 @@ function ConfigStep({
 }) {
   const [drawerTesting, setDrawerTesting] = useState(false);
   const kind = config.kind;
+  const paperChoices = PAPERS_FOR_PURPOSE[kind];
+  const printerClass = printerClassFor(kind, config.paper);
+  const drawerCapable = printerClass === "thermal";
+  // A cut sheet only prints through a Windows queue: raw TCP page printing
+  // would mean speaking a page-description language the connector does not.
+  const targetIncompatible = kind === "document" && target?.type === "network";
 
   function change<K extends keyof ConfigDraft>(key: K, next: ConfigDraft[K]) {
     onChange({ ...config, [key]: next });
+  }
+
+  /**
+   * Changing the purpose changes which papers are even possible, so the paper
+   * follows the purpose: the wizard can never ask someone to save an A4 tray
+   * on a receipt printer.
+   */
+  function choosePurpose(value: string) {
+    const next = (PURPOSE_CHOICES.find((choice) => choice.key === value)?.key ?? "receipt") as PrinterPurpose;
+    const allowed = PAPERS_FOR_PURPOSE[next];
+    onChange({
+      ...config,
+      kind: next,
+      paper: allowed.includes(config.paper) ? config.paper : allowed[0],
+      openDrawer: next === "receipt" ? config.openDrawer : false,
+    });
   }
 
   const targetLine = target
@@ -609,60 +639,56 @@ function ConfigStep({
       <Field label="کاربرد این چاپگر">
         <RadioGroup
           value={kind}
-          onValueChange={(value) => onChange({ ...config, kind: value === "kitchen" ? "kitchen" : "receipt", openDrawer: value === "kitchen" ? false : config.openDrawer })}
+          onValueChange={(value) => choosePurpose(value)}
           className="grid gap-2 sm:grid-cols-2"
         >
-          <label htmlFor="printer-purpose-receipt" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/80 bg-card p-3 transition-colors hover:bg-muted">
-            <RadioGroupItem id="printer-purpose-receipt" value="receipt" className="mt-0.5" />
-            <span className="min-w-0">
-              <span className="block text-sm font-medium text-foreground">رسید مشتری</span>
-              <span className="mt-0.5 block text-xs text-muted-foreground">چاپ فیش فروش در صندوق</span>
-            </span>
-          </label>
-          <label htmlFor="printer-purpose-kitchen" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/80 bg-card p-3 transition-colors hover:bg-muted">
-            <RadioGroupItem id="printer-purpose-kitchen" value="kitchen" className="mt-0.5" />
-            <span className="min-w-0">
-              <span className="block text-sm font-medium text-foreground">بلیت آشپزخانه</span>
-              <span className="mt-0.5 block text-xs text-muted-foreground">چاپ سفارش برای آشپزخانه</span>
-            </span>
-          </label>
+          {PURPOSE_CHOICES.map((choice) => (
+            <label
+              key={choice.key}
+              htmlFor={`printer-purpose-${choice.key}`}
+              className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/80 bg-card p-3 transition-colors hover:bg-muted"
+            >
+              <RadioGroupItem id={`printer-purpose-${choice.key}`} value={choice.key} className="mt-0.5" />
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-foreground">{choice.title}</span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">{choice.description}</span>
+              </span>
+            </label>
+          ))}
         </RadioGroup>
       </Field>
 
-      <Field label="کاغذ">
-        <RadioGroup
-          value={String(config.paperWidthMm)}
-          onValueChange={(value) => change("paperWidthMm", value === "58" ? 58 : 80)}
-          className="grid gap-2 sm:grid-cols-2"
-        >
-          <label htmlFor="printer-paper-80" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/80 bg-card p-3 transition-colors hover:bg-muted">
-            <RadioGroupItem id="printer-paper-80" value="80" className="mt-0.5" />
-            <span className="min-w-0">
-              <span className="block text-sm font-medium text-foreground">۸۰ میلی‌متر</span>
-              <span className="mt-0.5 block text-xs text-muted-foreground">رایج‌ترین چاپگر رسید</span>
-            </span>
-          </label>
-          <label htmlFor="printer-paper-58" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/80 bg-card p-3 transition-colors hover:bg-muted">
-            <RadioGroupItem id="printer-paper-58" value="58" className="mt-0.5" />
-            <span className="min-w-0">
-              <span className="block text-sm font-medium text-foreground">۵۸ میلی‌متر</span>
-              <span className="mt-0.5 block text-xs text-muted-foreground">چاپگرهای کوچک و سیار</span>
-            </span>
-          </label>
+      <Field label="کاغذ" hint="کاغذی که در این چاپگر گذاشته‌اید؛ عرض رستر و اندازهٔ صفحه از همین تعیین می‌شود.">
+        <RadioGroup value={config.paper} onValueChange={(value) => change("paper", value as PaperKey)} className="grid gap-2 sm:grid-cols-2">
+          {paperChoices.map((key) => (
+            <label
+              key={key}
+              htmlFor={`printer-paper-${key}`}
+              className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/80 bg-card p-3 transition-colors hover:bg-muted"
+            >
+              <RadioGroupItem id={`printer-paper-${key}`} value={key} className="mt-0.5" />
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-foreground">{PAPERS[key].label}</span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">{PAPERS[key].hint}</span>
+              </span>
+            </label>
+          ))}
         </RadioGroup>
       </Field>
+
+      {targetIncompatible ? (
+        <ErrorBox>فاکتور روی کاغذ A4/A5 فقط از طریق صف ویندوز چاپ می‌شود؛ برای این کاربرد «چاپگر ویندوز» را انتخاب کنید.</ErrorBox>
+      ) : null}
 
       <div className="flex flex-col gap-3 rounded-xl border border-border/80 p-3">
-        {kind === "receipt" ? (
+        {drawerCapable && kind === "receipt" ? (
           <label className="flex items-center justify-between gap-3">
             <span className="text-sm text-foreground">بازکردن کشوی پول پس از چاپ رسید نقدی</span>
             <Switch checked={config.openDrawer} onCheckedChange={(next) => change("openDrawer", next)} />
           </label>
         ) : null}
         <label className="flex items-center justify-between gap-3">
-          <span className="text-sm text-foreground">
-            {kind === "receipt" ? "چاپگر پیش‌فرض رسید" : "چاپگر پیش‌فرض آشپزخانه"}
-          </span>
+          <span className="text-sm text-foreground">{DEFAULT_LABELS[kind]}</span>
           <Switch checked={config.isDefault} onCheckedChange={(next) => change("isDefault", next)} />
         </label>
         {editing ? (
@@ -673,22 +699,9 @@ function ConfigStep({
         ) : null}
       </div>
 
-      <div>
-        <button type="button" className="text-xs text-primary hover:underline" onClick={onToggleAdvanced}>
-          {showAdvanced ? "بستن تنظیمات پیشرفته" : "تنظیمات پیشرفته"}
-        </button>
-        {showAdvanced ? (
-          <div className="mt-2">
-            <Field label="قالب چاپ این چاپگر">
-              <SearchableSelect
-                value={config.templateKey}
-                onChange={(next) => change("templateKey", next)}
-                options={templateOptions}
-              />
-            </Field>
-          </div>
-        ) : null}
-      </div>
+      <InfoBox>
+        ظاهر چاپ در «قالب‌ها» و مسیر چاپ هر سند در «قوانین چاپ» تعیین می‌شود؛ این چاپگر فقط کاغذ و سخت‌افزار را می‌داند.
+      </InfoBox>
 
       <div className="space-y-2 border-t border-border/80 pt-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -696,7 +709,7 @@ function ConfigStep({
             <PrinterIcon aria-hidden="true" />
             {test.state === "testing" ? "در حال چاپ آزمایشی…" : "چاپ آزمایشی"}
           </Button>
-          {editing && kind === "receipt" ? (
+          {editing && kind === "receipt" && drawerCapable ? (
             <Button type="button" variant="outline" onClick={() => void testDrawer()} disabled={drawerTesting}>
               {drawerTesting ? "در حال ارسال فرمان…" : "آزمایش کشوی پول"}
             </Button>
@@ -712,7 +725,7 @@ function ConfigStep({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 border-t border-border/80 pt-3">
-        <Button type="button" onClick={() => onSave(false)} disabled={saving}>
+        <Button type="button" onClick={() => onSave(false)} disabled={saving || targetIncompatible}>
           {saving ? "در حال ذخیره…" : test.state === "ok" ? "ذخیرهٔ چاپگر" : "چاپ آزمایشی و ذخیره"}
         </Button>
         {test.state === "failed" ? (

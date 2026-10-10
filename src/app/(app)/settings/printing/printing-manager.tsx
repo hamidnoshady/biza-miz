@@ -4,29 +4,26 @@
  * «چاپ و فاکتور» — the whole printing section, in three tabs with cleanly
  * separated concerns:
  *
- *   چاپگرها    — hardware connection (the printers panel; connection
- *                mechanics live in its add/edit dialog).
- *   قالب‌ها     — template design (opens the designer from a card).
- *   لوگو       — the logo every template prints.
+ *   چاپگرها     — hardware connection: which printer, on which port, with
+ *                 which paper. Hardware only — the panel's add/edit dialog
+ *                 never asks about templates.
+ *   قالب‌ها      — appearance: the built-in presets and this branch's saved
+ *                 templates, plus the logo every one of them prints.
+ *   قوانین چاپ  — routing: which template and which printer each document
+ *                 type uses, and what would actually print right now.
  *
- * Template design never mixes with hardware connection: a user adding a
- * printer never sees template-management complexity unless they deliberately
- * open Advanced settings inside the add-printer dialog.
+ * The three concerns never mix: appearance lives in templates, hardware in
+ * printers, and only a rule joins them.
  */
 import { useCallback, useMemo, useState } from "react";
 import { FileTextIcon, PrinterIcon, RouteIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { printDocument } from "@/lib/printing/client";
-import {
-  PAPERS,
-  builtInTemplate,
-  renderPrintTemplate,
-  starterTemplate,
-  type PrintTemplate,
-} from "@/lib/print-template";
+import { printTemplateSample } from "@/lib/printing/client";
+import { starterTemplate, type PrintTemplate } from "@/lib/print-template";
 import { samplePrintDocument } from "@/lib/print-sample";
 import { LoadingSkeleton, TabBar, cardClass } from "@/app/dashboard/page-chrome";
 import { ErrorBox, InfoBox, api, errorMessage } from "@/app/dashboard/ui";
+import { printerErrorMessage } from "@/lib/printing/errors";
 import { LogoPanel } from "./logo-panel";
 import { PrintersPanel } from "./printers-panel";
 import { RulesPanel } from "./rules-panel";
@@ -65,52 +62,28 @@ export function PrintingManager() {
     [identity.business, identity.footer],
   );
 
-  const printSample = useCallback(
-    async (template: PrintTemplate) => {
-      setError("");
-      setNotice("");
-      const html = renderPrintTemplate(template, sample);
-      const paper = PAPERS[template.paper];
-      // Sheets (A4/A5 invoices) are a browser-dialog job by design — they
-      // never ride the thermal connector. Thermal papers print through the
-      // branch's default printer for the document's kind; with no printer
-      // paired, the browser dialog is the no-hardware path.
-      if (paper.kind === "sheet") {
-        const { ok, data } = await api<{ printers?: { id: string; name: string; kind: string; isDefault: boolean; needsReconnect: boolean }[] }>("/api/printers");
-        const printers = data.printers ?? [];
-        const match = printers.find((p) => !p.needsReconnect && (p.kind === "receipt" || p.kind === "document"));
-        if (!ok || !match) {
-          setError("برای چاپ برگه، یک چاپگر ویندوز تنظیم کنید.");
-          return;
-        }
-        const result = await printDocument(match.id, html, template.paper);
-        if (!result.ok) setError("ارسال به چاپگر انجام نشد.");
-        else setNotice(`سند به «${match.name}» ارسال شد.`);
-        return;
-      }
-      const kind = template.docType === "kitchen" ? "kitchen" : "receipt";
-      const { ok, data } = await api<{ printers?: { id: string; name: string; kind: string; isDefault: boolean; needsReconnect: boolean }[] }>("/api/printers");
-      const printers = data.printers ?? [];
-      const match =
-        printers.find((p) => p.kind === kind && p.isDefault && !p.needsReconnect) ??
-        printers.find((p) => p.kind === kind && !p.needsReconnect);
-      if (!ok || !match) {
-        setError("چاپگری برای این سند تنظیم نشده است.");
-        return;
-      }
-      const result = await printDocument(match.id, html, template.paper);
-      if (!result.ok) {
-        setError(
-          result.error === "connector_not_installed" || result.error === "connector_outdated"
-            ? "چاپ از مرورگر به سرویس چاپ اشوبه نیاز دارد؛ از تب «چاپگرها» آن را نصب کنید."
-            : "چاپ نمونه انجام نشد.",
-        );
-        return;
-      }
-      setNotice(`نمونه روی «${match.name ?? "چاپگر"}» فرستاده شد.`);
-    },
-    [sample],
-  );
+  /**
+   * «چاپ نمونه» — the chosen template, printed through the OPERATIONAL
+   * pipeline: the same route the till calls, the same branding resolver, the
+   * same renderer, pinned to this exact template. Whatever the server would
+   * have printed for a real sale of this document type is what comes out —
+   * which is the point: the test print is evidence about production, not a
+   * separate preview mechanism.
+   */
+  const printSample = useCallback(async (template: PrintTemplate) => {
+    setError("");
+    setNotice("");
+    const result = await printTemplateSample(template);
+    if (result.ok) {
+      setNotice("نمونه از همان مسیر چاپ واقعی ارسال شد.");
+      return;
+    }
+    setError(
+      result.error === "connector_not_installed" || result.error === "connector_outdated"
+        ? "چاپ از مرورگر به سرویس چاپ اشوبه نیاز دارد؛ از تب «چاپگرها» آن را نصب کنید."
+        : printerErrorMessage(result.error),
+    );
+  }, []);
 
   async function saveTemplate(isDefault: boolean) {
     if (!editing) return;
@@ -211,15 +184,11 @@ export function PrintingManager() {
         )
       ) : null}
 
-      {tab === "printers" ? <PrintersPanel templates={saved.templates} /> : null}
+      {tab === "printers" ? <PrintersPanel /> : null}
 
       {tab === "rules" ? <RulesPanel /> : null}
     </div>
   );
-}
-
-function TabBarMemo({ active, onChange }: { active: Tab; onChange: (tab: Tab) => void }) {
-  return <TabBar idPrefix="printing" label="بخش‌های چاپ" tabs={TABS} active={active} onChange={onChange} />;
 }
 
 /** Icons the settings nav uses for this section's tabs. Exported for the nav. */
