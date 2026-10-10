@@ -217,9 +217,22 @@ export function buildRedirect(
  * authorization server rather than describing it, because for us they are the
  * same origin but a client must not assume that.
  */
-export function protectedResourceMetadata(issuer: string) {
+/**
+ * Issue #883 §4 — the platform console's realm deliberately remains *absent*
+ * from RFC 9728 discovery. `/api/platform/mcp` speaks to console operators
+ * only (`pospmcp_` tokens minted from the console UI); nothing in the OAuth
+ * handshake flow could ever produce one, so advertising `/api/platform/mcp`
+ * as a protected resource could only encourage external MCP clients to ping
+ * a surface they cannot possibly join. Tenants keep `/api/mcp`, platforms
+ * keep silence — one document, applied to one of the two resources. The
+ * `resourcePath` override lets the well-known route answer the path-inserted
+ * form (`…/oauth-protected-resource/api/platform/mcp`) with the same
+ * deliberate-omission verdict instead of a lie.
+ */
+export function protectedResourceMetadata(issuer: string, resourcePath = "/api/mcp") {
+  if (resourcePath.startsWith("/api/platform/mcp")) return null;
   return {
-    resource: `${issuer}/api/mcp`,
+    resource: `${issuer}${resourcePath}`,
     authorization_servers: [issuer],
     scopes_supported: ALL_MCP_SCOPES,
     bearer_methods_supported: ["header"],

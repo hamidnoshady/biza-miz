@@ -276,6 +276,7 @@ const DRAFTS: Draft[] = [
 
   // --- Security ------------------------------------------------------------
   { key: P.apiManage, group: "security", label: "مدیریت کلیدهای API", description: "ساخت و ابطال اعتبارنامه‌های بلندمدت برای سامانه‌های بیرونی.", risk: "critical", audit: true },
+  { key: P.mcpManage, group: "security", label: "مدیریت اتصال‌های هوش مصنوعی (MCP)", description: "ساخت، تغییر و ابطال اتصال‌های دستیارهای هوش مصنوعی و تأیید تغییرات در انتظار آن‌ها. مخصوص مالک.", risk: "critical", audit: true },
 ];
 
 /**

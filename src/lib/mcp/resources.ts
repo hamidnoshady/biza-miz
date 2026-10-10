@@ -15,9 +15,18 @@
  * catalogue, and a short guide to the conventions. A resource list is read in
  * full by most clients, so length here is a cost paid on every conversation.
  */
-import { runSystemReadTool } from "../ai-system-read";
+import { runReadTool } from "../ai-tools";
+import { canUseAiTool } from "../ai-capabilities";
 import { getBusinessIndustry } from "../industry-guard";
+import type { Permission } from "../permissions";
 import { standardReportsFor } from "../reports";
+import {
+  LEGACY_GRANTS,
+  mcpCanReadApp,
+  mcpGrantsUsable,
+  type McpGrants,
+} from "./grants";
+import { mcpRegistryEntryForResource } from "./registry";
 
 export interface McpResourceDescriptor {
   uri: string;
@@ -127,6 +136,51 @@ export interface McpResourceContent {
 }
 
 /**
+ * The permission each resource's content stands on — the tool whose answer it
+ * is republishing (issue #883 P0-1). The conventions document is static prose
+ * about this codebase's own storage rules and names nothing about the tenant,
+ * so it has no entry.
+ */
+const RESOURCE_TOOL: Record<string, string> = {
+  "pos://app/overview": "describe_app",
+  "pos://reports/catalog": "run_report",
+};
+
+/**
+ * The resources this connection may read (issue #883 §2). The filter has
+ * TWO axes now and both fail closed:
+ *
+ *   * the authorizer's current permissions — what the human behind the
+ *     connection may read right now (P0-1), and
+ *   * the connection's own grants — what its owner consented to. Before this
+ *     wave the second axis did not exist, so any resource republished its
+ *     tool's content to every connection regardless of grants.
+ *
+ * `resources/list` shows exactly this set and `resources/read` refuses
+ * anything outside it, so an unauthorized URI and a nonexistent one are
+ * indistinguishable. A *branch* subset does not trim resources: the overview
+ * and the report catalogue are metadata about the installation, not
+ * branch-aggregating facts (the tools under them enforce branch policy).
+ */
+export function mcpResourcesFor(
+  permissions: ReadonlySet<Permission>,
+  grants: McpGrants = LEGACY_GRANTS,
+): McpResourceDescriptor[] {
+  // A stored grants document that parses to "nothing at all" is a closed
+  // credential: it permitted nothing when it was minted and it permits
+  // nothing now — unlike a legacy `{}`, which parse treats as the
+  // conservative full set.
+  if (!mcpGrantsUsable(grants)) return [];
+  return MCP_RESOURCES.filter((resource) => {
+    const tool = RESOURCE_TOOL[resource.uri];
+    if (tool && !canUseAiTool(tool, permissions)) return false;
+    const entry = mcpRegistryEntryForResource(resource.uri);
+    if (entry && !mcpCanReadApp(grants, entry.app)) return false;
+    return true;
+  });
+}
+
+/**
  * Read one resource. Returns null for an unknown URI, which the caller turns
  * into a JSON-RPC error rather than an empty document — a client that receives
  * an empty resource shows the model nothing and gives no reason.
@@ -134,10 +188,18 @@ export interface McpResourceContent {
 export async function readMcpResource(
   uri: string,
   businessId: string,
+  permissions?: ReadonlySet<Permission>,
 ): Promise<McpResourceContent | null> {
   switch (uri) {
     case "pos://app/overview": {
-      const result = await runSystemReadTool("describe_app", {}, businessId);
+      const result = await runReadTool(
+        "describe_app",
+        {},
+        businessId,
+        undefined,
+        undefined,
+        permissions,
+      );
       return {
         uri,
         mimeType: "application/json",

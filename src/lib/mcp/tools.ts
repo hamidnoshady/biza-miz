@@ -30,6 +30,20 @@ import {
   type AutopilotExecutorKey,
   type OpenAiTool,
 } from "../ai";
+import { aiActionPermission, canUseAiTool } from "../ai-capabilities";
+import type { Permission } from "../permissions";
+import {
+  LEGACY_GRANTS,
+  isLegacyGrants,
+  mcpCanReadApp,
+  mcpCanWriteApp,
+  type McpGrants,
+} from "./grants";
+import {
+  mcpBusinessWideToolAllowed,
+  mcpReadRegistryEntry,
+  mcpWriteRegistryEntry,
+} from "./registry";
 import { MCP_SCOPES, type McpScope } from "./scopes";
 
 /** MCP's own tool descriptor. `annotations` are hints a client may show or ignore. */
@@ -50,7 +64,15 @@ export interface McpToolDescriptor {
 /** Which half of the connection a tool belongs to, and what it runs. */
 export type McpToolBinding =
   | { kind: "read"; readToolName: string }
-  | { kind: "write"; actionType: ActionType; executor: AutopilotExecutorKey };
+  | { kind: "write"; actionType: ActionType; executor: AutopilotExecutorKey }
+  /**
+   * Issue #883 §7 — asynchronous status/result retrieval: `get_write_status`
+   * is served by the dispatcher itself (it answers from ai_action_audit the
+   * connection's own write outcomes), not by an assistant executor, and is a
+   * read-shaped tool offered only when the connection has BOTH grants, so a
+   * read-only connection cannot probe write traffic.
+   */
+  | { kind: "status" };
 
 export interface McpTool {
   descriptor: McpToolDescriptor;
@@ -576,25 +598,163 @@ export function assertWriteToolsMatchCatalogue(): { missing: ActionType[]; extra
 }
 
 // ---------------------------------------------------------------------------
+// MCP-native status tools (issue #883 §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * `get_write_status` completes the async write contract: in `approve` mode a
+ * write returns "pending", in `apply` mode the caller may be watching the
+ * approval queue, and an interrupted execution (issue #883 A4) ends failed —
+ * the client needs one tool that asks "what happened to MY write?" without
+ * polling the app. It answers ONLY for rows this connection itself created:
+ * a connection may not probe another connection's traffic, which is exactly
+ * how the approval queue inside the app behaves (it lists the whole business
+ * because its reader is the owner; here the reader is the connection).
+ */
+const MCP_NATIVE_TOOLS: McpTool[] = [
+  {
+    descriptor: {
+      name: "get_write_status",
+      title: "وضعیت یک عملیات نوشتنی",
+      description:
+        "Ask what happened to one write this connection submitted: the audit id it returned, its status (pending_approval / applied / failed / dismissed / in_flight), and its message.\n" +
+        "وضعیت یک درخواست نوشتنی که همین اتصال ثبت کرده است را برمی‌گرداند: انتظار تأیید، انجام‌شده، ناموفق یا ردشده، همراه با پیام آن.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          auditId: { type: "string", description: "شناسهٔ حسابرسی (auditId) که ابزار نوشتنی برگرداند" },
+        },
+        required: ["auditId"],
+        additionalProperties: false,
+      },
+      annotations: {
+        title: "وضعیت عملیات نوشتنی",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    // Scoped to the write grant: polling a write outcome needs `pos.write`
+    // plus at least one writable app, never read-only traffic.
+    scope: MCP_SCOPES.write,
+    binding: { kind: "status" },
+  },
+];
+
+/** The native status tool(s) this connection holds. */
+function mcpNativeTools(scopes: readonly McpScope[], grants: McpGrants): McpTool[] {
+  return MCP_NATIVE_TOOLS.filter(() => MCP_NATIVE_TOOLS_SHOWABLE(scopes, grants));
+}
+
+/**
+ * Whether the own-connection status tool shows at all. Write scope alone is
+ * too narrow a test — a connection whose grants forbid every writable app
+ * must not see it either. The legacy `{}` document (`grants.apps` empty) IS a
+ * writable grant, exactly as it is in grants.ts.
+ */
+function MCP_NATIVE_TOOLS_SHOWABLE(scopes: readonly McpScope[], grants: McpGrants): boolean {
+  if (!scopes.includes(MCP_SCOPES.write)) return false;
+  // Legacy means THE legacy document (`{}` ⇔ `{apps:{}, branches:"all"}`),
+  // not merely an empty apps map: a stored closed document
+  // (`{apps:{}, branches:[]}`) says "nothing at all", and surfacing the
+  // status tool there would confirm the connection exists — one bit too
+  // much for a credential whose stored consent is closed (issue #883 A1).
+  if (isLegacyGrants(grants)) return true;
+  return Object.values(grants.apps).some((grant) => grant.write === true);
+}
+
+/**
+ * Lookup a native tool by name. Returns the descriptor for the dispatcher,
+ * skipping the catalogue filter (server.ts gates `kind: "status"` itself).
+ */
+export function findMcpStatusTool(name: string): McpTool | null {
+  return MCP_NATIVE_TOOLS.find((tool) => tool.descriptor.name === name) ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // Catalogue
 // ---------------------------------------------------------------------------
 
 /**
  * The tools this connection may call.
  *
- * Filtered by scope, not merely annotated with it: a read-only connection must
- * not be able to *see* that a write tool exists, or a model will keep proposing
- * one and telling the owner the app refused. Server-side, `server.ts` checks the
- * scope again on every call — this list is a courtesy to the client, never the
- * guard.
+ * Filtered twice, and both filters fail closed:
+ *
+ *   * **by scope** — a read-only connection must not be able to *see* that a
+ *     write tool exists, or a model will keep proposing one and telling the
+ *     owner the app refused;
+ *   * **by the authorizer's current permissions**, when the caller passes
+ *     them (the dispatcher always does) — a connector authorized by a member
+ *     without `payroll.view` neither sees nor calls `get_payroll_summary`,
+ *     and a write whose action maps to no recognisable domain permission is
+ *     withheld entirely (issue #883 P0-1).
+ *
+ * The catalogue is a courtesy to the client; `server.ts` re-checks the same
+ * two axes on every call. Omitting `permissions` yields the scope-only list
+ * (`isKnownMcpTool`'s "exists at all" answer) — it must never be passed to a
+ * client as what they may use.
  */
-export function mcpToolCatalogue(scopes: readonly McpScope[]): McpTool[] {
-  const all = [...mcpReadTools(), ...mcpWriteTools()];
-  return all.filter((tool) => scopes.includes(tool.scope));
+/**
+ * The tools this connection may call.
+ *
+ * Filtered on four axes now, and every one fails closed:
+ *
+ *   * **by scope** — a read-only connection must not be able to *see* that a
+ *     write tool exists;
+ *   * **by grants** (issue #883 §1) — the connection's app grants and its
+ *     branch consent. A "CRM read" connection sees the CRM rows only; a
+ *     connection consented to ONE branch sees no tool whose answer aggregates
+ *     across branches, because answering it would leak the branches it was
+ *     NOT consented to;
+ *   * **by the registry** — a tool with no registry entry is not offered. The
+ *     registry names the app, branch behaviour and risk; a missing row is a
+ *     CI failure (registry.test.ts), and defensively treated as denied here;
+ *   * **by the authorizer's current permissions**, when the caller passes
+ *     them (the dispatcher always does).
+ *
+ * The catalogue is a courtesy to the client; `server.ts` re-checks the same
+ * axes on every call. Omitting `permissions` yields the scope-only list
+ * (`isKnownMcpTool`'s "exists at all" answer) — it must never be passed to a
+ * client as what they may use.
+ */
+export function mcpToolCatalogue(
+  scopes: readonly McpScope[],
+  permissions?: ReadonlySet<Permission>,
+  grants: McpGrants = LEGACY_GRANTS,
+): McpTool[] {
+  const all = [...mcpReadTools(), ...mcpWriteTools(), ...mcpNativeTools(scopes, grants)];
+  return all.filter((tool) => {
+    if (!scopes.includes(tool.scope)) return false;
+    if (tool.binding.kind === "status") return true; // gated by mcpNativeTools itself
+    if (tool.binding.kind === "read") {
+      const entry = mcpReadRegistryEntry(tool.binding.readToolName);
+      if (!entry || !mcpCanReadApp(grants, entry.app)) return false;
+      if (
+        entry.branchPolicy === "business_wide" &&
+        !mcpBusinessWideToolAllowed(grants.branches === "all")
+      ) {
+        return false;
+      }
+    } else {
+      const entry = mcpWriteRegistryEntry(tool.binding.actionType);
+      if (!entry || !mcpCanWriteApp(grants, entry.app)) return false;
+    }
+    if (!permissions) return true;
+    return tool.binding.kind === "read"
+      ? canUseAiTool(tool.binding.readToolName, permissions)
+      : aiActionPermission(tool.binding.actionType) !== null &&
+          permissions.has(aiActionPermission(tool.binding.actionType)!);
+  });
 }
 
-export function findMcpTool(name: string, scopes: readonly McpScope[]): McpTool | null {
-  return mcpToolCatalogue(scopes).find((tool) => tool.descriptor.name === name) ?? null;
+export function findMcpTool(
+  name: string,
+  scopes: readonly McpScope[],
+  permissions?: ReadonlySet<Permission>,
+  grants?: McpGrants,
+): McpTool | null {
+  return mcpToolCatalogue(scopes, permissions, grants).find((tool) => tool.descriptor.name === name) ?? null;
 }
 
 /** True for a name this server knows at all — so "no access" and "no such tool" can be told apart. */

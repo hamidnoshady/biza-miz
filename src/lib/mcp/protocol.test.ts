@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   JSON_RPC_ERRORS,
   LATEST_PROTOCOL_VERSION,
+  MAX_BATCH_MESSAGES,
   SUPPORTED_PROTOCOL_VERSIONS,
   initializeResult,
   negotiateProtocolVersion,
@@ -69,6 +70,19 @@ describe("parseBody", () => {
 
   it("refuses an empty batch, which JSON-RPC calls an invalid request", () => {
     expect(parseBody([])).toBeNull();
+  });
+
+  it("refuses a batch past the cap — a load attempt, not a conversation", () => {
+    // Issue #883 P1-9: every message in a batch costs reads (and may cost
+    // writes), so the batch itself is bounded rather than each message.
+    const pings = Array.from({ length: MAX_BATCH_MESSAGES }, (_, i) => ({
+      jsonrpc: "2.0",
+      id: i,
+      method: "ping",
+    }));
+    expect(parseBody(pings)).toMatchObject({ batch: true });
+    expect(parseBody([...pings, { jsonrpc: "2.0", id: MAX_BATCH_MESSAGES, method: "ping" }]))
+      .toBeNull();
   });
 });
 

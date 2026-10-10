@@ -520,6 +520,15 @@ describe("every API route is guarded", () => {
         ).toBe(true);
         return;
       }
+      // Issue #883 wave 3 — the platform-realm MCP endpoint is bearer-guarded
+      // like its tenant sibling, against its own `pospmcp_` credential family.
+      if (key === "platform/mcp") {
+        expect(
+          /authenticatePlatformMcp\(/.test(src),
+          "src/app/api/platform/mcp/route.ts must authenticate a console MCP credential",
+        ).toBe(true);
+        return;
+      }
       if (PUBLIC_ROUTES[key]) return; // documented public route
       // Phase 24 — the two credentials that are neither a session nor an
       // absence of one: the interstitial MFA pending token, and the internal

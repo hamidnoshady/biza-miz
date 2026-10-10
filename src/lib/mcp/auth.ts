@@ -15,6 +15,7 @@
  * revocation from the connections screen takes effect on the connector's very
  * next tool call.
  */
+import type { Permission } from "../permissions";
 import { isFeatureEnabled } from "../features";
 import { query, withoutTenantScope } from "../db";
 import { businessScope, NO_SCOPE, runInTenantScope } from "../tenant-context";
@@ -24,7 +25,10 @@ import {
   hashMcpToken,
   parseMcpBearerToken,
 } from "./oauth";
+import { mcpHostAllowsBusiness, resolveMcpTenant } from "./origin";
 import { parseMcpScopes, type McpScope, type McpWriteMode, isMcpWriteMode } from "./scopes";
+import { parseMcpGrants, type McpGrants } from "./grants";
+import { resolveMcpAuthority } from "./authority";
 
 export interface McpAuthentication {
   connectionId: string;
@@ -34,13 +38,27 @@ export interface McpAuthentication {
   scopes: McpScope[];
   writeMode: McpWriteMode;
   /**
-   * The owner whose authority a write runs under. NULL where the authorizing
-   * user has since been deleted — such a connection can still read, but every
-   * write is refused, because an automated write is never anonymous (the same
-   * rule `ai_autopilot_settings.authorized_by` and `ai_coworker_jobs.authorized_by`
-   * encode).
+   * The member whose authority the connection acts under — its *current*
+   * membership, re-read on this request. Issue #883 removed the legacy
+   * "deleted authorizer can still read" fallback: a credential with no live
+   * member behind it does not authenticate at all, so this is never null
+   * inside a handler.
    */
-  authorizedByUserId: string | null;
+  authorizedByUserId: string;
+  /**
+   * Issue #883 §1 — the connection's app grants and branch consent, parsed
+   * from its stored `grants` document. `{}` rows (pre-wave-2 connections) are
+   * the conservative legacy: every reachable app, every branch — exactly the
+   * access its owner granted at the time.
+   */
+  grants: McpGrants;
+  /**
+   * The authorizer's *current* effective permissions (preset ∪ overrides), the
+   * same set their own session would carry right now. Every tools/list,
+   * tools/call and resources/read decision intersects with it — never the
+   * grant-time snapshot.
+   */
+  permissions: ReadonlySet<Permission>;
 }
 
 export type McpAuthFailure =
@@ -54,8 +72,27 @@ type ConnectionRow = {
   location_id: string;
   scopes: unknown;
   write_mode: string;
+  grants: unknown;
   authorized_by: string | null;
 };
+
+/**
+ * Issue #883 P1-6 — the bearer credential must be presented on its own
+ * business's host.
+ *
+ * OAuth resolves the tenant from the hostname (`resolveMcpTenant`); before this
+ * check the API endpoint authenticated from the token alone and never compared
+ * the two, so a token minted for business A answered on business B's MCP host.
+ * The host and the token must now agree. `ambiguous` — no host routing and more
+ * than one business, i.e. a single-origin install where the token *is* the
+ * tenant selector, the documented shape — stays allowed; every decisive answer
+ * that names a different or unusable business denies.
+ */
+async function mcpHostBindingOk(headers: Headers, businessId: string): Promise<boolean> {
+  // The decision itself is `mcpHostAllowsBusiness` in origin.ts — pure and
+  // unit tested; this is only the DB-backed resolution in front of it.
+  return mcpHostAllowsBusiness(await resolveMcpTenant(headers), businessId);
+}
 
 /**
  * Resolve a bearer credential to its connection, before any tenant is known.
@@ -63,7 +100,18 @@ type ConnectionRow = {
  * This is the documented `mcp-token-auth` bypass: the token itself is how the
  * tenant gets selected, exactly as with a public API key. The query joins
  * `locations` so a connection pointing at a deactivated branch stops
- * authenticating rather than silently answering about a branch that is closed.
+ * authenticating rather than silently answering about a branch that is closed,
+ * and `businesses` so a suspended business's credentials die the same moment
+ * its session logins do.
+ *
+ * Two further checks happen *after* the row resolves, in the connection's own
+ * tenant scope (issue #883 P0-1):
+ *
+ *   * the request's host must name this business (`mcpHostBindingOk`), and
+ *   * the authorizing member must still exist and be active, and their
+ *     *current* effective permissions ride along on the authentication —
+ *     there is no "still reads with all permissions" state for a credential
+ *     whose authorizer has left or lost access.
  *
  * The `last_used_at` touch is a second, tenant-scoped statement that re-checks
  * active/expiry: if a revocation won the race after the read, the update matches
@@ -83,12 +131,14 @@ export async function authenticateMcp(
     const { rows } = await withoutTenantScope("mcp-token-auth", () =>
       isOauth
         ? query<ConnectionRow>(
-            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.authorized_by
+            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.grants, c.authorized_by
                FROM mcp_oauth_tokens t
                JOIN mcp_connections c
                  ON c.id = t.connection_id AND c.business_id = t.business_id
                JOIN locations l
                  ON l.id = c.location_id AND l.business_id = c.business_id AND l.is_active
+               JOIN businesses b
+                 ON b.id = c.business_id AND b.status = 'active'
               WHERE t.token_hash = $1
                 AND t.kind = 'access'
                 AND t.revoked_at IS NULL
@@ -98,10 +148,12 @@ export async function authenticateMcp(
             [hash],
           )
         : query<ConnectionRow>(
-            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.authorized_by
+            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.grants, c.authorized_by
                FROM mcp_connections c
                JOIN locations l
                  ON l.id = c.location_id AND l.business_id = c.business_id AND l.is_active
+               JOIN businesses b
+                 ON b.id = c.business_id AND b.status = 'active'
               WHERE c.token_hash = $1
                 AND c.origin = 'token'
                 AND c.status = 'active'
@@ -113,6 +165,20 @@ export async function authenticateMcp(
     const row = rows[0];
     if (!row) return null;
 
+    // Host binding runs before any state change: a token replayed onto another
+    // business's host must not even refresh `last_used_at` there.
+    if (!(await mcpHostBindingOk(request.headers, row.business_id))) return null;
+
+    const authority = row.authorized_by
+      ? await runInTenantScope(businessScope(row.business_id, row.location_id), () =>
+          resolveMcpAuthority(row.business_id, row.authorized_by!),
+        )
+      : null;
+    // P0-1: the credential dies with the authority behind it. A membership
+    // removed, deactivated or downgraded takes effect on the very next call,
+    // exactly like a revocation — there is no cache to wait out.
+    if (!authority) return null;
+
     const authentication: McpAuthentication = {
       connectionId: row.id,
       connectionName: row.name,
@@ -120,7 +186,9 @@ export async function authenticateMcp(
       locationId: row.location_id,
       scopes: parseMcpScopes(row.scopes),
       writeMode: isMcpWriteMode(row.write_mode) ? row.write_mode : "approve",
-      authorizedByUserId: row.authorized_by,
+      grants: parseMcpGrants(row.grants),
+      authorizedByUserId: authority.userId,
+      permissions: authority.permissions,
     };
 
     const touched = await runInTenantScope(

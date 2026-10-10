@@ -267,6 +267,12 @@ describe("every tenant table is protected", () => {
       "platform_cms_config",
       "platform_cms_sites",
       "platform_cms_sync_runs",
+      // Issue #883 wave 3 (migration 0219) — the console's `pospmcp_` MCP
+      // credential store: hashed tokens and capability lists keyed on
+      // platform_admins, with authority over the whole deployment rather than
+      // any one business; therefore no business_id and no tenant policy. Its
+      // tenant counterpart (mcp_connections) is RLS-protected above.
+      "platform_mcp_connections",
       // Migration 0149 — the singleton S3/Parspack connection and price policy
       // behind every business's media library. One bucket credential for the
       // deployment, no business_id; tenant separation happens inside the bucket
