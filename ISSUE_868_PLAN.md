@@ -151,12 +151,13 @@ Environment: sandbox with 4 GB RAM / 2 vCPUs, Node 22.22.3 (`package.json` asks 
 | Step | Command | Result |
 | --- | --- | --- |
 | Type check | `npx tsc --noEmit` (`NODE_OPTIONS=--max-old-space-size=4096`) | exit 0 |
-| Unit suite | `npx vitest run` | 709 files, 9,334 tests passed, exit 0 |
-| Migrations | `DATABASE_URL=postgres://pos:pos@localhost:55432/pos npm run db:migrate` | 305 applied (including `0216` dimensions, `0217` deferred cycle trigger, `0218` parent advisory lock), exit 0 |
-| DB integration (targeted) | the 9 dimension- and posting-related files (`accounting-dimensions`, `accounting-dimension-reports`, `tenant-isolation`, `migrations`, `expense-import-adapter`, `expense`, `manual-journal`, `operational-accounting`, `posting-engine`) | 188 tests passed, exit 0 (full suite not rerun here; CI runs all 199 files) |
-| Design suite | `npx vitest run src/app/dashboard/design-lint.test.ts src/app/design-lint.test.ts src/app/dashboard/primitive-lint.test.ts src/app/loading-coverage.test.ts` | 4 files, 36 tests passed, exit 0 (`reference-screenshots` is the visual-regression run, which is pre-existing on main at 4.06% and never re-recorded here) |
-| ESLint (touched files) | `eslint --max-warnings=0` on every file this PR adds or modifies | exit 0 |
-| Build | `npm run build` with `NODE_OPTIONS=--max-old-space-size=6144` and an 8 GiB swap file added to /swapfile | exit 0. Only warnings are the existing `jose` edge-runtime notices from `src/lib/platform-auth-edge.ts`. |
+| Unit suite (partial targeted) | targeted runs: accounting-dimensions (35), accounting-dimension-reports (16), dimension-catalog (12), journal-export (8), data-transfer (198), holoo (68), dimension UI components (45), entries/expense/manual/trial section renderers | all green; full `npx vitest run` was re-run in CI (9,334 tests, exit 0; see run 38050249230) |
+| Migrations | `DATABASE_URL=postgres://pos:pos@localhost:55432/pos npm run db:migrate` | 305 applied (0216/0217/0218), exit 0 |
+| DB integration (targeted) | accounting-dimensions (34), accounting-dimension-reports (12), expense-import-adapter (21), holoo (5), tenant-isolation, migrations, expense, manual-journal, operational-accounting, posting-engine | all green. Full 199-file integration suite passes in CI (37m 58s run, exit 0) |
+| Design suite | `npx vitest run` on design-lint (15), primitive-lint (5), design-lint-root (10), loading-coverage (6) | 4/4 files, 36 tests passed, exit 0 |
+| ESLint (touched files) | `eslint --max-warnings=0` on every file this PR adds or modifies | exit 0; CI's full ESLint noninteractive also passes |
+| Build | `npm run build` with `NODE_OPTIONS=--max-old-space-size=6144` and an 8 GiB swap | exit 0. Only warnings are existing `jose` edge-runtime notices from `src/lib/platform-auth-edge.ts` |
+| CI | PR #898 run 38050249230 | every job green including integration tests (37m58s), packaged Windows, desktop shell, visual regression, production build and container — all 17 required checks pass |
 
 The one skipped DB test is the row-level-security case in `integration/ai-gateway.integration.test.ts`. It skips itself when `rlsEffective()` is false, which is the case on this cluster, because its role is the bootstrap superuser and superusers bypass row-level security.
 
