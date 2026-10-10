@@ -3,27 +3,43 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { createAccount, listAccounts, AccountsError } from "@/lib/accounts-service";
+import { isUuid } from "@/lib/uuid";
 
 /**
- * GET without ?all returns the active chart, for populating account pickers
- * (manual entries, …) — unchanged from before this phase. ?all=1 returns
- * every account, active or archived, with the postings/children flags the
+ * Query-boolean helper: returns true only for an explicit `?key=1`.
+ *
+ * Any other value — `?key=0`, `?key=false`, `?key=anything`, or absent — is
+ * treated as false. Without this, the GET route previously exposed archived
+ * accounts for every non-empty `all` parameter (issue #824 §11), because
+ * JavaScript treats any non-empty string as truthy.
+ */
+function isQueryTruthy(value: string | null): boolean {
+  return value === "1";
+}
+
+/**
+ * GET without ?all=1 returns the active chart, for populating account pickers
+ * (manual entries, …). ?all=1 returns every account, active or archived, with
+ * the management metadata flags (postings / draft-postings / children) the
  * management UI needs to decide what's safe to archive or delete.
  *
- * `parent_id` travels with the picker rows because an account's *meaning* is
- * inherited: `src/lib/account-classification.ts` resolves a custom sub-account
- * through its parent, and the Expenses payment-source picker applies that rule in
- * the browser (issue #832 §2). A code alone would not be enough — and shipping
- * the same ids the server classifies is what makes the two lists unable to
- * disagree about what «پرداخت از» may offer.
+ * ?all=0 (or any other value) behaves the same as omitting the parameter — it
+ * returns active accounts only. This is explicit so a typo cannot leak
+ * archived accounts into a picker.
+ *
+ * Picker rows carry `parent_id`, `has_children` and `is_postable`, all decided
+ * by the server over the whole chart (issue #832 §2 and the approval path in
+ * `manual-journal-service.ts`), so the client never re-derives them.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;
 
-  const all = new URL(request.url).searchParams.get("all");
+  const { searchParams } = new URL(request.url);
+  const all = isQueryTruthy(searchParams.get("all"));
+
   if (all) {
-    const accounts = await listAccounts(session.businessId);
+    const accounts = await listAccounts(session.businessId, { all: true });
     return NextResponse.json({ accounts });
   }
 
@@ -64,21 +80,44 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.accountsEdit);
   if (error) return error;
 
-  let body: { code?: string; name?: string; type?: string; parentId?: string | null; isContra?: boolean };
+  let body: { code?: unknown; name?: unknown; type?: unknown; parentId?: unknown; isContra?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (typeof body !== "object" || body === null) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  if (typeof body.code !== "string" || typeof body.name !== "string" || typeof body.type !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.parentId !== undefined && body.parentId !== null && typeof body.parentId !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.parentId !== undefined && body.parentId !== null && !isUuid(body.parentId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  // Issue #824 §10: `isContra` must be a real boolean when present. The old
+  // code did `Boolean(body.isContra)` which turned the string "false" into
+  // true — every non-empty, non-null, non-zero/non-false-but-actually-truthy
+  // value silently became a contra account.
+  if (body.isContra !== undefined && typeof body.isContra !== "boolean") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  const parentId = body.parentId === undefined ? null : (body.parentId as string | null);
 
   try {
     const result = await createAccount({
       businessId: session.businessId,
-      code: String(body.code ?? ""),
-      name: String(body.name ?? ""),
-      type: String(body.type ?? ""),
-      parentId: body.parentId ?? null,
-      isContra: Boolean(body.isContra),
+      code: body.code,
+      name: body.name,
+      type: body.type,
+      parentId,
+      isContra: body.isContra === undefined ? undefined : (body.isContra as boolean),
+      actorId: session.sub,
     });
     return NextResponse.json(result, { status: 201 });
   } catch (err) {

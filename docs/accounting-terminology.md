@@ -43,8 +43,12 @@ future wave's PR that touches accounting-adjacent UI copy.**
 2. For every new or changed label naming an account type, a statement, or an action on a
    سند, check it against the table above instead of inventing new wording.
 3. If the same concept is labeled in more than one file, grep for the concept across the
-   whole `src/app/dashboard/{ledger,reports,jewelry,inventory}`, `src/app/setup/{accounts,tax}`,
-   and `src/app/dashboard/settings/accounts-settings.tsx` and confirm every occurrence agrees.
+   whole `src/app/(app)/accounting`, `src/app/(app)/reports`, `src/app/setup/{accounts,tax}`,
+   and `src/app/(app)/settings/accounts-settings.tsx` and confirm every occurrence agrees.
+   (The chart of accounts has exactly one editor — `/accounting/chart-of-accounts`
+   (`chart-of-accounts-section.tsx`, plus its statement and history panels). The
+   platform settings tab is a shortcut to it since issue #824; do not add a second
+   place that spells these labels out.)
 4. Don't touch `src/lib/coa-template.ts` account names/codes for a terminology fix — renaming
    ledger account data is a migration concern, tracked separately from UI-copy wording.
 5. If you introduce a genuinely new concept with no entry above, add it to this table in the

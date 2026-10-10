@@ -155,9 +155,29 @@ export async function listAuditLog(
             a.action, a.entity, a.entity_id, a.payload, a.created_at,
             ec.credential_type::text AS credential_type,
             d.label AS device_label,
-            COALESCE(eu.full_name, ea.code || ' — ' || ea.name) AS entity_name,
-            ebp.code || ' — ' || ebp.name AS account_before_parent_label,
-            eap.code || ' — ' || eap.name AS account_after_parent_label
+            /* entity_name falls back to the snapshot stored in the payload when
+               the account row no longer exists (hard delete — issue #824 §5).
+               account.deleted always carries code+name in its payload; rename/
+               reparent/archive records still resolve live names. */
+            COALESCE(
+              eu.full_name,
+              ea.code || ' — ' || ea.name,
+              CASE
+                WHEN a.entity = 'account' AND a.payload IS NOT NULL AND jsonb_typeof(a.payload) = 'object'
+                THEN COALESCE(a.payload->>'code', '') || CASE WHEN a.payload->>'code' IS NOT NULL AND a.payload->>'name' IS NOT NULL THEN ' — ' ELSE '' END || COALESCE(a.payload->>'name', '')
+                ELSE NULL
+              END
+            ) AS entity_name,
+            /* Parent labels also fall back to the payload's parentLabel when
+               the parent row has been deleted or never existed. */
+            COALESCE(
+              ebp.code || ' — ' || ebp.name,
+              a.payload->>'beforeParentLabel'
+            ) AS account_before_parent_label,
+            COALESCE(
+              eap.code || ' — ' || eap.name,
+              a.payload->>'afterParentLabel'
+            ) AS account_after_parent_label
        FROM audit_log a
        LEFT JOIN locations l ON l.id = a.location_id AND l.business_id = a.business_id
        LEFT JOIN users u ON u.id = a.user_id AND u.business_id = a.business_id

@@ -24,9 +24,17 @@ import {
 } from "./slug";
 import { LOCAL_DISABLED_FEATURES, type DeploymentModeName } from "./deployment-mode";
 import { SETTING_KEYS, markSetupComplete } from "./settings";
-import { coaTemplateForIndustry, nextAccountLevel, type AccountLevel, type TemplateAccount } from "./coa-template";
+import {
+  coaTemplateForIndustry,
+  nextAccountLevel,
+  type AccountLevel,
+  type AccountType,
+  type TemplateAccount,
+} from "./coa-template";
 import { ENABLED_INDUSTRIES, INDUSTRIES, type Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
+import { lockChartOfAccounts } from "./accounts-service";
+import { attachmentLevel, type AttachableParent } from "./account-hierarchy";
 import { wizardStepsForIndustry } from "./wizard-steps";
 import { seedPaymentMethods } from "./payment-methods-service";
 import { isMobilePhone, phoneE164 } from "./phone";
@@ -726,6 +734,12 @@ export async function disableFeatures(
  * template are inserted. Seeding is therefore purely additive; nothing an
  * operator already uses is rewritten or removed.
  *
+ * A template child that would sit under an archived live parent, or under a
+ * parent of another accounting type, is a conflict, not a silent insert. It
+ * throws the canonical `AccountsError` (`parent_archived` or
+ * `parent_type_mismatch`), and the caller's transaction rolls back, so the
+ * change that asked for the seed is refused as a whole.
+ *
  * Returns the codes it actually inserted, so the console can report what a
  * change did.
  */
@@ -734,30 +748,59 @@ export async function seedChartOfAccounts(
   businessId: string,
   industry: Industry,
 ): Promise<string[]> {
-  const { rows: existing } = await client.query<{ id: string; code: string; level: AccountLevel }>(
-    "SELECT id, code, level FROM accounts WHERE business_id = $1",
+  // A hierarchy writer, so it takes the canonical chart-of-accounts lock
+  // (issue #824 review item 6). `changeBusinessIndustry` re-runs this against
+  // a business that is already live and being used, where a concurrent edit is
+  // entirely possible; in the provisioning case the lock is uncontended and
+  // costs one statement. There is deliberately no "we might be alone" branch —
+  // one rule for every writer is easier to keep true than a list of exceptions.
+  await lockChartOfAccounts(client, businessId);
+  // The whole live chart, with the facts an attachment depends on. This used to
+  // load only id, code and level, so an archived parent or a parent of another
+  // type was invisible here and its children were inserted under it anyway.
+  const { rows: existing } = await client.query<{
+    id: string;
+    code: string;
+    type: AccountType;
+    level: AccountLevel;
+    is_active: boolean;
+  }>(
+    "SELECT id, code, type::text AS type, level::text AS level, is_active FROM accounts WHERE business_id = $1",
     [businessId],
   );
-  const idByCode = new Map<string, string>(existing.map((a) => [a.code, a.id]));
-  const levelByCode = new Map<string, AccountLevel>(existing.map((a) => [a.code, a.level]));
+  const liveCodes = new Set(existing.map((a) => a.code));
+  // Live rows are authoritative for their codes. A template parent that this run
+  // inserts is active by construction, so it is registered as it is created.
+  const parentFacts = new Map<string, AttachableParent>(
+    existing.map((a) => [a.code, { id: a.id, code: a.code, type: a.type, level: a.level, isActive: a.is_active }]),
+  );
   const inserted: string[] = [];
 
-  const pending = [...coaTemplateForIndustry(industry)].filter((a) => !idByCode.has(a.code));
+  // A template code the business already has is skipped as it is: its name,
+  // type, archive state and postings belong to the business. Seeding never
+  // reactivates, renames or re-types a row (issue #824 finding 2).
+  const pending = [...coaTemplateForIndustry(industry)].filter((a) => !liveCodes.has(a.code));
   while (pending.length > 0) {
-    const ready = pending.filter((a) => !a.parentCode || idByCode.has(a.parentCode));
+    const ready = pending.filter((a) => !a.parentCode || parentFacts.has(a.parentCode));
     // The template is a fixed, cycle-free constant and every parentCode in it
     // is either already in the business or earlier in the same template, so
-    // `ready` can't be empty; it's never nested past four levels, so
-    // nextAccountLevel never returns null here.
+    // `ready` is never empty. If that ever stops being true, fail loudly
+    // instead of spinning: a silent empty pass here is an infinite loop inside
+    // the provisioning transaction.
+    if (ready.length === 0) throw new Error("coa_template_unresolved_parent");
     for (const a of ready) {
-      const level = nextAccountLevel(a.parentCode ? (levelByCode.get(a.parentCode) ?? null) : null)!;
+      const parent = a.parentCode ? parentFacts.get(a.parentCode)! : null;
+      // The same rules the editor, the Holoo import and the restore apply. An
+      // archived parent, a parent past تفصیلی, or a type mismatch throws a typed
+      // AccountsError. The caller's transaction rolls back, so the conflict is
+      // reported and nothing from this run is kept.
+      const level: AccountLevel = parent ? attachmentLevel(parent, a.type) : nextAccountLevel(null)!;
       const { rows } = await client.query<{ id: string }>(
         `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [businessId, a.parentCode ? idByCode.get(a.parentCode) : null, a.code, a.name, a.type, level, a.isContra ?? false],
+        [businessId, parent?.id ?? null, a.code, a.name, a.type, level, a.isContra ?? false],
       );
-      idByCode.set(a.code, rows[0].id);
-      levelByCode.set(a.code, level);
+      parentFacts.set(a.code, { id: rows[0].id, code: a.code, type: a.type, level, isActive: true });
       inserted.push(a.code);
       pending.splice(pending.indexOf(a), 1);
     }

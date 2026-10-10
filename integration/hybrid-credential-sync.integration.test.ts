@@ -179,9 +179,18 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     return json(payload);
   }
   if (url.pathname === "/api/pairing/redeem" || url.pathname === "/api/platform/pairing/redeem") {
-    const body = JSON.parse(String(init?.body)) as { code: string; deviceName: string; installationId: string };
+    // Mirrors handlePairingRedeem: the desktop's capability is forwarded, and
+    // an absent one means a legacy desktop.
+    const body = JSON.parse(String(init?.body)) as {
+      code: string;
+      deviceName: string;
+      installationId: string;
+      maxSnapshotVersion?: number;
+    };
     const redeemed = await onCloud(() =>
-      redeemPairingCode(body.code, "127.0.0.1", body.deviceName, body.installationId),
+      redeemPairingCode(body.code, "127.0.0.1", body.deviceName, body.installationId, {
+        maxSnapshotVersion: body.maxSnapshotVersion,
+      }),
     );
     if (!redeemed.ok) return json({ error: redeemed.error }, 400);
     return json({ snapshot: redeemed.snapshot, pairingSessionId: redeemed.pairingSessionId });
@@ -286,7 +295,7 @@ async function createCloudBusiness(): Promise<CloudBusiness> {
 async function pairBusiness(): Promise<PairedBusiness> {
   const remote = await createCloudBusiness();
   const installationId = `desktop-${randomUUID()}`;
-  const redeemed = await redeemPairingCode(remote.code, "127.0.0.1", "Windows Business Suite", installationId);
+  const redeemed = await redeemPairingCode(remote.code, "127.0.0.1", "Windows Business Suite", installationId, { maxSnapshotVersion: 7 });
   if (!redeemed.ok) throw new Error(`redeem failed: ${redeemed.error}`);
   const validation = validateSnapshot(JSON.parse(JSON.stringify(redeemed.snapshot)));
   if (!validation.ok) throw new Error(`snapshot invalid: ${validation.error}`);

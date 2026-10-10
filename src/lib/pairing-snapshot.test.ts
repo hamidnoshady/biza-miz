@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { PAIRING_SNAPSHOT_VERSION, validateSnapshot, type PairingSnapshot } from "./pairing-snapshot";
+import {
+  answersCapability,
+  DESKTOP_REDEEM_CAPABILITY,
+  LEGACY_PAIRING_SNAPSHOT_VERSION,
+  PAIRING_SNAPSHOT_VERSION,
+  validateSnapshot,
+  type PairingSnapshot,
+} from "./pairing-snapshot";
 
 function validSnapshot(): PairingSnapshot {
   return {
@@ -47,7 +54,15 @@ function validSnapshot(): PairingSnapshot {
     tenantRoles: [],
     iam: { schemaVersion: 1, lastSequence: 0, stateHash: "a".repeat(64) },
     accounts: [
-      { id: "44444444-4444-4444-4444-444444444444", parentCode: null, code: "1000", name: "دارایی", type: "asset" },
+      {
+        id: "44444444-4444-4444-4444-444444444444",
+        parentCode: null,
+        code: "1000",
+        name: "دارایی",
+        type: "asset",
+        isActive: true,
+        isContra: false,
+      },
     ],
     menu: {
       categories: [
@@ -263,6 +278,93 @@ describe("validateSnapshot", () => {
     expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
   });
 
+  describe("account tree (issue #824 finding 2)", () => {
+    const acct = (n: number, parentCode: string | null, code: string, extra: Record<string, unknown> = {}) => ({
+      id: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+      parentCode,
+      code,
+      name: `حساب ${code}`,
+      type: "asset",
+      isActive: true,
+      isContra: false,
+      ...extra,
+    });
+
+    it("accepts a four-level chain and an archived account, with isActive absent or boolean", () => {
+      const s = validSnapshot();
+      s.accounts = [
+        acct(1, null, "1000"),
+        acct(2, "1000", "1100"),
+        acct(3, "1100", "1110"),
+        acct(4, "1110", "1111", { isActive: false }),
+      ] as never;
+      expect(validateSnapshot(s).ok).toBe(true);
+    });
+
+    it("refuses a version-7 account that omits its state, rather than defaulting it", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000", { isActive: undefined })] as never;
+      expect(validateSnapshot(JSON.parse(JSON.stringify(s)))).toEqual({ ok: false, error: "snapshot_invalid" });
+      const t = validSnapshot();
+      t.accounts = [acct(1, null, "1000", { isContra: undefined })] as never;
+      expect(validateSnapshot(JSON.parse(JSON.stringify(t)))).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a non-boolean isContra", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000", { isContra: "yes" })] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses an accounting type outside the five the chart knows (issue #824 finding 1)", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000", { type: "bogus" })] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a child whose type differs from its parent's (issue #824 finding 1)", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000", { type: "asset" }), acct(2, "1000", "1100", { type: "liability" })] as never;
+      expect(validateSnapshot(JSON.parse(JSON.stringify(s)))).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("accepts a child whose type matches its parent's", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000", { type: "liability" }), acct(2, "1000", "1100", { type: "liability" })] as never;
+      expect(validateSnapshot(s).ok).toBe(true);
+    });
+
+    it("refuses a non-boolean isActive rather than guessing whether the account is live", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000", { isActive: "false" })] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a child whose parent is not in the snapshot, instead of restoring it as a root", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000"), acct(2, "1999", "1100")] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a cycle", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, "1100", "1000"), acct(2, "1000", "1100")] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a fifth tier", () => {
+      const s = validSnapshot();
+      s.accounts = [
+        acct(1, null, "1"),
+        acct(2, "1", "11"),
+        acct(3, "11", "111"),
+        acct(4, "111", "1111"),
+        acct(5, "1111", "11111"),
+      ] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+  });
+
   it("accepts empty accounts, menu and settings — a business may be freshly provisioned", () => {
     const s = validSnapshot();
     s.accounts = [];
@@ -281,5 +383,44 @@ describe("validateSnapshot", () => {
     const s = validSnapshot();
     s.menu.items[0].categoryId = null;
     expect(validateSnapshot(s).ok).toBe(true);
+  });
+
+  describe("version boundary (issue #824 finding 3)", () => {
+    const legacy = (): Record<string, unknown> => {
+      const v = JSON.parse(JSON.stringify(validSnapshot())) as Record<string, unknown>;
+      v.version = LEGACY_PAIRING_SNAPSHOT_VERSION;
+      for (const a of v.accounts as Array<Record<string, unknown>>) {
+        delete a.isActive;
+        delete a.isContra;
+      }
+      return v;
+    };
+
+    it("accepts a version-6 snapshot whose accounts carry no state, as the released reader wrote it", () => {
+      expect(validateSnapshot(legacy()).ok).toBe(true);
+    });
+
+    it("refuses a version-6 snapshot that claims an archived or a contra account", () => {
+      const archived = legacy();
+      (archived.accounts as Array<Record<string, unknown>>)[0].isActive = false;
+      expect(validateSnapshot(archived)).toEqual({ ok: false, error: "snapshot_invalid" });
+
+      const contra = legacy();
+      (contra.accounts as Array<Record<string, unknown>>)[0].isContra = true;
+      expect(validateSnapshot(contra)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a version that is neither 6 nor 7", () => {
+      expect(validateSnapshot({ ...validSnapshot(), version: 5 })).toEqual({ ok: false, error: "snapshot_invalid" });
+      expect(validateSnapshot({ ...validSnapshot(), version: 8 })).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("issues version 7, and only a desktop that declares it gets the answer it asked for", () => {
+      expect(PAIRING_SNAPSHOT_VERSION).toBe(7);
+      expect(DESKTOP_REDEEM_CAPABILITY).toEqual({ maxSnapshotVersion: 7 });
+      expect(answersCapability(PAIRING_SNAPSHOT_VERSION)).toBe(true);
+      // A v6 answer to a v7 request is a cloud that predates account state.
+      expect(answersCapability(LEGACY_PAIRING_SNAPSHOT_VERSION)).toBe(false);
+    });
   });
 });

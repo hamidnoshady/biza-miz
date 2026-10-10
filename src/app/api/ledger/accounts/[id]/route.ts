@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { AccountsError, deleteAccount, updateAccount } from "@/lib/accounts-service";
+import { isUuid } from "@/lib/uuid";
 
 interface Ctx {
   params: Promise<{ id: string }>;
 }
 
 /**
- * Renames, reparents, and/or archives-or-restores an account — whichever
+ * Renames, reparents, archives/restores, and/or flips contra status — whichever
  * fields are present, all of them in one transaction.
  *
  * It used to call three services in sequence, which meant a PATCH carrying a
@@ -26,7 +27,9 @@ export const PATCH = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (error) return error;
 
   const { id } = await ctx.params;
-  let body: { name?: unknown; parentId?: unknown; isActive?: unknown };
+  if (!isUuid(id)) return NextResponse.json({ error: "account_not_found" }, { status: 404 });
+
+  let body: { name?: unknown; parentId?: unknown; isActive?: unknown; isContra?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -39,16 +42,23 @@ export const PATCH = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const hasName = "name" in body;
   const hasParent = "parentId" in body;
   const hasActive = "isActive" in body;
+  const hasContra = "isContra" in body;
   if (hasName && typeof body.name !== "string") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   if (hasParent && body.parentId !== null && typeof body.parentId !== "string") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (hasParent && body.parentId !== null && !isUuid(body.parentId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
   if (hasActive && typeof body.isActive !== "boolean") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  if (!hasName && !hasParent && !hasActive) {
+  if (hasContra && typeof body.isContra !== "boolean") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (!hasName && !hasParent && !hasActive && !hasContra) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
@@ -61,6 +71,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
       parentId: hasParent ? ((body.parentId as string | null) || null) : undefined,
       reparent: hasParent,
       isActive: hasActive ? (body.isActive as boolean) : undefined,
+      isContra: hasContra ? (body.isContra as boolean) : undefined,
     });
     return NextResponse.json({ ok: true });
   } catch (err) {
@@ -75,8 +86,9 @@ export const DELETE = withTenantScope(async (_request: NextRequest, ctx: Ctx) =>
   if (error) return error;
 
   const { id } = await ctx.params;
+  if (!isUuid(id)) return NextResponse.json({ error: "account_not_found" }, { status: 404 });
   try {
-    await deleteAccount(session.businessId, id);
+    await deleteAccount(session.businessId, id, session.sub);
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof AccountsError) return NextResponse.json({ error: err.message }, { status: err.status });

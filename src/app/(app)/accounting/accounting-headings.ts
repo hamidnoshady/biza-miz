@@ -36,7 +36,11 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
   installments: { description: "فروش اقساطی، سررسید قسط‌ها و وصول آن‌ها." },
   cheques: { description: "چک‌های دریافتی و پرداختی و وضعیت هر کدام." },
   reconciliation: { description: "تطبیق گردش بانک با دفاتر و پیدا کردن اقلام باز." },
-  "chart-of-accounts": { description: "ساختار حساب‌ها: گروه، کل و معین." },
+  "chart-of-accounts": {
+    title: "سرفصل حساب‌ها",
+    description:
+      "مدیریت ساختار درختی حساب‌ها در چهار سطح گروه، کل، معین و تفصیلی. حساب‌های سیستمی محافظت می‌شوند؛ حساب‌های دارای سند قابل حذف نیستند و فقط بایگانی می‌شوند؛ وضعیت فعال/بایگانی، نوع حساب و کد حساب همیشه سالم و سازگار با ساختار می‌ماند.",
+  },
   payroll: { description: "دوره‌های حقوق، تعهد حقوق کارکنان و پرداخت آن." },
   vat: { description: "مالیات بر ارزش افزودهٔ فروش و خرید در هر دوره." },
   "fixed-assets": {

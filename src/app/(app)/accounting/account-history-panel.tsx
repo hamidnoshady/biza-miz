@@ -16,7 +16,21 @@ interface HistoryEntry {
   actorName: string | null;
   action: string;
   createdAt: string;
-  payload: { before?: string; after?: string } | null;
+  payload:
+    | ({
+        code?: string;
+        name?: string;
+        type?: string;
+        parentId?: string | null;
+        parentLabel?: string | null;
+        level?: string;
+        isContra?: boolean;
+        before?: unknown;
+        after?: unknown;
+        beforeParentLabel?: string | null;
+        afterParentLabel?: string | null;
+      } & Record<string, unknown>)
+    | null;
   accountBeforeParentLabel: string | null;
   accountAfterParentLabel: string | null;
 }
@@ -25,14 +39,33 @@ function formatTime(iso: string): string {
   return toPersianDigits(formatJalali(iso, { withMonthName: true }));
 }
 
-/** What actually changed, for the one row types that carry a before/after. */
+/** What actually changed, for audit row types that carry a before/after. */
 function changeDetail(entry: HistoryEntry): string | null {
-  if (entry.action === "account.renamed" && entry.payload?.before && entry.payload?.after) {
-    return `از «${entry.payload.before}» به «${entry.payload.after}»`;
+  const p = entry.payload ?? {};
+  if (entry.action === "account.created") {
+    const parts: string[] = [];
+    if (p.code) parts.push(`کد ${p.code}`);
+    if (p.name) parts.push(`نام «${p.name}»`);
+    if (p.parentLabel) parts.push(`زیر ${p.parentLabel}`);
+    else if (!p.parentId) parts.push("در سطح گروه");
+    if (typeof p.isContra === "boolean" && p.isContra) parts.push("کاهنده");
+    return parts.length > 0 ? parts.join("، ") : null;
+  }
+  if (entry.action === "account.deleted") {
+    const parts: string[] = [];
+    if (p.code) parts.push(`کد ${p.code}`);
+    if (p.name) parts.push(`نام «${p.name}»`);
+    return parts.length > 0 ? `حذف شد — ${parts.join("، ")}` : "حذف شد";
+  }
+  if (entry.action === "account.renamed" && typeof p.before === "string" && typeof p.after === "string") {
+    return `از «${p.before}» به «${p.after}»`;
+  }
+  if (entry.action === "account.contra_changed") {
+    return typeof p.after === "boolean" ? (p.after ? "به حساب کاهنده تغییر کرد" : "از حالت کاهنده خارج شد") : null;
   }
   if (entry.action === "account.reparented") {
-    const before = entry.accountBeforeParentLabel ?? "بدون سرگروه";
-    const after = entry.accountAfterParentLabel ?? "بدون سرگروه";
+    const before = entry.accountBeforeParentLabel ?? p.beforeParentLabel ?? "بدون سرگروه";
+    const after = entry.accountAfterParentLabel ?? p.afterParentLabel ?? "بدون سرگروه";
     return `از «${before}» به «${after}»`;
   }
   return null;

@@ -207,7 +207,7 @@ beforeAll(async () => {
   const issued = await withoutTenantScope("platform", () => issuePairingCode(biz.businessId, admin, biz.locationId));
   if (!("code" in issued)) throw new Error("pairing code not issued");
   const installationId = `desktop-${randomUUID()}`;
-  const redeemed = await redeemPairingCode(issued.code, "127.0.0.1", "test desktop", installationId);
+  const redeemed = await redeemPairingCode(issued.code, "127.0.0.1", "test desktop", installationId, { maxSnapshotVersion: 7 });
   if (!redeemed.ok) throw new Error("pairing code not redeemed");
   await acknowledgePairingSession(redeemed.pairingSessionId, installationId, redeemed.snapshot.syncToken);
 

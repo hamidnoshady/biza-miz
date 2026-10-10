@@ -52,10 +52,13 @@ const ACTION_LABELS: Record<string, string> = {
   "settings.business.update": "تغییر اطلاعات کسب‌وکار",
   "settings.mfa_policy.update": "تغییر سیاست ورود دومرحله‌ای",
   "impersonation.request": "درخواست ورود جانشینی",
+  "account.created": "ایجاد حساب",
   "account.renamed": "تغییر نام حساب",
   "account.reparented": "جابه‌جایی حساب در ساختار",
   "account.archived": "بایگانی حساب",
   "account.reactivated": "بازگردانی حساب از بایگانی",
+  "account.contra_changed": "تغییر وضعیت حساب کاهنده",
+  "account.deleted": "حذف حساب",
 };
 
 const ENTITY_LABELS: Record<string, string> = {

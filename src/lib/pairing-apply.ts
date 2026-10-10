@@ -20,6 +20,9 @@ import type { PoolClient } from "pg";
 import { getPool, withoutTenantScope } from "./db";
 import type { PairingSnapshot } from "./pairing-snapshot";
 import { SETTING_KEYS } from "./settings";
+import { ACCOUNT_LEVELS } from "./coa-template";
+import { orderAccountTree } from "./account-hierarchy";
+import { lockChartOfAccounts } from "./accounts-service";
 
 /** Electron supplies this durable identity; the deterministic fallback keeps non-Electron development resumable. */
 export function localInstallationId(): string {
@@ -126,6 +129,11 @@ export async function applyPairingSnapshot(
 
       await insertTenantRoles(client, snapshot);
       const ownerIds = await insertUsers(client, snapshot);
+      // The canonical chart-of-accounts hierarchy lock (issue #824 review
+      // item 6). Pairing restores into a business that may already be live —
+      // it is a full snapshot replay, not only a first-run path — so it
+      // serialises against the editor exactly like any other writer.
+      await lockChartOfAccounts(client, snapshot.business.id);
       await insertAccounts(client, snapshot);
       await insertMenu(client, snapshot);
       await insertDiningTables(client, snapshot);
@@ -210,54 +218,65 @@ async function insertUsers(client: PoolClient, snapshot: PairingSnapshot): Promi
   return { ownerUserId, ownerName, ownerPlatformUserId: null };
 }
 
-/** Parents before children, resolving parent_id from a code→id map built as we go. */
+/**
+ * Restores the chart as a tree, parents first, with every row's `level` derived
+ * from its parent's.
+ *
+ * The snapshot's account records predate the `level` column and carry no such
+ * field, so the level is computed here by `orderAccountTree` — the same
+ * derivation the editor uses — rather than read from the wire. A snapshot that
+ * cannot be placed (a missing parent, a cycle, or a chain deeper than تفصیلی)
+ * is refused as a whole with an `AccountTreeError`, which rolls the restore
+ * back. It is never clamped to a shallower level or re-rooted, because either
+ * would hand the restored device a chart whose levels disagree with its parents.
+ *
+ * Rows are inserted tier by tier (گروه, کل, معین, تفصیلی), so every parent is
+ * already in the table when its children arrive, within one statement or
+ * across them. `is_active` is written as the snapshot carries it; an absent
+ * value is an older snapshot, whose every account was active.
+ *
+ * The caller holds the canonical chart-of-accounts lock (review item 6).
+ */
 async function insertAccounts(
   client: PoolClient,
   snapshot: PairingSnapshot,
 ): Promise<void> {
+  const { ordered, levelByCode } = orderAccountTree(snapshot.accounts);
   const idByCode = new Map<string, string>();
-  const pending = [...snapshot.accounts];
-  let guard = pending.length + 1;
-  while (pending.length > 0 && guard > 0) {
-    guard -= 1;
-    const ready = pending.filter(
-      (a) => !a.parentCode || idByCode.has(a.parentCode),
-    );
-    // A snapshot whose parent chain can't be resolved (a cycle, or a parent
-    // that was inactive and so never travelled) would loop forever; treat the
-    // remaining rows as roots rather than hanging the pairing.
-    const batch = ready.length > 0 ? ready : [...pending];
-    const CHUNK_SIZE = 1000;
-    for (let i = 0; i < batch.length; i += CHUNK_SIZE) {
-      const chunk = batch.slice(i, i + CHUNK_SIZE);
+  for (const account of ordered) idByCode.set(account.code, account.id);
+
+  const CHUNK_SIZE = 1000;
+  for (const tier of ACCOUNT_LEVELS) {
+    const rows = ordered.filter((account) => levelByCode.get(account.code) === tier);
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
       const values: string[] = [];
       const args: unknown[] = [];
       let offset = 1;
       for (const account of chunk) {
         values.push(
-          `($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type)`,
+          `($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type, $${offset + 6}::account_level, $${offset + 7}, $${offset + 8})`,
         );
         args.push(
           account.id,
           snapshot.business.id,
-          account.parentCode
-            ? (idByCode.get(account.parentCode) ?? null)
-            : null,
+          account.parentCode ? (idByCode.get(account.parentCode) ?? null) : null,
           account.code,
           account.name,
           account.type,
+          levelByCode.get(account.code),
+          // Written as the snapshot carries them. A v6 snapshot has neither field,
+          // and by construction every account in it is active and not contra.
+          account.isActive ?? true,
+          account.isContra ?? false,
         );
-        offset += 6;
+        offset += 9;
       }
       if (values.length > 0) {
         await client.query(
-          `INSERT INTO accounts (id, business_id, parent_id, code, name, type) VALUES ${values.join(", ")}`,
+          `INSERT INTO accounts (id, business_id, parent_id, code, name, type, level, is_active, is_contra) VALUES ${values.join(", ")}`,
           args,
         );
-      }
-      for (const account of chunk) {
-        idByCode.set(account.code, account.id);
-        pending.splice(pending.indexOf(account), 1);
       }
     }
   }

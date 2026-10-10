@@ -126,6 +126,12 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   peer_unreachable: "سرور مقابل در دسترس نیست.",
   peer_auth_failed: "کلید این سرور در آن سمت پذیرفته نشد (لغو یا منقضی شده است؟).",
   bad_manifest: "پاسخ سرور مقابل معتبر نیست.",
+  // A live chart that cannot take the new industry's accounts. The change is
+  // rolled back as a whole, so the business keeps its old type and chart.
+  parent_archived:
+    "تغییر نوع کسب‌وکار انجام نشد: یکی از سرفصل‌های جدید زیر یک حساب بایگانی‌شدهٔ موجود قرار می‌گیرد. حساب را فعال یا جابه‌جا کنید، سپس دوباره تلاش کنید.",
+  parent_type_mismatch:
+    "تغییر نوع کسب‌وکار انجام نشد: نوع یکی از حساب‌های موجود با نوع سرفصل جدید زیر آن یکی نیست. حساب را اصلاح کنید، سپس دوباره تلاش کنید.",
 };
 
 /**

@@ -118,6 +118,10 @@ export function errorMessage(code: string | undefined): string {
     account_has_postings: "این حساب سند خورده و قابل حذف نیست؛ می‌توانید آن را غیرفعال کنید.",
     account_has_draft_postings: "این حساب در یک پیش‌نویس استفاده شده و قابل حذف نیست.",
     account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
+    parent_has_active_children: "نمی‌توان حسابی را که زیرمجموعهٔ فعال دارد بایگانی کرد؛ ابتدا زیرمجموعه‌ها را بایگانی یا جابه‌جا کنید.",
+    ancestor_archived: "نمی‌توان این حساب را فعال کرد؛ یکی از حساب‌های والد در زنجیره هنوز بایگانی است.",
+    parent_type_mismatch: "نوع حساب زیرمجموعه باید با نوع شاخهٔ والد یکسان باشد.",
+    parent_archived: "نمی‌توان حساب را زیر یک حساب بایگانی‌شده ایجاد یا جابه‌جا کرد.",
     // Fiscal years and periods (fiscal-periods-service.ts)
     invalid_year: "سال شمسی نامعتبر است.",
     fiscal_year_exists: "این سال مالی قبلاً تعریف شده است.",
