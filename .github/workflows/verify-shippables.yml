@@ -32,6 +32,12 @@ name: verify-shippables
 
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Commit or branch the desktop shell job measures. Empty = the commit this run is on. Lets a base commit be measured on the same runner image as a pull request.'
+        type: string
+        required: false
+        default: ''
   pull_request:
     paths:
       - 'electron/**'
@@ -274,6 +280,22 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Empty = the commit this run is on. A manual run may name another
+          # commit (for example a PR's base) to measure it on this runner image.
+          ref: ${{ inputs.source_ref || github.sha }}
+      # The size tooling comes from the commit running this workflow, not from
+      # the measured commit, so a base that predates the tooling can still be
+      # measured with it. Sparse, and kept out of the staged runtime.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .size-tooling
+          sparse-checkout: |
+            scripts/desktop-size-diagnostics.ts
+            src/lib/desktop-size-diagnostics.ts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -325,6 +347,20 @@ jobs:
           $mib = [math]::Round($bytes / 1MB, 1)
           Write-Host "staged desktop runtime: $mib MiB"
           if ($bytes -gt 200MB) { throw "Staged runtime $mib MiB exceeds 200 MiB budget" }
+
+      # Runs after the budget step even when it fails: the notices and the
+      # manifest are the numbers a failed budget otherwise never shows.
+      - name: Staged runtime size diagnostics
+        if: always()
+        run: npx tsx .size-tooling/scripts/desktop-size-diagnostics.ts --root=.desktop-runtime --label=staged-runtime --out=desktop-size-diagnostics
+
+      - name: Upload staged runtime size diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-staged-runtime-size
+          path: desktop-size-diagnostics
+          if-no-files-found: warn
 
   plugin:
     name: WordPress plugin

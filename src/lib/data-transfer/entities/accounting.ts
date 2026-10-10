@@ -22,6 +22,15 @@
 import { query } from "../../db";
 import { AccountsError, createAccount, setAccountActive } from "../../accounts-service";
 import { MissingLedgerAccountError, recordExpense } from "../../expense-service";
+import {
+  DIMENSION_CODE_FIELD,
+  DIMENSION_ERROR_MESSAGES,
+  DIMENSION_KINDS,
+  dimensionErrorMessage,
+  resolveDimensionCode,
+  type LineDimensions,
+} from "../../accounting-dimensions";
+import { AccountingDimensionError, findDimensionValueByCode } from "../../accounting-dimensions-service";
 import { expenseErrorMessage } from "../../expense-errors";
 import { parseExpenseAmount, parseExpenseVatAmount } from "../../expense-input";
 import { expenseDuplicatePredicate, expenseDuplicateRule } from "../../expense-import";
@@ -361,6 +370,35 @@ const paymentsAdapter: EntityAdapter = {
   },
 };
 
+/**
+ * The four code columns a sheet may carry, resolved to this business's own values
+ * (issue #868). A code that names nothing, or names an archived value, refuses the
+ * row by name: an import never creates a cost centre it was not told about, and
+ * never drops one it was. Whether the kind is enabled, and whether the value is
+ * open at this branch and on this date, is the posting guard's question, asked by
+ * `recordExpense` exactly as the screens ask it, so it is decided once.
+ */
+async function resolveExpenseDimensions(
+  businessId: string,
+  values: Record<string, unknown>,
+): Promise<LineDimensions> {
+  const dimensions: LineDimensions = {};
+  for (const kind of DIMENSION_KINDS) {
+    const cell = text(values[DIMENSION_CODE_FIELD[kind]]);
+    if (cell === null) continue;
+    const value = await findDimensionValueByCode(businessId, kind, cell);
+    const resolution = resolveDimensionCode(cell, value ? [value] : []);
+    if (resolution.status === "unknown") {
+      throw new RowRejection(`${DIMENSION_ERROR_MESSAGES.unknown_dimension_code} («${cell}»)`);
+    }
+    if (resolution.status === "inactive") {
+      throw new RowRejection(`${DIMENSION_ERROR_MESSAGES.inactive_dimension_code} («${cell}»)`);
+    }
+    dimensions[kind] = resolution.valueId;
+  }
+  return dimensions;
+}
+
 const expensesAdapter: EntityAdapter = {
   entity: "accounting.expenses",
   async read(context, options) {
@@ -383,13 +421,26 @@ const expensesAdapter: EntityAdapter = {
       `SELECT e.id, a.code AS "accountCode", pa.code AS "paymentAccountCode",
               e.amount, e.expense_date AS "expenseDate", e.vendor, e.memo,
               e.vat_amount AS "vatAmount", e.settlement, e.due_date::text AS "dueDate",
-              e.reference, COALESCE(sp.name, s.name) AS "supplier", pt.name AS "party"
+              e.reference, COALESCE(sp.name, s.name) AS "supplier", pt.name AS "party",
+              dcc.code AS "costCenterCode", dpc.code AS "profitCenterCode",
+              ddp.code AS "departmentCode", ddt.code AS "detailCode"
          FROM expenses e
          JOIN accounts a ON a.id = e.account_id
          JOIN accounts pa ON pa.id = e.payment_account_id
          LEFT JOIN suppliers s ON s.id = e.supplier_id
          LEFT JOIN parties sp ON sp.id = s.party_id
          LEFT JOIN parties pt ON pt.id = e.party_id
+         -- The attribution a row carries, as the code it was entered with. The business
+         -- check is repeated here on purpose: the id alone would be enough for the
+         -- database, and a reader should not have to know that to trust the join.
+         LEFT JOIN accounting_dimension_values dcc
+                ON dcc.id = e.cost_center_id AND dcc.business_id = e.business_id
+         LEFT JOIN accounting_dimension_values dpc
+                ON dpc.id = e.profit_center_id AND dpc.business_id = e.business_id
+         LEFT JOIN accounting_dimension_values ddp
+                ON ddp.id = e.department_id AND ddp.business_id = e.business_id
+         LEFT JOIN accounting_dimension_values ddt
+                ON ddt.id = e.detail_dimension_id AND ddt.business_id = e.business_id
         WHERE ${where.join(" AND ")}
         ORDER BY e.expense_date DESC, e.created_at DESC
         LIMIT $${params.length}`,
@@ -538,6 +589,9 @@ const expensesAdapter: EntityAdapter = {
     const expenseDate = typeof values.expenseDate === "string" ? values.expenseDate : null;
     const memo = text(values.memo) ?? "ورود از فایل";
     const vendor = text(values.vendor);
+    // Refused before the duplicate check, so a row with an unknown code is named as
+    // that, whether or not it would also have been a duplicate.
+    const dimensions = await resolveExpenseDimensions(context.businessId, values);
 
     /*
      * Duplicates are matched on the rule the operator chose — by default date,
@@ -565,8 +619,23 @@ const expensesAdapter: EntityAdapter = {
       },
       2,
     );
+    // Dimension attribution is part of identity (issue #868): two rows that are
+    // identical on every other field but carry different cost-centre/profit-centre
+    // codes are different expenses. This comparison is appended to the operator's
+    // chosen rule rather than offered as a selectable field, because an imported
+    // cell that names a dimension code always resolves before duplicate detection.
+    const dimStart = duplicate.params.length + 2; // $1 is business_id; base uses $2..
+    const dimParts = ["cost_center_id", "profit_center_id", "department_id", "detail_dimension_id"]
+      .map((col, i) => `COALESCE(${col}::text, '') = COALESCE($${dimStart + i}::uuid::text, '')`)
+      .join(" AND ");
+    duplicate.params.push(
+      dimensions.cost_center ?? null,
+      dimensions.profit_center ?? null,
+      dimensions.department ?? null,
+      dimensions.detail ?? null,
+    );
     const { rows: existingRows } = await query<{ id: string }>(
-      `SELECT id FROM expenses WHERE business_id = $1 AND ${duplicate.sql} LIMIT 1`,
+      `SELECT id FROM expenses WHERE business_id = $1 AND ${duplicate.sql} AND ${dimParts} LIMIT 1`,
       [context.businessId, ...duplicate.params],
     );
     const existing = existingRows[0];
@@ -595,10 +664,17 @@ const expensesAdapter: EntityAdapter = {
         vendor,
         partyId,
         memo,
+        dimensions,
         createdBy: context.actorUserId,
       });
       return { status: "created", id: String(expense.id) };
     } catch (error) {
+      if (error instanceof AccountingDimensionError) {
+        // The posting guard's own answer, in the words the screens use (issue #868): a
+        // kind the business has not enabled, or a value closed on this date or at this
+        // branch. Named, so the operator knows which setting or which value to change.
+        throw new RowRejection(dimensionErrorMessage(error.message));
+      }
       if (error instanceof MissingLedgerAccountError) {
         // The answer `POST /api/ledger/expenses` gives for the same fact (409
         // `ledger_account_missing`). This is not an `ExpenseError`, so before it was

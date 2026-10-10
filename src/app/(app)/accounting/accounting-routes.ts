@@ -46,6 +46,10 @@ export const ACCOUNTING_SECTION_KEYS = [
   "cheques",
   "reconciliation",
   "chart-of-accounts",
+  // «ابعاد حسابداری» — cost centres, profit centres, departments and the one
+  // configurable detail dimension (issue #868). Its own page, because the
+  // management and the reports both belong to the ledger, not to the chart.
+  "dimensions",
   "payroll",
   "vat",
   "fixed-assets",

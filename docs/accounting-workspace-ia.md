@@ -50,7 +50,7 @@ The rest of the workspace has these responsibilities:
 | خرید و انبار | inventory, products and industry-specific trade entries |
 | عملیات | the industry’s canonical operations screens, such as floor, kitchen, reservations and delivery |
 | اشخاص | the one directory (`/accounting/directory`) and its `?view=` links |
-| **فضای کار حسابداری** | trial balance, journal, manual entry, chart of accounts, receivables, payables, receipts/payments, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll and accounting settings |
+| **فضای کار حسابداری** | trial balance, journal, manual entry, chart of accounts, accounting dimensions (`/accounting/dimensions`), receivables, payables, receipts/payments, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll and accounting settings |
 | گزارش و تحلیل | financial reports (`/accounting/financial-reports`), business reports (`/accounting/reports`), growth/marketing |
 | پیکربندی | business settings, technical connections, credit and billing |
 
@@ -75,7 +75,7 @@ so the sidebar has one spelling of a group instead of one per menu.
 
   | sub-group | sections |
   | --- | --- |
-  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، سرفصل حساب‌ها |
+  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، سرفصل حساب‌ها، ابعاد حسابداری |
   | دریافتنی و پرداختنی | دریافتنی، پرداختنی، اقساط، چک‌ها |
   | وجوه و هزینه | دریافت و پرداخت، هزینه‌ها، تطبیق بانکی، دارایی ثابت |
   | دوره، مالیات و حقوق | دوره‌های مالی، مالیات، حقوق و دستمزد |

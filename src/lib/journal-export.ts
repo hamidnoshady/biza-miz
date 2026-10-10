@@ -21,8 +21,27 @@
  */
 import { formatJalali } from "./jalali";
 import { ledgerSourceLabel } from "./ledger-source-labels";
-import type { JournalEntryRecord } from "./journal-service";
+import { DIMENSION_KINDS, DIMENSION_KIND_LABELS, type DimensionKind } from "./accounting-dimensions";
+import type { JournalEntryRecord, JournalLineDimension } from "./journal-service";
 import type { ReportTable } from "./report-export";
+
+/** Column key for a dimension's code column in the export. */
+export function dimensionColumnKey(kind: DimensionKind, field: "code" | "name"): string {
+  return `dim_${kind}_${field}`;
+}
+
+function pickDimension(dims: JournalLineDimension[] | undefined, kind: DimensionKind): JournalLineDimension | null {
+  return dims?.find((d) => d.kind === kind) ?? null;
+}
+
+/** The fixed dimension columns, in the order the screens show them. Detail is labelled generically; a future pass can pass the business's own label. */
+const DIMENSION_COLUMN_SPECS: ReadonlyArray<{ kind: DimensionKind; codeKey: string; nameKey: string; codeLabel: string; nameLabel: string }> = DIMENSION_KINDS.map((kind) => ({
+  kind,
+  codeKey: dimensionColumnKey(kind, "code"),
+  nameKey: dimensionColumnKey(kind, "name"),
+  codeLabel: `کد ${DIMENSION_KIND_LABELS[kind]}`,
+  nameLabel: DIMENSION_KIND_LABELS[kind],
+}));
 
 export const JOURNAL_EXPORT_COLUMNS = [
   { key: "entryDate", label: "تاریخ سند" },
@@ -36,6 +55,10 @@ export const JOURNAL_EXPORT_COLUMNS = [
   { key: "entryTotal", label: "جمع سند (ریال)" },
   { key: "location", label: "شعبه" },
   { key: "project", label: "پروژه" },
+  ...DIMENSION_COLUMN_SPECS.flatMap((spec) => [
+    { key: spec.codeKey, label: spec.codeLabel },
+    { key: spec.nameKey, label: spec.nameLabel },
+  ]),
   { key: "createdBy", label: "ثبت‌کننده" },
   { key: "status", label: "وضعیت" },
   { key: "entryId", label: "شناسهٔ سند" },
@@ -60,7 +83,7 @@ export function journalStatusLabel(entry: {
 export function buildJournalExportTable(entries: readonly JournalEntryRecord[]): ReportTable {
   const rows: Record<string, unknown>[] = [];
   for (const entry of entries) {
-    const shared = {
+    const shared: Record<string, unknown> = {
       entryDate: formatJalali(entry.entryDate),
       postedAt: formatJalali(entry.postedAt, { withTime: true }),
       source: ledgerSourceLabel(entry.sourceType),
@@ -80,17 +103,27 @@ export function buildJournalExportTable(entries: readonly JournalEntryRecord[]):
     if (entry.lines.length === 0) {
       // A document with no lines is corrupt, not absent — it belongs in the
       // export so the person reconciling can see it.
+      for (const spec of DIMENSION_COLUMN_SPECS) {
+        shared[spec.codeKey] = "";
+        shared[spec.nameKey] = "";
+      }
       rows.push({ ...shared, accountCode: "", accountName: "", debit: "", credit: "" });
       continue;
     }
     for (const line of entry.lines) {
-      rows.push({
+      const row: Record<string, unknown> = {
         ...shared,
         accountCode: line.accountCode,
         accountName: line.accountName,
         debit: line.debit,
         credit: line.credit,
-      });
+      };
+      for (const spec of DIMENSION_COLUMN_SPECS) {
+        const dim = pickDimension(line.dimensions, spec.kind);
+        row[spec.codeKey] = dim?.code ?? "";
+        row[spec.nameKey] = dim?.name ?? "";
+      }
+      rows.push(row);
     }
   }
   return { columns: [...JOURNAL_EXPORT_COLUMNS], rows };

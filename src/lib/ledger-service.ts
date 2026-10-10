@@ -23,6 +23,8 @@ import {
 } from "./ledger";
 import type { Rial } from "./money";
 import { rialBigInt, type RialText } from "./inventory-exact";
+import type { LineDimensions } from "./accounting-dimensions";
+import { assertDimensionsPostable, dimensionColumnValues, hasDimensions } from "./accounting-dimensions-service";
 
 /**
  * Thrown when an auto-posting event needs a well-known account (by Chart of
@@ -60,6 +62,8 @@ export interface ExactJournalLine {
   accountId: string;
   debit: RialText;
   credit: RialText;
+  /** Optional accounting dimensions (issue #868). See `PostJournalEntryInput.dimensionMirror`. */
+  dimensions?: LineDimensions | null;
 }
 
 /**
@@ -107,12 +111,7 @@ export async function postExactJournalEntry(
       input.projectId ?? null,
     ],
   );
-  for (const line of lines) {
-    await client.query(
-      "INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES($1,$2,$3,$4)",
-      [rows[0].id, line.accountId, line.debit, line.credit],
-    );
-  }
+  await insertJournalLines(client, input, rows[0].id, lines);
   return rows[0].id;
 }
 
@@ -757,10 +756,24 @@ export async function postExactMirrorEntry(
     inventoryEventId?: string | null;
   },
 ): Promise<string | null> {
-  const { rows: lines } = await client.query<{ account_id: string; debit: string; credit: string }>(
-    "SELECT account_id, debit::text, credit::text FROM journal_lines WHERE entry_id=$1 ORDER BY id",
+  const { rows: lines } = await client.query<{
+    account_id: string;
+    debit: string;
+    credit: string;
+    cost_center_id: string | null;
+    profit_center_id: string | null;
+    department_id: string | null;
+    detail_dimension_id: string | null;
+  }>(
+    `SELECT account_id, debit::text, credit::text,
+            cost_center_id, profit_center_id, department_id, detail_dimension_id
+       FROM journal_lines WHERE entry_id=$1 ORDER BY id`,
     [params.originalEntryId],
   );
+  // A reversal mirrors exactly what the original recorded — including its
+  // dimension attribution (issue #868). It must succeed even if a value has
+  // since been archived or a kind switched off, so we set dimensionMirror=true
+  // and let the database structural guards handle tenancy/kind.
   const entryId = await postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -771,10 +784,17 @@ export async function postExactMirrorEntry(
     createdBy: params.createdBy,
     postingKind: params.postingKind,
     inventoryEventId: params.inventoryEventId ?? null,
+    dimensionMirror: true,
     lines: lines.map((line) => ({
       accountId: line.account_id,
       debit: line.credit as RialText,
       credit: line.debit as RialText,
+      dimensions: {
+        cost_center: line.cost_center_id ?? undefined,
+        profit_center: line.profit_center_id ?? undefined,
+        department: line.department_id ?? undefined,
+        detail: line.detail_dimension_id ?? undefined,
+      },
     })),
   });
   if (entryId) {
@@ -924,6 +944,44 @@ export interface PostJournalEntryInput {
   inventoryEventId?: string | null;
   /** Optional operating dimension. The caller must establish tenant affinity. */
   projectId?: string | null;
+  /**
+   * Issue #868. A NEW posting with attribution is checked against the dimension
+   * policy (enabled kind, active leaf value, branch, effective date) before it is
+   * written. A reversal sets this to `true`: it mirrors lines that already exist,
+   * so it must succeed even after the value it names has been archived. The
+   * database still checks tenancy and kind on every write either way.
+   */
+  dimensionMirror?: boolean;
+}
+
+/**
+ * The shared line writer for both posting variants. Attribution is validated
+ * here, once, for every path that reaches it, and written as four nullable
+ * columns — so a line without attribution writes exactly what it always did.
+ */
+async function insertJournalLines(
+  client: PoolClient,
+  input: Pick<PostJournalEntryInput, "businessId" | "locationId" | "entryDate" | "dimensionMirror">,
+  entryId: string,
+  lines: ReadonlyArray<{ accountId: string; debit: RialText | number; credit: RialText | number; dimensions?: LineDimensions | null }>,
+): Promise<void> {
+  if (!input.dimensionMirror && lines.some((line) => hasDimensions(line.dimensions))) {
+    await assertDimensionsPostable(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      entryDate: input.entryDate ?? null,
+      lines,
+    });
+  }
+  for (const line of lines) {
+    const dims = dimensionColumnValues(line.dimensions);
+    await client.query(
+      `INSERT INTO journal_lines
+         (entry_id, account_id, debit, credit, cost_center_id, profit_center_id, department_id, detail_dimension_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [entryId, line.accountId, line.debit, line.credit, dims.cost_center_id, dims.profit_center_id, dims.department_id, dims.detail_dimension_id],
+    );
+  }
 }
 
 /**
@@ -950,14 +1008,7 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
     [input.businessId, input.locationId, input.entryDate ?? null, input.memo, input.sourceType, input.sourceId, input.createdBy, input.postingKind ?? null, input.inventoryEventId ?? null, input.projectId ?? null],
   );
   const entryId = rows[0].id;
-  for (const l of lines) {
-    await client.query("INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4)", [
-      entryId,
-      l.accountId,
-      l.debit,
-      l.credit,
-    ]);
-  }
+  await insertJournalLines(client, input, entryId, lines);
   return entryId;
 }
 

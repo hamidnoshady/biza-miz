@@ -26,6 +26,8 @@ import { FilterChip } from "@/app/dashboard/filters";
 import { EXPENSE_SETTLEMENT_LABELS, type ExpenseSettlement } from "@/lib/payables-input";
 import { ExpenseDetailPanel } from "./expense-detail-panel";
 import type { AccountRow, Runner } from "./accounting-manager";
+import { DimensionFields, useDimensionCatalog, DimensionCatalogError } from "./dimension-fields";
+import { dimensionPayload, type DimensionDraft } from "./dimension-catalog";
 
 interface LocationOption {
   id: string;
@@ -157,6 +159,10 @@ export function ExpenseSection({
   const [vendor, setVendor] = useState("");
   const [memo, setMemo] = useState("");
   const [locationId, setLocationId] = useState("");
+  // Issue #868: the expense's own attribution (cost centre, department …). It
+  // lands on the debit line of the expense, and nowhere else.
+  const { catalog: dimensionCatalog, error: dimensionCatalogError, retry: retryDimensionCatalog } = useDimensionCatalog();
+  const [dimensionDraft, setDimensionDraft] = useState<DimensionDraft>({});
   const [partyId, setPartyId] = useState("");
   const [vatOn, setVatOn] = useState(false);
   const [vatAmount, setVatAmount] = useState("");
@@ -478,6 +484,7 @@ export function ExpenseSection({
           memo: memo.trim(),
           vatAmount: vatOn ? money.parse(vatAmount) : 0,
           receiptAssetId: receiptAsset?.id,
+          dimensions: dimensionPayload(dimensionDraft),
         }),
       }),
     );
@@ -488,6 +495,7 @@ export function ExpenseSection({
           : `هزینه به مبلغ ${money.format(rial)} ثبت و در دفاتر منعکس شد.`,
       );
       setAccountId("");
+      setDimensionDraft({});
       setPaymentAccountId("");
       // The next row is a fresh decision, not a continuation of the last one:
       // «پرداخت‌شده» is the default the form opens with.
@@ -766,6 +774,18 @@ export function ExpenseSection({
                     />
                   </div>
                 ) : null}
+
+                {dimensionCatalogError ? (
+                  <DimensionCatalogError error={dimensionCatalogError} onRetry={retryDimensionCatalog} />
+                ) : (
+                  <DimensionFields
+                    idPrefix="expense-dimensions"
+                    catalog={dimensionCatalog}
+                    locationId={locationId || null}
+                    value={dimensionDraft}
+                    onChange={setDimensionDraft}
+                  />
+                )}
 
                 <PartyField
                   value={partyId}
