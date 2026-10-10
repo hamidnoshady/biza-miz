@@ -27,10 +27,13 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   useDeferredValue,
   useCallback,
+  type ReactNode,
 } from "react";
+import Link from "next/link";
 import {
   SearchIcon,
   PlusIcon,
@@ -50,6 +53,8 @@ import {
   FileTextIcon,
   XIcon,
   ChevronDownIcon,
+  ExternalLinkIcon,
+  ArrowLeftIcon,
 } from "lucide-react";
 
 import {
@@ -112,15 +117,23 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali, todayIsoDate } from "@/lib/jalali";
-import { normalizePosSearchText } from "@/lib/pos-selection";
 import { useMoney } from "@/components/money/money-context";
 import {
   availableActions,
+  isTerminal,
   type ChequeAction,
   type ChequeDirection,
   type ChequeStatus,
 } from "@/lib/cheques";
+import {
+  OperationKeyHolder,
+  OperationKeyLimitError,
+  operationSignature,
+  outcomeOf,
+} from "@/lib/operation-key";
 import { api } from "@/app/dashboard/ui";
+import { JournalPeekDialog } from "./journal-peek-dialog";
+import { accountingCustomerHref, accountingSupplierHref } from "./accounting-routes";
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -128,6 +141,8 @@ import { api } from "@/app/dashboard/ui";
 
 interface Cheque {
   id: string;
+  locationId?: string | null;
+  locationName?: string | null;
   direction: ChequeDirection;
   status: ChequeStatus;
   serialNumber: string;
@@ -141,13 +156,62 @@ interface Cheque {
   customerId?: string | null;
   supplierId?: string | null;
   memo: string | null;
+  replacesChequeId?: string | null;
+  replacesSerialNumber?: string | null;
+  /** How much of this returned cheque has already been replaced. */
+  replacedByAmount?: number;
   createdAt?: string;
 }
 
 interface Counterparty {
   id: string;
   name: string;
+  /**
+   * The canonical party behind this directory entry, when it has one.
+   *
+   * A supplier id is an alias id, not a party id, so it cannot address the
+   * party directory on its own; the A/P directory already resolves the link
+   * (`suppliers.party_id`) and returns it. Customers in this directory *are*
+   * parties, so the two coincide there. Null means the alias has never been
+   * linked — the name then stays plain text rather than linking to nothing.
+   */
+  partyId?: string | null;
 }
+
+/** The server's accounting-aware totals for the whole filtered register. */
+interface SummaryBucket {
+  count: number;
+  total: number;
+}
+
+interface ChequeSummary {
+  outstanding: SummaryBucket;
+  onHand: SummaryBucket;
+  inCollection: SummaryBucket;
+  issued: SummaryBucket;
+  contingent: SummaryBucket;
+  returnedUnresolved: SummaryBucket;
+  resolved: SummaryBucket;
+  cleared: SummaryBucket;
+  cancelled: SummaryBucket;
+  settled: SummaryBucket;
+  overdue: SummaryBucket;
+  dueSoon: SummaryBucket;
+}
+
+interface ChequePage {
+  cheques?: Cheque[];
+  total?: number;
+  hasMore?: boolean;
+  /** The keyset cursor for the next window; `null` on the last one. */
+  nextCursor?: string | null;
+  summary?: ChequeSummary;
+  banks?: string[];
+  error?: string;
+}
+
+/** How many rows one «بیشتر» adds. */
+const PAGE_SIZE = 50;
 
 interface ChequeEvent {
   id: string;
@@ -159,6 +223,15 @@ interface ChequeEvent {
   createdAt: string;
 }
 
+/**
+ * Shown when the holder refuses to start one more operation (see
+ * `OperationKeyLimitError`). It says what is true — nothing was sent — and
+ * points at the only safe way forward, which is to finish the attempts whose
+ * fate is unknown rather than pile another posting on top of them.
+ */
+const TOO_MANY_UNRESOLVED =
+  "نتیجه چند درخواست قبلی هنوز مشخص نشده است، بنابراین درخواست تازه‌ای ارسال نشد. ارتباط خود را بررسی کنید و همان درخواست‌های قبلی را دوباره تأیید کنید.";
+
 const STATUS_LABELS: Record<ChequeStatus, string> = {
   on_hand: "نزد صندوق",
   in_collection: "در جریان وصول",
@@ -167,6 +240,7 @@ const STATUS_LABELS: Record<ChequeStatus, string> = {
   cleared: "وصول‌شده",
   bounced: "برگشتی",
   cancelled: "ابطال‌شده",
+  resolved: "تعیین‌تکلیف‌شده",
 };
 
 const STATUS_TONE: Record<ChequeStatus, string> = {
@@ -182,6 +256,7 @@ const STATUS_TONE: Record<ChequeStatus, string> = {
     "bg-emerald-100 text-emerald-900 border-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-200 dark:border-emerald-500/20",
   bounced: "bg-destructive/10 text-destructive border-destructive/20",
   cancelled: "bg-muted text-muted-foreground border-border",
+  resolved: "bg-muted text-foreground border-border",
 };
 
 const ACTION_LABELS: Record<ChequeAction, string> = {
@@ -191,6 +266,8 @@ const ACTION_LABELS: Record<ChequeAction, string> = {
   present: "پاس شد",
   bounce: "برگشت خورد",
   cancel: "ابطال",
+  settle: "تسویه نقدی/بانکی",
+  restore: "بازگشت به حساب طرف",
 };
 
 const ACTION_HINT: Record<ChequeAction, string> = {
@@ -198,8 +275,11 @@ const ACTION_HINT: Record<ChequeAction, string> = {
   endorse: "به تأمین‌کننده واگذار می‌شود",
   clear: "به حساب بانک واریز می‌شود",
   present: "از بانک کسر می‌شود",
-  bounce: "برگشتی ثبت می‌شود",
+  bounce: "برگشتی ثبت می‌شود؛ در صورت نیاز کارمزد بانکی هم ثبت می‌شود",
   cancel: "بدون اثر بانکی ابطال می‌شود",
+  settle: "مبلغ چک برگشتی از حساب چک‌های برگشتی به بانک منتقل می‌شود",
+  restore:
+    "مانده چک برگشتی به حساب طرف برمی‌گردد؛ چک جایگزین پس از آن مثل یک چک عادی ثبت می‌شود",
 };
 
 const DIRECTION_META: Record<
@@ -262,11 +342,34 @@ function errorMessage(code: string | undefined): string {
     due_date_before_issue: "سررسید نمی‌تواند پیش از تاریخ دریافت/صدور باشد.",
     invalid_occurred_on: "تاریخ وقوع معتبر نیست.",
     action_before_issue: "تاریخ این اقدام نمی‌تواند پیش از تاریخ دریافت/صدور باشد.",
+    action_before_previous_event:
+      "تاریخ این اقدام نمی‌تواند پیش از تاریخ آخرین رویداد ثبت‌شده چک باشد.",
+    invalid_fee_amount: "مبلغ کارمزد معتبر نیست.",
+    fee_not_supported_for_action: "ثبت کارمزد فقط هنگام برگشت چک ممکن است.",
+    invalid_location: "شعبه انتخاب‌شده معتبر نیست.",
     invalid_counterparty_for_direction: "طرف حساب انتخاب‌شده با نوع چک هم‌خوانی ندارد.",
     network_error: "ارتباط با سرور برقرار نشد. اتصال شبکه را بررسی و دوباره تلاش کنید.",
     customer_not_found: "مشتری انتخاب‌شده معتبر نیست.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
-    supplier_required: "انتخاب تأمین‌کننده الزامی است.",
+    supplier_required:
+      "انتخاب تأمین‌کننده الزامی است؛ یا «ثبت بدون اتصال به طرف حساب» را انتخاب کنید.",
+    customer_required: "انتخاب مشتری الزامی است؛ یا «ثبت بدون اتصال به طرف حساب» را انتخاب کنید.",
+    invalid_status: "وضعیت انتخاب‌شده معتبر نیست.",
+    replaced_cheque_not_found: "چک برگشتی مرجع پیدا نشد.",
+    replaced_cheque_not_returned: "فقط چک برگشتی را می‌توان با چک جدید جایگزین کرد.",
+    replaced_cheque_not_restored:
+      "ابتدا باید مانده چک برگشتی با «بازگشت به حساب طرف» تعیین‌تکلیف شود؛ سپس چک جایگزین ثبت می‌شود.",
+    replaced_cheque_other_branch: "چک جایگزین باید در همان شعبهٔ چک برگشتی ثبت شود.",
+    replaced_cheque_other_party: "چک جایگزین باید به همان طرف حساب چک برگشتی متصل باشد.",
+    replacement_before_resolution:
+      "تاریخ چک جایگزین نمی‌تواند پیش از تاریخ تعیین‌تکلیف چک برگشتی باشد.",
+    replacement_exceeds_original:
+      "مجموع چک‌های جایگزین نمی‌تواند از مبلغ چک برگشتی بیشتر شود.",
+    idempotency_key_conflict:
+      "این درخواست با همان شناسهٔ تکرار ولی اطلاعات متفاوت ارسال شده است؛ صفحه را تازه کنید.",
+    invalid_due_from: "تاریخ شروع بازهٔ سررسید معتبر نیست.",
+    invalid_due_to: "تاریخ پایان بازهٔ سررسید معتبر نیست.",
+    invalid_due_range: "پایان بازهٔ سررسید نمی‌تواند پیش از شروع آن باشد.",
     ledger_account_missing: "یکی از حساب‌های مورد نیاز در سرفصل یافت نشد.",
     fiscal_period_locked: "دوره مالی این تاریخ قفل است.",
     fiscal_period_soft_closed:
@@ -287,8 +390,16 @@ function errorMessage(code: string | undefined): string {
 export function ChequesSection({
   busy,
   run,
+  canManage,
 }: {
   busy: boolean;
+  /**
+   * Whether this member holds `finance.cheques_manage`. A `ledger.view`-only
+   * accountant reads the register, its filters and every cheque's history, and
+   * is shown no control that would only come back 403 from the API — the API
+   * check stays authoritative either way.
+   */
+  canManage: boolean;
   run: (
     fn: () => Promise<{ ok: boolean; data: { error?: string } }>,
   ) => Promise<boolean>;
@@ -306,10 +417,98 @@ export function ChequesSection({
   const deferredQuery = useDeferredValue(query);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [bankFilter, setBankFilter] = useState<string>("all");
+  const [branchFilter, setBranchFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<string>("due_asc");
+  const [dueFrom, setDueFrom] = useState("");
+  const [dueTo, setDueTo] = useState("");
+  /*
+   * Which append is currently on screen as «در حال بارگذاری…».
+   *
+   * This was a plain boolean, and that was a bug with teeth: a response that
+   * arrived after the filters had moved on returned early — correctly, it is
+   * stale — *before* clearing the flag, and the first-page effect never reset
+   * it. So changing a filter while «بیشتر» was in flight left the button
+   * disabled for ever and the register stuck on its first page, with no error
+   * and nothing to retry. Holding the owning ticket instead of a boolean
+   * makes that unrepresentable: a request can only ever clear its own
+   * loading state, and starting a new register clears it outright.
+   */
+  const [loadingTicket, setLoadingTicket] = useState<number | null>(null);
+  const loadingMore = loadingTicket !== null;
+  const [moreError, setMoreError] = useState("");
+  const [summary, setSummary] = useState<ChequeSummary | null>(null);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [banks, setBanks] = useState<string[]>([]);
+  const [branches, setBranches] = useState<Counterparty[]>([]);
 
   const [createOpen, setCreateOpen] = useState(false);
+  /** The returned cheque a «ثبت چک جایگزین» was started from, if any. */
+  const [replacing, setReplacing] = useState<Cheque | null>(null);
   const [detail, setDetail] = useState<Cheque | null>(null);
+  /**
+   * What the *current* detail selection is waiting for, if anything.
+   *
+   * Reading a related cheque by id is a network request, and the first
+   * version of this ignored everything about that: no busy state (the link
+   * looked dead on a slow connection), no error (a failed read did nothing at
+   * all — indistinguishable from a broken link), and no ownership, so a slow
+   * answer could overwrite a newer selection or push a dialog back open after
+   * the reader had closed it.
+   */
+  const [detailNav, setDetailNav] = useState<
+    { status: "loading"; id: string } | { status: "error"; id: string; message: string } | null
+  >(null);
+  /**
+   * The ticket of the newest detail selection.
+   *
+   * Every selection — a row, a related cheque, or closing the view — takes
+   * the next ticket, and a response may only act if it still holds it. That
+   * is what makes an out-of-order answer harmless: it is not cancelled (the
+   * read is cheap and may already be in flight), it is simply no longer the
+   * answer to what the reader is looking at.
+   */
+  const detailTicket = useRef(0);
+
+  /** Shows a cheque the register already holds, and owns the selection. */
+  const showDetail = useCallback((cheque: Cheque) => {
+    detailTicket.current += 1;
+    setDetailNav(null);
+    setDetail(cheque);
+  }, []);
+
+  /** Closes the detail view and invalidates anything it was waiting for. */
+  const closeDetail = useCallback(() => {
+    detailTicket.current += 1;
+    setDetailNav(null);
+    setDetail(null);
+  }, []);
+
+  /**
+   * Opens a cheque the register page may not hold — the returned original
+   * behind a replacement, or a replacement of a returned cheque. Both are
+   * routinely outside the current filter, so the row is read by id instead
+   * of being searched for in `items`.
+   */
+  const openChequeById = useCallback(async (id: string) => {
+    detailTicket.current += 1;
+    const ticket = detailTicket.current;
+    setDetailNav({ status: "loading", id });
+    const { ok, data, aborted } = await api<{ cheque?: Cheque; error?: string }>(
+      `/api/ledger/cheques/${id}`,
+    );
+    // Superseded: the reader has since picked another cheque or closed the
+    // view. Neither reopening it nor replacing what they are reading now
+    // would be an answer to anything they asked for.
+    if (aborted || ticket !== detailTicket.current) return;
+    if (ok && data.cheque) {
+      setDetailNav(null);
+      setDetail(data.cheque);
+      return;
+    }
+    setDetailNav({ status: "error", id, message: errorMessage(data?.error) });
+  }, []);
   const [action, setAction] = useState<{
     cheque: Cheque;
     act: ChequeAction;
@@ -319,29 +518,133 @@ export function ChequesSection({
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
 
-  // Fetch. A direction switch can race the previous response; only the most
-  // recent request may paint the register, otherwise a payable response can
-  // appear under the receivable tab.
+  /*
+   * Fetch. Searching, filtering, sorting and paging are the server's job (a
+   * large tenant's register is not a download), so every one of them is a
+   * query parameter.
+   *
+   * Paging *appends*. The first version asked for `limit = 50 × page` with no
+   * offset, which the service caps at 200 — so «بیشتر» silently stopped
+   * working at the fourth page and the rows the reader already had were
+   * blanked on every press. Each press now asks for the window after the
+   * server's `nextCursor` — the exact sort key of the last row read — rather
+   * than an offset the client counts. An offset slides under the reader when
+   * a row above it changes status; a cursor does not. The rows already on
+   * screen stay on screen while the next window loads.
+   *
+   * `requestRef` is the staleness guard: every filter change and every append
+   * takes the next ticket, and a response that is not holding the current
+   * ticket is dropped — a slow payable answer can never paint under the
+   * receivable tab, and a slow page 2 can never land after a filter reset.
+   */
+  const requestRef = useRef(0);
+
+  /**
+   * Idempotency keys for the action dialogs, held across retries — see
+   * `src/lib/operation-key.ts` for the rule this implements.
+   */
+  const actionKeys = useRef(new OperationKeyHolder());
+
+  const queryFor = useCallback(
+    (cursor: string | null) => {
+      const params = new URLSearchParams({
+        direction,
+        sort: sortBy,
+        limit: String(PAGE_SIZE),
+      });
+      if (cursor) params.set("cursor", cursor);
+      if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
+      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (bankFilter !== "all") params.set("bank", bankFilter);
+      if (branchFilter !== "all") params.set("locationId", branchFilter);
+      if (dueFrom) params.set("dueFrom", dueFrom);
+      if (dueTo) params.set("dueTo", dueTo);
+      return params;
+    },
+    [direction, sortBy, deferredQuery, statusFilter, bankFilter, branchFilter, dueFrom, dueTo],
+  );
+
+  const applyPage = useCallback(
+    (data: ChequePage) => {
+      setSummary(data.summary ?? null);
+      setTotal(data.total ?? 0);
+      setHasMore(Boolean(data.hasMore));
+      setNextCursor(data.nextCursor ?? null);
+      setBanks((previous) =>
+        bankFilter !== "all" && !(data.banks ?? []).includes(bankFilter)
+          ? Array.from(new Set([...(data.banks ?? []), bankFilter]))
+          : (data.banks ?? previous),
+      );
+    },
+    [bankFilter],
+  );
+
+  // First page: filters changed, so the register restarts.
   useEffect(() => {
-    let current = true;
+    const ticket = ++requestRef.current;
     setCheques(null);
+    setNextCursor(null);
     setLoadError("");
-    void api<{ cheques?: Cheque[] }>(
-      `/api/ledger/cheques?direction=${direction}`,
-    ).then(({ ok, data }) => {
-      if (!current) return;
+    setMoreError("");
+    // A new register owns the loading state: whatever append was pending
+    // belongs to filters the reader has left behind.
+    setLoadingTicket(null);
+    void api<ChequePage>(`/api/ledger/cheques?${queryFor(null)}`).then(({ ok, data }) => {
+      if (requestRef.current !== ticket) return;
       if (ok && Array.isArray(data.cheques)) {
         setCheques(data.cheques);
+        applyPage(data);
       } else {
         // Do not turn a failed request into the false claim that there are no
         // cheques. Keeping this null selects an explicit retry state below.
         setLoadError("بارگذاری فهرست چک‌ها ناموفق بود. دوباره تلاش کنید.");
       }
     });
+  }, [queryFor, applyPage, refreshKey]);
+
+  /** One more window, appended — the rows already read stay put. */
+  const loadMore = useCallback(() => {
+    if (loadingMore || !nextCursor) return;
+    const ticket = ++requestRef.current;
+    setLoadingTicket(ticket);
+    setMoreError("");
+    void api<ChequePage>(`/api/ledger/cheques?${queryFor(nextCursor)}`).then(({ ok, data }) => {
+      if (requestRef.current !== ticket) {
+        // Stale: drop the rows, and release the spinner only if it is still
+        // this request's. Whoever superseded it owns it now.
+        setLoadingTicket((owner) => (owner === ticket ? null : owner));
+        return;
+      }
+      setLoadingTicket(null);
+      if (ok && Array.isArray(data.cheques)) {
+        // Belt and braces against a duplicate the server could only produce
+        // if a row were inserted mid-scroll: identity wins over position.
+        setCheques((previous) => {
+          const seen = new Set((previous ?? []).map((c) => c.id));
+          return [...(previous ?? []), ...data.cheques!.filter((c) => !seen.has(c.id))];
+        });
+        applyPage(data);
+      } else {
+        // The page that failed is retryable on its own: the reader does not
+        // lose the register because one request did.
+        setMoreError("بارگذاری ادامهٔ فهرست ناموفق بود.");
+      }
+    });
+  }, [nextCursor, loadingMore, queryFor, applyPage]);
+
+  // Branch context only means something to a business that has branches.
+  useEffect(() => {
+    let current = true;
+    void api<{ locations?: { id: string; name: string }[] }>("/api/locations/active").then(
+      ({ ok, data }) => {
+        if (!current || !ok || !Array.isArray(data.locations)) return;
+        setBranches(data.locations.map((l) => ({ id: l.id, name: l.name })));
+      },
+    );
     return () => {
       current = false;
     };
-  }, [direction, refreshKey]);
+  }, []);
 
   // Statuses belong to one direction. Keeping a receivable-only status selected
   // when moving to payables produced an unexplained blank register.
@@ -349,6 +652,8 @@ export function ChequesSection({
     setStatusFilter("all");
     setBankFilter("all");
     setQuery("");
+    setDueFrom("");
+    setDueTo("");
   }, [direction]);
 
   /*
@@ -366,7 +671,7 @@ export function ChequesSection({
       api<{ customers?: { customerId: string; customerName: string }[] }>(
         "/api/ledger/ar/customers?scope=directory",
       ),
-      api<{ suppliers?: { supplierId: string; supplierName: string }[] }>(
+      api<{ suppliers?: { supplierId: string; supplierName: string; supplierPartyId?: string | null }[] }>(
         "/api/ledger/ap/suppliers?scope=directory",
       ),
     ]).then(([customerResult, supplierResult]) => {
@@ -376,6 +681,8 @@ export function ChequesSection({
           customerResult.data.customers.map((c) => ({
             id: c.customerId,
             name: c.customerName,
+            // The A/R directory is keyed by party id already.
+            partyId: c.customerId,
           })),
         );
       }
@@ -384,6 +691,7 @@ export function ChequesSection({
           supplierResult.data.suppliers.map((s) => ({
             id: s.supplierId,
             name: s.supplierName,
+            partyId: s.supplierPartyId ?? null,
           })),
         );
       }
@@ -403,96 +711,29 @@ export function ChequesSection({
     };
   }, [refreshKey]);
 
-  const banks = useMemo(() => {
-    if (!cheques) return [];
-    return Array.from(
-      new Set(cheques.map((c) => c.bankName).filter(Boolean)),
-    ).sort((a, b) => a.localeCompare(b, "fa"));
-  }, [cheques]);
+  // The register the server returned is already filtered, sorted and paged:
+  // nothing is re-filtered here, so what the KPIs count and what the table
+  // shows can no longer disagree.
+  const filtered = cheques ?? [];
 
-  // Pre-compute the same Persian/Arabic/digit-normalised strings the app's
-  // comboboxes use. A صیاد number is stored with Latin digits, so searching
-  // with the Persian digits printed on a real cheque must find it too.
-  const searchIndex = useMemo(() => {
-    if (!cheques) return null;
-    return cheques.map((c) => ({
-      cheque: c,
-      normalized: [
-        c.counterpartyName,
-        c.bankName,
-        c.serialNumber,
-        c.sayadId ?? "",
-        c.memo ?? "",
-      ].filter(Boolean).map(normalizePosSearchText),
-    }));
-  }, [cheques]);
-
-  // We depend on deferredQuery so typing remains snappy while filtering happens
-  // in the background. Individual fields avoid false-positive boundary matches.
-  const filtered = useMemo(() => {
-    if (!cheques || !searchIndex) return [];
-    let out = [...cheques];
-
-    if (deferredQuery.trim()) {
-      const q = normalizePosSearchText(deferredQuery);
-      out = searchIndex
-        .filter(({ normalized }) =>
-          normalized.some((field) => field.includes(q)),
-        )
-        .map(({ cheque }) => cheque);
-    }
-
-    if (statusFilter !== "all")
-      out = out.filter((c) => c.status === statusFilter);
-    if (bankFilter !== "all")
-      out = out.filter((c) => c.bankName === bankFilter);
-
-    out.sort((a, b) => {
-      if (sortBy === "due_asc")
-        return (
-          a.dueDate.localeCompare(b.dueDate) ||
-          a.serialNumber.localeCompare(b.serialNumber)
-        );
-      if (sortBy === "due_desc")
-        return (
-          b.dueDate.localeCompare(a.dueDate) ||
-          a.serialNumber.localeCompare(b.serialNumber)
-        );
-      if (sortBy === "amount_desc") return b.amount - a.amount;
-      if (sortBy === "amount_asc") return a.amount - b.amount;
-      return 0;
-    });
-    return out;
-  }, [cheques, searchIndex, deferredQuery, statusFilter, bankFilter, sortBy]);
-
-  // KPIs
-  const kpis = useMemo(() => {
-    if (!cheques) return null;
-    const t = todayIsoDate();
-    const active = cheques.filter(
-      (c) => !["cleared", "bounced", "cancelled"].includes(c.status),
-    );
-    const overdue = active.filter((c) => c.dueDate < t);
-    const dueSoon = active.filter((c) => {
-      const d = daysBetween(t, c.dueDate);
-      return d >= 0 && d <= 7;
-    });
-    const totalActive = active.reduce((s, c) => s + c.amount, 0);
-    const totalOverdue = overdue.reduce((s, c) => s + c.amount, 0);
-    const byStatus = cheques.reduce<Record<string, number>>((acc, c) => {
-      acc[c.status] = (acc[c.status] ?? 0) + 1;
-      return acc;
-    }, {});
-    return {
-      totalActive,
-      totalOverdue,
-      overdueCount: overdue.length,
-      dueSoonCount: dueSoon.length,
-      activeCount: active.length,
-      byStatus,
-      totalCount: cheques.length,
-    };
-  }, [cheques]);
+  // KPIs — the server's accounting-aware totals for the whole filtered set,
+  // not a count of the rows that happen to be loaded. Note what each one is:
+  // «outstanding» excludes an endorsed cheque (endorsement already paid the
+  // supplier) and a returned one (its value sits in چک‌های برگشتی and has its
+  // own tile until it is resolved).
+  const kpis = summary
+    ? {
+        totalActive: summary.outstanding.total,
+        activeCount: summary.outstanding.count,
+        totalOverdue: summary.overdue.total,
+        overdueCount: summary.overdue.count,
+        dueSoonCount: summary.dueSoon.count,
+        totalReturned: summary.returnedUnresolved.total,
+        returnedCount: summary.returnedUnresolved.count,
+        settledCount: summary.settled.count,
+        totalCount: total,
+      }
+    : null;
 
   async function doAction(
     cheque: Cheque,
@@ -501,36 +742,108 @@ export function ChequesSection({
   ) {
     setLocalError("");
     setActionError("");
-    let response: { ok: boolean; data: { error?: string } } | undefined;
+    /*
+     * One key per *operation*, not per press.
+     *
+     * `run()` reports a dropped connection and stops; it does not retry. The
+     * retry is therefore the user pressing «تأیید» again — and this used to
+     * mint a fresh key for that press, so a step whose response was lost on
+     * the way back could be posted a second time: two bounce fees, two
+     * endorsements, a cheque cleared twice in the history.
+     *
+     * The key is now derived from what is being asked for — this cheque, this
+     * action, this date and this fee, the same fields the server
+     * fingerprints. Press again after a failure and the request is recognised
+     * as the retry it is. Change the date or the fee first and it is a
+     * different operation, which gets its own key instead of being refused
+     * with `idempotency_key_conflict`.
+     */
+    const signature = operationSignature([
+      cheque.id,
+      act,
+      body.occurredOn ?? null,
+      body.feeAmount ?? null,
+      body.endorsedToSupplierId ?? null,
+    ]);
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = actionKeys.current.keyFor(signature);
+    } catch (err) {
+      // Refusing to mint a 33rd key is a refusal to post, not a silent
+      // reuse of someone else's: nothing is sent and the reader is told.
+      if (err instanceof OperationKeyLimitError) {
+        setActionError(TOO_MANY_UNRESOLVED);
+        return;
+      }
+      throw err;
+    }
+    let response: { ok: boolean; status: number; data: { error?: string } } | undefined;
     const ok = await run(async () => {
       response = await api<{ error?: string }>(`/api/ledger/cheques/${cheque.id}/${act}`, {
         method: "POST",
+        // `api()` lets init.headers replace its default, so the content type
+        // has to be restated here.
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
         body: JSON.stringify(body),
       });
       return response;
     });
+    // Committed or refused-in-words both settle this operation; anything else
+    // (a dropped connection, a 5xx, a proxy timeout) leaves the key in place
+    // so the next press is recognised as the retry it is.
+    actionKeys.current.resolve(signature, outcomeOf(response));
     if (ok) {
       setAction(null);
-      setDetail(null);
+      closeDetail();
       setRefreshKey((k) => k + 1);
     } else {
       setActionError(errorMessage(response?.data.error));
     }
   }
 
+  // One gate, used everywhere a control is drawn: a read-only member is shown
+  // the register, not a dialog that would be refused on submit.
+  const actionsFor = useCallback(
+    (cheque: Cheque): ChequeAction[] =>
+      canManage ? availableActions(cheque.direction, cheque.status) : [],
+    [canManage],
+  );
+
   const openCreate = useCallback(() => {
+    if (!canManage) return;
     setLocalError("");
+    setReplacing(null);
     setCreateOpen(true);
-  }, []);
+  }, [canManage]);
+
+  /**
+   * Registering the cheque a counterparty hands over after one bounced. The
+   * accounting is the ordinary registration's — what makes it a replacement
+   * is the recorded link, which is what the history drills through.
+   */
+  const openReplacement = useCallback(
+    (cheque: Cheque) => {
+      if (!canManage) return;
+      setLocalError("");
+      closeDetail();
+      setReplacing(cheque);
+      setCreateOpen(true);
+    },
+    [canManage, closeDetail],
+  );
 
   const openAction = useCallback((cheque: Cheque, act: ChequeAction) => {
+    if (!canManage) return;
     setLocalError("");
     setActionError("");
     // Never stack a second modal on the detail modal — that traps focus between
     // two dialogs on keyboard and makes the close affordance ambiguous.
-    setDetail(null);
+    closeDetail();
     setAction({ cheque, act });
-  }, []);
+  }, [canManage, closeDetail]);
 
   return (
     <div className="space-y-4" dir="rtl">
@@ -554,17 +867,23 @@ export function ChequesSection({
             </CardDescription>
           </div>
           <CardAction className="flex flex-wrap items-center gap-2 self-start">
-            <Button onClick={openCreate} className="gap-1.5">
-              <PlusIcon className="size-4" />
-              ثبت چک جدید
-            </Button>
+            {canManage ? (
+              <Button onClick={openCreate} className="gap-1.5">
+                <PlusIcon className="size-4" />
+                ثبت چک جدید
+              </Button>
+            ) : (
+              <Badge variant="secondary" className="font-normal">
+                دسترسی فقط خواندنی
+              </Badge>
+            )}
           </CardAction>
         </CardHeader>
 
         {/* KPI strip */}
         {kpis ? (
           <CardContent className="pt-0">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <ChequeToneTile
                 icon={WalletIcon}
                 label={
@@ -584,6 +903,21 @@ export function ChequesSection({
                 tone={kpis.overdueCount > 0 ? "destructive" : "muted"}
               />
               <ChequeToneTile
+                icon={AlertTriangleIcon}
+                label={
+                  direction === "receivable"
+                    ? "چک‌های برگشتی تعیین‌تکلیف‌نشده"
+                    : "چک‌های برگشتی پرداختنی"
+                }
+                value={money.format(kpis.totalReturned)}
+                hint={
+                  kpis.returnedCount > 0
+                    ? `${toPersianDigits(kpis.returnedCount)} فقره — مانده در حساب چک‌های برگشتی`
+                    : "موردی باز نیست"
+                }
+                tone={kpis.returnedCount > 0 ? "destructive" : "muted"}
+              />
+              <ChequeToneTile
                 icon={Clock3Icon}
                 label="۷ روز آینده"
                 value={toPersianDigits(kpis.dueSoonCount) + " فقره"}
@@ -592,16 +926,41 @@ export function ChequesSection({
               />
               <ChequeToneTile
                 icon={CheckCircle2Icon}
-                label="وضعیت‌ها"
-                value={
-                  direction === "receivable"
-                    ? `${toPersianDigits(kpis.byStatus["on_hand"] ?? 0)} نزد صندوق · ${toPersianDigits(kpis.byStatus["in_collection"] ?? 0)} در وصول`
-                    : `${toPersianDigits(kpis.byStatus["issued"] ?? 0)} صادرشده · ${toPersianDigits(kpis.byStatus["cleared"] ?? 0)} پاس‌شده`
-                }
-                hint="تفکیک بر پایه آخرین وضعیت"
+                label="تعیین‌تکلیف‌شده"
+                value={toPersianDigits(kpis.settledCount) + " فقره"}
+                hint={`وصول‌شده، ابطال‌شده یا تعیین‌تکلیف‌شده — از ${toPersianDigits(kpis.totalCount)} فقره`}
                 tone="muted"
               />
             </div>
+
+            {/* Where the register's value actually sits. Each line names the
+                control account it reconciles to, so "the register says X"
+                and "the ledger says X" are the same claim. */}
+            {summary ? (
+              <ul className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {categoryBreakdown(direction, summary).map((row) => (
+                  <li
+                    key={row.key}
+                    className="flex items-center justify-between gap-2 rounded-lg border bg-background/60 px-3 py-2"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-xs font-medium">{row.label}</span>
+                      <span className="block text-[11px] text-muted-foreground" dir="rtl">
+                        {row.account}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-end">
+                      <span className="block text-xs font-semibold tabular-nums">
+                        {money.format(row.bucket.total)}
+                      </span>
+                      <span className="block text-[11px] text-muted-foreground">
+                        {toPersianDigits(row.bucket.count)} فقره
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
 
             {/* Due-date distribution — counts only live cheques, so a cleared
                 item does not masquerade as an upcoming one. */}
@@ -661,7 +1020,7 @@ export function ChequesSection({
       <Card>
         <CardContent className="space-y-4 pt-6">
           {/* Search + selects */}
-          <div className="grid gap-3 lg:grid-cols-[1.4fr_0.9fr_0.9fr_0.9fr]">
+          <div className="grid gap-3 lg:grid-cols-[1.4fr_0.9fr_0.9fr_0.9fr_0.9fr]">
             <div className="relative">
               <SearchIcon className="pointer-events-none absolute end-auto start-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -679,6 +1038,11 @@ export function ChequesSection({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">همه وضعیت‌ها</SelectItem>
+                {STATUS_GROUP_OPTIONS.map((group) => (
+                  <SelectItem key={group.value} value={group.value}>
+                    {group.label}
+                  </SelectItem>
+                ))}
                 {availableStatusesFor(direction).map((s) => (
                   <SelectItem key={s} value={s}>
                     {STATUS_LABELS[s]}
@@ -701,6 +1065,22 @@ export function ChequesSection({
               </SelectContent>
             </Select>
 
+            {branches.length > 1 ? (
+              <Select value={branchFilter} onValueChange={setBranchFilter}>
+                <SelectTrigger aria-label="فیلتر شعبه">
+                  <SelectValue placeholder="شعبه" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">همه شعب</SelectItem>
+                  {branches.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
+
             <Select value={sortBy} onValueChange={setSortBy}>
               <SelectTrigger aria-label="مرتب‌سازی چک‌ها">
                 <SelectValue placeholder="مرتب‌سازی" />
@@ -714,8 +1094,38 @@ export function ChequesSection({
             </Select>
           </div>
 
+          {/* The treasurer's question: what falls due between these two dates.
+              Shamsi throughout — the wire carries ISO, the reader never sees
+              it — and validated again on the server. */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:w-2/3">
+            <div className="flex items-center gap-2">
+              <span id="cheque-due-from-label" className="shrink-0 text-xs text-muted-foreground">
+                سررسید از
+              </span>
+              <JalaliDatePicker
+                value={dueFrom}
+                onChange={setDueFrom}
+                labelledBy="cheque-due-from-label"
+                placeholder="بدون محدودیت"
+                className="flex-1"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span id="cheque-due-to-label" className="shrink-0 text-xs text-muted-foreground">
+                تا
+              </span>
+              <JalaliDatePicker
+                value={dueTo}
+                onChange={setDueTo}
+                labelledBy="cheque-due-to-label"
+                placeholder="بدون محدودیت"
+                className="flex-1"
+              />
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center gap-2">
-            {(query || statusFilter !== "all" || bankFilter !== "all") && (
+            {(query || statusFilter !== "all" || bankFilter !== "all" || branchFilter !== "all" || dueFrom || dueTo) && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -723,6 +1133,9 @@ export function ChequesSection({
                   setQuery("");
                   setStatusFilter("all");
                   setBankFilter("all");
+                  setBranchFilter("all");
+                  setDueFrom("");
+                  setDueTo("");
                 }}
                 className="h-7 gap-1.5 px-2.5 text-xs"
               >
@@ -733,13 +1146,13 @@ export function ChequesSection({
             <span className="text-xs text-muted-foreground">
               {cheques === null
                 ? "در حال بارگذاری…"
-                : `${toPersianDigits(filtered.length)} از ${toPersianDigits(cheques.length)} چک`}
+                : `${toPersianDigits(filtered.length)} از ${toPersianDigits(total)} چک`}
               {direction === "receivable" ? " دریافتی" : " صادرشده"}
             </span>
             <Separator orientation="vertical" className="mx-1 h-4" />
             <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-              <FilterIcon className="size-3.5" /> فیلتر ترکیبی بر اساس جستجو،
-              وضعیت و بانک
+              <FilterIcon className="size-3.5" /> جستجو، وضعیت، بانک، شعبه و
+              بازهٔ سررسید روی سرور اعمال می‌شود
             </span>
           </div>
 
@@ -907,16 +1320,20 @@ export function ChequesSection({
                                     variant="ghost"
                                     size="sm"
                                     className="h-8 px-2.5"
-                                    onClick={() => setDetail(c)}
+                                    onClick={() => showDetail(c)}
+                                    // Every row carries the same visible «جزئیات»;
+                                    // the serial is what tells them apart aloud.
+                                    aria-label={`جزئیات چک ${toPersianDigits(c.serialNumber)}`}
                                   >
                                     <EyeIcon className="size-4" />
                                     جزئیات
                                   </Button>
                                   <ChequeRowActions
                                     cheque={c}
+                                    actions={actionsFor(c)}
                                     busy={busy}
                                     onAction={(act) => openAction(c, act)}
-                                    onDetail={() => setDetail(c)}
+                                    onDetail={() => showDetail(c)}
                                   />
                                 </div>
                               </TableCell>
@@ -927,7 +1344,7 @@ export function ChequesSection({
                       <TableFooter>
                         <TableRow>
                           <TableCell colSpan={3} className="font-medium">
-                            جمع فهرست فعلی
+                            جمع ردیف‌های نمایش‌داده‌شده
                           </TableCell>
                           <TableCell className="font-bold tabular-nums">
                             {money.format(
@@ -938,7 +1355,8 @@ export function ChequesSection({
                             colSpan={2}
                             className="text-xs text-muted-foreground"
                           >
-                            {toPersianDigits(filtered.length)} فقره
+                            {toPersianDigits(filtered.length)} از{" "}
+                            {toPersianDigits(total)} فقره
                           </TableCell>
                         </TableRow>
                       </TableFooter>
@@ -1053,22 +1471,23 @@ export function ChequesSection({
                                 variant="outline"
                                 size="sm"
                                 className="flex-1"
-                                onClick={() => setDetail(c)}
+                                onClick={() => showDetail(c)}
+                                aria-label={`جزئیات و تاریخچهٔ چک ${toPersianDigits(c.serialNumber)}`}
                               >
                                 <EyeIcon className="size-4" /> جزئیات و تاریخچه
                               </Button>
                               <ChequeRowActions
                                 cheque={c}
+                                actions={actionsFor(c)}
                                 busy={busy}
                                 onAction={(act) => openAction(c, act)}
-                                onDetail={() => setDetail(c)}
+                                onDetail={() => showDetail(c)}
                               />
                             </div>
 
-                            {availableActions(c.direction, c.status).length >
-                            0 ? (
+                            {actionsFor(c).length > 0 ? (
                               <div className="flex flex-wrap gap-1.5 border-t pt-3">
-                                {availableActions(c.direction, c.status).map(
+                                {actionsFor(c).map(
                                   (act) => (
                                     <Button
                                       key={act}
@@ -1095,6 +1514,28 @@ export function ChequesSection({
                       );
                     })}
                   </div>
+
+                  {hasMore || moreError ? (
+                    <div className="flex flex-col items-center gap-2 pt-4">
+                      {moreError ? (
+                        <p className="text-xs text-destructive" role="alert">
+                          {moreError}
+                        </p>
+                      ) : null}
+                      <Button
+                        variant="outline"
+                        onClick={loadMore}
+                        disabled={cheques === null || loadingMore}
+                        aria-busy={loadingMore}
+                      >
+                        {loadingMore
+                          ? "در حال بارگذاری…"
+                          : moreError
+                            ? "تلاش دوباره"
+                            : `نمایش ${toPersianDigits(PAGE_SIZE)} مورد بیشتر`}
+                      </Button>
+                    </div>
+                  ) : null}
                 </>
               )}
             </TabsContent>
@@ -1118,33 +1559,47 @@ export function ChequesSection({
         </CardFooter>
       </Card>
 
-      {/* Create dialog */}
+      {/* Create dialog — never mounted for a read-only member. */}
+      {canManage ? (
       <CreateChequeDialog
         open={createOpen}
         onOpenChange={(open) => {
           setCreateOpen(open);
-          if (!open) setLocalError("");
+          if (!open) {
+            setLocalError("");
+            setReplacing(null);
+          }
         }}
         direction={direction}
+        replaces={replacing}
         customers={customers}
         suppliers={suppliers}
         counterpartyLoadError={counterpartyLoadError}
         busy={busy}
         onCreated={() => {
           setCreateOpen(false);
+          setReplacing(null);
           setRefreshKey((k) => k + 1);
         }}
         run={run}
         onError={setLocalError}
       />
+      ) : null}
 
       {/* Detail dialog */}
       {detail ? (
         <ChequeDetailDialog
           cheque={detail}
-          onClose={() => setDetail(null)}
+          onClose={closeDetail}
+          actions={actionsFor(detail)}
           onAction={(act) => openAction(detail, act)}
+          onReplace={canManage ? () => openReplacement(detail) : undefined}
+          canManage={canManage}
+          customers={customers}
           suppliers={suppliers}
+          onOpenCheque={openChequeById}
+          navigation={detailNav}
+          onRetryNavigation={() => detailNav && openChequeById(detailNav.id)}
           money={money}
           busy={busy}
         />
@@ -1233,8 +1688,22 @@ function ChequeToneTile({
 
 function ChequesSkeleton() {
   return (
-    <div className="space-y-3">
-      <div className="hidden lg:block">
+    /*
+     * The register's busy state is announced, like every other data region
+     * in this app (`page-chrome`'s `LoadingSkeleton` is the reference): a
+     * reader on a screen reader otherwise hears nothing at all between
+     * asking for the page and the rows arriving. The bars themselves are
+     * decoration, so they are hidden from the accessibility tree — and the
+     * visual harness waits on exactly this signal before photographing.
+     */
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="در حال بارگذاری فهرست چک‌ها"
+      className="space-y-3"
+    >
+      <div aria-hidden="true" className="hidden lg:block">
         <div className="overflow-hidden rounded-xl border">
           <div className="space-y-0">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -1251,7 +1720,7 @@ function ChequesSkeleton() {
           </div>
         </div>
       </div>
-      <div className="grid gap-3 lg:hidden">
+      <div aria-hidden="true" className="grid gap-3 lg:hidden">
         {Array.from({ length: 3 }).map((_, i) => (
           <Card key={i} className="p-4">
             <Skeleton className="h-5 w-32" />
@@ -1262,6 +1731,27 @@ function ChequesSkeleton() {
       </div>
     </div>
   );
+}
+
+/**
+ * Radix hands focus back only to a `Trigger`, and these register dialogs open
+ * from plain buttons, so focus fell to the page's body on every close. The
+ * control that held focus when the dialog opened is remembered and given focus
+ * back when it closes — unless it has been removed in the meantime.
+ */
+function useReturnFocusOnClose() {
+  const opener = useRef<HTMLElement | null>(null);
+  const onOpenAutoFocus = useCallback(() => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+  }, []);
+  const onCloseAutoFocus = useCallback((event: Event) => {
+    event.preventDefault();
+    const target = opener.current;
+    opener.current = null;
+    if (target?.isConnected) target.focus();
+  }, []);
+  return { onOpenAutoFocus, onCloseAutoFocus };
 }
 
 function ChequeLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -1320,16 +1810,18 @@ function EmptyCheques({
 
 function ChequeRowActions({
   cheque,
+  actions,
   busy,
   onAction,
   onDetail,
 }: {
   cheque: Cheque;
+  /** Already gated: empty for a read-only member, so nothing is drawn. */
+  actions: ChequeAction[];
   busy: boolean;
   onAction: (act: ChequeAction) => void;
   onDetail: () => void;
 }) {
-  const actions = availableActions(cheque.direction, cheque.status);
   if (actions.length === 0) return null;
   // On desktop we show a dropdown to keep the row tight
   return (
@@ -1340,6 +1832,7 @@ function ChequeRowActions({
           size="sm"
           className="h-8 gap-1"
           disabled={busy}
+          aria-label={`اقدام برای چک ${toPersianDigits(cheque.serialNumber)}`}
         >
           اقدام
           <ChevronDownIcon className="size-3.5 opacity-60" />
@@ -1373,9 +1866,21 @@ function ChequeRowActions({
 
 function availableStatusesFor(direction: ChequeDirection): ChequeStatus[] {
   return direction === "receivable"
-    ? ["on_hand", "in_collection", "endorsed", "cleared", "bounced"]
-    : ["issued", "cleared", "bounced", "cancelled"];
+    ? ["on_hand", "in_collection", "endorsed", "cleared", "bounced", "resolved"]
+    : ["issued", "cleared", "bounced", "cancelled", "resolved"];
 }
+
+/**
+ * The accounting-aware groups the server also understands, offered above the
+ * individual statuses: «در جریان» is where the money still is, «برگشتی
+ * تعیین‌تکلیف‌نشده» is what is stranded in چک‌های برگشتی.
+ */
+const STATUS_GROUP_OPTIONS: { value: string; label: string }[] = [
+  { value: "outstanding", label: "در جریان (دارایی/بدهی باز)" },
+  { value: "returned_unresolved", label: "برگشتی تعیین‌تکلیف‌نشده" },
+  { value: "contingent", label: "واگذارشده (تعهد احتمالی)" },
+  { value: "settled", label: "تعیین‌تکلیف‌شده" },
+];
 
 // ---------------------------------------------------------------------------
 // Detail dialog — timeline + meta + actions
@@ -1384,21 +1889,52 @@ function availableStatusesFor(direction: ChequeDirection): ChequeStatus[] {
 function ChequeDetailDialog({
   cheque,
   onClose,
+  actions,
   onAction,
+  onReplace,
+  canManage,
+  customers,
   suppliers,
+  onOpenCheque,
+  navigation,
+  onRetryNavigation,
   money,
   busy,
 }: {
   cheque: Cheque;
   onClose: () => void;
+  /**
+   * The transitions this member may take now: legal for the cheque *and*
+   * permitted for them. Empty therefore has two very different causes, which
+   * is why `canManage` is passed separately — see the panel below.
+   */
+  actions: ChequeAction[];
   onAction: (act: ChequeAction) => void;
+  /** Offered on a returned cheque only, and only to a member who may write. */
+  onReplace?: () => void;
+  /** Whether this member holds `finance.cheques_manage` at all. */
+  canManage: boolean;
+  customers: Counterparty[];
   suppliers: Counterparty[];
+  /** Opens another cheque's detail in place (the original, or a replacement). */
+  onOpenCheque: (id: string) => void;
+  /** Whether this view is waiting for — or failed to read — a related cheque. */
+  navigation:
+    | { status: "loading"; id: string }
+    | { status: "error"; id: string; message: string }
+    | null;
+  onRetryNavigation: () => void;
   money: ReturnType<typeof useMoney>;
   busy: boolean;
 }) {
   const [events, setEvents] = useState<ChequeEvent[] | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [historyRefresh, setHistoryRefresh] = useState(0);
+  // The journal document behind one history row. An audit screen that says
+  // «سند حسابداری ثبت شد» and leaves the reader to find it by hand is not an
+  // audit screen.
+  const [entryId, setEntryId] = useState<string | null>(null);
+  const focusReturn = useReturnFocusOnClose();
 
   useEffect(() => {
     let current = true;
@@ -1417,18 +1953,73 @@ function ChequeDetailDialog({
     };
   }, [cheque.id, historyRefresh]);
 
-  const actions = availableActions(cheque.direction, cheque.status);
+  /*
+   * The cheque this one replaces and the cheques issued to replace it, read
+   * by id rather than looked up in the register page: the page behind this
+   * dialog is one filtered, paginated slice, and the related cheque is very
+   * often not in it (a replacement is current, its returned original is
+   * settled — two different status filters). Reading them keeps the links
+   * working whatever the list is showing.
+   */
+  const [related, setRelated] = useState<{ replaces: Cheque | null; replacements: Cheque[] } | null>(
+    null,
+  );
+  useEffect(() => {
+    let current = true;
+    setRelated(null);
+    void api<{ replaces?: Cheque | null; replacements?: Cheque[] }>(
+      `/api/ledger/cheques/${cheque.id}`,
+    ).then(({ ok, data }) => {
+      if (!current || !ok) return;
+      setRelated({
+        replaces: data.replaces ?? null,
+        replacements: Array.isArray(data.replacements) ? data.replacements : [],
+      });
+    });
+    return () => {
+      current = false;
+    };
+  }, [cheque.id]);
+
   const endorsedSupplierId = events?.find((event) => event.event === "endorsed")?.endorsedToSupplierId;
   const linkedSupplierId = cheque.direction === "payable" ? cheque.supplierId : endorsedSupplierId;
-  const linkedSupplier = linkedSupplierId
-    ? (suppliers.find((supplier) => supplier.id === linkedSupplierId)?.name ?? "تأمین‌کننده")
-    : null;
+  const linkedSupplierRecord = linkedSupplierId
+    ? suppliers.find((supplier) => supplier.id === linkedSupplierId)
+    : undefined;
+  const linkedSupplier = linkedSupplierId ? (linkedSupplierRecord?.name ?? "تأمین‌کننده") : null;
+  /*
+   * Party links come from stored ids only. `customerId` *is* a party id; a
+   * supplier id is an alias, so its party comes from the A/P directory entry
+   * the picker is already built from. Nothing here is inferred from the memo
+   * or from matching names — a cheque whose counterparty was typed by hand
+   * has no party, and shows plain text, which is the truth.
+   */
+  const customerPartyId =
+    cheque.direction === "receivable" && cheque.customerId
+      ? (customers.find((c) => c.id === cheque.customerId)?.partyId ?? cheque.customerId)
+      : null;
+  const supplierPartyId = linkedSupplierRecord?.partyId ?? null;
+  const counterpartyHref = customerPartyId
+    ? accountingCustomerHref(customerPartyId)
+    : cheque.direction === "payable" && supplierPartyId
+      ? accountingSupplierHref(supplierPartyId)
+      : undefined;
+  const replacesCheque = related?.replaces ?? null;
+  const replacements = related?.replacements ?? [];
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent
         className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
         dir="rtl"
+        {...focusReturn}
+        // The journal entry opened from this history is a layer above the
+        // panel: Escape closes that layer alone, and the panel stays open.
+        onEscapeKeyDown={(event) => {
+          if (entryId === null) return;
+          event.preventDefault();
+          setEntryId(null);
+        }}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -1450,12 +2041,54 @@ function ChequeDetailDialog({
         </DialogHeader>
 
         <div className="grid gap-4">
+          {/*
+            Reading a related cheque is a request, and the reader is told so.
+            It is announced in place rather than by swapping the dialog out:
+            `role="status"` keeps focus where it is and lets a screen reader
+            hear the wait, and the failure below is an `alert` with the one
+            action that helps — try again — instead of a link that silently
+            did nothing.
+          */}
+          {navigation?.status === "loading" ? (
+            // A busy *label*, not a spinner: the design system reserves
+            // motion for skeletons of regions, and an action in flight says
+            // so in words (docs/design-system.md §Charts and loading).
+            <p
+              role="status"
+              aria-live="polite"
+              className="rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+            >
+              در حال باز کردن چک مرتبط…
+            </p>
+          ) : null}
+          {navigation?.status === "error" ? (
+            <Alert variant="destructive" className="items-start">
+              <AlertTriangleIcon className="mt-0.5 size-4" />
+              <div className="min-w-0 flex-1">
+                <AlertTitle>چک مرتبط باز نشد</AlertTitle>
+                <AlertDescription className="leading-6">{navigation.message}</AlertDescription>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-2"
+                  onClick={onRetryNavigation}
+                  disabled={busy}
+                >
+                  تلاش دوباره
+                </Button>
+              </div>
+            </Alert>
+          ) : null}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">مشخصات چک</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2">
-              <DetailItem label="طرف حساب" value={cheque.counterpartyName} />
+              <DetailItem
+                label="طرف حساب"
+                value={cheque.counterpartyName}
+                href={counterpartyHref}
+              />
               <DetailItem label="بانک" value={cheque.bankName} />
               <DetailItem
                 label="شماره چک"
@@ -1477,6 +2110,61 @@ function ChequeDetailDialog({
                 value={toPersianDigits(formatJalali(cheque.issueDate))}
               />
               <DetailItem label="وضعیت چک" value={STATUS_LABELS[cheque.status]} />
+              {/* The branch that owns the instrument: every entry of this
+                  cheque's life posts there, whatever branch the operator is
+                  currently switched into. */}
+              <DetailItem
+                label="شعبه ثبت چک"
+                value={cheque.locationName ?? "کل کسب‌وکار"}
+              />
+              {(cheque.replacedByAmount ?? 0) > 0 ? (
+                <DetailItem
+                  label="جایگزین‌شده تا کنون"
+                  value={`${money.format(cheque.replacedByAmount ?? 0)} از ${money.format(cheque.amount)}`}
+                  className={replacements.length > 0 ? "sm:col-span-2" : undefined}
+                />
+              ) : null}
+              {replacements.length > 0 ? (
+                <div className="sm:col-span-2">
+                  <p className="text-xs text-muted-foreground">چک‌های جایگزین</p>
+                  <ul className="mt-1 grid gap-1">
+                    {replacements.map((child) => (
+                      <li key={child.id}>
+                        <button
+                          type="button"
+                          onClick={() => onOpenCheque(child.id)}
+                          className="inline-flex items-center gap-1 rounded text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <span dir="ltr">{toPersianDigits(child.serialNumber)}</span>
+                          <span>· {money.format(child.amount)}</span>
+                          <span>· {STATUS_LABELS[child.status]}</span>
+                          <ArrowLeftIcon aria-hidden className="size-3.5 shrink-0" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {cheque.replacesChequeId ? (
+                <DetailItem
+                  label="جایگزین چک برگشتی"
+                  value={
+                    replacesCheque
+                      ? toPersianDigits(replacesCheque.serialNumber)
+                      : cheque.replacesSerialNumber
+                        ? toPersianDigits(cheque.replacesSerialNumber)
+                        : "ثبت‌شده"
+                  }
+                  dir="ltr"
+                  // The original is read by id, so the link survives the
+                  // register being filtered to a status it is not in.
+                  onClick={
+                    replacesCheque
+                      ? () => onOpenCheque(cheque.replacesChequeId as string)
+                      : undefined
+                  }
+                />
+              ) : null}
               {cheque.accountNumber ? (
                 <DetailItem
                   label="شماره حساب"
@@ -1488,6 +2176,7 @@ function ChequeDetailDialog({
                 <DetailItem
                   label={cheque.direction === "payable" ? "تأمین‌کننده" : "واگذارشده به"}
                   value={linkedSupplier}
+                  href={supplierPartyId ? accountingSupplierHref(supplierPartyId) : undefined}
                 />
               ) : null}
               {cheque.memo ? (
@@ -1510,8 +2199,19 @@ function ChequeDetailDialog({
             </CardHeader>
             <CardContent>
               {actions.length === 0 ? (
+                /*
+                 * Two unrelated reasons produce no buttons, and saying «در
+                 * وضعیت نهایی است» for both told a `ledger.view` reader that
+                 * a live on-hand cheque was finished — the opposite of the
+                 * truth. The legal state of the instrument and this member's
+                 * permission are reported separately.
+                 */
                 <p className="rounded-lg border border-dashed bg-muted/30 px-3 py-4 text-center text-xs text-muted-foreground">
-                  این چک در وضعیت نهایی است و اقدام دیگری ندارد.
+                  {isTerminal(cheque.direction, cheque.status)
+                    ? "این چک در وضعیت نهایی است و اقدام دیگری ندارد."
+                    : canManage
+                      ? "در این وضعیت اقدام دیگری برای این چک تعریف نشده است."
+                      : `این چک هنوز در جریان است، اما ثبت اقدام روی چک‌ها به دسترسی «مدیریت چک‌ها» نیاز دارد. وضعیت فعلی: ${STATUS_LABELS[cheque.status]}.`}
                 </p>
               ) : (
                 <div className="flex flex-wrap gap-2">
@@ -1586,10 +2286,19 @@ function ChequeDetailDialog({
                           {toPersianDigits(formatJalali(e.occurredOn))}
                         </span>
                         {e.entryId ? (
+                          <Button
+                            variant="link"
+                            size="sm"
+                            className="h-auto p-0 text-xs"
+                            onClick={() => setEntryId(e.entryId)}
+                          >
+                            مشاهده سند حسابداری
+                          </Button>
+                        ) : (
                           <span className="text-xs text-muted-foreground">
-                            · سند حسابداری ثبت شد
+                            · بدون سند (این مرحله مبلغی جابه‌جا نکرد)
                           </span>
-                        ) : null}
+                        )}
                       </div>
                       {e.memo ? (
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -1612,14 +2321,75 @@ function ChequeDetailDialog({
           </Card>
         </div>
 
-        <DialogFooter className="sm:justify-start">
+        <DialogFooter className="flex-wrap gap-2 sm:justify-start">
+          {onReplace && cheque.status === "resolved" && replaceableRemainder(cheque) > 0 ? (
+            <Button onClick={onReplace} className="gap-1.5">
+              <PlusIcon className="size-4" /> ثبت چک جایگزین
+            </Button>
+          ) : null}
+          {cheque.status === "bounced" ? (
+            // Not an option yet, and saying why is the point: the balance is
+            // still in چک‌های برگشتی, and a replacement registered now would
+            // credit a receivable nobody restored.
+            <p className="basis-full text-xs leading-5 text-muted-foreground">
+              برای ثبت چک جایگزین، ابتدا «بازگشت به حساب طرف» را انجام دهید تا
+              مانده چک برگشتی به حساب طرف حساب برگردد.
+            </p>
+          ) : null}
           <Button variant="outline" onClick={onClose}>
             بستن
           </Button>
         </DialogFooter>
+
+        {entryId ? (
+          <JournalPeekDialog
+            entryId={entryId}
+            title="سند این مرحله از زندگی چک"
+            onClose={() => setEntryId(null)}
+          />
+        ) : null}
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * The register's value by accounting category, each tied to the control
+ * account it must agree with. Payable cancellation is its own line because
+ * «ابطال» is not «وصول»: it gives the liability back to the supplier, and a
+ * treasurer reconciling 2121 needs to see it separately.
+ */
+/**
+ * How much of a returned cheque is still unreplaced. Splitting one returned
+ * cheque into several smaller replacements is ordinary practice, so the
+ * question is never "has it been replaced" but "is there anything left" —
+ * and the server refuses anything above this remainder anyway.
+ */
+function replaceableRemainder(cheque: Cheque): number {
+  return Math.max(0, cheque.amount - (cheque.replacedByAmount ?? 0));
+}
+
+function categoryBreakdown(
+  direction: ChequeDirection,
+  summary: ChequeSummary,
+): { key: string; label: string; account: string; bucket: SummaryBucket }[] {
+  if (direction === "receivable") {
+    return [
+      { key: "onHand", label: "نزد صندوق", account: "۱۲۴۱ چک‌های دریافتنی نزد صندوق", bucket: summary.onHand },
+      { key: "inCollection", label: "در جریان وصول", account: "۱۲۴۲ چک‌های در جریان وصول", bucket: summary.inCollection },
+      { key: "contingent", label: "ظهرنویسی‌شده (تعهد احتمالی)", account: "خارج از دارایی‌ها — بازگشت در صورت برگشت چک", bucket: summary.contingent },
+      { key: "returned", label: "برگشتی تعیین‌تکلیف‌نشده", account: "۱۲۴۴ چک‌های برگشتی", bucket: summary.returnedUnresolved },
+      { key: "resolved", label: "بازگشته به حساب طرف", account: "۱۲۰۰ حساب‌های دریافتنی", bucket: summary.resolved },
+      { key: "cleared", label: "وصول‌شده", account: "۱۱۱۰ بانک", bucket: summary.cleared },
+    ];
+  }
+  return [
+    { key: "issued", label: "صادرشده در جریان", account: "۲۱۲۱ اسناد پرداختنی", bucket: summary.issued },
+    { key: "returned", label: "برگشتی تعیین‌تکلیف‌نشده", account: "۲۱۲۲ چک‌های پرداختنی برگشتی", bucket: summary.returnedUnresolved },
+    { key: "resolved", label: "بازگشته به حساب تأمین‌کننده", account: "۲۱۰۰ حساب‌های پرداختنی", bucket: summary.resolved },
+    { key: "cancelled", label: "ابطال‌شده", account: "۲۱۰۰ حساب‌های پرداختنی — بدهی بازگشته", bucket: summary.cancelled },
+    { key: "cleared", label: "پاس‌شده", account: "۱۱۱۰ بانک", bucket: summary.cleared },
+  ];
 }
 
 function DetailItem({
@@ -1627,18 +2397,40 @@ function DetailItem({
   value,
   dir,
   className,
+  href,
+  onClick,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   dir?: "ltr" | "rtl";
   className?: string;
+  /** Navigates to the canonical screen for the thing this field names. */
+  href?: string;
+  /** In-screen navigation (another cheque), when there is no route to link to. */
+  onClick?: () => void;
 }) {
+  const linkClass =
+    "mt-1 inline-flex max-w-full items-center gap-1 break-words rounded text-start text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
   return (
     <div className={className}>
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 break-words text-sm font-medium" dir={dir}>
-        {value}
-      </p>
+      {href ? (
+        // A real anchor, so it is keyboard reachable, middle-clickable and
+        // readable by a screen reader as the link it is.
+        <Link href={href} className={linkClass} dir={dir}>
+          {value}
+          <ExternalLinkIcon aria-hidden className="size-3.5 shrink-0" />
+        </Link>
+      ) : onClick ? (
+        <button type="button" onClick={onClick} className={linkClass} dir={dir}>
+          {value}
+          <ArrowLeftIcon aria-hidden className="size-3.5 shrink-0" />
+        </button>
+      ) : (
+        <p className="mt-1 break-words text-sm font-medium" dir={dir}>
+          {value}
+        </p>
+      )}
     </div>
   );
 }
@@ -1652,6 +2444,8 @@ function eventLabel(event: string): string {
     cleared: "وصول / پاس",
     bounced: "برگشت",
     cancelled: "ابطال",
+    settled: "تسویه چک برگشتی",
+    restored: "بازگشت مانده به حساب طرف",
   };
   return m[event] ?? event;
 }
@@ -1664,6 +2458,7 @@ function CreateChequeDialog({
   open,
   onOpenChange,
   direction,
+  replaces,
   customers,
   suppliers,
   counterpartyLoadError,
@@ -1675,6 +2470,8 @@ function CreateChequeDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   direction: ChequeDirection;
+  /** Set when this registration replaces a returned cheque. */
+  replaces: Cheque | null;
   customers: Counterparty[];
   suppliers: Counterparty[];
   counterpartyLoadError: string;
@@ -1685,6 +2482,7 @@ function CreateChequeDialog({
   ) => Promise<boolean>;
   onError: (m: string) => void;
 }) {
+  const focusReturn = useReturnFocusOnClose();
   const money = useMoney();
   const [dir, setDir] = useState<ChequeDirection>(direction);
   const counterparties = dir === "receivable" ? customers : suppliers;
@@ -1700,6 +2498,27 @@ function CreateChequeDialog({
   const [counterpartyName, setCounterpartyName] = useState("");
   const [memo, setMemo] = useState("");
   const [formError, setFormError] = useState("");
+  // The exception, never the default: a cheque with no party lands in the A/R
+  // or A/P subledger's unattributed bucket, which no reconciliation can
+  // explain. Ticking this is the user saying they mean it.
+  const [unattributed, setUnattributed] = useState(false);
+  /*
+   * One key per *operation*, derived from the payload — see
+   * `src/lib/operation-key.ts`.
+   *
+   * A key held for the whole form was half right: a retry after a lost
+   * response did return the first cheque instead of registering a second
+   * instrument. But it was also held across *edits*, so the ordinary
+   * recovery — the server rejects the amount, the user fixes it and submits
+   * again — re-sent a different payload under the same key, which the server
+   * now correctly refuses with `idempotency_key_conflict`, leaving the form
+   * unusable until it was closed and reopened. Deriving the key from the
+   * payload keeps the retry safe and lets the correction through — and the
+   * holder keeps every payload whose fate is still unknown, so editing away
+   * from one (or closing the form) cannot throw away the identity of a
+   * registration that may already have committed.
+   */
+  const createKeys = useRef(new OperationKeyHolder());
 
   const reportError = useCallback(
     (message: string) => {
@@ -1716,6 +2535,19 @@ function CreateChequeDialog({
     setCounterpartyId("");
     setCounterpartyName("");
   }, [dir]);
+  // Pre-fill from the returned cheque being replaced: same counterparty, same
+  // bank, and the link the history will show.
+  useEffect(() => {
+    if (!open || !replaces) return;
+    setDir(replaces.direction);
+    setBankName(replaces.bankName);
+    setCounterpartyName(replaces.counterpartyName);
+    setCounterpartyId(
+      (replaces.direction === "receivable" ? replaces.customerId : replaces.supplierId) ?? "",
+    );
+    setAmount(String(replaces.amount));
+  }, [open, replaces]);
+
   useEffect(() => {
     if (!open) {
       setSerialNumber("");
@@ -1729,6 +2561,11 @@ function CreateChequeDialog({
       setCounterpartyName("");
       setMemo("");
       setFormError("");
+      setUnattributed(false);
+      // Deliberately *not* clearing the operation keys: closing the dialog is
+      // not evidence that a submission failed. If the last attempt's fate is
+      // unknown, reopening the form and submitting the same cheque again must
+      // still be the retry of that attempt, not a second registration.
     }
   }, [open]);
 
@@ -1761,6 +2598,12 @@ function CreateChequeDialog({
       reportError(errorMessage("counterparty_name_required"));
       return;
     }
+    if (!counterpartyId && !unattributed) {
+      reportError(
+        errorMessage(dir === "receivable" ? "customer_required" : "supplier_required"),
+      );
+      return;
+    }
     const body: Record<string, unknown> = {
       direction: dir,
       serialNumber: serialNumber.trim(),
@@ -1774,9 +2617,37 @@ function CreateChequeDialog({
       memo: memo.trim() || undefined,
       [dir === "receivable" ? "customerId" : "supplierId"]:
         counterpartyId || undefined,
+      allowUnattributed: !counterpartyId && unattributed ? true : undefined,
+      replacesChequeId: replaces?.id,
     };
+    // Every accounting-significant field of this registration, in the order
+    // the server fingerprints them. The memo is deliberately absent: fixing a
+    // typo in the note is still the same cheque.
+    const signature = operationSignature([
+      dir,
+      serialNumber.trim(),
+      sayadId.trim(),
+      bankName.trim(),
+      accountNumber.trim(),
+      rial,
+      issueDate,
+      dueDate,
+      name,
+      counterpartyId,
+      replaces?.id ?? null,
+      !counterpartyId && unattributed,
+    ]);
+    try {
+      body.idempotencyKey = createKeys.current.keyFor(signature);
+    } catch (err) {
+      if (err instanceof OperationKeyLimitError) {
+        reportError(TOO_MANY_UNRESOLVED);
+        return;
+      }
+      throw err;
+    }
     reportError("");
-    let response: { ok: boolean; data: { error?: string } } | undefined;
+    let response: { ok: boolean; status: number; data: { error?: string } } | undefined;
     const ok = await run(async () => {
       response = await api<{ error?: string }>("/api/ledger/cheques", {
         method: "POST",
@@ -1784,6 +2655,7 @@ function CreateChequeDialog({
       });
       return response;
     });
+    createKeys.current.resolve(signature, outcomeOf(response));
     if (ok) onCreated();
     else reportError(errorMessage(response?.data.error));
   }
@@ -1793,13 +2665,21 @@ function CreateChequeDialog({
       <DialogContent
         className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
         dir="rtl"
+        {...focusReturn}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <PlusIcon className="size-5 text-primary" />
-            ثبت چک جدید
+            {replaces ? "ثبت چک جایگزین" : "ثبت چک جدید"}
           </DialogTitle>
           <DialogDescription>
+            {replaces ? (
+              <span className="mb-1 block">
+                جایگزین چک برگشتی {toPersianDigits(replaces.serialNumber)} —
+                مانده آن قبلاً با «بازگشت به حساب طرف» از حساب چک‌های برگشتی
+                خارج شده است، بنابراین این ثبت بدهی را دوباره تسویه نمی‌کند.
+              </span>
+            ) : null}
             چک دریافتی حساب‌های دریافتنی را کاهش می‌دهد؛ چک صادرشده بدهی به
             تأمین‌کننده را در حساب چک‌های صادره قرار می‌دهد. هر دو فوراً سند
             حسابداری می‌خورند.
@@ -1935,7 +2815,8 @@ function CreateChequeDialog({
             </Field>
             <Field>
               <FieldLabel>
-                {dir === "receivable" ? "مشتری" : "تأمین‌کننده"} (اختیاری)
+                {dir === "receivable" ? "مشتری" : "تأمین‌کننده"}{" "}
+                {unattributed ? "(بدون اتصال)" : "*"}
               </FieldLabel>
               <SearchableSelect
                 value={counterpartyId}
@@ -1954,8 +2835,36 @@ function CreateChequeDialog({
                 }
                 ariaLabel={dir === "receivable" ? "مشتری" : "تأمین‌کننده"}
               />
+              <FieldDescription>
+                اتصال به طرف حساب، این چک را در معین دریافتنی/پرداختنی همان طرف
+                می‌نشاند؛ بدون آن قابل مغایرت‌گیری نیست.
+              </FieldDescription>
             </Field>
           </div>
+
+          {/* The exception, visibly an exception. */}
+          {!counterpartyId ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/30 dark:bg-amber-500/10">
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1 size-4 accent-amber-600"
+                  checked={unattributed}
+                  onChange={(e) => setUnattributed(e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium">
+                    ثبت بدون اتصال به طرف حساب
+                  </span>
+                  <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                    فقط برای چک‌های قدیمی یا ناشناس. این چک در سرفصل
+                    دریافتنی/پرداختنی بدون طرف حساب می‌نشیند و برای مغایرت‌گیری
+                    باید بعداً طبقه‌بندی شود.
+                  </span>
+                </span>
+              </label>
+            </div>
+          ) : null}
 
           <Field>
             <FieldLabel htmlFor="cname">
@@ -2042,19 +2951,24 @@ function ChequeActionDialog({
   onConfirm: (body: Record<string, unknown>) => void;
   onError: (m: string) => void;
 }) {
+  const focusReturn = useReturnFocusOnClose();
   const money = useMoney();
   const [occurredOn, setOccurredOn] = useState(todayIsoDate());
   const [memo, setMemo] = useState("");
   // No default: preselecting `suppliers[0]` meant one careless «ظهرنویسی»
   // handed a customer's cheque to whichever supplier sorted first.
   const [supplierId, setSupplierId] = useState("");
+  // The bank's returned-cheque charge, posted to «۵۸۶۰ هزینه چک برگشتی و جرایم
+  // بانکی» alongside the bounce itself. Optional: not every bounce is charged.
+  const [feeAmount, setFeeAmount] = useState("");
 
   const isEndorse = action === "endorse";
+  const isBounce = action === "bounce";
   const isDestructive = action === "bounce" || action === "cancel";
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-md" dir="rtl">
+      <DialogContent className="sm:max-w-md" dir="rtl" {...focusReturn}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {isDestructive ? (
@@ -2118,6 +3032,28 @@ function ChequeActionDialog({
             </FieldDescription>
           </Field>
 
+          {isBounce ? (
+            <Field>
+              <FieldLabel htmlFor="cheque-fee">
+                کارمزد/جریمه بانکی (اختیاری)
+              </FieldLabel>
+              <PersianNumberInput
+                id="cheque-fee"
+                value={feeAmount}
+                onChange={(e) => setFeeAmount(e.target.value)}
+                inputMode="numeric"
+                allowNegative={false}
+                placeholder="۰"
+                aria-label="مبلغ کارمزد چک برگشتی"
+                className="h-10 w-full rounded-lg border border-input bg-transparent px-3 text-sm"
+              />
+              <FieldDescription>
+                در صورت ثبت، همراه همین سند به حساب «هزینه چک برگشتی و جرایم
+                بانکی» منتقل و از بانک کسر می‌شود.
+              </FieldDescription>
+            </Field>
+          ) : null}
+
           <Field>
             <FieldLabel htmlFor="amemo">یادداشت (اختیاری)</FieldLabel>
             <Input
@@ -2133,8 +3069,9 @@ function ChequeActionDialog({
               <AlertTriangleIcon className="size-4" />
               <AlertTitle>تأیید اقدام برگشتی/ابطالی</AlertTitle>
               <AlertDescription>
-                این اقدام وضعیت چک را نهایی می‌کند و در دفتر روزنامه سند
-                برگشتی/ابطالی ثبت خواهد شد.
+                این اقدام سند برگشتی/ابطالی را در دفتر روزنامه ثبت می‌کند. چک
+                برگشتی پس از آن باید تعیین‌تکلیف شود: تسویه نقدی/بانکی یا
+                بازگشت مانده به حساب طرف (و سپس ثبت چک جایگزین).
               </AlertDescription>
             </Alert>
           ) : null}
@@ -2154,6 +3091,9 @@ function ChequeActionDialog({
                 occurredOn: occurredOn || undefined,
                 memo: memo.trim() || undefined,
                 ...(isEndorse ? { endorsedToSupplierId: supplierId } : {}),
+                ...(isBounce && Number(feeAmount) > 0
+                  ? { feeAmount: Number(feeAmount) }
+                  : {}),
               });
             }}
           >

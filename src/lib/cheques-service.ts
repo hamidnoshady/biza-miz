@@ -36,14 +36,18 @@
  * DB-touching, so per repo convention it has no direct unit test — the pure half
  * is `cheques.ts`, and this is covered by integration/cheques.integration.test.ts.
  */
+import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { isUuid } from "./uuid";
 import { accountIdsByCode, postJournalEntry } from "./ledger-service";
 import {
+  canonicalBankName,
+  canonicalSerialNumber,
   CHEQUE_ACTIONS,
   CHEQUE_DIRECTIONS,
+  CHEQUE_STATUSES,
   initialStatus,
   nextStatus,
   normalizeSayadId,
@@ -93,6 +97,9 @@ function requiredIsoDate(value: unknown, missingCode: string, invalidCode: strin
 
 export interface Cheque {
   id: string;
+  /** The branch that owns the instrument — every entry of its life posts here. */
+  locationId: string | null;
+  locationName: string | null;
   direction: ChequeDirection;
   status: ChequeStatus;
   serialNumber: string;
@@ -106,11 +113,19 @@ export interface Cheque {
   customerId: string | null;
   supplierId: string | null;
   memo: string | null;
+  /** Set when this cheque was registered to replace a returned one. */
+  replacesChequeId: string | null;
+  /** That cheque's serial, so the register can name it without a second call. */
+  replacesSerialNumber: string | null;
+  /** Set on a returned cheque that has already been replaced, in whole or in part. */
+  replacedByAmount: number;
   createdAt: string;
 }
 
 interface ChequeRow extends Record<string, unknown> {
   id: string;
+  location_id: string | null;
+  location_name?: string | null;
   direction: ChequeDirection;
   status: ChequeStatus;
   serial_number: string;
@@ -124,12 +139,20 @@ interface ChequeRow extends Record<string, unknown> {
   customer_id: string | null;
   supplier_id: string | null;
   memo: string | null;
-  created_at: string;
+  replaces_cheque_id: string | null;
+  replaces_serial_number?: string | null;
+  replaced_by_amount?: string | null;
+  /** `timestamptz`: a `Date` from pg, a string once it has been through jsonb. */
+  created_at: string | Date;
+  /** The last row's sort key, as canonical text — only ever read for `nextCursor`. */
+  cursor_keys?: string[];
 }
 
 function toCheque(r: ChequeRow): Cheque {
   return {
     id: r.id,
+    locationId: r.location_id,
+    locationName: r.location_name ?? null,
     direction: r.direction,
     status: r.status,
     serialNumber: r.serial_number,
@@ -143,32 +166,398 @@ function toCheque(r: ChequeRow): Cheque {
     customerId: r.customer_id,
     supplierId: r.supplier_id,
     memo: r.memo,
-    createdAt: r.created_at,
+    replacesChequeId: r.replaces_cheque_id,
+    replacesSerialNumber: r.replaces_serial_number ?? null,
+    replacedByAmount: Number(r.replaced_by_amount ?? 0),
+    // `timestamptz` arrives from pg as a `Date`, while this DTO has always
+    // declared a string and the wire has always carried one (JSON.stringify
+    // did the conversion silently). Doing it here makes the declared type
+    // true in memory too — which matters now that a result is stored as
+    // jsonb and replayed: a replay has to be *equal* to the original answer,
+    // not merely equivalent after serialisation.
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
   };
 }
 
-const CHEQUE_COLUMNS = `id, direction, status, serial_number, sayad_id, bank_name, account_number,
+const CHEQUE_COLUMNS = `id, location_id, direction, status, serial_number, sayad_id, bank_name, account_number,
                         amount::text AS amount, issue_date::text AS issue_date, due_date::text AS due_date,
-                        counterparty_name, customer_id, supplier_id, memo, created_at`;
+                        counterparty_name, customer_id, supplier_id, memo, replaces_cheque_id, created_at`;
 
-/** Every cheque of one direction, the ones still alive first and then by due date. */
-export async function listCheques(businessId: string, direction?: ChequeDirection): Promise<Cheque[]> {
+/** The same columns read through the register's `cheques c` alias. */
+const CHEQUE_COLUMNS_PREFIXED = CHEQUE_COLUMNS.split(",")
+  .map((col) => `c.${col.trim()}`)
+  .join(", ");
+
+/** What the register can be narrowed by — all of it resolved in SQL, not React. */
+export interface ChequeListFilters {
+  direction?: ChequeDirection;
+  locationId?: string | null;
+  /** A single status, or one of the accounting-aware groups below. */
+  status?: string | null;
+  bankName?: string | null;
+  /** Inclusive due-date window, ISO (storage/wire form; the UI picks Jalali). */
+  dueFrom?: string | null;
+  dueTo?: string | null;
+  /** Free text over counterparty, bank, serial, صیاد id and memo. */
+  q?: string | null;
+  sort?: string | null;
+  limit?: number;
+  /**
+   * Keyset cursor: the `nextCursor` of the page before. Offset paging is gone
+   * on purpose — a row that changes status between two requests moves within
+   * the ordering, and an offset window then skips or repeats a row nobody
+   * touched. A cursor names the last row read, by its exact sort key.
+   */
+  cursor?: string | null;
+}
+
+export interface ChequeListPage {
+  cheques: Cheque[];
+  total: number;
+  hasMore: boolean;
+  /** Pass back as `cursor` for the next window; `null` when this is the last. */
+  nextCursor: string | null;
+  /**
+   * Accounting-aware totals for the *filtered* set, by where the value sits
+   * rather than by "is the row finished" — see `CHEQUE_STATUS_GROUPS`.
+   */
+  summary: ChequeSummary;
+  banks: string[];
+}
+
+/**
+ * The accounting-aware categories the register reports, each reconciling to a
+ * control account rather than to "is this row finished":
+ *
+ *   onHand            چک‌های نزد صندوق (1241)
+ *   inCollection      چک‌های در جریان وصول (1242)
+ *   contingent        endorsed — off our books, but back if it bounces
+ *   returnedUnresolved چک‌های برگشتی (1244) / چک‌های پرداختنی برگشتی (2122)
+ *   cleared           وصول‌شده/پاس‌شده و تسویه‌شده
+ *   cancelled         ابطال چک صادرشده (payable only)
+ *   resolved          برگشتی که به حساب طرف بازگشته است
+ *
+ * `outstanding` stays as the sum of the two live asset buckets plus issued
+ * payables, because that is the number the KPI strip leads with.
+ *
+ * This replaced a plain "active" group that meant "not cleared, bounced or
+ * cancelled" — which called an endorsed cheque an outstanding asset (it is
+ * not; endorsement already paid the supplier) and dropped a returned cheque
+ * altogether, though it is very much still money, sitting in 1244/2122.
+ */
+export interface ChequeSummaryBucket {
+  count: number;
+  total: number;
+}
+
+export interface ChequeSummary {
+  outstanding: ChequeSummaryBucket;
+  onHand: ChequeSummaryBucket;
+  inCollection: ChequeSummaryBucket;
+  issued: ChequeSummaryBucket;
+  contingent: ChequeSummaryBucket;
+  returnedUnresolved: ChequeSummaryBucket;
+  resolved: ChequeSummaryBucket;
+  cleared: ChequeSummaryBucket;
+  cancelled: ChequeSummaryBucket;
+  /** Kept for the "settled" tab: cleared + cancelled + resolved. */
+  settled: ChequeSummaryBucket;
+  overdue: ChequeSummaryBucket;
+  dueSoon: ChequeSummaryBucket;
+}
+
+export const CHEQUE_STATUS_GROUPS: Record<string, ChequeStatus[]> = {
+  outstanding: ["on_hand", "in_collection", "issued"],
+  contingent: ["endorsed"],
+  returned_unresolved: ["bounced"],
+  settled: ["cleared", "cancelled", "resolved"],
+};
+
+/**
+ * One column of an ordering: the SQL that orders by it, its direction, and its
+ * storage type (for typed cursor comparisons).
+ */
+interface SortColumn {
+  expr: string;
+  dir: "ASC" | "DESC";
+  type: "boolean" | "date" | "bigint" | "timestamptz" | "uuid";
+}
+
+const column = (expr: string, dir: SortColumn["dir"], type: SortColumn["type"]): SortColumn => ({
+  expr,
+  dir,
+  type,
+});
+
+/** Open items first, closed ones after: the register's long-standing grouping. */
+const STATUS_GROUP_COLUMN = column(
+  "(c.status = ANY(ARRAY['cleared', 'bounced', 'cancelled', 'resolved']::cheque_status[]))",
+  "ASC",
+  "boolean",
+);
+
+/**
+ * Every sort ends in `c.id`, and `c.id` is unique: a window is only meaningful
+ * if two rows can never tie, so the cursor always names exactly one row.
+ */
+const SORTS: Record<string, SortColumn[]> = {
+  due_asc: [column("c.due_date", "ASC", "date"), column("c.created_at", "ASC", "timestamptz"), column("c.id", "ASC", "uuid")],
+  due_desc: [column("c.due_date", "DESC", "date"), column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
+  amount_desc: [column("c.amount", "DESC", "bigint"), column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
+  amount_asc: [column("c.amount", "ASC", "bigint"), column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
+  created_desc: [column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
+};
+const DEFAULT_SORT = "due_asc";
+
+/** The full ordering for a sort: the status group, then the sort's own columns. */
+function orderingFor(sort: string): SortColumn[] {
+  return [STATUS_GROUP_COLUMN, ...SORTS[sort]];
+}
+
+/**
+ * The canonical text of one key, independent of the session's DateStyle or
+ * time zone, so a cursor written on one request compares exactly on the next.
+ * Timestamps keep their microseconds: a millisecond round-trip through JS
+ * would silently move a row across the boundary it was read at.
+ */
+function keyTextOf(col: SortColumn): string {
+  if (col.type === "date") return `to_char(${col.expr}, 'YYYY-MM-DD')`;
+  if (col.type === "timestamptz") return `to_char(${col.expr} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+  return `(${col.expr})::text`;
+}
+
+const KEY_PATTERN: Record<SortColumn["type"], RegExp> = {
+  boolean: /^(true|false)$/,
+  date: /^\d{4}-\d{2}-\d{2}$/,
+  bigint: /^\d{1,19}$/,
+  timestamptz: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/,
+  uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+};
+
+function encodeCursor(sort: string, keys: string[]): string {
+  return Buffer.from(JSON.stringify({ s: sort, k: keys }), "utf8").toString("base64url");
+}
+
+/**
+ * Reads a cursor back, or refuses it. A cursor is only ever produced by this
+ * service, so one that does not parse, names another sort, or carries a key of
+ * the wrong shape is a client bug and is answered as one.
+ */
+function decodeCursor(raw: string, sort: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new ChequeError("invalid_cursor");
+  }
+  const { s, k } = (parsed ?? {}) as { s?: unknown; k?: unknown };
+  const columns = orderingFor(sort);
+  if (s !== sort || !Array.isArray(k) || k.length !== columns.length) {
+    throw new ChequeError("invalid_cursor");
+  }
+  columns.forEach((col, i) => {
+    const value = k[i];
+    if (typeof value !== "string" || !KEY_PATTERN[col.type].test(value)) {
+      throw new ChequeError("invalid_cursor");
+    }
+  });
+  return k as string[];
+}
+
+/**
+ * "Strictly after the cursor row" in the given ordering, written as the OR of
+ * one branch per column: equal on every earlier column, and past this one in
+ * its direction. Unique `c.id` at the end means exactly one row is never
+ * returned twice and no row that did not move is ever skipped.
+ */
+function keysetAfter(ordering: SortColumn[], values: string[], params: unknown[]): string {
+  const branches = ordering.map((col, i) => {
+    const conjunct: string[] = [];
+    for (let j = 0; j < i; j += 1) {
+      params.push(values[j]);
+      conjunct.push(`${ordering[j].expr} = $${params.length}::${ordering[j].type}`);
+    }
+    params.push(values[i]);
+    const op = col.dir === "ASC" ? ">" : "<";
+    conjunct.push(`${col.expr} ${op} $${params.length}::${col.type}`);
+    return `(${conjunct.join(" AND ")})`;
+  });
+  return `(${branches.join(" OR ")})`;
+}
+
+const MAX_PAGE = 200;
+
+/**
+ * One page of the register, filtered, sorted and counted in Postgres.
+ *
+ * The screen used to fetch every cheque of a direction and filter in a
+ * `useMemo`: fine for a demo tenant, a download of the whole cheque book for a
+ * real one. Search is folded the same way `normalizeSayadId` folds a صیاد id,
+ * so «۱۲۳» finds "123".
+ */
+export async function listCheques(
+  businessId: string,
+  filters: ChequeListFilters = {},
+): Promise<ChequeListPage> {
+  const { direction } = filters;
   if (direction && !CHEQUE_DIRECTIONS.includes(direction)) {
     throw new ChequeError("invalid_direction");
   }
+
   const params: unknown[] = [businessId];
-  let where = "business_id = $1";
+  let where = "c.business_id = $1";
   if (direction) {
     params.push(direction);
-    where += ` AND direction = $${params.length}`;
+    where += ` AND c.direction = $${params.length}`;
   }
+  if (filters.locationId) {
+    if (!isUuid(filters.locationId)) throw new ChequeError("invalid_location");
+    params.push(filters.locationId);
+    where += ` AND c.location_id = $${params.length}`;
+  }
+  const status = filters.status?.trim();
+  if (status && status !== "all") {
+    const group = CHEQUE_STATUS_GROUPS[status];
+    const statuses = group ?? (CHEQUE_STATUSES.includes(status as ChequeStatus) ? [status] : null);
+    if (!statuses) throw new ChequeError("invalid_status");
+    params.push(statuses);
+    where += ` AND c.status = ANY($${params.length}::cheque_status[])`;
+  }
+  const bankName = filters.bankName?.trim();
+  if (bankName && bankName !== "all") {
+    params.push(canonicalBankName(bankName));
+    where += ` AND c.bank_name_canonical = $${params.length}`;
+  }
+  const dueFrom = optionalIsoDate(filters.dueFrom, "invalid_due_from");
+  const dueTo = optionalIsoDate(filters.dueTo, "invalid_due_to");
+  if (dueFrom && dueTo && dueTo < dueFrom) throw new ChequeError("invalid_due_range");
+  if (dueFrom) {
+    params.push(dueFrom);
+    where += ` AND c.due_date >= $${params.length}`;
+  }
+  if (dueTo) {
+    params.push(dueTo);
+    where += ` AND c.due_date <= $${params.length}`;
+  }
+  const q = filters.q?.trim();
+  if (q) {
+    params.push(`%${q.toLowerCase()}%`);
+    const like = `$${params.length}`;
+    params.push(`%${canonicalSerialNumber(q)}%`);
+    const canonical = `$${params.length}`;
+    where += ` AND (lower(c.counterparty_name) LIKE ${like}
+                 OR lower(c.bank_name) LIKE ${like}
+                 OR lower(COALESCE(c.memo, '')) LIKE ${like}
+                 OR c.serial_number_canonical LIKE ${canonical}
+                 OR COALESCE(c.sayad_id, '') LIKE ${canonical})`;
+  }
+
+  const limit = Math.min(Math.max(Math.trunc(filters.limit ?? 50), 1), MAX_PAGE);
+  const sort = filters.sort && Object.hasOwn(SORTS, filters.sort) ? filters.sort : DEFAULT_SORT;
+  const ordering = orderingFor(sort);
+
+  // The cursor's values go to the page query only; the summary and the bank
+  // list describe the whole filtered set and must not see the window.
+  const pageParams = [...params];
+  let afterCursor = "";
+  if (filters.cursor) {
+    afterCursor = ` AND ${keysetAfter(ordering, decodeCursor(filters.cursor, sort), pageParams)}`;
+  }
+
   const { rows } = await query<ChequeRow>(
-    `SELECT ${CHEQUE_COLUMNS} FROM cheques
-      WHERE ${where}
-      ORDER BY (status IN ('cleared', 'bounced', 'cancelled')), due_date, created_at`,
+    `SELECT ${CHEQUE_COLUMNS_PREFIXED},
+            l.name AS location_name,
+            r.serial_number AS replaces_serial_number,
+            COALESCE(rep.replaced_by_amount, 0)::text AS replaced_by_amount,
+            ARRAY[${ordering.map(keyTextOf).join(", ")}]::text[] AS cursor_keys
+       FROM cheques c
+       LEFT JOIN locations l ON l.id = c.location_id
+       LEFT JOIN cheques r ON r.id = c.replaces_cheque_id
+       LEFT JOIN LATERAL (
+         SELECT SUM(x.amount) AS replaced_by_amount FROM cheques x
+          WHERE x.business_id = c.business_id AND x.replaces_cheque_id = c.id
+       ) rep ON true
+      WHERE ${where}${afterCursor}
+      ORDER BY ${ordering.map((col) => `${col.expr} ${col.dir}`).join(", ")}
+      LIMIT ${limit + 1}`,
+    pageParams,
+  );
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeCursor(sort, last.cursor_keys ?? []) : null;
+
+  // The totals describe the whole filtered set, not the page — a KPI that
+  // only counted the first fifty rows would be worse than none.
+  const { rows: summaryRows } = await query<{
+    status: ChequeStatus;
+    due_date: string;
+    count: string;
+    total: string;
+  }>(
+    `SELECT c.status, c.due_date::text AS due_date, count(*)::text AS count, SUM(c.amount)::text AS total
+       FROM cheques c WHERE ${where} GROUP BY c.status, c.due_date`,
     params,
   );
-  return rows.map(toCheque);
+  const { rows: bankRows } = await query<{ bank_name: string }>(
+    `SELECT DISTINCT ON (c.bank_name_canonical) c.bank_name
+       FROM cheques c WHERE ${where} ORDER BY c.bank_name_canonical, c.bank_name`,
+    params,
+  );
+
+  const today = todayIso();
+  const bucket = { count: 0, total: 0 };
+  const summary: ChequeSummary = {
+    outstanding: { ...bucket },
+    onHand: { ...bucket },
+    inCollection: { ...bucket },
+    issued: { ...bucket },
+    contingent: { ...bucket },
+    returnedUnresolved: { ...bucket },
+    resolved: { ...bucket },
+    cleared: { ...bucket },
+    cancelled: { ...bucket },
+    settled: { ...bucket },
+    overdue: { ...bucket },
+    dueSoon: { ...bucket },
+  };
+  const soonLimit = new Date(Date.parse(`${today}T00:00:00Z`) + 7 * 86_400_000).toISOString().slice(0, 10);
+  let total = 0;
+  for (const row of summaryRows) {
+    const count = Number(row.count);
+    const value = Number(row.total);
+    total += count;
+    const add = (key: keyof ChequeSummary) => {
+      summary[key].count += count;
+      summary[key].total += value;
+    };
+    const PER_STATUS: Partial<Record<ChequeStatus, keyof ChequeSummary>> = {
+      on_hand: "onHand",
+      in_collection: "inCollection",
+      issued: "issued",
+      endorsed: "contingent",
+      bounced: "returnedUnresolved",
+      cleared: "cleared",
+      cancelled: "cancelled",
+      resolved: "resolved",
+    };
+    const own = PER_STATUS[row.status];
+    if (own) add(own);
+    if (CHEQUE_STATUS_GROUPS.outstanding.includes(row.status)) {
+      add("outstanding");
+      if (row.due_date < today) add("overdue");
+      else if (row.due_date <= soonLimit) add("dueSoon");
+    } else if (row.status !== "bounced" && row.status !== "endorsed") add("settled");
+  }
+
+  return {
+    cheques: pageRows.map(toCheque),
+    total,
+    hasMore,
+    nextCursor,
+    summary,
+    banks: bankRows.map((row) => row.bank_name),
+  };
 }
 
 export interface ChequeEvent {
@@ -181,7 +570,15 @@ export interface ChequeEvent {
   createdAt: string;
 }
 
-/** One cheque's history — what happened to it, when, and which entry each step posted. */
+/**
+ * One cheque's history — what happened to it, when, and which entry each step
+ * posted.
+ *
+ * Ordered `occurred_on, created_at, id`: the timeline a treasurer reads is
+ * accounting chronology, and since `transitionCheque` refuses an event dated
+ * before the latest one, insertion order and accounting order now agree —
+ * `created_at, id` is only the tie-break for same-day steps.
+ */
 export async function getChequeHistory(businessId: string, chequeId: string): Promise<ChequeEvent[]> {
   if (!isUuid(chequeId)) throw new ChequeError("cheque_not_found", 404);
   const { rows: chequeRows } = await query<{ id: string }>(
@@ -200,7 +597,8 @@ export async function getChequeHistory(businessId: string, chequeId: string): Pr
     created_at: string;
   }>(
     `SELECT id, event, occurred_on::text AS occurred_on, entry_id, endorsed_to_supplier_id, memo, created_at
-       FROM cheque_events WHERE business_id = $1 AND cheque_id = $2 ORDER BY created_at, id`,
+       FROM cheque_events WHERE business_id = $1 AND cheque_id = $2
+      ORDER BY occurred_on, created_at, id`,
     [businessId, chequeId],
   );
   return rows.map((r) => ({
@@ -214,6 +612,69 @@ export async function getChequeHistory(businessId: string, chequeId: string): Pr
   }));
 }
 
+/** One cheque with the neighbours the detail view needs to navigate to. */
+export interface ChequeDetail {
+  cheque: Cheque;
+  /** The returned cheque this one replaces, when there is one. */
+  replaces: Cheque | null;
+  /** The cheques issued to replace this one, oldest first. */
+  replacements: Cheque[];
+}
+
+/**
+ * A single cheque, by id, enriched exactly like a register row.
+ *
+ * The register page is the only place that had a cheque in memory, so a
+ * detail view survived only as long as the page it came from: changing the
+ * filter or paging past it left a dialog describing a row the screen no
+ * longer held, and the links out of it had nothing to resolve. Reading the
+ * cheque by id — scoped to the business, 404 for anyone else's — makes the
+ * detail addressable on its own.
+ */
+export async function getChequeDetail(businessId: string, chequeId: string): Promise<ChequeDetail> {
+  if (!isUuid(chequeId)) throw new ChequeError("cheque_not_found", 404);
+  const cheque = await readCheque(businessId, "c.id = $2", [businessId, chequeId]);
+  if (!cheque) throw new ChequeError("cheque_not_found", 404);
+  const replaces = cheque.replacesChequeId
+    ? await readCheque(businessId, "c.id = $2", [businessId, cheque.replacesChequeId])
+    : null;
+  const replacements = await readCheques(businessId, "c.replaces_cheque_id = $2", [businessId, chequeId]);
+  return { cheque, replaces, replacements };
+}
+
+/** The register's enriched projection, for an arbitrary `WHERE` over `cheques c`. */
+async function readCheques(
+  businessId: string,
+  where: string,
+  params: unknown[],
+): Promise<Cheque[]> {
+  const { rows } = await query<ChequeRow>(
+    `SELECT ${CHEQUE_COLUMNS_PREFIXED},
+            l.name AS location_name,
+            r.serial_number AS replaces_serial_number,
+            COALESCE(rep.replaced_by_amount, 0)::text AS replaced_by_amount
+       FROM cheques c
+       LEFT JOIN locations l ON l.id = c.location_id
+       LEFT JOIN cheques r ON r.id = c.replaces_cheque_id
+       LEFT JOIN LATERAL (
+         SELECT SUM(x.amount) AS replaced_by_amount FROM cheques x
+          WHERE x.business_id = c.business_id AND x.replaces_cheque_id = c.id
+       ) rep ON true
+      -- Tenant scope is stated here as well as in RLS: a missing business_id
+      -- in a hand-written WHERE would otherwise be a cross-tenant read the
+      -- day this runs as an unscoped role.
+      WHERE c.business_id = $1 AND ${where}
+      ORDER BY c.created_at, c.id`,
+    params,
+  );
+  return rows.map(toCheque);
+}
+
+async function readCheque(businessId: string, where: string, params: unknown[]): Promise<Cheque | null> {
+  const rows = await readCheques(businessId, where, params);
+  return rows[0] ?? null;
+}
+
 /** A supplier belongs to this business through its (mandatory) location — `suppliers` has no business_id. */
 async function assertSupplier(client: PoolClient, businessId: string, supplierId: string): Promise<void> {
   // `suppliers.id` is a uuid: a non-uuid raises a Postgres syntax error rather
@@ -221,10 +682,31 @@ async function assertSupplier(client: PoolClient, businessId: string, supplierId
   // `isUuid`). The A/P balance list's «بدون تأمین‌کننده مشخص» bucket carries the
   // id `"unknown"`, and a picker built from that list could submit it.
   if (!isUuid(supplierId)) throw new ChequeError("supplier_not_found", 404);
+  // Active alias, and — when the alias is linked to a canonical party (the
+  // `suppliers.party_id` link migration 0137 introduced) — an active, unmerged
+  // party. Attributing a cheque to a deactivated alias or to a party that has
+  // since been merged away points the A/P subledger at a record no statement
+  // will ever show again, which is the attribution failure issue #826 is
+  // about. Cross-branch is deliberately allowed: an alias is location-scoped
+  // but A/P is answered per business, so a cheque written at one branch may
+  // legitimately pay a supplier registered at another.
+  //
+  // The linked party must also still *be* a supplier. Roles are editable
+  // (`parties.roles`, 0148) and every supplier-facing picker filters on them,
+  // so a party whose supplier role has been taken away is one no A/P screen
+  // will offer or group under again. Attributing a payable cheque — or an
+  // endorsement — to it would post into the subledger through a door the rest
+  // of the system has closed, which is the same class of silent
+  // mis-attribution as a merged party. `assertCustomer` has always required
+  // the customer role; this is its missing twin.
   const { rows } = await client.query(
-    `SELECT 1 FROM suppliers s JOIN locations l ON l.id = s.location_id
-      WHERE s.id = $1 AND l.business_id = $2`,
-    [supplierId, businessId],
+    `SELECT 1 FROM suppliers s
+       JOIN locations l ON l.id = s.location_id
+       LEFT JOIN parties pa ON pa.id = s.party_id
+      WHERE s.id = $1 AND l.business_id = $2 AND s.is_active
+        AND (s.party_id IS NULL OR (pa.business_id = $2 AND pa.is_active AND pa.merged_into_id IS NULL
+                                    AND pa.roles @> ARRAY[$3]::text[]))`,
+    [supplierId, businessId, PARTY_ROLE_STORAGE.Supplier],
   );
   if (!rows[0]) throw new ChequeError("supplier_not_found", 404);
 }
@@ -239,9 +721,214 @@ async function assertCustomer(client: PoolClient, businessId: string, customerId
   if (!rows[0]) throw new ChequeError("customer_not_found", 404);
 }
 
+/**
+ * The canonical fingerprint of a money-moving request.
+ *
+ * A retry is "the same request sent again", and only the payload can prove
+ * that. Every accounting-significant field goes in, in a fixed order, so the
+ * comparison cannot depend on key order or on a field the caller omitted; a
+ * key that comes back with a *different* payload is a client bug or a key
+ * collision, and is refused rather than answered with an unrelated cheque.
+ *
+ * **A registration is fingerprinted on** (in this order): the literal
+ * `"record"`, direction, branch (`locationId`), canonical bank name,
+ * canonical serial number, صیاد id, amount, issue date, due date, customer
+ * id, supplier id, the cheque being replaced, and whether the unattributed
+ * exception was asked for.
+ *
+ * **A transition is fingerprinted on**: the literal `"transition"`, the
+ * cheque id, the action, the date it occurred on (as sent — an omitted date
+ * is `null`, not today, so "retry without a date" stays one request), the
+ * fee, and the supplier endorsed to.
+ *
+ * **Deliberately excluded**: `memo` and `createdBy`. Re-sending a retry with
+ * a corrected note, or from a second device the same person is signed in on,
+ * is still the same posting. The canonical forms — not the typed text — are
+ * what identity means here, so «۱۲۳-۴۵۶» retried as "123456" is recognised
+ * as the retry it is.
+ *
+ * `src/app/(app)/accounting/cheques-section.tsx` builds its client-side
+ * operation key from the same field lists, so the two sides of the contract
+ * agree about what "the same request" means; see `src/lib/operation-key.ts`.
+ */
+function fingerprintOf(parts: (string | number | null)[]): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/**
+ * The answer a replay owes: what the first call *returned*, not what the row
+ * says now.
+ *
+ * A retry is the same request, so it deserves the same response. Reading the
+ * live row instead produced a different one as soon as the cheque moved on:
+ * register a cheque, lose the response, let it be deposited and bounce, retry
+ * the registration — and the retry replied `bounced`, an answer the first call
+ * could never have given. The result the call produced is therefore stored
+ * beside the key that produced it and replayed verbatim.
+ *
+ * `idempotency_result` is NULL only for rows written before migration 0219.
+ * Those keys keep the old behaviour — the current row is the best answer still
+ * available for them — and that is deliberate, not a gap left open: there is
+ * no record of what they first returned, and refusing them would break retries
+ * of work that genuinely committed.
+ */
+function replayResult(row: { idempotency_result: unknown }, fallback: Cheque): Cheque {
+  return (row.idempotency_result as Cheque | null) ?? fallback;
+}
+
+/**
+ * The cheque a previous call with this key created, if there was one.
+ *
+ * Retry safety has to answer *before* the write and again *after* a unique
+ * violation: between those two moments a concurrent duplicate can commit, and
+ * the loser of that race should still be handed the winner's cheque rather
+ * than an error.
+ */
+async function findChequeByIdempotencyKey(
+  businessId: string,
+  key: string,
+  fingerprint: string,
+  options: {
+    /**
+     * A fingerprint this row would have had under an older rule, if any. Used
+     * to keep keys issued by a previous release replayable; returning `null`
+     * means "no older spelling applies to this request".
+     */
+    legacyFingerprintFor?: (row: ChequeRow) => string | null;
+  } = {},
+): Promise<Cheque | null> {
+  const { rows } = await query<
+    ChequeRow & { idempotency_fingerprint: string | null; idempotency_result: unknown }
+  >(
+    `SELECT ${CHEQUE_COLUMNS}, idempotency_fingerprint, idempotency_result FROM cheques
+      WHERE business_id = $1 AND idempotency_key = $2`,
+    [businessId, key],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  // Same key, different request: answering with the first cheque would hide a
+  // real client bug behind a success.
+  if (row.idempotency_fingerprint && row.idempotency_fingerprint !== fingerprint) {
+    const legacy = options.legacyFingerprintFor?.(row) ?? null;
+    if (legacy === null || row.idempotency_fingerprint !== legacy) {
+      throw new ChequeError("idempotency_key_conflict", 409);
+    }
+  }
+  return replayResult(row, toCheque(row));
+}
+
+/**
+ * May this new cheque be registered as the replacement of that returned one?
+ *
+ * The accounting is the whole reason this is strict. A returned receivable's
+ * value sits in چک‌های برگشتی (1244) until a resolution moves it; `restore`
+ * moves it back to حساب‌های دریافتنی, and only *then* does registering a
+ * replacement — whose own entry debits چک‌های نزد صندوق and credits
+ * حساب‌های دریافتنی — net out. Replacing a cheque that is still `bounced`
+ * would credit an A/R that was never restored (driving the customer's balance
+ * negative) and leave 1244 stranded exactly as issue #828 describes. So the
+ * restoration is required first and enforced here, server-side, rather than
+ * being a sequence the UI is trusted to follow.
+ *
+ * Under the original's row lock, which is what makes the amount arithmetic
+ * below safe against two replacements registered at the same moment.
+ */
+async function assertReplaceable(
+  client: PoolClient,
+  params: {
+    businessId: string;
+    originalId: string;
+    direction: ChequeDirection;
+    locationId: string | null;
+    customerId: string | null;
+    supplierId: string | null;
+    amount: number;
+    issueDate: string;
+  },
+): Promise<void> {
+  // Two statements, deliberately. The lock has to be taken on its own first:
+  // in READ COMMITTED a subquery in the *same* statement is evaluated against
+  // that statement's snapshot, which was taken before the wait, so a
+  // concurrent replacement that committed while we were blocked would be
+  // invisible and both callers would see room for the full amount. Locking,
+  // then re-reading in a fresh statement, is what makes the arithmetic below
+  // true at the moment it is used.
+  const { rows: locked } = await client.query<{
+    status: ChequeStatus;
+    direction: ChequeDirection;
+    location_id: string | null;
+    customer_id: string | null;
+    supplier_id: string | null;
+    amount: string;
+  }>(
+    `SELECT status, direction, location_id, customer_id, supplier_id, amount::text AS amount
+       FROM cheques WHERE business_id = $1 AND id = $2 FOR UPDATE`,
+    [params.businessId, params.originalId],
+  );
+  const { rows: live } = await client.query<{ replaced: string; last_event_on: string | null }>(
+    `SELECT COALESCE((SELECT SUM(x.amount) FROM cheques x
+                       WHERE x.business_id = $1 AND x.replaces_cheque_id = $2), 0)::text AS replaced,
+            (SELECT max(e.occurred_on)::text FROM cheque_events e
+              WHERE e.business_id = $1 AND e.cheque_id = $2) AS last_event_on`,
+    [params.businessId, params.originalId],
+  );
+  const rows = locked[0] ? [{ ...locked[0], ...live[0] }] : [];
+
+  const original = rows[0];
+  if (!original) throw new ChequeError("replaced_cheque_not_found", 404);
+  if (original.direction !== params.direction) throw new ChequeError("replaced_cheque_not_found", 404);
+
+  // `bounced` means the returned balance is still sitting in 1244/2122.
+  if (original.status === "bounced") throw new ChequeError("replaced_cheque_not_restored", 409);
+  if (original.status !== "resolved") throw new ChequeError("replaced_cheque_not_returned", 409);
+
+  // One instrument, one branch — the replacement continues the original's
+  // books, so it cannot be captured into another branch's.
+  if ((original.location_id ?? null) !== (params.locationId ?? null)) {
+    throw new ChequeError("replaced_cheque_other_branch", 409);
+  }
+
+  // The debt that came back belongs to a party; the replacement settles that
+  // same party's balance or it settles the wrong account.
+  const originalParty = params.direction === "receivable" ? original.customer_id : original.supplier_id;
+  const newParty = params.direction === "receivable" ? params.customerId : params.supplierId;
+  if (originalParty && originalParty !== newParty) {
+    throw new ChequeError("replaced_cheque_other_party", 409);
+  }
+
+  // A replacement cannot predate the resolution it answers.
+  if (original.last_event_on && params.issueDate < original.last_event_on) {
+    throw new ChequeError("replacement_before_resolution");
+  }
+
+  // Splitting one returned cheque into several smaller ones is ordinary
+  // practice and is supported: what is refused is replacing more than came
+  // back. The sum is read under the lock above, so two concurrent
+  // replacements cannot each see room for the full amount.
+  const already = Number(original.replaced);
+  if (already + params.amount > Number(original.amount)) {
+    throw new ChequeError("replacement_exceeds_original", 409);
+  }
+}
+
 export interface RecordChequeParams {
   businessId: string;
   locationId: string | null;
+  /**
+   * A client-supplied key that makes this registration replayable: the same
+   * key returns the cheque the first call created instead of registering a
+   * second instrument.
+   */
+  idempotencyKey?: string | null;
+  /**
+   * Registering a cheque with no customer/supplier puts its value in the A/R
+   * or A/P subledger's unattributed bucket, which nothing can reconcile. The
+   * ordinary path therefore requires a party; capturing a legacy or
+   * unidentified cheque is possible, but only by saying so.
+   */
+  allowUnattributed?: boolean;
+  /** The returned cheque this one replaces, if any. */
+  replacesChequeId?: string | null;
   direction: ChequeDirection;
   serialNumber: string;
   sayadId?: string | null;
@@ -272,9 +959,21 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
   const serialNumber = requiredText(params.serialNumber, "serial_number_required");
   const bankName = requiredText(params.bankName, "bank_name_required");
   const counterpartyName = requiredText(params.counterpartyName, "counterparty_name_required");
-  const issueDate = optionalIsoDate(params.issueDate, "invalid_issue_date") ?? todayIso();
+  /*
+   * The date as *submitted* — `null` when the caller left it out.
+   *
+   * Resolving the default here is what the first version did, and it made a
+   * retry of an identical payload a different request: a registration sent at
+   * ۲۳:۵۹ and retried at ۰۰:۰۱ fingerprinted two different issue dates, so the
+   * replay was refused with `idempotency_key_conflict` — and the day after the
+   * due date, the retry did not even get that far, because the
+   * `due_date_before_issue` check (computed against *today*) threw before the
+   * committed original could be found and returned. What the client sent is
+   * stable; what the clock says is not, so only the former may take part in
+   * the request's identity.
+   */
+  const submittedIssueDate = optionalIsoDate(params.issueDate, "invalid_issue_date");
   const dueDate = requiredIsoDate(params.dueDate, "due_date_required", "invalid_due_date");
-  if (dueDate < issueDate) throw new ChequeError("due_date_before_issue");
 
   const sayadInput = optionalText(params.sayadId, "invalid_sayad_id");
   const sayadId = sayadInput ? normalizeSayadId(sayadInput) : null;
@@ -288,10 +987,67 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
   if (params.direction === "payable" && customerId) {
     throw new ChequeError("invalid_counterparty_for_direction");
   }
+  const linkedParty = params.direction === "receivable" ? customerId : supplierId;
+  if (!linkedParty && !params.allowUnattributed) {
+    throw new ChequeError(
+      params.direction === "receivable" ? "customer_required" : "supplier_required",
+    );
+  }
+  const idempotencyKey = optionalText(params.idempotencyKey);
+  const replacesChequeId = optionalText(params.replacesChequeId, "replaced_cheque_not_found");
+  if (replacesChequeId && !isUuid(replacesChequeId)) {
+    throw new ChequeError("replaced_cheque_not_found", 404);
+  }
   const accountNumber = optionalText(params.accountNumber);
   const memo = optionalText(params.memo);
 
   const status = initialStatus(params.direction);
+
+  // Everything the posting depends on, so a replay is recognised and a
+  // different request wearing the same key is refused. Only values the client
+  // sent go in — see `submittedIssueDate`.
+  const fingerprintFor = (issue: string | null) =>
+    fingerprintOf([
+      "record",
+      params.direction,
+      params.locationId,
+      canonicalBankName(bankName),
+      canonicalSerialNumber(serialNumber),
+      sayadId,
+      params.amount,
+      issue,
+      dueDate,
+      customerId,
+      supplierId,
+      replacesChequeId,
+      params.allowUnattributed ? 1 : 0,
+    ]);
+  const fingerprint = fingerprintFor(submittedIssueDate);
+
+  /*
+   * A replay answers from the first call's row, before anything is posted and
+   * before any check that depends on the clock — a retry of a request that
+   * committed must get that request's answer however much later it arrives.
+   *
+   * Rows written before this changed stored a fingerprint computed from the
+   * *resolved* date. When the caller omitted the date, that is the row's own
+   * `issue_date`, so the stored value is recomputed with it and accepted:
+   * keys issued by the previous release keep working instead of turning into
+   * conflicts.
+   */
+  if (idempotencyKey) {
+    const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint, {
+      legacyFingerprintFor: (row) =>
+        submittedIssueDate === null ? fingerprintFor(row.issue_date) : null,
+    });
+    if (replay) return replay;
+  }
+
+  // Only now, with no committed original to answer with, does the clock come
+  // in: an omitted issue date means "today", and a new request gets every
+  // validation the first one got.
+  const issueDate = submittedIssueDate ?? todayIso();
+  if (dueDate < issueDate) throw new ChequeError("due_date_before_issue");
 
   const client = await getPool().connect();
   try {
@@ -299,6 +1055,18 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
 
     if (customerId) await assertCustomer(client, params.businessId, customerId);
     if (supplierId) await assertSupplier(client, params.businessId, supplierId);
+    if (replacesChequeId) {
+      await assertReplaceable(client, {
+        businessId: params.businessId,
+        originalId: replacesChequeId,
+        direction: params.direction,
+        locationId: params.locationId,
+        customerId,
+        supplierId,
+        amount: params.amount,
+        issueDate,
+      });
+    }
 
     // A receivable lands in چک‌های نزد صندوق against the customer's account; a
     // payable clears down what we owe the supplier into چک‌های صادرشده.
@@ -311,8 +1079,10 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
     const { rows } = await client.query<ChequeRow>(
       `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, sayad_id, bank_name,
                             account_number, amount, issue_date, due_date, counterparty_name, customer_id,
-                            supplier_id, memo, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, CURRENT_DATE), $11, $12, $13, $14, $15, $16)
+                            supplier_id, memo, created_by, idempotency_key, idempotency_fingerprint,
+                            replaces_cheque_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, CURRENT_DATE), $11, $12, $13, $14, $15, $16,
+               $17, $18, $19)
        RETURNING ${CHEQUE_COLUMNS}`,
       [
         params.businessId,
@@ -331,6 +1101,9 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
         supplierId,
         memo,
         params.createdBy,
+        idempotencyKey,
+        idempotencyKey ? fingerprint : null,
+        replacesChequeId,
       ],
     );
     const cheque = rows[0];
@@ -366,14 +1139,42 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
       createdBy: params.createdBy,
     });
 
+    const result = toCheque(cheque);
+    // The answer this key produced, kept so a retry can be given it again
+    // however far the cheque's life has moved on by then. Written inside the
+    // same transaction as the posting it describes: a stored result can never
+    // exist for a registration that did not commit.
+    if (idempotencyKey) {
+      await client.query(
+        "UPDATE cheques SET idempotency_result = $2::jsonb WHERE id = $1",
+        [cheque.id, JSON.stringify(result)],
+      );
+    }
+
     await client.query("COMMIT");
-    return toCheque(cheque);
+    return result;
   } catch (err) {
     await client.query("ROLLBACK");
+    // Lost a race against the same key: the other request's cheque is the
+    // answer to this one too.
+    if (idempotencyKey && isUniqueViolation(err)) {
+      const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint, {
+        legacyFingerprintFor: (row) =>
+          submittedIssueDate === null ? fingerprintFor(row.issue_date) : null,
+      });
+      if (replay) return replay;
+    }
     throw err;
   } finally {
     client.release();
   }
+}
+
+/** A Postgres unique-constraint violation, whichever constraint it was. */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null && (err as { code?: string }).code === "23505"
+  );
 }
 
 async function recordChequeEvent(
@@ -386,12 +1187,17 @@ async function recordChequeEvent(
     entryId: string | null;
     endorsedToSupplierId?: string | null;
     memo: string | null;
+    idempotencyKey?: string | null;
+    idempotencyFingerprint?: string | null;
+    /** The response this step returned, replayed verbatim on a retry. */
+    idempotencyResult?: Cheque | null;
     createdBy: string | null;
   },
 ): Promise<void> {
   await client.query(
-    `INSERT INTO cheque_events (business_id, cheque_id, event, occurred_on, entry_id, endorsed_to_supplier_id, memo, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    `INSERT INTO cheque_events (business_id, cheque_id, event, occurred_on, entry_id, endorsed_to_supplier_id,
+                                memo, created_by, idempotency_key, idempotency_fingerprint, idempotency_result)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
     [
       params.businessId,
       params.chequeId,
@@ -401,31 +1207,54 @@ async function recordChequeEvent(
       params.endorsedToSupplierId ?? null,
       params.memo,
       params.createdBy,
+      params.idempotencyKey ?? null,
+      params.idempotencyKey ? (params.idempotencyFingerprint ?? null) : null,
+      params.idempotencyKey && params.idempotencyResult
+        ? JSON.stringify(params.idempotencyResult)
+        : null,
     ],
   );
 }
 
-/** Which two accounts a transition moves the money between — `null` when it moves none. */
+/** One posting a transition owes: an amount moved between two accounts. */
+interface ChequePosting {
+  debitCode: string;
+  creditCode: string;
+  amount: number;
+}
+
+/**
+ * Which accounts a transition moves the cheque's money between — an empty list
+ * when it moves none.
+ *
+ * `amount` is the cheque's, except for the returned-cheque fee, which is the
+ * bank's charge and rides along on the bounce that caused it.
+ */
 function linesFor(
   direction: ChequeDirection,
   from: ChequeStatus,
   action: ChequeAction,
-): { debitCode: string; creditCode: string } | null {
+  amount: number,
+  feeAmount: number,
+): ChequePosting[] {
+  const postings: ChequePosting[] = [];
+  const move = (debitCode: string, creditCode: string) => {
+    postings.push({ debitCode, creditCode, amount });
+  };
+
   if (direction === "receivable") {
     if (action === "deposit") {
-      return { debitCode: WELL_KNOWN_CODES.chequesInCollection, creditCode: WELL_KNOWN_CODES.chequesOnHand };
-    }
-    if (action === "endorse") {
-      return { debitCode: WELL_KNOWN_CODES.accountsPayable, creditCode: WELL_KNOWN_CODES.chequesOnHand };
-    }
-    if (action === "clear") {
+      move(WELL_KNOWN_CODES.chequesInCollection, WELL_KNOWN_CODES.chequesOnHand);
+    } else if (action === "endorse") {
+      move(WELL_KNOWN_CODES.accountsPayable, WELL_KNOWN_CODES.chequesOnHand);
+    } else if (action === "clear") {
       // An endorsed cheque clearing at the supplier's bank moves no money of
       // ours: the endorsement already settled the debt. The status advances so
       // the register stops calling it outstanding, and that is all.
-      if (from === "endorsed") return null;
-      return { debitCode: WELL_KNOWN_CODES.bank, creditCode: WELL_KNOWN_CODES.chequesInCollection };
-    }
-    if (action === "bounce") {
+      if (from !== "endorsed") {
+        move(WELL_KNOWN_CODES.bank, WELL_KNOWN_CODES.chequesInCollection);
+      }
+    } else if (action === "bounce") {
       // Wherever it was, it comes back to چک‌های برگشتی. From `endorsed` the
       // credit is accounts payable: the supplier is owed again.
       const creditCode =
@@ -434,23 +1263,45 @@ function linesFor(
           : from === "endorsed"
             ? WELL_KNOWN_CODES.accountsPayable
             : WELL_KNOWN_CODES.chequesOnHand;
-      return { debitCode: WELL_KNOWN_CODES.chequesReturned, creditCode };
+      move(WELL_KNOWN_CODES.chequesReturned, creditCode);
+    } else if (action === "settle") {
+      // The customer paid the returned cheque another way; چک‌های برگشتی empties
+      // into the bank rather than sitting there forever.
+      move(WELL_KNOWN_CODES.bank, WELL_KNOWN_CODES.chequesReturned);
+    } else if (action === "restore") {
+      // Back to the customer's account. A replacement cheque is then an
+      // ordinary registration, whose own entry credits حساب‌های دریافتنی again —
+      // the two net out, so A/R is never settled twice.
+      move(WELL_KNOWN_CODES.accountsReceivable, WELL_KNOWN_CODES.chequesReturned);
     }
-    return null;
-  }
-
-  if (action === "present") {
-    return { debitCode: WELL_KNOWN_CODES.chequesIssued, creditCode: WELL_KNOWN_CODES.bank };
-  }
-  if (action === "bounce") {
-    return { debitCode: WELL_KNOWN_CODES.chequesIssued, creditCode: WELL_KNOWN_CODES.chequesIssuedReturned };
-  }
-  if (action === "cancel") {
+  } else if (action === "present") {
+    move(WELL_KNOWN_CODES.chequesIssued, WELL_KNOWN_CODES.bank);
+  } else if (action === "bounce") {
+    move(WELL_KNOWN_CODES.chequesIssued, WELL_KNOWN_CODES.chequesIssuedReturned);
+  } else if (action === "cancel") {
     // Undoing the issue: the supplier is owed again and the outstanding cheque
     // is gone. A reversal, not an edit — the original entry stays.
-    return { debitCode: WELL_KNOWN_CODES.chequesIssued, creditCode: WELL_KNOWN_CODES.accountsPayable };
+    move(WELL_KNOWN_CODES.chequesIssued, WELL_KNOWN_CODES.accountsPayable);
+  } else if (action === "settle") {
+    // We paid our returned cheque by bank/cash instead of replacing it.
+    move(WELL_KNOWN_CODES.chequesIssuedReturned, WELL_KNOWN_CODES.bank);
+  } else if (action === "restore") {
+    // The liability goes back to the supplier's account, ready for a
+    // replacement cheque or an ordinary payment.
+    move(WELL_KNOWN_CODES.chequesIssuedReturned, WELL_KNOWN_CODES.accountsPayable);
   }
-  return null;
+
+  // The bank's returned-cheque charge is ours either way, and the chart has an
+  // account for exactly it («۵۸۶۰ هزینه چک برگشتی و جرایم بانکی»).
+  if (feeAmount > 0 && action === "bounce") {
+    postings.push({
+      debitCode: WELL_KNOWN_CODES.bouncedChequeExpense,
+      creditCode: WELL_KNOWN_CODES.bank,
+      amount: feeAmount,
+    });
+  }
+
+  return postings;
 }
 
 const EVENT_FOR_ACTION: Record<ChequeAction, string> = {
@@ -460,6 +1311,8 @@ const EVENT_FOR_ACTION: Record<ChequeAction, string> = {
   present: "cleared",
   bounce: "bounced",
   cancel: "cancelled",
+  settle: "settled",
+  restore: "restored",
 };
 
 const MEMO_FOR_ACTION: Record<ChequeAction, string> = {
@@ -469,16 +1322,21 @@ const MEMO_FOR_ACTION: Record<ChequeAction, string> = {
   present: "پاس شدن چک صادرشده",
   bounce: "برگشت چک",
   cancel: "ابطال چک صادرشده",
+  settle: "تسویه چک برگشتی",
+  restore: "بازگشت چک برگشتی به حساب طرف",
 };
 
 export interface TransitionChequeParams {
   businessId: string;
-  locationId: string | null;
   chequeId: string;
+  /** Replay protection: the same key returns the first call's result. */
+  idempotencyKey?: string | null;
   action: ChequeAction;
   occurredOn?: string | null;
   /** Required for `endorse`: who the cheque was passed to. */
   endorsedToSupplierId?: string | null;
+  /** Optional on `bounce`: the bank's returned-cheque charge, posted to 5860. */
+  feeAmount?: number | null;
   memo?: string | null;
   createdBy: string | null;
 }
@@ -490,10 +1348,37 @@ export interface TransitionChequeParams {
  * cashiers clearing the same cheque at once cannot both post: the second one
  * finds the status already advanced and is refused by the transition table
  * rather than double-crediting چک‌های در جریان وصول.
+ *
+ * Two invariants the lock also buys, both of which used to be missing:
+ *
+ * **The branch is the cheque's, not the operator's.** The entry posts to
+ * `cheques.location_id`, so switching the active location between a deposit and
+ * its clearing cannot split one instrument across two branches' books. Moving a
+ * cheque between branches is a different operation and would need its own
+ * workflow and audit event.
+ *
+ * **Time only moves forward.** A step may not be dated before the latest event
+ * already on the cheque, so "deposited on ۱۰ بهمن, cleared on ۲۰ دی" is refused
+ * (`action_before_previous_event`) instead of being written as accounting
+ * history that could not have happened — and so a transition cannot sneak into
+ * a fiscal period earlier than one the cheque has already posted into. Same-day
+ * steps stay legal: a cheque deposited in the morning can clear that afternoon.
  */
 export async function transitionCheque(params: TransitionChequeParams): Promise<Cheque> {
   if (!isUuid(params.chequeId)) throw new ChequeError("cheque_not_found", 404);
   if (!CHEQUE_ACTIONS.includes(params.action)) throw new ChequeError("invalid_action");
+  const idempotencyKey = optionalText(params.idempotencyKey);
+  // Bound to the cheque, the step, the date and the fee: a retry of "bounce
+  // this cheque with a ۳۰٬۰۰۰ ریال charge" is that request again, and a
+  // different charge under the same key is not a retry.
+  const fingerprint = fingerprintOf([
+    "transition",
+    params.chequeId,
+    params.action,
+    optionalIsoDate(params.occurredOn, "invalid_occurred_on"),
+    params.feeAmount ?? null,
+    optionalText(params.endorsedToSupplierId, "supplier_not_found"),
+  ]);
 
   const client = await getPool().connect();
   try {
@@ -506,6 +1391,33 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
     const cheque = current[0];
     if (!cheque) throw new ChequeError("cheque_not_found", 404);
 
+    // A replayed step is answered from history, under the same row lock that
+    // serialises a real one — so a retry after a lost response returns the
+    // cheque as the first call left it instead of being refused by the
+    // transition table (or, worse, posting again from a status that allows it).
+    if (idempotencyKey) {
+      const { rows: replay } = await client.query<{
+        id: string;
+        idempotency_fingerprint: string | null;
+        idempotency_result: unknown;
+      }>(
+        `SELECT id, idempotency_fingerprint, idempotency_result FROM cheque_events
+          WHERE business_id = $1 AND idempotency_key = $2`,
+        [params.businessId, idempotencyKey],
+      );
+      if (replay[0]) {
+        if (replay[0].idempotency_fingerprint && replay[0].idempotency_fingerprint !== fingerprint) {
+          throw new ChequeError("idempotency_key_conflict", 409);
+        }
+        await client.query("COMMIT");
+        // The cheque as this step left it — a `deposit` replayed after the
+        // cheque has since cleared still answers `in_collection`, because
+        // that is what the call being retried returned. Pre-0219 events have
+        // no stored result and fall back to the live row.
+        return replayResult(replay[0], toCheque(cheque));
+      }
+    }
+
     const target = nextStatus(cheque.direction, cheque.status, params.action);
     if (!target) throw new ChequeError("invalid_cheque_transition", 409);
 
@@ -517,26 +1429,48 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
 
     const occurredOn = optionalIsoDate(params.occurredOn, "invalid_occurred_on") ?? todayIso();
     if (occurredOn < cheque.issue_date) throw new ChequeError("action_before_issue");
+
+    // Still under the row lock: the latest event is the floor for this one.
+    const { rows: latest } = await client.query<{ occurred_on: string }>(
+      `SELECT occurred_on::text AS occurred_on FROM cheque_events
+        WHERE business_id = $1 AND cheque_id = $2
+        ORDER BY occurred_on DESC, created_at DESC, id DESC LIMIT 1`,
+      [params.businessId, params.chequeId],
+    );
+    if (latest[0] && occurredOn < latest[0].occurred_on) {
+      throw new ChequeError("action_before_previous_event");
+    }
+
+    let feeAmount = 0;
+    if (params.feeAmount !== undefined && params.feeAmount !== null) {
+      const fee = Number(params.feeAmount);
+      if (!Number.isSafeInteger(fee) || fee < 0) throw new ChequeError("invalid_fee_amount");
+      if (fee > 0 && params.action !== "bounce") throw new ChequeError("fee_not_supported_for_action");
+      feeAmount = fee;
+    }
+
     const memo = optionalText(params.memo);
-    const codes = linesFor(cheque.direction, cheque.status, params.action);
+    const amount = Number(cheque.amount);
+    const postings = linesFor(cheque.direction, cheque.status, params.action, amount, feeAmount);
 
     let entryId: string | null = null;
-    if (codes) {
-      const accounts = await accountIdsByCode(client, params.businessId, [codes.debitCode, codes.creditCode]);
-      const amount = Number(cheque.amount);
+    if (postings.length > 0) {
+      const codes = [...new Set(postings.flatMap((p) => [p.debitCode, p.creditCode]))];
+      const accounts = await accountIdsByCode(client, params.businessId, codes);
       entryId = await postJournalEntry(client, {
         businessId: params.businessId,
-        locationId: params.locationId,
+        // The cheque's own branch, never the operator's current one.
+        locationId: cheque.location_id,
         entryDate: occurredOn,
         memo: `${MEMO_FOR_ACTION[params.action]} ${cheque.serial_number}`,
         sourceType: "cheque",
         sourceId: cheque.id,
         createdBy: params.createdBy,
         postingKind: `cheque_${EVENT_FOR_ACTION[params.action]}`,
-        lines: [
-          { accountId: accounts.get(codes.debitCode)!, debit: amount, credit: 0 },
-          { accountId: accounts.get(codes.creditCode)!, debit: 0, credit: amount },
-        ],
+        lines: postings.flatMap((posting) => [
+          { accountId: accounts.get(posting.debitCode)!, debit: posting.amount, credit: 0 },
+          { accountId: accounts.get(posting.creditCode)!, debit: 0, credit: posting.amount },
+        ]),
       });
     }
 
@@ -545,6 +1479,7 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
        RETURNING ${CHEQUE_COLUMNS}`,
       [params.businessId, params.chequeId, target],
     );
+    const result = toCheque(updated[0]);
 
     await recordChequeEvent(client, {
       businessId: params.businessId,
@@ -556,11 +1491,14 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
       entryId,
       endorsedToSupplierId: params.action === "endorse" ? endorsedToSupplierId : null,
       memo,
+      idempotencyKey,
+      idempotencyFingerprint: fingerprint,
+      idempotencyResult: result,
       createdBy: params.createdBy,
     });
 
     await client.query("COMMIT");
-    return toCheque(updated[0]);
+    return result;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

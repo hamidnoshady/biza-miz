@@ -125,6 +125,29 @@ const SCREENS = [
     anchor: "table",
   },
   { id: "accounting-receivables", path: "/accounting/receivables", theme: "light" },
+  /*
+   * The cheque register: the one place a cheque's lifecycle is read. The
+   * seeded lifecycle fixture (scripts/seed-visual-fixture.ts) gives it one row
+   * per state the register draws differently — in collection, endorsed to a
+   * supplier, returned, returned-and-replaced, cleared, and an issued payable.
+   * Light and dark both, because the status pills and the returned-cheque
+   * callout are the parts a token mistake would hide. `anchor` frames the
+   * register table itself: the returned, restored and replacement rows are
+   * the relationships the screen exists to show, and a frame above the table
+   * photographs none of them.
+   */
+  {
+    id: "accounting-cheques",
+    path: "/accounting/cheques",
+    theme: "light",
+    anchor: "table",
+  },
+  {
+    id: "accounting-cheques-dark",
+    path: "/accounting/cheques",
+    theme: "dark",
+    anchor: "table",
+  },
   // — CRM —
   { id: "crm-overview", path: "/crm/overview", theme: "light" },
   { id: "crm-deals", path: "/crm/deals", theme: "light" },
@@ -396,10 +419,27 @@ async function main() {
     await context.close();
     const baselinePath = join(BASELINE_DIR, `${screen.id}.png`);
 
-    if (UPDATE || !existsSync(baselinePath)) {
+    if (UPDATE) {
       writeFileSync(baselinePath, actual);
       recorded.push(screen.id);
       continue;
+    }
+
+    /*
+     * A screen listed here with no committed baseline used to be recorded
+     * silently and counted as a pass. On CI — where the recorded file is
+     * thrown away with the runner — that is a job reporting green for a
+     * screen it never compared: a gate that exists in the list and nowhere
+     * else. Adding a screen and committing its approved PNG are one change,
+     * and this makes that non-optional.
+     */
+    if (!existsSync(baselinePath)) {
+      throw new Error(
+        `${screen.id}: no baseline at docs/design/visual/${screen.id}.png. ` +
+          "Record it with `node scripts/visual-regression.mjs --update`, review the " +
+          "image, and commit it together with the SCREENS entry — a screen without " +
+          "a committed baseline is not covered.",
+      );
     }
 
     const { mismatch, reason, diff, bounds } = comparePng(actual, readFileSync(baselinePath));

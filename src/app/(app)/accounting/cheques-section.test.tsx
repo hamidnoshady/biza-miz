@@ -1,0 +1,1156 @@
+// @vitest-environment jsdom
+
+/**
+ * The cheque register as a reader actually meets it (issue #828).
+ *
+ * Each case is one thing that was wrong on the real screen:
+ *
+ *  - «بیشتر» asked for `limit = 50 × page` with no offset. The service caps a
+ *    page at 200, so the fourth press returned the same 200 rows forever and
+ *    the register could never reach a later cheque — and because the request
+ *    restarted the list, every press blanked the rows already read.
+ *  - A `ledger.view`-only member was shown live mutation controls that the API
+ *    then refused.
+ *  - The KPI strip reported a single "active" number that reconciled to no
+ *    control account.
+ */
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toPersianDigits } from "@/lib/digits";
+import { MoneyProvider } from "@/components/money/money-context";
+import { ChequesSection } from "./cheques-section";
+
+afterEach(cleanup);
+
+function cheque(index: number, overrides: Record<string, unknown> = {}) {
+  return {
+    id: `cheque-${index}`,
+    locationId: "loc-1",
+    locationName: "شعبهٔ مرکزی",
+    direction: "receivable",
+    status: "on_hand",
+    serialNumber: `S-${String(index).padStart(3, "0")}`,
+    sayadId: null,
+    bankName: "ملت",
+    accountNumber: null,
+    amount: 1_000_000,
+    issueDate: "2026-01-10",
+    dueDate: "2026-03-10",
+    counterpartyName: "مشتری",
+    customerId: "customer-1",
+    supplierId: null,
+    memo: null,
+    replacesChequeId: null,
+    replacesSerialNumber: null,
+    replacedByAmount: 0,
+    createdAt: "2026-01-10T08:00:00.000Z",
+    ...overrides,
+  };
+}
+
+const EMPTY_BUCKET = { count: 0, total: 0 };
+
+function summary(overrides: Record<string, unknown> = {}) {
+  return {
+    outstanding: { count: 120, total: 120_000_000 },
+    onHand: { count: 120, total: 120_000_000 },
+    inCollection: EMPTY_BUCKET,
+    issued: EMPTY_BUCKET,
+    contingent: { count: 2, total: 2_000_000 },
+    returnedUnresolved: { count: 1, total: 3_000_000 },
+    resolved: EMPTY_BUCKET,
+    cleared: EMPTY_BUCKET,
+    cancelled: EMPTY_BUCKET,
+    settled: EMPTY_BUCKET,
+    overdue: EMPTY_BUCKET,
+    dueSoon: EMPTY_BUCKET,
+    ...overrides,
+  };
+}
+
+/** Every register URL the component asked for, in order. */
+let registerCalls: string[];
+
+function stubFetch(pageFor: (url: URL) => unknown) {
+  registerCalls = [];
+  const fetchMock = vi.fn(async (url: string) => {
+    if (url.startsWith("/api/ledger/cheques?")) {
+      registerCalls.push(url);
+      return { ok: true, status: 200, json: async () => pageFor(new URL(url, "http://t")) };
+    }
+    return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function renderSection(props: Partial<Parameters<typeof ChequesSection>[0]> = {}) {
+  return render(
+    <MoneyProvider unit="rial">
+      <ChequesSection busy={false} run={async (fn) => (await fn()).ok} canManage {...props} />
+    </MoneyProvider>,
+  );
+}
+
+beforeEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("the cheque register's paging", () => {
+  it("asks for the server's next cursor and appends the window, keeping what is already read", async () => {
+    // Five rows per answer keeps the DOM small. What is under test is that the
+    // register follows the cursor the server issued — opaque to the client,
+    // never a count of the rows already on screen — and accumulates the rows.
+    const WINDOW = 5;
+    const TOTAL = 20;
+    stubFetch((url) => {
+      const cursor = url.searchParams.get("cursor");
+      const start = cursor ? Number(cursor.slice("after-".length)) : 0;
+      const end = Math.min(start + WINDOW, TOTAL);
+      return {
+        cheques: Array.from({ length: end - start }, (_, i) => cheque(start + i)),
+        total: TOTAL,
+        hasMore: end < TOTAL,
+        nextCursor: end < TOTAL ? `after-${end}` : null,
+        banks: ["ملت"],
+        summary: summary(),
+      };
+    });
+
+    const user = userEvent.setup();
+    renderSection();
+
+    await screen.findByText(toPersianDigits("S-000"));
+    expect(new URL(registerCalls[0], "http://t").searchParams.get("limit")).toBe("50");
+    expect(new URL(registerCalls[0], "http://t").searchParams.has("cursor")).toBe(false);
+
+    await user.click(await screen.findByRole("button", { name: /مورد بیشتر/ }));
+    await screen.findByText(toPersianDigits("S-005"));
+
+    // The second request carries the cursor the first answer issued…
+    const second = new URL(registerCalls[1], "http://t");
+    expect(second.searchParams.get("cursor")).toBe("after-5");
+    expect(second.searchParams.get("limit")).toBe("50");
+    expect(second.searchParams.has("offset")).toBe(false);
+    // …and the rows already on screen are still there.
+    expect(screen.getByText(toPersianDigits("S-000"))).toBeTruthy();
+
+    for (let press = 0; press < 2; press += 1) {
+      await user.click(await screen.findByRole("button", { name: /مورد بیشتر/ }));
+    }
+    // The last window (after-15) answers without a cursor, so «بیشتر» goes
+    // away instead of asking again.
+    await screen.findByText(toPersianDigits("S-019"));
+    const cursors = registerCalls.map((u) => new URL(u, "http://t").searchParams.get("cursor"));
+    expect(cursors).toEqual([null, "after-5", "after-10", "after-15"]);
+    expect(screen.getByText(toPersianDigits("S-000"))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /مورد بیشتر/ })).toBeNull();
+  });
+
+  it("does not strand «بیشتر» when the filters change while a page is in flight", async () => {
+    /*
+     * The stale-response bug, reproduced with a response the test holds open.
+     *
+     * Press «بیشتر», change a filter before the answer comes back, then let
+     * it arrive. The answer is correctly discarded — it belongs to the old
+     * filters — but it used to return *before* clearing the loading flag, and
+     * nothing else ever cleared it, so the button stayed disabled and the
+     * register was frozen on its first page until a full remount.
+     */
+    const pending: { url: string; release: (body: unknown) => void }[] = [];
+    registerCalls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!url.startsWith("/api/ledger/cheques?")) {
+          return { ok: true, status: 200, json: async () => ({ locations: [] }) };
+        }
+        registerCalls.push(url);
+        const params = new URL(url, "http://t").searchParams;
+        const cursor = params.get("cursor");
+        const offset = cursor ? Number(cursor.slice("after-".length)) : 0;
+        const filtered = params.get("q") === "ملت";
+        const body = {
+          cheques: Array.from({ length: 5 }, (_, i) =>
+            cheque(offset + i, { bankName: filtered ? "ملت" : "صادرات" }),
+          ),
+          total: 300,
+          hasMore: true,
+          nextCursor: `after-${offset + 5}`,
+          banks: ["ملت"],
+          summary: summary(),
+        };
+        // Only the append is held open; first pages answer immediately so the
+        // test is about the stale append and nothing else.
+        if (offset === 0) return { ok: true, status: 200, json: async () => body };
+        return await new Promise((resolve) => {
+          pending.push({
+            url,
+            release: () => resolve({ ok: true, status: 200, json: async () => body }),
+          });
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-000"));
+
+    await user.click(await screen.findByRole("button", { name: /مورد بیشتر/ }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    // The reader changes their mind mid-flight and searches instead.
+    await user.type(screen.getByLabelText("جستجوی چک‌ها"), "ملت");
+    await waitFor(() =>
+      expect(
+        registerCalls.filter((u) => new URL(u, "http://t").searchParams.get("q") === "ملت"),
+      ).not.toHaveLength(0),
+    );
+
+    // Now the obsolete page lands.
+    pending[0].release(null);
+
+    // The register belongs to the new filter, and paging still works.
+    const more = await screen.findByRole("button", { name: /مورد بیشتر/ });
+    await waitFor(() => expect(more.hasAttribute("disabled")).toBe(false));
+    await user.click(more);
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(new URL(pending[1].url, "http://t").searchParams.get("q")).toBe("ملت");
+    pending[1].release(null);
+    await screen.findByText(toPersianDigits("S-005"));
+  });
+
+  it("offers a retry for the page that failed without discarding the register", async () => {
+    let fail = true;
+    registerCalls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!url.startsWith("/api/ledger/cheques?")) {
+          return { ok: true, status: 200, json: async () => ({ locations: [] }) };
+        }
+        registerCalls.push(url);
+        const cursor = new URL(url, "http://t").searchParams.get("cursor");
+        const offset = cursor ? Number(cursor.slice("after-".length)) : 0;
+        if (offset > 0 && fail) {
+          fail = false;
+          return { ok: false, status: 500, json: async () => ({ error: "boom" }) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            cheques: Array.from({ length: 5 }, (_, i) => cheque(offset + i)),
+            total: 120,
+            hasMore: true,
+            nextCursor: `after-${offset + 5}`,
+            banks: [],
+            summary: summary(),
+          }),
+        };
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-000"));
+
+    await user.click(await screen.findByRole("button", { name: /مورد بیشتر/ }));
+    const retry = await screen.findByRole("button", { name: "تلاش دوباره" });
+    // The failed page did not take the register with it.
+    expect(screen.getByText(toPersianDigits("S-000"))).toBeTruthy();
+
+    await user.click(retry);
+    await screen.findByText(toPersianDigits("S-005"));
+  });
+});
+
+
+describe("the idempotency key a confirmation carries", () => {
+  /** Posts to the action route, with the key each attempt sent. */
+  let posts: { url: string; key: string | null; body: Record<string, unknown> }[];
+
+  function stubAction(respond: (attempt: number) => Promise<unknown>) {
+    posts = [];
+    registerCalls = [];
+    let attempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.startsWith("/api/ledger/cheques/")) {
+          attempt += 1;
+          const headers = new Headers(init?.headers);
+          posts.push({
+            url,
+            key: headers.get("Idempotency-Key"),
+            body: JSON.parse(String(init?.body ?? "{}")),
+          });
+          return await respond(attempt);
+        }
+        if (url.startsWith("/api/ledger/cheques?")) {
+          registerCalls.push(url);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              cheques: [cheque(1, { status: "on_hand" })],
+              total: 1,
+              hasMore: false,
+              banks: ["ملت"],
+              summary: summary(),
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+      }),
+    );
+  }
+
+  /** The ledger studio's runner: it reports a thrown fetch, it never retries. */
+  const run = async (fn: () => Promise<{ ok: boolean; data: { error?: string } }>) => {
+    try {
+      return (await fn()).ok;
+    } catch {
+      return false;
+    }
+  };
+
+  it("retries a lost response under the first key, so the step is replayed and not reposted", async () => {
+    /*
+     * The dangerous case: the request *did* commit and the response was lost
+     * on the way back. The user has no way to know, presses «واگذاری به
+     * بانک» again — and the second attempt must be recognisable to the
+     * server as the same operation. It used to mint a new key here, which
+     * would have deposited the cheque twice.
+     */
+    stubAction(async (attempt) => {
+      if (attempt === 1) throw new TypeError("Failed to fetch");
+      // The server replays the committed step.
+      return { ok: true, status: 200, json: async () => ({ cheque: cheque(1, { status: "in_collection" }) }) };
+    });
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    const confirm = await screen.findByRole("button", { name: "واگذاری به بانک" });
+    await user.click(confirm);
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    // The user presses again — that press is the retry.
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+
+    expect(posts[0].key).toBeTruthy();
+    expect(posts[1].key).toBe(posts[0].key);
+    expect(posts[1].body).toEqual(posts[0].body);
+  });
+
+  it("starts a new operation when the payload is edited after a failure", async () => {
+    stubAction(async (attempt) =>
+      attempt === 1
+        ? { ok: false, status: 400, json: async () => ({ error: "invalid_fee_amount" }) }
+        : { ok: true, status: 200, json: async () => ({ cheque: cheque(1, { status: "bounced" }) }) },
+    );
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    const fee = await screen.findByLabelText("مبلغ کارمزد چک برگشتی");
+    await user.type(fee, "30000");
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    // Corrected fee: a different request, so a different key — otherwise the
+    // server would refuse it as a conflicting replay and the dialog would be
+    // stuck for ever.
+    await user.clear(fee);
+    await user.type(fee, "45000");
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+
+    expect(posts[0].body.feeAmount).toBe(30000);
+    expect(posts[1].body.feeAmount).toBe(45000);
+    expect(posts[1].key).not.toBe(posts[0].key);
+  });
+
+  it("keeps the first key when the dialog is closed and reopened after a lost response", async () => {
+    /*
+     * Closing a dialog is a user interface event, not a statement about what
+     * the server did. If the deposit may have committed, the operation is
+     * still open: reopening and confirming the same step must replay it.
+     */
+    stubAction(async (attempt) => {
+      if (attempt <= 2) throw new TypeError("Failed to fetch");
+      return { ok: true, status: 200, json: async () => ({ cheque: cheque(1, { status: "in_collection" }) }) };
+    });
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByText("تأیید واگذاری به بانک")).toBeNull());
+
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1].key).toBe(posts[0].key);
+  });
+
+  it("returns to the original key when an edit is reverted while the first outcome is unknown", async () => {
+    stubAction(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    const fee = await screen.findByLabelText("مبلغ کارمزد چک برگشتی");
+    await user.type(fee, "30000");
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    await user.clear(fee);
+    await user.type(fee, "45000");
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+
+    // Back to the first fee. That first attempt may have posted a bounce with
+    // a ۳۰٬۰۰۰ fee, so this press has to be its retry, under its key — the
+    // old holder kept only the latest payload and minted a third key here.
+    await user.clear(fee);
+    await user.type(fee, "30000");
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    await waitFor(() => expect(posts).toHaveLength(3));
+
+    expect(posts[1].key).not.toBe(posts[0].key);
+    expect(posts[2].key).toBe(posts[0].key);
+    expect(posts[2].body).toEqual(posts[0].body);
+  });
+
+  it("treats a later identical action as new work once the first one has succeeded", async () => {
+    stubAction(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ cheque: cheque(1, { status: "in_collection" }) }),
+    }));
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    // The register still answers «نزد صندوق» here, so the same step is
+    // offered again. It is a second, deliberate operation — reusing the
+    // retired key would make the server replay the first one and silently
+    // do nothing.
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1].key).not.toBe(posts[0].key);
+  });
+
+  it("refuses to start a thirty-third unresolved operation instead of forgetting the first", async () => {
+    stubAction(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    const fee = (await screen.findByLabelText("مبلغ کارمزد چک برگشتی")) as HTMLInputElement;
+    const confirm = () => screen.getByRole("button", { name: "برگشت خورد" });
+
+    // Thirty-two distinct bounces, every one of them with an unknown
+    // outcome. `fireEvent.change` rather than `user.type` only because this
+    // loop is long; the submit is a real click.
+    for (let i = 1; i <= 32; i++) {
+      fireEvent.change(fee, { target: { value: String(i * 1000) } });
+      await user.click(confirm());
+      await waitFor(() => expect(posts).toHaveLength(i));
+    }
+
+    // The thirty-third is a *different* payload again, so it would need a new
+    // key. The holder refuses, and the screen says so — what it must not do
+    // is evict the first payload, whose retry identity is still the only
+    // thing standing between the user and a duplicate bounce.
+    fireEvent.change(fee, { target: { value: "999000" } });
+    await user.click(confirm());
+    expect(await screen.findByText(/نتیجه چند درخواست قبلی هنوز مشخص نشده است/)).toBeTruthy();
+    expect(posts).toHaveLength(32);
+
+    // And the very first payload can still be retried, under its own key.
+    fireEvent.change(fee, { target: { value: "1000" } });
+    await user.click(confirm());
+    await waitFor(() => expect(posts).toHaveLength(33));
+    expect(posts[32].key).toBe(posts[0].key);
+    expect(posts[32].body).toEqual(posts[0].body);
+  });
+
+  it("does not reuse a key the server refused in words", async () => {
+    // A 400 is the server saying it read the request and wrote nothing, so
+    // the identical payload may be sent again as new work.
+    stubAction(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: "period_locked" }),
+    }));
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1].key).not.toBe(posts[0].key);
+  });
+});
+
+
+
+describe("the idempotency key a new registration carries", () => {
+  /** Every POST to the create route, with the key its body carried. */
+  let creates: Record<string, unknown>[];
+
+  function stubCreate(respond: (attempt: number) => Promise<unknown>) {
+    creates = [];
+    let attempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/ledger/cheques" && init?.method === "POST") {
+          attempt += 1;
+          creates.push(JSON.parse(String(init?.body ?? "{}")));
+          return await respond(attempt);
+        }
+        if (url.startsWith("/api/ledger/cheques?")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              cheques: [cheque(1)],
+              total: 1,
+              hasMore: false,
+              banks: ["ملت"],
+              summary: summary(),
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            locations: [],
+            customers: [{ customerId: "customer-1", customerName: "مشتری" }],
+            suppliers: [],
+          }),
+        };
+      }),
+    );
+  }
+
+  const run = async (fn: () => Promise<{ ok: boolean; data: { error?: string } }>) => {
+    try {
+      return (await fn()).ok;
+    } catch {
+      return false;
+    }
+  };
+
+  /** Fills the minimum a registration needs and submits it. */
+  async function fillAndSubmit(user: ReturnType<typeof userEvent.setup>, serial: string) {
+    const serialInput = screen.getByLabelText(/^شماره چک/);
+    await user.clear(serialInput);
+    await user.type(serialInput, serial);
+    const bank = screen.getByLabelText(/^بانک/);
+    await user.clear(bank);
+    await user.type(bank, "ملت");
+    const amount = screen.getByLabelText(/^مبلغ \(/);
+    await user.clear(amount);
+    await user.type(amount, "5000000");
+    const name = screen.getByLabelText(/^نام صادرکننده روی چک/);
+    await user.clear(name);
+    await user.type(name, "مشتری");
+    if (!(screen.getByRole("checkbox") as HTMLInputElement).checked) {
+      await user.click(screen.getByRole("checkbox"));
+    }
+    // Shamsi only: the due date is picked from the Jalali calendar, never
+    // typed into a Gregorian `<input type="date">`.
+    if (!screen.queryByRole("button", { name: "ماه بعد" })) {
+      await user.click(screen.getByLabelText("سررسید چک"));
+    }
+    await user.click(await screen.findByRole("button", { name: "ماه بعد" }));
+    const days = await screen.findAllByRole("button", { name: /^۱۵ / });
+    await user.click(days[0]);
+    await user.click(screen.getByRole("button", { name: "ثبت چک" }));
+  }
+
+  it("retries a registration whose response was lost under the same key, even after the dialog was closed", async () => {
+    stubCreate(async (attempt) => {
+      if (attempt <= 1) throw new TypeError("Failed to fetch");
+      return { ok: true, status: 200, json: async () => ({ cheque: cheque(1) }) };
+    });
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(screen.getByRole("button", { name: /ثبت چک جدید/ }));
+    await fillAndSubmit(user, "S-777");
+    await waitFor(() => expect(creates).toHaveLength(1));
+
+    // The user closes the form — they have no idea whether the cheque was
+    // registered — then reopens it and enters the same cheque again.
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByLabelText("شماره چک")).toBeNull());
+    await user.click(screen.getByRole("button", { name: /ثبت چک جدید/ }));
+    await fillAndSubmit(user, "S-777");
+    await waitFor(() => expect(creates).toHaveLength(2));
+
+    expect(creates[0].idempotencyKey).toBeTruthy();
+    // Same key: the server replays the first registration instead of putting
+    // a second instrument with the same serial on the books.
+    expect(creates[1].idempotencyKey).toBe(creates[0].idempotencyKey);
+    expect(creates[1].serialNumber).toBe(creates[0].serialNumber);
+  });
+
+  it("gives a corrected registration its own key", async () => {
+    stubCreate(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: "serial_number_required" }),
+    }));
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(screen.getByRole("button", { name: /ثبت چک جدید/ }));
+    await fillAndSubmit(user, "S-777");
+    await waitFor(() => expect(creates).toHaveLength(1));
+    await fillAndSubmit(user, "S-778");
+    await waitFor(() => expect(creates).toHaveLength(2));
+
+    expect(creates[1].idempotencyKey).not.toBe(creates[0].idempotencyKey);
+  });
+});
+
+describe("the cheque register's permission gate", () => {
+  beforeEach(() => {
+    stubFetch(() => ({
+      cheques: [cheque(1)],
+      total: 1,
+      hasMore: false,
+      banks: ["ملت"],
+      summary: summary(),
+    }));
+  });
+
+  it("shows a read-only member the register and no mutation control", async () => {
+    renderSection({ canManage: false });
+    await screen.findByText(toPersianDigits("S-001"));
+    expect(screen.queryByRole("button", { name: /ثبت چک جدید/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "واگذاری به بانک" })).toBeNull();
+  });
+
+  it("shows the same register with controls to a member who may manage cheques", async () => {
+    renderSection({ canManage: true });
+    await screen.findByText(toPersianDigits("S-001"));
+    expect(screen.getByRole("button", { name: /ثبت چک جدید/ })).toBeTruthy();
+  });
+});
+
+
+describe("the cheque detail view's context", () => {
+  /** A register with one returned original and the replacement issued for it. */
+  function stubDetail(options: { canManage?: boolean; status?: string } = {}) {
+    const original = cheque(1, {
+      id: "cheque-original",
+      status: "resolved",
+      serialNumber: "S-ORIG",
+      amount: 4_000_000,
+      replacedByAmount: 4_000_000,
+    });
+    const replacement = cheque(2, {
+      id: "cheque-child",
+      status: options.status ?? "on_hand",
+      serialNumber: "S-CHILD",
+      amount: 4_000_000,
+      replacesChequeId: "cheque-original",
+      replacesSerialNumber: "S-ORIG",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+        if (url.startsWith("/api/ledger/cheques?")) {
+          return answer({
+            cheques: [replacement],
+            total: 1,
+            hasMore: false,
+            banks: ["ملت"],
+            summary: summary(),
+          });
+        }
+        if (url.endsWith("/history")) return answer({ events: [] });
+        if (url === "/api/ledger/cheques/cheque-child") {
+          return answer({ cheque: replacement, replaces: original, replacements: [] });
+        }
+        if (url === "/api/ledger/cheques/cheque-original") {
+          return answer({ cheque: original, replaces: null, replacements: [replacement] });
+        }
+        return answer({
+          locations: [],
+          customers: [{ customerId: "customer-1", customerName: "مشتری" }],
+          suppliers: [],
+        });
+      }),
+    );
+    return { original, replacement };
+  }
+
+  it("links the counterparty to its record in the people directory", async () => {
+    stubDetail();
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-CHILD"));
+    // Desktop table and mobile cards are both in the DOM; either opens it.
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+
+    const link = await screen.findByRole("link", { name: /مشتری/ });
+    // Addressed by the stored customer id through the canonical directory
+    // route — never guessed from the memo or matched on the name.
+    expect(link.getAttribute("href")).toContain("customer-1");
+    expect(link.getAttribute("href")).toContain("/accounting/directory");
+  });
+
+  it("opens the returned original a replacement points at, even when the register is not showing it", async () => {
+    stubDetail();
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-CHILD"));
+    // Desktop table and mobile cards are both in the DOM; either opens it.
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+
+    // The original is «تعیین‌تکلیف‌شده» and this page is showing the current
+    // cheque only: it is read by id, so the link works anyway.
+    const original = await screen.findByRole("button", {
+      name: new RegExp(toPersianDigits("S-ORIG")),
+    });
+    await user.click(original);
+    await screen.findByText(new RegExp(`جزئیات چک ${toPersianDigits("S-ORIG")}`));
+    // And from there, the replacement issued against it is reachable too.
+    expect(
+      await screen.findByRole("button", { name: new RegExp(toPersianDigits("S-CHILD")) }),
+    ).toBeTruthy();
+  });
+
+  it("does not tell a read-only member that a live cheque is finished", async () => {
+    stubDetail({ canManage: false });
+    const user = userEvent.setup();
+    renderSection({ canManage: false });
+    await screen.findByText(toPersianDigits("S-CHILD"));
+    // Desktop table and mobile cards are both in the DOM; either opens it.
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+
+    // An on-hand cheque is not terminal; the reader simply may not act.
+    expect(screen.queryByText(/در وضعیت نهایی است/)).toBeNull();
+    expect(await screen.findByText(/دسترسی «مدیریت چک‌ها»/)).toBeTruthy();
+    expect(screen.getByText(/هنوز در جریان است/)).toBeTruthy();
+  });
+
+  it("still calls a genuinely terminal cheque final", async () => {
+    stubDetail({ status: "cleared" });
+    const user = userEvent.setup();
+    renderSection({ canManage: false });
+    await screen.findByText(toPersianDigits("S-CHILD"));
+    // Desktop table and mobile cards are both in the DOM; either opens it.
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+
+    expect(await screen.findByText(/در وضعیت نهایی است/)).toBeTruthy();
+  });
+});
+
+
+describe("opening a related cheque", () => {
+  /** A deferred fetch answer the test releases by hand. */
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  const child = cheque(2, {
+    id: "cheque-child",
+    serialNumber: "S-CHILD",
+    replacesChequeId: "cheque-original",
+    replacesSerialNumber: "S-ORIG",
+  });
+  const original = cheque(1, {
+    id: "cheque-original",
+    status: "resolved",
+    serialNumber: "S-ORIG",
+    replacedByAmount: 1_000_000,
+  });
+  const other = cheque(3, { id: "cheque-other", serialNumber: "S-OTHER" });
+
+  /**
+   * Answers the register with all three cheques and routes every by-id read
+   * through `detailFor`, so a case can hold one open or fail it.
+   */
+  function stubDetails(detailFor: (id: string) => Promise<unknown>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+        if (url.startsWith("/api/ledger/cheques?")) {
+          return answer({
+            cheques: [child, other],
+            total: 2,
+            hasMore: false,
+            banks: ["ملت"],
+            summary: summary(),
+          });
+        }
+        if (url.endsWith("/history")) return answer({ events: [] });
+        const byId = /^\/api\/ledger\/cheques\/([^/?]+)$/.exec(url);
+        if (byId) return await detailFor(byId[1]);
+        return answer({ locations: [], customers: [], suppliers: [] });
+      }),
+    );
+  }
+
+  const relatedOf = (id: string) =>
+    id === "cheque-child"
+      ? { cheque: child, replaces: original, replacements: [] }
+      : { cheque: original, replaces: null, replacements: [child] };
+
+  /** Opens the replacement's detail and clicks through to its original. */
+  async function openChildThenOriginal(user: ReturnType<typeof userEvent.setup>) {
+    await screen.findByText(toPersianDigits("S-CHILD"));
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+    await user.click(await screen.findByRole("button", { name: new RegExp(toPersianDigits("S-ORIG")) }));
+  }
+
+  it("says it is working, then shows what failed and offers a retry that works", async () => {
+    let attempt = 0;
+    stubDetails(async (id) => {
+      if (id === "cheque-original") {
+        attempt += 1;
+        // The first press loses the connection — `api()` reports that as
+        // status 0 with `network_error`, not as a thrown rejection.
+        if (attempt === 1) throw new TypeError("Failed to fetch");
+      }
+      return { ok: true, status: 200, json: async () => relatedOf(id) };
+    });
+
+    const user = userEvent.setup();
+    renderSection();
+    await openChildThenOriginal(user);
+
+    // A dead-looking link was the defect: the failure is now stated, and the
+    // one useful action is offered.
+    const failure = await screen.findByText("چک مرتبط باز نشد");
+    expect(failure).toBeTruthy();
+    expect(screen.getByText(/ارتباط با سرور/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await screen.findByText(new RegExp(`جزئیات چک ${toPersianDigits("S-ORIG")}`));
+    expect(screen.queryByText("چک مرتبط باز نشد")).toBeNull();
+  });
+
+  it("announces the wait while the related cheque is being read", async () => {
+    const gate = deferred<void>();
+    stubDetails(async (id) => {
+      if (id === "cheque-original") await gate.promise;
+      return { ok: true, status: 200, json: async () => relatedOf(id) };
+    });
+
+    const user = userEvent.setup();
+    renderSection();
+    await openChildThenOriginal(user);
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain("در حال باز کردن چک مرتبط");
+
+    gate.resolve();
+    await screen.findByText(new RegExp(`جزئیات چک ${toPersianDigits("S-ORIG")}`));
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("does not reopen a detail view the reader has closed", async () => {
+    const gate = deferred<void>();
+    stubDetails(async (id) => {
+      if (id === "cheque-original") await gate.promise;
+      return { ok: true, status: 200, json: async () => relatedOf(id) };
+    });
+
+    const user = userEvent.setup();
+    renderSection();
+    await openChildThenOriginal(user);
+    await screen.findByRole("status");
+
+    // Closed while the read is still in flight.
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByText(new RegExp(`جزئیات چک ${toPersianDigits("S-CHILD")}`))).toBeNull(),
+    );
+
+    gate.resolve();
+    // The answer arrives to nobody: a dialog that pushes itself back open
+    // after the reader dismissed it is a bug, not a feature.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText(new RegExp(`جزئیات چک ${toPersianDigits("S-ORIG")}`))).toBeNull();
+  });
+
+  it("lets a newer selection win when an older read answers late", async () => {
+    const gate = deferred<void>();
+    stubDetails(async (id) => {
+      if (id === "cheque-original") await gate.promise;
+      return { ok: true, status: 200, json: async () => relatedOf(id) };
+    });
+
+    const user = userEvent.setup();
+    renderSection();
+    await openChildThenOriginal(user);
+    await screen.findByRole("status");
+
+    // While that is outstanding, the reader picks a different row — which
+    // the register already holds, so it appears at once.
+    await user.keyboard("{Escape}");
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[1]);
+    await screen.findByText(new RegExp(`جزئیات چک ${toPersianDigits("S-OTHER")}`));
+
+    gate.resolve();
+    // The stale answer must not replace what the reader is now looking at.
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+    expect(screen.getByText(new RegExp(`جزئیات چک ${toPersianDigits("S-OTHER")}`))).toBeTruthy();
+    expect(screen.queryByText(new RegExp(`جزئیات چک ${toPersianDigits("S-ORIG")}`))).toBeNull();
+  });
+});
+
+
+/*
+ * The states a baseline photograph cannot cover.
+ *
+ * The cheque screen is going into the visual suite, and a screenshot is one
+ * frame of one viewport: it says nothing about what a screen reader hears
+ * while the register loads, what the empty and failed states offer, whether
+ * the mobile layout exists at all, or whether the Latin-numeral fields are
+ * marked LTR inside an RTL document. Those are asserted here instead.
+ */
+describe("the cheque register's states, direction and accessibility", () => {
+  const page = {
+    cheques: [cheque(1, { sayadId: "1234567890123456", accountNumber: "0203045678001" })],
+    total: 1,
+    hasMore: false,
+    banks: ["ملت"],
+    summary: summary(),
+  };
+
+  it("announces that it is loading, and stops announcing when the rows arrive", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/ledger/cheques?")) {
+          await held;
+          return { ok: true, status: 200, json: async () => page };
+        }
+        return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+      }),
+    );
+
+    renderSection();
+    const busy = await screen.findByRole("status", { name: "در حال بارگذاری فهرست چک‌ها" });
+    expect(busy.getAttribute("aria-busy")).toBe("true");
+    expect(busy.getAttribute("aria-live")).toBe("polite");
+
+    release();
+    await screen.findByText(toPersianDigits("S-001"));
+    expect(screen.queryByRole("status", { name: "در حال بارگذاری فهرست چک‌ها" })).toBeNull();
+  });
+
+  it("offers a way forward from the empty register", async () => {
+    stubFetch(() => ({ cheques: [], total: 0, hasMore: false, banks: [], summary: summary() }));
+    renderSection();
+    expect(await screen.findByText("هنوز چک‌های دریافتی ثبت نشده است")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /ثبت چک دریافتی/ })).toBeTruthy();
+  });
+
+  it("explains a failed load and retries it on request", async () => {
+    let attempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/ledger/cheques?")) {
+          attempt += 1;
+          if (attempt === 1) return { ok: false, status: 500, json: async () => ({ error: "server_error" }) };
+          return { ok: true, status: 200, json: async () => page };
+        }
+        return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSection();
+    expect(await screen.findByText("فهرست چک‌ها در دسترس نیست")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await screen.findByText(toPersianDigits("S-001"));
+    expect(screen.queryByText("فهرست چک‌ها در دسترس نیست")).toBeNull();
+  });
+
+  it("renders both the desktop table and the mobile card for every cheque", async () => {
+    stubFetch(() => page);
+    const { container } = renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+
+    // One row in the table, one card beside it — the small-screen layout is
+    // a real DOM branch, not a CSS reflow of the table.
+    expect(container.querySelector(".hidden.lg\\:block table")).toBeTruthy();
+    expect(container.querySelector(".lg\\:hidden")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /جزئیات/ })).toHaveLength(2);
+  });
+
+  it("lays the register out right-to-left and marks the Latin-numeral fields LTR", async () => {
+    stubFetch(() => page);
+    const user = userEvent.setup();
+    const { container } = renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+    expect(container.querySelector("[dir='rtl']")).toBeTruthy();
+
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+    // Serial, صیاد id and account number are identifiers: they read
+    // left-to-right even inside the RTL dialog, or the digits reorder.
+    const dialog = await screen.findByRole("dialog");
+    for (const label of ["شماره چک", "شناسه صیاد", "شماره حساب"]) {
+      const field = within(dialog).getAllByText(label)[0].parentElement;
+      expect(field?.querySelector("[dir='ltr']")).toBeTruthy();
+    }
+  });
+
+  it("gives the detail dialog an accessible name and closes it from the keyboard", async () => {
+    stubFetch(() => page);
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("جزئیات چک");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+describe("the cheque register's keyboard and names", () => {
+  const page = {
+    cheques: [cheque(1), cheque(2)],
+    total: 2,
+    hasMore: false,
+    banks: [],
+    summary: summary(),
+  };
+
+  it("gives every row its own name, so a screen reader can tell the rows apart", async () => {
+    stubFetch(() => page);
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+
+    expect(
+      screen.getByRole("button", {
+        name: `جزئیات چک ${toPersianDigits("S-001")}`,
+      }),
+    ).toBeTruthy();
+    // The action trigger is drawn once in the table and once in the card.
+    expect(
+      screen.getAllByRole("button", {
+        name: `اقدام برای چک ${toPersianDigits("S-001")}`,
+      }),
+    ).toHaveLength(2);
+    // The desktop row and the mobile card are different controls with different names.
+    expect(
+      screen.getByRole("button", {
+        name: `جزئیات و تاریخچهٔ چک ${toPersianDigits("S-001")}`,
+      }),
+    ).toBeTruthy();
+  });
+
+  it("names every filter control, so none of them is an unlabelled combobox", async () => {
+    stubFetch(() => page);
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+
+    const comboboxes = screen.getAllByRole("combobox");
+    // Status, bank, sort and the branch filter (shown with branches) — at least three.
+    expect(comboboxes.length).toBeGreaterThanOrEqual(3);
+    for (const box of comboboxes) {
+      expect(
+        box.getAttribute("aria-label") || box.getAttribute("aria-labelledby"),
+      ).toBeTruthy();
+    }
+    expect(screen.getByLabelText("جستجوی چک‌ها")).toBeTruthy();
+  });
+
+  it("keeps Tab inside the detail dialog while it is open", async () => {
+    stubFetch(() => page);
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+    await user.click(
+      screen.getByRole("button", {
+        name: `جزئیات چک ${toPersianDigits("S-001")}`,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+
+    for (let i = 0; i < 40; i += 1) {
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+  });
+});
+
+describe("the cheque register's accounting categories", () => {
+  it("names each category and the control account it reconciles to", async () => {
+    stubFetch(() => ({
+      cheques: [cheque(1)],
+      total: 1,
+      hasMore: false,
+      banks: [],
+      summary: summary(),
+    }));
+    renderSection();
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await waitFor(() => expect(screen.getAllByText("نزد صندوق").length).toBeGreaterThan(0));
+    expect(screen.getAllByText(/۱۲۴۱/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("ظهرنویسی‌شده (تعهد احتمالی)").length).toBe(1);
+    expect(screen.getAllByText("برگشتی تعیین‌تکلیف‌نشده").length).toBe(1);
+    expect(screen.getAllByText(/۱۲۴۴/).length).toBeGreaterThan(0);
+  });
+});

@@ -142,6 +142,41 @@ here.
 counterparty hands over a new cheque in practice, and because a status that can loop makes "what
 happened to this cheque" unanswerable from the event log.
 
+> **Revised by issue #828 (migrations 0215/0216).** The *instrument* is still dead — a bounce
+> never loops back to `on_hand` — but the *balance* is not. A returned cheque left the value
+> sitting in «۱۲۴۴ چک‌های برگشتی» / «۲۱۲۲ چک‌های پرداختنی برگشتی» with no supported way out, and
+> registering a replacement as an ordinary new cheque credits/debits the control account a second
+> time instead of moving the returned balance. A `bounced` cheque now offers exactly two
+> resolutions — `settle` (paid another way: the returned account clears against بانک, status
+> `cleared`) and `restore` (the debt goes back to حساب‌های دریافتنی/پرداختنی, status `resolved`,
+> after which a replacement cheque is registered normally and the two entries net out). An
+> optional returned-cheque charge posts to «۵۸۶۰ هزینه چک برگشتی و جرایم بانکی» on the bounce
+> itself.
+>
+> The same issue settled four more things about the register (migration 0217):
+> **identity** — the uniqueness rule compares canonical forms (Latin digits, no separators, no
+> «بانک » prefix), so «۱۲۳-۴۵۶» at «بانک ملت» and "123456" at «ملت» are one instrument;
+> **retry safety** — `cheques.idempotency_key` and `cheque_events.idempotency_key` make a
+> replayed registration or lifecycle step return the first result instead of posting twice;
+> **attribution** — an ordinary registration must name a customer/supplier, and capturing an
+> unattributed cheque is an explicit, visibly exceptional choice; **replacement** —
+> `replaces_cheque_id` records which cheque replaced which, so the history drills through.
+>
+> Migration 0218 finished two of those. **Replacement is a sequence, not a
+> link**: a replacement may only be registered against a cheque whose returned
+> balance has already been restored (`restore`), in the same branch, for the
+> same party, dated no earlier than that restoration, and for no more than the
+> part of the original that is still unreplaced — splitting one returned
+> cheque into several is supported, replacing more than came back is not. The
+> original is locked while that arithmetic is read, so two concurrent
+> replacements cannot both see room. **Identity survives an upgrade**: legacy
+> duplicates are classified (`canonical_duplicate_of`) rather than tolerated,
+> and the unique index covers every unclassified row, so a tenant whose
+> history contains the same cheque three times still has new duplicates
+> refused. **A retry is the same request**: both tables store the canonical
+> fingerprint of the payload that wrote them, and the same key carrying a
+> different payload is `idempotency_key_conflict` instead of a silent success.
+
 ## Where the exit criteria are satisfied
 
 - Retail payroll and depreciation post against the template's own chart —

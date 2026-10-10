@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   availableActions,
+  canonicalBankName,
+  canonicalSerialNumber,
   bucketChequesByDueDate,
   CHEQUE_ACTIONS,
   CHEQUE_DIRECTIONS,
@@ -64,17 +66,89 @@ describe("nextStatus — payable", () => {
   });
 });
 
+describe("canonical instrument identity", () => {
+  it("reads one cheque's serial the same however it was typed", () => {
+    const canonical = canonicalSerialNumber("123456");
+    for (const typed of ["۱۲۳۴۵۶", "١٢٣٤٥٦", " 123-456 ", "123/456", "123 456"]) {
+      expect(canonicalSerialNumber(typed)).toBe(canonical);
+    }
+  });
+
+  it("reads a group separator inside a serial as formatting, not identity", () => {
+    // A serial number is a label: nothing is ever computed from it, so a
+    // thousands separator inside one can only be how it was typed. Persian
+    // input produces «٬» (U+066C) most often, but «٫» (U+066B), the Arabic
+    // comma «،» (U+060C) and a Latin comma all turn up on the same paper.
+    const canonical = canonicalSerialNumber("123456");
+    for (const typed of ["۱۲۳٬۴۵۶", "۱۲۳٫۴۵۶", "۱۲۳،۴۵۶", "123,456", " 123٬456 "]) {
+      expect(canonicalSerialNumber(typed)).toBe(canonical);
+    }
+  });
+
+  it("keeps genuinely different serials apart", () => {
+    expect(canonicalSerialNumber("123456")).not.toBe(canonicalSerialNumber("123457"));
+    expect(canonicalSerialNumber("A-123")).not.toBe(canonicalSerialNumber("B-123"));
+  });
+
+  it("treats «بانک ملت» and «ملت» as one bank", () => {
+    const mellat = canonicalBankName("ملت");
+    expect(canonicalBankName("بانک ملت")).toBe(mellat);
+    expect(canonicalBankName("  ملت ")).toBe(mellat);
+    expect(canonicalBankName("بانک  ملت")).toBe(mellat);
+  });
+
+  it("does not collapse two different banks, and keeps «بانک» inside a name", () => {
+    expect(canonicalBankName("ملی")).not.toBe(canonicalBankName("ملت"));
+    expect(canonicalBankName("بانک خاورمیانه")).toBe(canonicalBankName("خاورمیانه"));
+  });
+
+  it("folds the Arabic ي/ك a Persian keyboard produces by accident", () => {
+    expect(canonicalBankName("ملي")).toBe(canonicalBankName("ملی"));
+    expect(canonicalBankName("بانك ملت")).toBe(canonicalBankName("بانک ملت"));
+  });
+});
+
+describe("returned cheques get a resolution", () => {
+  it("lets a returned receivable be settled another way or put back on the customer", () => {
+    expect(nextStatus("receivable", "bounced", "settle")).toBe("cleared");
+    expect(nextStatus("receivable", "bounced", "restore")).toBe("resolved");
+  });
+
+  it("lets a returned payable be paid or put back on the supplier", () => {
+    expect(nextStatus("payable", "bounced", "settle")).toBe("cleared");
+    expect(nextStatus("payable", "bounced", "restore")).toBe("resolved");
+  });
+
+  it("never loops a returned cheque back into circulation", () => {
+    for (const direction of CHEQUE_DIRECTIONS) {
+      for (const action of ["deposit", "endorse", "clear", "present", "cancel", "bounce"] as const) {
+        expect(nextStatus(direction, "bounced", action)).toBeNull();
+      }
+    }
+  });
+
+  it("offers exactly the two resolutions, and nothing after them", () => {
+    expect(availableActions("receivable", "bounced")).toEqual(["settle", "restore"]);
+    expect(availableActions("payable", "bounced")).toEqual(["settle", "restore"]);
+    expect(isTerminal("receivable", "bounced")).toBe(false);
+    expect(isTerminal("payable", "resolved")).toBe(true);
+    expect(isTerminal("receivable", "resolved")).toBe(true);
+  });
+});
+
 describe("terminal states", () => {
-  it("ends a cheque's life at cleared, bounced and cancelled", () => {
+  it("ends a cheque's life at cleared, cancelled and resolved — but not at a bounce", () => {
     for (const direction of CHEQUE_DIRECTIONS) {
       expect(isTerminal(direction, "cleared")).toBe(true);
-      expect(isTerminal(direction, "bounced")).toBe(true);
+      expect(isTerminal(direction, "resolved")).toBe(true);
+      // A returned cheque still has a balance in 1244/2122 to move.
+      expect(isTerminal(direction, "bounced")).toBe(false);
     }
     expect(isTerminal("payable", "cancelled")).toBe(true);
   });
 
   it("leaves nothing to do from a terminal state, in any direction, for any action", () => {
-    const terminal: ChequeStatus[] = ["cleared", "bounced", "cancelled"];
+    const terminal: ChequeStatus[] = ["cleared", "cancelled", "resolved"];
     for (const direction of CHEQUE_DIRECTIONS) {
       for (const status of terminal) {
         expect(availableActions(direction, status)).toEqual([]);
