@@ -213,6 +213,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       await ensureEmployeeParty(session.businessId, userId, {
         displayName: body.fullName?.trim() || null,
         email: body.email ?? null,
+        // Issue #854 (pass 4, gap 5) — the file is seeded with the canonical
+        // login phone too, so the personnel tab never starts out disagreeing
+        // with the membership about it.
+        phone: phone ?? undefined,
       });
     } catch {
       /* no party row yet — see the comment above */

@@ -18,6 +18,7 @@
 import { useEffect, useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatJalali } from "@/lib/jalali";
+import { normalizeSecurityDigits } from "@/lib/digits";
 import {
   ErrorBox,
   Field,
@@ -207,7 +208,7 @@ export function OwnerActivation({ token }: { token: string }) {
                 autoComplete="one-time-code"
                 maxLength={CODE_LENGTH}
                 value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                onChange={(e) => setCode(normalizeSecurityDigits(e.target.value, CODE_LENGTH))}
               />
               <SecondaryButton onClick={sendCode} disabled={sending}>
                 {sending ? "در حال ارسال…" : "ارسال کد"}

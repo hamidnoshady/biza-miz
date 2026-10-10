@@ -22,7 +22,7 @@ import {
   useResendCooldown,
 } from "@/components/auth/use-resend-cooldown";
 import type { CredentialSurface } from "@/lib/credential-authority";
-import { toPersianDigits } from "@/lib/digits";
+import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
 
 interface SelfMfaStatus {
   methods: Array<MfaMethod | { method: MfaMethod; isPrimary?: boolean; phoneHint?: string | null }>;
@@ -663,7 +663,7 @@ export function TwoFactorSettings({
                   maxLength={6}
                   required
                   value={confirmCode}
-                  onChange={(e) => setConfirmCode(e.target.value)}
+                  onChange={(e) => setConfirmCode(normalizeSecurityDigits(e.target.value, 6))}
                   placeholder="123456"
                   className={inputClass}
                 />
@@ -762,7 +762,12 @@ export function TwoFactorSettings({
                       inputMode="tel"
                       required
                       value={phoneInput}
-                      onChange={(e) => setPhoneInput(e.target.value)}
+                      onChange={(e) =>
+                        // Issue #854 pass 4 — phone digits are numeric input too;
+                        // accept Persian/Arabic/extended-Arabic digits the same way
+                        // the OTP inputs do, keeping the field clean for submission.
+                        setPhoneInput(normalizeSecurityDigits(e.target.value, 16))
+                      }
                       placeholder="09121234567"
                       className={inputClass}
                     />
@@ -818,7 +823,7 @@ export function TwoFactorSettings({
                       maxLength={6}
                       required
                       value={confirmCode}
-                      onChange={(e) => setConfirmCode(e.target.value)}
+                      onChange={(e) => setConfirmCode(normalizeSecurityDigits(e.target.value, 6))}
                       placeholder="123456"
                       className={inputClass}
                     />

@@ -370,3 +370,37 @@ export function partiesSectionAbilities(
     canOpenStatement: canSeeLedger && PARTIES_STATEMENT_ROLES.includes(role),
   };
 }
+
+/**
+ * Roles whose built-in presets carry `parties.view` — the fallback answer when
+ * a screen asks whether the directory may be rendered at all without the
+ * member's effective permissions in hand. Mirrors `ROLE_PRESETS` in
+ * permissions.ts (admin is everything but owner-only keys; waiter and kitchen
+ * carry no party read); `parties-scopes.test.ts` pins it against
+ * `roleBasePermissions` so the two cannot drift.
+ */
+export const PARTIES_PRESET_VIEWING_ROLES: readonly string[] = [
+  "owner",
+  "admin",
+  "manager",
+  "accountant",
+  "cashier",
+];
+
+/**
+ * Issue #854 (pass 4, gap 3) — may this member see a party directory at all:
+ * the real answer when their effective permissions are known, the preset
+ * answer when they are not. `/api/parties` enforces `parties.view` either
+ * way; this exists so a screen (the Team tab's personnel file) can hide the
+ * section instead of rendering a list that only ever answers 403 — without
+ * broadening the permission itself.
+ */
+export function canViewParties(
+  role: string,
+  permissions?: readonly string[] | null,
+): boolean {
+  const known = permissions !== undefined && permissions !== null;
+  return known
+    ? permissions.includes(PERMISSIONS.partiesView)
+    : PARTIES_PRESET_VIEWING_ROLES.includes(role);
+}

@@ -5,6 +5,7 @@ import {
   PARTY_SCOPES_DEF,
   canEditAccountingInScope,
   canSeeAccountingInScope,
+  canViewParties,
   defaultRoleForScope,
   partiesSectionAbilities,
   partyMatchesScope,
@@ -256,6 +257,39 @@ describe("what a member may do on a party screen", () => {
       expect(partiesSectionAbilities(role), role).toEqual(
         partiesSectionAbilities(role, preset),
       );
+    }
+  });
+});
+
+describe("who may see a party directory at all (issue #854 pass 4)", () => {
+  it("answers from the member's effective permissions when they are known", () => {
+    expect(canViewParties("manager", ["parties.view"])).toBe(true);
+    // `parties.manage` alone is not the read: the API gate is `parties.view`.
+    expect(canViewParties("manager", ["parties.manage"])).toBe(false);
+    expect(canViewParties("manager", [])).toBe(false);
+    // A role with no preset grant sees the directory once granted…
+    expect(canViewParties("waiter", ["parties.view"])).toBe(true);
+    // …and a preset role loses it once revoked — the team manager who holds
+    // team access without `parties.view` is exactly the case the Team tab
+    // hides the personnel file for.
+    expect(canViewParties("manager", ["team.view", "team.manage"])).toBe(false);
+  });
+
+  it("falls back to the presets when permissions are unknown", () => {
+    for (const role of ["owner", "manager", "accountant", "cashier"] as const) {
+      expect(canViewParties(role), role).toBe(true);
+    }
+    for (const role of ["waiter", "kitchen"] as const) {
+      expect(canViewParties(role), role).toBe(false);
+    }
+  });
+
+  it("agrees with the presets it falls back to", () => {
+    // Same drift guard as the abilities fallback: for every built-in role, the
+    // preset answer equals the answer computed from that role's base set.
+    for (const role of ["owner", "admin", "manager", "accountant", "cashier", "waiter", "kitchen"] as const) {
+      const preset = roleBasePermissions(role);
+      expect(canViewParties(role), role).toBe(canViewParties(role, preset));
     }
   });
 });

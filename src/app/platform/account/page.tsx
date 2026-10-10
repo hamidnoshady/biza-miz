@@ -25,7 +25,7 @@ import {
   RecoveryCodeSheet,
   type MfaMethod,
 } from "@/components/auth/mfa-step";
-import { toPersianDigits } from "@/lib/digits";
+import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
 import { PLATFORM_ROLE_LABELS, type PlatformAdminRole } from "@/lib/platform-admin";
 
 interface PlatformMeResponse {
@@ -463,7 +463,7 @@ function PlatformSelfMfaSection() {
                   inputMode="numeric"
                   maxLength={6}
                   value={stepUpMfaCode}
-                  onChange={(e) => setStepUpMfaCode(e.target.value)}
+                  onChange={(e) => setStepUpMfaCode(normalizeSecurityDigits(e.target.value, 6))}
                   className={inputClass}
                 />
               </Field>
@@ -781,7 +781,7 @@ function PlatformSelfMfaSection() {
                       maxLength={6}
                       required
                       value={confirmCode}
-                      onChange={(e) => setConfirmCode(e.target.value)}
+                      onChange={(e) => setConfirmCode(normalizeSecurityDigits(e.target.value, 6))}
                       placeholder="123456"
                       className={inputClass}
                     />

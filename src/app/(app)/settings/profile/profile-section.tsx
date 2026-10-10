@@ -12,7 +12,7 @@ import {
   api,
   inputClass,
 } from "@/app/dashboard/ui";
-import { toPersianDigits } from "@/lib/digits";
+import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { formatPhoneDisplay } from "@/lib/phone";
 import { roleLabel } from "@/lib/role-labels";
@@ -709,7 +709,7 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
                 maxLength={6}
                 required
                 value={codeInput}
-                onChange={(e) => setCodeInput(e.target.value)}
+                onChange={(e) => setCodeInput(normalizeSecurityDigits(e.target.value, 6))}
                 placeholder="123456"
                 className={inputClass}
               />
@@ -963,9 +963,10 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
                   <input
                     dir="ltr"
                     inputMode="numeric"
+                    maxLength={12}
                     required
                     value={currentPin}
-                    onChange={(e) => setCurrentPin(e.target.value)}
+                    onChange={(e) => setCurrentPin(normalizeSecurityDigits(e.target.value, 12))}
                     className={inputClass}
                   />
                 </Field>
@@ -975,9 +976,10 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
                   <input
                     dir="ltr"
                     inputMode="numeric"
+                    maxLength={12}
                     required
                     value={newPin}
-                    onChange={(e) => setNewPin(e.target.value)}
+                    onChange={(e) => setNewPin(normalizeSecurityDigits(e.target.value, 12))}
                     className={inputClass}
                   />
                 </Field>
@@ -985,9 +987,10 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
                   <input
                     dir="ltr"
                     inputMode="numeric"
+                    maxLength={12}
                     required
                     value={confirmPin}
-                    onChange={(e) => setConfirmPin(e.target.value)}
+                    onChange={(e) => setConfirmPin(normalizeSecurityDigits(e.target.value, 12))}
                     className={inputClass}
                   />
                 </Field>

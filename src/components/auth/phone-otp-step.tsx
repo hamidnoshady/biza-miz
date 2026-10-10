@@ -13,7 +13,7 @@
  * rate-limit sentence can live beside the button it describes.
  */
 import { useEffect, useState } from "react";
-import { toPersianDigits } from "@/lib/digits";
+import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
 import { MfaStep } from "./mfa-step";
 import { BusinessPicker, useBusinessSelection } from "./business-picker";
 import { useResendCooldown } from "./use-resend-cooldown";
@@ -295,7 +295,7 @@ export function PhoneOtpStep({
         maxLength={6}
         required
         value={code}
-        onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+        onChange={(e) => setCode(normalizeSecurityDigits(e.target.value, 6))}
         placeholder="------"
         aria-label="کد تأیید ۶ رقمی"
         className="w-full rounded-lg border border-input px-3 py-2 text-center text-lg tracking-[0.4em] focus:border-primary focus:outline-none"

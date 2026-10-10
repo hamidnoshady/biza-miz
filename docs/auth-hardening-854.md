@@ -20,7 +20,7 @@ a green table.
 | 6 | MFA policy is one rule for every login path | `src/lib/mfa.ts` (`mfaAppliesToRole`, `privilegedMfaBaseline`) + `mfa-policy.ts`; asked by password, phone-OTP, PIN, biometric, invitation and step-up |
 | 7 | Global identity security is judged across **all** memberships | `mfa-service.globalMfaRequirementForPlatformUser` (`mayRemoveGlobalMfaFactor` is the only decision point) |
 | 8 | Cloud/Hybrid/Local ownership is explicit per field | `src/lib/credential-authority.ts` — a data table, not scattered `if (profile === "hybrid")` |
-| 9 | Personal security in `/settings/profile`, organization security in Security Center, membership administration in Team | `(app)/settings/profile/page.tsx` passes server-computed surfaces; the policy card lives in the Security Center |
+| 9 | Personal security in `/settings/profile`, organization security in Security Center, membership administration in Team | `(app)/settings/profile/page.tsx` passes server-computed surfaces; the Security Center renders policy posture only — its personal phone card links to the Profile ceremony instead of duplicating it (pass 4) |
 | 10 | Sensitive changes need recent auth in a credential the user actually has | `recent-auth.ts` + `src/lib/auth-contracts.ts` (`availableStepUpMethods`) + `components/auth/step-up-prompt.tsx` |
 | 11 | Session UI describes the scope it revokes | `src/lib/session-contract.ts`, `/api/sessions/self` (`scope`, `sessionRevokeDescription`) |
 | 12 | Sensitive mutations are audited | `src/lib/security-audit.ts` (`recordSecurityAudit`) writes a secret-free row **inside the same transaction** as every personal-security mutation in both realms (enrol start/confirm, factor removed/replaced, primary changed, recovery codes, step-up success/failure, session revoke scopes), plus the `audit_log` rows on every changed route (`auth.step_up`, `auth.self_phone_changed`, `auth.self_pin_changed`, `crew.pin_rotation`, `team.invited`, `team.invitation_accepted`, …) and the membership rows carrying actor + change + reason (GAP 4) |
@@ -88,11 +88,11 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.2 Team UI permission controls gated | resolved (pass 1) | mutating controls require `team.permissions_manage`; request shape omits the permission half without it |
 | P2.3 permission registry duplicated | resolved (pass 1) | member editor + roles dialog render the canonical `PermissionEditor` |
 | P2.4 "reason required" was only UI metadata | **resolved (pass 2, GAP 4)** | server-validated meaningful reasons (8–500 chars, whitespace-normalised) in `validateAccessChangeReason`; enforced inside the write — `updateMembership`, `createMembership`, `createInvitation` (stored on the invitation, inherited by the acceptance audit), `createTenantRole` (always) and `updateTenantRole` (permission/archive/scope changes, not description-only edits). The validated reason, the actor and the change ride the IAM event and the audit row. The member editor, roles dialog and invite dialog show the reason field exactly when the server will demand it; role archiving asks for its reason. Blank/missing/short refusals and successful persistence are pinned in `integration/auth-hardening-854-gaps.integration.test.ts` (GAP 4) |
-| P2.5 personnel/membership identity drift | deferred — product decision | membership renames repair the personnel file (`ensureEmployeeParty` is the repair path, covered by `parties.integration.test.ts`); whether a personnel edit may rename a membership backwards is undecided. Nothing reads the stale copy for authorization |
+| P2.5 personnel/membership identity drift | **resolved (pass 4)** | canonical ownership defined exactly as the issue prescribes: the membership row (`users`: `full_name`, `email`, `phone_e164`) and the global identity own the login-identity fields; the personnel record keeps HR-only fields. A personnel write that would *change* a shared field away from the membership's value is refused with `identity_{name,email,phone}_managed_by_membership` (HTTP 409 + fieldErrors from `/api/parties/[id]`), so `/api/parties` can never silently fork a conflicting identity copy; repair writes that align the party with the membership stay allowed, and unlinked parties are untouched. The membership→party direction remains the repair path (`ensureEmployeeParty` after a committed rename, plus `setMemberPhone` post-commit sync). Nothing reads a stale personnel copy for authorization. Pinned by the canonical-ownership cases in `parties.integration.test.ts` and the sync cases in `team.integration.test.ts` |
 | P2.6 membership-linked party hard-deleted | **resolved (pass 2)** | `removeParty`'s history check now counts the `employee_user_id` link itself, so a member's personnel file is archived, never hard-deleted; pinned by the new case in `parties.integration.test.ts` |
-| P2.7 personnel subsection without `parties.view` | deferred — scope | the Team page degrades instead of crashing; a membership-scoped personnel read path is a larger change recorded rather than guessed |
-| P2.8 offboarded member looks "reactivatable" | partly resolved | reactivating a stripped (offboarded) membership is refused; a true rehire flow (new states, credential re-establishment) needs a migration — deferred as a product decision |
-| P2.9 re-invite collides with retained rows | partly resolved | invitations supersede pending ones per address and acceptance is idempotent per identity; an explicit rehire/relink workflow is part of the same deferred product decision as P2.8 |
+| P2.7 personnel subsection without `parties.view` | **resolved (pass 4)** | the issue offers two fixes; the Team page now implements the first — the personnel subsection mounts only when the signed-in member can actually read it: `canViewParties(role, permissions)` from the shared `parties-scopes` module gates the single `<PartiesSection>` mount (no unconditional fallback mount), so a team manager with team access but no `parties.view` sees a clean team screen instead of a 403-ing subsection. The dedicated membership-scoped personnel read path stays recorded as possible future work; the `parties.view` permission itself was *not* widened to make the error disappear |
+| P2.8 offboarded member looks "reactivatable" | **resolved (pass 4)** | actions now derive from the lifecycle state: suspended members get «فعال‌سازی» (reactivate), offboarded members get «بازگشت به کار» (rehire) and nothing else — the generic activate button no longer renders for an offboarded row, and the service refuses `not_offboarded` in the other direction. Rehire is an explicit ceremony, `POST /api/team/[id]/rehire`, holding the membership row lock, gated on `team.manage` **and** `team.permissions.manage` (a rehire re-grants the stored role/permissions), with the whole grant re-checked against the actor (`grants_beyond_actor`) and owner-only/self checks preserved. It restores the identity linkage (relinks or mints the platform identity, preserving the historical membership row — no history deletion), re-establishes PIN credentials under the blind index, and applies the stored role, permission overrides and branch scope in one transaction, with an explicit `reason`. No migration was required: offboarding already retained everything a rehire needs. Pinned by the rehire cases in `team.integration.test.ts` (success + every refusal code + MFA factor survival + same-email rehire with history kept) |
+| P2.9 re-invite collides with retained rows | **resolved (pass 4)** | the same-email case no longer dead-ends: a new membership for an offboarded identity's email is refused `email_taken` by design, and the retained row is recovered through the rehire ceremony instead of colliding with it — invitations still supersede pending ones per address and acceptance stays idempotent per identity. Cross-tenant rehire attempts answer `not_found`, and historical membership/personnel/audit references survive the relink untouched |
 | P2.10 branch-scope validation incomplete | resolved (pass 1) | explicit scope validated at creation and acceptance |
 | P2.11 invitation UI lacks branch scope | resolved (pass 1) | the invite form asks for scope + branches |
 | P2.12 PIN uniqueness copy and implementation disagree | resolved (pass 1) | the PIN surface copy and the blind-index constraint now describe the same per-business rule |
@@ -106,12 +106,12 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.20 two SMS numbers for one user | resolved as *kept separate*, labelled | the login phone (membership, `users.phone_e164`) and the MFA SMS factor (identity, `mfa_enrolments.phone_e164`) are independent by design; Profile labels them as login vs second factor, and the strict verifier binds each code to the number its challenge was sent to — collapsing them would make "which number gets which code" ambiguous |
 | P2.21 replacing the only SMS factor | **resolved (pass 2 backend, pass 3 UI)** | enrolment accepts `replaceConfirmed` for a *different* number, keeps the confirmed row untouched during the ceremony (never factorless), and the confirmation commits the swap inside the account lock — `commitSmsFactorReplacement` semantics live in `confirmMfaEnrolment` (`provenPhoneE164`), audited as `auth.mfa_factor_replaced`. Pass 3 finished the *screen* half the service tests could not see: the tenant and platform cards render «تغییر شمارهٔ دریافت» for a member who already has a confirmed SMS factor (the form used to render only when none existed), the confirmation and the replacement resend both name the new number (`expectedPhoneE164` / `provenPhoneE164` carry it; a provided phone that does not canonicalise is a 400, never a silent drop), the swap itself waits behind the P2.26 confirmation, cancellation sends nothing, and a reload resumes a fresh enrolment from `pendingSmsPhone` (a replacement deliberately restarts — the screen says so). Pinned by the P2.21 cases in `auth-hardening-854-gaps.integration.test.ts` (swap-on-proof, wrong-destination refusal, resend-to-named-number, abandon-mid-ceremony, concurrent replacement-vs-removal) and by the rendered contract `src/app/(app)/settings/two-factor-settings.test.tsx` |
 | P2.22 personal security under-audited | **resolved (pass 1 + pass 2, GAP 5)** | `recordSecurityAudit` writes a secret-free row inside the same transaction as every sensitive mutation (enrol start/confirm, factor removed/replaced, primary changed, recovery codes, step-up success/failure, session revoke scopes) in both realms; `auditRevocation` no longer swallows failures |
-| P2.23 Persian digits in OTP/TOTP inputs | resolved (pass 1) | `toLatinDigits` normalisation before validation |
+| P2.23 Persian digits in OTP/TOTP inputs | **resolved (pass 1, completed pass 4)** | pass 1 added `toLatinDigits` normalisation; pass 4 audited **every** remaining security-code input and moved them onto one helper, `normalizeSecurityDigits` (`src/lib/digits.ts`): Persian *and* Arabic-Indic digits become ASCII, non-digits drop, and the length cap is enforced on the client before validation. It covers the login MFA step (TOTP/SMS/recovery), the phone-OTP door, the tenant and platform MFA cards (code **and** replacement-number fields), the Profile login-phone/PIN cards, owner activation, the platform console card, and the welcome pairing PIN — no remaining input strips localised digits with `/\D/g` before converting them. Pinned by the localised-digit cases in `two-factor-settings.test.tsx` and the pure-rule cases in `digits.test.ts` |
 | P2.24 "trusted device" wording inaccurate | **resolved (pass 2)** | `otp_login_at` is membership-wide and the wording now says so — the Profile phone card reads «رمز عددی تا ۷ روز برای همهٔ ورودهای این عضویت کار می‌کند (نه فقط یک دستگاه)»; the security-center and login-screen copy already described the window without per-device claims. No per-device trust is claimed anywhere |
 | P2.25 resend UX for phone verification | resolved (pass 2 + pass 3) | server-side cooldown and caps (`checkPhoneOtpRateLimit`: 60 s resend, 5/hour, 20/day; the MFA challenge limiter is the twin) with `retryAfterMs` surfaced by the routes. Pass 3 finished the presentation the issue actually asks for, via one shared hook (`components/auth/use-resend-cooldown.ts`): a **live ticking countdown** seeded from the challenge's real send time (so a reload mid-window shows the honest remainder, not a fresh 60), the limiter's own `retryAfterMs` rewriting the window on a 429, the masked destination, and a live expiry line (`smsChallengeExpiryMessage`) driven by `useNowTick`. Wired into the tenant two-factor card, the platform console card, the Profile login-phone card (whose pending challenge now carries `requestedAt`), and the door's `phone-otp-step` |
 | P2.26 destructive actions confirmed | **resolved (pass 3)** | one shared product confirmation (`components/auth/security-confirm-dialog.tsx`): consequences are a required, rendered list; cancellation sends no mutation; while busy the dialog cannot be closed and both buttons disable, so a retry cannot duplicate the mutation; recent-auth stays a separate gate. It now fronts every destructive personal/membership-security action that used to be a bare `confirm()` or nothing: factor removal and recovery-code regeneration (tenant card + platform console card), the SMS-factor swap, WebAuthn credential removal, team suspension and offboarding, and the IAM card's «ترمیم از نسخهٔ ابری» and detach-to-local. Session revocation keeps its own inline confirmed panel (P1.4). Pinned by `two-factor-settings.test.tsx` and `components/auth/webauthn-manager.test.tsx` |
 | P2.27 weak device/session labels | resolved (pass 1) | device labels + login methods recorded |
-| P2.28 personal security split across surfaces | **resolved (pass 3)** | `/settings/profile` is the canonical personal-security screen **including WebAuthn**: pass 3 extracted the sidebar-only biometric overlay into the reusable `components/auth/webauthn-manager.tsx` card, added it to the profile under the `webauthn_credential` credential surface (server authority unchanged — writable on every profile, read-only contract honoured), and reduced the sidebar's `BiometricSettingsButton` to a link to the profile instead of a duplicate panel. Pinned by `components/auth/webauthn-manager.test.tsx` |
+| P2.28 personal security split across surfaces | **resolved (pass 3 + pass 4)** | `/settings/profile` is the canonical personal-security screen **including WebAuthn**: pass 3 extracted the sidebar-only biometric overlay into the reusable `components/auth/webauthn-manager.tsx` card, added it to the profile under the `webauthn_credential` credential surface (server authority unchanged — writable on every profile, read-only contract honoured), and reduced the sidebar's `BiometricSettingsButton` to a link to the profile instead of a duplicate panel. Pass 4 removed the last duplicate: the Security Center's personal phone card (its own mutation form against `/api/auth/phone/self`) is gone from the organisation screen; the Security Center now renders the organisation's MFA policy posture and links to the Profile section that owns the personal phone ceremony. One writer per surface remains: Profile for the signed-in person, Security Center for policy, Team for member administration. Pinned by `components/auth/webauthn-manager.test.tsx` and the Security Center's rendered contract |
 
 ### Second-pass gaps (GAP 1–10) mapped to findings
 
@@ -126,7 +126,21 @@ corrected record: one row per finding, status, and where the proof lives.
 | GAP 7 — unlocked login-path assertion | P1.12, invariant 13-adjacent | `src/lib/membership-lock.ts`: one advisory-lock protocol for role transitions, creation, PIN writes, cloud PIN/credential replication, IAM event application, site commands, offboarding and owner-profile suspension. Proven by making one transaction wait on the other, plus a rollback case (GAP 7 cases) |
 | GAP 8 — deferred phone verification | P0.7 | the MFA pending token carries `phoneCompletion`; `/api/auth/mfa/verify` commits the stamps only after the second factor, the session keeps `phone_otp` provenance, abandonment commits nothing (GAP 8 cases). Fixing this surfaced migration `0216`: the `auth_login_attempts` realm check had never admitted `phone_otp`, so phone-OTP sends failed the constraint — a real bug the test caught |
 | GAP 9 — this document | — | corrected ids and acceptance matrix (you are reading it) |
-| GAP 10 — deferred items | P2.5–P2.9, P2.14, P2.20, P2.21, P2.24, P2.25 | P2.6/P2.14/P2.21 completed (rows above); P2.24 wording fixed; the rest are recorded product decisions with their reason |
+| GAP 10 — deferred items | P2.5–P2.9, P2.14, P2.20, P2.21, P2.24, P2.25 | P2.6/P2.14/P2.21 completed (rows above); P2.24 wording fixed; the rest were recorded product decisions — every one of them was closed in pass 4 (rows above) |
+
+### Pass 4 (round 4) — the review gaps
+
+The fourth pass came from a review of the branch head `f79cf31`. It did not redo
+passes 1–3; it closed what the review still found reachable:
+
+| Gap | Finding(s) | What pass 4 did |
+|---|---|---|
+| Personal-security ownership | P2.28 | the Security Center no longer carries a personal phone mutation form; it renders the organisation's phone-door posture (adoption + unverified members) and links to the Profile section that owns the ceremony. Consumers traced before removal: the card's only writes were `/api/auth/phone/self`, which Profile's `SelfPhoneCard` already owns |
+| OTP/PIN digit handling | P2.23 | one `normalizeSecurityDigits` helper in front of every remaining security-code input (see the P2.23 row); the duplicated form whose `/\D/g` strip motivated the audit was removed with the phone card above |
+| Personnel section authorisation | P2.7 | the Team screen's personnel subsection mounts only behind `canViewParties`; `parties.view` not widened |
+| Membership lifecycle & rehire | P2.8, P2.9 | lifecycle-derived actions + the explicit rehire ceremony `POST /api/team/[id]/rehire` (`rehireMembership`: membership row lock, dual permission gate, grant re-check against the actor, identity relink, PIN re-establishment, stored role/permissions/branch scope restored in one transaction, reason required; refuses `not_offboarded`, keeps history rows; `email_taken` steers same-email cases to rehire instead of colliding). No MFA bypass: factors live on the global identity and survive the relink — pinned by an integration test that reads `mfa_enrolments` through the relinked `platform_user_id` |
+| Canonical identity ownership | P2.5 | the membership/global identity owns `full_name`/`email`/`phone_e164` for login purposes; conflicting personnel writes are refused (`identity_*_managed_by_membership`, 409 + fieldErrors), alignment writes allowed; membership→party sync on rename/create/setMemberPhone. Consumers inspected: party create/update API, `ensureEmployeeParty`, team rename/create/setMemberPhone, data-transfer CRM import (`entities/crm.ts` now refuses conflicting employee-party identity writes), ai-autopilot customer updates (unaffected — customers are not employee-linked) |
+| Deterministic MFA contention | P0.9/GAP 3 + P2.21 concurrency | the existing `Promise.all` races stay (they prove the invariant under a real race), and pass 4 adds held-lock ordering tests: a client holds `pg_advisory_xact_lock(hashtext('platform_user'), hashtext(subject))` — the same lock both `removeMfaFactorChecked` and `confirmMfaEnrolment` take — the queued operation is *proven* waiting by a 700 ms race probe, then released. Pinned orderings: replacement-commits-first then removal refuses; removal-decides-first (refused, required account) then replacement commits — identical final state, never factorless; two-factor removals serialise with the survivor covering the account; a stale replacement code cannot authorise a swap to a different number (`expectedPhoneE164` binding) and cannot be replayed; a wrong code rolls back leaving the confirmed factor intact |
 
 ## Known limitations, stated plainly
 
@@ -170,17 +184,25 @@ rollback, GAP 8's deferred stamps through the real routes, and P2.21's atomic
 SMS replacement — the swap on proof plus the UI-contract cases: a replacement
 resend bound to the named number, wrong-destination refusal, abandonment leaving
 the old factor authenticating, and a concurrent replacement-vs-removal that can
-never end factorless), `integration/team.integration.test.ts` (P1.12's four transition
-cases, now exercising the reason rule), plus the updated
-`integration/{team,auth-account-security,phone-otp,iam-login-credentials,parties}.integration.test.ts`.
+never end factorless, plus the pass-4 deterministic contention suite: held-lock
+orderings (replacement-first and removal-first converge on the same
+non-factorless end state), serialised two-factor removals, the stale-challenge
+destination binding and its replay refusal, and a wrong-code rollback),
+`integration/team.integration.test.ts` (P1.12's four transition
+cases, now exercising the reason rule, the pass-4 rehire ceremony — success,
+every refusal code, MFA factor survival across the relink, same-email rehire
+with history preserved — and the membership→party sync cases), plus the updated
+`integration/{team,auth-account-security,phone-otp,iam-login-credentials,parties}.integration.test.ts`
+(parties including the canonical-ownership refusals).
 
 Rendered component contracts (jsdom, real components against a fake server):
 `src/app/(app)/settings/two-factor-settings.test.tsx` — the replacement form is
 reachable with a confirmed SMS factor, the enrol/confirm/resend bodies carry the
 new number, the swap waits behind its dialog and cancellation sends nothing,
 factor removal and recovery regeneration are dialog-gated, a reload resumes a
-fresh enrolment from the server's pending row, and a 429 surfaces the limiter's
-message — and `src/components/auth/webauthn-manager.test.tsx` — the profile's
+fresh enrolment from the server's pending row, a 429 surfaces the limiter's
+message, and Persian/Arabic-Indic digits typed into the number and code fields
+reach the API as ASCII (pass 4) — and `src/components/auth/webauthn-manager.test.tsx` — the profile's
 WebAuthn card lists devices, renders the empty state, gates removal behind the
 confirmation (cancellation sends no DELETE), and a read-only deployment surface
 renders the notice without controls. These exist because the service tests
@@ -191,32 +213,30 @@ Screen contracts without rendering: `src/lib/admin-screen-contracts.test.ts`
 holds the admin screens to the same rules the routes enforce, including P1.19 —
 both doors import the shared picker, keep the pending choice in the shared hook,
 and check `capture(data)` *before* treating the response as a sign-in.
+`src/app/dashboard/team/team-manager.test.ts` pins the pass-4 Team wiring the
+same way: the personnel directory mounts only behind `canViewParties`, the
+suspend/reactivate button renders only for non-offboarded members while
+«بازگشت به کار» renders only for offboarded ones, the rehire dialog POSTs to
+the dedicated ceremony endpoint with a mandatory reason, and the route keeps
+both permission gates and the service's lock/reason enforcement.
 
 ## Remaining work
 
-Every P0 and P1 finding is closed end to end. Of the P2 list, all items are
-resolved except three recorded product decisions, none of which hides a
-security invariant:
+Every P0, P1 and P2 finding is now closed end to end. The items pass 3 carried
+as recorded product decisions were closed in pass 4:
 
-- **P2.5** personnel edits renaming memberships backwards — needs a product
-  ownership decision; the forward direction (membership rename repairs the
-  personnel file) is implemented and tested. (P2.5 is identity drift between a
-  membership and its personnel file, not anything the MFA rows touch.)
-- **P2.7** a membership-scoped personnel read path for Team managers without
-  `parties.view` — the page degrades safely today; the dedicated path is a
-  larger change. (P2.7 is about reading personnel without `parties.view`, not
-  permission gating in general.)
-- **P2.8 / P2.9** suspend→reactivate is safe and re-checked; offboard→rehire
-  needs new membership states, credential re-establishment and a migration.
-  The dangerous half — reactivating a stripped membership as if nothing
-  happened — is refused today.
+- **P2.5** — canonical ownership defined and enforced in both directions
+  (conflicting personnel writes refused; membership writes repair the party).
+- **P2.7** — the conditional-render fix the issue lists first; a dedicated
+  membership-scoped personnel read path stays a *possible* future change, not a
+  requirement of the issue, since no broken subsection remains.
+- **P2.8 / P2.9** — the rehire ceremony replaces the "reactivate an offboarded
+  row" dead end; same-email recovery goes through it instead of colliding.
 
-Items closed in the third pass that earlier drafts of this document credited to
-pass 1/2 without the screen half being done: P2.21 (the replacement UI), P2.25
-(the live countdown/expiry feedback), P2.26 (the confirmation dialogs), P2.28
-(WebAuthn on the profile). P2.20's two phone numbers — the membership's login
-phone and the identity's MFA SMS factor — are kept deliberately separate and
-labelled; the rationale is in its row above.
+No security invariant is deferred. P2.20's two phone numbers — the membership's
+login phone and the identity's MFA SMS factor — remain deliberately separate
+and labelled; the rationale is in its row above (the issue's own fix for P2.20
+is labelling, not collapsing).
 
 ## Gate results in this workspace
 

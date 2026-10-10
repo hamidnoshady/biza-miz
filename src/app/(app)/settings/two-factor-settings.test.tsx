@@ -200,6 +200,45 @@ describe("Issue #854 P2.21 — SMS replacement on the tenant two-factor card", (
   });
 });
 
+describe("Issue #854 pass 4 — localized digits are normalized before validation", () => {
+  it("accepts Persian and Arabic-Indic digits in the new number and code, and submits ASCII", async () => {
+    mountCard();
+    fireEvent.click(await screen.findByRole("button", { name: "تغییر شمارهٔ دریافت" }));
+
+    // Persian digits typed into the number field.
+    fireEvent.change(await screen.findByPlaceholderText("09121234567"), {
+      target: { value: "۰۹۱۲۱۱۱۰۰۰۲" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "ارسال کد تأیید پیامکی" }));
+    await waitFor(() => {
+      const enrol = recorded.find((r) => r.body?.action === "enrol");
+      // The client sends what was typed (normalized to ASCII); the API route
+      // turns a local "0912…" into +98 E.164 before the SMS is minted.
+      expect(enrol?.body).toMatchObject({
+        action: "enrol",
+        method: "sms_otp",
+        phone: "09121110002",
+      });
+    });
+
+    // Arabic-Indic digits typed into the code field.
+    fireEvent.change(screen.getByPlaceholderText("123456"), {
+      target: { value: "٦٥٤٣٢١" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "تأیید شماره و جایگزینی" }));
+    fireEvent.click(await screen.findByRole("button", { name: "بله، شماره جایگزین شود" }));
+    await waitFor(() => {
+      const confirm = recorded.find((r) => r.body?.action === "confirm");
+      expect(confirm?.body).toMatchObject({
+        action: "confirm",
+        method: "sms_otp",
+        code: "654321",
+        phone: "+989121110002",
+      });
+    });
+  });
+});
+
 describe("Issue #854 P2.26 — destructive confirmations on the tenant two-factor card", () => {
   it("factor removal waits behind a dialog that spells out consequences; cancelling sends nothing", async () => {
     mountCard({

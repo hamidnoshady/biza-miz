@@ -33,6 +33,7 @@ import {
   invitationStatus,
   isPasswordRole,
   isPinRole,
+  isValidPin,
   resolveMemberLocationAssignment,
   type InvitationStatus,
   type MemberSummary,
@@ -48,9 +49,12 @@ import { loginCredentialModelForRole } from "./roles";
 import {
   isSensitiveAccessChange,
   loadCustomRole,
+  membershipGrantRefusal,
+  projectGrantedPermissions,
+  resolveMembershipAuthority,
   validateAccessChangeReason,
 } from "./membership-authority";
-import { lockMembership } from "./membership-lock";
+import { lockMembership, lockPlatformIdentity } from "./membership-lock";
 import { maySelfServiceWrite } from "./credential-authority";
 
 export class TeamError extends Error {
@@ -378,6 +382,22 @@ export async function createMembership(
       if (dup.length > 0) {
         await client.query("ROLLBACK");
         throw new TeamError("already_a_member", 409);
+      }
+      /*
+       * Issue #854 (pass 4) — an offboarded membership keeps its email on the
+       * retained row (history is never deleted), so the per-business unique
+       * index would refuse the same address for a new hire with a raw
+       * Postgres error. Surface that as a sentence instead: the person who
+       * wore this address comes back through the rehire ceremony
+       * (`rehireMembership`), not through a second membership.
+       */
+      const { rows: emailTaken } = await client.query(
+        "SELECT 1 FROM users WHERE business_id = $1 AND email = $2",
+        [input.businessId, email],
+      );
+      if (emailTaken.length > 0) {
+        await client.query("ROLLBACK");
+        throw new TeamError("email_taken", 409);
       }
     }
 
@@ -1099,6 +1119,431 @@ export async function removeMembership(
   }
 }
 
+export interface RehireMembershipInput {
+  businessId: string;
+  userId: string;
+  actorId: string | null;
+  /**
+   * The branch policy the rehire comes back to. Offboarding wiped the
+   * assignments (`location_scope='none'`, `user_locations` deleted), so the
+   * ceremony must name them again — or rely on the custom role's default
+   * scope, exactly like a creation does.
+   */
+  locationIds?: string[];
+  defaultLocationId?: string | null;
+  locationScope?: "all" | "selected" | "home" | "none";
+  /**
+   * An optional fresh PIN for a PIN-role member. Without one, the PIN that
+   * was active at offboarding is restored; when nothing can be restored the
+   * rehire is refused rather than leaving an active member without a door.
+   */
+  pin?: string;
+  /** Issue #854 (P2.4) — a rehire re-grants access, so it carries a reason. */
+  reason?: string;
+}
+
+/**
+ * Issue #854 (pass 4, gap 4) — the explicit rehire ceremony.
+ *
+ * Offboarding (`removeMembership`) is deliberately destructive: it severs the
+ * global-identity linkage (`platform_user_id = NULL`), revokes the staff
+ * credentials, wipes the branch assignments, and marks the membership
+ * `offboarded` — while keeping the row itself, because history (orders,
+ * payroll, audit) still points at it. The old Team screen then offered a bare
+ * «فعال‌سازی» for such a member, and `updateMembership(isActive: true)` would
+ * flip the row back to `active` with no identity, no credential and no branch
+ * — an active member with no door, or worse, the appearance of restored
+ * access that the login path then refuses.
+ *
+ * Rehire is therefore its own transition, the mirror image of offboarding, in
+ * one advisory-locked transaction:
+ *
+ *  - only an `offboarded` membership can be rehired (suspended and inactive
+ *    members reactivate through the ordinary path, which already asserts the
+ *    login door);
+ *  - the anti-escalation decision runs against the *stored* role, custom role
+ *    and overrides — rehire re-grants the whole set from an empty state, so a
+ *    delegated manager cannot rehire somebody into capabilities the manager
+ *    does not hold, and only an owner brings an owner back. Because the
+ *    relink targets only the identity matching the membership's own retained
+ *    email, the ceremony can never hand an admin somebody else's identity;
+ *  - a password-role member is relinked to the global identity found by that
+ *    retained email (the identity's password and every MFA factor live on
+ *    `platform_users`/its enrolments and were never deleted, so they return
+ *    with the linkage — no MFA bypass is created and none is needed);
+ *  - a PIN-role member gets the PIN restored that was active at offboarding,
+ *    or a fresh one when the request names it; nothing restorable and nothing
+ *    offered is a refusal (`pin_required`), never a doorless activation;
+ *  - the branch policy is resolved exactly like a creation's, including the
+ *    custom role's `default_location_scope`;
+ *  - `assertRoleTransitionKeepsLoginPath` re-checks the finished row, so a
+ *    racing revoker cannot strand the member between check and commit.
+ *
+ * Nothing is deleted anywhere in this path — the membership row, its history
+ * and the audit trail only ever grow.
+ */
+export async function rehireMembership(input: RehireMembershipInput): Promise<void> {
+  const profile = (await readDeploymentProfile(input.businessId)).profile;
+  if (profile === "hybrid") {
+    // Rehire expands access; a Hybrid site may only restrict (the cloud owns
+    // the decision and the replica applies the event, as with every grant).
+    throw new TeamError("cloud_confirmation_required", 409);
+  }
+  const eventOrigin = profile === "local" ? "local" : "cloud";
+
+  const members = await memberSummaries(input.businessId);
+  if (!members.some((m) => m.id === input.userId)) throw new TeamError("not_found", 404);
+
+  // Rehire always re-grants the stored role/overrides, so the reason rule
+  // applies unconditionally — validated here, where the decision is made.
+  const validated = validateAccessChangeReason(input.reason);
+  if (!validated.ok) throw new TeamError(validated.error, 400);
+  const reason = validated.reason;
+
+  // A rehire counts the seat again; the same ceiling a hire respects applies.
+  const ceiling = await resolveLimitCeiling(input.businessId, "member_limit");
+  if (ceiling.limit !== null && (await activeMemberCount(input.businessId)) >= ceiling.limit) {
+    throw new TeamError("member_limit_exceeded", 403);
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await lockMembership(client, input.businessId, input.userId);
+
+    const { rows: beforeRows } = await client.query<{
+      role: Role;
+      custom_role_id: string | null;
+      full_name: string;
+      email: string | null;
+      is_active: boolean;
+      membership_status: string;
+      permissions: unknown;
+      location_id: string | null;
+    }>(
+      `SELECT role, custom_role_id, full_name, email, is_active, membership_status, permissions, location_id
+         FROM users WHERE id = $1 AND business_id = $2`,
+      [input.userId, input.businessId],
+    );
+    const before = beforeRows[0];
+    if (!before) {
+      await client.query("ROLLBACK");
+      throw new TeamError("not_found", 404);
+    }
+    if (before.membership_status !== "offboarded") {
+      // Suspended/inactive memberships reactivate through updateMembership —
+      // that path keeps their credentials and asserts the door on the way in.
+      await client.query("ROLLBACK");
+      throw new TeamError("not_offboarded", 409);
+    }
+
+    /**
+     * The anti-escalation decision. Rehire restores the membership from an
+     * exercisable-empty state, so `currentPermissions` is empty and every
+     * restored capability counts as an addition the actor must hold — the
+     * same shape the creation path is checked with. An offboarded actor can
+     * never reach this: `resolveMembershipAuthority` only answers for active
+     * members, so a self-rehire is a plain refusal.
+     */
+    const actor = input.actorId
+      ? await resolveMembershipAuthority(input.businessId, input.actorId)
+      : null;
+    if (!actor) {
+      await client.query("ROLLBACK");
+      throw new TeamError("forbidden", 403);
+    }
+    const customRole = before.custom_role_id
+      ? await loadCustomRole(input.businessId, before.custom_role_id)
+      : null;
+    if (before.custom_role_id && !customRole) {
+      // The stored custom role was archived while the member was away. Silent
+      // rehire on the bare preset would smuggle a demotion in; refuse instead
+      // so an owner reassigns the role deliberately.
+      await client.query("ROLLBACK");
+      throw new TeamError("custom_role_not_found", 404);
+    }
+    const refusal = membershipGrantRefusal({
+      actor,
+      nextRole: before.role,
+      currentPermissions: new Set(),
+      nextPermissions: projectGrantedPermissions({
+        role: before.role,
+        overrides: parseOverrides(before.permissions),
+        customRolePermissions: customRole?.permissions ?? null,
+      }),
+      customRole,
+      isSelf: input.actorId === input.userId,
+      isCreation: false,
+      roleChanges: false,
+      changesAccess: true,
+    });
+    if (refusal) {
+      await client.query("ROLLBACK");
+      throw new TeamError(refusal, 403);
+    }
+
+    /**
+     * The branch policy, resolved exactly like a creation's: explicit request
+     * first, the custom role's default scope next, and an unhonourable
+     * default is a refusal rather than a silent widening to «all».
+     */
+    const namesBranchPolicy =
+      input.locationScope !== undefined ||
+      (input.locationIds?.length ?? 0) > 0 ||
+      Boolean(input.defaultLocationId);
+    let effectiveLocationScope = input.locationScope ?? null;
+    const defaultScope = customRole?.defaultLocationScope ?? null;
+    if (!namesBranchPolicy && defaultScope && before.role !== "owner") {
+      if (defaultScope === "selected") {
+        await client.query("ROLLBACK");
+        throw new TeamError("selected_locations_required", 400);
+      }
+      if (defaultScope === "home") {
+        await client.query("ROLLBACK");
+        throw new TeamError("home_location_required", 400);
+      }
+      effectiveLocationScope = defaultScope;
+    }
+    const locations = await resolveMemberLocations(
+      client,
+      input.businessId,
+      input.locationIds,
+      input.defaultLocationId,
+    );
+
+    /**
+     * Relink the global identity. The membership's email survived offboarding
+     * (the row is never deleted, and per-business email uniqueness means no
+     * other membership could have taken it), so the identity it points at is
+     * the member's own — an admin cannot aim the relink anywhere else. The
+     * lookup spans tenants by nature, exactly like the creation path's.
+     */
+    let platformUserId: string | null = null;
+    if (loginCredentialModelForRole(before.role) === "password") {
+      if (!before.email) {
+        await client.query("ROLLBACK");
+        throw new TeamError("identity_required", 409);
+      }
+      await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
+      const { rows: identityRows } = await client.query<{ id: string }>(
+        "SELECT id FROM platform_users WHERE email = $1",
+        [before.email],
+      );
+      await client.query("SELECT set_config('app.rls_bypass', '', true)");
+      await client.query("SELECT set_config('app.business_id', $1, true)", [input.businessId]);
+      if (!identityRows[0]) {
+        // The global identity is gone (retired on the platform); a password
+        // role cannot come back without it.
+        await client.query("ROLLBACK");
+        throw new TeamError("identity_not_found", 409);
+      }
+      platformUserId = identityRows[0].id;
+      // Membership lock first, identity lock second — the protocol's only order.
+      await lockPlatformIdentity(client, platformUserId);
+      const { rows: dup } = await client.query(
+        "SELECT 1 FROM users WHERE business_id = $1 AND platform_user_id = $2 AND id <> $3",
+        [input.businessId, platformUserId, input.userId],
+      );
+      if (dup.length > 0) {
+        await client.query("ROLLBACK");
+        throw new TeamError("already_a_member", 409);
+      }
+    }
+
+    /**
+     * The PIN half. With a fresh PIN named, the rehire provisions it the way
+     * a creation does (shape check, uniqueness, blind index). Otherwise the
+     * credential active at offboarding is restored — offboarding revoked it,
+     * it was never deleted, and reviving it is a single row flip under the
+     * same lock. Nothing to restore and nothing offered: refuse, because an
+     * active PIN-role member without a PIN is the state P1.12 forbids.
+     */
+    if (isPinRole(before.role)) {
+      if (input.pin !== undefined && input.pin !== null && String(input.pin).length > 0) {
+        const pin = String(input.pin);
+        if (!isValidPin(pin)) {
+          await client.query("ROLLBACK");
+          throw new TeamError("invalid_pin", 400);
+        }
+        if (await isPinTaken(input.businessId, pin, input.userId)) {
+          await client.query("ROLLBACK");
+          throw new TeamError("pin_taken", 409);
+        }
+        const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
+        const pinIndex = await pinBlindIndex(input.businessId, pin);
+        await client.query(
+          `INSERT INTO employees (id, business_id) VALUES ($1, $2)
+           ON CONFLICT (id) DO NOTHING`,
+          [input.userId, input.businessId],
+        );
+        try {
+          await client.query(
+            `INSERT INTO employee_credentials
+               (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
+             VALUES ($1, $2, 'pin', $3, $4)`,
+            [input.userId, input.businessId, pinHash, pinIndex],
+          );
+        } catch (err) {
+          if ((err as { code?: string }).code === "23505") {
+            await client.query("ROLLBACK");
+            throw new TeamError("pin_taken", 409);
+          }
+          throw err;
+        }
+      } else {
+        const { rows: restorable } = await client.query<{ id: string }>(
+          `SELECT id FROM employee_credentials
+            WHERE employee_id = $1 AND business_id = $2
+              AND credential_type = 'pin' AND status = 'revoked'
+            ORDER BY revoked_at DESC NULLS LAST, created_at DESC
+            LIMIT 1 FOR UPDATE`,
+          [input.userId, input.businessId],
+        );
+        if (!restorable[0]) {
+          await client.query("ROLLBACK");
+          throw new TeamError("pin_required", 409);
+        }
+        try {
+          await client.query(
+            `UPDATE employee_credentials
+                SET status = 'active', revoked_at = NULL
+              WHERE id = $1 AND business_id = $2`,
+            [restorable[0].id, input.businessId],
+          );
+        } catch (err) {
+          // The blind index is unique among *active* PINs business-wide: if
+          // somebody else now holds that PIN, the restore collides — surface
+          // the same refusal a fresh PIN would, so the caller can name one.
+          if ((err as { code?: string }).code === "23505") {
+            await client.query("ROLLBACK");
+            throw new TeamError("pin_taken", 409);
+          }
+          throw err;
+        }
+      }
+    }
+
+    const { rows: after } = await client.query<{ membership_revision: string }>(
+      `UPDATE users
+          SET is_active = true,
+              membership_status = 'active',
+              platform_user_id = CASE WHEN $3::boolean THEN $4::uuid ELSE platform_user_id END,
+              location_scope = CASE
+                WHEN role = 'owner'::user_role THEN 'all'::location_scope
+                WHEN $5::text IS NOT NULL THEN $5::location_scope
+                WHEN cardinality($6::uuid[]) > 0 THEN 'selected'::location_scope
+                WHEN $7::uuid IS NOT NULL THEN 'home'::location_scope
+                ELSE 'all'::location_scope END,
+              location_id = $7,
+              membership_revision = membership_revision + 1,
+              updated_at = now()
+        WHERE id = $1 AND business_id = $2 RETURNING membership_revision`,
+      [
+        input.userId,
+        input.businessId,
+        platformUserId !== null,
+        platformUserId,
+        effectiveLocationScope,
+        locations.locationIds,
+        locations.defaultLocationId,
+      ],
+    );
+    const revision = Number(after[0]?.membership_revision ?? 1);
+
+    await client.query("DELETE FROM user_locations WHERE user_id = $1", [input.userId]);
+    if (locations.locationIds.length > 0) {
+      await client.query(
+        "INSERT INTO user_locations (user_id, location_id) SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+        [input.userId, locations.locationIds],
+      );
+    }
+
+    // The finished row must hold the door the role needs — re-checked last,
+    // on this connection, inside this transaction, under the membership lock.
+    await assertRoleTransitionKeepsLoginPath(client, {
+      businessId: input.businessId,
+      userId: input.userId,
+      fromRole: before.role,
+      toRole: before.role,
+      priorActive: false,
+      willBeActive: true,
+    });
+
+    await appendIamEvent(client, {
+      businessId: input.businessId,
+      type: "membership.rehired",
+      entityId: input.userId,
+      payload: {
+        membership: {
+          id: input.userId,
+          businessId: input.businessId,
+          cloudIdentityRef: platformUserId,
+          role: before.role,
+          customRoleId: before.custom_role_id,
+          fullName: before.full_name,
+          email: before.email,
+          isActive: true,
+          status: "active",
+          overrides: parseOverrides(before.permissions),
+          locationScope:
+            before.role === "owner"
+              ? "all"
+              : effectiveLocationScope ??
+                (locations.locationIds.length
+                  ? "selected"
+                  : locations.defaultLocationId
+                    ? "home"
+                    : "all"),
+          defaultLocationId: locations.defaultLocationId,
+          locationIds: locations.locationIds,
+          revision,
+        },
+        revision,
+        reason,
+      },
+      actorUserId: input.actorId,
+      origin: eventOrigin,
+    });
+
+    await auditMembership(client, {
+      businessId: input.businessId,
+      actorId: input.actorId,
+      action: "team.member_rehired",
+      targetUserId: input.userId,
+      before: {
+        membershipStatus: "offboarded",
+        isActive: false,
+        role: before.role,
+        platformLinked: false,
+      },
+      after: {
+        membershipStatus: "active",
+        isActive: true,
+        role: before.role,
+        platformLinked: platformUserId !== null,
+        locationScope:
+          before.role === "owner"
+            ? "all"
+            : effectiveLocationScope ??
+              (locations.locationIds.length
+                ? "selected"
+                : locations.defaultLocationId
+                  ? "home"
+                  : "all"),
+      },
+      reason,
+      accessChange: { role: null, customRoleId: null, permissionsChanged: false },
+    });
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Credentials
 // ---------------------------------------------------------------------------
@@ -1257,6 +1702,21 @@ export async function setMemberPhone(
     throw err;
   } finally {
     client.release();
+  }
+
+  /*
+   * Issue #854 (pass 4, gap 5) — the membership is the canonical owner of the
+   * login phone, and the linked personnel file follows it: without this the
+   * team screen's phone edit and the personnel tab would disagree about the
+   * very field they promise to share. Best-effort like every party sync — the
+   * phone change above is already committed and is never the casualty of a
+   * display-file hiccup; the file catches up on the next membership edit.
+   */
+  try {
+    const { ensureEmployeeParty } = await import("./parties-service");
+    await ensureEmployeeParty(businessId, userId, { phone: phoneE164 });
+  } catch {
+    /* no party row yet, or a display-file failure — see the comment above */
   }
 }
 

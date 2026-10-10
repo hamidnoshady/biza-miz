@@ -37,7 +37,7 @@ import { RolesManager } from "@/components/team/roles-manager";
 import { IamSyncCard } from "@/components/team/iam-sync-card";
 import { LocalToHybridGuide } from "@/components/team/local-to-hybrid-guide";
 import { SecurityConfirmDialog } from "@/components/auth/security-confirm-dialog";
-import { partyScopeFor } from "@/lib/parties-scopes";
+import { canViewParties, partyScopeFor } from "@/lib/parties-scopes";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -163,6 +163,13 @@ export function TeamManager({
   const [pendingSuspend, setPendingSuspend] = useState<Member | null>(null);
   const [pendingOffboard, setPendingOffboard] = useState<Member | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  /**
+   * Issue #854 (pass 4, gap 4) — an offboarded member does not «فعال‌سازی»:
+   * offboarding severed the identity linkage, revoked the credentials and
+   * wiped the branches, so coming back is an explicit ceremony with its own
+   * dialog, not the flip of a toggle.
+   */
+  const [rehiring, setRehiring] = useState<Member | null>(null);
 
   const load = useCallback(async () => {
     const [membersRes, invitesRes] = await Promise.all([
@@ -337,20 +344,33 @@ export function TeamManager({
                   {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton onClick={() => setCredentialsEditing(member)}>
                     رمز ورود
                   </SecondaryButton> : null}
-                  {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton
+                  {/*
+                    Issue #854 (pass 4, gap 4) — the actions derive from the
+                    lifecycle: an active member suspends, a suspended/inactive
+                    one reactivates, and an *offboarded* one comes back only
+                    through the rehire ceremony — offboarding removed the
+                    identity linkage, the credentials and the branch scope, so
+                    a bare «فعال‌سازی» would restore a doorless membership.
+                  */}
+                  {(canManage && (isOwner || member.role !== "owner") && member.status !== "offboarded") ? <SecondaryButton
                     onClick={() => {
                       // Issue #854 (P2.26) — suspension asks with consequences
                       // spelled out; reactivation is harmless and asks nothing.
                       if (member.isActive) setPendingSuspend(member);
                       else void mutate(`/api/team/${member.id}`, {
                         method: "PATCH",
-                        body: JSON.stringify({ isActive: !member.isActive }),
+                        body: JSON.stringify({ isActive: true }),
                       });
                     }}
                   >
                     {member.isActive ? "تعلیق" : "فعال‌سازی"}
                   </SecondaryButton> : null}
-                  {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton
+                  {(canManage && (isOwner || member.role !== "owner") && member.status === "offboarded") ? <SecondaryButton
+                    onClick={() => setRehiring(member)}
+                  >
+                    بازگشت به کار
+                  </SecondaryButton> : null}
+                  {(canManage && (isOwner || member.role !== "owner") && member.status !== "offboarded") ? <SecondaryButton
                     onClick={() => setPendingOffboard(member)}
                     className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
                   >
@@ -423,11 +443,18 @@ export function TeamManager({
         here rather than in a screen of its own so the two views of one person cannot
         disagree about the name — and so editing a phone number here is editing it
         everywhere, the POS's customer picker included.
+
+        Issue #854 (pass 4, gap 3) — the directory is `/api/parties`-backed and
+        that route enforces `parties.view`, which a team manager's grant need
+        not include. The section is hidden rather than rendered into a 403, and
+        the permission itself is not widened to avoid the error.
       */}
-      <div>
-        <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-300">پروندهٔ کارکنان</p>
-        <PartiesSection scope={partyScopeFor("team")} role={role} permissions={permissions} />
-      </div>
+      {canViewParties(role, permissions) ? (
+        <div>
+          <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-300">پروندهٔ کارکنان</p>
+          <PartiesSection scope={partyScopeFor("team")} role={role} permissions={permissions} />
+        </div>
+      ) : null}
 
       {/* Issue #854 (P2.26) — suspension/offboarding confirmations. */}
       <SecurityConfirmDialog
@@ -456,7 +483,7 @@ export function TeamManager({
           "دسترسی، نشست‌های فعال و اعتبارنامه‌های ورود او لغو می‌شوند.",
           "اگر ورود دومرحله‌ای یا شمارهٔ ورودی داشته، برای این کسب‌وکار بی‌اثر می‌شوند.",
           "سوابق تاریخی و اسنادی که به نام او ثبت شده حفظ می‌شوند.",
-          "بازگشت دوبارهٔ همین شخص از مسیر دعوت/افزودن عضو انجام می‌شود، نه بازکردن همین حساب.",
+          "بازگشت دوبارهٔ همین شخص با «بازگشت به کار» انجام می‌شود؛ هویت، نقش و دسترسی‌های ذخیره‌شدهٔ همین حساب بازمی‌گردند.",
         ]}
         confirmLabel="بله، قطع همکاری شود"
         busy={confirmBusy}
@@ -467,7 +494,255 @@ export function TeamManager({
           if (pendingOffboard) void executeOffboard(pendingOffboard);
         }}
       />
+
+      {/* Issue #854 (pass 4, gap 4) — the rehire ceremony. */}
+      <RehireDialog
+        member={rehiring}
+        locations={locations}
+        onClose={() => setRehiring(null)}
+        onRehired={() => {
+          setRehiring(null);
+          void load();
+        }}
+      />
     </div>
+  );
+}
+
+/** Persian sentences for the refusals the rehire ceremony can answer with. */
+const REHIRE_ERROR_MESSAGES: Record<string, string> = {
+  not_offboarded: "این عضو در وضعیت «قطع همکاری» نیست؛ فقط اعضای قطع‌همکاری‌شده با این مسیر بازمی‌گردند.",
+  reason_required: "برای بازگشت به کار، دلیل این تغییر را بنویسید.",
+  reason_too_short: "دلیل نوشته‌شده کوتاه است؛ حداقل ۸ نویسه بنویسید.",
+  reason_too_long: "دلیل نوشته‌شده بلند است؛ حداکثر ۵۰۰ نویسه.",
+  permissions_manage_required: "بازگشت به کار مجوز «مدیریت دسترسی‌های تیم» لازم دارد.",
+  owner_only: "فقط مالک کسب‌وکار می‌تواند مالک را به کار برگرداند.",
+  grants_beyond_actor: "نمی‌توانید عضوی را با دسترسی‌هایی که خودتان ندارید به کار برگردانید.",
+  self_role_change: "بازگشت به کارِ خودتان مجاز نیست.",
+  identity_required: "این عضو ایمیل ثبت‌شده ندارد؛ هویت ورودش قابل بازیابی نیست.",
+  identity_not_found: "هویت ورود این عضو در سطح سامانه حذف شده است؛ با پشتیبانی تماس بگیرید.",
+  already_a_member: "هویت ورود این عضو همین حالا به عضوی دیگر در این کسب‌وکار متصل است.",
+  pin_required: "برای این نقش، رمز عددی فعالی برای بازیابی وجود ندارد؛ رمز عددی تازه‌ای تعیین کنید.",
+  pin_taken: "این رمز عددی در این کسب‌وکار استفاده شده است؛ رمز دیگری انتخاب کنید.",
+  invalid_pin: `رمز عددی باید ${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم باشد.`,
+  custom_role_not_found: "نقش سفارشی ذخیره‌شدهٔ این عضو دیگر فعال نیست؛ ابتدا نقش او را مشخص کنید.",
+  selected_locations_required: "شعبه‌های این عضو را انتخاب کنید.",
+  home_location_required: "شعبهٔ اصلی این عضو را انتخاب کنید.",
+  member_limit_exceeded: "سقف اعضای این کسب‌وکار پر است؛ ابتدا عضوی را خارج کنید یا سقف را افزایش دهید.",
+  cloud_confirmation_required: "این سایت در حالت ترکیبی فقط محدودسازی می‌کند؛ بازگشت به کار باید از فضای ابری انجام شود.",
+  unknown_location: "یکی از شعبه‌های انتخاب‌شده در این کسب‌وکار وجود ندارد.",
+};
+
+/**
+ * Issue #854 (pass 4, gap 4) — the rehire ceremony.
+ *
+ * Offboarding is deliberately destructive (identity linkage severed, staff
+ * credentials revoked, branch assignments wiped, history kept), so the way
+ * back is an explicit form rather than a toggle:
+ *
+ *  - the branch policy is named again — the old assignments are gone;
+ *  - a PIN-role member may get a fresh PIN, or leaves the field empty and the
+ *    PIN active at offboarding is restored (the server refuses when there is
+ *    nothing to restore, rather than activating a doorless member);
+ *  - a password-role member's global identity, password and MFA factors come
+ *    back with the relink — nothing here can bypass them;
+ *  - the re-grant of the stored role and permissions carries a reason, like
+ *    every access change.
+ */
+function RehireDialog({
+  member,
+  locations,
+  onClose,
+  onRehired,
+}: {
+  member: Member | null;
+  locations: TeamLocation[];
+  onClose: () => void;
+  onRehired: () => void;
+}) {
+  const [scope, setScope] = useState<Member["locationScope"]>("selected");
+  const [branchIds, setBranchIds] = useState<string[]>([]);
+  const [defaultLocationId, setDefaultLocationId] = useState("");
+  const [pin, setPin] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const memberId = member?.id ?? null;
+  useEffect(() => {
+    // A fresh ceremony for each member the dialog opens on.
+    setScope("selected");
+    setBranchIds([]);
+    setDefaultLocationId("");
+    setPin("");
+    setReason("");
+    setError("");
+  }, [memberId]);
+
+  if (!member) return null;
+  const isOwnerRole = member.role === "owner";
+  const isPinMember = PIN_ROLES.includes(member.role as (typeof PIN_ROLES)[number]);
+
+  function toggleBranch(id: string, checked: boolean) {
+    setBranchIds((current) => {
+      const next = checked ? [...current, id] : current.filter((entry) => entry !== id);
+      if (!checked && defaultLocationId === id) setDefaultLocationId("");
+      return next;
+    });
+  }
+
+  function chooseDefaultBranch(id: string) {
+    setDefaultLocationId(id);
+    if (id) setBranchIds((current) => (current.includes(id) ? current : [...current, id]));
+  }
+
+  async function submit() {
+    if (!member) return;
+    if (reason.trim().length < 8) {
+      setError("برای بازگشت به کار، دلیل این تغییر را بنویسید (حداقل ۸ نویسه).");
+      return;
+    }
+    if (!isOwnerRole && scope === "selected" && branchIds.length === 0) {
+      setError("شعبه‌های این عضو را انتخاب کنید.");
+      return;
+    }
+    if (!isOwnerRole && scope === "home" && !defaultLocationId) {
+      setError("شعبهٔ اصلی این عضو را انتخاب کنید.");
+      return;
+    }
+    if (isPinMember && pin && !isValidPin(pin)) {
+      setError(`رمز عددی باید ${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم باشد.`);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const res = await api<{ error?: string; reason?: string }>(`/api/team/${member.id}/rehire`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason: reason.trim(),
+        locationScope: isOwnerRole ? "all" : scope,
+        locationIds: !isOwnerRole && scope === "selected" ? branchIds : [],
+        defaultLocationId: !isOwnerRole && scope === "home" ? defaultLocationId : null,
+        ...(isPinMember && pin ? { pin } : {}),
+      }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const code = res.data.error ?? "";
+      setError(res.data.reason || REHIRE_ERROR_MESSAGES[code] || errorMessage(code));
+      return;
+    }
+    onRehired();
+  }
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+    >
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>بازگشت به کار «{member.fullName}»</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            قطع همکاری، هویت ورود، اعتبارنامه‌ها و شعبه‌های این عضو را لغو کرده اما نقش،
+            دسترسی‌ها و سوابق او را نگه داشته است. این فرم همهٔ آن‌ها را یک‌جا بازمی‌گرداند.
+          </p>
+          <ErrorBox>{error}</ErrorBox>
+
+          {isOwnerRole ? (
+            <InfoBox>مالک به همهٔ شعبه‌ها دسترسی دارد.</InfoBox>
+          ) : (
+            <>
+              <Field label="دامنهٔ شعبه">
+                <SearchableSelect
+                  value={scope}
+                  onChange={(value) => setScope(value as Member["locationScope"])}
+                  options={[
+                    { value: "all", label: "همهٔ شعبه‌ها" },
+                    { value: "selected", label: "شعبه‌های انتخابی" },
+                    { value: "home", label: "فقط شعبهٔ اصلی" },
+                  ]}
+                />
+              </Field>
+              {scope === "selected" ? (
+                <Field label="شعبه‌ها" hint="شعبه‌هایی که این عضو به آن‌ها دسترسی دارد.">
+                  {locations.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">شعبه‌ای ثبت نشده است.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {locations.map((location) => (
+                        <label key={location.id} className="flex items-center gap-2 text-sm">
+                          <Checkbox
+                            checked={branchIds.includes(location.id)}
+                            onCheckedChange={(checked) => toggleBranch(location.id, checked === true)}
+                          />
+                          <span>
+                            {location.name}
+                            {!location.isActive ? (
+                              <span className="ms-1 text-xs text-muted-foreground">(غیرفعال)</span>
+                            ) : null}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </Field>
+              ) : null}
+              {scope === "home" ? (
+                <Field label="شعبهٔ اصلی" hint="تنها شعبه‌ای که این عضو به آن دسترسی دارد.">
+                  <SearchableSelect
+                    value={defaultLocationId}
+                    onChange={chooseDefaultBranch}
+                    options={[
+                      { value: "", label: "— انتخاب نشده —" },
+                      ...locations.map((location) => ({ value: location.id, label: location.name })),
+                    ]}
+                  />
+                </Field>
+              ) : null}
+            </>
+          )}
+
+          {isPinMember ? (
+            <Field
+              label="رمز عددی (اختیاری)"
+              hint="خالی بگذارید تا رمز عددیِ زمان قطع همکاری بازیابی شود؛ یا رمز تازه‌ای تعیین کنید."
+            >
+              <input
+                className={`${inputClass} w-48 text-center tracking-[0.25em]`}
+                dir="ltr"
+                inputMode="numeric"
+                maxLength={PIN_MAX_LENGTH}
+                value={pin}
+                onChange={(e) => setPin(toLatinDigits(e.target.value).replace(/[^0-9]/g, ""))}
+                placeholder="----"
+              />
+            </Field>
+          ) : null}
+
+          <Field label="دلیل بازگشت به کار *">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="مثلاً: قرارداد دوباره از آبان شروع می‌شود."
+            />
+          </Field>
+        </div>
+        <DialogFooter>
+          <SecondaryButton onClick={onClose} disabled={busy}>
+            انصراف
+          </SecondaryButton>
+          <PrimaryButton onClick={() => void submit()} disabled={busy}>
+            {busy ? "در حال بازگرداندن…" : "بازگشت به کار"}
+          </PrimaryButton>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

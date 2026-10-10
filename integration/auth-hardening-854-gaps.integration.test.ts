@@ -1474,3 +1474,302 @@ describe("Issue #854 GAP 8 — the phone-OTP door commits its stamps only after 
     expect(sessions.rows[0].count).toBe("0");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pass 4 — deterministic MFA contention: held locks fix the order
+// ---------------------------------------------------------------------------
+
+describe("Issue #854 pass 4 — deterministic MFA contention (held lock, fixed orderings)", () => {
+  /**
+   * The Promise.all tests above prove the invariant under a genuine race;
+   * these tests pin the *orderings* that race can produce, one at a time, by
+   * holding the account lock the same way a concurrent transaction would and
+   * releasing it only when the blocked operation is proven to be waiting.
+   * Same end state from either order is the property: a required account is
+   * never factorless, and a stale challenge never authorises the wrong swap.
+   */
+
+  const WAIT_PROBE_MS = 700;
+
+  async function seedConfirmedSms(oldPhone: string): Promise<Seed> {
+    const seeded = await seedBusiness("DeterministicMfa");
+    const first = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      method: "sms_otp",
+      phone: oldPhone,
+      sendSmsChallenge: true,
+    });
+    expect(first.ok).toBe(true);
+    const confirmed = await mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      code: sms.sent[sms.sent.length - 1].code,
+      expectedPhoneE164: oldPhone,
+    });
+    expect(confirmed.outcome).toBe("sms_otp");
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    return seeded;
+  }
+
+  /** Hold the MFA account lock exactly like a competing transaction would. */
+  async function holdAccountLock(subjectId: string): Promise<Client> {
+    const holder = new Client({ connectionString: urlFor(databaseName) });
+    await holder.connect();
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      "platform_user",
+      subjectId,
+    ]);
+    return holder;
+  }
+
+  async function stageReplacement(seeded: Seed, newPhone: string): Promise<string> {
+    const replace = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      method: "sms_otp",
+      phone: newPhone,
+      sendSmsChallenge: true,
+      replaceConfirmed: true,
+    });
+    expect(replace.ok).toBe(true);
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    return sms.sent[sms.sent.length - 1].code;
+  }
+
+  function removalCall(seeded: Seed) {
+    return mfaService.removeMfaFactorChecked({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      allowRemoveLast: true,
+      evaluateGlobalRequirement: true,
+      audit: {
+        businessId: seeded.businessId,
+        actorUserId: seeded.ownerId,
+        platformUserId: seeded.ownerPlatformUserId,
+      },
+    });
+  }
+
+  function confirmCall(seeded: Seed, code: string, newPhone: string) {
+    return mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      code,
+      expectedPhoneE164: newPhone,
+      audit: {
+        businessId: seeded.businessId,
+        actorUserId: seeded.ownerId,
+        platformUserId: seeded.ownerPlatformUserId,
+      },
+    });
+  }
+
+  async function readSmsFactor(subjectId: string) {
+    const { rows } = await db.query<{ phone_e164: string | null; confirmed_at: Date | null }>(
+      `SELECT phone_e164, confirmed_at FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [subjectId],
+    );
+    return rows;
+  }
+
+  it("ordering A — the replacement commits first, and the queued removal then refuses a required account", async () => {
+    const oldPhone = "+989121000031";
+    const newPhone = "+989121000032";
+    const seeded = await seedConfirmedSms(oldPhone);
+    const code = await stageReplacement(seeded, newPhone);
+
+    const holder = await holdAccountLock(seeded.ownerPlatformUserId);
+
+    // The swap confirmation must wait on the held lock — measured, not assumed.
+    const confirm = confirmCall(seeded, code, newPhone).then((r) => r.outcome);
+    const raced = await Promise.race([
+      confirm,
+      new Promise<string>((resolve) => setTimeout(() => resolve("waiting"), WAIT_PROBE_MS)),
+    ]);
+    expect(raced).toBe("waiting");
+
+    await holder.query("COMMIT");
+    await holder.end();
+    await expect(confirm).resolves.toBe("sms_otp");
+
+    // The removal now runs after the swap, in full view of it: a required
+    // account's last factor is still unremovable.
+    const removal = await removalCall(seeded);
+    expect(removal).toMatchObject({ ok: false, error: "cannot_remove_last_factor" });
+
+    const after = await readSmsFactor(seeded.ownerPlatformUserId);
+    expect(after).toHaveLength(1);
+    expect(after[0].phone_e164).toBe(newPhone);
+    expect(after[0].confirmed_at).not.toBeNull();
+  });
+
+  it("ordering B — the removal decision goes first and refuses, then the queued replacement commits", async () => {
+    const oldPhone = "+989121000033";
+    const newPhone = "+989121000034";
+    const seeded = await seedConfirmedSms(oldPhone);
+    const code = await stageReplacement(seeded, newPhone);
+
+    const holder = await holdAccountLock(seeded.ownerPlatformUserId);
+
+    const removal = removalCall(seeded).then((r) => r);
+    const raced = await Promise.race([
+      removal,
+      new Promise<string>((resolve) => setTimeout(() => resolve("waiting"), WAIT_PROBE_MS)),
+    ]);
+    expect(raced).toBe("waiting");
+
+    await holder.query("COMMIT");
+    await holder.end();
+    // Required account: even with `allowRemoveLast`, the cross-membership veto
+    // stands — nothing was removed.
+    await expect(removal).resolves.toMatchObject({ ok: false, error: "cannot_remove_last_factor" });
+    const midState = await readSmsFactor(seeded.ownerPlatformUserId);
+    expect(midState[0].phone_e164).toBe(oldPhone);
+    expect(midState[0].confirmed_at).not.toBeNull();
+
+    // The replacement now commits — the account never spent a moment factorless.
+    const confirm = await confirmCall(seeded, code, newPhone);
+    expect(confirm.outcome).toBe("sms_otp");
+    const after = await readSmsFactor(seeded.ownerPlatformUserId);
+    expect(after).toHaveLength(1);
+    expect(after[0].phone_e164).toBe(newPhone);
+  });
+
+  it("two-factor removals serialise in a fixed order and the survivor keeps the account covered", async () => {
+    const seeded = await seedBusiness("DeterministicTwoFactors");
+
+    const totp = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      method: "totp",
+    });
+    expect(totp.ok).toBe(true);
+    if (!totp.ok || !totp.totpSecret) throw new Error("totp enrolment failed");
+    const totpConfirm = await mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "totp",
+      code: await generateTotp({ secret: totp.totpSecret }),
+    });
+    expect(totpConfirm.outcome).toBe("totp");
+
+    const smsEnrol = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      method: "sms_otp",
+      phone: "+989121000035",
+      sendSmsChallenge: true,
+    });
+    expect(smsEnrol.ok).toBe(true);
+    const smsConfirm = await mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      code: sms.sent[sms.sent.length - 1].code,
+    });
+    expect(smsConfirm.outcome).toBe("sms_otp");
+
+    const holder = await holdAccountLock(seeded.ownerPlatformUserId);
+
+    // First removal (TOTP) must wait on the lock.
+    const first = mfaService
+      .removeMfaFactorChecked({
+        subjectRealm: "platform_user",
+        subjectId: seeded.ownerPlatformUserId,
+        method: "totp",
+        allowRemoveLast: false,
+      })
+      .then((r) => r);
+    const raced = await Promise.race([
+      first,
+      new Promise<string>((resolve) => setTimeout(() => resolve("waiting"), WAIT_PROBE_MS)),
+    ]);
+    expect(raced).toBe("waiting");
+
+    await holder.query("COMMIT");
+    await holder.end();
+    await expect(first).resolves.toMatchObject({ ok: true });
+
+    // Second removal (SMS) now deterministically sees exactly one confirmed
+    // factor and refuses to take the last one.
+    const second = await mfaService.removeMfaFactorChecked({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      allowRemoveLast: false,
+    });
+    expect(second).toMatchObject({ ok: false, error: "cannot_remove_last_factor" });
+
+    const { rows } = await db.query<{ count: string; method: string }>(
+      `SELECT count(*)::text AS count, string_agg(method, ',') AS method FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1`,
+      [seeded.ownerPlatformUserId],
+    );
+    expect(rows[0].count).toBe("1");
+    expect(rows[0].method).toBe("sms_otp");
+  });
+
+  it("a stale replacement code cannot authorise a swap to a different number", async () => {
+    const oldPhone = "+989121000036";
+    const firstNewPhone = "+989121000037";
+    const secondNewPhone = "+989121000038";
+    const seeded = await seedConfirmedSms(oldPhone);
+    const staleCode = await stageReplacement(seeded, firstNewPhone);
+    const freshCode = await stageReplacement(seeded, secondNewPhone);
+
+    // The stale code belongs to the first number's challenge; spending it for
+    // the second number's swap is refused by the destination binding — and it
+    // must not confirm anything else by accident either.
+    const cross = await confirmCall(seeded, staleCode, secondNewPhone);
+    expect(cross.outcome).toBe("rejected");
+
+    let midState = await readSmsFactor(seeded.ownerPlatformUserId);
+    expect(midState[0].phone_e164).toBe(oldPhone);
+
+    // The fresh code redeems only its own number, and the account ends on it.
+    const fresh = await confirmCall(seeded, freshCode, secondNewPhone);
+    expect(fresh.outcome).toBe("sms_otp");
+    midState = await readSmsFactor(seeded.ownerPlatformUserId);
+    expect(midState).toHaveLength(1);
+    expect(midState[0].phone_e164).toBe(secondNewPhone);
+    expect(midState[0].confirmed_at).not.toBeNull();
+
+    // And the stale code is dead even for its own number once spent once:
+    // challenges are consumed on redemption, never reusable.
+    const replay = await confirmCall(seeded, freshCode, secondNewPhone);
+    expect(replay.outcome).toBe("rejected");
+  });
+
+  it("a failed confirmation rolls back cleanly: wrong code leaves the confirmed factor untouched", async () => {
+    const oldPhone = "+989121000039";
+    const newPhone = "+989121000040";
+    const seeded = await seedConfirmedSms(oldPhone);
+    await stageReplacement(seeded, newPhone);
+
+    const wrong = await confirmCall(seeded, "000000", newPhone);
+    expect(wrong.outcome).toBe("rejected");
+
+    const state = await readSmsFactor(seeded.ownerPlatformUserId);
+    expect(state).toHaveLength(1);
+    expect(state[0].phone_e164).toBe(oldPhone);
+    expect(state[0].confirmed_at).not.toBeNull();
+
+    // The ceremony itself survives the failed attempt: the real code still
+    // completes the swap afterwards.
+    const code = sms.sent[sms.sent.length - 1].code;
+    const retry = await confirmCall(seeded, code, newPhone);
+    expect(retry.outcome).toBe("sms_otp");
+    const after = await readSmsFactor(seeded.ownerPlatformUserId);
+    expect(after[0].phone_e164).toBe(newPhone);
+  });
+});
