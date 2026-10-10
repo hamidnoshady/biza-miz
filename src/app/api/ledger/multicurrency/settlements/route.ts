@@ -45,6 +45,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       items: parsed.value.items,
       entryDate: parsed.value.entryDate,
       memo: parsed.value.memo,
+      projectId: parsed.value.projectId,
       actorId: session.sub,
       idempotencyKey: parsed.value.idempotencyKey,
     });

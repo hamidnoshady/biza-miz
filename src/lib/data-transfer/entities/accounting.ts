@@ -21,6 +21,7 @@
 
 import { query } from "../../db";
 import { AccountsError, createAccount, setAccountActive } from "../../accounts-service";
+import { ensureCurrencyEnabled, MulticurrencyError } from "../../multicurrency-service";
 import { MissingLedgerAccountError, recordExpense } from "../../expense-service";
 import { expenseErrorMessage } from "../../expense-errors";
 import { parseExpenseAmount, parseExpenseVatAmount } from "../../expense-input";
@@ -210,6 +211,20 @@ const accountsAdapter: EntityAdapter = {
     }
 
     try {
+      const currencyCode = typeof values.currencyCode === "string" ? values.currencyCode : null;
+      if (currencyCode) {
+        // The imported chart may name a foreign currency the target business
+        // has not enabled yet — enabling it (tenant-local, idempotent) is part
+        // of importing the row, or the account would come back base-currency
+        // and its postings would no longer mean what the export said (issue
+        // #863 §import-side). Unknown/inactive/base currencies still reject.
+        try {
+          await ensureCurrencyEnabled(context.businessId, currencyCode);
+        } catch (err) {
+          if (err instanceof MulticurrencyError) throw new RowRejection(importCurrencyErrorMessage(err.message));
+          throw err;
+        }
+      }
       const created = await createAccount({
         businessId: context.businessId,
         code,
@@ -218,7 +233,7 @@ const accountsAdapter: EntityAdapter = {
         parentId,
         // Preserved on import so a foreign-currency financial account keeps
         // the currency its postings are denominated in (issue #863).
-        currencyCode: typeof values.currencyCode === "string" ? values.currencyCode : null,
+        currencyCode,
       });
       if (values.isActive === false) {
         await setAccountActive(context.businessId, created.id, false);
@@ -253,6 +268,20 @@ function accountErrorMessage(code: string): string {
       return "حساب بالادست در پایین‌ترین سطح است و زیرمجموعه نمی‌پذیرد.";
     default:
       return `ثبت حساب ممکن نشد (${code}).`;
+  }
+}
+
+/** Why an imported account's currency could not be set up for this business. */
+function importCurrencyErrorMessage(code: string): string {
+  switch (code) {
+    case "currency_not_found":
+      return "ارز این حساب در فهرست ارزهای سامانه یافت نشد.";
+    case "currency_inactive":
+      return "ارز این حساب در سامانه غیرفعال است.";
+    case "base_currency_not_a_transaction_currency":
+      return "ارز پایهٔ کسب‌وکار نمی‌تواند ارز معاملهٔ یک حساب باشد.";
+    default:
+      return `فعال‌سازی ارز این حساب ممکن نشد (${code}).`;
   }
 }
 

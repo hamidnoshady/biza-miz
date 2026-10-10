@@ -197,6 +197,49 @@ export function MulticurrencySection({
   );
 }
 
+/**
+ * Reversal for an FX document/settlement this screen just produced: the API
+ * endpoint exists (`POST /entries/[id]/reverse`) but no surface called it, so
+ * a mistaken posting or settlement was only correctable from raw API calls.
+ * Succeeding replaces the control with the reversal's own entry id.
+ */
+function ReverseEntryButton({
+  entryId,
+  busy,
+  label,
+  onReversed,
+}: {
+  entryId: string;
+  busy: boolean;
+  label: string;
+  onReversed: (reversalEntryId: string) => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const reverse = () => {
+    setError(null);
+    void (async () => {
+      const res = await api<{ entryId: string; error?: string }>(`/api/ledger/multicurrency/entries/${entryId}/reverse`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      if (res.ok) onReversed(res.data.entryId);
+      else setError(errorMessage((res.data as { error?: string }).error));
+    })();
+  };
+  return (
+    <span className="inline-flex flex-col gap-1">
+      <SecondaryButton onClick={reverse} disabled={busy}>
+        {label}
+      </SecondaryButton>
+      {error ? (
+        <span role="alert" className="text-xs text-red-700 dark:text-red-300">
+          {error}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 function Notice({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -432,7 +475,12 @@ function DocumentsTab({
   const [entryDate, setEntryDate] = useState(todayIsoDate());
   const [memo, setMemo] = useState("");
   const [lines, setLines] = useState<DocLineDraft[]>(EMPTY_LINES);
-  const [posted, setPosted] = useState<{ foreignTotal: string; baseTotal: string } | null>(null);
+  const [posted, setPosted] = useState<{ entryId: string; foreignTotal: string; baseTotal: string } | null>(null);
+  // The invoice's party — the settlement screen resolves open items through
+  // the party attribution on the A/R (or A/P) line, so a document posted
+  // without one can never be settled. The field stamps every CONTROL line
+  // (the 1200/2100 legs); revenue/expense legs stay unattributed.
+  const [partyId, setPartyId] = useState("");
 
   useEffect(() => {
     if (!currencyCode && config) {
@@ -466,7 +514,7 @@ function DocumentsTab({
     if (preview.state !== "ok") return;
     setPosted(null);
     return run(async () => {
-      const res = await api<{ foreignTotal: string; baseTotal: string; error?: string }>(
+      const res = await api<{ entryId: string; foreignTotal: string; baseTotal: string; error?: string }>(
         "/api/ledger/multicurrency/entries",
         {
           method: "POST",
@@ -475,33 +523,54 @@ function DocumentsTab({
             rateId: null,
             entryDate,
             memo,
-            lines: lines
-              .filter((l) => l.accountId && l.amount)
-              .map((l) => ({
-                accountId: l.accountId,
-                side: l.side,
-                foreignAmount: majorToMinorText(l.amount, precision),
-              })),
+            lines: postLines(),
           }),
         },
       );
       if (res.ok) {
-        setPosted({ foreignTotal: res.data.foreignTotal, baseTotal: res.data.baseTotal });
+        setPosted({ entryId: res.data.entryId, foreignTotal: res.data.foreignTotal, baseTotal: res.data.baseTotal });
         setLines(EMPTY_LINES);
         setMemo("");
+        setPartyId("");
       }
       return res;
     });
   };
 
   const postable = accounts.filter((a) => a.is_postable !== false);
+  // Control accounts are the ones whose balance IS somebody's open item.
+  const CONTROL_CODES = new Set(["1200", "2100"]);
+  const postLines = () =>
+    lines
+      .filter((l) => l.accountId && l.amount)
+      .map((l) => ({
+        accountId: l.accountId,
+        side: l.side,
+        foreignAmount: majorToMinorText(l.amount, precision),
+        // `code` rides only for the attribution decision below.
+        ...(CONTROL_CODES.has(accounts.find((a) => a.id === l.accountId)?.code ?? "") && partyId
+          ? { partyId }
+          : {}),
+      }));
 
   return (
     <div className="space-y-4">
       {posted ? (
         <Notice>
           سند ثبت شد — ارزی {toPersianDigits(minorToMajorText(BigInt(posted.foreignTotal), precision))}{" "}
-          {currencyCode}، معادل {money.formatText(posted.baseTotal, { withUnit: true })}.
+          {currencyCode}، معادل {money.formatText(posted.baseTotal, { withUnit: true })}.{" "}
+          <ReverseEntryButton
+            entryId={posted.entryId}
+            busy={busy}
+            label="برگشت سند"
+            onReversed={(reversalId) =>
+              setPosted({
+                entryId: reversalId,
+                foreignTotal: posted.foreignTotal,
+                baseTotal: posted.baseTotal,
+              })
+            }
+          />
         </Notice>
       ) : null}
 
@@ -521,6 +590,10 @@ function DocumentsTab({
             <span className="mb-1 block">تاریخ سند</span>
             <JalaliDatePicker value={entryDate} onChange={setEntryDate} />
           </label>
+          <div className="text-sm">
+            <span className="mb-1 block">طرف حساب (اختیاری — برای اقلام باز)</span>
+            <PartyPicker onPick={setPartyId} direction="receivable" />
+          </div>
           <label className="grow text-sm">
             <span className="mb-1 block">شرح</span>
             <input
@@ -661,7 +734,7 @@ function SettlementTab({
   const [amount, setAmount] = useState("");
   const [bankAccountId, setBankAccountId] = useState("");
   const [memo, setMemo] = useState("");
-  const [done, setDone] = useState<{ difference: string } | null>(null);
+  const [done, setDone] = useState<{ entryId: string; difference: string } | null>(null);
   const [loadingLots, setLoadingLots] = useState(false);
 
   useEffect(() => {
@@ -715,6 +788,7 @@ function SettlementTab({
       .map((l) => ({
         lineId: l.lineId,
         entryId: l.entryId,
+        entryDate: l.entryDate,
         foreignRemaining: BigInt(l.foreignRemaining),
         baseRemaining: BigInt(l.baseRemaining),
       }));
@@ -736,9 +810,23 @@ function SettlementTab({
 
   const submit = () => {
     if (preview.state !== "ok" || !bankAccountId) return;
-    setDone(null);
+            setDone(null);
     return run(async () => {
-      const res = await api<{ realizedDifference: string; error?: string }>("/api/ledger/multicurrency/settlements", {
+      /* Two submission modes, matching the API's XOR: an explicit amount goes
+         as `autoAmount` (FIFO across the selection); an empty amount settles
+         each selected lot IN FULL, which the wire expresses as per-lot
+         `items` — sending both empty used to be a guaranteed 400, so the
+         «empty = whole selection» mode advertised by the field could never
+         actually submit. */
+      const settleItems =
+        amount.trim() !== ""
+          ? []
+          : [...selected].map((lineId) => {
+              const lot = lots.find((l) => l.lineId === lineId);
+              return { entryId: lot?.entryId ?? lineId, amount: lot?.foreignRemaining ?? "0" };
+            });
+      const res = await api<{ entryId: string; realizedDifference: string; error?: string }>(
+        "/api/ledger/multicurrency/settlements", {
         method: "POST",
         body: JSON.stringify({
           direction,
@@ -747,13 +835,13 @@ function SettlementTab({
           rateId: null,
           settlementAccountId: bankAccountId,
           autoAmount: amount.trim() !== "" ? majorToMinorText(amount, precision) : null,
-          items: [],
+          items: settleItems,
           entryDate: null,
           memo,
         }),
       });
       if (res.ok) {
-        setDone({ difference: res.data.realizedDifference });
+        setDone({ entryId: res.data.entryId, difference: res.data.realizedDifference });
         setAmount("");
         setMemo("");
         await loadLots();
@@ -772,7 +860,18 @@ function SettlementTab({
             : done.difference !== "0"
               ? `سود تسعیر ${money.formatText(done.difference, { withUnit: true })}`
               : "بدون اثر تسعیر"}
-          .
+          .{" "}
+          <ReverseEntryButton
+            entryId={done.entryId}
+            busy={busy}
+            label="برگشت تسویه"
+            onReversed={(reversalId) => {
+              setDone({ entryId: reversalId, difference: "0" });
+              // The reversal re-opens the settled lot server-side; reload so
+              // the open-items table shows it instead of the stale settled view.
+              void loadLots();
+            }}
+          />
         </Notice>
       ) : null}
 

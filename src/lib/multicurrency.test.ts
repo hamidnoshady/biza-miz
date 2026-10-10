@@ -290,6 +290,7 @@ describe("consumeOpenLots — exact FIFO settlement", () => {
   const lot = (lineId: string, foreignRemaining: bigint, baseRemaining: bigint): ForeignOpenLot => ({
     lineId,
     entryId: `entry-${lineId}`,
+    entryDate: "2026-01-01",
     foreignRemaining,
     baseRemaining,
   });
