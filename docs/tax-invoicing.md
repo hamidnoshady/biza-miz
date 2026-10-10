@@ -379,6 +379,9 @@ Client code imports only types from `tax-invoice-core.ts`, because that module i
    validate actual direct and TSP acceptance/inquiry before considering live use.
 2. Confirm indefinite retention and the resulting reset/delete refusal with the
    product/legal owner. No accepted record is deleted while that decision is open.
-3. PR #897 must remain unmerged for the user. The expenses visual diff is inherited
-   (4.06%, identical bounds on two main runs); no baseline or expenses edits are made.
-   Latest verification and CI state are in `ISSUE_866_PLAN.md`.
+3. Resolve the packaged Windows size gate (620.2 MiB against 620 MiB); no budget
+   increase or unrelated packaging change is included here.
+4. PR #897 remains unmerged for the user. Branch-push expenses visual diff is
+   inherited (4.06%); PR-merge visual passes using newer main's separately updated
+   baseline. No baseline or expenses edits are made here. Exact verification/CI
+   evidence and remaining decisions are in `ISSUE_866_PLAN.md`.

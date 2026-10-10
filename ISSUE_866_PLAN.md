@@ -139,7 +139,8 @@ Two problems surfaced by the checks above, and fixed:
 - [ ] Current official protocol/SDK vectors and sandbox access; verified taxid/pattern mapping, signing/encryption, trust roots, wire snapshot/version persistence, real direct and TSP acceptance/inquiry.
 - [ ] Product/legal confirmation of indefinite retention and resulting reset/delete refusal. No accepted history is deleted while open.
 - [ ] Reviewed resolution workflow for contradictory provider evidence. Holds cannot currently be cleared through an application endpoint.
-- [ ] Owner decision on inherited expenses visual change; this PR does not update baselines or touch expenses.
+- [~] Branch-push expenses visual diff is inherited. PR-merge visual passes with newer main's separately updated baseline; this branch does not edit expenses or baselines.
+- [ ] Packaged Windows size gate: 620.2 MiB exceeds 620 MiB. Needs measured packaging reduction or explicit owner-approved budget policy; not silently waived.
 - [ ] User decides whether/when to merge PR #897. **Do not merge.**
 
 ## PR #897 — CI follow-up (2026-10-09)
@@ -193,20 +194,56 @@ new archive table includes forced RLS and tenant policy in its creating migratio
   1 skipped**. It overlapped edits/targeted DB runs: two hybrid-sync failures plus
   one retention-hold error-shape assertion against cached pre-fix platform service.
   Both failing files reran alone on final code: **2 files / 23 tests passed**.
-  A fresh unchanged-tree full DB run is in progress, without competing DB runs.
+  Superseded by the clean full run below.
+- [x] Final unchanged-tree `npm run test:db`: **200 files / 2,733 tests passed,
+  1 existing skipped** (AI gateway suite), Node 24. No competing DB run.
 - [x] Final taxpayer logical backup/restore round trip includes an accepted record,
   immutable archive, events and verified hashes; excludes the other tenant.
 - [x] Full-run Linux tenant/RLS, data-transfer, migrations, reset, backup, restore
   and AI isolation suites passed. Migrations reapply as a no-op.
 - [~] Local build attempted on Node 24 with repository heap setting (3072 MB) and
   Postgres stopped: kernel OOM (~3.7 GB RSS on 3.9 GB/no swap). No successful local
-  build claimed. CI production build passed at 4fac7c3; new-head result pending.
-- [ ] Follow-up push/CI watch/comments pending. The full checklist has run and
-  the failed DB files passed in isolation; the extra unchanged-tree full DB repeat
-  is retained as an additional check (not presented as green before it finishes).
+  build claimed. CI production build **passed at 2bbb025**.
+- [x] Code pushed as **2bbb025** to existing PR #897; CI watched through completion.
+  PR test workflow is **success**. PR comments contain implementation and evidence.
+- [~] Issue #866 comment attempted, but GitHub returned **403 Resource not accessible
+  by integration**. PR comments work; no successful issue update claimed.
+- [ ] PR remains **unmerged**. Live protocol and Windows size gate are unresolved.
 
 Main visual evidence (annotations rechecked):
 - https://github.com/hamidnoshady/biza-miz/actions/runs/37919841516
 - https://github.com/hamidnoshady/biza-miz/actions/runs/37925908136
 Both report `accounting-expenses.png`, **4.06%**, bounds **54,18 1370×830**.
 PR 4fac7c3 visual job 113980285958 reports the same. No baseline update authorized.
+
+
+### CI for implementation commit 2bbb025
+
+[PR test run](https://github.com/hamidnoshady/biza-miz/actions/runs/38048875438):
+**all checks passed**, including production build, type check, units, real-database
+integration (32m8s), ESLint, Linux API guard/permission and data-transfer sweeps,
+design, media E2E and visual regression.
+
+[Shippables](https://github.com/hamidnoshady/biza-miz/actions/runs/38048875421):
+production container, desktop shell and Windows print connector **passed**;
+WordPress plugin **skipped by path filter** (unchanged).
+
+[Packaged Windows](https://github.com/hamidnoshady/biza-miz/actions/runs/38048875451):
+**failed at final size gate**, not at install/runtime. Security audits, packaged
+PostgreSQL tools, standard-user install, both launches, restricted-role boot and
+persistence steps all passed. Unpacked **620.2 MiB > 620 MiB**; installer
+**161.3 MiB < 175 MiB**. No budget was raised or unrelated packaging code changed.
+This is a new unresolved blocker, not classified as pre-existing.
+
+Visual check distinction (same feature commit):
+- [Branch push](https://github.com/hamidnoshady/biza-miz/actions/runs/38048872422/job/114203800019):
+  inherited expenses **4.06%, bounds 54,18 1370×830**.
+- [PR synthetic merge](https://github.com/hamidnoshady/biza-miz/actions/runs/38048875438/job/114203808556):
+  **passed**. Merge `9580aca` has parents newer main `a4e8aa8` (PR #881) and
+  `2bbb025`. Newer main independently recorded the expenses baseline. Verified
+  expenses blob: merge `97f41f1820429042b9e2c79d7a57fb78bcc1c73a`, unchanged branch
+  `5fff18d3641fde150425049a4c2f2fb144a701d8`. No baseline update was made here.
+
+This evidence documents the implementation commit. A subsequent documentation-only
+commit records these results; its own checks are reported in the PR, not assumed
+from the earlier run. There is no merge authorization.
