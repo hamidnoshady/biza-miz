@@ -74,8 +74,33 @@ export interface PlanInput {
   /** Inclusive window the run was asked for (YYYY-MM-DD). Rows dated on or before `periodTo` are candidates. */
   periodFrom: string;
   periodTo: string;
-  /** Rows in the window that a payroll run has already claimed. They are excluded, and the warning names how many. */
-  claimedByPayroll: number;
+  /**
+   * Rows a payroll run has already claimed. They are excluded; the warning names
+   * each payroll run and how many of its rows were left out, so the reviewer can
+   * find the payroll that paid them.
+   */
+  payrollClaims: readonly PayrollClaim[];
+  /**
+   * Sellers with sales in the period and no commission rule in force, and what
+   * those sales were worth. Nothing is accrued for them (there is no rule to
+   * accrue under); the warning makes the gap visible before the run is paid.
+   */
+  unmappedSellers: readonly UnmappedSeller[];
+}
+
+export interface PayrollClaim {
+  payrollRunId: string;
+  periodLabel: string;
+  rows: number;
+}
+
+export interface UnmappedSeller {
+  employeeId: string;
+  fullName: string;
+  /** Sale lines the seller rang up in the period. */
+  lines: number;
+  /** Σ unit price × quantity of those lines, integer Rial (before invoice-level discounts). */
+  salesValue: bigint;
 }
 
 export interface PlanLine {
@@ -106,10 +131,11 @@ export interface PlanLine {
 
 export type PlanWarning =
   | { code: "balance_not_positive"; employees: { employeeId: string; fullName: string; net: string; rows: number }[] }
-  | { code: "claimed_by_payroll"; rows: number }
+  | { code: "claimed_by_payroll"; rows: number; payrolls: { payrollRunId: string; periodLabel: string; rows: number }[] }
   | { code: "earlier_rows_included"; rows: number; before: string }
   | { code: "inactive_member"; employees: { employeeId: string; fullName: string }[] }
-  | { code: "rule_missing"; rows: number };
+  | { code: "rule_missing"; rows: number }
+  | { code: "unmapped_seller"; lines: number; sellers: { employeeId: string; fullName: string; lines: number; salesValue: string }[] };
 
 export interface PlanMember {
   employeeId: string;
@@ -292,7 +318,18 @@ export function planSettlement(input: PlanInput): SettlementPlan {
   const claimedAccruals = lines.filter((line) => line.lineKind === "accrual");
   const warnings: PlanWarning[] = [];
   if (blocked.length > 0) warnings.push({ code: "balance_not_positive", employees: blocked });
-  if (input.claimedByPayroll > 0) warnings.push({ code: "claimed_by_payroll", rows: input.claimedByPayroll });
+  const payrollRows = input.payrollClaims.reduce((total, claim) => total + claim.rows, 0);
+  if (payrollRows > 0) {
+    warnings.push({
+      code: "claimed_by_payroll",
+      rows: payrollRows,
+      payrolls: input.payrollClaims.map((claim) => ({
+        payrollRunId: claim.payrollRunId,
+        periodLabel: claim.periodLabel,
+        rows: claim.rows,
+      })),
+    });
+  }
   const earlier = claimedAccruals.filter((line) => (line.saleDate ?? "") < input.periodFrom).length;
   if (earlier > 0) warnings.push({ code: "earlier_rows_included", rows: earlier, before: input.periodFrom });
   const inactive = members
@@ -301,6 +338,18 @@ export function planSettlement(input: PlanInput): SettlementPlan {
   if (inactive.length > 0) warnings.push({ code: "inactive_member", employees: inactive });
   const withoutRule = claimedAccruals.filter((line) => line.ruleId === null).length;
   if (withoutRule > 0) warnings.push({ code: "rule_missing", rows: withoutRule });
+  if (input.unmappedSellers.length > 0) {
+    warnings.push({
+      code: "unmapped_seller",
+      lines: input.unmappedSellers.reduce((total, seller) => total + seller.lines, 0),
+      sellers: input.unmappedSellers.map((seller) => ({
+        employeeId: seller.employeeId,
+        fullName: seller.fullName,
+        lines: seller.lines,
+        salesValue: seller.salesValue.toString(),
+      })),
+    });
+  }
 
   return { members, lines, accrualIds, carryIds, total, warnings };
 }

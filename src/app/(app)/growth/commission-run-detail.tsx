@@ -329,7 +329,7 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
   }
 
   const canPay = run.actions.includes("pay");
-  const warnings = run.warnings.map((warning) => commissionWarningText(warning, (n) => formatPersianNumber(n)));
+  const warnings = run.warnings.map((warning) => commissionWarningText(warning, (n) => formatPersianNumber(n), (rial) => money.formatText(rial)));
   const period = `${shamsiDate(run.periodFrom)} تا ${shamsiDate(run.periodTo)}`;
 
   return (
@@ -363,8 +363,17 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
                 <li key={index}>{text}</li>
               ))}
             </ul>
+            {run.warnings.some((warning) => warning.code === "claimed_by_payroll") ? (
+              <p className="mt-3 text-sm">
+                <Link href={accountingSectionHref("payroll")} className="text-primary underline-offset-4 hover:underline">
+                  دیدن فیش‌های حقوقی که این ردیف‌ها را پرداخته‌اند
+                </Link>
+              </p>
+            ) : null}
           </SectionCard>
         ) : null}
+
+        <ApprovalSummaryCard run={run} money={money} />
 
         <KpiRow>
           <KpiCard label="کل پورسانت دوره" value={money.formatText(run.commissionTotal)} hint={`${formatPersianNumber(run.lineCount)} ردیف`} />
@@ -972,6 +981,76 @@ function LinesCard({ runId, employees, money }: { runId: string; employees: Empl
           </div>
         </>
       )}
+    </SectionCard>
+  );
+}
+
+/**
+ * What a reviewer needs before approving, and who did each step so far. Every
+ * figure comes from the run's own snapshot and event trail, so it matches what
+ * the server will pay; nothing here is recomputed on the screen.
+ */
+function ApprovalSummaryCard({ run, money }: { run: RunDetailData; money: MoneyApi }) {
+  const steps: { action: string; label: string }[] = [
+    { action: "calculate", label: "محاسبه" },
+    { action: "review", label: "بازبینی" },
+    { action: "approve", label: "تأیید" },
+    { action: "release", label: "آزادسازی برای پرداخت" },
+  ];
+  const lastEvent = (action: string) => run.events.filter((event) => event.action === action).at(-1) ?? null;
+  const unmapped = run.warnings.find((warning) => warning.code === "unmapped_seller");
+  const blocked = run.warnings.find((warning) => warning.code === "balance_not_positive");
+  const approvalHint =
+    run.status === "reviewed"
+      ? "این دوره آمادهٔ تأیید است. تأیید را فردی غیر از کسی که دوره را محاسبه کرده انجام دهد."
+      : run.status === "calculated"
+        ? "پیش از تأیید، ابتدا دوره باید بازبینی شود."
+        : null;
+
+  return (
+    <SectionCard title={<CardTitle eyebrow="تأیید" title="خلاصهٔ تأیید" />} description={approvalHint ?? undefined}>
+      <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <dt className="text-muted-foreground">کل پورسانت برای پرداخت</dt>
+          <dd className="font-medium text-foreground">{money.formatText(run.commissionTotal)}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">فروشندگان با ردیف</dt>
+          <dd className="font-medium text-foreground">{formatPersianNumber(run.employeeCount)} نفر</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">ردیف‌های تسویه</dt>
+          <dd className="font-medium text-foreground">{formatPersianNumber(run.lineCount)} ردیف</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">هشدارها</dt>
+          <dd className="font-medium text-foreground">
+            {run.warnings.length > 0 ? `${formatPersianNumber(run.warnings.length)} مورد برای بررسی` : "بدون هشدار"}
+          </dd>
+        </div>
+      </dl>
+      <ol className="mt-4 divide-y divide-border/60 rounded-lg border border-border/80 text-sm">
+        {steps.map((step) => {
+          const event = lastEvent(step.action);
+          return (
+            <li key={step.action} className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2">
+              <span className="font-medium text-foreground">{step.label}</span>
+              {event ? (
+                <span className="text-xs text-muted-foreground">
+                  {event.actorName ?? "—"} · {shamsiDateTime(event.createdAt)}
+                </span>
+              ) : (
+                <span className="text-xs text-muted-foreground">هنوز انجام نشده</span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      {unmapped || blocked ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          پیش از تأیید، هشدارهای فروشندگان بدون قانون و مانده‌های غیرمثبت را در بالای صفحه بررسی کنید؛ این موارد پرداخت نمی‌شوند یا در دورهٔ دیگری آمده‌اند.
+        </p>
+      ) : null}
     </SectionCard>
   );
 }

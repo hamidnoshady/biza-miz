@@ -66,6 +66,7 @@ describe("the runs export", () => {
           commissionTotal: "500000",
           paidTotal: "200000",
           outstandingTotal: "300000",
+          warningCount: 2,
           createdAt: "2026-10-09T10:00:00.000Z",
         },
       ],

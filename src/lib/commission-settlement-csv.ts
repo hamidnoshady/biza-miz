@@ -42,6 +42,8 @@ export interface RunExportRow {
   commissionTotal: string;
   paidTotal: string;
   outstandingTotal: string;
+  /** How many calculation warnings the run carries (blocked balances, unmapped sellers, payroll-claimed rows, …). */
+  warningCount: number;
   createdAt: string;
 }
 
@@ -103,6 +105,7 @@ export function runsToCsv(rows: readonly RunExportRow[], unit: MoneyUnit): strin
     `کل پورسانت (${word})`,
     `پرداخت‌شده (${word})`,
     `باقی‌مانده (${word})`,
+    "تعداد هشدار",
     "تاریخ ایجاد",
   ];
   const body = rows.map((row) => [
@@ -116,6 +119,7 @@ export function runsToCsv(rows: readonly RunExportRow[], unit: MoneyUnit): strin
     displayAmount(row.commissionTotal, unit),
     displayAmount(row.paidTotal, unit),
     displayAmount(row.outstandingTotal, unit),
+    row.warningCount,
     formatJalali(row.createdAt, { withTime: true }),
   ]);
   return toCsv(headers, body);

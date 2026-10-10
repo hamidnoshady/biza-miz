@@ -110,9 +110,18 @@ describe("the warnings a run carries", () => {
   });
 
   it("gives each other warning its count", () => {
-    expect(commissionWarningText({ code: "claimed_by_payroll", rows: 3 }, count)).toContain("3");
+    expect(commissionWarningText({ code: "claimed_by_payroll", rows: 3, payrolls: [{ payrollRunId: "p1", periodLabel: "مهر ۱۴۰۵", rows: 3 }] }, count)).toContain("مهر ۱۴۰۵");
     expect(commissionWarningText({ code: "earlier_rows_included", rows: 2, before: "2026-10-01" }, count)).toContain("2");
+    expect(commissionWarningText({ code: "earlier_rows_included", rows: 2, before: "2026-10-01" }, count)).toContain("دو بار");
     expect(commissionWarningText({ code: "rule_missing", rows: 4 }, count)).toContain("4");
     expect(commissionWarningText({ code: "inactive_member", employees: [{ employeeId: "e1", fullName: "رضا" }] }, count)).toContain("رضا");
+    const unmapped = commissionWarningText(
+      { code: "unmapped_seller", lines: 3, sellers: [{ employeeId: "e9", fullName: "نیلوفر", lines: 3, salesValue: "900000" }] },
+      count,
+      (rial) => `${rial} ریال`,
+    );
+    expect(unmapped).toContain("نیلوفر");
+    expect(unmapped).toContain("900000 ریال");
+    expect(unmapped).toContain("قانون پورسانت فعال ندارند");
   });
 });

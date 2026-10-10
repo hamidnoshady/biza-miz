@@ -117,15 +117,30 @@ export function requiredPermissionFor(action: CommissionRunAction, status: Commi
 }
 
 /**
- * Whether the status allows the action at all, ignoring who asks. `paidTotal`
- * is the net amount paid so far (reversals already subtracted).
+ * What a run has already moved, as the policy sees it.
+ *
+ * `paidTotal` is the NET amount paid (reversals subtract). `hasPayouts` is
+ * whether a payout document was EVER posted for the run, reversed or not.
+ * The two answer different questions: a fully reversed run has nothing
+ * outstanding paid, but its posted payout and journal entry are history, so
+ * reject and void (which delete the run's snapshot and release its accruals)
+ * must stay refused. Only the database-level guards (migration 0218) and this
+ * policy decide that; the screen reads the same value the server enforces.
+ */
+export interface RunMoneyState {
+  paidTotal: bigint;
+  hasPayouts: boolean;
+}
+
+/**
+ * Whether the status allows the action at all, ignoring who asks.
  */
 export function actionAllowedInStatus(
   action: CommissionRunAction,
   status: CommissionRunStatus,
-  paidTotal: bigint,
+  money: RunMoneyState,
 ): boolean {
-  const nothingPaid = paidTotal === 0n;
+  const nothingPaid = money.paidTotal === 0n;
   switch (action) {
     case "calculate":
       return status === "draft";
@@ -136,14 +151,14 @@ export function actionAllowedInStatus(
     case "reject":
       return (
         REJECT_TO_DRAFT_ALLOWED &&
-        nothingPaid &&
+        !money.hasPayouts &&
         (status === "calculated" || status === "reviewed" || status === "approved" || status === "payable")
       );
     case "release":
       return status === "approved";
     case "void":
       return (
-        nothingPaid &&
+        !money.hasPayouts &&
         (status === "draft" ||
           status === "calculated" ||
           status === "reviewed" ||
@@ -159,14 +174,14 @@ export function actionAllowedInStatus(
   }
 }
 
-/** The actions a person holding `has(permission)` may take on a run in this status, in lifecycle order. */
+/** The actions a person holding `has(permission)` may take on a run in this status and money state, in lifecycle order. */
 export function availableRunActions(
   status: CommissionRunStatus,
-  paidTotal: bigint,
+  money: RunMoneyState,
   has: (permission: string) => boolean,
 ): CommissionRunAction[] {
   return COMMISSION_RUN_ACTIONS.filter(
-    (action) => actionAllowedInStatus(action, status, paidTotal) && has(requiredPermissionFor(action, status)),
+    (action) => actionAllowedInStatus(action, status, money) && has(requiredPermissionFor(action, status)),
   );
 }
 

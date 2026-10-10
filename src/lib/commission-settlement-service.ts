@@ -50,7 +50,9 @@ import {
   type PlanCarry,
   type PlanLine,
   type PlanPerson,
+  type PayrollClaim,
   type PlanWarning,
+  type UnmappedSeller,
 } from "./commission-settlement-plan";
 import { isUuid, type CreateRunInput, type PayoutInput } from "./commission-settlement-input";
 import type { LineExportRow, RunExportRow } from "./commission-settlement-csv";
@@ -88,6 +90,8 @@ export interface CommissionRunSummary {
   /** Integer Rial, as text. */
   commissionTotal: string;
   paidTotal: string;
+  /** A payout document was ever posted for this run, reversed or not. Once true, the run can no longer be rejected or voided. */
+  hasPayouts: boolean;
   /** What is still owed under this run. Zero once the run is closed (the balance moved to carry-forwards) or voided. */
   outstandingTotal: string;
   warnings: PlanWarning[];
@@ -239,6 +243,10 @@ const RUN_COLUMNS = `
   location_id, employee_filter::text[] AS employee_filter,
   status, line_count, employee_count,
   commission_total::text AS commission_total, paid_total::text AS paid_total,
+  EXISTS (
+    SELECT 1 FROM commission_settlement_payouts p
+     WHERE p.run_id = commission_settlement_runs.id AND p.kind = 'payout'
+  ) AS has_payouts,
   warnings, idempotency_key, created_by, calculated_by,
   ${isoTs("created_at")} AS created_at,
   ${isoTs("calculated_at")} AS calculated_at,
@@ -262,6 +270,8 @@ type RunRow = {
   employee_count: number;
   commission_total: string;
   paid_total: string;
+  /** A payout document was ever posted for the run (reversed or not). Drives reject/void. */
+  has_payouts: boolean;
   warnings: unknown;
   idempotency_key: string | null;
   created_by: string | null;
@@ -391,6 +401,7 @@ function toRunSummary(row: RunRow): CommissionRunSummary {
     employeeCount: row.employee_count,
     commissionTotal: row.commission_total,
     paidTotal: row.paid_total,
+    hasPayouts: row.has_payouts,
     outstandingTotal: outstanding.toString(),
     warnings: Array.isArray(row.warnings) ? (row.warnings as PlanWarning[]) : [],
     createdAt: row.created_at,
@@ -429,10 +440,10 @@ async function lockRun(client: PoolClient, businessId: string, runId: string): P
  * the screen can say what is wrong rather than only that something is.
  */
 function assertAction(run: RunRow, action: CommissionRunAction, actor: CommissionActor): void {
-  const paid = BigInt(run.paid_total);
+  const money = { paidTotal: BigInt(run.paid_total), hasPayouts: run.has_payouts };
   requirePermission(actor, requiredPermissionFor(action, run.status));
-  if (actionAllowedInStatus(action, run.status, paid)) return;
-  const hasPayouts = paid !== 0n;
+  if (actionAllowedInStatus(action, run.status, money)) return;
+  const hasPayouts = run.has_payouts;
   const codes: Record<CommissionRunAction, string> = {
     calculate: "run_not_draft",
     review: "run_not_calculated",
@@ -600,7 +611,11 @@ async function loadRunDetail(
       details: row.details ?? {},
       createdAt: row.created_at,
     })),
-    actions: availableRunActions(summary.status, BigInt(summary.paidTotal), (permission) => permissions.has(permission)),
+    actions: availableRunActions(
+      summary.status,
+      { paidTotal: BigInt(summary.paidTotal), hasPayouts: summary.hasPayouts },
+      (permission) => permissions.has(permission),
+    ),
     today: await businessToday(businessId),
   };
 }
@@ -768,6 +783,7 @@ export async function exportCommissionRuns(
       commissionTotal: summary.commissionTotal,
       paidTotal: summary.paidTotal,
       outstandingTotal: summary.outstandingTotal,
+      warningCount: summary.warnings.length,
       createdAt: summary.createdAt,
     };
   });
@@ -1186,7 +1202,8 @@ interface CandidateSet {
   accruals: PlanAccrual[];
   carries: PlanCarry[];
   people: PlanPerson[];
-  claimedByPayroll: number;
+  payrollClaims: PayrollClaim[];
+  unmappedSellers: UnmappedSeller[];
 }
 
 async function loadCandidates(client: PoolClient, businessId: string, run: RunRow): Promise<CandidateSet> {
@@ -1231,15 +1248,52 @@ async function loadCandidates(client: PoolClient, businessId: string, run: RunRo
     );
     people = result.rows;
   }
-  const { rows: claimed } = await client.query<{ n: number }>(
-    `SELECT COUNT(*)::int AS n
+  // Rows a payroll run already paid, grouped by that payroll run so the warning
+  // can name it. Same window and filters as the rows this run would take.
+  const { rows: claimed } = await client.query<{ payroll_run_id: string; period_label: string; n: number }>(
+    `SELECT a.payroll_run_id, pr.period_label, COUNT(*)::int AS n
        FROM commission_accruals a
+       JOIN payroll_runs pr ON pr.id = a.payroll_run_id
        LEFT JOIN journal_entries je ON je.id = a.entry_id
       WHERE a.business_id = $1 AND a.payroll_run_id IS NOT NULL AND a.amount <> 0
         AND COALESCE(je.entry_date, a.created_at::date) <= $2::date
         AND ($3::uuid IS NULL OR je.location_id = $3::uuid)
-        AND (cardinality($4::uuid[]) = 0 OR a.employee_id = ANY($4::uuid[]))`,
+        AND (cardinality($4::uuid[]) = 0 OR a.employee_id = ANY($4::uuid[]))
+      GROUP BY a.payroll_run_id, pr.period_label, pr.created_at
+      ORDER BY pr.created_at, a.payroll_run_id`,
     [businessId, run.period_to, run.location_id, run.employee_filter],
+  );
+  // Retail sales in the period whose seller has no commission rule in force
+  // today (the same `is_active` + effective-window test the accrual path applies
+  // to a rule). The sale's business day is the day the period is measured on.
+  const { rows: unmapped } = await client.query<{
+    employee_id: string;
+    full_name: string;
+    lines: number;
+    sales_value: string;
+  }>(
+    `SELECT o.opened_by AS employee_id, COALESCE(u.full_name, '') AS full_name,
+            COUNT(oi.id)::int AS lines,
+            COALESCE(SUM(oi.unit_price * oi.quantity), 0)::text AS sales_value
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+       JOIN locations l ON l.id = o.location_id AND l.business_id = $1
+       LEFT JOIN users u ON u.id = o.opened_by AND u.business_id = $1
+      WHERE o.type = 'retail' AND o.status = 'completed' AND oi.status <> 'voided'
+        AND o.opened_by IS NOT NULL
+        AND app_business_date(o.closed_at, l.timezone, l.business_day_start_minutes)
+            BETWEEN $2::date AND $3::date
+        AND ($4::uuid IS NULL OR o.location_id = $4::uuid)
+        AND (cardinality($5::uuid[]) = 0 OR o.opened_by = ANY($5::uuid[]))
+        AND NOT EXISTS (
+          SELECT 1 FROM commission_rules r
+           WHERE r.business_id = $1 AND r.employee_id = o.opened_by AND r.is_active
+             AND (r.active_from IS NULL OR r.active_from <= CURRENT_DATE)
+             AND (r.active_to IS NULL OR r.active_to >= CURRENT_DATE)
+        )
+      GROUP BY o.opened_by, u.full_name
+      ORDER BY u.full_name NULLS LAST, o.opened_by`,
+    [businessId, run.period_from, run.period_to, run.location_id, run.employee_filter],
   );
 
   return {
@@ -1259,7 +1313,17 @@ async function loadCandidates(client: PoolClient, businessId: string, run: RunRo
       role: person.role,
       isActive: person.is_active,
     })),
-    claimedByPayroll: claimed[0]?.n ?? 0,
+    payrollClaims: claimed.map((row) => ({
+      payrollRunId: row.payroll_run_id,
+      periodLabel: row.period_label,
+      rows: row.n,
+    })),
+    unmappedSellers: unmapped.map((row) => ({
+      employeeId: row.employee_id,
+      fullName: row.full_name,
+      lines: row.lines,
+      salesValue: BigInt(row.sales_value),
+    })),
   };
 }
 
@@ -1284,7 +1348,8 @@ export async function calculateCommissionRun(
       people: candidates.people,
       periodFrom: run.period_from,
       periodTo: run.period_to,
-      claimedByPayroll: candidates.claimedByPayroll,
+      payrollClaims: candidates.payrollClaims,
+      unmappedSellers: candidates.unmappedSellers,
     });
     if (plan.members.length === 0) {
       throw new CommissionSettlementError("nothing_to_settle", 409, { warnings: plan.warnings });
@@ -1507,6 +1572,13 @@ export async function rejectCommissionRun(
     const run = await lockRun(client, businessId, runId);
     assertAction(run, "reject", actor);
 
+    // The snapshot is purged only because nothing was posted (the guards refuse
+    // otherwise). What it held is recorded on the reject event, so the history
+    // of what was released survives the purge.
+    const { rows: purged } = await client.query<{ accrual_id: string | null; carry_id: string | null }>(
+      "SELECT accrual_id, carry_id FROM commission_settlement_lines WHERE business_id = $1 AND run_id = $2 ORDER BY ordinal",
+      [businessId, runId],
+    );
     await client.query("SELECT set_config('app.commission_settlement_reset', 'on', true)");
     await client.query(
       "UPDATE commission_accruals SET settlement_run_id = NULL WHERE business_id = $1 AND settlement_run_id = $2",
@@ -1535,7 +1607,12 @@ export async function rejectCommissionRun(
       actor,
       actorName: name,
       note,
-      details: { previousLines: run.line_count, previousTotal: run.commission_total },
+      details: {
+        previousLines: run.line_count,
+        previousTotal: run.commission_total,
+        releasedAccrualIds: purged.flatMap((row) => (row.accrual_id ? [row.accrual_id] : [])),
+        releasedCarryIds: purged.flatMap((row) => (row.carry_id ? [row.carry_id] : [])),
+      },
     });
     await writeAudit(client, {
       businessId,

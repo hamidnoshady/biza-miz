@@ -52,7 +52,7 @@ function carry(id: string, employeeId: string, amount: bigint, fromRunNumber = 3
   return { id, fromRunId: `run-${fromRunNumber}`, fromRunNumber, employeeId, employeeName: "نامعلوم", amount };
 }
 
-const BASE = { people: PEOPLE, periodFrom: "2026-10-01", periodTo: "2026-10-09", claimedByPayroll: 0 };
+const BASE = { people: PEOPLE, periodFrom: "2026-10-01", periodTo: "2026-10-09", payrollClaims: [], unmappedSellers: [] };
 
 describe("which rows a run takes", () => {
   it("claims every row of a member whose net is positive, in name then date order", () => {
@@ -146,9 +146,47 @@ describe("which rows a run takes", () => {
 });
 
 describe("warnings the run carries", () => {
-  it("names rows a payroll run already holds, and how many", () => {
-    const plan = planSettlement({ ...BASE, accruals: [accrual("a1", "emp-a", 100n)], carries: [], claimedByPayroll: 3 });
-    expect(plan.warnings).toContainEqual({ code: "claimed_by_payroll", rows: 3 });
+  it("names each payroll run that already holds rows, and how many of its rows were left out", () => {
+    const plan = planSettlement({
+      ...BASE,
+      accruals: [accrual("a1", "emp-a", 100n)],
+      carries: [],
+      payrollClaims: [
+        { payrollRunId: "pr-1", periodLabel: "مهر ۱۴۰۵", rows: 2 },
+        { payrollRunId: "pr-2", periodLabel: "آبان ۱۴۰۵", rows: 1 },
+      ],
+    });
+    expect(plan.warnings).toContainEqual({
+      code: "claimed_by_payroll",
+      rows: 3,
+      payrolls: [
+        { payrollRunId: "pr-1", periodLabel: "مهر ۱۴۰۵", rows: 2 },
+        { payrollRunId: "pr-2", periodLabel: "آبان ۱۴۰۵", rows: 1 },
+      ],
+    });
+  });
+
+  it("warns about sellers with sales in the period and no rule, with what those sales were worth", () => {
+    const plan = planSettlement({
+      ...BASE,
+      accruals: [accrual("a1", "emp-a", 100n)],
+      carries: [],
+      unmappedSellers: [
+        { employeeId: "emp-x", fullName: "فروشندهٔ بی‌قانون", lines: 4, salesValue: 1_250_000n },
+      ],
+    });
+    expect(plan.warnings).toContainEqual({
+      code: "unmapped_seller",
+      lines: 4,
+      sellers: [{ employeeId: "emp-x", fullName: "فروشندهٔ بی‌قانون", lines: 4, salesValue: "1250000" }],
+    });
+    // Nothing is accrued for an unmapped seller: they are not paid, and the plan does not invent a member.
+    expect(plan.members.map((m) => m.employeeId)).toEqual(["emp-a"]);
+  });
+
+  it("does not warn when every seller who sold in the period has a rule", () => {
+    const plan = planSettlement({ ...BASE, accruals: [accrual("a1", "emp-a", 100n)], carries: [] });
+    expect(plan.warnings.map((w) => w.code)).not.toContain("unmapped_seller");
   });
 
   it("counts rows dated before the run's start, which were left unpaid earlier", () => {

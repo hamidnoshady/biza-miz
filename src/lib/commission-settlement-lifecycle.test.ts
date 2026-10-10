@@ -10,6 +10,7 @@ import {
   requiredPermissionFor,
   statusForPaidTotal,
   type CommissionRunStatus,
+  type RunMoneyState,
 } from "./commission-settlement-lifecycle";
 
 const ALL = new Set<string>([
@@ -21,33 +22,47 @@ const ALL = new Set<string>([
 ]);
 const has = (set: Set<string>) => (permission: string) => set.has(permission);
 
+/** Nothing has been posted: no payout document exists. */
+const UNPOSTED: RunMoneyState = { paidTotal: 0n, hasPayouts: false };
+/** A payout was posted; `paidTotal` is what is still net-paid after any reversals. */
+const posted = (paidTotal: bigint): RunMoneyState => ({ paidTotal, hasPayouts: true });
+
 describe("the settlement lifecycle", () => {
   it("walks the forward path one step at a time", () => {
-    expect(availableRunActions("draft", 0n, has(ALL))).toEqual(["calculate", "void"]);
-    expect(availableRunActions("calculated", 0n, has(ALL))).toEqual(["review", "reject", "void"]);
-    expect(availableRunActions("reviewed", 0n, has(ALL))).toEqual(["approve", "reject", "void"]);
-    expect(availableRunActions("approved", 0n, has(ALL))).toEqual(["reject", "release", "void"]);
-    expect(availableRunActions("payable", 0n, has(ALL))).toEqual(["reject", "void", "pay"]);
+    expect(availableRunActions("draft", UNPOSTED, has(ALL))).toEqual(["calculate", "void"]);
+    expect(availableRunActions("calculated", UNPOSTED, has(ALL))).toEqual(["review", "reject", "void"]);
+    expect(availableRunActions("reviewed", UNPOSTED, has(ALL))).toEqual(["approve", "reject", "void"]);
+    expect(availableRunActions("approved", UNPOSTED, has(ALL))).toEqual(["reject", "release", "void"]);
+    expect(availableRunActions("payable", UNPOSTED, has(ALL))).toEqual(["reject", "void", "pay"]);
   });
 
   it("offers payment and closing only once money has moved, and reversal only then too", () => {
-    expect(availableRunActions("partially_paid", 500n, has(ALL))).toEqual(["pay", "reverse_payout", "close"]);
-    expect(availableRunActions("paid", 1000n, has(ALL))).toEqual(["reverse_payout", "close"]);
-    expect(availableRunActions("closed", 1000n, has(ALL))).toEqual([]);
-    expect(availableRunActions("voided", 0n, has(ALL))).toEqual([]);
+    expect(availableRunActions("partially_paid", posted(500n), has(ALL))).toEqual(["pay", "reverse_payout", "close"]);
+    expect(availableRunActions("paid", posted(1000n), has(ALL))).toEqual(["reverse_payout", "close"]);
+    expect(availableRunActions("closed", posted(1000n), has(ALL))).toEqual([]);
+    expect(availableRunActions("voided", UNPOSTED, has(ALL))).toEqual([]);
   });
 
-  it("never allows a reject or a void once any payout exists", () => {
-    expect(actionAllowedInStatus("reject", "partially_paid", 1n)).toBe(false);
-    expect(actionAllowedInStatus("void", "partially_paid", 1n)).toBe(false);
-    expect(actionAllowedInStatus("reject", "payable", 0n)).toBe(true);
+  it("never allows a reject or a void once any payout was posted, even if it was reversed", () => {
+    expect(actionAllowedInStatus("reject", "partially_paid", posted(1n))).toBe(false);
+    expect(actionAllowedInStatus("void", "partially_paid", posted(1n))).toBe(false);
+    expect(actionAllowedInStatus("reject", "payable", UNPOSTED)).toBe(true);
+  });
+
+  it("regression (#869 review): a fully reversed run is payable with nothing paid, but still has history", () => {
+    // Net paid is zero again, so the old `paidTotal === 0` test let reject and void through.
+    const fullyReversed = posted(0n);
+    expect(availableRunActions("payable", fullyReversed, has(ALL))).toEqual(["pay"]);
+    expect(actionAllowedInStatus("reject", "payable", fullyReversed)).toBe(false);
+    expect(actionAllowedInStatus("void", "payable", fullyReversed)).toBe(false);
+    expect(actionAllowedInStatus("pay", "payable", fullyReversed)).toBe(true);
   });
 
   it("refuses every action out of order", () => {
-    expect(actionAllowedInStatus("approve", "calculated", 0n)).toBe(false);
-    expect(actionAllowedInStatus("release", "reviewed", 0n)).toBe(false);
-    expect(actionAllowedInStatus("pay", "approved", 0n)).toBe(false);
-    expect(actionAllowedInStatus("calculate", "calculated", 0n)).toBe(false);
+    expect(actionAllowedInStatus("approve", "calculated", UNPOSTED)).toBe(false);
+    expect(actionAllowedInStatus("release", "reviewed", UNPOSTED)).toBe(false);
+    expect(actionAllowedInStatus("pay", "approved", UNPOSTED)).toBe(false);
+    expect(actionAllowedInStatus("calculate", "calculated", UNPOSTED)).toBe(false);
   });
 
   it("gives each action the permission its step needs", () => {
@@ -69,15 +84,15 @@ describe("the settlement lifecycle", () => {
 
   it("hides every action from a person who holds none of the keys (the split is real)", () => {
     const viewOnly = new Set<string>([PERMISSIONS.commissionView]);
-    expect(availableRunActions("calculated", 0n, has(viewOnly))).toEqual([]);
-    expect(availableRunActions("approved", 0n, has(viewOnly))).toEqual([]);
+    expect(availableRunActions("calculated", UNPOSTED, has(viewOnly))).toEqual([]);
+    expect(availableRunActions("approved", UNPOSTED, has(viewOnly))).toEqual([]);
     // Calculating does not let someone approve or pay.
     const calculatorOnly = new Set<string>([PERMISSIONS.commissionView, PERMISSIONS.commissionCalculate]);
-    expect(availableRunActions("calculated", 0n, has(calculatorOnly))).toEqual(["void"]);
-    expect(availableRunActions("draft", 0n, has(calculatorOnly))).toEqual(["calculate", "void"]);
+    expect(availableRunActions("calculated", UNPOSTED, has(calculatorOnly))).toEqual(["void"]);
+    expect(availableRunActions("draft", UNPOSTED, has(calculatorOnly))).toEqual(["calculate", "void"]);
     // Approving does not let someone pay.
     const approverOnly = new Set<string>([PERMISSIONS.commissionView, PERMISSIONS.commissionApprove]);
-    expect(availableRunActions("payable", 0n, has(approverOnly))).toEqual(["reject", "void"]);
+    expect(availableRunActions("payable", UNPOSTED, has(approverOnly))).toEqual(["reject", "void"]);
   });
 });
 

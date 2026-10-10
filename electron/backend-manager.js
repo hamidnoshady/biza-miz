@@ -8,6 +8,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { computePaths } = require("./app-paths");
+const { releaseEmbeddedPostgresExitHook } = require("./embedded-postgres-exit");
 const desktopPackage = require("./package.json");
 
 class StartupError extends Error {
@@ -315,7 +316,11 @@ class BackendManager {
     const modulePath = this.app.isPackaged
       ? path.join(process.resourcesPath, "app.asar.unpacked", "node_modules", "embedded-postgres", "dist", "index.js")
       : path.join(__dirname, "node_modules", "embedded-postgres", "dist", "index.js");
-    this.EmbeddedPostgres = (await import(pathToFileURL(modulePath).href)).default;
+    const embedded = await import(pathToFileURL(modulePath).href);
+    // Loading the module registers an exit hook that cannot shut PostgreSQL down
+    // cleanly on process exit; this backend stops it explicitly (see the helper).
+    releaseEmbeddedPostgresExitHook(modulePath);
+    this.EmbeddedPostgres = embedded.default;
     return this.EmbeddedPostgres;
   }
 

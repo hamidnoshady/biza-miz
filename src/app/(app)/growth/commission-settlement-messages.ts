@@ -85,24 +85,38 @@ export function commissionSettlementErrorMessage(code: string | undefined): stri
 }
 
 /**
- * The words for one calculation warning. Counts are passed in as text (already
- * in the form the screen shows); names come from the run's own snapshot.
+ * The words for one calculation warning. Counts and amounts are passed in as
+ * text in the form the screen shows (a Persian count, a money string through the
+ * business's display unit); names come from the run's own snapshot.
  */
-export function commissionWarningText(warning: PlanWarning, formatCount: (n: number) => string): string {
+export function commissionWarningText(
+  warning: PlanWarning,
+  formatCount: (n: number) => string,
+  formatMoney: (rial: string) => string = (rial) => rial,
+): string {
   switch (warning.code) {
     case "balance_not_positive": {
       const names = warning.employees.map((e) => e.fullName).join("، ");
       return `مانده این فروشندگان در این دوره مثبت نیست و پرداخت نشد؛ ردیف‌هایشان برای دورهٔ بعد باز می‌ماند: ${names}.`;
     }
-    case "claimed_by_payroll":
-      return `${formatCount(warning.rows)} ردیف پورسانت در یک فیش حقوق ثبت شده است و در این دوره نیامده است.`;
+    case "claimed_by_payroll": {
+      const payrolls = (warning.payrolls ?? []).map((p) => p.periodLabel).join("، ");
+      const where = payrolls ? ` در فیش حقوق ${payrolls}` : "";
+      return `${formatCount(warning.rows)} ردیف پورسانت${where} ثبت شده و پیش‌تر پرداخت شده است؛ در این دوره نیامده تا دو بار پرداخت نشود.`;
+    }
     case "earlier_rows_included":
-      return `${formatCount(warning.rows)} ردیف مربوط به پیش از شروع این دوره، که هنوز پرداخت نشده، در این دوره آمده است.`;
+      return `${formatCount(warning.rows)} ردیف مربوط به پیش از شروع این دوره، که هنوز پرداخت نشده، در این دوره آمده است. هر دوره همهٔ پورسانت پرداخت‌نشدهٔ تا پایان خود را می‌گیرد، تا چیزی جا نماند و چیزی دو بار پرداخت نشود.`;
     case "inactive_member": {
       const names = warning.employees.map((e) => e.fullName).join("، ");
       return `فروشندهٔ غیرفعال در این دوره است؛ پیش از پرداخت، تأیید کنید: ${names}.`;
     }
     case "rule_missing":
       return `${formatCount(warning.rows)} ردیف قانون پورسانت خود را از دست داده است؛ مبلغ آن‌ها در این دوره آمده است.`;
+    case "unmapped_seller": {
+      const parts = warning.sellers.map(
+        (seller) => `${seller.fullName || "فروشندهٔ بدون نام"} (${formatCount(seller.lines)} فروش، ${formatMoney(seller.salesValue)})`,
+      );
+      return `فروشندگانی در این دوره فروش داشته‌اند که قانون پورسانت فعال ندارند؛ برای فروش آن‌ها پورسانتی ثبت نشده است: ${parts.join("، ")}.`;
+    }
   }
 }

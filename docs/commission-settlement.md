@@ -51,7 +51,16 @@ Policy constants (`commission-settlement-lifecycle.ts`):
 - `REJECT_TO_DRAFT_ALLOWED = true` — a run may return to draft (lines purged, claims
   released) while nothing has been paid.
 - A run with any payout cannot be rejected or voided. It must be reversed payout by payout.
-- Closing requires that money has moved (`paid` or `partially_paid`).
+- Closing requires that money has moved (`paid` or `partially_paid`) and a net paid total above
+  zero. A net-positive paid total implies posted payouts, so close cannot be reached by a run
+  whose money was fully reversed; such a run is `payable` and close refuses it.
+- Reject and void are refused once **any** payout has been posted, reversed or not
+  (`run_has_payouts`). The gate is the posted history (`has_payouts`), not the net paid total:
+  a run that paid and reversed everything is back at `payable` with a net of zero, and rejecting
+  it would delete its snapshot and release its accruals while the posted payout still exists.
+  The same rule is enforced in the database (migration 0218) and shown to the UI through
+  `actionAllowedInStatus` / `availableRunActions`, so a button is never offered that the server
+  would refuse.
 
 ## What a run contains
 
@@ -175,6 +184,34 @@ at the statement, not at the line.
 Every table has tenant isolation (`tenant_isolation`, `FORCE ROW LEVEL SECURITY`) in the same
 migration.
 
+## Warnings a run carries
+
+Calculation records each warning on the run, with the text the screen shows (`commission-settlement-messages.ts`):
+
+- `balance_not_positive` — a member whose net balance is not positive is not paid; their rows wait for the next run.
+- `claimed_by_payroll` — rows a payroll run already paid. The warning names each payroll run
+  (its period label) and its row count. The run does not take those rows. The run screen links
+  to the payroll section (`/accounting/payroll`); there is no per-run deep link yet.
+- `earlier_rows_included` — unpaid rows dated before the period start are included. Each run takes
+  every unclaimed row up to its end date, so nothing is missed and nothing is paid twice. The
+  message says so.
+- `inactive_member` — an inactive member is being paid; confirm before paying.
+- `rule_missing` — rows whose rule is no longer set.
+- `unmapped_seller` — retail sale lines in the run's period (business day, branch and member
+  filter applied) whose seller (`orders.opened_by`) has no commission rule in force today. The
+  warning gives each seller's line count and sales value (Σ unit price × quantity, before any
+  invoice-level discount). Nothing is accrued or paid for them, because there is no rule to accrue
+  under. Limits: "in force" is checked against today's rules, not the rules on each sale's day, and
+  sales value is not net of discounts.
+
+The run's CSV export (`runs` list) carries a warning count per run.
+
+## Approval summary
+
+The run screen shows, before approval, the total payable, members, lines and warnings, and who did
+each of calculate, review, approve and release, with the time. Every figure comes from the run's
+snapshot and event trail. The approver must differ from the calculator, and the server refuses it.
+
 ## Permissions
 
 | Key | Grants |
@@ -231,10 +268,23 @@ note (a void's reason is required). The run page shows the trail.
   corrected by a reversal (before close) or by an adjustment that the next run carries.
 - **Unpaid balances after a close move forward; they are not written off.**
 
+## Tests
+
+- Unit: `commission-settlement-{lifecycle,plan,payout,input,csv}.test.ts`, `commission-settlement-messages.test.ts`.
+- Database, `integration/commission-settlement.integration.test.ts`: lifecycle, claims, payouts,
+  reversals, carry-forward, posted-history refusals (including a fully reversed run), the
+  unmapped-seller and payroll-provenance warnings, and direct-write guards.
+- Database, `integration/commission-tenant-isolation.integration.test.ts`: the six settlement
+  tables read, updated, deleted and inserted by a non-superuser, non-BYPASSRLS role.
+- Database, `integration/commission-contention.integration.test.ts`: a calculation held behind
+  payroll's advisory lock claims only what payroll did not take; two runs and two payouts racing
+  for the same rows; a repeated payout key; a payout that fails after its writes rolls back fully.
+
 ## Known gaps
 
-- Sales lines whose seller has no matching rule never accrue, so the run cannot warn about them
-  (the warning would have to come from the sales path). Surface this from the sales side.
+- Sales lines whose seller has no matching rule never accrue. The run warns about them
+  (`unmapped_seller`), but a rule-scoped line for a seller who does have a rule is not warned about.
+- No project dimension exists on commission accruals, so the statement and the run carry none.
 - Amounts are stored as integer Rial and shown in the business's display unit.
 - Category-scoped commission rules never match: the retail invoice path does not pass a category
   (`retail-invoice-service.ts`). This predates #869 and is unchanged.

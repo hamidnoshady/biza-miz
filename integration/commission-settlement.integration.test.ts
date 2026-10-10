@@ -269,6 +269,16 @@ async function expectRefusal(promise: Promise<unknown>, code: string, status?: n
   if (status !== undefined) expect(err!.status).toBe(status);
 }
 
+/** A write the database itself must refuse: the message names the guard that fired. */
+async function expectDbRefusal(promise: Promise<unknown>, messageFragment: string) {
+  const err = await promise.then(
+    () => null,
+    (e: unknown) => e as Error,
+  );
+  expect(err, `expected the database to refuse a write containing "${messageFragment}"`).not.toBeNull();
+  expect(err!.message).toContain(messageFragment);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -320,10 +330,69 @@ describe("calculating a run", () => {
   });
 });
 
+/**
+ * A retail sale as the till writes it: a completed retail order whose seller is
+ * `opened_by`, with its lines. Nothing here accrues commission; the sale is what
+ * the unmapped-seller warning reads.
+ */
+async function retailSale(t: Tenant, sellerId: string, lines: { unitPrice: number; quantity: number; status?: string }[]): Promise<void> {
+  // Opened first, as the till does: a guard refuses lines on an order that is not open.
+  const { rows: [order] } = await db.query<{ id: string }>(
+    `INSERT INTO orders (location_id, order_number, type, status, opened_by)
+     VALUES ($1, $2, 'retail', 'open', $3) RETURNING id`,
+    [t.locationId, Math.floor(Math.random() * 1_000_000_000), sellerId],
+  );
+  for (const line of lines) {
+    await db.query(
+      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price, quantity, status)
+       VALUES ($1, $2, 'کالای تست', $3, $4, $5)`,
+      [t.locationId, order.id, line.unitPrice, line.quantity, line.status ?? "served"],
+    );
+  }
+  await db.query("UPDATE orders SET status = 'completed', closed_by = $2, closed_at = now() WHERE id = $1", [order.id, sellerId]);
+}
+
 async function calculateNewRun(t: Tenant) {
   const draft = await newRun(t);
   return settlement.calculateCommissionRun(t.id, t.calculator, draft.id);
 }
+
+describe("warnings about sales the run does not pay", () => {
+  it("warns about a seller with sales in the period and no rule in force, and accrues nothing for them", async () => {
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000); // 5,000, the only commission in the run
+    const { rows: [stranger] } = await db.query<{ id: string; full_name: string }>(
+      "INSERT INTO users (business_id, role, full_name, pin_hash) SELECT business_id, role, 'فروشندهٔ بی‌قانون', 'x' FROM users WHERE id = $1 RETURNING id, full_name",
+      [t.sellerA],
+    );
+    await retailSale(t, stranger.id, [
+      { unitPrice: 1_000_000, quantity: 2 },
+      { unitPrice: 500_000, quantity: 1 },
+      { unitPrice: 999_999, quantity: 1, status: "voided" }, // a voided line is not a sale
+    ]);
+
+    const run = await calculateNewRun(t);
+
+    expect(run.commissionTotal).toBe("5000");
+    expect(run.employees.map((e) => e.employeeId)).not.toContain(stranger.id);
+    expect(run.warnings).toContainEqual({
+      code: "unmapped_seller",
+      lines: 2,
+      sellers: [{ employeeId: stranger.id, fullName: stranger.full_name, lines: 2, salesValue: "2500000" }],
+    });
+    expect(await tieOut(t)).toMatchObject({ difference: "0", subledgerDifference: "0" });
+  });
+
+  it("does not warn about a seller who has a rule, however much they sold", async () => {
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000);
+    await retailSale(t, t.sellerA, [{ unitPrice: 1_000_000, quantity: 1 }]);
+
+    const run = await calculateNewRun(t);
+
+    expect(run.warnings.map((w) => w.code)).not.toContain("unmapped_seller");
+  });
+});
 
 describe("approval and payout", () => {
   it("refuses the calculator's own approval, and pays in part, refuses an overpayment, replays a retry", async () => {
@@ -591,6 +660,80 @@ describe("closing, carrying forward, rejecting and voiding", () => {
     await expectRefusal(settlement.rejectCommissionRun(t.id, t.approver, paid.id, null), "run_has_payouts", 409);
   });
 
+  it("a fully reversed run has still posted money: it cannot be rejected or voided, and its history is kept", async () => {
+    // Regression (#869 review): reject and void used to test the NET paid total. Pay
+    // and reverse the whole amount and the run is "payable" with nothing paid, so
+    // reject deleted the run's snapshot lines and released the accruals, and the
+    // posted payout and its journal entry were left pointing at nothing.
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000); // 5,000
+    const run = await approvedRun(t);
+    const payout = await settlement.recordCommissionPayout(
+      t.id,
+      t.paymaster,
+      run.id,
+      { allocations: [{ employeeId: t.sellerA, amount: 5000n }], paymentAccountId: null, method: "cash", paidDate: null, memo: null },
+      "payout-full-reverse-0001",
+    );
+    await settlement.reverseCommissionPayout(t.id, t.paymaster, payout.payout.id, "برگشت کامل");
+
+    const after = await settlement.getCommissionRun(t.id, run.id, ALL);
+    expect(after.status).toBe("payable");
+    expect(after.paidTotal).toBe("0");
+    expect(after.actions).toEqual(["pay"]);
+
+    await expectRefusal(settlement.rejectCommissionRun(t.id, t.approver, run.id, null), "run_has_payouts", 409);
+    await expectRefusal(settlement.voidCommissionRun(t.id, t.approver, run.id, "نه"), "run_has_payouts", 409);
+
+    // Nothing was undone: the snapshot is still there and still claims its accrual.
+    const lines = await settlement.listCommissionRunLines(t.id, run.id, { employeeId: null, limit: 50, offset: 0 });
+    expect(lines.total).toBe(1);
+    const { rows: claim } = await db.query<{ settlement_run_id: string | null }>(
+      "SELECT settlement_run_id FROM commission_accruals WHERE business_id = $1 AND source_type = 'order_item'",
+      [t.id],
+    );
+    expect(claim.map((row) => row.settlement_run_id)).toEqual([run.id]);
+
+    // The database refuses the same undo written directly, bypassing the service.
+    await expectDbRefusal(
+      db.query("DELETE FROM commission_settlement_lines WHERE run_id = $1", [run.id]),
+      "immutable snapshot",
+    );
+    await expectDbRefusal(
+      db.query("UPDATE commission_settlement_runs SET status = 'draft' WHERE id = $1", [run.id]),
+      "posted payouts",
+    );
+    await expectDbRefusal(
+      db.query("UPDATE commission_accruals SET settlement_run_id = NULL WHERE business_id = $1 AND settlement_run_id = $2", [t.id, run.id]),
+      "posted payouts",
+    );
+    expect(await tieOut(t)).toMatchObject({ difference: "0", subledgerDifference: "0" });
+  });
+
+  it("the database refuses a payout written into a closed run, around the service", async () => {
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000); // 5,000
+    const run = await approvedRun(t);
+    await settlement.recordCommissionPayout(
+      t.id,
+      t.paymaster,
+      run.id,
+      { allocations: [{ employeeId: t.sellerA, amount: 5000n }], paymentAccountId: null, method: "cash", paidDate: null, memo: null },
+      "payout-closed-guard-0001",
+    );
+    const closed = await settlement.closeCommissionRun(t.id, t.paymaster, run.id, null);
+    expect(closed.status).toBe("closed");
+
+    await expectDbRefusal(
+      db.query(
+        `INSERT INTO commission_settlement_payouts (business_id, run_id, kind, amount, payment_method, idempotency_key, request_hash)
+         VALUES ($1, $2, 'payout', 1, 'cash', 'direct-write-guard-01', 'x')`,
+        [t.id, run.id],
+      ),
+      "a payout can only be posted to a payable run",
+    );
+  });
+
   it("requires the permission for each action, and a run cannot skip a step", async () => {
     const t = await newTenant();
     await accrue(t, t.sellerA, 100_000);
@@ -638,6 +781,11 @@ describe("the database keeps payroll and settlement from claiming the same accru
 
     const run = await calculateNewRun(t);
     expect(run.commissionTotal).toBe("10000");
+    expect(run.warnings).toContainEqual({
+      code: "claimed_by_payroll",
+      rows: 1,
+      payrolls: [{ payrollRunId: payroll.id, periodLabel: "تست", rows: 1 }],
+    });
     expect(run.employeeCount).toBe(1);
     expect(run.warnings.map((w) => w.code)).toContain("claimed_by_payroll");
 
