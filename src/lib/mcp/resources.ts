@@ -20,6 +20,13 @@ import { canUseAiTool } from "../ai-capabilities";
 import { getBusinessIndustry } from "../industry-guard";
 import type { Permission } from "../permissions";
 import { standardReportsFor } from "../reports";
+import {
+  LEGACY_GRANTS,
+  mcpCanReadApp,
+  mcpGrantsUsable,
+  type McpGrants,
+} from "./grants";
+import { mcpRegistryEntryForResource } from "./registry";
 
 export interface McpResourceDescriptor {
   uri: string;
@@ -140,14 +147,36 @@ const RESOURCE_TOOL: Record<string, string> = {
 };
 
 /**
- * The resources this connection's authorizer may read. `resources/list` shows
- * exactly this set and `resources/read` refuses anything outside it, so an
- * unauthorized URI and a nonexistent one are indistinguishable.
+ * The resources this connection may read (issue #883 §2). The filter has
+ * TWO axes now and both fail closed:
+ *
+ *   * the authorizer's current permissions — what the human behind the
+ *     connection may read right now (P0-1), and
+ *   * the connection's own grants — what its owner consented to. Before this
+ *     wave the second axis did not exist, so any resource republished its
+ *     tool's content to every connection regardless of grants.
+ *
+ * `resources/list` shows exactly this set and `resources/read` refuses
+ * anything outside it, so an unauthorized URI and a nonexistent one are
+ * indistinguishable. A *branch* subset does not trim resources: the overview
+ * and the report catalogue are metadata about the installation, not
+ * branch-aggregating facts (the tools under them enforce branch policy).
  */
-export function mcpResourcesFor(permissions: ReadonlySet<Permission>): McpResourceDescriptor[] {
+export function mcpResourcesFor(
+  permissions: ReadonlySet<Permission>,
+  grants: McpGrants = LEGACY_GRANTS,
+): McpResourceDescriptor[] {
+  // A stored grants document that parses to "nothing at all" is a closed
+  // credential: it permitted nothing when it was minted and it permits
+  // nothing now — unlike a legacy `{}`, which parse treats as the
+  // conservative full set.
+  if (!mcpGrantsUsable(grants)) return [];
   return MCP_RESOURCES.filter((resource) => {
     const tool = RESOURCE_TOOL[resource.uri];
-    return !tool || canUseAiTool(tool, permissions);
+    if (tool && !canUseAiTool(tool, permissions)) return false;
+    const entry = mcpRegistryEntryForResource(resource.uri);
+    if (entry && !mcpCanReadApp(grants, entry.app)) return false;
+    return true;
   });
 }
 

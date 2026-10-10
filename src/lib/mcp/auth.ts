@@ -27,6 +27,7 @@ import {
 } from "./oauth";
 import { mcpHostAllowsBusiness, resolveMcpTenant } from "./origin";
 import { parseMcpScopes, type McpScope, type McpWriteMode, isMcpWriteMode } from "./scopes";
+import { parseMcpGrants, type McpGrants } from "./grants";
 import { resolveMcpAuthority } from "./authority";
 
 export interface McpAuthentication {
@@ -44,6 +45,13 @@ export interface McpAuthentication {
    * inside a handler.
    */
   authorizedByUserId: string;
+  /**
+   * Issue #883 §1 — the connection's app grants and branch consent, parsed
+   * from its stored `grants` document. `{}` rows (pre-wave-2 connections) are
+   * the conservative legacy: every reachable app, every branch — exactly the
+   * access its owner granted at the time.
+   */
+  grants: McpGrants;
   /**
    * The authorizer's *current* effective permissions (preset ∪ overrides), the
    * same set their own session would carry right now. Every tools/list,
@@ -64,6 +72,7 @@ type ConnectionRow = {
   location_id: string;
   scopes: unknown;
   write_mode: string;
+  grants: unknown;
   authorized_by: string | null;
 };
 
@@ -122,7 +131,7 @@ export async function authenticateMcp(
     const { rows } = await withoutTenantScope("mcp-token-auth", () =>
       isOauth
         ? query<ConnectionRow>(
-            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.authorized_by
+            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.grants, c.authorized_by
                FROM mcp_oauth_tokens t
                JOIN mcp_connections c
                  ON c.id = t.connection_id AND c.business_id = t.business_id
@@ -139,7 +148,7 @@ export async function authenticateMcp(
             [hash],
           )
         : query<ConnectionRow>(
-            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.authorized_by
+            `SELECT c.id, c.name, c.business_id, c.location_id, c.scopes, c.write_mode, c.grants, c.authorized_by
                FROM mcp_connections c
                JOIN locations l
                  ON l.id = c.location_id AND l.business_id = c.business_id AND l.is_active
@@ -177,6 +186,7 @@ export async function authenticateMcp(
       locationId: row.location_id,
       scopes: parseMcpScopes(row.scopes),
       writeMode: isMcpWriteMode(row.write_mode) ? row.write_mode : "approve",
+      grants: parseMcpGrants(row.grants),
       authorizedByUserId: authority.userId,
       permissions: authority.permissions,
     };

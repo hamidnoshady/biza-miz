@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { isFeatureEnabled } from "@/lib/features";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { listBranches } from "@/lib/branch-service";
 import { getMcpClient, issueAuthorizationCode, validateAuthorizationRequest } from "@/lib/mcp/oauth-service";
 import { parseMcpScopes, isMcpWriteMode } from "@/lib/mcp/scopes";
 
@@ -32,9 +33,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (!client) return NextResponse.json({ error: "invalid_client" }, { status: 404 });
 
   const location = await resolveActiveLocation(session);
+  // Issue #883 §1 — the consent screen needs the branch vocabulary to let
+  // the owner narrow the connection: every active branch this member could
+  // name (id + name only — the picker shows no other data).
+  const branches = await listBranches(session.businessId);
   return NextResponse.json({
     client: { clientId: client.clientId, clientName: client.clientName },
     branch: location ? { id: location.id, name: location.name } : null,
+    branches: branches
+      .filter((branch) => branch.isActive)
+      .map((branch) => ({ id: branch.id, name: branch.name })),
     requestedScopes: parseMcpScopes(
       (request.nextUrl.searchParams.get("scope") ?? "").split(/\s+/).filter(Boolean),
     ),
@@ -50,6 +58,12 @@ interface ConsentBody {
   approvedScopes?: unknown;
   writeMode?: unknown;
   connectionName?: string;
+  /**
+   * Issue #883 §1 — the app/branch grants the owner ticked on the consent
+   * screen. Passed through verbatim; the service validates shape + that every
+   * named branch is real, and fails closed with `invalid_grants` otherwise.
+   */
+  grants?: unknown;
 }
 
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -106,6 +120,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     // Every write this connection ever makes runs under this owner's authority.
     userId: session.sub,
     connectionName: body.connectionName ?? validation.client.clientName,
+    grants: body.grants,
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
 

@@ -146,7 +146,10 @@ describe("mcpToolCatalogue", () => {
 
   it("gives a connection with both grants both halves", () => {
     const both = mcpToolCatalogue(["pos.read", "pos.write"]);
-    expect(both.length).toBe(mcpReadTools().length + mcpWriteTools().length);
+    expect(both.length).toBe(mcpReadTools().length + mcpWriteTools().length + 1);
+    // The +1 is the own-connection get_write_status native tool (issue #883
+    // A4): it is exposed on write scope alone, no domain permission needed.
+    expect(both.map((tool) => tool.descriptor.name)).toContain("get_write_status");
   });
 
   it("uses names that satisfy MCP's own tool-name rule", () => {
@@ -213,8 +216,14 @@ describe("permission-filtered catalogue (issue #883 P0-1)", () => {
     expect(names).not.toContain("write_stock_count");
   });
 
-  it("an empty permission set sees nothing at all", () => {
-    expect(mcpToolCatalogue(["pos.read", "pos.write"], new Set())).toEqual([]);
+  it("an empty permission set sees nothing but its own write status", () => {
+    // Every data-bearing tool disappears; the single survivor is the native
+    // get_write_status tool, which answers only about audit rows this very
+    // connection created — the connection's own traffic, not tenant data.
+    const names = mcpToolCatalogue(["pos.read", "pos.write"], new Set()).map(
+      (tool) => tool.descriptor.name,
+    );
+    expect(names).toEqual(["get_write_status"]);
   });
 
   it("every exposed read tool has an entry in the permission map — fail closed otherwise", () => {

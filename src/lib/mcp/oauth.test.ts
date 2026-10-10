@@ -186,9 +186,17 @@ describe("discovery documents", () => {
 
   it("names the MCP endpoint as the resource and this origin as its authorization server", () => {
     const doc = protectedResourceMetadata(issuer);
-    expect(doc.resource).toBe(`${issuer}/api/mcp`);
-    expect(doc.authorization_servers).toEqual([issuer]);
-    expect(doc.scopes_supported).toEqual(["pos.read", "pos.write"]);
+    expect(doc!.resource).toBe(`${issuer}/api/mcp`);
+    expect(doc!.authorization_servers).toEqual([issuer]);
+    expect(doc!.scopes_supported).toEqual(["pos.read", "pos.write"]);
+  });
+
+  it("answers metadata for any inserted path with the tenant document", () => {
+    expect(protectedResourceMetadata(issuer, "/api/mcp")!.resource).toBe(`${issuer}/api/mcp`);
+  });
+
+  it("deliberately declines to describe the platform realm as a protected resource", () => {
+    expect(protectedResourceMetadata(issuer, "/api/platform/mcp")).toBeNull();
   });
 
   it("advertises dynamic registration, which is what makes 'paste a URL' work", () => {

@@ -147,6 +147,14 @@ beforeEach(async () => {
   Object.assign(shop, await seedCafe());
 });
 
+/**
+ * Issue #883 §1 — the shape of the grant document the connections screen now
+ * sends for a "no narrowing wanted" mint: every app at scope level, every
+ * branch. It parses as legacy (empty apps + branches "all") but is explicit,
+ * which the service requires of every new connection.
+ */
+const FULL_GRANTS = { apps: {}, branches: "all" } as const;
+
 /** Mint a static-token connection the way the connections screen does. */
 async function mintToken(input: {
   scopes: string[];
@@ -154,6 +162,7 @@ async function mintToken(input: {
   businessId?: string;
   locationId?: string;
   userId?: string;
+  grants?: unknown;
 }): Promise<string> {
   const businessId = input.businessId ?? shop.businessId;
   const result = await dbLib.withTenant(businessId, () =>
@@ -162,6 +171,7 @@ async function mintToken(input: {
       locationId: input.locationId ?? shop.locationId,
       scopes: input.scopes,
       writeMode: input.writeMode ?? "approve",
+      grants: input.grants ?? FULL_GRANTS,
     }),
   );
   if (!result.ok) throw new Error(`could not mint token: ${result.error}`);

@@ -1,7 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { revokeMcpConnection, updateMcpConnectionAccess } from "@/lib/mcp/connections-service";
+import {
+  listMcpGrantHistory,
+  revokeMcpConnection,
+  updateMcpConnectionAccess,
+} from "@/lib/mcp/connections-service";
+
+/**
+ * Read one connection with its consent-grants history — the trail of minted,
+ * narrowed, widened and revoked events that answer "who agreed to this, when,
+ * through which interface?". Owner-only for the same reason changing it is:
+ * a grants event reveals which staff member authorised a connector.
+ */
+export const GET = withTenantScope(
+  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { session, error } = await requirePermission(PERMISSIONS.mcpManage);
+    if (error) return error;
+    const { id } = await context.params;
+    const history = await listMcpGrantHistory(session.businessId, id);
+    if (!history) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    return NextResponse.json(history);
+  },
+);
 
 /**
  * Narrow or withdraw one connection.
@@ -18,7 +39,7 @@ export const PATCH = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
 
-    let body: { scopes?: unknown; writeMode?: unknown };
+    let body: { scopes?: unknown; writeMode?: unknown; grants?: unknown };
     try {
       body = await request.json();
     } catch {
@@ -31,6 +52,9 @@ export const PATCH = withTenantScope(
       // Re-recorded on every change: the person whose authority the connection's
       // writes run under is whoever last said what it may do.
       authorizedBy: session.sub,
+      // Issue #883 §1 — app/branch grants are patched wholesale. A narrowing
+      // (fewer apps, a branch removed) dismisses that connection's queue.
+      grants: body.grants,
     });
     if (!result.ok) {
       return NextResponse.json(

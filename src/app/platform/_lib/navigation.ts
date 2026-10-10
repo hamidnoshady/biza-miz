@@ -91,6 +91,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: "حساب من", href: "/platform/account" },
       { label: "امنیت", href: "/platform/security", cap: "system.read" },
       { label: "مدیران", href: "/platform/admins", cap: "admins.manage" },
+      { label: "اتصال‌های MCP", href: "/platform/mcp-connections", cap: "admins.manage" },
     ],
   },
 ];

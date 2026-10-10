@@ -35,6 +35,14 @@ import {
   type McpScope,
   type McpWriteMode,
 } from "@/lib/mcp/scopes";
+import {
+  MCP_APPS,
+  MCP_APP_LABELS,
+  defaultGrantsForConsents,
+  grantsToStorage,
+  type McpApp,
+  type McpGrants,
+} from "@/lib/mcp/grants";
 
 interface McpConnection {
   id: string;
@@ -48,6 +56,25 @@ interface McpConnection {
   lastUsedAt: string | null;
   expiresAt: string | null;
   createdAt: string;
+  /** Issue #883 §1 — the parsed app/branch consent this connection carries. */
+  grants: McpGrants;
+  branchScope: "single" | "multi";
+  grantedBranchIds: string[] | null;
+  locationName: string | null;
+}
+
+/** A ment of history from the operations trail. */
+interface HistoryRow {
+  id: string;
+  connectionId: string | null;
+  connectionName: string | null;
+  actionLabel: string;
+  title: string;
+  summary: string;
+  status: "applied" | "failed" | "dismissed";
+  requiresReview: boolean;
+  createdAt: string;
+  closedAt: string | null;
 }
 
 interface PendingAction {
@@ -62,6 +89,22 @@ interface PendingAction {
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("fa-IR", { dateStyle: "short", timeStyle: "short" });
+}
+
+/** A one-line Persian summary of the grants document, for the connection row. */
+function grantsSummary(connection: McpConnection): string {
+  const writable = MCP_APPS.filter((app) => connection.grants.apps[app]?.write);
+  const readable = MCP_APPS.filter((app) => connection.grants.apps[app]?.read && !connection.grants.apps[app]?.write);
+  const parts: string[] = [];
+  if (writable.length > 0) parts.push(`خواندن+نوشتن: ${writable.map((a) => MCP_APP_LABELS[a]).join("، ")}`);
+  if (readable.length > 0) parts.push(`فقط خواندن: ${readable.map((a) => MCP_APP_LABELS[a]).join("، ")}`);
+  if (parts.length === 0) {
+    // Legacy `{}` — pre-wave-2 connections parse to the conservative full set.
+    parts.push("همهٔ بخش‌ها (سطح دسترسی اتصال)");
+  }
+  if (connection.grants.branches === "all") parts.push("همهٔ شعبه‌ها");
+  else if (connection.locationName) parts.push(`شعبهٔ «${connection.locationName}»`);
+  return parts.join(" — ");
 }
 
 export function McpPanel() {
@@ -81,7 +124,24 @@ export function McpPanel() {
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<McpScope[]>([MCP_SCOPES.read]);
   const [writeMode, setWriteMode] = useState<McpWriteMode>("approve");
-  const [expiresInDays, setExpiresInDays] = useState("");
+  const [expiresInDays, setExpiresInDays] = useState("180");
+  // Issue #883 §1: the grant document the new connection gets. The panel's
+  // default = read everything, write nothing, only THE CURRENT branch — the
+  // safe shape the banner copy explains; widen from here explicitly.
+  const [grantDraft, setGrantDraft] = useState<{
+    apps: Record<McpApp, { read: boolean; write: boolean }>;
+    branches: string[] | "all";
+  } | null>(null);
+  // The owner's current branch — the panel shows it as the anchor of the
+  // default grant document.
+  const [branches, setBranches] = useState<{ id: string; name: string }[]>([]);
+  // Issue #883 UX — the decided-trail view, with filters + pagination.
+  const [history, setHistory] = useState<HistoryRow[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [historyStatus, setHistoryStatus] = useState<string>("");
+  const [historyQuery, setHistoryQuery] = useState("");
+  const HISTORY_PAGE = 10;
 
   const load = useCallback(async () => {
     if (locked) {
@@ -96,12 +156,25 @@ export function McpPanel() {
       pending?: PendingAction[];
       endpoint?: string;
       canManage?: boolean;
+      branches?: { id: string; name: string }[];
+      currentBranchId?: string | null;
     }>("/api/connections/mcp");
     if (ok) {
       setConnections(data.connections ?? []);
       setPending(data.pending ?? []);
       setEndpoint(data.endpoint ?? "");
       setCanManage(data.canManage === true);
+      setBranches(data.branches ?? []);
+      // Prime the grant draft from the safe default, anchored on the current branch.
+      const defaults = defaultGrantsForConsents(data.currentBranchId ?? data.branches?.[0]?.id ?? "");
+      setGrantDraft((current) =>
+        current ?? {
+          apps: Object.fromEntries(
+            MCP_APPS.map((app) => [app, { ...defaults.apps[app]! }]),
+          ) as Record<McpApp, { read: boolean; write: boolean }>,
+          branches: Array.isArray(defaults.branches) ? [...defaults.branches] : defaults.branches,
+        },
+      );
     } else {
       setMessage({ kind: "error", text: "بارگذاری اتصال‌ها ممکن نشد." });
     }
@@ -111,6 +184,11 @@ export function McpPanel() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!locked) void loadHistory(0, historyStatus, historyQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locked, historyStatus]);
 
   function toggleScope(scope: McpScope) {
     setSelected((current) =>
@@ -128,6 +206,12 @@ export function McpPanel() {
         scopes: selected,
         writeMode,
         expiresInDays: expiresInDays.trim() ? Number(expiresInDays) : null,
+        grants: grantDraft
+          ? grantsToStorage({
+              apps: grantDraft.apps,
+              branches: grantDraft.branches,
+            })
+          : undefined,
       }),
     });
     setBusy(false);
@@ -137,6 +221,9 @@ export function McpPanel() {
         invalid_scopes: "حداقل یک دسترسی را انتخاب کنید.",
         invalid_write_mode: "حالت اعمال تغییرها معتبر نیست.",
         invalid_expiry: "مدت اعتبار معتبر نیست.",
+        invalid_grants:
+          "مجوزهای انتخاب‌شده معتبر نیست — حداقل یک بخش با دسترسی خواندن و یک شعبه لازم است.",
+        branch_out_of_scope: "شعبهٔ انتخاب‌شده برای این اتصال قابل استفاده نیست.",
         feature_disabled: "«اتصال هوش مصنوعی» برای کسب‌وکار شما فعال نیست.",
       };
       setMessage({ kind: "error", text: map[data.error ?? ""] ?? errorMessage(data.error) });
@@ -146,6 +233,23 @@ export function McpPanel() {
     setName("");
     setExpiresInDays("");
     await load();
+  }
+
+  async function loadHistory(offset: number, status: string, q: string) {
+    const params = new URLSearchParams({
+      limit: String(HISTORY_PAGE),
+      offset: String(offset),
+    });
+    if (status) params.set("status", status);
+    if (q.trim()) params.set("q", q.trim());
+    const { ok, data } = await api<{ rows?: HistoryRow[]; total?: number }>(
+      `/api/connections/mcp/history?${params.toString()}`,
+    );
+    if (ok) {
+      setHistory(data.rows ?? []);
+      setHistoryTotal(data.total ?? 0);
+      setHistoryOffset(offset);
+    }
   }
 
   async function revoke(connection: McpConnection) {
@@ -322,11 +426,128 @@ export function McpPanel() {
           <PersianNumberInput
             className={inputClass}
             dir="ltr"
-            placeholder="مدت اعتبار به روز (خالی = بدون انقضا)"
+            placeholder="مدت اعتبار به روز (پیش‌فرض ۱۸۰ روز)"
             value={expiresInDays}
             onChange={(e) => setExpiresInDays(e.target.value)}
           />
         </div>
+
+        {grantDraft ? (
+          <fieldset className="mt-3 rounded-xl border border-border/60 p-3">
+            <legend className="mb-1 text-sm font-medium">دسترسی هر بخش</legend>
+            <p className="mb-3 text-xs leading-5 text-muted-foreground">
+              پیش‌فرض را استفای شروع کنید: خواندن همه‌چیز و نوشتن هیچ‌چیز. «نوشتن» فقط وقتی اثر دارد
+              که دسترسی pos.write هم روشن باشد و حتی برای موارد خطرناک، تأیید شما لازم است.
+            </p>
+            <div className="space-y-2">
+              {MCP_APPS.map((app) => (
+                <div key={app} className="flex flex-wrap items-center gap-3 text-sm">
+                  <span className="min-w-28 text-xs font-medium">{MCP_APP_LABELS[app]}</span>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={grantDraft.apps[app].read}
+                      onChange={() =>
+                        setGrantDraft((current) =>
+                          current
+                            ? {
+                                ...current,
+                                apps: {
+                                  ...current.apps,
+                                  [app]: {
+                                    read: !current.apps[app].read,
+                                    write: current.apps[app].read
+                                      ? false
+                                      : current.apps[app].write,
+                                  },
+                                },
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                    خواندن
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={grantDraft.apps[app].write}
+                      onChange={() =>
+                        setGrantDraft((current) =>
+                          current
+                            ? {
+                                ...current,
+                                apps: {
+                                  ...current.apps,
+                                  [app]: {
+                                    read: current.apps[app].write ? true : current.apps[app].read,
+                                    write: !current.apps[app].write,
+                                  },
+                                },
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                    نوشتن
+                  </label>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 border-t border-border/60 pt-2">
+              <label className="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={grantDraft.branches === "all"}
+                  onChange={() =>
+                    setGrantDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            branches:
+                              current.branches === "all"
+                                ? branches.slice(0, 1).map((b) => b.id)
+                                : "all",
+                          }
+                        : current,
+                    )
+                  }
+                />
+                همهٔ شعبه‌ها
+              </label>
+              {grantDraft.branches !== "all" ? (
+                branches.length > 1 ? (
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                    {branches.map((branch) => (
+                      <label key={branch.id} className="flex cursor-pointer items-center gap-1.5 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={
+                            Array.isArray(grantDraft.branches) && grantDraft.branches.includes(branch.id)
+                          }
+                          onChange={() =>
+                            setGrantDraft((current) => {
+                              if (!current || current.branches === "all") return current;
+                              const next = current.branches.includes(branch.id)
+                                ? current.branches.filter((id) => id !== branch.id)
+                                : [...current.branches, branch.id];
+                              return { ...current, branches: next };
+                            })
+                          }
+                        />
+                        {branch.name}
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    فقط شعبهٔ فعلی ({branches[0]?.name ?? "—"})
+                  </p>
+                )
+              ) : null}
+            </div>
+          </fieldset>
+        ) : null}
 
         <fieldset className="mt-3">
           <legend className="mb-2 text-sm font-medium">دسترسی‌ها</legend>
@@ -431,6 +652,12 @@ export function McpPanel() {
                     </span>
                   ) : null}
                 </div>
+                {/* Issue #883 §1 — what the connection touches, in words any
+                    owner can read. The registry keeps the machine truth; this
+                    is the human rendering of it. */}
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {grantsSummary(connection)}
+                </p>
 
                 {connection.status === "active" && canManage ? (
                   <div className="mt-2 flex flex-wrap gap-2">
@@ -492,6 +719,112 @@ export function McpPanel() {
             ))}
           </ul>
         )}
+      </SectionCard>
+
+      {/* Issue #883 UX — the decided trail with status filter, search and
+          pagination. Arabian-aware layout mirrors the pending queue above. */}
+      <SectionCard title={`گزارش عملیات دستیارها (${historyTotal.toLocaleString("fa-IR")})`}>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <input
+            className={`${inputClass} max-w-52 text-xs`}
+            placeholder="جست‌وجو در عنوان یا قسمت…"
+            value={historyQuery}
+            onChange={(e) => setHistoryQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void loadHistory(0, historyStatus, historyQuery);
+            }}
+          />
+          <select
+            className="rounded-lg border border-input bg-white dark:bg-card px-3 py-2 text-xs"
+            value={historyStatus}
+            onChange={(e) => setHistoryStatus(e.target.value)}
+            aria-label="وضعیت"
+          >
+            <option value="">همهٔ وضعیت‌ها</option>
+            <option value="applied">انجام‌شده</option>
+            <option value="failed">ناموفق</option>
+            <option value="dismissed">ردشده</option>
+          </select>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => void loadHistory(0, historyStatus, historyQuery)}
+          >
+            جست‌وجو
+          </Button>
+        </div>
+        {history.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            هنوز عملیاتی ثبت نشده است — وقتی یک اتصال کاری انجام دهد یا شما درخواستی را رد کنید،
+            اینجا می‌آید.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {history.map((row) => (
+              <li key={row.id} className="rounded-lg border border-border/60 p-3 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge
+                    tone={
+                      row.status === "applied"
+                        ? "positive"
+                        : row.status === "failed"
+                          ? "danger"
+                          : "neutral"
+                    }
+                  >
+                    {row.status === "applied" ? "انجام‌شده" : row.status === "failed" ? "ناموفق" : "ردشده"}
+                  </StatusBadge>
+                  {row.requiresReview ? <StatusBadge tone="active">نیازمند بازبینی</StatusBadge> : null}
+                  <span className="font-medium">{row.actionLabel}</span>
+                  {row.connectionName ? (
+                    <StatusBadge tone="neutral">{row.connectionName}</StatusBadge>
+                  ) : null}
+                  <span className="text-muted-foreground">
+                    {formatDateTime(row.closedAt ?? row.createdAt)}
+                  </span>
+                </div>
+                <p dir="ltr" className="mt-1 break-all text-start text-muted-foreground">
+                  {row.summary}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+        {historyTotal > HISTORY_PAGE ? (
+          <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={historyOffset === 0}
+              onClick={() =>
+                void loadHistory(
+                  Math.max(0, historyOffset - HISTORY_PAGE),
+                  historyStatus,
+                  historyQuery,
+                )
+              }
+            >
+              قبلی
+            </Button>
+            <span>
+              صفحهٔ {(Math.floor(historyOffset / HISTORY_PAGE) + 1).toLocaleString("fa-IR")} از{" "}
+              {Math.ceil(historyTotal / HISTORY_PAGE).toLocaleString("fa-IR")}
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={historyOffset + HISTORY_PAGE >= historyTotal}
+              onClick={() =>
+                void loadHistory(historyOffset + HISTORY_PAGE, historyStatus, historyQuery)
+              }
+            >
+              بعدی
+            </Button>
+          </div>
+        ) : null}
       </SectionCard>
 
       <SectionCard title="راهنمای برنامه‌های مبتنی بر فایل تنظیمات">

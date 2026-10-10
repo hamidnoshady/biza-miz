@@ -32,8 +32,9 @@ import {
 } from "./protocol";
 import { mcpResourcesFor, readMcpResource } from "./resources";
 import { MCP_SCOPES, hasMcpScope } from "./scopes";
+import { mcpBrancheIds } from "./grants";
 import { findMcpTool, isKnownMcpTool, mcpToolCatalogue } from "./tools";
-import { performMcpWrite } from "./write-service";
+import { findMcpWriteStatus, performMcpWrite } from "./write-service";
 
 /**
  * The `instructions` field of `initialize` — the one piece of text every client
@@ -66,6 +67,10 @@ async function buildInstructions(auth: McpAuthentication): Promise<{ title: stri
     `You are connected to the point-of-sale and accounting system of «${businessName}»${trade ? ` (${trade})` : ""}.`,
     `The owner and staff speak Persian; answer in Persian unless asked otherwise. This trade calls one sale a «${saleDoc}» and its item list «${catalogue}».`,
     modules ? `Modules available here: ${modules}.` : "",
+    // Issue #883 §1 — the catalogue is already filtered by this connection's
+    // consent document; saying so up front keeps the client from explaining
+    // missing tools as malfunctions.
+    `The owner consented exactly to the tools listed by tools/list — if a section of the app is not there, this connection was not granted it; the owner can widen it from Settings → Connections.`,
     "",
     "Before you interpret any number, read the resource `pos://app/conventions`. In short: money is an integer count of RIAL and people speak in TOMAN (Rial ÷ 10) — tools hand you a preformatted `text` field, use it; dates on the wire are Gregorian ISO while people read Jalali; a trading day is not a calendar day, so never recompute a date range yourself.",
     "Never ask the user for an id and never print one — `find_items` turns a Persian name into the ids the tools need.",
@@ -108,6 +113,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const MAX_TOOL_ARGUMENT_BYTES = 64 * 1024;
 
 /**
+ * Issue #883 §7 — the reverse budget: one tool call (or one resource/read)
+ * may not stream an unbounded document at the client. Sized so the largest
+ * legitimate reads (a full quarter of a report's rows, a big menu inventory)
+ * fit with headroom; anything over it gets a clear, structured "narrow the
+ * query" failure rather than a silently truncated — and therefore silently
+ * corrupt — JSON document.
+ */
+export const MAX_TOOL_RESULT_BYTES = 256 * 1024;
+
+/**
+ * `toolResult`, budgeted. Over-budget payloads fail closed with guidance:
+ * which budget was exceeded and how to narrow the read (date range, filters,
+ * paging). Never truncate mid-JSON: a model cannot tell a cut JSON document
+ * apart from a complete one.
+ */
+function boundedToolResult(data: unknown, isError: boolean) {
+  const result = toolResult(data, isError);
+  const text = result.content[0]?.text ?? "";
+  if (text.length <= MAX_TOOL_RESULT_BYTES) return result;
+  return toolResult(
+    {
+      status: "result_too_large",
+      bytes: text.length,
+      budget: MAX_TOOL_RESULT_BYTES,
+      message:
+        "نتیجه بزرگ‌تر از حد مجاز یک پاسخ است. بازهٔ تاریخ، فیلترها یا تعداد ردیف‌ها را باریک‌تر کنید و دوباره بخوانید.\n" +
+        "The result exceeds the per-response budget. Narrow the date range, filters or row count and retry.",
+    },
+    true,
+  );
+}
+
+/**
  * The idempotency key a client attaches to a write retry, in the spec's own
  * out-of-band channel (`params._meta`) so it never collides with a tool's
  * declared input schema. Bounded and namespaced: the durable contract lives in
@@ -139,17 +177,57 @@ async function callTool(
     };
   }
 
-  const tool = findMcpTool(name, auth.scopes, auth.permissions);
+  const tool = findMcpTool(name, auth.scopes, auth.permissions, auth.grants);
   if (!tool) {
     // "You may not" and "no such thing" are different answers and a model
     // behaves differently for each: the first is worth telling the user about,
-    // the second means it should stop trying. Scope, module and the
-    // authorizer's current permission all land in the first bucket — the
-    // client needs no finer distinction to behave correctly.
+    // the second means it should stop trying. Scope, module, grants, branch
+    // consent and the authorizer's current permission all land in the first
+    // bucket — the client needs no finer distinction to behave correctly.
     const message = isKnownMcpTool(name)
-      ? `ابزار «${name}» برای این اتصال مجاز نیست. ممکن است اتصال دسترسی نوشتن نداشته باشد یا کاربر مجوزش نداشته باشد.`
+      ? `ابزار «${name}» برای این اتصال مجاز نیست. ممکن است اتصال دسترسی نوشتن نداشته باشد، به این بخش اجازه نداده شده باشد، یا کاربر مجوزش نداشته باشد.`
       : `ابزار «${name}» وجود ندارد.`;
     return { error: { code: JSON_RPC_ERRORS.invalidParams, message } };
+  }
+
+  // Issue #883 §7 — the dispatcher-native status tool. It answers from this
+  // connection's own audit rows and nothing else's; the catalogue gate above
+  // already proved the connection holds `pos.write` and a writable app.
+  if (tool.binding.kind === "status") {
+    const auditId = typeof args.auditId === "string" ? args.auditId.trim() : "";
+    if (!auditId) {
+      return {
+        error: {
+          code: JSON_RPC_ERRORS.invalidParams,
+          message: "auditId لازم است — همان شناسه‌ای که ابزار نوشتنی برگرداند.",
+        },
+      };
+    }
+    const stored = await findMcpWriteStatus(auth.businessId, auth.connectionId, auditId);
+    if (!stored) {
+      return {
+        result: toolResult(
+          {
+            status: "unknown",
+            message:
+              "چنین درخواستی متعلق به این اتصال پیدا نشد. auditId باید متعلق به فراخوانی همین اتصال باشد — درخواست‌های اتصال دیگر قابل پرس‌وجو نیست.",
+          },
+          true,
+        ),
+      };
+    }
+    return {
+      result: toolResult(
+        {
+          status: stored.status,
+          actionType: stored.actionType,
+          message: stored.message,
+          result: stored.result,
+          requiresReview: stored.requiresReview,
+        },
+        stored.status === "failed",
+      ),
+    };
   }
 
   if (tool.binding.kind === "read") {
@@ -166,8 +244,13 @@ async function callTool(
       undefined,
       auth.authorizedByUserId,
       auth.permissions,
+      // Issue #883 §1: the connection's branch consent, enforced at the
+      // executor — a pinned tool resolves a consented branch instead of the
+      // primary, a business-wide aggregate refused at the catalogue is also
+      // refused here (registry + executor agree through ai-tools's own check).
+      { allowedBranchIds: mcpBrancheIds(auth.grants) },
     );
-    return { result: toolResult(outcome.data, !outcome.ok) };
+    return { result: boundedToolResult(outcome.data, !outcome.ok) };
   }
 
   const outcome = await performMcpWrite({
@@ -229,7 +312,9 @@ export async function dispatchMcpMessage(
 
     case "tools/list":
       return jsonRpcResult(id, {
-        tools: mcpToolCatalogue(auth.scopes, auth.permissions).map((tool) => tool.descriptor),
+        tools: mcpToolCatalogue(auth.scopes, auth.permissions, auth.grants).map(
+          (tool) => tool.descriptor,
+        ),
       });
 
     case "tools/call": {
@@ -240,7 +325,7 @@ export async function dispatchMcpMessage(
     }
 
     case "resources/list":
-      return jsonRpcResult(id, { resources: mcpResourcesFor(auth.permissions) });
+      return jsonRpcResult(id, { resources: mcpResourcesFor(auth.permissions, auth.grants) });
 
     // Nothing here is parameterised by a URI template. Answering with an empty
     // list is required: a client that gets "method not found" for this stops
@@ -255,13 +340,24 @@ export async function dispatchMcpMessage(
       // tool's permission (P0-1). Unknown and unauthorized get the same
       // answer — a resource the authorizer may not see is not one to confirm
       // the existence of.
-      if (!mcpResourcesFor(auth.permissions).some((resource) => resource.uri === uri)) {
+      if (!mcpResourcesFor(auth.permissions, auth.grants).some((resource) => resource.uri === uri)) {
         return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
       }
       const content = await readMcpResource(uri, auth.businessId, auth.permissions);
-      return content
-        ? jsonRpcResult(id, { contents: [content] })
-        : jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
+      if (!content) {
+        return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
+      }
+      // Issue #883 §7 — resources obey the same response budget as tools: a
+      // never-ending overview is as much a budget break as an over-wide
+      // report. Refusing clearly beats transmitting a cut document.
+      if ((content.text?.length ?? 0) > MAX_TOOL_RESULT_BYTES) {
+        return jsonRpcError(
+          id,
+          JSON_RPC_ERRORS.internalError,
+          `منبع «${uri}» بزرگ‌تر از حد مجاز یک پاسخ است (${MAX_TOOL_RESULT_BYTES} بایت). به‌جای این منبع، ابزار متناظر را با فیلتر باریک‌تر فراخوانی کنید.`,
+        );
+      }
+      return jsonRpcResult(id, { contents: [content] });
     }
 
     // No prompt templates yet — the `instructions` above carry what a prompt

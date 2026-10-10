@@ -162,6 +162,13 @@ export const EXEMPT_TABLES = new Set([
   // media_usage_charges) are RLS-protected in that migration and deliberately
   // NOT listed here.
   "platform_media_config",
+  // Issue #883 wave 3 — the SUPERADMIN console's MCP credentials (/`pospmcp_`
+  // tokens): console-side authority over the whole deployment, hashed at rest,
+  // keyed on platform_admins rather than any business. Carrying no
+  // business_id is the point of the design — this table must never be
+  // reachable through a tenant connection, exactly like platform_audit_log.
+  // Its tenant counterpart (mcp_connections) IS RLS-protected.
+  "platform_mcp_connections",
 ]);
 
 export interface ForeignKeyEdge {

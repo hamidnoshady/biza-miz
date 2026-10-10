@@ -87,6 +87,66 @@ async function primaryLocationId(businessId: string): Promise<string | null> {
 }
 
 /**
+ * Issue #883 §1 — the MCP connection's branch consent, which read executors
+ * must honour. A connection consented to one branch may not receive an answer
+ * that aggregates or resolves another branch.
+ *
+ * Delivered as a single optional parameter on `runReadTool` rather than
+ * swapped into `floorScope` (which is real floor-assistant state) — the two
+ * pins differ in meaning: the floor pin says "where the waiter stands", this
+ * one says "which branches the owner consented to the connector seeing".
+ */
+export interface McpReadScope {
+  /**
+   * Branch-consented location ids, or null when consent covers every branch
+   * ("all"). A legacy connection has null here. An empty array means the
+   * stored grants named no branch, i.e. a closed credential.
+   */
+  allowedBranchIds: string[] | null;
+}
+
+/** The single branch a pinned read resolves to. Policy:
+ *
+ *   * consent 'all'/legacy → the primary location (today's behaviour);
+ *   * consent [a]         → a;
+ *   * consent [a,b,…]     → the model must pass an explicit locationId (the
+ *     refusing message below says so); a silently-chosen one would guess.
+ *
+ * An explicitly-requested branch outside the consented set is refused; so is a
+ * business with no live branch for the pin.
+ */
+type PinnedLocation =
+  | { ok: true; locationId: string | null }
+  | { ok: false; error: string };
+
+async function pinnedLocation(
+  businessId: string,
+  args: Record<string, unknown>,
+  mcpScope: McpReadScope | undefined,
+): Promise<PinnedLocation> {
+  if (!mcpScope || mcpScope.allowedBranchIds === null) {
+    return { ok: true, locationId: await primaryLocationId(businessId) };
+  }
+  const allowed = mcpScope.allowedBranchIds;
+  if (allowed.length === 0) {
+    return { ok: false, error: "این اتصال به هیچ شعبه‌ای اجازهٔ خواندن ندارد." };
+  }
+  const requested =
+    typeof args.locationId === "string" && args.locationId.length > 0 ? args.locationId : null;
+  if (requested !== null) {
+    return allowed.includes(requested)
+      ? { ok: true, locationId: requested }
+      : { ok: false, error: "شعبهٔ درخواستی در فهرست شعبه‌های مجاز این اتصال نیست." };
+  }
+  if (allowed.length === 1) return { ok: true, locationId: allowed[0] };
+  return {
+    ok: false,
+    error:
+      "این اتصال به چند شعبهٔ خاص اجازهٔ دیدن دارد و این ابزار شعبه‌لحاظ است؛ locationId را از بین شعبه‌های مجاز صریح بده.",
+  };
+}
+
+/**
  * The floor assistant has a deliberately narrower scope than dashboard mode:
  * one active location, and—when the caller is a waiter—only the tables in
  * sections assigned to that member.
@@ -245,10 +305,27 @@ async function voidPattern(businessId: string, args: Record<string, unknown>) {
  * empty result), how much is on hand right now, and what it is worth — so the
  * model can say "«نان» غیرفعال است" instead of "پیدا نشد".
  */
-async function findItems(businessId: string, args: Record<string, unknown>) {
+async function findItems(
+  businessId: string,
+  args: Record<string, unknown>,
+  /** Issue #883 §1: consented branch set for an MCP caller; null = all branches. */
+  allowedBranchIds: string[] | null = null,
+) {
   const search = typeof args.query === "string" ? args.query.trim() : "";
   const kind = args.kind === "menu" || args.kind === "inventory" ? args.kind : "all";
   if (search.length === 0) return { ok: false as const, data: { error: "عبارت جست‌وجو خالی است." } };
+
+  // An MCP connection consented to a subset of branches finds only that
+  // subset's items — even as candidates, an out-of-branch id would be a write
+  // the branch gate refuses anyway, and the find would leak the item's
+  // existence. Filter in the query, not after it, so the LIMIT cannot be
+  // exhausted by invisible rows.
+  const branchFilter =
+    allowedBranchIds === null ? "" : "AND l.id = ANY($3::uuid[])";
+  const branchParam = allowedBranchIds === null ? [] : [allowedBranchIds];
+  if (allowedBranchIds !== null && allowedBranchIds.length === 0) {
+    return { ok: false as const, data: { error: "این اتصال به هیچ شعبه‌ای اجازهٔ خواندن ندارد." } };
+  }
 
   // ILIKE on both sides: an owner typing «نان» must find «نان باگت» and
   // «نان لواش», and typing «باگت» must find the same row.
@@ -265,20 +342,21 @@ async function findItems(businessId: string, args: Record<string, unknown>) {
       on_hand: string;
       avg_cost: string;
       location_name: string;
+      location_id: string;
     }>(
       `SELECT i.id, i.name, i.unit, i.is_active, i.is_produced,
               trim_scale(COALESCE(sm.total, 0))::text AS on_hand,
               COALESCE(i.avg_cost, 0)::text AS avg_cost,
-              l.name AS location_name
+              l.name AS location_name, l.id AS location_id
          FROM inventory_items i
          JOIN locations l ON l.id = i.location_id
          LEFT JOIN LATERAL (
            SELECT sum(quantity) AS total FROM stock_movements WHERE inventory_item_id = i.id
          ) sm ON true
-        WHERE l.business_id = $1 AND i.name ILIKE $2
+        WHERE l.business_id = $1 AND i.name ILIKE $2 ${branchFilter}
         ORDER BY i.is_active DESC, i.name
         LIMIT 25`,
-      [businessId, pattern],
+      [businessId, pattern, ...branchParam],
     );
     for (const row of rows) {
       results.push({
@@ -311,10 +389,10 @@ async function findItems(businessId: string, args: Record<string, unknown>) {
          FROM menu_items m
          JOIN locations l ON l.id = m.location_id
          LEFT JOIN menu_categories c ON c.id = m.category_id
-        WHERE l.business_id = $1 AND m.name ILIKE $2
+        WHERE l.business_id = $1 AND m.name ILIKE $2 ${branchFilter}
         ORDER BY m.is_active DESC, m.name
         LIMIT 25`,
-      [businessId, pattern],
+      [businessId, pattern, ...branchParam],
     );
     for (const row of rows) {
       results.push({
@@ -1266,6 +1344,13 @@ export async function runReadTool(
    */
   actorUserId?: string,
   permissions?: ReadonlySet<Permission>,
+  /**
+   * Issue #883 §1 — when the caller is an MCP connection: the branches the
+   * connection's owner consented to. Absent means "no branch restriction"
+   * (in-app assistant, internal callers); for MCP server.ts always supplies
+   * it from the connection's stored grants.
+   */
+  mcpScope?: McpReadScope,
 ): Promise<ToolResult> {
   // The provider-facing catalogue and production executor paths pass an
   // effective permission set. Keep the low-level executor compatible with
@@ -1275,6 +1360,21 @@ export async function runReadTool(
   if (permissions && !canUseAiTool(name, permissions)) {
     return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
   }
+  /**
+   * Whether a business-wide (branch-aggregating) answer may be given.
+   * The MCP catalogue hides these tools from branch-pinned connections, and
+   * the dispatcher refuses them; this is the executor-level fail close so a
+   * future caller path cannot inherit the leak.
+   */
+  const businessWideOk = !mcpScope || mcpScope.allowedBranchIds === null;
+  const businessWideRefusal = (toolFa: string): ToolResult => ({
+    ok: false,
+    data: {
+      error:
+        `ابزار «${toolFa}» پاسخ تجمیعی از همهٔ شعبه‌ها می‌سازد و این اتصال فقط به شعبه‌های مشخص ` +
+        "اجازهٔ دیدن دارد. برای خواندن تجمیعی، اتصال را به «همهٔ شعبه‌ها» مجاز کنید.",
+    },
+  });
   // Issue #799 §23 — the AEC read tools. Kept out of the switch below for the
   // same reason the workspace tools are: they share one executor, and that
   // executor needs the business's industry (an AEC question from a café must
@@ -1369,16 +1469,24 @@ export async function runReadTool(
       const dateFrom = typeof args.dateFrom === "string" ? args.dateFrom : undefined;
       const dateTo = typeof args.dateTo === "string" ? args.dateTo : undefined;
 
+      // Issue #883 §1: with a branch-scoped MCP consent, the business-wide
+      // statements (P&L, balance sheet) refuse, since their whole point is a
+      // total across branches; branch-pinned trade reports resolve the
+      // consented branch instead of primary.
       if (key === "profit_and_loss") {
+        if (!businessWideOk) return businessWideRefusal("سود و زیان");
         return { ok: true, data: await getProfitAndLoss(businessId, { dateFrom, dateTo }) };
       }
       if (key === "balance_sheet") {
+        if (!businessWideOk) return businessWideRefusal("ترازنامه");
         return { ok: true, data: await getBalanceSheet(businessId, dateTo) };
       }
       if (reportShape(def) !== "rows") {
+        const pinned = await pinnedLocation(businessId, args, mcpScope);
+        if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
         const report = await runTradeReport(key, {
           businessId,
-          locationId: await primaryLocationId(businessId),
+          locationId: pinned.locationId,
           industry: industry ?? "food_service",
           filters: { dateFrom, dateTo },
         });
@@ -1397,7 +1505,11 @@ export async function runReadTool(
     // Phase 33 — name→id resolution, so the assistant never asks an owner for
     // a UUID, and never reports "پیدا نشد" for an item that is merely disabled.
     case "find_items":
-      return findItems(businessId, args);
+      return findItems(
+        businessId,
+        args,
+        mcpScope ? mcpScope.allowedBranchIds : null,
+      );
 
     case "get_waste_history":
       return wasteHistory(businessId, args);
@@ -1568,9 +1680,10 @@ export async function runReadTool(
       if (industry !== "cosmetics") {
         return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای آرایشی و بهداشتی در دسترس است." } };
       }
-      const locationId = await primaryLocationId(businessId);
-      if (!locationId) return { ok: true, data: [] };
-      return { ok: true, data: await nearExpiryBatches(locationId) };
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: [] };
+      return { ok: true, data: await nearExpiryBatches(pinned.locationId) };
     }
 
     case "get_staff_commission": {
@@ -1580,10 +1693,11 @@ export async function runReadTool(
     }
 
     case "get_repurchase_candidates": {
-      const locationId = await primaryLocationId(businessId);
-      if (!locationId) return { ok: true, data: [] };
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: [] };
       const today = new Date().toISOString().slice(0, 10);
-      return { ok: true, data: await customersDueForRepurchase(businessId, locationId, today) };
+      return { ok: true, data: await customersDueForRepurchase(businessId, pinned.locationId, today) };
     }
 
     // Phase 32 — the coworker's two read tools. Both are deterministic: the
