@@ -2,6 +2,7 @@
  * DB-touching reporting orchestration (not unit-tested directly, per repo
  * convention — pure logic lives in reports.ts and is what *.test.ts covers).
  */
+import { randomUUID } from "node:crypto";
 import { queryReportPage } from "./report-page-query";
 import { query, getPool } from "./db";
 import {
@@ -11,6 +12,7 @@ import {
   REPORT_VIEWS,
   STANDARD_REPORTS,
   standardReportsFor,
+  reportViewsFor,
   validateReportConfig,
   type FoodCostVariance,
   type FoodCostVarianceItemInput,
@@ -18,6 +20,7 @@ import {
   type ChartType,
 } from "./reports";
 import { addDays } from "./rollup";
+import { reportScopeLocationId, type ReportScope } from "./report-scope";
 import {
   costOfSalesCodesForIndustry,
   isNonCurrentCode,
@@ -29,19 +32,28 @@ import { getBusinessIndustry } from "./industry-guard";
 import { classifyAccounts, isClearing, isUsableLiquidity } from "./account-classification";
 import { ledgerSourceLabel } from "./ledger-source-labels";
 import type { Role } from "./auth";
+import type { Industry } from "./industries";
 
 export interface ReportRow extends Record<string, unknown> {
   dim: string | null;
   value: string | number | null;
 }
 
-/** Runs a validated custom (or standard) report config against its view. Throws if invalid — call validateReportConfig first for a user-facing error. */
+/**
+ * Runs a validated custom (or standard) report config against its view. Throws
+ * if invalid — call validateReportConfig first for a user-facing error.
+ *
+ * The scope is required and comes from `authorizedReportScope` (issue #819):
+ * this function used to take an optional `locationId`, so a caller that forgot
+ * to resolve one read every branch in the business. `buildReportQuery` now
+ * refuses a missing scope as well, so the widening has nowhere left to hide.
+ */
 export async function runCustomReportQuery(
   businessId: string,
   config: ReportConfig,
-  locationId?: string,
+  scope: ReportScope,
 ): Promise<ReportRow[]> {
-  const { sql, params } = buildReportQuery(config, businessId, locationId);
+  const { sql, params } = buildReportQuery(config, businessId, scope);
   const { rows } = await query<ReportRow>(sql, params);
   return rows;
 }
@@ -51,12 +63,22 @@ export interface DateRangeFilters {
   dateTo?: string;
 }
 
-/** Raw (unaggregated) rows from a standard report's backing view, for its table display. Null-view reports (P&L, Balance Sheet) use their own dedicated functions instead. */
+/**
+ * Raw (unaggregated) rows from a standard report's backing view, for its table
+ * display. Null-view reports (P&L, Balance Sheet) use their own dedicated
+ * functions instead.
+ *
+ * Every one of these views exposes `location_id` (checked by
+ * `report-scope.test.ts`, which reads the migrations), so the branch predicate
+ * is always applicable — a row dump is one branch's trading regardless of which
+ * report it came from. The scope is required for the same reason it is on
+ * `runCustomReportQuery`.
+ */
 export async function runStandardReportRows(
   key: string,
   businessId: string,
+  scope: ReportScope,
   filters: DateRangeFilters = {},
-  locationId?: string,
 ): Promise<Record<string, unknown>[]> {
   const def = STANDARD_REPORTS.find((r) => r.key === key);
   if (!def || !def.view) throw new Error(`no_table_view_for_report: ${key}`);
@@ -64,6 +86,7 @@ export async function runStandardReportRows(
 
   const params: unknown[] = [businessId];
   const where = ["business_id = $1"];
+  const locationId = reportScopeLocationId(scope);
   if (locationId) {
     params.push(locationId);
     where.push("location_id = $" + params.length);
@@ -182,12 +205,25 @@ export interface ProfitAndLoss {
   operatingExpenses: number;
 }
 
+/**
+ * The branch this statement is read for, or the consolidated scope.
+ *
+ * These entry points used to take `locationId?: string` and simply omit the
+ * predicate when it was absent — the same "undefined location widens the query"
+ * shape the audit found in `buildReportQuery` (issue #819). They now require an
+ * explicit `ReportScope`, and `reportScopeLocationId` is the runtime backstop,
+ * so a caller cannot reach the ledger without having decided *whose* books it
+ * is reading. The branch predicate itself stays where it belongs — a query
+ * builder must not invent authorization.
+ */
+
 /** P&L for a date range, traced directly from the Phase 7 ledger (v_ledger_by_account, revenue/expense accounts only). */
 export async function getProfitAndLoss(
   businessId: string,
   filters: DateRangeFilters = {},
-  locationId?: string,
+  scope: ReportScope,
 ): Promise<ProfitAndLoss> {
+  const locationId = reportScopeLocationId(scope);
   const [rows, industry] = await Promise.all([
     ledgerAccountTotals(businessId, ["revenue", "expense"], filters.dateTo, filters.dateFrom, locationId),
     getBusinessIndustry(businessId),
@@ -246,8 +282,13 @@ async function readFoodCostVariance(
   locationId?: string,
   page?: number,
 ) {
-  const params: unknown[] = [];
-  const where = ["o.status = 'completed'", "oi.status != 'voided'"];
+  const params: unknown[] = [businessId];
+  const where = [
+    "o.status = 'completed'",
+    "oi.status != 'voided'",
+    "o.location_id = oi.location_id",
+    `l.business_id = $${params.length}`,
+  ];
   if (locationId) {
     params.push(locationId);
     where.push(`oi.location_id = $${params.length}`);
@@ -268,15 +309,17 @@ async function readFoodCostVariance(
     `WITH sales AS (SELECT oi.menu_item_id, COALESCE(mi.name, MAX(oi.name_snapshot)) AS menu_item_name,
             SUM(oi.quantity)::text AS units_sold, SUM(oi.unit_price * oi.quantity)::text AS revenue
        FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id
-       LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
+       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
+       JOIN locations l ON l.id = oi.location_id
+       LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id AND mi.location_id = oi.location_id
       WHERE ${where.join(" AND ")}
       GROUP BY oi.menu_item_id, mi.name), theoretical AS (SELECT s.source_menu_item_id AS menu_item_id,
             ROUND(SUM(s.required_quantity * oi.quantity * ii.avg_cost))::text AS theoretical_cost
        FROM order_item_inventory_snapshots s
        JOIN order_items oi ON oi.id = s.order_item_id
-       JOIN orders o ON o.id = oi.order_id
-       JOIN inventory_items ii ON ii.id = s.inventory_item_id
+       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
+       JOIN locations l ON l.id = oi.location_id
+       JOIN inventory_items ii ON ii.id = s.inventory_item_id AND ii.location_id = oi.location_id
       WHERE ${where.join(" AND ")}
       GROUP BY s.source_menu_item_id)
      SELECT sales.*, coalesce(theoretical.theoretical_cost,'0') AS theoretical_cost
@@ -308,11 +351,19 @@ async function readFoodCostVariance(
   ) };
 }
 
-export async function getFoodCostVariance(businessId: string, filters: DateRangeFilters = {}, locationId?: string): Promise<FoodCostVariance> {
-  return (await readFoodCostVariance(businessId, filters, locationId)).report;
+export async function getFoodCostVariance(
+  businessId: string,
+  filters: DateRangeFilters = {},
+  scope: ReportScope,
+): Promise<FoodCostVariance> {
+  return (await readFoodCostVariance(businessId, filters, reportScopeLocationId(scope))).report;
 }
-export const getFoodCostVariancePage = (businessId: string, filters: DateRangeFilters, locationId: string | undefined, page: number) =>
-  readFoodCostVariance(businessId, filters, locationId, page);
+export const getFoodCostVariancePage = (
+  businessId: string,
+  filters: DateRangeFilters,
+  scope: ReportScope,
+  page: number,
+) => readFoodCostVariance(businessId, filters, reportScopeLocationId(scope), page);
 
 export interface BalanceSheet {
   assets: PnlLine[];
@@ -349,9 +400,10 @@ export interface BalanceSheet {
  */
 export async function getBalanceSheet(
   businessId: string,
-  asOfDate?: string,
-  locationId?: string,
+  asOfDate: string | undefined,
+  scope: ReportScope,
 ): Promise<BalanceSheet> {
+  const locationId = reportScopeLocationId(scope);
   const [balanceRows, incomeRows] = await Promise.all([
     ledgerAccountTotals(businessId, ["asset", "liability", "equity"], asOfDate, undefined, locationId),
     ledgerAccountTotals(businessId, ["revenue", "expense"], asOfDate, undefined, locationId),
@@ -497,8 +549,9 @@ async function cashBalanceAsOf(
 export async function getCashFlow(
   businessId: string,
   filters: DateRangeFilters = {},
-  locationId?: string,
+  scope: ReportScope,
 ): Promise<CashFlowStatement> {
+  const locationId = reportScopeLocationId(scope);
   const cashDefinition = "صندوق، بانک و تنخواه (وجوه در راه کارت‌خوان و درگاه جزو نقد نیست)";
   const empty = { operating: 0, investing: 0, financing: 0 };
   const { cash: cashAccountIds, clearing: clearingAccountIds } = await liquidityAccountIds(businessId);
@@ -640,6 +693,11 @@ export interface VatReport {
  * still post to it for anything bought outside «خرید». This report just reads
  * both control accounts' movements over a period and nets them — a
  * return-shaped summary, not a new posting path.
+ *
+ * This is intentionally a business-wide accounting read, like the trial
+ * balance: VAT liability is held in the business's central ledger and the
+ * endpoint/tool is gated by `ledger.view`, not `reports.view`. It must not be
+ * given a branch filter merely because the operational reports are branch-scoped.
  */
 export async function getVatReport(businessId: string, filters: DateRangeFilters = {}): Promise<VatReport> {
   const codes = [WELL_KNOWN_CODES.vatPayable, WELL_KNOWN_CODES.vatReceivable];
@@ -679,14 +737,14 @@ export interface Comparison<T> {
 export async function getProfitAndLossComparison(
   businessId: string,
   filters: DateRangeFilters,
-  locationId?: string,
+  scope: ReportScope,
 ): Promise<Comparison<ProfitAndLoss>> {
-  const current = await getProfitAndLoss(businessId, filters, locationId);
+  const current = await getProfitAndLoss(businessId, filters, scope);
   if (!filters.dateFrom || !filters.dateTo) return { current, previous: null };
   const previous = await getProfitAndLoss(
     businessId,
     previousPeriodRange(filters.dateFrom, filters.dateTo),
-    locationId,
+    scope,
   );
   return { current, previous };
 }
@@ -694,14 +752,14 @@ export async function getProfitAndLossComparison(
 export async function getCashFlowComparison(
   businessId: string,
   filters: DateRangeFilters,
-  locationId?: string,
+  scope: ReportScope,
 ): Promise<Comparison<CashFlowStatement>> {
-  const current = await getCashFlow(businessId, filters, locationId);
+  const current = await getCashFlow(businessId, filters, scope);
   if (!filters.dateFrom || !filters.dateTo) return { current, previous: null };
   const previous = await getCashFlow(
     businessId,
     previousPeriodRange(filters.dateFrom, filters.dateTo),
-    locationId,
+    scope,
   );
   return { current, previous };
 }
@@ -715,11 +773,11 @@ export async function getBalanceSheetComparison(
   businessId: string,
   asOfDate: string | undefined,
   previousAsOfDate: string | undefined,
-  locationId?: string,
+  scope: ReportScope,
 ): Promise<Comparison<BalanceSheet>> {
-  const current = await getBalanceSheet(businessId, asOfDate, locationId);
+  const current = await getBalanceSheet(businessId, asOfDate, scope);
   if (!previousAsOfDate) return { current, previous: null };
-  const previous = await getBalanceSheet(businessId, previousAsOfDate, locationId);
+  const previous = await getBalanceSheet(businessId, previousAsOfDate, scope);
   return { current, previous };
 }
 
@@ -754,7 +812,7 @@ export interface AccountDrillDownPage {
 export async function getAccountDrillDown(
   businessId: string,
   accountCode: string,
-  filters: DateRangeFilters & { offset?: number; limit?: number } = {},
+  filters: DateRangeFilters & { offset?: number; limit?: number; locationId?: string } = {},
 ): Promise<AccountDrillDownPage> {
   const params: unknown[] = [businessId, accountCode];
   const where = ["je.business_id = $1", "a.business_id = $1", "a.code = $2"];
@@ -765,6 +823,14 @@ export async function getAccountDrillDown(
   if (filters.dateTo) {
     params.push(filters.dateTo);
     where.push(`je.entry_date <= $${params.length}`);
+  }
+  // The reporting caller passes its authorized branch, so the postings behind a
+  // statement figure are the same postings the figure was computed from. The
+  // accounting caller (the trial-balance overlay) deliberately does not: it
+  // reads the business's whole ledger, which is what a trial balance is.
+  if (filters.locationId) {
+    params.push(filters.locationId);
+    where.push(`je.location_id = $${params.length}`);
   }
   const whereSql = where.join(" AND ");
   const { rows: summaryRows } = await query<{
@@ -958,9 +1024,13 @@ interface SavedReportRow extends Record<string, unknown> {
   business_id: string;
   created_by: string | null;
   name: string;
+  /** Optional free text saying what the report is for (issue #819, Step 8). */
+  description: string | null;
   config: ReportConfig;
   is_standard: boolean;
   standard_key: string | null;
+  /** Bumped by every edit, so a shared report says whether it changed. */
+  version: number;
   created_at: string;
   updated_at: string;
 }
@@ -986,18 +1056,26 @@ export async function createSavedReport(
   createdBy: string | null,
   name: string,
   config: ReportConfig,
+  description?: string | null,
 ): Promise<string> {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO saved_reports (business_id, created_by, name, config) VALUES ($1, $2, $3, $4) RETURNING id`,
-    [businessId, createdBy, name, JSON.stringify(config)],
+    `INSERT INTO saved_reports (business_id, created_by, name, description, config)
+     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    [businessId, createdBy, name, description?.trim() || null, JSON.stringify(config)],
   );
   return rows[0].id;
 }
 
+/**
+ * Edits a saved report. Every accepted patch bumps `version` (migration 0212):
+ * the row is a shared definition, and "has it changed since I ran it" is only
+ * answerable if edits are counted — including a rename or a description change,
+ * which are exactly the edits a reader notices.
+ */
 export async function updateSavedReport(
   businessId: string,
   id: string,
-  patch: { name?: string; config?: ReportConfig },
+  patch: { name?: string; description?: string | null; config?: ReportConfig },
 ): Promise<boolean> {
   const fields: string[] = [];
   const values: unknown[] = [id, businessId];
@@ -1005,11 +1083,18 @@ export async function updateSavedReport(
     values.push(patch.name);
     fields.push(`name = $${values.length}`);
   }
+  if (patch.description !== undefined) {
+    // An explicit empty string clears it, matching how the builder's input
+    // reports "the field is empty" rather than "the field was not sent".
+    values.push(patch.description?.trim() || null);
+    fields.push(`description = $${values.length}`);
+  }
   if (patch.config !== undefined) {
     values.push(JSON.stringify(patch.config));
     fields.push(`config = $${values.length}`);
   }
   if (fields.length === 0) return false;
+  fields.push("version = version + 1");
   fields.push("updated_at = now()");
   const { rowCount } = await query(
     `UPDATE saved_reports SET ${fields.join(", ")} WHERE id = $1 AND business_id = $2 AND is_standard = false`,
@@ -1024,6 +1109,50 @@ export async function deleteSavedReport(businessId: string, id: string): Promise
     [id, businessId],
   );
   return (rowCount ?? 0) > 0;
+}
+
+/**
+ * Which of `ids` name a saved report of this business.
+ *
+ * Used by the widgets route to check client-supplied report ids before it
+ * stores a layout (issue #819): an id from another tenant (or a deleted one)
+ * would otherwise be written into `dashboard_widgets` and render as a widget
+ * nobody can open — and a dashboard layout is written from the browser, so the
+ * ids are caller input, not facts.
+ */
+export interface SavedReportIdsInBusiness {
+  /** IDs that exist in this tenant; caller-supplied IDs are not ownership facts. */
+  owned: Set<string>;
+  /** Owned IDs that still satisfy this business's trade and current engine schema. */
+  applicable: Set<string>;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export async function savedReportIdsInBusiness(
+  businessId: string,
+  ids: string[],
+): Promise<SavedReportIdsInBusiness> {
+  // Never pass arbitrary strings through `::uuid[]`: invalid client input must
+  // be a 400, not a Postgres cast error turned into a 500.
+  const unique = [...new Set(ids)].filter((id) => UUID_RE.test(id));
+  if (unique.length === 0) return { owned: new Set(), applicable: new Set() };
+  const [industry, result] = await Promise.all([
+    getBusinessIndustry(businessId),
+    query<{ id: string; config: ReportConfig; standard_key: string | null }>(
+      "SELECT id, config, standard_key FROM saved_reports WHERE business_id = $1 AND id = ANY($2::uuid[])",
+      [businessId, unique],
+    ),
+  ]);
+  const offeredStandardKeys = new Set(standardReportsFor(industry).map((report) => report.key));
+  const offeredViewKeys = new Set(reportViewsFor(industry).map(({ key }) => key));
+  const owned = new Set(result.rows.map((row) => row.id));
+  const applicable = new Set(
+    result.rows
+      .filter((row) => savedReportApplicability(row, offeredStandardKeys, offeredViewKeys).applicable)
+      .map((row) => row.id),
+  );
+  return { owned, applicable };
 }
 
 /**
@@ -1060,11 +1189,14 @@ export async function ensureStandardSavedReports(businessId: string): Promise<Ma
   } finally {
     client.release();
   }
+  const offeredKeys = new Set(withCharts.map((report) => report.key));
   const { rows } = await query<{ standard_key: string; id: string }>(
     "SELECT standard_key, id FROM saved_reports WHERE business_id = $1 AND standard_key IS NOT NULL",
     [businessId],
   );
-  return new Map(rows.map((r) => [r.standard_key, r.id]));
+  // Old standard rows remain because existing dashboard_widgets may reference
+  // them, but they are not candidates for this trade's current default layout.
+  return new Map(rows.filter((r) => offeredKeys.has(r.standard_key)).map((r) => [r.standard_key, r.id]));
 }
 
 export function standardChartType(key: string): ChartType | null {
@@ -1083,38 +1215,255 @@ export interface DashboardWidgetRow extends Record<string, unknown> {
   report_name: string;
   report_config: ReportConfig;
   standard_key: string | null;
+  /** Set by the dashboard read: whether this report still means something for the business's trade. */
+  applicable?: boolean;
+  applicable_reason?: "standard_report_not_in_trade" | "unknown_view";
 }
 
-/** A user's personal widget layout, or (if they have none yet) their role's default layout — seeded once for the Owner (see Phase 8 doc, "Dashboard defaults"). */
+export type DashboardLayoutName = "personal" | "role-default";
+
+/** The exact source shown to the client and the exact scope it intends to replace. */
+export interface DashboardWidgetPrecondition {
+  source: { scope: DashboardLayoutName; revision: string };
+  target: { scope: DashboardLayoutName; revision: string | null };
+}
+
+export interface DashboardWidgetsResult {
+  /** The layout actually rendered: personal, or the role default being inherited. */
+  scope: DashboardLayoutName;
+  widgets: DashboardWidgetRow[];
+  /** Both revision domains are explicit; an inherited view has a role source and no personal target yet. */
+  precondition: DashboardWidgetPrecondition;
+}
+
+type DashboardWidgetTarget = { userId: string; role: Role } | { role: Role };
+type WidgetDbClient = import("pg").PoolClient;
+type WidgetLayoutState = { revision: string } | null;
+type WidgetLayoutSnapshot = {
+  exists: boolean;
+  revision: string | null;
+  widgets: DashboardWidgetRow[];
+};
+
+/**
+ * Whether a pinned report still says something about this business.
+ *
+ * A widget stores a `saved_reports` row, and that row can stop being usable for
+ * reasons nobody deleted it for (issue #819):
+ *
+ *  - a **standard** report the trade no longer has. `ensureStandardSavedReports`
+ *    seeds only the current trade's reports and deliberately keeps rows seeded
+ *    before a business changed trade, because a `dashboard_widgets` row
+ *    references them and silently removing a tile an owner arranged is worse
+ *    than an empty one;
+ *  - a **custom** report saved against a view the engine has since retired, or a
+ *    metric/dimension pair that no longer exists in `REPORT_VIEWS`.
+ *
+ * Either way the tile used to render as a chart of zeros, which reads as "this
+ * branch sold nothing" rather than "this report is obsolete". The grid says
+ * which it is instead, and the member can remove it deliberately.
+ */
+export function savedReportApplicability(
+  report: { config?: ReportConfig | null; report_config?: ReportConfig | null; standard_key: string | null },
+  offeredStandardKeys: ReadonlySet<string>,
+  offeredViewKeys: ReadonlySet<string>,
+): { applicable: true } | { applicable: false; applicable_reason: "standard_report_not_in_trade" | "unknown_view" } {
+  if (report.standard_key && !offeredStandardKeys.has(report.standard_key)) {
+    return { applicable: false, applicable_reason: "standard_report_not_in_trade" };
+  }
+  const config = report.config ?? report.report_config ?? null;
+  const view = config && Object.hasOwn(REPORT_VIEWS, config.view) ? REPORT_VIEWS[config.view] : undefined;
+  if (!config || !view || !offeredViewKeys.has(config.view) || validateReportConfig(config).length > 0) {
+    return { applicable: false, applicable_reason: "unknown_view" };
+  }
+  return { applicable: true };
+}
+
+function layoutName(target: DashboardWidgetTarget): DashboardLayoutName {
+  return "userId" in target ? "personal" : "role-default";
+}
+
+function layoutScopeWhere(target: DashboardWidgetTarget, alias = ""): string {
+  return "userId" in target ? `${alias}user_id = $2` : `${alias}role = $2`;
+}
+
+function layoutScopeValue(target: DashboardWidgetTarget): string {
+  return "userId" in target ? target.userId : target.role;
+}
+
+/** A layout's state row is the source of truth, including when it has zero widgets. */
+async function widgetLayoutState(
+  client: WidgetDbClient,
+  businessId: string,
+  target: DashboardWidgetTarget,
+  lock = false,
+): Promise<WidgetLayoutState> {
+  const { rows } = await client.query<{ revision: string }>(
+    `SELECT revision::text AS revision
+       FROM dashboard_widget_layout_state
+      WHERE business_id = $1 AND ${layoutScopeWhere(target)}${lock ? " FOR UPDATE" : ""}`,
+    [businessId, layoutScopeValue(target)],
+  );
+  return rows[0] ?? null;
+}
+
+async function widgetRowsForTarget(
+  client: WidgetDbClient,
+  businessId: string,
+  target: DashboardWidgetTarget,
+  lock = false,
+): Promise<DashboardWidgetRow[]> {
+  const { rows } = await client.query<DashboardWidgetRow>(
+    `SELECT dw.id, dw.saved_report_id, dw.chart_type, dw.title, dw.x, dw.y, dw.w, dw.h,
+            sr.name AS report_name, sr.config AS report_config, sr.standard_key
+       FROM dashboard_widgets dw
+       JOIN saved_reports sr ON sr.id = dw.saved_report_id AND sr.business_id = dw.business_id
+      WHERE dw.business_id = $1 AND ${layoutScopeWhere(target, "dw.")}
+      ORDER BY dw.y, dw.x, dw.id${lock ? " FOR UPDATE OF dw" : ""}`,
+    [businessId, layoutScopeValue(target)],
+  );
+  return rows;
+}
+
+/**
+ * A consistent read of a user's inherited-or-personal layout. The repeatable
+ * read snapshot keeps the widget rows and their separately stored revisions in
+ * agreement even if a write commits while the GET is being assembled.
+ */
 export async function getDashboardWidgets(
   businessId: string,
   userId: string,
   role: Role,
-): Promise<{ scope: "personal" | "role-default"; widgets: DashboardWidgetRow[] }> {
-  const personal = await queryWidgets(businessId, "user_id = $2", [businessId, userId]);
-  if (personal.length > 0) return { scope: "personal", widgets: personal };
-  let roleDefault = await queryWidgets(businessId, "role = $2", [businessId, role]);
-  if (roleDefault.length === 0 && role === "owner") {
-    await seedOwnerDashboardDefaults(businessId);
-    roleDefault = await queryWidgets(businessId, "role = $2", [businessId, role]);
+): Promise<DashboardWidgetsResult> {
+  const personalTarget: DashboardWidgetTarget = { userId, role };
+
+  // Role defaults are seeded lazily; personal layouts remain absent until a
+  // member edits or pins. A non-empty row set without state is a legacy layout,
+  // not an inheritance signal, so adopt it under the same per-user lock.
+  if (role === "owner") await seedOwnerDashboardDefaults(businessId);
+  else await ensureWidgetLayoutState(businessId, { role });
+  await adoptLegacyPersonalWidgetLayout(businessId, personalTarget);
+
+  const industry = await getBusinessIndustry(businessId);
+  const offeredStandardKeys = new Set(standardReportsFor(industry).map((report) => report.key));
+  const offeredViewKeys = new Set(reportViewsFor(industry).map(({ key }) => key));
+  const snapshots = await readUserLayoutSnapshots(businessId, personalTarget, { role });
+  const personal = snapshots.personal;
+  const inherited = snapshots.role;
+
+  if (personal.exists) {
+    return {
+      scope: "personal",
+      widgets: annotateDashboardWidgets(personal.widgets, offeredStandardKeys, offeredViewKeys),
+      precondition: {
+        source: { scope: "personal", revision: personal.revision! },
+        target: { scope: "personal", revision: personal.revision! },
+      },
+    };
   }
-  return { scope: "role-default", widgets: roleDefault };
+
+  return {
+    scope: "role-default",
+    widgets: annotateDashboardWidgets(inherited.widgets, offeredStandardKeys, offeredViewKeys),
+    precondition: {
+      source: { scope: "role-default", revision: inherited.revision! },
+      target: { scope: "personal", revision: null },
+    },
+  };
+}
+
+/** Read the explicit role-default layout for its permission-checked manager. */
+export async function getRoleDashboardWidgets(
+  businessId: string,
+  role: Role,
+): Promise<DashboardWidgetsResult> {
+  if (role === "owner") await seedOwnerDashboardDefaults(businessId);
+  else await ensureWidgetLayoutState(businessId, { role });
+
+  const industry = await getBusinessIndustry(businessId);
+  const offeredStandardKeys = new Set(standardReportsFor(industry).map((report) => report.key));
+  const offeredViewKeys = new Set(reportViewsFor(industry).map(({ key }) => key));
+  const snapshot = await readLayoutSnapshot(businessId, { role });
+  if (snapshot.revision === null) throw new Error("role_dashboard_layout_state_missing");
+
+  return {
+    scope: "role-default",
+    widgets: annotateDashboardWidgets(snapshot.widgets, offeredStandardKeys, offeredViewKeys),
+    precondition: {
+      source: { scope: "role-default", revision: snapshot.revision },
+      target: { scope: "role-default", revision: snapshot.revision },
+    },
+  };
+}
+
+function annotateDashboardWidgets(
+  rows: DashboardWidgetRow[],
+  offeredStandardKeys: ReadonlySet<string>,
+  offeredViewKeys: ReadonlySet<string>,
+): DashboardWidgetRow[] {
+  return rows.map((row) => ({
+    ...row,
+    ...savedReportApplicability(row, offeredStandardKeys, offeredViewKeys),
+  }));
+}
+
+async function readLayoutSnapshot(
+  businessId: string,
+  target: DashboardWidgetTarget,
+): Promise<WidgetLayoutSnapshot> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const state = await widgetLayoutState(client, businessId, target);
+    const widgets = await widgetRowsForTarget(client, businessId, target);
+    await client.query("COMMIT");
+    return { exists: state !== null, revision: state?.revision ?? null, widgets };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function readUserLayoutSnapshots(
+  businessId: string,
+  personalTarget: DashboardWidgetTarget & { userId: string },
+  roleTarget: DashboardWidgetTarget & { userId?: never },
+): Promise<{ personal: WidgetLayoutSnapshot; role: WidgetLayoutSnapshot }> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const personalState = await widgetLayoutState(client, businessId, personalTarget);
+    const personalWidgets = await widgetRowsForTarget(client, businessId, personalTarget);
+    const roleState = await widgetLayoutState(client, businessId, roleTarget);
+    const roleWidgets = await widgetRowsForTarget(client, businessId, roleTarget);
+    await client.query("COMMIT");
+    return {
+      personal: { exists: personalState !== null, revision: personalState?.revision ?? null, widgets: personalWidgets },
+      role: { exists: roleState !== null, revision: roleState?.revision ?? null, widgets: roleWidgets },
+    };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
- * The Owner's day-to-day picture on first login after this phase ships:
- * today's revenue trend, cash/card reconciliation, what's selling, and who's
- * closing sales — the four things worth a glance without opening a report.
- * Seeded once (lazily, on first dashboard view); the Owner can then
- * rearrange or replace freely, same as any personal layout.
+ * The Owner's day-to-day report picture. The role-scoped default is seeded at
+ * most once; a saved empty role layout remains empty instead of being reseeded.
  */
 async function seedOwnerDashboardDefaults(businessId: string): Promise<void> {
+  const roleTarget: DashboardWidgetTarget = { role: "owner" };
+  const before = await query<{ revision: string }>(
+    "SELECT revision::text AS revision FROM dashboard_widget_layout_state WHERE business_id = $1 AND role = 'owner'",
+    [businessId],
+  );
+  if (before.rows[0]) return;
+
   const ids = await ensureStandardSavedReports(businessId);
-  // Preference order, not fixed positions: the first four this trade actually
-  // has are laid into the 2×2 below. «پرفروش‌ترین اقلام» is a menu report, so a
-  // jewellery shop skips it and takes the next candidate rather than being
-  // seeded a hole where its third tile should be — the old fixed-coordinate
-  // list left exactly that gap.
   const candidates: { key: string; chartType: ChartType }[] = [
     { key: "daily_sales_summary", chartType: "bar" },
     { key: "shift_reconciliation", chartType: "bar" },
@@ -1129,31 +1478,145 @@ async function seedOwnerDashboardDefaults(businessId: string): Promise<void> {
     { x: 0, y: 3 },
     { x: 6, y: 3 },
   ];
-  const chosen = candidates.filter((c) => ids.has(c.key)).slice(0, slots.length);
-  await saveDashboardWidgets(
-    businessId,
-    { role: "owner" },
-    chosen.map((c, index) => ({
-      savedReportId: ids.get(c.key)!,
-      chartType: c.chartType,
-      x: slots[index].x,
-      y: slots[index].y,
-      w: 6,
-      h: 3,
-    })),
-  );
+  const selected = candidates.filter((candidate) => ids.has(candidate.key)).slice(0, slots.length);
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await lockWidgetScope(client, businessId, roleTarget);
+    if (await widgetLayoutState(client, businessId, roleTarget, true)) {
+      await client.query("COMMIT");
+      return;
+    }
+
+    // A non-empty legacy row set without state is adopted intact, never replaced.
+    const existing = await widgetRowsForTarget(client, businessId, roleTarget, true);
+    let initial: WidgetInput[] = [];
+    if (existing.length === 0) {
+      const selectedIds = selected.map((candidate) => ids.get(candidate.key)!).filter(Boolean);
+      const availability = await widgetSavedReportAvailability(client, businessId, selectedIds);
+      initial = selected
+        .filter((candidate) => {
+          const reportId = ids.get(candidate.key);
+          return Boolean(reportId && availability.owned.has(reportId) && availability.applicable.has(reportId));
+        })
+        .map((candidate) => {
+          const index = selected.indexOf(candidate);
+          return {
+            savedReportId: ids.get(candidate.key)!,
+            chartType: candidate.chartType,
+            x: slots[index].x,
+            y: slots[index].y,
+            w: 6,
+            h: 3,
+          };
+        });
+    }
+
+    for (const widget of initial) await insertWidget(client, businessId, roleTarget, widget);
+    await insertWidgetLayoutState(client, businessId, roleTarget, randomUUID());
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
-async function queryWidgets(businessId: string, extraWhere: string, params: unknown[]): Promise<DashboardWidgetRow[]> {
-  const { rows } = await query<DashboardWidgetRow>(
-    `SELECT dw.id, dw.saved_report_id, dw.chart_type, dw.title, dw.x, dw.y, dw.w, dw.h,
-            sr.name AS report_name, sr.config AS report_config, sr.standard_key
-       FROM dashboard_widgets dw JOIN saved_reports sr ON sr.id = dw.saved_report_id
-      WHERE dw.business_id = $1 AND ${extraWhere}
-      ORDER BY dw.y, dw.x`,
-    params,
+async function ensureWidgetLayoutState(
+  businessId: string,
+  target: DashboardWidgetTarget,
+): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await lockWidgetScope(client, businessId, target);
+    if (!(await widgetLayoutState(client, businessId, target, true))) {
+      // Preserve a legacy non-empty row set and simply give it a durable revision.
+      await widgetRowsForTarget(client, businessId, target, true);
+      await insertWidgetLayoutState(client, businessId, target, randomUUID());
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** Adopt old personal rows without turning a genuinely absent layout into one. */
+async function adoptLegacyPersonalWidgetLayout(
+  businessId: string,
+  target: DashboardWidgetTarget & { userId: string },
+): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await lockWidgetScope(client, businessId, target);
+    if (!(await widgetLayoutState(client, businessId, target, true))) {
+      const rows = await widgetRowsForTarget(client, businessId, target, true);
+      if (rows.length > 0) await insertWidgetLayoutState(client, businessId, target, randomUUID());
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Serializes widget writes for one scope. The advisory lock also protects an
+ * empty layout, where `FOR UPDATE` has no row to lock. User transitions that
+ * read a role default always acquire role then user locks in that order.
+ */
+async function lockWidgetScope(
+  client: WidgetDbClient,
+  businessId: string,
+  target: DashboardWidgetTarget,
+): Promise<void> {
+  const key = `${businessId}:${"userId" in target ? `user:${target.userId}` : `role:${target.role}`}`;
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [key]);
+}
+
+interface WidgetSavedReportAvailability {
+  owned: Set<string>;
+  applicable: Set<string>;
+}
+
+/** Rechecks report ownership and trade applicability while the layout is locked. */
+async function widgetSavedReportAvailability(
+  client: WidgetDbClient,
+  businessId: string,
+  ids: string[],
+): Promise<WidgetSavedReportAvailability> {
+  if (ids.length === 0) return { owned: new Set(), applicable: new Set() };
+  const businessResult = await client.query<{ industry: Industry | null }>(
+    "SELECT industry FROM businesses WHERE id = $1 FOR SHARE",
+    [businessId],
   );
-  return rows;
+  const industry = businessResult.rows[0]?.industry;
+  if (!industry) return { owned: new Set(), applicable: new Set() };
+
+  const reportResult = await client.query<{ id: string; config: ReportConfig; standard_key: string | null }>(
+    `SELECT id, config, standard_key
+       FROM saved_reports
+      WHERE business_id = $1 AND id = ANY($2::uuid[])
+      FOR SHARE`,
+    [businessId, ids],
+  );
+  const offeredStandardKeys = new Set(standardReportsFor(industry).map((report) => report.key));
+  const offeredViewKeys = new Set(reportViewsFor(industry).map(({ key }) => key));
+  const owned = new Set(reportResult.rows.map((row) => row.id));
+  const applicable = new Set(
+    reportResult.rows
+      .filter((row) => savedReportApplicability(row, offeredStandardKeys, offeredViewKeys).applicable)
+      .map((row) => row.id),
+  );
+  return { owned, applicable };
 }
 
 export interface WidgetInput {
@@ -1166,45 +1629,275 @@ export interface WidgetInput {
   h: number;
 }
 
-/** Replaces a scope's whole widget layout in one transaction (drag-resize saves send the full grid). */
+export type WidgetLayoutWrite =
+  | { ok: true; revision: string; precondition: DashboardWidgetPrecondition }
+  | { ok: false; reason: "layout_changed" | "saved_report_not_applicable" | "unknown_saved_report" };
+
+/** The insert every dashboard widget write shares. */
+async function insertWidget(
+  client: WidgetDbClient,
+  businessId: string,
+  target: DashboardWidgetTarget,
+  widget: WidgetInput,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dashboard_widgets (business_id, user_id, role, saved_report_id, chart_type, title, x, y, w, h)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [
+      businessId,
+      "userId" in target ? target.userId : null,
+      "userId" in target ? null : target.role,
+      widget.savedReportId,
+      widget.chartType,
+      widget.title ?? null,
+      widget.x,
+      widget.y,
+      widget.w,
+      widget.h,
+    ],
+  );
+}
+
+async function insertWidgetLayoutState(
+  client: WidgetDbClient,
+  businessId: string,
+  target: DashboardWidgetTarget,
+  revision: string,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dashboard_widget_layout_state (business_id, user_id, role, revision)
+     VALUES ($1, $2, $3, $4::uuid)`,
+    [businessId, "userId" in target ? target.userId : null, "userId" in target ? null : target.role, revision],
+  );
+}
+
+async function advanceWidgetLayoutState(
+  client: WidgetDbClient,
+  businessId: string,
+  target: DashboardWidgetTarget,
+  revision: string,
+  stateExists: boolean,
+): Promise<void> {
+  if (!stateExists) {
+    await insertWidgetLayoutState(client, businessId, target, revision);
+    return;
+  }
+  await client.query(
+    `UPDATE dashboard_widget_layout_state
+        SET revision = $3::uuid, updated_at = now()
+      WHERE business_id = $1 AND ${layoutScopeWhere(target)}`,
+    [businessId, layoutScopeValue(target), revision],
+  );
+}
+
+function validLayoutPrecondition(
+  target: DashboardWidgetTarget,
+  precondition: DashboardWidgetPrecondition,
+): boolean {
+  const targetName = layoutName(target);
+  if (precondition.target.scope !== targetName || !precondition.source.revision) return false;
+  if (targetName === "role-default") {
+    return precondition.source.scope === "role-default" &&
+      precondition.target.revision !== null &&
+      precondition.source.revision === precondition.target.revision;
+  }
+  if (precondition.source.scope === "personal") {
+    return precondition.target.revision !== null &&
+      precondition.source.revision === precondition.target.revision;
+  }
+  return precondition.source.scope === "role-default" && precondition.target.revision === null;
+}
+
+/**
+ * Replaces a whole layout only when both the visible source and write target
+ * still match the revisions the caller read. When a user is inheriting a role
+ * layout, the source role and empty personal target are both checked while
+ * locked; the first replacement creates a durable personal state row, even if
+ * the submitted layout is empty.
+ */
 export async function saveDashboardWidgets(
   businessId: string,
-  scope: { userId: string } | { role: Role },
+  target: DashboardWidgetTarget,
   widgets: WidgetInput[],
-): Promise<void> {
+  precondition: DashboardWidgetPrecondition,
+  options: { preserveInapplicableSavedReportIds?: readonly string[] } = {},
+): Promise<WidgetLayoutWrite> {
+  if (!validLayoutPrecondition(target, precondition)) return { ok: false, reason: "layout_changed" };
+
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    if ("userId" in scope) {
-      await client.query("DELETE FROM dashboard_widgets WHERE business_id = $1 AND user_id = $2", [
-        businessId,
-        scope.userId,
-      ]);
+    if ("userId" in target && precondition.source.scope === "role-default") {
+      await lockWidgetScope(client, businessId, { role: target.role });
+    }
+    await lockWidgetScope(client, businessId, target);
+
+    const targetState = await widgetLayoutState(client, businessId, target, true);
+    const targetRows = await widgetRowsForTarget(client, businessId, target, true);
+    let sourceState = targetState;
+    let sourceRows = targetRows;
+    if ("userId" in target && precondition.source.scope === "role-default") {
+      const roleTarget: DashboardWidgetTarget = { role: target.role };
+      sourceState = await widgetLayoutState(client, businessId, roleTarget, true);
+      sourceRows = await widgetRowsForTarget(client, businessId, roleTarget, true);
+    }
+
+    if (
+      (targetState?.revision ?? null) !== precondition.target.revision ||
+      sourceState?.revision !== precondition.source.revision
+    ) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "layout_changed" };
+    }
+
+    const requestedIds = [...new Set(widgets.map((widget) => widget.savedReportId))];
+    if (requestedIds.some((id) => !UUID_RE.test(id))) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "unknown_saved_report" };
+    }
+    const availability = await widgetSavedReportAvailability(client, businessId, requestedIds);
+    if (requestedIds.some((id) => !availability.owned.has(id))) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "unknown_saved_report" };
+    }
+
+    // First-edit replacements are based on the inherited source, not the still-empty personal target.
+    const existingReportIds = new Set([
+      ...targetRows.map((widget) => widget.saved_report_id),
+      ...(precondition.source.scope === "role-default" ? sourceRows.map((widget) => widget.saved_report_id) : []),
+    ]);
+    const requestedIdSet = new Set(requestedIds);
+    const preservedIds = new Set(options.preserveInapplicableSavedReportIds ?? []);
+    if ([...preservedIds].some((id) => !existingReportIds.has(id) || !requestedIdSet.has(id))) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "saved_report_not_applicable" };
+    }
+    if (
+      requestedIds.some(
+        (id) => !availability.applicable.has(id) &&
+          (!existingReportIds.has(id) || !preservedIds.has(id)),
+      )
+    ) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "saved_report_not_applicable" };
+    }
+
+    if ("userId" in target) {
+      await client.query("DELETE FROM dashboard_widgets WHERE business_id = $1 AND user_id = $2", [businessId, target.userId]);
     } else {
-      await client.query("DELETE FROM dashboard_widgets WHERE business_id = $1 AND role = $2", [
-        businessId,
-        scope.role,
-      ]);
+      await client.query("DELETE FROM dashboard_widgets WHERE business_id = $1 AND role = $2", [businessId, target.role]);
     }
-    for (const widget of widgets) {
-      await client.query(
-        `INSERT INTO dashboard_widgets (business_id, user_id, role, saved_report_id, chart_type, title, x, y, w, h)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [
-          businessId,
-          "userId" in scope ? scope.userId : null,
-          "userId" in scope ? null : scope.role,
-          widget.savedReportId,
-          widget.chartType,
-          widget.title ?? null,
-          widget.x,
-          widget.y,
-          widget.w,
-          widget.h,
-        ],
-      );
-    }
+    for (const widget of widgets) await insertWidget(client, businessId, target, widget);
+
+    const revision = randomUUID();
+    await advanceWidgetLayoutState(client, businessId, target, revision, targetState !== null);
     await client.query("COMMIT");
+    const scope = layoutName(target);
+    return {
+      ok: true,
+      revision,
+      precondition: {
+        source: { scope, revision },
+        target: { scope, revision },
+      },
+    };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export type WidgetAppendWrite =
+  | { ok: true; revision: string; widget: WidgetInput }
+  | { ok: false; reason: "unknown_saved_report" | "saved_report_not_applicable" };
+
+/**
+ * Appends one widget atomically. If the user's personal layout has never been
+ * created, this transaction copies the locked role default first and then adds
+ * the new pin. A prior explicit empty personal layout is never repopulated.
+ */
+export async function appendDashboardWidget(
+  businessId: string,
+  target: DashboardWidgetTarget,
+  widget: Omit<WidgetInput, "x" | "y">,
+): Promise<WidgetAppendWrite> {
+  if ("userId" in target) {
+    const personalState = await query<{ revision: string }>(
+      "SELECT revision::text AS revision FROM dashboard_widget_layout_state WHERE business_id = $1 AND user_id = $2",
+      [businessId, target.userId],
+    );
+    if (!personalState.rows[0]) {
+      if (target.role === "owner") await seedOwnerDashboardDefaults(businessId);
+      else await ensureWidgetLayoutState(businessId, { role: target.role });
+    }
+  } else if (target.role === "owner") {
+    await seedOwnerDashboardDefaults(businessId);
+  } else {
+    await ensureWidgetLayoutState(businessId, target);
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    if ("userId" in target) await lockWidgetScope(client, businessId, { role: target.role });
+    await lockWidgetScope(client, businessId, target);
+
+    const targetState = await widgetLayoutState(client, businessId, target, true);
+    const existing = await widgetRowsForTarget(client, businessId, target, true);
+    let inherited: DashboardWidgetRow[] = [];
+    const shouldInherit = "userId" in target && targetState === null && existing.length === 0;
+    if (shouldInherit && "userId" in target) {
+      const roleTarget: DashboardWidgetTarget = { role: target.role };
+      if (!(await widgetLayoutState(client, businessId, roleTarget, true))) {
+        await insertWidgetLayoutState(client, businessId, roleTarget, randomUUID());
+      }
+      inherited = await widgetRowsForTarget(client, businessId, roleTarget, true);
+      for (const row of inherited) {
+        await insertWidget(client, businessId, target, {
+          savedReportId: row.saved_report_id,
+          chartType: row.chart_type,
+          title: row.title,
+          x: row.x,
+          y: row.y,
+          w: row.w,
+          h: row.h,
+        });
+      }
+    }
+
+    if (!UUID_RE.test(widget.savedReportId)) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "unknown_saved_report" };
+    }
+    const availability = await widgetSavedReportAvailability(client, businessId, [widget.savedReportId]);
+    if (!availability.owned.has(widget.savedReportId)) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "unknown_saved_report" };
+    }
+    if (!availability.applicable.has(widget.savedReportId)) {
+      await client.query("ROLLBACK");
+      return { ok: false, reason: "saved_report_not_applicable" };
+    }
+
+    const allCurrent = shouldInherit ? [...inherited, ...existing] : existing;
+    const nextY = allCurrent.reduce((maximum, row) => Math.max(maximum, row.y + row.h), 0);
+    const placed: WidgetInput = {
+      savedReportId: widget.savedReportId,
+      chartType: widget.chartType,
+      title: widget.title ?? null,
+      x: 0,
+      y: nextY,
+      w: widget.w,
+      h: widget.h,
+    };
+    await insertWidget(client, businessId, target, placed);
+
+    const revision = randomUUID();
+    await advanceWidgetLayoutState(client, businessId, target, revision, targetState !== null);
+    await client.query("COMMIT");
+    return { ok: true, revision, widget: placed };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

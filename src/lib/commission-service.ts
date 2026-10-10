@@ -294,6 +294,8 @@ export interface StaffCommissionRow {
 export async function staffCommissionReport(
   businessId: string,
   opts?: { from?: string | null; to?: string | null },
+  /** Optional source branch for branch-scoped AI reads; omitted for the central commission screen. */
+  locationId?: string | null,
 ): Promise<StaffCommissionRow[]> {
   const { rows } = await query<{
     employee_id: string;
@@ -308,12 +310,18 @@ export async function staffCommissionReport(
             COUNT(*)::text AS line_count
        FROM commission_accruals a
        LEFT JOIN users u ON u.id = a.employee_id
+       LEFT JOIN order_items oi ON a.source_type = 'order_item' AND oi.id = a.source_id
+       LEFT JOIN orders o ON a.source_type = 'retail_invoice' AND o.id = a.source_id
+       LEFT JOIN order_amendments am ON a.source_type = 'order_amendment' AND am.id = a.source_id
+       LEFT JOIN serial_returns sr ON a.source_type = 'serial_return' AND sr.id = a.source_id
+       LEFT JOIN journal_entries je ON je.id = a.entry_id
       WHERE a.business_id = $1
         AND ($2::date IS NULL OR a.created_at::date >= $2::date)
         AND ($3::date IS NULL OR a.created_at::date <= $3::date)
+        AND ($4::uuid IS NULL OR $4 = COALESCE(oi.location_id, o.location_id, am.location_id, sr.location_id, je.location_id))
       GROUP BY a.employee_id, u.full_name
       ORDER BY COALESCE(SUM(a.amount), 0) DESC`,
-    [businessId, opts?.from ?? null, opts?.to ?? null],
+    [businessId, opts?.from ?? null, opts?.to ?? null, locationId ?? null],
   );
   return rows.map((r) => ({
     employeeId: r.employee_id,

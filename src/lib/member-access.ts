@@ -39,8 +39,17 @@ export interface MemberAccess {
 export async function memberAccessFor(
   session: SessionPayload,
 ): Promise<MemberAccess | null> {
+  return memberAccessForUser(session.businessId, session.sub, session.locationId);
+}
+
+/** The same live access lookup for a non-session caller, such as an MCP token's authorizing member. */
+export async function memberAccessForUser(
+  businessId: string,
+  userId: string,
+  locationId: string | null = null,
+): Promise<MemberAccess | null> {
   const { rows } = await withTenant(
-    session.businessId,
+    businessId,
     () =>
       query<{ role: Role; permissions: unknown; is_active: boolean; custom_role_permissions: string[] | null }>(
         `SELECT u.role, u.permissions, u.is_active,
@@ -48,9 +57,9 @@ export async function memberAccessFor(
            FROM users u
            LEFT JOIN tenant_roles tr ON tr.id = u.custom_role_id AND tr.business_id = u.business_id
           WHERE u.id = $1 AND u.business_id = $2`,
-        [session.sub, session.businessId],
+        [userId, businessId],
       ),
-    { locationId: session.locationId, userId: session.sub },
+    { locationId, userId },
   );
   const member = rows[0];
   if (!member) return null;

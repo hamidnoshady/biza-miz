@@ -15,7 +15,8 @@
  * inherited that fix by losing its private copy.
  */
 import { displayCell, sheetsToXlsxBuffer, toCsv } from "./data-transfer/codecs";
-import { formatShiftWindow } from "./jalali";
+import { toPersianDigits } from "./digits";
+import { formatJalali, formatShiftWindow } from "./jalali";
 import { formatMoney, moneyToInput, type MoneyUnit } from "./money";
 
 export interface ReportColumn {
@@ -38,10 +39,20 @@ export interface ReportTable {
  * the one addition here is the shift window, which is a reports-only string
  * format (`a~b`) that must show both times rather than the raw value.
  */
+/** A `YYYY-MM-DD` held as text — how every reporting view emits a `date` column over JSON. */
+const ISO_DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
 export function cellValue(value: unknown): string | number {
   if (typeof value === "string") {
     const window = formatShiftWindow(value);
     if (window) return window;
+    // A date column arrives from PostgreSQL as text (`sale_date::text`, a
+    // date_trunc bucket), not as a JS Date, so `displayCell` cannot know to
+    // convert it. Issue #819: the screen shows Jalali while CSV/Excel/PDF
+    // showed «2026-08-11» for the same row — one report, five date labels.
+    // Date-only strings are unambiguous, so they are Shamsi in every file,
+    // exactly like the screen's formatDim.
+    if (ISO_DATE_ONLY.test(value)) return toPersianDigits(formatJalali(value));
   }
   return displayCell(value);
 }

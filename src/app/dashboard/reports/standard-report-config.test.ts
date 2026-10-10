@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   COMPARABLE_SHAPES,
   DOCUMENT_SHAPES,
+  canToggleBusinessWideScope,
   EXPORT_KIND_BY_SHAPE,
   SNAPSHOT_SHAPES,
   UNDATED_SHAPES,
@@ -134,6 +135,15 @@ describe("isInvalidRange", () => {
 
   it("does not apply to a snapshot, whose earlier date is the comparison date", () => {
     expect(isInvalidRange("balance_sheet", "2023-12-31", "2024-12-31")).toBe(false);
+  });
+});
+
+describe("business-wide scope controls", () => {
+  it("matches the canonical allowlist and still requires the elevated capability", () => {
+    expect(canToggleBusinessWideScope("food_cost_variance", true)).toBe(true);
+    expect(canToggleBusinessWideScope("profit_and_loss", true)).toBe(true);
+    expect(canToggleBusinessWideScope("daily_sales_summary", true)).toBe(false);
+    expect(canToggleBusinessWideScope("food_cost_variance", false)).toBe(false);
   });
 });
 

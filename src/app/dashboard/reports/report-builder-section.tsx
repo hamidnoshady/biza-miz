@@ -2,9 +2,11 @@
 
 import { EmptyState, LoadingSkeleton, SectionCard, SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { useMoney } from "@/components/money/money-context";
+import { toPersianDigits } from "@/lib/digits";
 import { JalaliDatePicker } from "../jalali-date-picker";
 import { BusinessDayRangePresets } from "./business-day-range";
 import { ErrorBox, Field, inputClass } from "../ui";
@@ -17,26 +19,49 @@ import {
   type ChartType,
   type ReportRow,
 } from "./report-ui";
+import type { ReportCapabilities } from "@/lib/report-permissions";
+import type { ReportConfig, ReportFilterControl, ReportFilterOption } from "@/lib/reports";
+import {
+  builderConfigFromState,
+  builderStateFromConfig,
+  previewIsStale,
+  previewMetadata,
+  type PreviewMeta,
+  type SortBy,
+  type SortDir,
+} from "./report-builder-config";
 
+/**
+ * What `/api/reports/views` publishes about one source. Every picker and every
+ * filter below is built from this — the engine's own catalogue — rather than
+ * from a hand-written list that can drift away from the SQL whitelist (issue
+ * #819: a filter the engine supports but the builder never offered is a
+ * capability hidden behind a UI omission).
+ */
 interface ViewMeta {
   key: string;
   label: string;
   hasDateColumn: boolean;
   dimensions: { key: string; label: string }[];
-  metrics: { key: string; label: string; aggregations: Aggregation[] }[];
+  metrics: { key: string; label: string; money: boolean; aggregations: Aggregation[] }[];
+  /** Filter presentation metadata remains paired with the engine whitelist. */
+  filters: { key: string; label: string; control: ReportFilterControl }[];
 }
+
+export type { SortBy, SortDir } from "./report-builder-config";
 
 interface SavedReportRow {
   id: string;
   name: string;
-  config: {
-    view: string;
-    metric: string;
-    aggregation: Aggregation;
-    dimension: string;
-    filters?: { dateFrom?: string; dateTo?: string };
-  };
+  /** Optional free text saying what the report is for (issue #819, Step 8). */
+  description: string | null;
+  /** Bumped by every edit, so the list can say whether a shared report changed. */
+  version: number;
+  /** The stored config; `ReportConfig` is the one shape both sides agree on. */
+  config: ReportConfig;
   is_standard: boolean;
+  applicable?: boolean;
+  applicable_reason?: "standard_report_not_in_trade" | "unknown_view";
 }
 
 const AGG_LABELS: Record<Aggregation, string> = {
@@ -46,7 +71,17 @@ const AGG_LABELS: Record<Aggregation, string> = {
   count_distinct: "تعداد یکتا",
 };
 
-export function ReportBuilderSection() {
+/**
+ * The Report Builder.
+ *
+ * `capabilities` comes from the server page (issue #819), so the actions the
+ * member cannot perform are not drawn: saving, renaming and deleting a saved
+ * report need `reports.manage`, and the export buttons need `reports.export`.
+ * The routes enforce the same keys — this only keeps the screen from offering
+ * a control whose request could only answer 403.
+ */
+export function ReportBuilderSection({ capabilities }: { capabilities: ReportCapabilities }) {
+  const money = useMoney();
   const [views, setViews] = useState<ViewMeta[] | null>(null);
   const [saved, setSaved] = useState<SavedReportRow[] | null>(null);
 
@@ -56,13 +91,90 @@ export function ReportBuilderSection() {
   const [dimension, setDimension] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Engine-supported equality filters (view.filters), keyed by filter key.
+  const [equals, setEquals] = useState<Record<string, string>>({});
+  const [filterOptions, setFilterOptions] = useState<Record<string, ReportFilterOption[]>>({});
+  const [filterOptionsLoading, setFilterOptionsLoading] = useState(false);
+  const [filterOptionsError, setFilterOptionsError] = useState("");
+  const [filterOptionsReload, setFilterOptionsReload] = useState(0);
+  const filterOptionsSequence = useRef(0);
+  const filterOptionsController = useRef<AbortController | null>(null);
+  const [sortBy, setSortBy] = useState<"" | SortBy>("");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [limit, setLimit] = useState("");
   const [chartType, setChartType] = useState<ChartType>("bar");
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [rows, setRows] = useState<ReportRow[] | null>(null);
+  /**
+   * The config that produced `rows`. Export, pin and the stale notice all read
+   * this rather than the live draft: what is downloaded must be what is on
+   * screen (issue #819 — the file used to be built from controls the reader had
+   * changed but never previewed).
+   */
+  const [loadedConfig, setLoadedConfig] = useState<ReportConfig | null>(null);
+  /**
+   * How `rows` must be rendered, resolved from `loadedConfig` when the result
+   * landed — never from the draft (see `previewMetadata`). Switching the
+   * measure or the source moves the controls, not the meaning of the numbers
+   * already on screen.
+   */
+  const [loadedMeta, setLoadedMeta] = useState<PreviewMeta | null>(null);
   const [error, setError] = useState("");
+  /** Success/confirmation feedback for the saved-report list, announced politely. */
+  const [notice, setNotice] = useState("");
+  /** Which mutation is running, so one entry is busy without freezing the list. */
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  /** The entry awaiting delete confirmation — deleting cascades to dashboard widgets. */
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  /**
+   * Focus target for the delete confirmation (issue #819).
+   *
+   * Confirming swaps the row's whole action group, so the button the member just
+   * pressed is removed from the DOM and focus falls back to `<body>` — a
+   * keyboard user loses their place with no announcement. Focus moves to the
+   * confirm button when the question appears and back to the delete button when
+   * it is dismissed.
+   */
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const deleteButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  useEffect(() => {
+    if (confirmingDelete) confirmButtonRef.current?.focus();
+  }, [confirmingDelete]);
+  const [listError, setListError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Monotonic request id + the in-flight request: a slow first preview must
+  // never overwrite a newer one, and a preview superseded by a filter change
+  // is aborted rather than left to land late.
+  const previewSeq = useRef(0);
+  const inFlight = useRef<AbortController | null>(null);
+  useEffect(() => () => inFlight.current?.abort(), []);
+
+  /**
+   * Drops any preview in flight and clears the result it would have produced
+   * (issue #819).
+   *
+   * The sequence guard inside `preview()` only fires when a *newer preview*
+   * supersedes an older one. A source change or a saved-report load clears the
+   * rows without starting a preview, so the guard had nothing to compare
+   * against and a slow response for the old source landed afterwards — writing
+   * its rows and its `loadedConfig` back onto a form that was now describing a
+   * different report, with an Export button that would happily build a file
+   * from them.
+   *
+   * Bumping the sequence is what makes the late response inert; aborting is
+   * what stops it doing the work at all. `busy` is cleared here because the
+   * `finally` in `preview()` skips it for a superseded request — otherwise the
+   * form would stay disabled forever.
+   */
+  function invalidatePreview() {
+    previewSeq.current += 1;
+    inFlight.current?.abort();
+    inFlight.current = null;
+    setBusy(false);
+  }
 
   async function loadSaved() {
     try {
@@ -101,6 +213,61 @@ export function ReportBuilderSection() {
     () => views?.find((item) => item.key === view) ?? null,
     [views, view],
   );
+
+  function invalidateFilterOptions() {
+    filterOptionsSequence.current += 1;
+    filterOptionsController.current?.abort();
+    filterOptionsController.current = null;
+    setFilterOptions({});
+    setFilterOptionsLoading(false);
+    setFilterOptionsError("");
+  }
+
+  useEffect(() => {
+    filterOptionsController.current?.abort();
+    const sequence = ++filterOptionsSequence.current;
+    const source = currentView;
+    const needsDynamicOptions = source?.filters.some((filter) => filter.control.kind === "entity") ?? false;
+    setFilterOptions({});
+    setFilterOptionsError("");
+
+    if (!source || !needsDynamicOptions) {
+      setFilterOptionsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    filterOptionsController.current = controller;
+    setFilterOptionsLoading(true);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/reports/filter-options?view=${encodeURIComponent(source.key)}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("filter_options_failed");
+        const payload: unknown = await response.json();
+        if (
+          typeof payload !== "object" || payload === null ||
+          !("options" in payload) || typeof payload.options !== "object" || payload.options === null
+        ) {
+          throw new Error("filter_options_invalid");
+        }
+        if (sequence !== filterOptionsSequence.current || controller.signal.aborted) return;
+        setFilterOptions(payload.options as Record<string, ReportFilterOption[]>);
+      } catch {
+        if (controller.signal.aborted || sequence !== filterOptionsSequence.current) return;
+        setFilterOptionsError("بارگذاری گزینه‌های فیلتر ناموفق بود. دوباره تلاش کنید.");
+      } finally {
+        if (sequence === filterOptionsSequence.current) setFilterOptionsLoading(false);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+      if (filterOptionsController.current === controller) filterOptionsController.current = null;
+    };
+  }, [currentView, filterOptionsReload]);
+
   const currentMetric = useMemo(
     () => currentView?.metrics.find((item) => item.key === metric) ?? null,
     [currentView, metric],
@@ -133,18 +300,40 @@ export function ReportBuilderSection() {
       setDateFrom("");
       setDateTo("");
     }
+    // Equality filters and dynamic option lists belong to one source only.
+    invalidateFilterOptions();
+    setEquals({});
+    // Invalidate before clearing, or a response for the previous source lands
+    // on a form that no longer describes it.
+    invalidatePreview();
     setRows(null);
+    setLoadedConfig(null);
+    setLoadedMeta(null);
     setError("");
   }
 
-  function currentConfig() {
-    return {
-      view,
-      metric,
-      aggregation,
-      dimension,
-      filters: { dateFrom: dateFrom || undefined, dateTo: dateTo || undefined },
-    };
+  /**
+   * The loaded form as a report config. The same object feeds the preview, the
+   * save/update body, the export and the pin, so what is exported is what was
+   * on screen — not a second, separately-assembled config (issue #819).
+   */
+  function currentConfig(): ReportConfig {
+    return builderConfigFromState(
+      {
+        view,
+        metric,
+        aggregation,
+        dimension,
+        dateFrom,
+        dateTo,
+        equals,
+        sortBy,
+        sortDir,
+        limit,
+        chartType,
+      },
+      (currentView?.filters ?? []).map((filter) => filter.key),
+    );
   }
 
   async function preview() {
@@ -152,24 +341,40 @@ export function ReportBuilderSection() {
       setError("تاریخ شروع نمی‌تواند بعد از تاریخ پایان باشد.");
       return;
     }
+    inFlight.current?.abort();
+    const controller = new AbortController();
+    inFlight.current = controller;
+    const seq = ++previewSeq.current;
+    // The exact object that goes on the wire is remembered with the rows, so
+    // "what produced this result" is a fact rather than a reconstruction.
+    const config = currentConfig();
+    // Resolved now, from the config that is about to run, so the rows and the
+    // way they are rendered are decided together.
+    const meta = previewMetadata(config, views);
     setBusy(true);
     setError("");
     try {
       const response = await fetch("/api/reports/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(currentConfig()),
+        body: JSON.stringify(config),
+        signal: controller.signal,
       });
       const data = await response.json().catch(() => ({}));
+      if (seq !== previewSeq.current) return; // a newer preview is on its way
       if (!response.ok) {
         setError(data.details?.join(" ") ?? "پیکربندی گزارش نامعتبر است.");
         return;
       }
       setRows(data.rows ?? []);
-    } catch {
+      setLoadedConfig(config);
+      setLoadedMeta(meta);
+    } catch (cause) {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      if (seq !== previewSeq.current) return;
       setError("دریافت پیش‌نمایش ناموفق بود. اتصال شبکه را بررسی کنید.");
     } finally {
-      setBusy(false);
+      if (seq === previewSeq.current) setBusy(false);
     }
   }
 
@@ -187,7 +392,7 @@ export function ReportBuilderSection() {
       const response = await fetch(url, {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, config: currentConfig() }),
+        body: JSON.stringify({ name, description, config: currentConfig() }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -196,6 +401,8 @@ export function ReportBuilderSection() {
       }
       setEditingId(null);
       setName("");
+      setDescription("");
+      setNotice(editingId ? "گزارش به‌روزرسانی شد." : "گزارش ذخیره شد.");
       void loadSaved();
     } catch {
       setError("ذخیرهٔ گزارش ناموفق بود. اتصال شبکه را بررسی کنید.");
@@ -204,21 +411,96 @@ export function ReportBuilderSection() {
     }
   }
 
+  /**
+   * Loads every stored field back into the form. Anything dropped here is lost
+   * on the next save: the old version restored only view/metric/aggregation/
+   * dimension/dates, so editing a saved report silently reset its filters,
+   * sort, Top-N and chosen chart (issue #819).
+   */
   function loadIntoBuilder(report: SavedReportRow) {
-    setView(report.config.view);
-    setMetric(report.config.metric);
-    setAggregation(report.config.aggregation);
-    setDimension(report.config.dimension);
-    setDateFrom(report.config.filters?.dateFrom ?? "");
-    setDateTo(report.config.filters?.dateTo ?? "");
+    const state = builderStateFromConfig(report.config);
+    invalidateFilterOptions();
+    setView(state.view);
+    setMetric(state.metric);
+    setAggregation(state.aggregation);
+    setDimension(state.dimension);
+    setDateFrom(state.dateFrom);
+    setDateTo(state.dateTo);
+    setEquals(state.equals);
+    setSortBy(state.sortBy);
+    setSortDir(state.sortDir);
+    setLimit(state.limit);
+    setChartType(state.chartType);
     setName(report.name);
+    setDescription(report.description ?? "");
     setEditingId(report.id);
+    // Same reason as `selectView`: the form now describes a different report,
+    // so a preview still in flight for the previous one must not land.
+    invalidatePreview();
     setRows(null);
+    setLoadedConfig(null);
+    setLoadedMeta(null);
+    setError("");
+    setNotice("");
+    setListError("");
   }
 
+  /**
+   * Deletes a saved report, with the failure handling the old one-liner did not
+   * have (issue #819): it ignored `response.ok`, so a 403 or 404 looked exactly
+   * like success and the row simply stayed. Deleting a report also removes every
+   * dashboard widget pinned to it — `dashboard_widgets.saved_report_id` is
+   * `ON DELETE CASCADE` (migration 0008) — so the confirmation says so.
+   */
   async function remove(id: string) {
-    await fetch("/api/reports/saved/" + id, { method: "DELETE" });
-    loadSaved();
+    setPendingId(id);
+    setListError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/reports/saved/" + id, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        setListError("حذف گزارش انجام نشد. دسترسی یا اتصال را بررسی کنید.");
+        return;
+      }
+      setConfirmingDelete(null);
+      setNotice("گزارش حذف شد؛ ویجت‌های سنجاق‌شدهٔ آن هم از داشبورد برداشته شدند.");
+      if (editingId === id) {
+        setEditingId(null);
+        setName("");
+      }
+      void loadSaved();
+    } catch {
+      setListError("حذف گزارش انجام نشد. اتصال شبکه را بررسی کنید.");
+    } finally {
+      setPendingId(null);
+    }
+  }
+
+  /** A copy of a saved report under a new name — the same config, a new row. */
+  async function duplicate(report: SavedReportRow) {
+    setPendingId(report.id);
+    setListError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/reports/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: `${report.name} (کپی)`, config: report.config }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setListError(data.details?.join(" ") ?? "ساخت نسخهٔ کپی انجام نشد.");
+        return;
+      }
+      setNotice("نسخهٔ کپی ساخته شد.");
+      void loadSaved();
+    } catch {
+      setListError("ساخت نسخهٔ کپی انجام نشد. اتصال شبکه را بررسی کنید.");
+    } finally {
+      setPendingId(null);
+    }
   }
 
   if (!views) {
@@ -226,6 +508,25 @@ export function ReportBuilderSection() {
       <SectionCardSkeleton rows={4} label="در حال بارگذاری گزارش‌ساز" />
     );
   }
+
+  /*
+   * Everything the preview renders with comes from `loadedMeta` — resolved from
+   * the config that produced the rows — and never from `currentView` /
+   * `currentMetric`, which describe the *next* report (issue #819). Reading them
+   * here meant changing the measure from money to count silently reformatted the
+   * rows already on screen through the money formatter.
+   */
+  const formatValue = loadedMeta?.money ? money.format : undefined;
+  const previewLabel = loadedMeta?.label ?? "";
+  const previewChartType = loadedMeta?.chartType ?? chartType;
+
+  /**
+   * True when the controls no longer describe the result on screen (issue
+   * #819). Compared as JSON over the config the form would submit — the same
+   * object the preview sent — so "dirty" means exactly "the next Preview
+   * would send something different".
+   */
+  const isDirty = previewIsStale(currentConfig(), loadedConfig);
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -325,6 +626,125 @@ export function ReportBuilderSection() {
             </fieldset>
           ) : null}
 
+          {(currentView?.filters.length ?? 0) > 0 ? (
+            <fieldset className="mt-3 rounded-xl border border-border/80 bg-muted p-3 sm:p-4">
+              <legend className="px-1 text-sm font-semibold text-foreground">
+                فیلترها
+              </legend>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                فیلترهای پشتیبانی‌شدهٔ همین منبع داده. مقدار خالی یعنی فیلتر اعمال نشود.
+              </p>
+              <div className="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {currentView?.filters.map((filter) => {
+                  const selectedValue = equals[filter.key] ?? "";
+                  const declaredOptions = filter.control.kind === "enum"
+                    ? [...filter.control.options]
+                    : filter.control.kind === "entity"
+                      ? filterOptions[filter.key] ?? []
+                      : [];
+                  const options = [
+                    { value: "", label: "بدون فیلتر" },
+                    ...declaredOptions,
+                    ...(selectedValue && !declaredOptions.some((option) => option.value === selectedValue)
+                      ? [{
+                          value: selectedValue,
+                          label: filter.control.kind === "entity"
+                            ? "مقدار پیشین (در این شعبه در دسترس نیست)"
+                            : `مقدار پیشین: ${selectedValue}`,
+                        }]
+                      : []),
+                  ];
+
+                  return (
+                    <div key={filter.key} className="block">
+                      <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                        {filter.label}
+                      </span>
+                      {filter.control.kind === "text" ? (
+                        <input
+                          className={inputClass}
+                          value={selectedValue}
+                          placeholder={filter.label}
+                          aria-label={filter.label}
+                          onChange={(event) =>
+                            setEquals((current) => ({ ...current, [filter.key]: event.target.value }))
+                          }
+                        />
+                      ) : (
+                        <SearchableSelect
+                          className={inputClass}
+                          ariaLabel={filter.label}
+                          value={selectedValue}
+                          onChange={(value) =>
+                            setEquals((current) => ({ ...current, [filter.key]: value }))
+                          }
+                          options={options}
+                          loading={filter.control.kind === "entity" && filterOptionsLoading}
+                          emptyText={filter.control.kind === "entity" ? "گزینه‌ای در این شعبه نیست." : "گزینه‌ای یافت نشد."}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {filterOptionsLoading ? (
+                <LoadingSkeleton rows={1} compact label="در حال بارگذاری گزینه‌های فیلتر" className="mt-2" />
+              ) : null}
+              {filterOptionsError ? (
+                <div role="alert" className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+                  <span>{filterOptionsError}</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setFilterOptionsReload((value) => value + 1)}>
+                    تلاش دوباره
+                  </Button>
+                </div>
+              ) : null}
+            </fieldset>
+          ) : null}
+
+          <div className="mt-3 grid gap-3 rounded-xl border border-border/80 bg-muted p-3 sm:grid-cols-3 sm:p-4">
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                ترتیب
+              </span>
+              <SearchableSelect
+                className={inputClass}
+                value={sortBy}
+                onChange={(value) => setSortBy(value as "" | SortBy)}
+                options={[
+                  { value: "", label: "پیش‌فرض منبع" },
+                  { value: "dimension", label: "بر اساس بُعد" },
+                  { value: "metric", label: "بر اساس مقدار" },
+                ]}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                جهت ترتیب
+              </span>
+              <SearchableSelect
+                className={inputClass}
+                value={sortDir}
+                onChange={(value) => setSortDir(value as SortDir)}
+                options={[
+                  { value: "desc", label: "نزولی" },
+                  { value: "asc", label: "صعودی" },
+                ]}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                حداکثر ردیف (Top-N)
+              </span>
+              <input
+                className={inputClass}
+                inputMode="numeric"
+                placeholder="بدون محدودیت"
+                value={limit}
+                onChange={(event) => setLimit(event.target.value.replace(/[^\d]/g, ""))}
+              />
+            </label>
+          </div>
+
           <div className="mt-5 grid gap-3 border-t border-border pt-5 lg:grid-cols-[auto_minmax(11rem,1fr)_minmax(12rem,1fr)_auto] lg:items-end">
             <Button type="button" size="lg" onClick={preview} disabled={busy} className="px-5 font-semibold">
               پیش‌نمایش
@@ -359,33 +779,58 @@ export function ReportBuilderSection() {
               />
             </label>
 
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-              <Button
-                type="button"
-                variant="outline"
-                size="lg"
-                onClick={save}
-                disabled={busy}
-                className="font-semibold"
-              >
-                {editingId ? "به‌روزرسانی گزارش" : "ذخیرهٔ گزارش"}
-              </Button>
-              {editingId ? (
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                توضیح (اختیاری)
+              </span>
+              <input
+                className={inputClass}
+                placeholder="این گزارش برای چه پرسشی است؟"
+                value={description}
+                maxLength={500}
+                onChange={(event) => setDescription(event.target.value)}
+              />
+            </label>
+
+            {capabilities.canManageSavedReports ? (
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   size="lg"
-                  onClick={() => {
-                    setEditingId(null);
-                    setName("");
-                  }}
-                  className="text-muted-foreground"
+                  onClick={save}
+                  disabled={busy}
+                  className="font-semibold"
                 >
-                  انصراف از ویرایش
+                  {editingId ? "به‌روزرسانی گزارش" : "ذخیرهٔ گزارش"}
                 </Button>
-              ) : null}
-            </div>
+                {editingId ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="lg"
+                    onClick={() => {
+                      setEditingId(null);
+                      setName("");
+                      setDescription("");
+                    }}
+                    className="text-muted-foreground"
+                  >
+                    انصراف از ویرایش
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
           </div>
+
+          {rows !== null && isDirty ? (
+            <p
+              role="status"
+              className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100"
+            >
+              تنظیمات تغییر کرده‌اند — برای به‌روزرسانی نتیجه، پیش‌نمایش را اجرا کنید.
+            </p>
+          ) : null}
 
           {rows !== null ? (
             <section
@@ -393,23 +838,41 @@ export function ReportBuilderSection() {
               className="mt-6 space-y-5 border-t border-border pt-5"
             >
               <ChartPreview
-                chartType={chartType}
+                chartType={previewChartType}
                 data={rowsToChartData(rows)}
-                label={name || currentView?.label || ""}
+                label={name || previewLabel}
+                formatValue={formatValue}
               />
               <DataTable
                 columns={["بُعد", "مقدار"]}
                 data={rowsToChartData(rows)}
+                formatValue={formatValue}
               />
-              <div className="border-t border-border pt-4">
-                <ExportButtons
-                  request={{
-                    title: name || currentView?.label || "گزارش",
-                    kind: "chart",
-                    config: currentConfig(),
-                  }}
-                />
-              </div>
+              {capabilities.canExportReports ? (
+                <div className="border-t border-border pt-4">
+                  {/*
+                    The file is built from `loadedConfig` — the config that
+                    produced the rows above — never from the live draft, so it
+                    cannot disagree with what the reader is looking at. While the
+                    draft is dirty the buttons are disabled anyway; that is the
+                    "optionally disable export until Preview runs again" half of
+                    the issue's fix, and belt-and-braces with the config above.
+                  */}
+                  <ExportButtons
+                    disabled={isDirty}
+                    request={{
+                      title: name || previewLabel || "گزارش",
+                      kind: "chart",
+                      config: loadedConfig ?? undefined,
+                    }}
+                  />
+                  {isDirty ? (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      خروجی از نتیجهٔ فعلی ساخته می‌شود؛ ابتدا پیش‌نمایش را اجرا کنید.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </section>
           ) : null}
         </div>
@@ -420,6 +883,20 @@ export function ReportBuilderSection() {
         description="گزارش‌هایی که خودتان ساخته‌اید — قابل ویرایش، سنجاق به داشبورد یا حذف."
         flush
       >
+        {/* Feedback for the list's mutations: announced, and never a message
+            about one report drawn on another one. */}
+        <div className="px-4 pt-3 sm:px-5">
+          {listError ? (
+            <p role="alert" className="text-xs text-destructive">
+              {listError}
+            </p>
+          ) : null}
+          {notice ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              {notice}
+            </p>
+          ) : null}
+        </div>
         <ul className="divide-y divide-border px-4 sm:px-5">
           {saved === null ? (
             <li className="py-3">
@@ -427,39 +904,116 @@ export function ReportBuilderSection() {
             </li>
           ) : null}
 
-          {customReports.map((report) => (
-            <li
-              key={report.id}
-              className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <span className="min-w-0 break-words font-semibold text-foreground">
-                {report.name}
-              </span>
-              <div className="grid shrink-0 gap-2 sm:flex sm:flex-wrap">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="lg"
-                  onClick={() => loadIntoBuilder(report)}
-                >
-                  ویرایش
-                </Button>
-                <PinToDashboardButton
-                  savedReportId={report.id}
-                  chartType="bar"
-                  title={report.name}
-                />
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="lg"
-                  onClick={() => remove(report.id)}
-                >
-                  حذف
-                </Button>
-              </div>
-            </li>
-          ))}
+          {customReports.map((report) => {
+            const pending = pendingId === report.id;
+            const confirming = confirmingDelete === report.id;
+            return (
+              <li
+                key={report.id}
+                className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <span className="min-w-0">
+                  <span className="block break-words font-semibold text-foreground">
+                    {report.name}
+                  </span>
+                  {report.description ? (
+                    <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
+                      {report.description}
+                    </span>
+                  ) : null}
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    نسخهٔ {toPersianDigits(report.version)}
+                  </span>
+                  {report.applicable === false ? (
+                    <span className="mt-1 block text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      این پیکربندی با صنف یا نسخهٔ فعلی گزارش‌ساز سازگار نیست؛ می‌توانید آن را ویرایش یا حذف کنید، اما تا اصلاح قابل اجرا یا سنجاق نیست.
+                    </span>
+                  ) : null}
+                </span>
+                {confirming ? (
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <span className="text-xs leading-5 text-muted-foreground">
+                      این گزارش و ویجت‌های سنجاق‌شدهٔ آن حذف می‌شوند. مطمئنید؟
+                    </span>
+                    <Button
+                      ref={confirmButtonRef}
+                      type="button"
+                      variant="destructive"
+                      size="lg"
+                      disabled={pending}
+                      onClick={() => remove(report.id)}
+                    >
+                      {pending ? "در حال حذف…" : "تأیید حذف"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="lg"
+                      disabled={pending}
+                      onClick={() => {
+                        setConfirmingDelete(null);
+                        deleteButtonRefs.current[report.id]?.focus();
+                      }}
+                    >
+                      انصراف
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid shrink-0 gap-2 sm:flex sm:flex-wrap">
+                    {capabilities.canManageSavedReports ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="lg"
+                        disabled={pending}
+                        onClick={() => loadIntoBuilder(report)}
+                      >
+                        ویرایش / تغییر نام
+                      </Button>
+                    ) : null}
+                    {capabilities.canManageSavedReports ? (
+                      <PinToDashboardButton
+                        savedReportId={report.id}
+                        chartType={report.config.visualization ?? "bar"}
+                        title={report.name}
+                        disabled={report.applicable === false}
+                      />
+                    ) : null}
+                    {capabilities.canManageSavedReports ? (
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="lg"
+                          disabled={pending || report.applicable === false}
+                          onClick={() => duplicate(report)}
+                        >
+                          {pending ? "در حال کپی…" : "کپی"}
+                        </Button>
+                        <Button
+                          ref={(node) => {
+                            deleteButtonRefs.current[report.id] = node;
+                          }}
+                          type="button"
+                          variant="destructive"
+                          size="lg"
+                          disabled={pending}
+                          aria-expanded={confirming}
+                          onClick={() => {
+                            setListError("");
+                            setNotice("");
+                            setConfirmingDelete(report.id);
+                          }}
+                        >
+                          حذف
+                        </Button>
+                      </>
+                    ) : null}
+                  </div>
+                )}
+              </li>
+            );
+          })}
 
           {saved !== null && customReports.length === 0 ? (
             <li className="py-4">

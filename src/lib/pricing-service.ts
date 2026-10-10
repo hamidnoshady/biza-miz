@@ -11,6 +11,7 @@ import type { Rial } from "./money";
 import { query } from "./db";
 import { getSetting, setSetting, SETTING_KEYS } from "./settings";
 import { getProfitAndLoss } from "./reports-service";
+import { BUSINESS_WIDE_SCOPE } from "./report-scope";
 import { addDays } from "./rollup";
 import { computeSuggestedPrice } from "./pricing";
 import { recipeCostDrift } from "./cost-drift";
@@ -91,10 +92,29 @@ export async function getEffectiveOverheadRate(
 ): Promise<EffectiveOverheadRate> {
   const resolvedConfig = config ?? (await getPricingConfig(businessId));
   const dateTo = new Date().toISOString().slice(0, 10);
-  const pnl = await getProfitAndLoss(businessId, {
-    dateFrom: addDays(dateTo, -(OVERHEAD_LOOKBACK_DAYS - 1)),
-    dateTo,
-  });
+  /*
+   * Business-wide on purpose (issue #819).
+   *
+   * Cost-plus pricing is *one policy for the business*, not a per-branch one:
+   * `settings.pricing` stores a single margin and overhead for the whole
+   * business, menu items inherit it, and the surfaces that read this rate are
+   * the settings screen (`settings.manage`) and a menu item's suggested price.
+   * A branch filter here would derive a rate from one branch's revenue and
+   * expenses and then apply it to prices the other branches sell at — which is
+   * not a stricter answer, it is a wrong one.
+   *
+   * It used to be `getProfitAndLoss(businessId, range)`: the same read, but
+   * spelled as a forgotten argument. `BUSINESS_WIDE_SCOPE` says it out loud, so
+   * an audit can tell a decision from an omission.
+   */
+  const pnl = await getProfitAndLoss(
+    businessId,
+    {
+      dateFrom: addDays(dateTo, -(OVERHEAD_LOOKBACK_DAYS - 1)),
+      dateTo,
+    },
+    BUSINESS_WIDE_SCOPE,
+  );
   const rawLedgerRate =
     pnl.totalRevenue > 0 ? ((pnl.operatingExpenses + pnl.laborCost) / pnl.totalRevenue) * 100 : null;
   // Expense reversals can make a short window's net overhead negative. A

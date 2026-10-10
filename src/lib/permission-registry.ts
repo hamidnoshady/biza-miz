@@ -217,8 +217,11 @@ const DRAFTS: Draft[] = [
   { key: P.payrollManage, group: "payroll", label: "اجرای حقوق و دستمزد", description: "تعریف حکم حقوقی، صدور لیست حقوق و پرداخت یا ابطال آن.", risk: "critical", audit: true, implies: [P.payrollView] },
 
   // --- Reports -------------------------------------------------------------
-  { key: P.reportsView, group: "reports", label: "مشاهده گزارش‌ها", description: "دیدن گزارش‌های فروش، مالی و عملیاتی.", risk: "low", audit: false },
-  { key: P.reportsExport, group: "reports", label: "خروجی گزارش", description: "دانلود گزارش‌ها به صورت فایل.", risk: "medium", audit: true, implies: [P.reportsView] },
+  { key: P.reportsView, group: "reports", label: "مشاهده گزارش‌ها", description: "دیدن گزارش‌های فروش، مالی و عملیاتی و اجرای گزارش‌های آماده و ذخیره‌شده.", risk: "low", audit: false },
+  { key: P.reportsManage, group: "reports", label: "مدیریت گزارش‌های ذخیره‌شده", description: "ساخت، ویرایش، تغییر نام و حذف گزارش‌های سفارشی و ذخیرهٔ چیدمان شخصی داشبورد.", risk: "medium", audit: true, implies: [P.reportsView] },
+  { key: P.reportsExport, group: "reports", label: "خروجی گزارش", description: "دانلود گزارش‌ها به صورت فایل (CSV، اکسل، PDF).", risk: "medium", audit: true, implies: [P.reportsView] },
+  { key: P.reportsBusinessWide, group: "reports", label: "گزارش سراسری شعب", description: "دیدن و خروجی گرفتن از اعداد تجمیعی همهٔ شعب کسب‌وکار (مقایسهٔ شعبه‌ها). مخصوص مالک.", risk: "critical", audit: true, implies: [P.reportsView] },
+  { key: P.reportsDashboardDefaultsManage, group: "reports", label: "مدیریت پیش‌فرض داشبورد نقش‌ها", description: "تعیین چیدمان پیش‌فرض ویجت‌های گزارش برای هر نقش؛ همهٔ اعضای آن نقش این چیدمان را می‌بینند.", risk: "medium", audit: true, implies: [P.reportsView] },
 
   // --- Growth --------------------------------------------------------------
   { key: P.growthView, group: "growth", label: "میز کار رشد", description: "داشبورد مدیریتی رشد، بینش مخاطبان و پل حسابداری رشد. ابزار صندوق نیست.", risk: "medium", audit: false },

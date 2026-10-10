@@ -210,9 +210,45 @@ export const PERMISSIONS = {
   payrollView: "payroll.view",
   payrollManage: "payroll.manage",
 
-  // Insight
+  /**
+   * Insight — the reporting stack's capabilities (issue #819).
+   *
+   * The keys answer four *different* questions, and the audit that produced
+   * them found the answers conflated: `/api/reports/query` — the normal read
+   * path for previews, row reports and the builder — required
+   * `reports.export`, so `reports.view` alone could not run a report; saving
+   * or deleting a saved report required the download key; cross-branch
+   * consolidated reporting was guarded by the same `reports.view` as a single
+   * branch's own reports; and a role's default dashboard layout could be
+   * replaced by anybody who could view reports at all.
+   *
+   *   reports.view   run/read standard reports, saved reports, builder
+   *                  previews, and the caller's own dashboard widgets.
+   *   reports.manage author saved reports: create, rename, edit, delete, and
+   *                  save a personal dashboard layout. Not a read key, and not
+   *                  a download key.
+   *   reports.export CSV/Excel/PDF download. Export is a different act from
+   *                  reading — it is how data leaves the building — so it
+   *                  implies `reports.view` rather than the other way round.
+   *   reports.business_wide
+   *                  consolidated numbers across the business's own branches
+   *                  (the branch-comparison screen, its export, and the AI
+   *                  branch-comparison tool). Owner-reserved, in the same
+   *                  cross-location trust family as `rollup.manage`: a member
+   *                  sees their own branch's reports with `reports.view`, and
+   *                  reading every branch at once stays with ownership.
+   *   reports.dashboard_defaults.manage
+   *                  replace a *role's* default dashboard layout, which a
+   *                  member inherits until they make a personal override.
+   *                  Owner, Admin and Manager receive it by default; it is
+   *                  separate from both personal-layout (`reports.manage`) and
+   *                  business-wide reporting authority.
+   */
   reportsView: "reports.view",
+  reportsManage: "reports.manage",
   reportsExport: "reports.export",
+  reportsBusinessWide: "reports.business_wide",
+  reportsDashboardDefaultsManage: "reports.dashboard_defaults.manage",
 
   /**
    * «ورود و خروج داده» — the platform-wide data transfer engine.
@@ -349,6 +385,9 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.ledgerApprove,
   PERMISSIONS.ledgerClosePeriod,
   PERMISSIONS.reportsExport,
+  // Cross-branch consolidated numbers (issue #819): money-adjacent data
+  // leaving its own branch, and owner-reserved below.
+  PERMISSIONS.reportsBusinessWide,
   PERMISSIONS.dataExport,
   PERMISSIONS.teamManage,
   PERMISSIONS.backupManage,
@@ -406,6 +445,13 @@ export const OWNER_ONLY_PERMISSIONS: readonly Permission[] = [
   PERMISSIONS.backupExport,
   PERMISSIONS.backupRestore,
   PERMISSIONS.rollupManage,
+  // Issue #819 — the reporting-stack member of the cross-location trust
+  // family, next to `rollup.manage` (cross-branch aggregation pushed between
+  // servers). The branch-comparison screen, its export and the AI's branch
+  // comparison are the whole business's trading at once; a member assigned to
+  // one branch reaches their own branch's reports with `reports.view` and
+  // never the rest by asking for a "report".
+  PERMISSIONS.reportsBusinessWide,
 ];
 
 export function isOwnerOnlyPermission(permission: Permission): boolean {
@@ -426,7 +472,7 @@ const {
   financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
   financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
   payrollView, payrollManage,
-  reportsView, reportsExport,
+  reportsView, reportsManage, reportsExport, reportsBusinessWide, reportsDashboardDefaultsManage,
   dataImport, dataExport,
   teamView, teamManage, teamPermissionsManage, settingsManage, locationsManage, backupManage,
   websiteView, websiteManage, websiteSettingsManage,
@@ -470,7 +516,11 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // business that wants a narrower manager revokes the individual keys.
     workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
     workspaceAdmin,
-    ledgerView, reportsView, reportsExport,
+    // Issue #819. `reports.manage` and the role-default dashboard key keep the
+    // manager doing what the reports screens and the widgets route always
+    // documented they could do; `reports.export` they already held. Not
+    // `reports.business_wide`: cross-branch comparison is granted explicitly.
+    ledgerView, reportsView, reportsManage, reportsExport, reportsDashboardDefaultsManage,
     // Operational finance the manager already did under a role gate. Not
     // accounting authority, and not payroll.
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
@@ -508,7 +558,11 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
     payrollView, payrollManage,
-    reportsView, reportsExport,
+    // Issue #819: the accountant could already download the statements; running
+    // and saving a report is the read/manage half of the same work. Not the
+    // role-default dashboard key (Owner, Admin and Manager receive that
+    // separate capability by default) and not `reports.business_wide`.
+    reportsView, reportsManage, reportsExport,
     // Same reasoning as the manager's: the accountant already downloaded the
     // financial statements through reports.export, and importing a chart of
     // accounts or a month of expenses is the accounting work this role exists
@@ -623,6 +677,9 @@ const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>
   [PERMISSIONS.ledgerApprove]: [PERMISSIONS.ledgerView],
   [PERMISSIONS.accountsEdit]: [PERMISSIONS.ledgerView],
   [PERMISSIONS.reportsExport]: [PERMISSIONS.reportsView],
+  [PERMISSIONS.reportsManage]: [PERMISSIONS.reportsView],
+  [PERMISSIONS.reportsBusinessWide]: [PERMISSIONS.reportsView],
+  [PERMISSIONS.reportsDashboardDefaultsManage]: [PERMISSIONS.reportsView],
   [PERMISSIONS.workspaceAdmin]: [PERMISSIONS.workspaceView, PERMISSIONS.workspaceManage],
   [PERMISSIONS.reservationsManage]: [PERMISSIONS.reservationsView],
   [PERMISSIONS.teamManage]: [PERMISSIONS.teamView],

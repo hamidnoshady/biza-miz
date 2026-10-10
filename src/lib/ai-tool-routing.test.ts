@@ -53,6 +53,8 @@ describe("routeTools", () => {
     "draft_expense_from_receipt",
     "get_bill_split_preview",
     "run_accounting_review",
+    "list_message_templates",
+    "list_message_campaigns",
   ];
 
   it("returns null when no apps are specified (uncertain → send everything)", () => {
@@ -123,6 +125,8 @@ describe("issue #812 §11 — App Focus narrows the live catalogue", () => {
     "list_website_posts",
     "list_website_products",
     "get_website_status",
+    "list_message_templates",
+    "list_message_campaigns",
   ];
 
   it("drops other apps' tools while keeping the always-on set", () => {
@@ -162,6 +166,18 @@ describe("issue #812 §11 — App Focus narrows the live catalogue", () => {
     }
     // And it is genuinely narrower, not just differently shaped.
     expect(routed!.length).toBeLessThan(ALL.length);
+  });
+
+  it("narrows Growth to campaign reads, including messaging", () => {
+    const routed = routeTools(ALL, ["growth"]);
+    expect(routed).not.toBeNull();
+    expect(routed).toContain("get_repurchase_candidates");
+    expect(routed).toContain("list_message_templates");
+    expect(routed).toContain("list_message_campaigns");
+    expect(routed).not.toContain("list_website_posts");
+    expect(routed).not.toContain("list_website_products");
+    expect(appForTool("list_message_templates")).toBe("growth");
+    expect(appForTool("list_message_campaigns")).toBe("growth");
   });
 
   it("returns null for no focus, so an unfocused turn is unchanged", () => {

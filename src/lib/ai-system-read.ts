@@ -1,5 +1,6 @@
 import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
 import { SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
+import type { Permission } from "./permissions";
 
 /**
  * Explicit executor context for trusted background jobs and authenticated MCP
@@ -13,6 +14,9 @@ export function runSystemReadTool(
   businessId: string,
   floorScope?: FloorReadScope,
   actorUserId?: string,
+  permissions: ReadonlySet<Permission> = SYSTEM_AI_READ_PERMISSIONS,
+  /** Durable MCP credentials stay pinned to the branch the issuer approved. */
+  pinnedLocationId?: string,
 ): Promise<ToolResult> {
-  return runReadTool(name, args, businessId, floorScope, actorUserId, SYSTEM_AI_READ_PERMISSIONS);
+  return runReadTool(name, args, businessId, floorScope, actorUserId, permissions, pinnedLocationId);
 }

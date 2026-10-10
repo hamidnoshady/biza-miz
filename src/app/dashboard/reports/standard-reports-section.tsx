@@ -44,6 +44,7 @@ import { rowsToChartData, type ChartType, type ReportRow } from "./report-ui";
 import {
   COMPARABLE_SHAPES,
   DOCUMENT_SHAPES,
+  canToggleBusinessWideScope,
   EXPORT_KIND_BY_SHAPE,
   SNAPSHOT_SHAPES,
   UNDATED_SHAPES,
@@ -87,11 +88,11 @@ interface SavedReportRow {
 type ReportPayload = Record<string, unknown>;
 
 /**
- * Headline figures of a document-shaped report (a statement, not a row dump)
- * as one readable sentence — what the assistant gets asked to explain when
- * there are no rows to summarize. The comparison payload wraps the current
- * period under `current`, so unwrap it first. Statement amounts are Rial by
- * contract, so the caller passes the business's money formatter in; unknown
+ * Headline figures of a document-shaped report (not a row dump) as one readable
+ * sentence — what the assistant gets asked to explain when there are no rows
+ * to summarize. The comparison payload wraps the current period under
+ * `current`, so unwrap it first. Report amounts are Rial by contract, so the
+ * caller passes the business's money formatter in; unknown
  * shapes contribute nothing rather than fabricated numbers.
  */
 function documentFacts(
@@ -155,7 +156,24 @@ function normalizeSearch(value: string): string {
   return normalizePosSearchText(value);
 }
 
-export function StandardReportsSection({ canExplain }: { canExplain: boolean }) {
+export function StandardReportsSection({
+  canExplain,
+  canExport,
+  canBusinessWide,
+  canManageSavedReports,
+}: {
+  canExplain: boolean;
+  /**
+   * `reports.export` (issue #819). The download buttons used to be drawn for
+   * every member who could open the section, on top of a route that requires
+   * the export capability — a control whose request could only answer 403.
+   */
+  canExport: boolean;
+  /** `reports.business_wide`: may request reports in the consolidated allowlist. */
+  canBusinessWide: boolean;
+  /** `reports.manage`: may append to a personal dashboard layout. */
+  canManageSavedReports: boolean;
+}) {
   const money = useMoney();
   const searchId = useId();
   const resultPanelId = `${useId()}-report-result`;
@@ -188,6 +206,15 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
    * figures in it never covered.
    */
   const [loadedRange, setLoadedRange] = useState({ dateFrom: "", dateTo: "" });
+  /** The scope that produced the visible structured report, immutable until the next read succeeds. */
+  const [loadedScope, setLoadedScope] = useState<"branch" | "business-wide">("branch");
+  /**
+   * «کل کسب‌وکار» instead of the active branch, for allowlisted reports.
+   * Off by default: the branch the member is working in is the safe reading of
+   * an unqualified report, and business-wide scope has to be requested
+   * explicitly (`scope: "business-wide"`) — see issue #819.
+   */
+  const [businessWide, setBusinessWide] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +251,10 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
   }, []);
 
   const isDocument = selected ? DOCUMENT_SHAPES.has(selected.shape) : false;
+  /** Only allowlisted reports can be consolidated, and only for an authorized member. */
+  const scopeToggleAvailable = Boolean(
+    selected && canToggleBusinessWideScope(selected.key, canBusinessWide),
+  );
   const hasDateColumn = selected?.config
     ? Boolean(views.find((view) => view.key === selected.config!.view)?.hasDateColumn)
     : false;
@@ -231,7 +262,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
     ? (isDocument && !UNDATED_SHAPES.has(selected.shape)) || hasDateColumn
     : false;
   const canCompare = selected ? COMPARABLE_SHAPES.has(selected.shape) : false;
-  /** A point-in-time statement: only an as-of date means anything to it. */
+  /** A point-in-time report: only an as-of date means anything to it. */
   const isSnapshot = selected ? SNAPSHOT_SHAPES.has(selected.shape) : false;
   // Each snapshot names its cutoff the way an owner would: a balance sheet
   // has a «تاریخ ترازنامه», the warranty register a plain «تا تاریخ».
@@ -244,6 +275,13 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
   useEffect(() => {
     if (compare && !comparisonReady) setCompare(false);
   }, [compare, comparisonReady]);
+
+  // «کل کسب‌وکار» belongs to the report it was chosen for. Carrying it to the
+  // next report picked would silently answer a *different* report with the
+  // whole business's figures.
+  useEffect(() => {
+    setBusinessWide(false);
+  }, [selected?.key]);
 
   /**
    * How this report's measure is written. Money metrics are Rial in the
@@ -285,9 +323,17 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
       setLoading(true);
       setLoadError("");
       const requestedRange = { dateFrom, dateTo };
+      const canRequestBusinessWide = canToggleBusinessWideScope(selected.key, canBusinessWide);
+      const requestedScope = canRequestBusinessWide && businessWide ? "business-wide" : "branch";
       try {
         if (DOCUMENT_SHAPES.has(selected.shape)) {
           const params = new URLSearchParams();
+          // The consolidated read is opt-in and only for a member who holds the
+          // capability; the server re-checks it and refuses the request without
+          // it, so this is the client side of the same rule, not the rule.
+          if (canRequestBusinessWide) {
+            params.set("scope", requestedScope);
+          }
           if (dateFrom) params.set("dateFrom", dateFrom);
           if (dateTo) params.set("dateTo", dateTo);
           if (compare && COMPARABLE_SHAPES.has(selected.shape)) {
@@ -295,7 +341,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
             // A snapshot has no period length to mirror, so
             // `getBalanceSheetComparison` needs the earlier as-of date spelled
             // out and returns `previous: null` without it — the checkbox
-            // appeared to do nothing on the one statement where an owner most
+            // appeared to do nothing on the statement where an owner most
             // expects a side-by-side. The extra picker beside it collects the
             // date into `dateFrom`.
             if (SNAPSHOT_SHAPES.has(selected.shape) && dateFrom) {
@@ -318,6 +364,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
           setDocument(data.report ?? data.comparison ?? null);
           setRows(null);
           setLoadedRange(requestedRange);
+          setLoadedScope(requestedScope);
           return;
         }
         const response = await fetch("/api/reports/query", {
@@ -347,7 +394,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
         if (!signal.aborted) setLoading(false);
       }
     },
-    [selected, dateFrom, dateTo, compare],
+    [selected, dateFrom, dateTo, compare, businessWide, canBusinessWide],
   );
 
   useEffect(() => {
@@ -402,6 +449,8 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
     setDocument(null);
     setLoadError("");
     setLoadedRange({ dateFrom: "", dateTo: "" });
+    setLoadedScope("branch");
+    setBusinessWide(false);
     // Below `lg` the library is a full-width column with the result *under* it,
     // so tapping a report on a phone changed a screenful of content the person
     // could not see and looked like it had done nothing at all. Take them to
@@ -421,7 +470,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
     // everything else as a grouped Persian number. Feeding the assistant a bare
     // Rial integer for a Toman business invited it to quote a number ten times
     // what the owner is looking at.
-    // Document-shaped reports (the statements) have no rows — pull their
+    // Document-shaped reports have no rows — pull their
     // headline figures from the payload instead, so «توضیح این عدد» is never
     // sent to the assistant empty-handed over a screen full of numbers.
     const facts = rows
@@ -677,6 +726,30 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
                     </label>
                   ) : null}
 
+                  {/*
+                    Branch or consolidated (issue #819). A report is read for
+                    one branch unless its reader asks for the whole business and
+                    holds `reports.business_wide`; without that capability the
+                    server refuses the consolidated read, so the control is not
+                    drawn for them at all.
+                  */}
+                  {scopeToggleAvailable ? (
+                    <div>
+                      <label className="flex min-h-11 w-fit cursor-pointer items-center gap-3 rounded-xl border border-border/80 bg-muted px-3 text-sm text-foreground">
+                        <Checkbox
+                          checked={businessWide}
+                          onCheckedChange={(value) => setBusinessWide(value === true)}
+                        />
+                        کل کسب‌وکار (همهٔ شعبه‌ها)
+                      </label>
+                      <p className="mt-1.5 text-xs text-muted-foreground">
+                        {businessWide
+                          ? "این گزارش داده‌های همهٔ شعبه‌ها را یک‌جا جمع می‌زند."
+                          : "فقط شعبهٔ فعال شما محاسبه می‌شود."}
+                      </p>
+                    </div>
+                  ) : null}
+
                   {canCompare ? (
                     <div>
                       <label className="flex min-h-11 w-fit cursor-pointer items-center gap-3 rounded-xl border border-border/80 bg-muted px-3 text-sm text-foreground">
@@ -735,7 +808,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
                   its own numbers never covered. `disabled` while a read is in
                   flight or failed, since there is nothing truthful to export.
                 */}
-                {selected.shape === "rows" || EXPORT_KIND_BY_SHAPE[selected.shape] ? (
+                {canExport && (selected.shape === "rows" || EXPORT_KIND_BY_SHAPE[selected.shape]) ? (
                   <ExportButtons
                     disabled={loading || Boolean(loadError) || invalidRange || (rows === null && document === null)}
                     request={
@@ -745,6 +818,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
                             kind: EXPORT_KIND_BY_SHAPE[selected.shape],
                             dateFrom: loadedRange.dateFrom,
                             dateTo: loadedRange.dateTo,
+                            scope: loadedScope,
                           }
                         : {
                             title: selected.label,
@@ -775,7 +849,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
                     <SparklesIcon className="size-4" aria-hidden="true" /> توضیح این عدد
                   </Button>
                 ) : null}
-                {selected.chartType && savedIds.has(selected.key) ? (
+                {canManageSavedReports && selected.chartType && savedIds.has(selected.key) ? (
                   <PinToDashboardButton
                     savedReportId={savedIds.get(selected.key)!}
                     chartType={chartType}
