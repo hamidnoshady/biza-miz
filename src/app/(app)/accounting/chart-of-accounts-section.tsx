@@ -87,6 +87,7 @@ interface AccountRow {
   level: AccountLevel;
   normalBalance: NormalBalance;
   isContra: boolean;
+  currencyCode: string | null;
 }
 
 /** The indentation one tree level costs, in both layouts. */
@@ -131,6 +132,27 @@ export function ChartOfAccountsSection({
   const [type, setType] = useState<AccountType>("expense");
   const [parentId, setParentId] = useState("");
   const [isContra, setIsContra] = useState(false);
+  // The account's own currency (issue #863): empty = the base currency, a
+  // code = a foreign-currency account (an FX bank, an FX receivable). The
+  // list is the business's allowed transaction currencies, not the whole
+  // catalogue — an account for a currency the business cannot post is noise.
+  const [currencyCode, setCurrencyCode] = useState("");
+  const [currencyOptions, setCurrencyOptions] = useState<{ code: string; name: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void api<{
+      currencies: { code: string; name: string }[];
+      config: { transactionCurrencies: { code: string; name: string; allowed: boolean }[] };
+    }>("/api/currencies")
+      .then(({ ok, data }) => {
+        if (cancelled || !ok) return;
+        setCurrencyOptions(data.config.transactionCurrencies.filter((c) => c.allowed));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const [visibility, setVisibility] = useState<"all" | "active" | "archived">("all");
@@ -198,7 +220,14 @@ export function ChartOfAccountsSection({
     try {
       const { ok, data } = await api<{ error?: string }>("/api/ledger/accounts", {
         method: "POST",
-        body: JSON.stringify({ code: normalizedCode, name: trimmedName, type, parentId: parentId || null, isContra }),
+        body: JSON.stringify({
+          code: normalizedCode,
+          name: trimmedName,
+          type,
+          parentId: parentId || null,
+          isContra,
+          currencyCode: currencyCode || null,
+        }),
       });
       if (!ok) {
         setLocalError(accountError(data.error));
@@ -208,6 +237,7 @@ export function ChartOfAccountsSection({
       setName("");
       setParentId("");
       setIsContra(false);
+      setCurrencyCode("");
       setNotice(`حساب «${normalizedCode} — ${trimmedName}» اضافه شد.`);
       refresh();
     } catch {
@@ -390,6 +420,24 @@ export function ChartOfAccountsSection({
                 ]}
               />
             </Field>
+            <Field
+              label="ارز حساب"
+              hint={
+                currencyCode
+                  ? "گردش این حساب به همین ارز ثبت می‌شود (حساب ارزی)."
+                  : "بدون ارز، حساب به ارز پایهٔ کسب‌وکار کار می‌کند."
+              }
+            >
+              <SearchableSelect
+                value={currencyCode}
+                onChange={setCurrencyCode}
+                ariaLabel="ارز حساب"
+                options={[
+                  { value: "", label: "ارز پایه (بدون ارز جدا)" },
+                  ...currencyOptions.map((c) => ({ value: c.code, label: `${c.code} — ${c.name}` })),
+                ]}
+              />
+            </Field>
             <label className="mb-4 flex items-center gap-2 md:col-span-2 xl:col-span-4">
               <input
                 type="checkbox"
@@ -509,6 +557,7 @@ export function ChartOfAccountsSection({
                           <span className="min-w-0 break-words">{a.name}</span>
                           {WELL_KNOWN_CODE_SET.has(a.code) ? <StatusBadge tone="active">سیستمی</StatusBadge> : null}
                           {a.isContra ? <StatusBadge tone="neutral">کاهنده</StatusBadge> : null}
+                          {a.currencyCode ? <StatusBadge tone="positive">{a.currencyCode}</StatusBadge> : null}
                         </span>
                       </Td>
                       <Td muted>{TYPE_LABELS[a.type]}</Td>
@@ -559,6 +608,7 @@ export function ChartOfAccountsSection({
                         <div className="mt-1.5 flex flex-wrap gap-1.5">
                           {WELL_KNOWN_CODE_SET.has(a.code) ? <StatusBadge tone="active">سیستمی</StatusBadge> : null}
                           {a.isContra ? <StatusBadge tone="neutral">کاهنده</StatusBadge> : null}
+                          {a.currencyCode ? <StatusBadge tone="positive">{a.currencyCode}</StatusBadge> : null}
                         </div>
                       </div>
                       <StatusBadge tone={a.isActive ? "positive" : "neutral"}>

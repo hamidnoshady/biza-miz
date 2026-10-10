@@ -32,6 +32,7 @@
  *    rows, atomically.
  */
 import { query, getPool } from "./db";
+import { assertCurrencyAvailable, MulticurrencyError } from "./multicurrency-service";
 import { isUuid } from "./uuid";
 import { toLatinDigits } from "./digits";
 import {
@@ -90,6 +91,14 @@ export interface AccountRow {
   level: AccountLevel;
   normalBalance: NormalBalance;
   isContra: boolean;
+  /**
+   * Multicurrency (issue #863): the account's own currency when it is a
+   * foreign-currency financial account (a foreign bank). NULL = the business
+   * base currency, which is every account until one is flagged. Surfaced so
+   * the chart shows which accounts hold foreign value instead of leaving the
+   * flag visible only at creation time.
+   */
+  currencyCode: string | null;
 }
 
 export async function listAccounts(businessId: string): Promise<AccountRow[]> {
@@ -106,11 +115,12 @@ export async function listAccounts(businessId: string): Promise<AccountRow[]> {
     level: AccountLevel;
     normal_balance: NormalBalance;
     is_contra: boolean;
+    currency_code: string | null;
   }>(
     `SELECT a.id, a.code, a.name, a.type, a.parent_id, p.code AS parent_code, a.is_active,
             EXISTS (SELECT 1 FROM journal_lines jl WHERE jl.account_id = a.id) AS has_postings,
             EXISTS (SELECT 1 FROM accounts c WHERE c.parent_id = a.id) AS has_children,
-            a.level, a.normal_balance, a.is_contra
+            a.level, a.normal_balance, a.is_contra, a.currency_code
        FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
       WHERE a.business_id = $1
       ORDER BY a.code`,
@@ -129,6 +139,7 @@ export async function listAccounts(businessId: string): Promise<AccountRow[]> {
     level: r.level,
     normalBalance: r.normal_balance,
     isContra: r.is_contra,
+    currencyCode: r.currency_code,
   }));
 }
 
@@ -267,6 +278,12 @@ export async function createAccount(params: {
   type: string;
   parentId?: string | null;
   isContra?: boolean;
+  /**
+   * Multicurrency (issue #863): the account's own currency for a
+   * foreign-currency financial account (a foreign bank). NULL/omitted = the
+   * business's base currency, which is every account until one is flagged.
+   */
+  currencyCode?: string | null;
 }): Promise<{ id: string }> {
   /* The convention is «Latin digits in storage, Persian digits in display»
      (digits.ts), and the add form's own placeholder invites «۶۱۰۰». Storing a
@@ -296,11 +313,27 @@ export async function createAccount(params: {
   ]);
   if (existing.length > 0) throw new AccountsError("code_in_use", 409);
 
+  const currencyCode =
+    typeof params.currencyCode === "string" && /^[A-Za-z]{3}$/.test(params.currencyCode)
+      ? params.currencyCode.toUpperCase()
+      : null;
+  if (currencyCode) {
+    // An account that names a currency may only name one this business has
+    // enabled — and never the base currency (that is what NULL means). The
+    // catalogue check is server-side: the form offers the allowed list, but
+    // the API does not trust it (issue #863 §tenant-ownership).
+    try {
+      await assertCurrencyAvailable(params.businessId, currencyCode);
+    } catch (err) {
+      if (err instanceof MulticurrencyError) throw new AccountsError(err.message, err.status);
+      throw err;
+    }
+  }
   try {
     const { rows } = await query<{ id: string }>(
-      `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [params.businessId, params.parentId ?? null, code, name, params.type, level, params.isContra ?? false],
+      `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra, currency_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [params.businessId, params.parentId ?? null, code, name, params.type, level, params.isContra ?? false, currencyCode],
     );
     return { id: rows[0].id };
   } catch (err) {

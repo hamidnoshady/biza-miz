@@ -63,6 +63,7 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "installments", label: "اقساط" },
   { key: "cheques", label: "چک‌ها" },
   { key: "reconciliation", label: "تطبیق بانکی" },
+  { key: "multicurrency", label: "ارز و تسعیر" },
   { key: "chart-of-accounts", label: "سرفصل حساب‌ها" },
   // Wages are compensation data, so this entry follows `payroll.view` — the
   // same capability the in-page rail and `/api/ledger/payroll/*` enforce. By
@@ -112,6 +113,10 @@ export const ACCOUNTING_NAV_GROUPS: readonly {
       "manual",
       "chart-of-accounts",
     ],
+  },
+  {
+    label: "ارز و تسعیر",
+    keys: ["multicurrency"],
   },
   { label: "اشخاص", keys: ["directory"] },
   {
