@@ -19,8 +19,61 @@
 
 import { isIndustry, type Industry } from "./industries";
 import { AccountTreeError, orderAccountTree } from "./account-hierarchy";
+import { ACCOUNT_TYPES, type AccountType } from "./coa-template";
 
-export const PAIRING_SNAPSHOT_VERSION = 6;
+/**
+ * The version this build issues to a desktop that declares it can read it.
+ *
+ * Version 7 carries the whole chart with each account's `isActive` and
+ * `isContra`. Version 6 is what the released desktop v1.0.28 reads: it exported
+ * only ACTIVE accounts and carried no account state at all. Changing what 6
+ * means would hand an unchanged desktop an archived account it would restore as
+ * active, so the two are different contracts with different numbers.
+ *
+ * Which one a redeem gets is decided by the caller's declared capability (see
+ * `redeemPairingCode`). A legacy caller receives v6 only when the chart can be
+ * expressed in it losslessly; otherwise it is refused and told to update.
+ */
+export const PAIRING_SNAPSHOT_VERSION = 7;
+export const LEGACY_PAIRING_SNAPSHOT_VERSION = 6;
+const ACCEPTED_SNAPSHOT_VERSIONS: readonly number[] = [LEGACY_PAIRING_SNAPSHOT_VERSION, PAIRING_SNAPSHOT_VERSION];
+
+/**
+ * The redeem answer for a desktop that cannot read the chart as it stands: it
+ * declared no capability (or an old one) and the chart holds an archived or
+ * contra account, which v6 cannot say. Nothing is issued, and the one-time code
+ * is not spent, so the same code works once the desktop is updated.
+ */
+export const PAIRING_REQUIRES_NEWER_CLIENT = "pairing_requires_newer_client";
+
+/**
+ * The capability a desktop declares when it redeems. It asks for the newest
+ * version, so a cloud that can serve it does, and any other answer is judged on
+ * its own terms (see `answersCapability`).
+ */
+export const DESKTOP_REDEEM_CAPABILITY = { maxSnapshotVersion: PAIRING_SNAPSHOT_VERSION } as const;
+
+/**
+ * Whether a redeem answer is the snapshot the desktop asked for. A version-6
+ * answer to a version-7 request can only come from a cloud that predates
+ * account-state support. That cloud exports active accounts only and has no
+ * contra state, so accepting it would restore the chart silently wrong.
+ */
+export function answersCapability(snapshotVersion: number): boolean {
+  return snapshotVersion === PAIRING_SNAPSHOT_VERSION;
+}
+
+/** Whether an account is state that v6 would silently lose: archived, or contra. */
+export function accountNeedsNewerClient(account: { isActive: boolean; isContra: boolean }): boolean {
+  return !account.isActive || account.isContra;
+}
+
+/** Thrown by the producer when a v6 build would have to drop account state. */
+export class LegacySnapshotNotRepresentable extends Error {
+  constructor() {
+    super(PAIRING_REQUIRES_NEWER_CLIENT);
+  }
+}
 
 /**
  * Explicit contract for what pairing seeds and what continuing sync does (or
@@ -68,14 +121,20 @@ export interface SnapshotAccount {
   parentCode: string | null;
   code: string;
   name: string;
-  type: string;
+  /** Checked against ACCOUNT_TYPES by validateSnapshot before anything reads it. */
+  type: AccountType;
   /**
-   * Whether the account is active on the issuing server. Optional for
-   * compatibility: snapshots issued before archived accounts travelled omit it,
-   * and every account in such a snapshot was active, so an absent value means
-   * `true`. Restore writes it verbatim.
+   * Version 7: required. Restore writes it verbatim, so an archived account stays
+   * archived. Version 6 has no such field and every account in it was active.
    */
   isActive?: boolean;
+  /**
+   * Version 7: required. Restore writes it verbatim. Without it a contra account
+   * (accumulated depreciation, sales returns) comes back as an ordinary one with
+   * the opposite balance rule. Version 6 has no such field, and no version 6
+   * snapshot is issued with a contra account.
+   */
+  isContra?: boolean;
 }
 
 export interface SnapshotMenuCategory {
@@ -310,7 +369,8 @@ function isStringArray(v: unknown): v is string[] {
 export function validateSnapshot(raw: unknown): SnapshotValidation {
   const fail = { ok: false, error: "snapshot_invalid" } as const;
   if (!isObject(raw)) return fail;
-  if (raw.version !== PAIRING_SNAPSHOT_VERSION) return fail;
+  if (typeof raw.version !== "number" || !ACCEPTED_SNAPSHOT_VERSIONS.includes(raw.version)) return fail;
+  const version = raw.version;
 
   const business = raw.business;
   if (!isObject(business)) return fail;
@@ -381,12 +441,22 @@ export function validateSnapshot(raw: unknown): SnapshotValidation {
     if (!isNullableString(account.parentCode)) return fail;
     if (typeof account.code !== "string" || !account.code) return fail;
     if (typeof account.name !== "string" || !account.name) return fail;
-    if (typeof account.type !== "string" || !account.type) return fail;
-    if (account.isActive !== undefined && typeof account.isActive !== "boolean") return fail;
+    if (typeof account.type !== "string" || !ACCOUNT_TYPES.includes(account.type as AccountType)) return fail;
+    if (version === PAIRING_SNAPSHOT_VERSION) {
+      // Fail closed: a v7 account without its state is refused, never defaulted.
+      if (typeof account.isActive !== "boolean") return fail;
+      if (typeof account.isContra !== "boolean") return fail;
+    } else {
+      // A v6 snapshot cannot say an account is archived or contra. Anything that
+      // claims otherwise is a contradiction, and it is refused, not read as active.
+      if (account.isActive !== undefined && account.isActive !== true) return fail;
+      if (account.isContra !== undefined && account.isContra !== false) return fail;
+    }
   }
   // The chart must be a tree a restore can place: unique codes, every parent
-  // present, no cycles, and no chain deeper than the four tiers. Checking it
-  // here refuses a bad snapshot before the local install opens a transaction.
+  // present, no cycles, no chain deeper than the four tiers, and every child's
+  // type equal to its parent's. Checking it here refuses a bad snapshot before
+  // the local install opens a transaction.
   try {
     orderAccountTree(raw.accounts as SnapshotAccount[]);
   } catch (err) {

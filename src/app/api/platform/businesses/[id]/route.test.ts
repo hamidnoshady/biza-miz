@@ -68,6 +68,7 @@ function summary(status: string): BusinessSummary {
 const setBusinessStatus = vi.hoisted(() => vi.fn());
 const hardDeleteBusiness = vi.hoisted(() => vi.fn());
 const resetBusiness = vi.hoisted(() => vi.fn());
+const changeBusinessIndustry = vi.hoisted(() => vi.fn(async () => null));
 
 vi.mock("@/lib/platform-service", () => ({
   getBusiness: vi.fn(async () => summary(state.status)),
@@ -76,7 +77,7 @@ vi.mock("@/lib/platform-service", () => ({
   resetBusiness,
   updateBusiness: vi.fn(async () => summary(state.status)),
   renameBusinessSubdomain: vi.fn(async () => ({ ok: false, error: "not_found" })),
-  changeBusinessIndustry: vi.fn(async () => null),
+  changeBusinessIndustry,
   industryDataCounts: vi.fn(async () => null),
   BusinessNotFoundError: class BusinessNotFoundError extends Error {},
   ResetBusinessNotPossibleError: class ResetBusinessNotPossibleError extends Error {},
@@ -441,5 +442,36 @@ describe("the capability table the tests rely on", () => {
     expect(CAPABILITIES_FOR("engineer")).toContain("business.suspend");
     expect(CAPABILITIES_FOR("engineer")).not.toContain("business.archive");
     expect(CAPABILITIES_FOR("support")).not.toContain("business.suspend");
+  });
+});
+
+describe("PATCH industry — a live-chart conflict is reported as itself (issue #824 finding 2)", () => {
+  beforeEach(() => {
+    state.role = "owner";
+    state.status = "active";
+    changeBusinessIndustry.mockReset();
+  });
+
+  it("answers 409 with the typed code when the seed refuses, and the change is not reported as done", async () => {
+    const { AccountsError } = await import("@/lib/accounts-error");
+    changeBusinessIndustry.mockRejectedValueOnce(new AccountsError("parent_archived", 409));
+    const res = await patch({ industry: "jewelry" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "parent_archived" });
+  });
+
+  it("answers 500 for an error that is not a typed conflict, rather than inventing a code", async () => {
+    changeBusinessIndustry.mockRejectedValueOnce(new Error("connection reset"));
+    await expect(patch({ industry: "jewelry" })).rejects.toThrow("connection reset");
+  });
+
+  it("returns the seeded codes on success", async () => {
+    changeBusinessIndustry.mockResolvedValueOnce({
+      business: summary("active"),
+      seededAccountCodes: ["1110"],
+    } as never);
+    const res = await patch({ industry: "jewelry" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ seededAccountCodes: ["1110"] });
   });
 });

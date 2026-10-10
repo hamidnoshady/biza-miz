@@ -255,7 +255,7 @@ async function insertAccounts(
       let offset = 1;
       for (const account of chunk) {
         values.push(
-          `($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type, $${offset + 6}::account_level, $${offset + 7})`,
+          `($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type, $${offset + 6}::account_level, $${offset + 7}, $${offset + 8})`,
         );
         args.push(
           account.id,
@@ -265,13 +265,16 @@ async function insertAccounts(
           account.name,
           account.type,
           levelByCode.get(account.code),
+          // Written as the snapshot carries them. A v6 snapshot has neither field,
+          // and by construction every account in it is active and not contra.
           account.isActive ?? true,
+          account.isContra ?? false,
         );
-        offset += 8;
+        offset += 9;
       }
       if (values.length > 0) {
         await client.query(
-          `INSERT INTO accounts (id, business_id, parent_id, code, name, type, level, is_active) VALUES ${values.join(", ")}`,
+          `INSERT INTO accounts (id, business_id, parent_id, code, name, type, level, is_active, is_contra) VALUES ${values.join(", ")}`,
           args,
         );
       }

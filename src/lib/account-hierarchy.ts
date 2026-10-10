@@ -42,15 +42,29 @@ export interface AttachableParent {
 }
 
 /**
- * Pure rule set for one attachment. Returns the level the child takes.
+ * The type rule, as one primitive: a child carries its parent's accounting
+ * type. Shared by live attachment (`attachmentLevel`) and by snapshot restore
+ * (`orderAccountTree`), so the two cannot disagree about what a mismatch is.
+ */
+export function childTypeMatchesParent(parentType: AccountType, childType: AccountType): boolean {
+  return parentType === childType;
+}
+
+/**
+ * Pure rule set for one live attachment. Returns the level the child takes.
  * Throws `AccountsError` with the code the editor already reports, so every
  * adapter surfaces the same message for the same mistake.
+ *
+ * This is the LIVE policy: it refuses an archived parent. Snapshot restore has
+ * its own policy (see `orderAccountTree`): it keeps archived rows as they are
+ * and checks only structure and type, because a restored chart must mirror its
+ * source, not re-decide it. Both share the depth and type primitives above.
  */
 export function attachmentLevel(parent: AttachableParent, childType: AccountType): AccountLevel {
   if (!parent.isActive) throw new AccountsError("parent_archived", 409);
   const level = nextAccountLevel(parent.level);
   if (!level) throw new AccountsError("parent_too_deep", 409);
-  if (parent.type !== childType) throw new AccountsError("parent_type_mismatch", 409);
+  if (!childTypeMatchesParent(parent.type, childType)) throw new AccountsError("parent_type_mismatch", 409);
   return level;
 }
 
@@ -95,7 +109,7 @@ export async function loadAttachableParent(
 /** Thrown by `orderAccountTree` for a snapshot that cannot be restored as-is. */
 export class AccountTreeError extends Error {
   constructor(
-    readonly reason: "duplicate_code" | "parent_missing" | "parent_cycle" | "too_deep",
+    readonly reason: "duplicate_code" | "parent_missing" | "parent_cycle" | "too_deep" | "type_mismatch",
     readonly code: string,
   ) {
     super(`account_tree_${reason}:${code}`);
@@ -105,6 +119,11 @@ export class AccountTreeError extends Error {
 export interface TreeNode {
   code: string;
   parentCode: string | null;
+  /**
+   * Checked against the parent's type whenever both nodes carry one. A node
+   * without a type (the type-free callers) is ordered by structure alone.
+   */
+  type?: AccountType;
 }
 
 /**
@@ -112,10 +131,16 @@ export interface TreeNode {
  * its parent's — the only level computation pairing restore may use.
  *
  * Refuses (`AccountTreeError`) instead of guessing when the list is not a tree:
- * a duplicate code, a parent code that is not in the list, a cycle, or a chain
- * deeper than the four tiers. The previous restore clamped the last case to
- * «تفصیلی» and quietly re-rooted the other two, producing a chart whose
- * levels disagreed with its parents.
+ * a duplicate code, a parent code that is not in the list, a cycle, a chain
+ * deeper than the four tiers, or a child whose type differs from its parent's.
+ * The previous restore clamped the depth case to «تفصیلی» and quietly re-rooted
+ * the missing-parent case, producing a chart whose levels disagreed with its
+ * parents; it also never looked at types at all.
+ *
+ * This is the SNAPSHOT policy. It keeps every row's `is_active` and `is_contra`
+ * as the source wrote them (the caller writes them), so an archived parent is
+ * not refused here: refusing it would flatten a legitimate source chart. Live
+ * attachment is the stricter `attachmentLevel`.
  */
 export function orderAccountTree<T extends TreeNode>(nodes: readonly T[]): {
   ordered: T[];
@@ -127,6 +152,7 @@ export function orderAccountTree<T extends TreeNode>(nodes: readonly T[]): {
     byCode.set(node.code, node);
   }
   const levelByCode = new Map<string, AccountLevel>();
+  const typeByCode = new Map<string, AccountType | undefined>();
   const ordered: T[] = [];
   for (const node of nodes) {
     if (levelByCode.has(node.code)) continue;
@@ -153,6 +179,16 @@ export function orderAccountTree<T extends TreeNode>(nodes: readonly T[]): {
     for (let i = chain.length - 1; i >= 0; i--) {
       const level = nextAccountLevel(parentLevel);
       if (!level) throw new AccountTreeError("too_deep", chain[i].code);
+      // Parents are assigned before their children (top-down), so the parent's
+      // type is already resolved here.
+      const node = chain[i];
+      if (node.parentCode && node.type !== undefined) {
+        const parentType = typeByCode.get(node.parentCode);
+        if (parentType !== undefined && !childTypeMatchesParent(parentType, node.type)) {
+          throw new AccountTreeError("type_mismatch", node.code);
+        }
+      }
+      typeByCode.set(node.code, node.type);
       levelByCode.set(chain[i].code, level);
       ordered.push(chain[i]);
       parentLevel = level;

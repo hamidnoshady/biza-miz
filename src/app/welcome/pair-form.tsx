@@ -22,6 +22,10 @@ const ERROR_MESSAGES: Record<string, string> = {
     "این آدرس به سامانهٔ فروش شما نمی‌رسد. آدرسی را وارد کنید که با آن وارد پنل ابری می‌شوید.",
   remote_not_initialized: "این آدرس هنوز کسب‌وکاری روی آن ساخته نشده است.",
   snapshot_invalid: "داده‌های دریافتی معتبر نیستند. با پشتیبانی تماس بگیرید.",
+  // A cloud server older than this desktop's account-state support would drop
+  // archived and contra accounts. Refusing is the only safe answer.
+  server_predates_account_state:
+    "سرور ابری هنوز از حساب‌های بایگانی‌شده و متضاد پشتیبانی نمی‌کند. ابتدا سرور ابری را به‌روز کنید، سپس دوباره تلاش کنید.",
   missing_fields: "آدرس سرور و کد اتصال را وارد کنید.",
   invalid_url: "آدرس سرور معتبر نیست.",
   // The three shapes classifyConnectionCode can report back from the server,

@@ -10,6 +10,8 @@
  */
 import { createHash } from "node:crypto";
 import { getPool, query, withoutTenantScope } from "./db";
+import { orderAccountTree } from "./account-hierarchy";
+import type { AccountType } from "./coa-template";
 import { effectiveFeatures } from "./features";
 import type { Industry } from "./industries";
 import {
@@ -20,7 +22,11 @@ import {
   type PairingCodeState,
 } from "./pairing-codes";
 import {
+  LEGACY_PAIRING_SNAPSHOT_VERSION,
+  LegacySnapshotNotRepresentable,
+  PAIRING_REQUIRES_NEWER_CLIENT,
   PAIRING_SNAPSHOT_VERSION,
+  accountNeedsNewerClient,
   type PairingSnapshot,
 } from "./pairing-snapshot";
 import { SETTING_KEYS } from "./settings";
@@ -218,8 +224,18 @@ export type RedeemResult =
         | "code_expired"
         | "code_already_redeemed"
         | "code_revoked"
-        | "pairing_session_unavailable";
+        | "pairing_session_unavailable"
+        | typeof PAIRING_REQUIRES_NEWER_CLIENT;
     };
+
+/**
+ * What the desktop says it can read. Absent means a desktop built before the
+ * version was declared, which is the released v1.0.28 reader: it is served
+ * version 6, and only when the chart holds nothing v6 would lose.
+ */
+export interface RedeemOptions {
+  maxSnapshotVersion?: number;
+}
 
 export type AcknowledgePairingResult =
   | { ok: true; state: "completed" }
@@ -293,6 +309,23 @@ export async function expireStalePairingSessions(): Promise<void> {
   });
 }
 
+/**
+ * Whether the chart behind a code holds state a legacy reader would lose. Read
+ * with the same predicate the producer uses, so the refusal and the build can
+ * never disagree about it. A code that does not exist answers false, and the
+ * normal path reports `code_not_found`.
+ */
+async function chartNeedsNewerClient(rawCode: string): Promise<boolean> {
+  const { rows } = await query<{ is_active: boolean; is_contra: boolean }>(
+    `SELECT a.is_active, a.is_contra
+       FROM install_pairing_codes c
+       JOIN accounts a ON a.business_id = c.business_id
+      WHERE c.code_hash = $1`,
+    [hashPairingCode(rawCode)],
+  );
+  return rows.some((r) => accountNeedsNewerClient({ isActive: r.is_active, isContra: r.is_contra }));
+}
+
 async function saveBuiltSnapshot(
   sessionId: string,
   snapshot: PairingSnapshot,
@@ -320,6 +353,7 @@ export async function redeemPairingCode(
   clientIp: string | null,
   deviceName = "Windows Business Suite",
   installationId?: string | null,
+  options: RedeemOptions = {},
 ): Promise<RedeemResult> {
   return withoutTenantScope("pairing-redeem", async () => {
     const cleanDeviceName =
@@ -329,6 +363,13 @@ export async function redeemPairingCode(
       clientIp,
       cleanDeviceName,
     );
+    const capable = (options.maxSnapshotVersion ?? 0) >= PAIRING_SNAPSHOT_VERSION;
+    const version = capable ? PAIRING_SNAPSHOT_VERSION : LEGACY_PAIRING_SNAPSHOT_VERSION;
+    // Checked before anything is written: a refusal spends no code and creates
+    // no session, so the same code still works for an updated desktop.
+    if (!capable && (await chartNeedsNewerClient(rawCode))) {
+      return { ok: false, error: PAIRING_REQUIRES_NEWER_CLIENT };
+    }
     const key = resolveEncryptionKey(process.env);
     const client = await getPool().connect();
     let session: PairingSessionRow | null = null;
@@ -474,10 +515,21 @@ export async function redeemPairingCode(
             displayName: device.rows[0].display_name,
           },
           syncToken,
+          version,
         );
         if (!(await saveBuiltSnapshot(session.id, snapshot)))
           return { ok: false, error: "pairing_session_unavailable" };
       } catch (error) {
+        if (error instanceof LegacySnapshotNotRepresentable) {
+          // The session stays in `redeeming`, unbuilt: a capable retry on the
+          // same installation builds version 7 from it.
+          await query(
+            `UPDATE pairing_sessions SET last_error_code=$2,updated_at=now()
+              WHERE id=$1 AND state='redeeming'`,
+            [session.id, PAIRING_REQUIRES_NEWER_CLIENT],
+          ).catch(() => {});
+          return { ok: false, error: PAIRING_REQUIRES_NEWER_CLIENT };
+        }
         await query(
           `UPDATE pairing_sessions SET last_error_code='snapshot_build_failed',updated_at=now()
             WHERE id=$1 AND state='redeeming'`,
@@ -492,6 +544,17 @@ export async function redeemPairingCode(
           decryptSecret(session.snapshot_ciphertext!, key),
         ) as PairingSnapshot;
       } catch {
+        return { ok: false, error: "pairing_session_unavailable" };
+      }
+      // A session built for a capable desktop is never handed to a legacy one:
+      // the legacy reader cannot hold what the v7 snapshot carries.
+      if (!capable && snapshot.version !== LEGACY_PAIRING_SNAPSHOT_VERSION) {
+        return { ok: false, error: PAIRING_REQUIRES_NEWER_CLIENT };
+      }
+      // The reverse: a session built as v6 (before this desktop was updated) is
+      // not upgraded in place. Handing it to a capable desktop would be refused
+      // there as a pre-#824 cloud. The honest answer is to issue a new code.
+      if (capable && snapshot.version !== PAIRING_SNAPSHOT_VERSION) {
         return { ok: false, error: "pairing_session_unavailable" };
       }
     }
@@ -598,6 +661,7 @@ export async function buildPairingSnapshot(
   locationId: string,
   siteDevice: PairingSnapshot["siteDevice"],
   syncToken: string,
+  version: number = PAIRING_SNAPSHOT_VERSION,
 ): Promise<PairingSnapshot> {
   const iamSnapshot = await buildIamSnapshot(businessId, siteDevice.id);
   const [
@@ -651,13 +715,15 @@ export async function buildPairingSnapshot(
       name: string;
       type: string;
       is_active: boolean;
+      is_contra: boolean;
     }>(
-      // The whole chart, archived rows included, each with its `is_active`.
+      // The whole chart, archived rows included, each with its `is_active` and
+      // `is_contra`.
       // Exporting only active rows left an active child of an archived parent
       // with a parentCode that no longer travelled, so the restore could only
       // flatten it (issue #824 finding 2). Archived accounts keep their history
       // on this side, so they belong in the snapshot too.
-      `SELECT a.id, p.code AS parent_code, a.code, a.name, a.type::text AS type, a.is_active
+      `SELECT a.id, p.code AS parent_code, a.code, a.name, a.type::text AS type, a.is_active, a.is_contra
            FROM accounts a
            LEFT JOIN accounts p ON p.id = a.parent_id
           WHERE a.business_id = $1
@@ -822,8 +888,33 @@ export async function buildPairingSnapshot(
 
 
 
+  const accounts = accountRes.rows.map((a) => ({
+    id: a.id,
+    parentCode: a.parent_code,
+    code: a.code,
+    name: a.name,
+    type: a.type as AccountType,
+    isActive: a.is_active,
+    isContra: a.is_contra,
+  }));
+  // The producer refuses a tree the restore would refuse, so a bad chart fails
+  // here, at the source, rather than as an opaque snapshot_invalid on the desktop.
+  orderAccountTree(accounts);
+  if (version === LEGACY_PAIRING_SNAPSHOT_VERSION) {
+    // v6 readers treat every account as active and non-contra. Issuing one that
+    // is not would hand them the wrong chart, so this build refuses instead.
+    if (accounts.some(accountNeedsNewerClient)) throw new LegacySnapshotNotRepresentable();
+  }
+  // v6 has no account-state fields at all: writing them there would be a contract
+  // the released reader does not read, and omitting them from v7 would drop state.
+  const accountWire: PairingSnapshot["accounts"] = accounts.map((a) =>
+    version === PAIRING_SNAPSHOT_VERSION
+      ? a
+      : { id: a.id, parentCode: a.parentCode, code: a.code, name: a.name, type: a.type },
+  );
+
   return {
-    version: PAIRING_SNAPSHOT_VERSION,
+    version,
     business: bizRes.rows[0],
     location: locRes.rows[0],
     locationIdentities: locationIdentityRes.rows.map((location) => ({ id: location.id, name: location.name, timezone: location.timezone })),
@@ -847,14 +938,7 @@ export async function buildPairingSnapshot(
     tenantRoles: iamSnapshot.tenantRoles.map((role) => ({ id: role.id, name: role.name, description: role.description,
       permissions: role.permissions, defaultLocationScope: role.defaultLocationScope, isActive: role.isActive, roleRevision: role.revision })),
     iam: { schemaVersion: iamSnapshot.schemaVersion, lastSequence: iamSnapshot.lastSequence, stateHash: iamSnapshot.stateHash },
-    accounts: accountRes.rows.map((a) => ({
-      id: a.id,
-      parentCode: a.parent_code,
-      code: a.code,
-      name: a.name,
-      type: a.type,
-      isActive: a.is_active,
-    })),
+    accounts: accountWire,
     menu: {
       categories: catRes.rows.map((c) => ({
         id: c.id,

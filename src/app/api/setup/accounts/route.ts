@@ -30,6 +30,15 @@ export const GET = withTenantScope(async () => {
  * Creates the chart of accounts from the (possibly customized) template.
  * Replaces an existing chart only while no journal lines reference it.
  */
+/** The Persian message for each way a wizard chart can fail to place. */
+const TREE_MESSAGES: Record<AccountTreeError["reason"], string> = {
+  too_deep: "ساختار حساب‌ها از سطح «تفصیلی» عمیق‌تر است.",
+  parent_cycle: "ساختار والد/فرزند حساب‌ها حلقه دارد.",
+  parent_missing: "والد یکی از حساب‌ها در فهرست نیست.",
+  duplicate_code: "کد یکی از حساب‌ها تکراری است.",
+  type_mismatch: "نوع حساب فرزند باید با نوع والدش یکسان باشد.",
+};
+
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireManager();
   if (error) return error;
@@ -61,10 +70,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     placed = orderAccountTree(accounts.map((a) => ({ ...a, parentCode: a.parentCode ?? null })));
   } catch (err) {
     if (!(err instanceof AccountTreeError)) throw err;
-    const message =
-      err.reason === "too_deep"
-        ? "ساختار حساب‌ها از سطح «تفصیلی» عمیق‌تر است."
-        : "ساختار والد/فرزند حساب‌ها حلقه دارد.";
+    // One message per reason. Before this, every refusal other than depth read
+    // as a cycle, so a child under a parent of another type was reported as a loop.
+    const message = TREE_MESSAGES[err.reason];
     return NextResponse.json({ error: "invalid_accounts", messages: [message] }, { status: 400 });
   }
 

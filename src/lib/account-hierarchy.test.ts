@@ -129,6 +129,40 @@ describe("orderAccountTree", () => {
     }
   });
 
+  it("refuses a child whose type differs from its parent's, with the reason and the child's code (issue #824 finding 1)", () => {
+    const err = (() => {
+      try {
+        orderAccountTree([
+          { code: "1000", parentCode: null, type: "asset" },
+          { code: "1100", parentCode: "1000", type: "liability" },
+        ]);
+      } catch (e) {
+        return e;
+      }
+      return null;
+    })();
+    expect(err).toBeInstanceOf(AccountTreeError);
+    expect(err).toMatchObject({ reason: "type_mismatch", code: "1100" });
+  });
+
+  it("refuses a mismatch deeper in the chain, not only at the first tier", () => {
+    expect(() =>
+      orderAccountTree([
+        { code: "1000", parentCode: null, type: "asset" },
+        { code: "1100", parentCode: "1000", type: "asset" },
+        { code: "1110", parentCode: "1100", type: "expense" },
+      ]),
+    ).toThrow("account_tree_type_mismatch:1110");
+  });
+
+  it("orders by structure alone when the nodes carry no type", () => {
+    const { levelByCode } = orderAccountTree([
+      { code: "1000", parentCode: null },
+      { code: "1100", parentCode: "1000" },
+    ]);
+    expect(levelByCode.get("1100")).toBe("kol");
+  });
+
   it("accepts an empty chart", () => {
     expect(orderAccountTree([]).ordered).toEqual([]);
   });
