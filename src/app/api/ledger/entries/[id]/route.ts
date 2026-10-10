@@ -13,6 +13,7 @@ interface EntryRow extends Record<string, unknown> {
   entry_date: string;
   memo: string | null;
   source_type: string | null;
+  source_id: string | null;
   location_name: string | null;
   created_by_name: string | null;
   posted_at: string;
@@ -22,6 +23,7 @@ interface EntryRow extends Record<string, unknown> {
 
 interface LineRow extends Record<string, unknown> {
   id: string;
+  account_id: string;
   account_code: string;
   account_name: string;
   debit: string;
@@ -33,7 +35,8 @@ interface LineRow extends Record<string, unknown> {
  * needs (issue #833): the fixed-asset register's history opens the exact
  * entry a depreciation/reversal/disposal caused, by its stored id, never by
  * guessing at memo text. The list view (`/api/ledger/entries`) stays the
- * book; this is «show me this document».
+ * book; this is «show me this document». A/R and A/P statements use the same
+ * tenant-scoped, ledger.view-protected document for their drill-down (#825).
  */
 export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -44,7 +47,7 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   // error (the manual-reversal route's own guard, same reasoning).
   if (!isUuid(id)) return NextResponse.json({ error: "entry_not_found" }, { status: 404 });
   const { rows } = await query<EntryRow>(
-    `SELECT je.id, je.entry_date::text AS entry_date, je.memo, je.source_type,
+    `SELECT je.id, je.entry_date::text AS entry_date, je.memo, je.source_type, je.source_id,
             l.name AS location_name, u.full_name AS created_by_name,
             je.posted_at::text AS posted_at, je.reverses_entry_id, je.reversed_at::text AS reversed_at
        FROM journal_entries je
@@ -56,7 +59,7 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   if (!rows[0]) return NextResponse.json({ error: "entry_not_found" }, { status: 404 });
 
   const { rows: lines } = await query<LineRow>(
-    `SELECT jl.id, a.code AS account_code, a.name AS account_name,
+    `SELECT jl.id, jl.account_id, a.code AS account_code, a.name AS account_name,
             jl.debit::text AS debit, jl.credit::text AS credit
        FROM journal_lines jl
        JOIN accounts a ON a.id = jl.account_id
@@ -72,6 +75,7 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
       entryDate: entry.entry_date,
       memo: entry.memo,
       sourceType: entry.source_type,
+      sourceId: entry.source_id,
       locationName: entry.location_name,
       createdByName: entry.created_by_name,
       postedAt: entry.posted_at,
@@ -79,6 +83,7 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
       reversedAt: entry.reversed_at,
       lines: lines.map((l) => ({
         id: l.id,
+        accountId: l.account_id,
         accountCode: l.account_code,
         accountName: l.account_name,
         debit: Number(l.debit),

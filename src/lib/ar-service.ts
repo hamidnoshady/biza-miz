@@ -1,3 +1,5 @@
+import { AR_CUSTOMER_ATTRIBUTION_SQL, AR_CUSTOMER_ID_SQL, arCustomerAttributionSql } from "./ar-attribution";
+import { subledgerNextOffset, validateSubledgerWindow } from "./subledger-pagination";
 /**
  * Phase 16 — AR subledger, the DB-touching part.
  *
@@ -9,19 +11,31 @@
  * statements use (reports-service.ts), so a customer's balance always agrees
  * with the control account to the Rial by construction rather than by care.
  *
+ * Every one of those three reports is computed *in SQL* — grouped, joined and
+ * aged by PostgreSQL. The read path used to load every A/R journal line the
+ * business had ever posted into Node and group it there (`arLines()`), which is
+ * fine for a shop in its first year and a whole-history scan for a tenant in
+ * its fifth: opening one customer's statement read every other customer's
+ * rows, and an aging run shipped history it then filtered by date in JS. The
+ * attribution rule is unchanged and still lives in
+ * {@link AR_CUSTOMER_ATTRIBUTION_SQL}, so the balance list, a statement, the
+ * aging report and the CRM's segment engine cannot disagree about who owes
+ * what.
+ *
  * DB-touching, so per repo convention it has no direct unit test; the pure
  * aging math (shared with the AP subledger) lives in aging.ts and is what
  * aging.test.ts covers. Covered here by integration/ar.integration.test.ts.
  */
-import { getPool, query } from "./db";
+import { getPool, query, type PoolClient } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { PARTY_ROLE_STORAGE } from "./parties";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
-import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
+import { agingBucketCaseSql, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
 import { toPersianDigits } from "./digits";
+import { foldForSearch, searchPattern } from "./sql-search";
 import { enqueueHolooReceiptForArReceipt } from "./integrations/holoo/outbox-producer";
 import { normalizeBankReference } from "./payables-input";
 import { resolveVoucherCashAccount } from "./voucher-cash-account";
@@ -39,14 +53,8 @@ export class ArError extends Error {
   }
 }
 
-/**
- * An actual calendar date in ISO form. The regex alone passes «2025-13-45»,
- * which `Date.parse` then reads as NaN — and every age bucket computed from a
- * NaN «today» falls through to «بیش از ۹۰ روز» without failing the request.
- * The rule is `iso-date.ts`'s `isValidIsoDate`, shared with A/P aging, bank
- * reconciliation, the manual journal and «دفتر روزنامه».
- */
-const isIsoDateOnly = isValidIsoDate;
+/** How a party with no name yet is shown — one copy, because the list, the statement and the aging report all need it. */
+const UNATTRIBUTED_CUSTOMER_NAME = "بدون مشتری مشخص";
 
 async function arAccountId(businessId: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(
@@ -54,38 +62,6 @@ async function arAccountId(businessId: string): Promise<string | null> {
     [businessId, WELL_KNOWN_CODES.accountsReceivable],
   );
   return rows[0]?.id ?? null;
-}
-
-interface ArLineRow extends Record<string, unknown> {
-  customer_id: string | null;
-  customer_name: string | null;
-  customer_phone: string | null;
-  entry_date: string;
-  source_type: string | null;
-  order_number: string | number | null;
-  memo: string | null;
-  debit: string;
-  credit: string;
-}
-
-/** Every journal line posted to the AR account, oldest first, with whatever customer it's attributable to. */
-async function arLines(businessId: string, accountId: string): Promise<ArLineRow[]> {
-  const { rows } = await query<ArLineRow>(
-    `SELECT c.id AS customer_id, c.name AS customer_name, c.phone AS customer_phone,
-            je.entry_date::text AS entry_date, je.source_type, o.order_number, je.memo,
-            jl.debit, jl.credit
-       FROM journal_lines jl
-       JOIN journal_entries je ON je.id = jl.entry_id
-       LEFT JOIN order_amendments am ON je.source_type = 'order_amendment' AND am.id = je.source_id
-       LEFT JOIN orders o ON o.id = CASE WHEN je.source_type = 'order' THEN je.source_id ELSE am.order_id END
-       LEFT JOIN ar_receipts r ON je.source_type = 'ar_receipt' AND r.id = je.source_id
-       LEFT JOIN cheques ch ON je.source_type = 'cheque' AND ch.id = je.source_id
-       LEFT JOIN parties c ON c.id = COALESCE(o.customer_id, r.customer_id, ch.customer_id)
-      WHERE je.business_id = $1 AND jl.account_id = $2
-      ORDER BY je.entry_date, je.posted_at`,
-    [businessId, accountId],
-  );
-  return rows;
 }
 
 export interface CustomerBalance {
@@ -127,25 +103,239 @@ export async function listCustomerDirectory(businessId: string): Promise<Custome
   }));
 }
 
-/** Every customer with a nonzero AR balance, largest first. */
+/**
+ * The balance list, grouped in SQL and bounded by the caller's window: one row
+ * per customer with a non-zero balance, largest first.
+ *
+ * `q` filters on the customer's name, phone or accounting code (folded the way
+ * the app's pickers fold a typed needle), `limit`/`offset` page it, and `total`
+ * is how many rows the
+ * filter matches *before* the window — so the screen can say «۲۵ از ۳۱۰» and
+ * keep paging without believing the first page is the whole book. Passing
+ * `limit: null` answers the whole list, which is what the callers outside the
+ * screen (the directory's balance column, the assistant's collections digest)
+ * have always asked for.
+ */
+async function customerBalanceRows(
+  businessId: string,
+  accountId: string,
+  options: { q: string | null; limit: number | null; offset: number },
+): Promise<{ customers: CustomerBalance[]; total: number }> {
+  const pattern = searchPattern(options.q);
+  const { rows } = await query<{
+    customer_id: string | null;
+    name: string;
+    phone: string | null;
+    balance: string;
+    total: string;
+    present: boolean | null;
+  }>(
+    /*
+     * `HAVING … <> 0` rather than filtering after the fact: a customer who has
+     * settled in full has nothing to show, and a row carrying a zero would
+     * read as a debt of nothing.
+     *
+     * Count the filtered relation independently of the window. The LEFT JOIN
+     * retains its count even when the requested page is empty; present marks
+     * real rows, including the null-key unknown bucket.
+     */
+    `WITH filtered AS (
+     SELECT g.customer_id,
+            coalesce(p.name, '${UNATTRIBUTED_CUSTOMER_NAME}') AS name,
+            p.phone,
+            g.balance AS balance
+       FROM (
+         SELECT ${AR_CUSTOMER_ID_SQL} AS customer_id,
+                sum(jl.debit - jl.credit) AS balance
+         ${AR_CUSTOMER_ATTRIBUTION_SQL}
+          WHERE je.business_id = $1 AND jl.account_id = $2
+          GROUP BY ${AR_CUSTOMER_ID_SQL}
+         HAVING sum(jl.debit - jl.credit) <> 0
+       ) g
+       LEFT JOIN parties p ON p.id = g.customer_id
+      WHERE $3::text IS NULL
+         -- Name first, then the two other things a person would type to find
+         -- a customer: the phone number on the file and the accounting code
+         -- the directory prints beside it. Folded the same way as every other
+         -- picker in the app, so «علي» finds «علی» and «۱۲» finds «12».
+         OR ${foldForSearch(`coalesce(p.name, '${UNATTRIBUTED_CUSTOMER_NAME}')`)} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(p.phone, '')")} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(p.accounting_code, '')")} ILIKE $3 ESCAPE '\\'
+     )
+     SELECT page.*, counts.total
+       FROM (SELECT count(*)::text AS total FROM filtered) counts
+       LEFT JOIN LATERAL (
+         SELECT *, true AS present FROM filtered
+          ORDER BY balance DESC, customer_id NULLS LAST
+          LIMIT $4::int OFFSET $5::bigint
+       ) page ON true
+      ORDER BY balance DESC, customer_id NULLS LAST`,
+    [businessId, accountId, pattern, options.limit, options.offset],
+  );
+  return {
+    customers: rows.filter((row) => row.present).map((r) => ({
+      customerId: r.customer_id ?? UNKNOWN_CUSTOMER_KEY,
+      customerName: r.name,
+      customerPhone: r.phone,
+      balance: Number(r.balance),
+    })),
+    total: rows[0] ? Number(rows[0].total) : 0,
+  };
+}
+
+/** Every customer with a nonzero AR balance, largest first — the unbounded read the callers outside the A/R screen need. */
 export async function listCustomerBalances(businessId: string): Promise<CustomerBalance[]> {
   const accountId = await arAccountId(businessId);
   if (!accountId) return [];
-  const lines = await arLines(businessId, accountId);
+  const { customers } = await customerBalanceRows(businessId, accountId, { q: null, limit: null, offset: 0 });
+  return customers;
+}
 
-  const byCustomer = new Map<string, CustomerBalance>();
-  for (const l of lines) {
-    const key = l.customer_id ?? UNKNOWN_CUSTOMER_KEY;
-    const entry = byCustomer.get(key) ?? {
-      customerId: key,
-      customerName: l.customer_name ?? "بدون مشتری مشخص",
-      customerPhone: l.customer_phone,
-      balance: 0,
-    };
-    entry.balance += Number(l.debit) - Number(l.credit);
-    byCustomer.set(key, entry);
-  }
-  return [...byCustomer.values()].filter((c) => c.balance !== 0).sort((a, b) => b.balance - a.balance);
+/**
+ * What the whole subledger adds up to, as of now — the numbers the balances
+ * screen shows above its rows so an accountant can see the report reconcile to
+ * the control account instead of taking it on faith.
+ *
+ * Every figure comes from the same journal lines as the rows themselves (and
+ * the same attribution SQL), not from a second calculation in React:
+ *
+ *  - `receivableTotal` — what customers owe (the positive balances);
+ *  - `advanceTotal` — advances and overpayments the business holds (the
+ *    negative balances, as a positive number);
+ *  - `netTotal` — the two combined, signed the way an asset is;
+ *  - `controlBalance` — the A/R control account's own balance, read straight
+ *    from `journal_lines`;
+ *  - `difference` — `netTotal − controlBalance`, and `reconciles` its being
+ *    zero.
+ *
+ * The two are equal by construction — the subledger *is* a regrouping of the
+ * control account's lines — which is exactly why they are both shown: a
+ * difference that cannot happen is the cheapest possible early warning that
+ * something has (a line posted to a different A/R account, a business whose
+ * chart has two).
+ */
+export interface ArReconciliationSummary {
+  receivableTotal: number;
+  advanceTotal: number;
+  netTotal: number;
+  controlBalance: number;
+  difference: number;
+  reconciles: boolean;
+  /** How many parties carry a non-zero balance — the count the rows add up to. */
+  parties: number;
+  /** The balance sitting in the explicit unknown bucket, if any. */
+  unattributedBalance: number;
+}
+
+function toSummary(row: {
+  receivable: string;
+  advances: string;
+  net: string;
+  control: string;
+  parties: number;
+  unattributed: string;
+}): ArReconciliationSummary {
+  const netTotal = Number(row.net);
+  const controlBalance = Number(row.control);
+  return {
+    receivableTotal: Number(row.receivable),
+    advanceTotal: Number(row.advances),
+    netTotal,
+    controlBalance,
+    difference: netTotal - controlBalance,
+    reconciles: netTotal === controlBalance,
+    parties: Number(row.parties),
+    unattributedBalance: Number(row.unattributed),
+  };
+}
+
+const EMPTY_AR_SUMMARY: ArReconciliationSummary = {
+  receivableTotal: 0,
+  advanceTotal: 0,
+  netTotal: 0,
+  controlBalance: 0,
+  difference: 0,
+  reconciles: true,
+  parties: 0,
+  unattributedBalance: 0,
+};
+
+/** The whole-subledger totals, in one round trip, over the same attribution as every row. */
+export async function getArReconciliationSummary(businessId: string): Promise<ArReconciliationSummary> {
+  const accountId = await arAccountId(businessId);
+  if (!accountId) return { ...EMPTY_AR_SUMMARY };
+  const { rows } = await query<{
+    receivable: string;
+    advances: string;
+    net: string;
+    control: string;
+    parties: number;
+    unattributed: string;
+  }>(
+    `WITH grouped AS (
+       SELECT ${AR_CUSTOMER_ID_SQL} AS customer_id,
+              sum(jl.debit - jl.credit) AS balance
+       ${AR_CUSTOMER_ATTRIBUTION_SQL}
+        WHERE je.business_id = $1 AND jl.account_id = $2
+        GROUP BY ${AR_CUSTOMER_ID_SQL}
+     ),
+     subledger AS (
+       SELECT coalesce(sum(balance) FILTER (WHERE balance > 0), 0) AS receivable,
+              coalesce(sum(-balance) FILTER (WHERE balance < 0), 0) AS advances,
+              coalesce(sum(balance), 0) AS net,
+              count(*) FILTER (WHERE balance <> 0)::int AS parties,
+              coalesce(sum(balance) FILTER (WHERE customer_id IS NULL), 0) AS unattributed
+         FROM grouped
+     ),
+     control AS (
+       SELECT coalesce(sum(jl.debit - jl.credit), 0) AS balance
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+        WHERE je.business_id = $1 AND jl.account_id = $2
+     )
+     SELECT s.receivable::text AS receivable, s.advances::text AS advances, s.net::text AS net,
+            s.parties, s.unattributed::text AS unattributed, c.balance::text AS control
+       FROM subledger s, control c`,
+    [businessId, accountId],
+  );
+  return rows[0]
+    ? toSummary(rows[0])
+    : { ...EMPTY_AR_SUMMARY };
+}
+
+/** One page of the balances list, with the totals the page must not change. */
+export interface CustomerBalancePage {
+  nextOffset: number | null;
+  customers: CustomerBalance[];
+  /** Rows matching the search, before the window — «۲۵ از ۳۱۰». */
+  total: number;
+  /** Whole-subledger totals, deliberately *not* narrowed by the search: they reconcile to the control account and must do so whatever the table is filtered to. */
+  summary: ArReconciliationSummary;
+}
+
+/**
+ * The balances list as the screen asks for it: a search, a window, the total
+ * behind the window, and the reconciliation summary.
+ *
+ * The summary is fetched beside the page rather than derived from the rows:
+ * paginating or searching a table must never change what the business is owed.
+ */
+export async function listCustomerBalancePage(
+  businessId: string,
+  options: { q?: string | null; limit: number; offset: number },
+): Promise<CustomerBalancePage> {
+  validateSubledgerWindow(options.limit, options.offset);
+  const accountId = await arAccountId(businessId);
+  if (!accountId) return { customers: [], total: 0, nextOffset: null, summary: { ...EMPTY_AR_SUMMARY } };
+  const [{ customers, total }, summary] = await Promise.all([
+    customerBalanceRows(businessId, accountId, {
+      q: options.q?.trim() || null,
+      limit: options.limit,
+      offset: options.offset,
+    }),
+    getArReconciliationSummary(businessId),
+  ]);
+  return { customers, total, summary, nextOffset: subledgerNextOffset(options.offset, customers.length, total) };
 }
 
 /**
@@ -194,20 +384,8 @@ export async function arBalancesForCustomers(
  *
  * `$1` is the business id. The caller supplies the account filter.
  */
-export const AR_CUSTOMER_ATTRIBUTION_SQL = `
-  FROM journal_lines jl
-  JOIN journal_entries je ON je.id = jl.entry_id
-  LEFT JOIN order_amendments am
-         ON je.source_type = 'order_amendment' AND am.id = je.source_id
-  LEFT JOIN orders o
-         ON o.id = CASE WHEN je.source_type = 'order' THEN je.source_id ELSE am.order_id END
-  LEFT JOIN ar_receipts r
-         ON je.source_type = 'ar_receipt' AND r.id = je.source_id
-  LEFT JOIN cheques ch
-         ON je.source_type = 'cheque' AND ch.id = je.source_id`;
-
-/** The customer-id expression that goes with {@link AR_CUSTOMER_ATTRIBUTION_SQL}. */
-export const AR_CUSTOMER_ID_SQL = "COALESCE(o.customer_id, r.customer_id, ch.customer_id)";
+// Re-export the public contract for CRM and existing service consumers.
+export { AR_CUSTOMER_ATTRIBUTION_SQL, AR_CUSTOMER_ID_SQL } from "./ar-attribution";
 
 /**
  * A ready-made CTE body giving every customer's A/R balance in one pass.
@@ -295,24 +473,101 @@ export async function getCustomerArBalance(businessId: string, customerId: strin
   return { balance: Number(rows[0]?.debit ?? 0) - Number(rows[0]?.credit ?? 0), hasLedger: true };
 }
 
+/**
+ * Where a statement line came from, as the source record itself describes it.
+ *
+ * The description on a line is written for a person («سفارش #۱۲۳», «دریافت
+ * وجه»); it is not an identifier, and a screen must never take an address back
+ * out of it. These fields are the identifiers behind the line, so the statement
+ * can offer a real link instead of a plausible one.
+ */
+export interface StatementSource {
+  /** The journal entry's own `source_type` — 'order', 'order_amendment', 'ar_receipt', 'cheque', or null for a plain manual entry. */
+  type: string | null;
+  /** The source row's id (the order, the receipt, or the cheque). */
+  id: string | null;
+  /** A short label taken from the source record — «چک ۱۲۳۴۵ — بانک ملت» — never parsed out of the description. */
+  label: string | null;
+  /** The order behind the line, including the original order a closed-order amendment corrects. */
+  orderId: string | null;
+  orderNumber: number | string | null;
+}
+
 export interface ArStatementLine {
+  /** The journal entry this line belongs to — what a drill-down opens. */
+  entryId: string;
   date: string;
   type: "invoice" | "receipt" | "other";
   description: string;
   debit: number;
   credit: number;
   balance: number;
+  source: StatementSource;
 }
 
-/** One customer's full activity against A/R, oldest first, with a running balance. `customerId` may be UNKNOWN_CUSTOMER_KEY. */
+interface ArStatementRow extends Record<string, unknown> {
+  entry_id: string;
+  entry_date: string;
+  source_type: string | null;
+  source_id: string | null;
+  order_id: string | null;
+  order_number: number | string | null;
+  serial_number: string | null;
+  bank_name: string | null;
+  receipt_method: "cash" | "bank" | null;
+  memo: string | null;
+  debit: string;
+  credit: string;
+}
+
+/** The label a receipt or cheque line wears — the counterparty's own document, in its own words. */
+function statementSourceLabel(row: ArStatementRow): string | null {
+  if (row.source_type === "ar_receipt") {
+    return row.receipt_method === "bank" ? "دریافت بانکی" : "دریافت نقدی";
+  }
+  if (row.source_type === "cheque" && row.serial_number) {
+    return row.bank_name ? `چک ${row.serial_number} — ${row.bank_name}` : `چک ${row.serial_number}`;
+  }
+  return null;
+}
+
+/**
+ * One customer's full activity against A/R, oldest first, with a running
+ * balance. `customerId` may be UNKNOWN_CUSTOMER_KEY.
+ *
+ * The rows are attributed in SQL and only this customer's leave the database —
+ * the pre-fix version pulled every A/R line the business had ever posted into
+ * Node and filtered there. Named statements now start from the canonical
+ * source relation filtered to this customer, using the journal source index;
+ * the unknown bucket necessarily checks unmatched sources across the account.
+ * Attribution is shared with balances, aging and CRM, never restated here.
+ */
 export async function getCustomerStatement(businessId: string, customerId: string): Promise<ArStatementLine[]> {
   const accountId = await arAccountId(businessId);
   if (!accountId) return [];
-  const lines = await arLines(businessId, accountId);
-  const filtered = lines.filter((l) => (l.customer_id ?? UNKNOWN_CUSTOMER_KEY) === customerId);
+  const isUnknown = customerId === UNKNOWN_CUSTOMER_KEY;
+  // A non-uuid customer id cannot match an attributed line. Asking Postgres
+  // anyway raises `invalid input syntax for type uuid` rather than returning
+  // none — and the unknown bucket is not a uuid at all, so it is `IS NULL`.
+  if (!isUnknown && !isUuid(customerId)) return [];
+
+  const { rows } = await query<ArStatementRow>(
+    // The same attribution fragment as every other A/R number; here it also
+    // supplies the source joins the drill-down metadata is read from.
+    `SELECT je.id AS entry_id, je.entry_date::text AS entry_date, je.source_type, je.source_id,
+            ar_source.order_id, ar_source.order_number,
+            ar_source.serial_number, ar_source.bank_name,
+            ar_source.receipt_method,
+            je.memo, jl.debit::text AS debit, jl.credit::text AS credit
+     ${isUnknown ? AR_CUSTOMER_ATTRIBUTION_SQL : arCustomerAttributionSql("$3::uuid")}
+      WHERE je.business_id = $1 AND jl.account_id = $2
+        AND ${isUnknown ? `${AR_CUSTOMER_ID_SQL} IS NULL` : `${AR_CUSTOMER_ID_SQL} = $3`}
+      ORDER BY je.entry_date, je.posted_at, jl.id`,
+    isUnknown ? [businessId, accountId] : [businessId, accountId, customerId],
+  );
 
   let balance = 0;
-  return filtered.map((l) => {
+  return rows.map((l) => {
     const debit = Number(l.debit);
     const credit = Number(l.credit);
     balance += debit - credit;
@@ -332,7 +587,22 @@ export async function getCustomerStatement(businessId: string, customerId: strin
           // amount and date around it.
           `سفارش #${toPersianDigits(String(l.order_number))}`
         : (l.memo ?? (type === "receipt" ? "دریافت وجه" : "سند دستی"));
-    return { date: l.entry_date, type, description, debit, credit, balance };
+    return {
+      entryId: l.entry_id,
+      date: l.entry_date,
+      type,
+      description,
+      debit,
+      credit,
+      balance,
+      source: {
+        type: l.source_type,
+        id: l.source_id,
+        label: statementSourceLabel(l),
+        orderId: l.order_id,
+        orderNumber: l.order_number,
+      },
+    };
   });
 }
 
@@ -347,63 +617,170 @@ export interface AgingReport {
   totals: AgingSummary;
 }
 
+const EMPTY_AGING_SUMMARY: AgingSummary = { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 };
+
 /**
- * Standard 30/60/90-day AR aging, per customer, as of `asOfDate` (defaults to
- * the *business's* today).
+ * The aging report, aggregated in PostgreSQL as of a date.
  *
- * `new Date().toISOString().slice(0, 10)` — what this used to default to — is
- * today in UTC, which is yesterday for the first three and a half hours of
- * every Tehran day and for the whole late shift of a café trading 18:00→03:00.
- * An invoice raised in those hours aged into the wrong bucket, and the
- * «۳۱-۶۰ روز» column moved a day early. `businessToday` answers the same
- * question the branch's own calendar does.
+ * It used to load every A/R line the business had ever posted, drop the ones
+ * after the as-of date in JS, and age each customer in memory. The arithmetic
+ * is the same — open invoices oldest-first against the payments received, then
+ * 30/60/90 buckets (aging.ts defines the boundaries, and the `CASE` below is
+ * generated from them) — but the work now happens where the rows are: the
+ * database returns *one row per customer*, not one per journal line, and it
+ * never sends the report a line dated after the as-of date.
+ *
+ * `asOfDate` defaults to the *business's* today: `new Date().toISOString()`
+ * is yesterday for the first three and a half hours of every Tehran day and
+ * for the whole late shift of a café trading 18:00→03:00.
+ *
+ * Two shapes were changed after reading the plan on a 138k-line ledger, and
+ * only because of what it showed. The per-customer payment total is a window
+ * over the rows being scanned rather than a join back onto a per-party total:
+ * as a join it planned as a nested loop with `NOT (… IS DISTINCT FROM …)` as
+ * its filter, comparing every party against every line (2.7M comparisons at
+ * 300 parties × 9,000 lines, and quadratic from there). And the parties are
+ * keyed by a text attribution key, so the buckets join is a hash join on
+ * equality instead of the same nested-loop filter, and the unattributed bucket
+ * — whose id is NULL and therefore matches nothing — gets a key of its own.
+ * Same numbers, same order, ~4× faster on that ledger.
+ *
+ * No index was added for this report: the plan already reaches the A/R lines
+ * through `idx_journal_lines_account` (they are one business's, because the
+ * account id is) and the entries through the join on their primary key.
  */
 export async function getArAging(businessId: string, asOfDate?: string): Promise<AgingReport> {
-  if (asOfDate !== undefined && !isIsoDateOnly(asOfDate)) throw new ArError("invalid_date");
+  if (asOfDate !== undefined && !isValidIsoDate(asOfDate)) throw new ArError("invalid_date");
   const effectiveAsOf = asOfDate ?? (await businessToday(businessId));
   const accountId = await arAccountId(businessId);
-  if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
+  if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { ...EMPTY_AGING_SUMMARY } };
 
-  const lines = (await arLines(businessId, accountId)).filter((l) => l.entry_date <= effectiveAsOf);
+  /*
+   * `open_items` is the FIFO rule of `ageOpenItems` expressed as a window
+   * function: a customer's payments pay off their invoices oldest-first, so
+   * what is left of invoice *i* is `max(0, cum_i − paid) − max(0, cum_{i−1} −
+   * paid)`. The ordering (`entry_date, posted_at, line_id`) is the order the
+   * JS implementation received the lines in, made explicit so two lines dated
+   * the same day can never be applied in a different order on two runs.
+   */
+  const { rows } = await query<{
+    customer_id: string | null;
+    name: string;
+    current: string;
+    d31_60: string;
+    d61_90: string;
+    over90: string;
+    total: string;
+  }>(
+    `WITH scoped AS (
+       -- The bucket key is the attribution, normalised to text so the
+       -- unattributed lines have a key of their own instead of the NULL that
+       -- no join can match (an empty string cannot collide with a uuid).
+       SELECT coalesce(${AR_CUSTOMER_ID_SQL}::text, '') AS customer_key,
+              ${AR_CUSTOMER_ID_SQL} AS customer_id,
+              je.entry_date,
+              je.posted_at,
+              jl.id AS line_id,
+              jl.debit AS debit,
+              jl.credit AS credit,
+              -- The customer's payments, carried as a window over the rows
+              -- being scanned rather than joined back on a per-party total:
+              -- the join version planned as a nested loop whose filter
+              -- compared every party against every line (2.7M comparisons on
+              -- a 300-customer book, and quadratic from there).
+              sum(jl.credit) OVER (PARTITION BY coalesce(${AR_CUSTOMER_ID_SQL}::text, '')) AS paid
+       ${AR_CUSTOMER_ATTRIBUTION_SQL}
+        WHERE je.business_id = $1 AND jl.account_id = $2 AND je.entry_date <= $3::date
+     ),
+     totals AS (
+       SELECT customer_key, customer_id, sum(debit) AS owed, sum(credit) AS paid
+         FROM scoped GROUP BY customer_key, customer_id
+     ),
+     items AS (
+       SELECT customer_key, entry_date, posted_at, line_id, paid,
+              sum(debit) OVER (
+                PARTITION BY customer_key ORDER BY entry_date, posted_at, line_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+              ) AS cumulative
+         FROM scoped
+        WHERE debit > 0
+     ),
+     open_items AS (
+       -- What is left of each invoice once the payments are applied to the
+       -- oldest first: max(0, cum_i - paid) - max(0, cum_{i-1} - paid).
+       SELECT customer_key, bucket, outstanding
+         FROM (
+           SELECT customer_key,
+                  ${agingBucketCaseSql("($3::date - entry_date)")} AS bucket,
+                  greatest(0, cumulative - paid)
+                    - coalesce(
+                        greatest(0, lag(cumulative) OVER (
+                          PARTITION BY customer_key ORDER BY entry_date, posted_at, line_id
+                        ) - paid),
+                        0
+                      ) AS outstanding
+             FROM items
+         ) x
+        WHERE outstanding > 0
+     ),
+     buckets AS (
+       SELECT customer_key,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'current'), 0) AS current,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'd31_60'), 0) AS d31_60,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'd61_90'), 0) AS d61_90,
+              coalesce(sum(outstanding) FILTER (WHERE bucket = 'over90'), 0) AS over90
+         FROM open_items GROUP BY customer_key
+     ),
+     per_party AS (
+       SELECT t.customer_key,
+              t.customer_id,
+              -- An advance or overpayment has no open invoice to age, so it is
+              -- carried as a *negative* current amount, the way a running-balance
+              -- subledger does: each row's «جمع» stays exactly the customer's net
+              -- balance, and the report's «جمع کل» stays exactly the control account.
+              coalesce(b.current, 0) - greatest(0, t.paid - t.owed) AS current,
+              coalesce(b.d31_60, 0) AS d31_60,
+              coalesce(b.d61_90, 0) AS d61_90,
+              coalesce(b.over90, 0) AS over90
+         FROM totals t
+         LEFT JOIN buckets b ON b.customer_key = t.customer_key
+     )
+     SELECT p.customer_id,
+            coalesce(c.name, '${UNATTRIBUTED_CUSTOMER_NAME}') AS name,
+            p.current::text AS current,
+            p.d31_60::text AS d31_60,
+            p.d61_90::text AS d61_90,
+            p.over90::text AS over90,
+            (p.current + p.d31_60 + p.d61_90 + p.over90)::text AS total
+       FROM per_party p
+       LEFT JOIN parties c ON c.id = p.customer_id
+      WHERE (p.current + p.d31_60 + p.d61_90 + p.over90) <> 0
+      ORDER BY (p.current + p.d31_60 + p.d61_90 + p.over90) DESC, c.name NULLS LAST`,
+    [businessId, accountId, effectiveAsOf],
+  );
 
-  const byCustomer = new Map<string, { name: string; invoices: { id: string; date: string; amount: number }[]; receipts: { id: string; date: string; amount: number }[] }>();
-  lines.forEach((l, i) => {
-    const key = l.customer_id ?? UNKNOWN_CUSTOMER_KEY;
-    const entry = byCustomer.get(key) ?? { name: l.customer_name ?? "بدون مشتری مشخص", invoices: [], receipts: [] };
-    const debit = Number(l.debit);
-    const credit = Number(l.credit);
-    if (debit > 0) entry.invoices.push({ id: `${key}-${i}`, date: l.entry_date, amount: debit });
-    if (credit > 0) entry.receipts.push({ id: `${key}-${i}`, date: l.entry_date, amount: credit });
-    byCustomer.set(key, entry);
-  });
-
-  const rows: AgingRow[] = [];
-  const totals: AgingSummary = { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 };
-  for (const [customerId, { name, invoices, receipts }] of byCustomer) {
-    const aged = ageOpenItems(invoices, receipts, effectiveAsOf);
-    const summary = summarizeAging(aged);
-    /*
-     * An advance or overpayment has no open invoice to age, so `summarizeAging`
-     * alone drops it — and then the column of the screen's own «مانده حساب‌ها»
-     * tab (and the A/R control account) says one number while this report's
-     * «جمع» says another. Carry the unapplied credit as a *negative* current
-     * amount, the way a running-balance subledger does, so each row's «جمع»
-     * is exactly the customer's net balance and the report's «جمع کل» is
-     * exactly the control account.
-     */
-    const credit = unappliedCredit(invoices, receipts);
-    summary.current -= credit;
-    summary.total -= credit;
-    if (summary.total === 0) continue;
-    rows.push({ customerId, customerName: name, ...summary });
-    totals.current += summary.current;
-    totals.d31_60 += summary.d31_60;
-    totals.d61_90 += summary.d61_90;
-    totals.over90 += summary.over90;
-    totals.total += summary.total;
-  }
-  rows.sort((a, b) => b.total - a.total);
-  return { asOfDate: effectiveAsOf, rows, totals };
+  const rowsOut: AgingRow[] = rows.map((r) => ({
+    customerId: r.customer_id ?? UNKNOWN_CUSTOMER_KEY,
+    customerName: r.name,
+    current: Number(r.current),
+    d31_60: Number(r.d31_60),
+    d61_90: Number(r.d61_90),
+    over90: Number(r.over90),
+    total: Number(r.total),
+  }));
+  // One row per customer, so this is the report's own arithmetic — the same
+  // sums the screen draws in its footer.
+  const totals = rowsOut.reduce<AgingSummary>(
+    (sum, r) => ({
+      current: sum.current + r.current,
+      d31_60: sum.d31_60 + r.d31_60,
+      d61_90: sum.d61_90 + r.d61_90,
+      over90: sum.over90 + r.over90,
+      total: sum.total + r.total,
+    }),
+    { ...EMPTY_AGING_SUMMARY },
+  );
+  return { asOfDate: effectiveAsOf, rows: rowsOut, totals };
 }
 
 export interface ArReceipt {
@@ -415,6 +792,39 @@ export interface ArReceipt {
   memo: string | null;
   cashAccountId: string | null;
   bankReference: string | null;
+}
+
+/**
+ * May this party receive a customer payment?
+ *
+ * The check is the same set of invariants the customer directory applies
+ * (`listCustomerDirectory`), asked in the one transaction that is about to
+ * write the receipt: the party belongs to this business, holds the Customer
+ * role, is active, and has not been merged into another party.
+ *
+ * The weaker `WHERE id = $1 AND business_id = $2` that used to stand here was
+ * written when `ar_receipts.customer_id` referenced a table that could only
+ * hold customers. Migration 0137 renamed that table to `parties`, whose rows
+ * are customers, suppliers *and* employees — so the foreign key can no longer
+ * say what the id means, and only this check can. Without it a crafted request
+ * could post a receipt against a supplier, a former employee, a deactivated
+ * customer, or a duplicate that was merged away.
+ */
+async function assertReceivableCustomer(
+  client: PoolClient,
+  businessId: string,
+  customerId: string,
+): Promise<void> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id
+       FROM parties
+      WHERE id = $1 AND business_id = $2
+        AND roles @> ARRAY[$3]::text[]
+        AND is_active
+        AND merged_into_id IS NULL`,
+    [customerId, businessId, PARTY_ROLE_STORAGE.Customer],
+  );
+  if (!rows[0]) throw new ArError("customer_not_found", 404);
 }
 
 /**
@@ -447,7 +857,9 @@ export async function receivePayment(params: {
   if (!isUuid(params.customerId)) throw new ArError("customer_not_found", 404);
   // Same story for a date off the wire: reject it here, in the error
   // vocabulary the API answers with, rather than as Postgres's parse error.
-  if (params.receiptDate != null && !isIsoDateOnly(params.receiptDate)) throw new ArError("invalid_date");
+  // `isValidIsoDate` is the repo's one calendar-aware check — the regex it
+  // replaces accepted «2026-02-31», which Postgres then refused with a 500.
+  if (params.receiptDate != null && !isValidIsoDate(params.receiptDate)) throw new ArError("invalid_date");
 
   /*
    * «امروز» here is the business's own date, not the database server's.
@@ -468,11 +880,7 @@ export async function receivePayment(params: {
   try {
     await client.query("BEGIN");
 
-    const { rows: customerRows } = await client.query<{ id: string }>(
-      `SELECT id FROM parties WHERE id = $1 AND business_id = $2`,
-      [params.customerId, params.businessId],
-    );
-    if (!customerRows[0]) throw new ArError("customer_not_found", 404);
+    await assertReceivableCustomer(client, params.businessId, params.customerId);
 
     const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsReceivable]);
     const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
