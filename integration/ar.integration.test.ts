@@ -490,6 +490,44 @@ describe("receivePayment", () => {
     ).rejects.toThrow("customer_not_found");
   });
 
+  it("rejects an employee-only party as the receipt customer", async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, 'Crew', 'employee') RETURNING id`,
+      [biz.id],
+    );
+    await expect(
+      arService.receivePayment({
+        idempotencyKey: randomUUID(),
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: rows[0].id,
+        method: "cash",
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("customer_not_found");
+  });
+
+  it("accepts a multi-role party when Customer is one of the roles", async () => {
+    // Legacy `role` says supplier on purpose: the service reads the `roles`
+    // array, so a party that is also a customer must still be receivable.
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role, roles)
+       VALUES ($1, 'Both', 'supplier', ARRAY['customer', 'supplier']) RETURNING id`,
+      [biz.id],
+    );
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: rows[0].id,
+      method: "cash",
+      amount: 10_000,
+      createdBy: user.id,
+    });
+    expect(receipt.customerId).toBe(rows[0].id);
+  });
+
   it("rejects a customer from a different business", async () => {
     const other = await db.query<{ id: string }>(
       "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
@@ -592,6 +630,38 @@ describe("reverseReceipt", () => {
     const lines = await arService.getCustomerStatement(biz.id, customer.id);
     expect(lines.map((l) => l.type)).toEqual(["invoice", "receipt", "reversal"]);
     expect(lines[2].balance).toBe(500_000);
+  });
+
+  it("refuses to reverse into a locked fiscal period", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 50_000,
+      receiptDate: "2025-03-10",
+      createdBy: user.id,
+    });
+    const year = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on)
+       VALUES ($1, 'test-2025', '2025-01-01', '2026-01-01') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO fiscal_periods (business_id, fiscal_year_id, label, starts_on, ends_on, status)
+       VALUES ($1, $2, 'locked-april', '2025-04-01', '2025-05-01', 'locked')`,
+      [biz.id, year.rows[0].id],
+    );
+    await expect(
+      arService.reverseReceipt({
+        businessId: biz.id,
+        receiptId: receipt.id,
+        actorId: user.id,
+        reversalDate: "2025-04-15",
+      }),
+    ).rejects.toThrow("fiscal_period_locked");
   });
 });
 
