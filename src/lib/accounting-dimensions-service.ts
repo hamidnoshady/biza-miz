@@ -229,19 +229,24 @@ export async function getDimensionValue(businessId: string, id: string): Promise
  * import can say «archived» rather than «unknown». The match is the same
  * expression the unique index uses (`lower(btrim(code))`), so the lookup and
  * the uniqueness rule can never disagree about which value a code means.
+ *
+ * Accepts an optional `client` so the importer can look codes up inside its
+ * own transaction; with no client it uses the tenant-scoped pool.
  */
 export async function findDimensionValueByCode(
   businessId: string,
   kind: DimensionKind,
   code: string,
+  client?: Queryable,
 ): Promise<{ id: string; code: string; isActive: boolean } | null> {
-  const { rows } = await query<{ id: string; code: string; is_active: boolean }>(
-    `SELECT id, code, is_active
-       FROM accounting_dimension_values
-      WHERE business_id = $1 AND kind = $2 AND lower(btrim(code)) = lower(btrim($3))
-      LIMIT 1`,
-    [businessId, kind, code],
-  );
+  const sql = `SELECT id, code, is_active
+                 FROM accounting_dimension_values
+                WHERE business_id = $1 AND kind = $2 AND lower(btrim(code)) = lower(btrim($3))
+                LIMIT 1`;
+  const params = [businessId, kind, code] as const;
+  const { rows } = client
+    ? await client.query<{ id: string; code: string; is_active: boolean }>(sql, params as unknown as unknown[])
+    : await query<{ id: string; code: string; is_active: boolean }>(sql, params as unknown as unknown[]);
   const row = rows[0];
   return row ? { id: row.id, code: row.code, isActive: row.is_active } : null;
 }
