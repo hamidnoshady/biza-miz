@@ -14,6 +14,25 @@
  * and `ap-section` are now the two sides' words, endpoints and payload keys,
  * and nothing else.
  *
+ * Three things this screen is deliberate about, because a subledger is read by
+ * an accountant who will notice:
+ *
+ *  - **Capability is configuration.** `canSettle` comes in as a prop and is
+ *    never derived here: A/R needs `finance.receivables_manage`, A/P needs
+ *    `finance.payables_manage`, and a shared component that hard-coded either
+ *    would be wrong for the other side — or, worse, silently permissive. The
+ *    page is readable with `ledger.view` alone (auditors hold exactly that), so
+ *    a member without the write permission sees no live «دریافت وجه» button to
+ *    press and be refused by the API afterwards.
+ *  - **The list is a window, not the book.** One page is fetched at a time,
+ *    searched in SQL, and the totals above it come from the server's
+ *    whole-subledger summary — so paging or searching can never change what
+ *    the business is owed.
+ *  - **A row can be opened.** Each statement line carries the identifiers of
+ *    the record that caused it, so the panel links to a real destination (the
+ *    order) or opens the journal entry itself, rather than guessing a URL out
+ *    of a Persian sentence.
+ *
  * What deliberately stays per-side (the `SubledgerSide` config):
  *
  *  - the **nouns** on screen («مشتری» / «تأمین‌کننده») and every sentence
@@ -26,13 +45,16 @@
  *  - the settle **payload** (`customerId`+`receiptDate` vs
  *    `supplierId`+`paymentDate`);
  *  - whether a negative balance wears «بستانکار» — A/R marks an advance or
- *    overpayment so it cannot read as debt; A/P keeps the bare figure.
+ *    overpayment so it cannot read as debt; A/P keeps the bare figure;
+ *  - which source records have a destination of their own (an A/R line from an
+ *    order can link to that order; an A/P line has no such screen).
  *
- * Everything else — the fetch/retry/refresh wiring, the layouts, the aging
- * buckets, the overlays — is here, once.
+ * Everything else — the fetch/retry/refresh wiring, the search box, the
+ * paging, the layouts, the aging buckets, the overlays — is here, once.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { SUBLEDGER_PAGE_SIZE } from "@/lib/subledger-pagination";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -49,16 +71,27 @@ import {
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import {
+  KpiCard,
+  KpiRow,
   LoadingSkeleton,
   SectionCardSkeleton,
   cardClass,
   overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
-import { FilterChip } from "@/app/dashboard/filters";
+import { FilterChip, SearchField } from "@/app/dashboard/filters";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { LedgerLoadFailed, OverlayDialog } from "./ledger-ui";
-import { accountingSectionHref } from "./accounting-routes";
+import { LedgerLoadFailed, fmtJalali, OverlayDialog } from "./ledger-ui";
+
+/**
+ * How many balance rows one request asks for. Small enough that a tenant with
+ * thousands of customers never ships the whole book to draw a screen, large
+ * enough that a small shop's list is one page.
+ */
+const PAGE_SIZE = SUBLEDGER_PAGE_SIZE;
+
+/** Typing settles before the request goes out — the same 250ms the voucher lists use. */
+const SEARCH_DEBOUNCE_MS = 250;
 
 /** One row of the balances list — the common shape both sides map their payloads into. */
 export interface SubledgerPartyRow {
@@ -77,6 +110,37 @@ export interface SubledgerPartyRow {
   locationName?: string | null;
 }
 
+/**
+ * The whole-subledger totals the server computes beside the page.
+ *
+ * Deliberately not derived from the rows on screen: they are the subledger's
+ * reconciliation with the control account, and a filter or a page must never
+ * move them.
+ */
+export interface SubledgerSummary {
+  /** What the parties owe the business (A/R) / what the business owes them (A/P), as a positive number. */
+  primaryTotal: number;
+  /** Advances and overpayments held, as a positive number. */
+  advanceTotal: number;
+  /** The two combined, signed the way the control account is. */
+  netTotal: number;
+  /** The control account's own balance, read from the same journal lines. */
+  controlBalance: number;
+  /** `netTotal − controlBalance`; zero when the subledger reconciles. */
+  difference: number;
+  reconciles: boolean;
+}
+
+/** The balances response as this screen reads it — one page plus the facts that must not change with it. */
+export interface SubledgerBalancePage {
+  nextOffset: number | null;
+  rows: SubledgerPartyRow[];
+  /** Rows the search matches, before the window — «۲۵ از ۳۱۰». */
+  total: number;
+  /** Null when the side's payload carried no summary (older endpoint). */
+  summary: SubledgerSummary | null;
+}
+
 /** One row of the aging report, in the buckets the reference software uses. */
 export interface SubledgerAgingRow {
   id: string;
@@ -88,6 +152,7 @@ export interface SubledgerAgingRow {
   total: number;
   /** The «اشخاص» record behind the row, when the payload carries one (null on A/P, whose aging names the alias only). */
   partyId: string | null;
+  /** Branch alias/location label (A/P); absent for business-wide A/R rows. */
   locationName?: string | null;
 }
 
@@ -106,14 +171,42 @@ export interface SubledgerAgingReport {
   totals: SubledgerAgingTotals;
 }
 
-/** One line of a party's statement — a shared shape both endpoints already answer with. */
+/**
+ * The identifiers behind a statement line, as the source record itself reports
+ * them — what a drill-down addresses, never a URL taken back out of a
+ * description.
+ */
+export interface SubledgerStatementSource {
+  /** The journal entry's own `sourceType` ('order', 'ar_receipt', 'cheque', 'purchase', …), or null for a manual entry. */
+  type: string | null;
+  /** The source row's id (the order, the receipt or the cheque). */
+  id: string | null;
+  /** A short label from the source record itself — «چک ۱۲۳۴۵ — بانک ملت». */
+  label: string | null;
+  /** The order behind the line, when there is one (A/R). */
+  orderId?: string | null;
+  /** The purchase behind the line, when there is one (A/P). */
+  purchaseId?: string | null;
+}
+
+/** One line of a party's statement — a shared shape both endpoints answer with. */
 export interface SubledgerStatementLine {
+  /** The journal entry to open for this line, when the payload carries one. */
+  entryId?: string;
   date: string;
   type: string;
   description: string;
   debit: number;
   credit: number;
   balance: number;
+  /** The source record's own label and identifiers (A/R shapes it; A/P answers flat fields). */
+  source?: SubledgerStatementSource | null;
+  /**
+   * The A/P statement's flat references — same facts as `source`, in the shape
+   * that endpoint answers with. The panel accepts either: `journalEntryId` is
+   * read as `entryId`, `sourceType` names the source when no label came with
+   * it, and the rest is context the A/P contract guarantees.
+   */
   journalEntryId?: string;
   journalLineId?: string;
   sourceType?: string | null;
@@ -129,6 +222,7 @@ export interface SubledgerStatementLine {
   locationName?: string | null;
   supplierLocationId?: string | null;
   supplierLocationName?: string | null;
+  /** A/P attribution status; the side's config turns it into a sentence (or none). */
   attributionStatus?: "attributed" | "automatic_missing" | "conditional_missing" | "intentional_unknown" | "unclassified";
 }
 
@@ -150,7 +244,7 @@ function CreditBadge({ label }: { label: string }) {
   );
 }
 
-/** Who the statement overlay is open for — the three fields it needs. */
+/** Who the statement overlay is open for — the four fields it needs. */
 interface StatementTarget {
   id: string;
   name: string;
@@ -170,12 +264,15 @@ export interface SubledgerSide {
   agingCaption: string;
   emptyBalances: string;
   loadBalancesFailed: string;
+  /** Shown when a *search* found nothing — different from «there are no open accounts». */
+  noSearchMatches: string;
   /** The mobile summary under the aging list («جمع کل حساب‌های دریافتنی»). */
   agingTotalLabel: string;
   /** The header's link into the one people directory, filtered to this side. */
   directoryHref: string;
   directoryLinkLabel: string;
-  /** Explanation shown when the unknown/unattributed bucket is present. */
+  searchLabel: string;
+  /** Explanation shown when the unknown/unattributed bucket is present, if the side has one. */
   unknownExplanation?: string;
 
   // — data ———————————————————————————————————————————————————————————————
@@ -183,18 +280,35 @@ export interface SubledgerSide {
   unknownKey: string;
   listEndpoint: string;
   agingEndpoint: string;
-  /** Reads the list endpoint's payload as the rows the screen draws. */
-  readParties: (data: unknown) => SubledgerPartyRow[];
+  /** Reads the list endpoint's payload as one page plus the totals beside it. */
+  readBalances: (data: unknown) => SubledgerBalancePage;
   /** Reads the aging endpoint's payload as the report the screen draws. */
   readAging: (data: unknown) => SubledgerAgingReport;
 
   // — presentation switches ————————————————————————————————————————————
-  /** Explicit meaning of a negative row (A/R customer credit or A/P supplier advance). */
+  /**
+   * What a negative row is called (A/R: «بستانکار» — an advance must not read
+   * as debt; A/P: a prepayment to the supplier). Null: no badge.
+   */
   negativeBalanceLabel: string | null;
-  /** A negative A/P balance is an advance, so the action/modal wording changes with it. */
+  /** The settle action's words when the balance is negative (A/P: «افزودن پیش‌پرداخت»). */
   negativeSettleActionLabel?: string;
+  /** The dialog's title prefix for a negative balance (A/P: «پیش‌پرداخت به »). */
   negativeTitlePrefix?: string;
+  /** The dialog's explanation of what a negative balance means on this side. */
   negativeBalanceMessage?: string;
+
+  // — the reconciliation strip ————————————————————————————————————————
+  summary: {
+    primaryLabel: string;
+    advanceLabel: string;
+    netLabel: string;
+    controlLabel: string;
+    /** The control card's hint when the two agree. */
+    reconciled: string;
+    /** The control card's hint when they do not — the difference is appended. */
+    difference: string;
+  };
 
   // — the settle dialog («دریافت وجه» / «ثبت پرداخت») ————————————————————
   settle: {
@@ -225,6 +339,17 @@ export interface SubledgerSide {
     /** The directory link's words, and where it points for this row (null: no link). */
     directoryLabel: string;
     directoryHrefFor: (id: string, partyId: string | null) => string | null;
+    /** The snapshot column's header — «منبع». */
+    sourceColumnLabel: string;
+    /** The label on the button that opens the line's journal entry. */
+    entryLinkLabel: string;
+    entryFailed: string;
+    /** Turns an A/P attribution status into the sentence the panel shows beside the source. */
+    attributionNoteFor?: (status: SubledgerStatementLine["attributionStatus"]) => string | null;
+    /** Where a line's source record lives, when this side has a destination for it. */
+    orderHrefFor?: (source: SubledgerStatementSource | null | undefined) => string | null;
+    /** The order link's words, for the sides that have one. */
+    orderLinkLabel?: string;
   };
 }
 
@@ -253,10 +378,120 @@ function AgingAsOfPicker({
   );
 }
 
-export function SubledgerSection({ side, canSettle = false }: { side: SubledgerSide; canSettle?: boolean }) {
+/**
+ * The subledger against its control account: what is owed, what is held, what
+ * the two net to, and what the ledger itself says. Both numbers are shown even
+ * though they are equal by construction — that is the point. An accountant
+ * should be able to *see* the report reconcile rather than be told to trust it,
+ * and a difference that has become possible is the cheapest early warning the
+ * screen can give.
+ */
+function BalanceSummary({ side, summary }: { side: SubledgerSide; summary: SubledgerSummary }) {
+  const money = useMoney();
+  return (
+    <KpiRow className="mb-4">
+      <KpiCard label={side.summary.primaryLabel} value={money.format(summary.primaryTotal)} />
+      <KpiCard label={side.summary.advanceLabel} value={money.format(summary.advanceTotal)} />
+      <KpiCard label={side.summary.netLabel} value={money.format(summary.netTotal)} />
+      <KpiCard
+        label={side.summary.controlLabel}
+        value={money.format(summary.controlBalance)}
+        hint={
+          summary.reconciles
+            ? side.summary.reconciled
+            : `${side.summary.difference}: ${money.format(summary.difference)}`
+        }
+      />
+    </KpiRow>
+  );
+}
+
+interface LedgerEntryDetail {
+  id: string;
+  entryDate: string;
+  memo: string | null;
+  sourceType: string | null;
+  postedAt: string;
+  createdByName: string | null;
+  reversesEntryId: string | null;
+  lines: { id: string; accountCode: string; accountName: string; debit: number; credit: number }[];
+}
+
+/**
+ * The journal entry behind one statement line — «what was actually posted».
+ *
+ * A receipt, a cheque movement or a closed-order amendment has no screen of
+ * its own, so this is where a statement line becomes a document an accountant
+ * can read: the accounts, the sides, the memo, and who posted it. Fetched when
+ * opened (never with the statement), so a long statement does not pay for
+ * lines nobody drills into.
+ */
+function StatementEntryDetail({ entryId, failedMessage, onClose }: { entryId: string; failedMessage: string; onClose: () => void }) {
+  const money = useMoney();
+  const [entry, setEntry] = useState<LedgerEntryDetail | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEntry(null);
+    setFailed(false);
+    api<{ entry?: LedgerEntryDetail }>(`/api/ledger/entries/${entryId}`).then(({ ok, data }) => {
+      if (cancelled) return;
+      if (ok && data.entry) setEntry(data.entry);
+      else setFailed(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [entryId, reloadKey]);
+
+  return (
+    <OverlayDialog
+      headingId="statement-entry-heading"
+      onClose={onClose}
+      className={`${overlayPanelClass} max-h-[88vh] w-full max-w-2xl overflow-y-auto p-4 sm:p-5`}
+    >
+      <header className="mb-3 flex items-start justify-between gap-2">
+        <h3 id="statement-entry-heading" className="font-semibold text-foreground">سند حسابداری</h3>
+        <SecondaryButton onClick={onClose}>بستن سند</SecondaryButton>
+      </header>
+      {failed ? <LedgerLoadFailed message={failedMessage} onRetry={() => setReloadKey((k) => k + 1)} /> : !entry ? <LoadingSkeleton rows={2} /> : <>
+      <p className="font-semibold text-foreground">
+        {fmtJalali(entry.entryDate)}
+        {entry.reversesEntryId ? <span className="ms-2 text-xs font-medium text-amber-700 dark:text-amber-300">سند برگشتی</span> : null}
+      </p>
+      <p className="mt-1 text-xs leading-6 text-muted-foreground">
+        {entry.memo || "بدون شرح"}
+        {entry.createdByName ? ` — ثبت: ${entry.createdByName}` : ""}
+      </p>
+      <dl className="mt-2 grid gap-1.5">
+        {entry.lines.map((line) => (
+          <div key={line.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-1.5">
+            <dt className="min-w-0 text-xs text-muted-foreground sm:text-sm">
+              <span className="tabular-nums">{toPersianDigits(line.accountCode)}</span> — {line.accountName}
+            </dt>
+            <dd className="shrink-0 whitespace-nowrap text-xs font-semibold tabular-nums text-foreground sm:text-sm">
+              {line.debit ? `بدهکار ${money.format(line.debit)}` : `بستانکار ${money.format(line.credit)}`}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      </>}
+    </OverlayDialog>
+  );
+}
+
+export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; canSettle: boolean }) {
   const money = useMoney();
   const [parties, setParties] = useState<SubledgerPartyRow[] | null>(null);
+  const [partiesTotal, setPartiesTotal] = useState(0);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [summary, setSummary] = useState<SubledgerSummary | null>(null);
   const [partiesFailed, setPartiesFailed] = useState(false);
+  const [loadingBalances, setLoadingBalances] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
   const [view, setView] = useState<"balances" | "aging">("balances");
   const [aging, setAging] = useState<SubledgerAgingReport | null>(null);
   const [agingFailed, setAgingFailed] = useState(false);
@@ -269,52 +504,112 @@ export function SubledgerSection({ side, canSettle = false }: { side: SubledgerS
   // accepted one and answered with the date it used; the picker is what lets
   // an accountant ask what the ageing looked like at a period end.
   const [asOfDate, setAsOfDate] = useState("");
+  const [search, setSearch] = useState("");
+  // A generation owns replacement + its pages. Only that generation may
+  // finish either loading state; invalidation releases the old page's state.
+  const balanceSeq = useRef(0);
+  const loadedSeq = useRef<number | null>(null);
+  const pageOwner = useRef<object | null>(null);
+  const agingSeq = useRef(0);
+  const invalidateBalances = () => {
+    balanceSeq.current += 1;
+    loadedSeq.current = null;
+    pageOwner.current = null;
+    setLoadingMore(false);
+  };
+  const refresh = () => {
+    invalidateBalances();
+    setRefreshKey((k) => k + 1);
+  };
 
   useEffect(() => {
-    let cancelled = false;
+    const seq = ++balanceSeq.current;
+    const controller = new AbortController();
+    loadedSeq.current = null;
+    pageOwner.current = null;
+    setLoadingMore(false);
     setPartiesFailed(false);
-    // A refetch keeps the list it already has (no skeleton flash between two
-    // good loads), but shows the skeleton again when there is nothing to keep
-    // — a retry after a failure must not flash «هیچ حسابی وجود ندارد» while
-    // the request is still running.
-    setParties((prev) => (prev && prev.length > 0 ? prev : null));
-    api(side.listEndpoint).then(({ ok, data }) => {
-      if (cancelled) return;
-      if (ok) setParties(side.readParties(data));
-      // Not `null` for ever: an unending skeleton claims the request is still
-      // running. An empty list would claim there are no debts — say it failed.
-      else {
-        setParties([]);
-        setPartiesFailed(true);
-      }
-    });
-    // `api()` never rejects (it answers the synthetic «network_error»), but a
-    // guard here costs nothing and keeps an endless skeleton impossible.
+    setLoadMoreFailed(false);
+    setLoadingBalances(true);
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: "0" });
+    const query = search.trim();
+    if (query) params.set("q", query);
+    // Invalidate immediately, including the debounce interval. Old rows remain
+    // readable, but cannot supply an offset for a replacement query.
+    const timer = setTimeout(() => {
+      api(`${side.listEndpoint}?${params.toString()}`, { signal: controller.signal }).then(({ ok, data }) => {
+        if (balanceSeq.current !== seq) return;
+        setLoadingBalances(false);
+        if (ok) {
+          const page = side.readBalances(data);
+          loadedSeq.current = seq;
+          setParties(page.rows);
+          setPartiesTotal(page.total);
+          setNextOffset(page.nextOffset);
+          setSummary(page.summary);
+        } else {
+          setParties((prev) => prev ?? []);
+          setPartiesFailed(true);
+        }
+      });
+    }, query ? SEARCH_DEBOUNCE_MS : 0);
     return () => {
-      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+      if (balanceSeq.current === seq) balanceSeq.current += 1;
+      pageOwner.current = null;
     };
-  }, [refreshKey, side]);
+  }, [refreshKey, search, side]);
 
   useEffect(() => {
     if (view !== "aging") return;
-    let cancelled = false;
+    const seq = ++agingSeq.current;
     setAging(null);
     setAgingFailed(false);
     api(`${side.agingEndpoint}${asOfDate ? `?asOfDate=${asOfDate}` : ""}`).then(({ ok, data }) => {
-      if (cancelled) return;
+      if (agingSeq.current !== seq) return;
       if (ok) setAging(side.readAging(data));
       // Not an empty report: an aging fetch that fails must not fall into the
       // «هیچ بدهی بازی وجود ندارد» branch — a false claim.
       else setAgingFailed(true);
     });
-    return () => {
-      cancelled = true;
-    };
   }, [view, asOfDate, refreshKey, side]);
 
-  if (!parties) {
+  /** One more page, appended to what is on screen — the table never blanks while it loads. */
+  const loadMore = useCallback(() => {
+    const seq = balanceSeq.current;
+    if (loadedSeq.current !== seq || pageOwner.current || loadingBalances || nextOffset === null) return;
+    const owner = {};
+    pageOwner.current = owner;
+    setLoadingMore(true);
+    setLoadMoreFailed(false);
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(nextOffset) });
+    if (search.trim()) params.set("q", search.trim());
+    api(`${side.listEndpoint}?${params.toString()}`).then(({ ok, data }) => {
+      if (balanceSeq.current !== seq || pageOwner.current !== owner) return;
+      pageOwner.current = null;
+      setLoadingMore(false);
+      if (!ok) {
+        setLoadMoreFailed(true);
+        return;
+      }
+      const page = side.readBalances(data);
+      setParties((prev) => {
+        const existing = prev ?? [];
+        const seen = new Set(existing.map((row) => row.id));
+        return [...existing, ...page.rows.filter((row) => !seen.has(row.id))];
+      });
+      setNextOffset(page.nextOffset);
+      setPartiesTotal(page.total);
+      setSummary(page.summary);
+    });
+  }, [search, nextOffset, loadingBalances, side]);
+
+  if (!parties && loadingBalances) {
     return <SectionCardSkeleton rows={4} />;
   }
+
+  const hasMore = nextOffset !== null;
 
   return (
     <section className="space-y-4">
@@ -324,7 +619,7 @@ export function SubledgerSection({ side, canSettle = false }: { side: SubledgerS
             <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">{side.eyebrow}</p>
             <h2 className="mt-1 text-base font-semibold text-foreground">{side.title}</h2>
             <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{side.description}</p>
-            {side.unknownExplanation && parties.some((p) => p.id === side.unknownKey) ? (
+            {side.unknownExplanation && parties?.some((p) => p.id === side.unknownKey) ? (
               <p className="mt-3 max-w-3xl rounded-xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
                 {side.unknownExplanation}
               </p>
@@ -348,18 +643,42 @@ export function SubledgerSection({ side, canSettle = false }: { side: SubledgerS
         <div className="p-4 sm:p-5">
           {view === "balances" ? (
             <div>
-              {partiesFailed ? (
-                <LedgerLoadFailed message={side.loadBalancesFailed} onRetry={() => setRefreshKey((k) => k + 1)} />
-              ) : parties.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">{side.emptyBalances}</p>
-              ) : (
+              {summary ? <BalanceSummary side={side} summary={summary} /> : null}
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <SearchField
+                  value={search}
+                  onChange={(value) => { if (value !== search) { invalidateBalances(); setSearch(value); } }}
+                  label={side.searchLabel}
+                  placeholder={`${side.searchLabel}…`}
+                  className="w-full sm:w-64"
+                />
+                {parties && partiesTotal > 0 ? (
+                  <p className="text-xs text-muted-foreground" aria-live="polite">
+                    {toPersianDigits(parties.length)} از {toPersianDigits(partiesTotal)} {side.partyNoun}
+                    {loadingBalances ? " — در حال به‌روزرسانی…" : ""}
+                  </p>
+                ) : null}
+              </div>
+              {partiesFailed && (parties?.length ?? 0) === 0 ? (
+                <LedgerLoadFailed message={side.loadBalancesFailed} onRetry={refresh} />
+              ) : parties && parties.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
+                  {search.trim() ? side.noSearchMatches : side.emptyBalances}
+                </p>
+              ) : parties ? (
                 <>
+                  {/* A failed *refresh* keeps the rows it had and says so above them. */}
+                  {partiesFailed ? (
+                    <div className="mb-3">
+                      <LedgerLoadFailed message={side.loadBalancesFailed} onRetry={refresh} />
+                    </div>
+                  ) : null}
                   <DataTable caption={side.balancesCaption} className="hidden lg:block">
                     <DataTableHead>
                       <Th>{side.partyNoun}</Th>
                       <Th>تلفن</Th>
                       <Th numeric>مانده</Th>
-                      <Th>اقدام</Th>
+                      {canSettle ? <Th>اقدام</Th> : null}
                     </DataTableHead>
                     <DataTableBody>
                       {parties.map((p) => (
@@ -372,7 +691,13 @@ export function SubledgerSection({ side, canSettle = false }: { side: SubledgerS
                           </Td>
                           <Td muted>{p.phone ? toPersianDigits(p.phone) : "—"}</Td>
                           <Td numeric nowrap className="font-bold">{money.format(p.balance)}{p.balance < 0 && side.negativeBalanceLabel ? <CreditBadge label={side.negativeBalanceLabel} /> : null}</Td>
-                          <Td>{p.id !== side.unknownKey && canSettle ? <button type="button" onClick={() => setSettleTarget(p)} className="inline-flex min-h-9 items-center justify-center rounded-lg px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-500/20">{p.balance < 0 ? side.negativeSettleActionLabel ?? side.settle.actionLabel : side.settle.actionLabel}</button> : null}</Td>
+                          {canSettle ? (
+                            <Td>
+                              {p.id !== side.unknownKey ? (
+                                <button type="button" onClick={() => setSettleTarget(p)} className="inline-flex min-h-9 items-center justify-center rounded-lg px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-500/20">{p.balance < 0 ? side.negativeSettleActionLabel ?? side.settle.actionLabel : side.settle.actionLabel}</button>
+                              ) : null}
+                            </Td>
+                          ) : null}
                         </DataTableRow>
                       ))}
                     </DataTableBody>
@@ -389,18 +714,34 @@ export function SubledgerSection({ side, canSettle = false }: { side: SubledgerS
                           <span className="whitespace-nowrap font-bold text-foreground">{money.format(p.balance)}</span>
                         </div>
                         {p.balance < 0 && side.negativeBalanceLabel ? <div className="mt-2"><CreditBadge label={side.negativeBalanceLabel} /></div> : null}
-                        {p.id !== side.unknownKey && canSettle ? <button type="button" onClick={() => setSettleTarget(p)} className="mt-3 min-h-11 w-full rounded-lg bg-amber-100 px-4 text-sm font-semibold text-amber-950 transition-colors hover:bg-amber-200 dark:bg-amber-500/20 dark:text-amber-200 dark:hover:bg-amber-500/30">{p.balance < 0 ? side.negativeSettleActionLabel ?? side.settle.actionLabel : side.settle.actionLabel}</button> : null}
+                        {canSettle && p.id !== side.unknownKey ? (
+                          <button type="button" onClick={() => setSettleTarget(p)} className="mt-3 min-h-11 w-full rounded-lg bg-amber-100 px-4 text-sm font-semibold text-amber-950 transition-colors hover:bg-amber-200 dark:bg-amber-500/20 dark:text-amber-200 dark:hover:bg-amber-500/30">{p.balance < 0 ? side.negativeSettleActionLabel ?? side.settle.actionLabel : side.settle.actionLabel}</button>
+                        ) : null}
                       </article>
                     ))}
                   </div>
+                  {hasMore || loadMoreFailed ? (
+                    <div className="mt-4 flex flex-col items-center gap-2">
+                      {loadMoreFailed ? (
+                        <p role="alert" className="text-xs text-destructive">
+                          بارگذاری بخش بعدی ناموفق بود؛ نگران نباشید، ردیف‌های نمایش‌داده‌شده هنوز معتبرند.
+                        </p>
+                      ) : null}
+                      <SecondaryButton onClick={loadMore} disabled={loadingMore || loadingBalances || loadedSeq.current !== balanceSeq.current}>
+                        {loadingMore ? "در حال بارگذاری…" : "نمایش موارد بیشتر"}
+                      </SecondaryButton>
+                    </div>
+                  ) : null}
                 </>
+              ) : (
+                <SectionCardSkeleton rows={4} />
               )}
             </div>
           ) : (
             <div>
               <AgingAsOfPicker asOfDate={asOfDate} onAsOfDateChange={setAsOfDate} report={aging} />
               {agingFailed ? (
-                <LedgerLoadFailed message="بارگذاری نمای سنی بدهی‌ها ناموفق بود." onRetry={() => setRefreshKey((k) => k + 1)} />
+                <LedgerLoadFailed message="بارگذاری نمای سنی بدهی‌ها ناموفق بود." onRetry={refresh} />
               ) : !aging ? (
                 <LoadingSkeleton rows={3} />
               ) : aging.rows.length === 0 ? (
@@ -462,14 +803,15 @@ export function SubledgerSection({ side, canSettle = false }: { side: SubledgerS
         />
       ) : null}
 
-      {settleTarget ? (
+      {/* No write capability, no dialog: the only way to open it is a row action that is not drawn. */}
+      {canSettle && settleTarget ? (
         <SubledgerSettleDialog
           side={side}
           party={settleTarget}
           onClose={() => setSettleTarget(null)}
           onDone={() => {
             setSettleTarget(null);
-            setRefreshKey((k) => k + 1);
+            refresh();
           }}
         />
       ) : null}
@@ -492,6 +834,7 @@ export function SubledgerStatementPanel({
   name: string;
   /** The «اشخاص» record behind the row, when the caller knows it — the directory link's key. */
   partyId: string | null;
+  /** Branch/location context, when the row is a per-branch A/P alias. */
   locationName?: string | null;
   onClose: () => void;
 }) {
@@ -499,11 +842,15 @@ export function SubledgerStatementPanel({
   const [lines, setLines] = useState<SubledgerStatementLine[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  // One entry overlay serves both responsive layouts. Keep the line and its
+  // stable journal ID together, without mounting/fetching two hidden details.
+  const [openLine, setOpenLine] = useState<{ index: number; entryId: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLines(null);
     setFailed(false);
+    setOpenLine(null);
     api(side.statement.endpointFor(id))
       .then(({ ok, data }) => {
         if (cancelled) return;
@@ -522,14 +869,22 @@ export function SubledgerStatementPanel({
 
   const directoryHref = side.statement.directoryHrefFor(id, partyId);
   const typeLabel = (type: string) => side.statement.typeLabels[type] ?? type;
-  const attributionLabel = (status: SubledgerStatementLine["attributionStatus"]) => {
-    switch (status) {
-      case "intentional_unknown": return "استثنای آگاهانه؛ بدون طرف معین";
-      case "automatic_missing": return "خطای تطبیق؛ منبع خودکار بدون تأمین‌کننده";
-      case "conditional_missing": return "نیازمند بررسی؛ انتساب مشروط پیدا نشد";
-      case "unclassified": return "منبع هنوز در قرارداد انتساب دسته‌بندی نشده";
-      default: return null;
-    }
+  /**
+   * Everything a line can be resolved to, whichever shape its endpoint uses:
+   * A/R answers a `source` object, A/P answers flat references and an
+   * attribution status. One reader here means the table, the mobile card and
+   * either side all show the same thing for the same line.
+   */
+  const sourceOf = (line: SubledgerStatementLine) => {
+    const entryId = line.entryId ?? line.journalEntryId ?? null;
+    const label =
+      line.source?.label ??
+      (line.sourceType ? ledgerSourceLabel(line.sourceType) : null) ??
+      null;
+    const location = line.locationName ?? line.supplierLocationName ?? null;
+    const note = side.statement.attributionNoteFor?.(line.attributionStatus) ?? null;
+    const orderHref = side.statement.orderHrefFor?.(line.source) ?? null;
+    return { entryId, label, location, note, orderHref };
   };
 
   return (
@@ -576,73 +931,123 @@ export function SubledgerStatementPanel({
           <DataTable
             caption={side.statement.caption}
             className="hidden lg:block"
-            tableClassName="min-w-[920px]"
+            tableClassName="min-w-[820px]"
           >
             <DataTableHead>
               <Th>تاریخ</Th>
               <Th>نوع</Th>
-              <Th>منبع و سند</Th>
               <Th>شرح</Th>
+              <Th>{side.statement.sourceColumnLabel}</Th>
               <Th numeric>بدهکار</Th>
               <Th numeric>بستانکار</Th>
               <Th numeric>مانده</Th>
             </DataTableHead>
             <DataTableBody>
-              {lines.map((l, i) => (
-                <DataTableRow key={i}>
-                  <Td muted nowrap>{toPersianDigits(formatJalali(l.date))}</Td>
-                  <Td muted>{typeLabel(l.type)}</Td>
-                  <Td>
-                    <div className="space-y-1 text-xs">
-                      <p className="font-medium text-foreground">{ledgerSourceLabel(l.sourceType ?? l.type)}</p>
-                      {l.locationName || l.supplierLocationName ? <p className="text-muted-foreground">شعبه: {l.locationName ?? l.supplierLocationName}</p> : null}
-                      {attributionLabel(l.attributionStatus) ? <p className="text-amber-700 dark:text-amber-300">{attributionLabel(l.attributionStatus)}</p> : null}
-                      {l.journalEntryId ? <Link className="inline-block font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(l.journalEntryId)}`}>مشاهدهٔ سند روزنامه</Link> : <span className="text-muted-foreground">شناسهٔ سند موجود نیست</span>}
-                    </div>
-                  </Td>
-                  <Td>{l.description}</Td>
-                  <Td numeric nowrap>{l.debit ? money.format(l.debit) : "—"}</Td>
-                  <Td numeric nowrap>{l.credit ? money.format(l.credit) : "—"}</Td>
-                  <Td numeric nowrap className="font-semibold">{money.format(l.balance)}</Td>
-                </DataTableRow>
-              ))}
+              {lines.map((l, i) => {
+                const { entryId, label, location, note, orderHref } = sourceOf(l);
+                return (
+                  <DataTableRow key={`line-${i}`}>
+                    <Td muted nowrap>{fmtJalali(l.date)}</Td>
+                    <Td muted>{typeLabel(l.type)}</Td>
+                    <Td>{l.description}</Td>
+                    <Td>
+                      <div className="space-y-1 text-xs">
+                        <p className="font-medium text-foreground">{label ?? "—"}</p>
+                        {location ? <p className="text-muted-foreground">شعبه: {location}</p> : null}
+                        {note ? <p className="font-medium text-amber-700 dark:text-amber-300">{note}</p> : null}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {orderHref ? (
+                            <Link href={orderHref} className="font-semibold text-primary underline-offset-4 hover:underline">
+                              {side.statement.orderLinkLabel ?? "مشاهده"}
+                            </Link>
+                          ) : null}
+                          {entryId ? (
+                            <button
+                              type="button"
+                              aria-haspopup="dialog"
+                              aria-expanded={openLine?.index === i}
+                              onClick={() => setOpenLine(openLine?.index === i ? null : { index: i, entryId })}
+                              className="rounded-lg border border-border px-2 py-1 text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted"
+                            >
+                              {side.statement.entryLinkLabel}
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </Td>
+                    <Td numeric nowrap>{l.debit ? money.format(l.debit) : "—"}</Td>
+                    <Td numeric nowrap>{l.credit ? money.format(l.credit) : "—"}</Td>
+                    <Td numeric nowrap className="font-semibold">{money.format(l.balance)}</Td>
+                  </DataTableRow>
+                );
+              })}
             </DataTableBody>
           </DataTable>
 
           <div className="space-y-3 lg:hidden">
-            {lines.map((l, i) => (
-              <article key={i} className="rounded-xl border border-border/80 bg-muted/60 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-xs text-muted-foreground">{toPersianDigits(formatJalali(l.date))}</p>
-                    <h4 className="mt-1 break-words font-semibold text-foreground">{l.description}</h4>
+            {lines.map((l, i) => {
+              const { entryId, label, location, note, orderHref } = sourceOf(l);
+              return (
+                <article key={i} className="rounded-xl border border-border/80 bg-muted/60 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs text-muted-foreground">{fmtJalali(l.date)}</p>
+                      <h4 className="mt-1 break-words font-semibold text-foreground">{l.description}</h4>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">{typeLabel(l.type)}</span>
                   </div>
-                  <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">{typeLabel(l.type)}</span>
-                </div>
-                <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
-                  <p>{ledgerSourceLabel(l.sourceType ?? l.type)}{l.locationName || l.supplierLocationName ? ` — شعبه: ${l.locationName ?? l.supplierLocationName}` : ""}</p>
-                  {attributionLabel(l.attributionStatus) ? <p className="font-medium text-amber-700 dark:text-amber-300">{attributionLabel(l.attributionStatus)}</p> : null}
-                  {l.journalEntryId ? <Link className="inline-block font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(l.journalEntryId)}`}>مشاهدهٔ سند روزنامه</Link> : null}
-                </div>
-                <dl className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3 text-sm">
-                  <div className="min-w-0">
-                    <dt className="text-xs text-muted-foreground">بدهکار</dt>
-                    <dd className="mt-1 whitespace-nowrap font-semibold tabular-nums text-foreground">{l.debit ? money.format(l.debit) : "—"}</dd>
-                  </div>
-                  <div className="min-w-0">
-                    <dt className="text-xs text-muted-foreground">بستانکار</dt>
-                    <dd className="mt-1 whitespace-nowrap font-semibold tabular-nums text-foreground">{l.credit ? money.format(l.credit) : "—"}</dd>
-                  </div>
-                  <div className="min-w-0">
-                    <dt className="text-xs text-muted-foreground">مانده</dt>
-                    <dd className="mt-1 whitespace-nowrap font-bold tabular-nums text-foreground">{money.format(l.balance)}</dd>
-                  </div>
-                </dl>
-              </article>
-            ))}
+                  <dl className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3 text-sm">
+                    <div className="min-w-0">
+                      <dt className="text-xs text-muted-foreground">بدهکار</dt>
+                      <dd className="mt-1 whitespace-nowrap font-semibold tabular-nums text-foreground">{l.debit ? money.format(l.debit) : "—"}</dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-xs text-muted-foreground">بستانکار</dt>
+                      <dd className="mt-1 whitespace-nowrap font-semibold tabular-nums text-foreground">{l.credit ? money.format(l.credit) : "—"}</dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-xs text-muted-foreground">مانده</dt>
+                      <dd className="mt-1 whitespace-nowrap font-bold tabular-nums text-foreground">{money.format(l.balance)}</dd>
+                    </div>
+                  </dl>
+                  {label || location || note || orderHref || entryId ? (
+                    <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs">
+                      {label ? <p className="text-muted-foreground">{label}</p> : null}
+                      {location ? <p className="text-muted-foreground">شعبه: {location}</p> : null}
+                      {note ? <p className="font-medium text-amber-700 dark:text-amber-300">{note}</p> : null}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {orderHref ? (
+                          <Link href={orderHref} className="font-semibold text-primary underline-offset-4 hover:underline">
+                            {side.statement.orderLinkLabel ?? "مشاهده"}
+                          </Link>
+                        ) : null}
+                        {entryId ? (
+                          <button
+                            type="button"
+                            aria-haspopup="dialog"
+                              aria-expanded={openLine?.index === i}
+                            onClick={() => setOpenLine(openLine?.index === i ? null : { index: i, entryId })}
+                            className="rounded-lg border border-border px-2 py-1 font-semibold text-muted-foreground"
+                          >
+                            {side.statement.entryLinkLabel}
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+
+                </article>
+              );
+            })}
           </div>
         </>
       )}
+      {openLine ? <StatementEntryDetail
+        key={openLine.entryId}
+        entryId={openLine.entryId}
+        failedMessage={side.statement.entryFailed}
+        onClose={() => setOpenLine(null)}
+      /> : null}
     </OverlayDialog>
   );
 }
@@ -669,6 +1074,12 @@ function SubledgerSettleDialog({
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  /*
+   * The idempotency key for this intent, kept across a failed attempt: the A/P
+   * payments endpoint dedupes on it, so a user who retries after a timeout
+   * does not post the same payment twice. A changed intent (a different
+   * amount, method, date or memo) is a different payment and gets a new key.
+   */
   const requestKeyRef = useRef<{ intent: string; key: string } | null>(null);
 
   async function submit(e: React.FormEvent) {

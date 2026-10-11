@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { RegistrationResponseJSON } from "@simplewebauthn/server";
 import { requireRole, withTenantScope } from "@/lib/auth";
+import { PIN_ROLES } from "@/lib/roles";
+import { requireRecentAuth } from "@/lib/recent-auth";
 import { resolveDeviceId } from "@/lib/device-service";
 import { requestHost } from "@/lib/host";
 import { completeWebauthnRegistration, EmployeeError } from "@/lib/employee-service";
@@ -15,8 +17,12 @@ import { expectedOriginsFor } from "@/lib/webauthn";
  * exactly as Wave 3 behaved.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requireRole("cashier", "waiter", "kitchen");
+  const { session, error } = await requireRole(...PIN_ROLES);
   if (error) return error;
+
+  /** Issue #854 (P1.8): the ceremony's *storing* half needs the same bar. */
+  const recentAuthError = requireRecentAuth(session);
+  if (recentAuthError) return recentAuthError;
 
   let body: {
     response?: RegistrationResponseJSON;
