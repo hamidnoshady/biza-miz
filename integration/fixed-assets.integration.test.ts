@@ -2567,6 +2567,85 @@ describe("accounting dimensions on fixed assets (issue #868)", () => {
         acquisition: { sourceAccountId: acct.cash, entryDate: null },
       }),
     ).rejects.toBeInstanceOf(dims.AccountingDimensionError);
+
+    // A real value that belongs to a DIFFERENT business must be refused.
+    const otherRow = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ($1, $2) RETURNING id",
+      [`Other-dim-${randomUUID().slice(0, 6)}`, `other-dim-${randomUUID().slice(0, 6)}`],
+    );
+    const otherVal = await dims.createDimensionValue(otherRow.rows[0].id, owner.id, {
+      kind: "cost_center",
+      code: "CC-OTHER",
+      name: "Other",
+    });
+    await expect(
+      fixedAssetsService.createFixedAsset({
+        businessId: biz.id,
+        locationId: biz.locationA,
+        name: "برج خنک‌کننده ۲",
+        acquisitionDate: "2026-08-01",
+        cost: 10_000_000,
+        salvageValue: 0,
+        usefulLifeMonths: 60,
+        createdBy: owner.id,
+        dimensions: { cost_center: otherVal.id },
+        acquisition: { sourceAccountId: acct.cash, entryDate: null },
+      }),
+    ).rejects.toBeInstanceOf(dims.AccountingDimensionError);
+  });
+
+  it("updates default dimensions prospectively without rewriting posted history", async () => {
+    const cc2 = (await dims.createDimensionValue(biz.id, owner.id, {
+      kind: "cost_center",
+      code: `CC-2-${randomUUID().slice(0, 6)}`,
+      name: "Second kitchen",
+    })).id;
+    const asset = await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "یخچال استهلاک‌دار",
+      acquisitionDate: acquisitionDateFor(periodMonthsAgo(2)),
+      inServiceDate: acquisitionDateFor(periodMonthsAgo(2)),
+      cost: 60_000_000,
+      salvageValue: 0,
+      usefulLifeMonths: 60,
+      createdBy: owner.id,
+      dimensions: { cost_center: ccId },
+      acquisition: { sourceAccountId: acct.cash, entryDate: null },
+    });
+    const first = await fixedAssetsService.postDepreciation({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      periodKey: periodMonthsAgo(2),
+      createdBy: owner.id,
+    });
+    const updated = await fixedAssetsService.updateFixedAssetDimensions({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      dimensions: { cost_center: cc2 },
+    });
+    expect(updated.costCenterId).toBe(cc2);
+    const second = await fixedAssetsService.postDepreciation({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      periodKey: periodMonthsAgo(1),
+      createdBy: owner.id,
+    });
+    const { rows } = await db.query<{ source_id: string; cost_center_id: string | null }>(
+      `SELECT je.source_id, jl.cost_center_id
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.business_id = $1
+          AND je.source_type = 'fixed_asset_depreciation'
+          AND a.code = '5700'
+        ORDER BY je.source_id`,
+      [biz.id],
+    );
+    const firstLine = rows.find((r) => r.source_id === first.depreciationEntryId)!;
+    const secondLine = rows.find((r) => r.source_id === second.depreciationEntryId)!;
+    expect(firstLine.cost_center_id).toBe(ccId);
+    expect(secondLine.cost_center_id).toBe(cc2);
   });
 });
 
