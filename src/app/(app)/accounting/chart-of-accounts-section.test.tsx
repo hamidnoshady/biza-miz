@@ -50,6 +50,14 @@ function fetchMockOnce(rows: unknown[] = ROWS) {
     if (init?.method === "PATCH" || init?.method === "DELETE" || init?.method === "POST") {
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
+    // The form's currency list (issue #863) is a separate, allowed request; the
+    // assertions below count only the account requests this screen owns.
+    if (String(url).startsWith("/api/currencies")) {
+      return new Response(JSON.stringify({ currencies: [], config: { transactionCurrencies: [] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     expect(url).toContain("/api/ledger/accounts?all=1");
     return new Response(JSON.stringify({ accounts: rows }), {
       status: 200,
@@ -92,7 +100,7 @@ describe("issue #824 §7: the chart owns its own fetch", () => {
 
     await waitFor(() => expect(seen("اجاره انبار")).toBe(true));
 
-    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    const urls = fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => !u.startsWith("/api/currencies"));
     expect(urls).toEqual(["/api/ledger/accounts?all=1"]);
     // No `?all=0` / active-only picker call: the accounting workspace's shared
     // account list is only needed by the manual/expense flows (item §7).

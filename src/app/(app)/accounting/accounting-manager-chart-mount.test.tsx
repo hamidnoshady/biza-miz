@@ -52,6 +52,11 @@ function okJson(body: unknown) {
 describe("issue #824 §7: chart mounting is independent", () => {
   it("issues only the chart's own ?all=1 request", async () => {
     const fetchMock = vi.fn(async (url: string) => {
+      // The currency list for the form (issue #863) is allowed; the account
+      // requests are what this test counts.
+      if (String(url).startsWith("/api/currencies")) {
+        return okJson({ currencies: [], config: { transactionCurrencies: [] } });
+      }
       expect(String(url)).toContain("/api/ledger/accounts?all=1");
       return okJson({ accounts: CHART_ROWS });
     });
@@ -60,7 +65,7 @@ describe("issue #824 §7: chart mounting is independent", () => {
     renderChart();
     await waitFor(() => expect(screen.getAllByText("هزینه‌ها").length).toBeGreaterThan(0));
 
-    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    const urls = fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => !u.startsWith("/api/currencies"));
     expect(urls).toEqual(["/api/ledger/accounts?all=1"]);
     // The picker list is what the manual/expense sections need; this screen
     // must not pay for it.
