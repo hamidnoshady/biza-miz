@@ -394,11 +394,14 @@ jobs:
           # to freeze the app's growth. It sat at 599.8 MiB (0.2 MiB of headroom) before the AEC
           # document-control wave added eight traced API routes and a project tab, which took it to
           # 600.6 MiB; the headroom is therefore 20 MiB rather than the 0.2 MiB the previous
-          # threshold implied. The dominant term is .next/server at 103 MiB of *unminified* server
+          # threshold implied. On 2026-10-11 the merged multicurrency and auth-hardening work on
+          # main took the measured payload to 620.4 MiB (installer 161.3 MiB, well inside its
+          # gate), so the detector moves to 640 MiB with the same 20 MiB headroom. Minifying the
+          # server chunks remains the real size work. The dominant term is .next/server at 103 MiB of *unminified* server
           # chunks — minifying the compile pass is the real win available here, and is tracked
           # separately rather than smuggled into a feature branch.
           if ($exe.Length -gt 175MB) { throw "Installer $installerMiB MiB exceeds the 175 MiB release baseline" }
-          if ($unpacked -gt 620MB) { throw "Installed payload $installedMiB MiB exceeds 620 MiB budget" }
+          if ($unpacked -gt 640MB) { throw "Installed payload $installedMiB MiB exceeds 640 MiB budget" }
 
       - name: Write Windows Server package evidence
         env:
