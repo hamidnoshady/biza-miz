@@ -120,16 +120,25 @@ function request(code: string, extra: Record<string, unknown> = {}): NextRequest
   });
 }
 
-/** A fully-bound pending token, the shape the request route now mints. */
+/**
+ * A pending token, the shape the request route now mints.
+ *
+ * #854 moved the challenge *binding* off the token and onto the
+ * `mfa_challenges` row: the token carries which ceremony this is
+ * (`mayAttachPhone` / `phone`) and the route derives the purpose and the
+ * expected number from that, passing both to the verifier, which checks them
+ * against the row under `FOR UPDATE`. So the binding is asserted here as the
+ * arguments handed to the verifier rather than as token fields.
+ */
 function boundPayload(overrides: Record<string, unknown> = {}) {
   return {
     sub: USER,
     businessId: BUSINESS,
     mayAttachPhone: false,
     phone: null,
-    cid: CHALLENGE,
-    destination: PHONE,
-    purpose: "login",
+    candidatePhone: null,
+    multiBusiness: false,
+    otpProven: false,
     realm: "phone",
     ...overrides,
   };
@@ -138,7 +147,7 @@ function boundPayload(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   for (const fn of Object.values(mocks)) (fn as AnyFn).mockClear();
   mocks.verifyPhonePendingToken.mockResolvedValue(boundPayload());
-  mocks.verifyEmployeePhoneOtp.mockResolvedValue({ verified: true });
+  mocks.verifyEmployeePhoneOtp.mockResolvedValue(true);
   // A member row with no linked global identity, so the MFA branch is skipped
   // and the response is the plain session.
   mocks.query.mockResolvedValue({
@@ -165,12 +174,12 @@ describe("anti-enumeration (L15)", () => {
     // The token the request route hands back for a number nothing matched: no
     // subject, so its verify can never succeed.
     mocks.verifyPhonePendingToken.mockResolvedValue(
-      boundPayload({ sub: null, cid: null, destination: null }),
+      boundPayload({ sub: null }),
     );
     const unknownNumber = await POST(request("123456"));
 
     mocks.verifyPhonePendingToken.mockResolvedValue(boundPayload());
-    mocks.verifyEmployeePhoneOtp.mockResolvedValue({ verified: false, reason: "wrong_code" });
+    mocks.verifyEmployeePhoneOtp.mockResolvedValue(false);
     const wrongCode = await POST(request("123456"));
 
     // Both status and body. Comparing only the status would let a differing
@@ -182,7 +191,7 @@ describe("anti-enumeration (L15)", () => {
 
   it("does not consult the challenge at all for an unmatched number", async () => {
     mocks.verifyPhonePendingToken.mockResolvedValue(
-      boundPayload({ sub: null, cid: null, destination: null }),
+      boundPayload({ sub: null }),
     );
     await POST(request("123456"));
 
@@ -194,36 +203,59 @@ describe("anti-enumeration (L15)", () => {
 });
 
 describe("challenge binding (L02)", () => {
-  it("refuses a token that names a member but no challenge", async () => {
-    // A pre-#885 token: it predates the binding, so there is no row it could
-    // be redeemed against.
-    mocks.verifyPhonePendingToken.mockResolvedValue(
-      boundPayload({ cid: null, destination: null }),
-    );
-    const res = await POST(request("123456"));
-
-    expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "unauthorized" });
-    expect(mocks.verifyEmployeePhoneOtp).not.toHaveBeenCalled();
-  });
-
-  it("passes the whole binding through to the verifier", async () => {
-    mocks.verifyPhonePendingToken.mockResolvedValue(
-      boundPayload({ purpose: "attach", mayAttachPhone: true, phone: PHONE }),
-    );
+  /*
+   * Where the binding lives changed between #885 and #854, and #854's place is
+   * the stronger one. #885 carried `cid` and `destination` on the token and
+   * re-checked them against the row here; #854 binds `purpose` and
+   * `candidate_phone_e164` *on the row* and redeems under `FOR UPDATE`, so of
+   * N concurrent verifies exactly one can consume the challenge and the
+   * attempt ceiling is exact rather than approximate. The token no longer
+   * needs to assert the binding, which also removes a field a caller could
+   * tamper with.
+   *
+   * What is still the route's job, and what these tests pin, is deriving the
+   * right purpose and the right expected number from the ceremony the token
+   * describes — because a wrong purpose is what would let a code minted for
+   * one ceremony be spent on another.
+   */
+  it("derives the login purpose for an ordinary door login", async () => {
     await POST(request("۱۲۳۴۵۶"));
 
-    // Every field the token asserts about the challenge has to reach the row
-    // check, or the binding is decoration.
     expect(mocks.verifyEmployeePhoneOtp).toHaveBeenCalledWith({
-      challengeId: CHALLENGE,
       userId: USER,
-      businessId: BUSINESS,
-      purpose: "attach",
-      destination: PHONE,
+      purpose: "login",
+      expectedPhoneE164: null,
       // Persian digits, canonicalised at this boundary too (L11).
       code: "123456",
     });
+  });
+
+  it("derives the phone-change purpose and binds the number being written", async () => {
+    mocks.verifyPhonePendingToken.mockResolvedValue(
+      boundPayload({ mayAttachPhone: true, phone: PHONE }),
+    );
+    await POST(request("۱۲۳۴۵۶"));
+
+    // The number is bound from the *token*, never from the request body, so a
+    // caller cannot redirect the write by editing the body.
+    expect(mocks.verifyEmployeePhoneOtp).toHaveBeenCalledWith({
+      userId: USER,
+      purpose: "change_login_phone",
+      expectedPhoneE164: PHONE,
+      code: "123456",
+    });
+  });
+
+  it("refuses a verifier rejection as a wrong code, never as a pass", async () => {
+    mocks.verifyEmployeePhoneOtp.mockResolvedValue(false);
+    const res = await POST(request("123456"));
+
+    // Every binding failure — no row, wrong purpose, wrong number, expired,
+    // attempts exhausted — collapses to the same answer, so the response
+    // cannot be used to learn which one it was.
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid_code" });
+    expect(mocks.auditLoginFailure).toHaveBeenCalled();
   });
 
   it("rejects a code that is not six digits before touching anything", async () => {
@@ -233,12 +265,20 @@ describe("challenge binding (L02)", () => {
     expect(mocks.verifyEmployeePhoneOtp).not.toHaveBeenCalled();
   });
 
-  it("reports an expired challenge as expired rather than as a wrong code", async () => {
-    mocks.verifyEmployeePhoneOtp.mockResolvedValue({ verified: false, reason: "expired" });
+  it("collapses an expired challenge into the same answer as a wrong code", async () => {
+    /*
+     * This used to assert a distinct `code_expired`. #854's verifier returns a
+     * bare boolean, so the route can no longer tell expiry from a wrong code —
+     * and that is the better contract, not a regression: a distinct
+     * "expired" answer is an oracle that confirms a live challenge row exists
+     * for this member. Every refusal therefore collapses to `invalid_code`,
+     * which is also exactly what the anti-enumeration path answers.
+     */
+    mocks.verifyEmployeePhoneOtp.mockResolvedValue(false);
     const res = await POST(request("123456"));
 
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "code_expired" });
+    expect(await res.json()).toEqual({ error: "invalid_code" });
     expect(mocks.auditLoginFailure).toHaveBeenCalled();
   });
 });
@@ -335,7 +375,8 @@ describe("runtime input handling (L14)", () => {
     await POST(request("123456", { deviceToken: "x".repeat(5000) }));
 
     // Over the bound it is dropped rather than forwarded to a row lookup.
-    expect(mocks.resolveDeviceId).toHaveBeenCalledWith(null, BUSINESS);
+    // `undefined`, not the 5,000-character string the caller sent.
+    expect(mocks.resolveDeviceId).toHaveBeenCalledWith(undefined, BUSINESS);
   });
 });
 
@@ -400,9 +441,10 @@ describe("trusted-device exemption before MFA (gap 3)", () => {
     await POST(request("123456"));
 
     // Trust is never a substitute for the phone proof; it only skips the
-    // *second* factor. Redemption still happened, bound to the named challenge.
+    // *second* factor. Redemption still happened first, for this member and
+    // this ceremony, and the stamps still committed.
     expect(mocks.verifyEmployeePhoneOtp).toHaveBeenCalledWith(
-      expect.objectContaining({ challengeId: CHALLENGE, userId: USER, destination: PHONE }),
+      expect.objectContaining({ userId: USER, purpose: "login", code: "123456" }),
     );
     expect(mocks.stampPhoneVerified).toHaveBeenCalled();
   });

@@ -194,7 +194,11 @@ describe("biometric login — the ceremony is the assurance (gap 4)", () => {
       expect.objectContaining({
         sub: USER.id,
         businessId: USER.business_id,
-        platformUserId: null,
+        // This fixture has no linked global identity, so the route's
+        // `LEFT JOIN platform_users` yields nothing and the claim is absent
+        // rather than an explicit null. What matters is that it is *not*
+        // populated: no global capability rides on a site-local biometric.
+        platformUserId: undefined,
       }),
     );
     expect(res.headers.getSetCookie?.()[0]).toContain("pos_session=");
