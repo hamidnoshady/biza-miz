@@ -86,12 +86,47 @@ export function oldestOverdueBucket(
   return null;
 }
 
+/**
+ * The inclusive upper age of each bucket, in days — the *definition* of the
+ * boundaries, in one place.
+ *
+ * `bucketForAge` reads it, and `agingBucketCaseSql` below generates the SQL
+ * `CASE` from it, so the JS report and the SQL report cannot drift: moving a
+ * boundary is one edit here, not two edits and a silent disagreement between
+ * two screens that are supposed to show the same number.
+ */
+export const AGING_BUCKET_MAX_AGE_DAYS: Record<AgingBucket, number> = {
+  current: 30,
+  d31_60: 60,
+  d61_90: 90,
+  // Open-ended: everything older.
+  over90: Number.POSITIVE_INFINITY,
+};
+
 /** 0-30 days old = current, then 30-day buckets out to 90+. */
 export function bucketForAge(ageDays: number): AgingBucket {
-  if (ageDays <= 30) return "current";
-  if (ageDays <= 60) return "d31_60";
-  if (ageDays <= 90) return "d61_90";
+  if (ageDays <= AGING_BUCKET_MAX_AGE_DAYS.current) return "current";
+  if (ageDays <= AGING_BUCKET_MAX_AGE_DAYS.d31_60) return "d31_60";
+  if (ageDays <= AGING_BUCKET_MAX_AGE_DAYS.d61_90) return "d61_90";
   return "over90";
+}
+
+/**
+ * The SQL twin of {@link bucketForAge}: a `CASE` expression over an age in
+ * days, built from {@link AGING_BUCKET_MAX_AGE_DAYS}.
+ *
+ * Exists because the subledger aging reports aggregate in PostgreSQL now
+ * (a tenant with years of history must not ship every A/R line to Node just to
+ * add it up). The buckets a person reads there still have to be the buckets
+ * `bucketForAge` defines — so the SQL is generated from the same table rather
+ * than transcribed, which is the only way two implementations stay one.
+ */
+export function agingBucketCaseSql(ageDaysExpression: string): string {
+  const buckets: AgingBucket[] = ["current", "d31_60", "d61_90"];
+  const cases = buckets
+    .map((bucket) => `WHEN ${ageDaysExpression} <= ${AGING_BUCKET_MAX_AGE_DAYS[bucket]} THEN '${bucket}'`)
+    .join(" ");
+  return `CASE ${cases} ELSE 'over90' END`;
 }
 
 export interface AgedItem extends OpenItem {

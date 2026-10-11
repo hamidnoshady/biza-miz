@@ -8,6 +8,7 @@ import {
   TENANT_MFA_THEME,
   type MfaMethod,
 } from "@/components/auth/mfa-step";
+import { BusinessPicker, useBusinessSelection } from "@/components/auth/business-picker";
 import { lockoutMessage, useNextPath } from "@/components/auth/login-helpers";
 import { toPersianDigits } from "@/lib/digits";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
@@ -23,6 +24,9 @@ interface LoginResponse {
   mfaState?: "grace" | "required";
   graceUntil?: string | null;
   graceDaysLeft?: number | null;
+  /** Issue #854 (P1.19) — the multi-business answer, which carries no session. */
+  needsBusinessSelection?: boolean;
+  businesses?: { id: string; name: string }[];
 }
 
 /**
@@ -57,6 +61,19 @@ export default function AdminLoginForm() {
     availableMethods: MfaMethod[];
   } | null>(null);
   /**
+   * Issue #854 (P1.19) — the missing step.
+   *
+   * A member of two businesses cannot be signed in until they name one, so
+   * `/api/auth/login` answers `{ needsBusinessSelection: true, businesses }`
+   * with **HTTP 200 and no session**. This door treated any `res.ok` as a
+   * successful login and navigated to the destination, which then bounced the
+   * user straight back here — a loop with no explanation on either screen.
+   *
+   * The step is `BusinessPicker` from `components/auth`, the same one the
+   * phone-OTP door renders, so the two cannot drift apart again.
+   */
+  const { selection, capture, clear } = useBusinessSelection();
+  /**
    * The grace nag: `mfaState: "grace"` arrives *alongside* a real session, so
    * this is a prompt, not a gate — the user is already signed in and may
    * dismiss it. Persisted for the length of the visit only; the countdown comes
@@ -69,14 +86,23 @@ export default function AdminLoginForm() {
     router.refresh();
   }
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  /**
+   * Sign in, optionally naming the business.
+   *
+   * The password door has no bearer token to replay: `/api/auth/login` requires
+   * `email`+`password` on *every* call (`missing_credentials` otherwise), so the
+   * business-selection round re-sends the same credentials plus the chosen id
+   * and the route re-verifies them. Nothing about the first response is trusted
+   * on the second call, which is why there is no token here.
+   */
+  async function submit(e: React.FormEvent | null, businessId?: string) {
+    e?.preventDefault();
     setBusy(true);
     setError(null);
     const res = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, ...(businessId ? { businessId } : {}) }),
     });
     const data: LoginResponse = await res.json().catch(() => ({}));
     setBusy(false);
@@ -89,6 +115,15 @@ export default function AdminLoginForm() {
       setError(lockoutMessage(data.lockedUntil));
       return;
     }
+
+    /*
+     * The selection request is checked before the MFA interstitial and before
+     * the success path: the response is `res.ok` with no cookie, so treating it
+     * as success is precisely the bug. It is also reachable *after* a wrong
+     * business id on the second round, in which case the list comes back again
+     * and the member simply picks another.
+     */
+    if (res.ok && capture(data)) return;
 
     if (res.ok && data.mfaRequired && data.mfaToken) {
       setPending({
@@ -114,7 +149,20 @@ export default function AdminLoginForm() {
   // The MFA interstitial and the grace nag replace the form *inside* the same
   // card chrome — MfaStep's theme is only its inner spacing, not a page.
   let body: React.ReactNode;
-  if (pending) {
+  if (selection) {
+    body = (
+      <BusinessPicker
+        selection={selection}
+        busy={busy}
+        error={error}
+        onChoose={(businessId) => void submit(null, businessId)}
+        onCancel={() => {
+          clear();
+          setPassword("");
+        }}
+      />
+    );
+  } else if (pending) {
     body = (
       <MfaStep
         mfaToken={pending.token}

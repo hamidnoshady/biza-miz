@@ -11,10 +11,16 @@
  * callers: an Owner's second factor and a cashier's door login differ in
  * ceremony, not in what a live challenge row means.
  */
-import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { SignJWT } from "jose";
 import { query, withoutTenantScope } from "./db";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
+import {
+  consumeAllChallenges,
+  issueOtpChallenge,
+  liveChallengePhone,
+  redeemOtpChallenge,
+  type OtpPurpose,
+} from "./otp-challenge";
 import { getSmsProvider } from "./sms-config";
 import { isMobilePhone, phoneE164 } from "./phone";
 import {
@@ -76,6 +82,13 @@ export async function phoneOtpEnforcementFor(
 // The pending token — what carries "this far has been proven" between steps
 // ---------------------------------------------------------------------------
 
+/**
+ * The subject realm the multi-business phone challenge lives under — a
+ * challenge keyed on the *number*, not on a membership, used when the caller has
+ * not yet named (and must not be told) a business.
+ */
+export const PENDING_PHONE_REALM = "phone_pending";
+
 export interface PhonePendingPayload {
   /** users.id of the member logging in; null on the anti-enumeration path. */
   sub: string | null;
@@ -88,6 +101,21 @@ export interface PhonePendingPayload {
   mayAttachPhone: boolean;
   /** The candidate number to attach (PIN-verified flow, phone not yet on file). */
   phone?: string | null;
+  /**
+   * Issue #854 (P1.18): the number a *multi-business* login was started for.
+   * Present only on the path where no business was named, so verification can
+   * resolve the candidate members after the code checks out rather than
+   * publishing them before it does.
+   */
+  candidatePhone?: string | null;
+  /** True when the token represents "a number matched, business not yet chosen". */
+  multiBusiness?: boolean;
+  /**
+   * True once the code for a multi-business login has actually been redeemed.
+   * Only then may the business list be shown, and only then can a business be
+   * chosen — a token that merely started a login cannot be spent as one.
+   */
+  otpProven?: boolean;
   realm: "phone";
 }
 
@@ -97,7 +125,12 @@ export async function signPhonePendingToken(
   payload: Omit<PhonePendingPayload, "realm">,
 ): Promise<string> {
   const secret = await getRealmSecret("phone");
-  return new SignJWT({ ...payload, sub: undefined, uid: payload.sub, realm: "phone" })
+  return new SignJWT({
+    ...payload,
+    sub: undefined,
+    uid: payload.sub,
+    realm: "phone",
+  })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(PHONE_PENDING_TTL)
@@ -112,6 +145,9 @@ export async function verifyPhonePendingToken(token: string): Promise<PhonePendi
       businessId?: string;
       mayAttachPhone?: boolean;
       phone?: string | null;
+      candidatePhone?: string | null;
+      multiBusiness?: boolean;
+      otpProven?: boolean;
     }>(token, "phone");
     if (!payload || payload.realm !== "phone") return null;
     return {
@@ -119,6 +155,9 @@ export async function verifyPhonePendingToken(token: string): Promise<PhonePendi
       businessId: payload.businessId ?? "",
       mayAttachPhone: payload.mayAttachPhone === true,
       phone: payload.phone ?? null,
+      candidatePhone: payload.candidatePhone ?? null,
+      multiBusiness: payload.multiBusiness === true,
+      otpProven: payload.otpProven === true,
       realm: "phone",
     };
   } catch {
@@ -131,17 +170,7 @@ export async function verifyPhonePendingToken(token: string): Promise<PhonePendi
 // ---------------------------------------------------------------------------
 
 const EMPLOYEE_PHONE_REALM = "employee_phone";
-/** Wrong codes burn the challenge, same ceiling as the MFA interstitial. */
-const MAX_OTP_ATTEMPTS = 5;
-/** Till door: a code must survive a busy shift's worth of SMS lag, not a login form's. */
-const OTP_TTL_MINUTES = 5;
 
-async function hashOtp(otp: string): Promise<string> {
-  const secretKey = await getRealmSecret("platform");
-  return createHmac("sha256", secretKey).update(otp).digest("hex");
-}
-
-/** `+98912***4567` — enough to recognise your own number, not to dial it. */
 export function maskPhoneE164(e164: string): string {
   return e164.length > 8 ? `+${e164.slice(1, 4)}***${e164.slice(-4)}` : "***";
 }
@@ -164,32 +193,38 @@ export async function sendEmployeePhoneOtp(options: {
   businessId: string;
   userId: string;
   phone: string;
-}): Promise<{ allowed: true } | { allowed: false; retryAfterMs: number }> {
+  /**
+   * What the code authorises. Required rather than defaulted: the whole of
+   * #854 P0.8 is that a code must not be spendable for a purpose it was not
+   * issued for, and a default would silently give every caller the weakest
+   * answer. The candidate phone is bound into the row at the same time.
+   */
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+}): Promise<
+  | { allowed: true; maskedPhone: string; expiresAt: Date }
+  | { allowed: false; retryAfterMs: number }
+> {
   const identityKey = `${options.businessId}:${options.userId}`;
   const limit = await checkPhoneOtpRateLimit(identityKey);
   if (!limit.allowed) return limit;
 
-  const otp = String(randomInt(0, 1_000_000)).padStart(6, "0");
-  const hashed = await hashOtp(otp);
-  await withoutTenantScope("platform", () =>
-    query(
-      `INSERT INTO mfa_challenges (subject_realm, subject_id, hashed_otp, expires_at)
-       VALUES ($1, $2, $3, now() + interval '1 minute' * $4)`,
-      [EMPLOYEE_PHONE_REALM, options.userId, hashed, OTP_TTL_MINUTES],
-    ),
-  );
+  const issued = await issueOtpChallenge({
+    subjectRealm: EMPLOYEE_PHONE_REALM,
+    subjectId: options.userId,
+    purpose: options.purpose,
+    candidatePhoneE164: options.phone,
+  });
 
   try {
     const provider = await getSmsProvider();
-    await provider.sendOtp(options.phone, otp);
+    await provider.sendOtp(options.phone, issued.code);
   } catch (err) {
-    await withoutTenantScope("platform", () =>
-      query(`DELETE FROM mfa_challenges WHERE subject_realm = $1 AND subject_id = $2 AND hashed_otp = $3`, [
-        EMPLOYEE_PHONE_REALM,
-        options.userId,
-        hashed,
-      ]),
-    ).catch(() => {});
+    // A code that was never delivered must not sit live for five minutes.
+    await consumeAllChallenges({
+      subjectRealm: EMPLOYEE_PHONE_REALM,
+      subjectId: options.userId,
+      purpose: options.purpose,
+    }).catch(() => {});
     throw err;
   }
 
@@ -201,7 +236,11 @@ export async function sendEmployeePhoneOtp(options: {
     ),
   );
 
-  return { allowed: true };
+  return {
+    allowed: true,
+    maskedPhone: maskPhoneE164(options.phone),
+    expiresAt: issued.expiresAt,
+  };
 }
 
 /**
@@ -212,28 +251,56 @@ export async function sendEmployeePhoneOtp(options: {
 export async function verifyEmployeePhoneOtp(options: {
   userId: string;
   code: string;
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+  /**
+   * The number this verification is about. When present it must equal the
+   * number the code went to — that is what stops a valid code for A being
+   * submitted while asking the server to persist B (#854 P0.8).
+   */
+  expectedPhoneE164?: string | null;
 }): Promise<boolean> {
-  const { rows } = await query<{ id: string; hashed_otp: string; attempts: number }>(
-    `SELECT id, hashed_otp, attempts FROM mfa_challenges
-      WHERE subject_realm = $1 AND subject_id = $2 AND expires_at > now()
-      ORDER BY created_at DESC LIMIT 1`,
-    [EMPLOYEE_PHONE_REALM, options.userId],
-  );
-  const challenge = rows[0];
-  if (!challenge || challenge.attempts >= MAX_OTP_ATTEMPTS) return false;
+  const result = await redeemOtpChallenge({
+    subjectRealm: EMPLOYEE_PHONE_REALM,
+    subjectId: options.userId,
+    purpose: options.purpose,
+    code: options.code,
+    expectedPhoneE164: options.expectedPhoneE164,
+  });
+  return result.ok;
+}
 
-  const offered = await hashOtp(options.code.trim());
-  const stored = Buffer.from(challenge.hashed_otp, "hex");
-  const candidate = Buffer.from(offered, "hex");
-  const isMatch = stored.length === candidate.length && timingSafeEqual(stored, candidate);
-
-  if (!isMatch) {
-    await query(`UPDATE mfa_challenges SET attempts = attempts + 1 WHERE id = $1`, [challenge.id]);
-    return false;
-  }
-
-  await query(`DELETE FROM mfa_challenges WHERE id = $1`, [challenge.id]);
-  return true;
+/**
+ * The destination a live employee challenge is waiting on (#854 P2.19).
+ *
+ * Lets the verify screen say «کد به … ارسال شد» after a refresh without ever
+ * reconstructing the number from a masked string, and without trusting the
+ * request body for it.
+ */
+export async function liveEmployeePhoneChallenge(options: {
+  userId: string;
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+}): Promise<{
+  maskedPhone: string | null;
+  /** When the code was sent — the resend cooldown counts from here (P2.25). */
+  requestedAt: string;
+  expiresAt: string;
+  /** The exact number the code went to — the server's copy, not the body's. */
+  candidatePhoneE164: string | null;
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+} | null> {
+  const live = await liveChallengePhone({
+    subjectRealm: EMPLOYEE_PHONE_REALM,
+    subjectId: options.userId,
+    purpose: options.purpose,
+  });
+  if (!live) return null;
+  return {
+    maskedPhone: live.candidatePhoneE164 ? maskPhoneE164(live.candidatePhoneE164) : null,
+    requestedAt: live.createdAt.toISOString(),
+    expiresAt: live.expiresAt.toISOString(),
+    candidatePhoneE164: live.candidatePhoneE164,
+    purpose: options.purpose,
+  };
 }
 
 export async function checkPhoneOtpRateLimit(

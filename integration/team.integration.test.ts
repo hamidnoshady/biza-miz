@@ -135,6 +135,7 @@ describe("membership creation always produces a usable login", () => {
         email: "manager@example.com",
         password: "manager-password",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -159,6 +160,7 @@ describe("membership creation always produces a usable login", () => {
         defaultLocationId: alpha.locationId,
         locationIds: [alpha.locationId],
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -184,6 +186,7 @@ describe("membership creation always produces a usable login", () => {
           pin: "2468",
           defaultLocationId: business.locationId,
           actorId: business.ownerId,
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
         }),
       );
     }
@@ -206,15 +209,27 @@ describe("cross-business invitation", () => {
         fullName: "Alpha Owner",
         locationIds: [beta.locationId],
         actorId: beta.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
     const preview = await team.previewInvitation(token);
     expect(preview.businessName).toBe("Beta");
-    // They already have a login, so acceptance needs no password.
     expect(preview.hasExistingLogin).toBe(true);
 
-    const result = await team.acceptInvitation(token, null);
+    /**
+     * Issue #854 (P0.4): the link identifies the intended account, it does not
+     * prove who is holding it. For an address that already has a login, the
+     * ceremony must therefore include that login's password — otherwise anyone
+     * who obtained the invitation (forwarded, leaked, intercepted) inherits the
+     * membership, and with it every business the identity can reach.
+     */
+    await expect(team.acceptInvitation(token, null)).rejects.toThrow("authentication_required");
+    await expect(team.acceptInvitation(token, "not-the-password")).rejects.toThrow(
+      "invalid_credentials",
+    );
+
+    const result = await team.acceptInvitation(token, "owner-password");
     expect(result.businessId).toBe(beta.businessId);
     expect(result.role).toBe("accountant");
 
@@ -241,12 +256,20 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Newcomer",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
     expect((await team.previewInvitation(token)).hasExistingLogin).toBe(false);
-    await expect(team.acceptInvitation(token, null)).rejects.toThrow("weak_password");
-    await expect(team.acceptInvitation(token, "short")).rejects.toThrow("weak_password");
+    /**
+     * A brand-new identity has nothing to authenticate against, so the password
+     * *is* the credential — and it goes through the one shared strength
+     * validator, whose vocabulary (`password_too_short`) is the same one every
+     * other password surface answers with (#854 P2.16).
+     */
+    await expect(team.acceptInvitation(token, null)).rejects.toThrow("password_too_short");
+    await expect(team.acceptInvitation(token, "short")).rejects.toThrow("password_too_short");
+    await expect(team.acceptInvitation(token, "        ")).rejects.toThrow("password_blank");
 
     await team.acceptInvitation(token, "a-good-password");
     const identity = await db.query("SELECT 1 FROM platform_users WHERE email = 'newcomer@example.com'");
@@ -261,6 +284,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Once",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -279,6 +303,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Revoked",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await asBusiness(alpha.businessId, () =>
@@ -295,6 +320,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Stale",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await db.query("UPDATE invitations SET expires_at = now() - interval '1 day'");
@@ -315,6 +341,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Twice",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     const second = await asBusiness(alpha.businessId, () =>
@@ -324,6 +351,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Twice",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -340,6 +368,7 @@ describe("cross-business invitation", () => {
           role: "manager",
           fullName: "Alpha Owner",
           actorId: alpha.ownerId,
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
         }),
       ),
     ).rejects.toThrow("already_a_member");
@@ -358,6 +387,7 @@ describe("permission changes take effect immediately", () => {
         email: "perm@example.com",
         password: "manager-password",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -371,6 +401,7 @@ describe("permission changes take effect immediately", () => {
         userId,
         actorId: alpha.ownerId,
         overrides: { granted: [], revoked: [permissions.PERMISSIONS.menuEdit] },
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -387,6 +418,7 @@ describe("permission changes take effect immediately", () => {
         fullName: "Trusted Cashier",
         pin: "9182",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -396,6 +428,7 @@ describe("permission changes take effect immediately", () => {
         userId,
         actorId: alpha.ownerId,
         overrides: { granted: [permissions.PERMISSIONS.reportsView], revoked: [] },
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -447,6 +480,7 @@ describe("a business cannot lock itself out", () => {
         email: "second.owner@example.com",
         password: "second-password",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     expect(secondOwner).toBeTruthy();
@@ -457,6 +491,7 @@ describe("a business cannot lock itself out", () => {
         userId: alpha.ownerId,
         actorId: alpha.ownerId,
         role: "manager",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -477,6 +512,7 @@ describe("removal preserves history", () => {
         pin: "5309",
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -521,6 +557,7 @@ describe("every membership mutation is auditable", () => {
         fullName: "Audited",
         pin: "7391",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await asBusiness(alpha.businessId, () =>
@@ -562,6 +599,7 @@ describe("every membership mutation is auditable", () => {
         role: "manager",
         fullName: "Invited",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await team.acceptInvitation(token, "a-good-password");
@@ -583,6 +621,7 @@ describe("team reads stay inside the business", () => {
         fullName: "Beta Cashier",
         pin: "1593",
         actorId: beta.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -603,11 +642,13 @@ describe("custom role assignment revisioning", () => {
     const { userId } = await asBusiness(alpha.businessId, () => team.createMembership({
       businessId: alpha.businessId, role: "cashier", fullName: "Revision Cashier",
       pin: "7531", actorId: alpha.ownerId,
+      reason: "تست: دلیل تغییر دسترسی ثبت شد",
     }));
     const before = await db.query<{ membership_revision: string }>("SELECT membership_revision FROM users WHERE id=$1", [userId]);
 
     await asBusiness(alpha.businessId, () => team.updateMembership({
       businessId: alpha.businessId, userId, actorId: alpha.ownerId, customRoleId: roles[0].id,
+      reason: "تست: دلیل تغییر دسترسی ثبت شد",
     }));
 
     const after = await db.query<{ custom_role_id: string; membership_revision: string }>("SELECT custom_role_id,membership_revision FROM users WHERE id=$1", [userId]);
@@ -653,6 +694,7 @@ describe("branch assignment", () => {
           pin: "1357",
           locationIds: [alpha.locationId, beta.locationId],
           actorId: alpha.ownerId,
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
         }),
       ),
     ).rejects.toMatchObject({ message: "unknown_location" });
@@ -677,6 +719,7 @@ describe("branch assignment", () => {
         locationIds: [second],
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -696,6 +739,7 @@ describe("branch assignment", () => {
         locationIds: [alpha.locationId],
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -734,6 +778,7 @@ describe("branch assignment", () => {
         locationIds: [alpha.locationId],
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -750,5 +795,911 @@ describe("branch assignment", () => {
 
     // The refused update rolled back: the original assignment still stands.
     expect(await assignmentOf(userId)).toEqual({ defaultId: alpha.locationId, ids: [alpha.locationId] });
+  });
+});
+
+/**
+ * Issue #854 (P1.12) — a role transition may not strand the membership.
+ *
+ * The two models are not interchangeable: a password role signs in at the
+ * tenant login screen through the global identity, a PIN role signs in at the
+ * staff door. Moving a member across the line changes which door exists for
+ * them, and before this pass the role was written regardless — leaving an
+ * "active" member with no way in.
+ *
+ * The refusals name the missing credential, because the server deliberately
+ * does not invent one (a password or PIN the member never chose is a credential
+ * their administrator holds). Suspended memberships move freely: nobody signs in
+ * with a suspended membership, so the door is not needed until reactivation —
+ * which is checked, and is the third case below.
+ */
+describe("credential-aware role transitions (P1.12)", () => {
+  it("refuses to move a PIN member into a password role without a global identity", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Stranded",
+        pin: "7314",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Stranded'",
+      [alpha.businessId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.updateMembership({
+          businessId: alpha.businessId,
+          userId: rows[0].id,
+          actorId: alpha.ownerId,
+          role: "manager",
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "identity_required", status: 409 });
+
+    // Nothing half-applied: the member is still a cashier with their PIN.
+    const after = await db.query<{ role: string }>("SELECT role FROM users WHERE id = $1", [
+      rows[0].id,
+    ]);
+    expect(after.rows[0].role).toBe("cashier");
+  });
+
+  it("allows the same move once a global identity is linked", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Promoted",
+        pin: "7315",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const identity = await db.query<{ id: string }>(
+      `INSERT INTO platform_users (email, password_hash, full_name)
+       VALUES ('promoted@example.com', 'hash', 'Promoted') RETURNING id`,
+    );
+    await db.query(
+      "UPDATE users SET platform_user_id = $2 WHERE business_id = $1 AND full_name = 'Promoted'",
+      [alpha.businessId, identity.rows[0].id],
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Promoted'",
+      [alpha.businessId],
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        role: "manager",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+
+    const after = await db.query<{ role: string }>("SELECT role FROM users WHERE id = $1", [
+      rows[0].id,
+    ]);
+    expect(after.rows[0].role).toBe("manager");
+  });
+
+  it("refuses to move a password member onto the staff door without a PIN", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "manager",
+        fullName: "Demoted",
+        email: "demoted@example.com",
+        password: "manager-password",
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Demoted'",
+      [alpha.businessId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.updateMembership({
+          businessId: alpha.businessId,
+          userId: rows[0].id,
+          actorId: alpha.ownerId,
+          role: "cashier",
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "pin_required", status: 409 });
+
+    // With a PIN set first — the same order the Team screen asks for — it lands.
+    await asBusiness(alpha.businessId, () =>
+      team.setPin(alpha.businessId, rows[0].id, "9182", alpha.ownerId),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        role: "cashier",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const after = await db.query<{ role: string }>("SELECT role FROM users WHERE id = $1", [
+      rows[0].id,
+    ]);
+    expect(after.rows[0].role).toBe("cashier");
+  });
+
+  it("lets a suspended member change model, then insists on the credential before reactivation", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "manager",
+        fullName: "Returning",
+        email: "returning@example.com",
+        password: "manager-password",
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Returning'",
+      [alpha.businessId],
+    );
+
+    // Suspend, then move to the staff door while inactive: allowed, because a
+    // suspended membership has no door to lose.
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        isActive: false,
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        role: "waiter",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+
+    // Reactivation is where the door is needed again — and there is no PIN yet.
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.updateMembership({
+          businessId: alpha.businessId,
+          userId: rows[0].id,
+          actorId: alpha.ownerId,
+          isActive: true,
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "pin_required", status: 409 });
+
+    await asBusiness(alpha.businessId, () =>
+      team.setPin(alpha.businessId, rows[0].id, "9183", alpha.ownerId),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        isActive: true,
+      }),
+    );
+    const after = await db.query<{ is_active: boolean }>(
+      "SELECT is_active FROM users WHERE id = $1",
+      [rows[0].id],
+    );
+    expect(after.rows[0].is_active).toBe(true);
+  });
+});
+
+describe("the rehire ceremony (issue #854 pass 4)", () => {
+  /**
+   * Offboarding is deliberately destructive — identity linkage severed,
+   * credentials revoked, branch scope wiped, the row retained — and rehire is
+   * the explicit mirror-image transition that puts all of it back in one
+   * locked write. These tests pin that ceremony against a real database.
+   */
+
+  async function hireManager(overrides?: { revoked?: string[]; granted?: string[] }) {
+    return asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "manager",
+        fullName: "Rehire Manager",
+        email: `rehire.manager.${randomUUID().slice(0, 8)}@example.com`,
+        password: "strong-password-1",
+        overrides: overrides ?? {},
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: استخدام اولیه برای آزمون بازگشت به کار",
+      }),
+    );
+  }
+
+  it("only rehire what is offboarded — suspended and active members take the ordinary path", async () => {
+    const { userId } = await hireManager();
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId: alpha.ownerId,
+          locationScope: "all",
+          reason: "تست: بازگشت به کار پیش از قطع همکاری ممکن نیست",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "not_offboarded", status: 409 });
+
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        isActive: false,
+      }),
+    );
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId: alpha.ownerId,
+          locationScope: "all",
+          reason: "تست: عضو تعلیق‌شده با فعال‌سازی بازمی‌گردد نه بازگشت به کار",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "not_offboarded", status: 409 });
+  });
+
+  it("restores the identity linkage, role, permissions and branch scope atomically, keeping history", async () => {
+    const { userId } = await hireManager({ revoked: ["crm.export"] });
+    const identity = await db.query<{ platform_user_id: string }>(
+      "SELECT platform_user_id FROM users WHERE id = $1",
+      [userId],
+    );
+    const platformUserId = identity.rows[0].platform_user_id;
+
+    // History the rehire must never touch.
+    await db.query(
+      `INSERT INTO orders (location_id, order_number, type, status, total, opened_by)
+       VALUES ($1, 1, 'takeaway', 'completed', 1000, $2)`,
+      [alpha.locationId, userId],
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+    const offboarded = await db.query<{
+      is_active: boolean;
+      membership_status: string;
+      platform_user_id: string | null;
+      location_scope: string;
+    }>("SELECT is_active, membership_status, platform_user_id, location_scope FROM users WHERE id = $1", [userId]);
+    expect(offboarded.rows[0]).toMatchObject({
+      is_active: false,
+      membership_status: "offboarded",
+      platform_user_id: null,
+      location_scope: "none",
+    });
+
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationScope: "selected",
+        locationIds: [alpha.locationId],
+        reason: "تست: قرارداد دوباره از این ماه شروع می‌شود",
+      }),
+    );
+
+    const after = await db.query<{
+      is_active: boolean;
+      membership_status: string;
+      platform_user_id: string | null;
+      role: string;
+      location_scope: string;
+      permissions: { revoked?: string[] };
+    }>(
+      "SELECT is_active, membership_status, platform_user_id, role, location_scope, permissions FROM users WHERE id = $1",
+      [userId],
+    );
+    expect(after.rows[0]).toMatchObject({
+      is_active: true,
+      membership_status: "active",
+      platform_user_id: platformUserId,
+      role: "manager",
+      location_scope: "selected",
+    });
+    expect(after.rows[0].permissions.revoked).toContain("crm.export");
+
+    const branches = await db.query(
+      "SELECT 1 FROM user_locations WHERE user_id = $1 AND location_id = $2",
+      [userId, alpha.locationId],
+    );
+    expect(branches.rowCount).toBe(1);
+
+    const history = await db.query("SELECT 1 FROM orders WHERE opened_by = $1", [userId]);
+    expect(history.rowCount, "history lost during rehire").toBe(1);
+
+    const events = await db.query(
+      "SELECT event_type FROM iam_events WHERE business_id = $1 AND entity_id = $2 ORDER BY sequence",
+      [alpha.businessId, userId],
+    );
+    const types = events.rows.map((row) => row.event_type);
+    expect(types).toContain("membership.offboarded");
+    expect(types[types.length - 1]).toBe("membership.rehired");
+
+    const audit = await db.query<{ payload: { reason?: string } }>(
+      "SELECT payload FROM audit_log WHERE business_id = $1 AND action = 'team.member_rehired' AND entity_id = $2",
+      [alpha.businessId, userId],
+    );
+    expect(audit.rowCount).toBe(1);
+    expect(audit.rows[0].payload.reason).toBe("تست: قرارداد دوباره از این ماه شروع می‌شود");
+  });
+
+  it("brings MFA enrolments back with the relink — no bypass, no loss", async () => {
+    const { userId } = await hireManager();
+    const { rows: linked } = await db.query<{ platform_user_id: string }>(
+      "SELECT platform_user_id FROM users WHERE id = $1",
+      [userId],
+    );
+    const platformUserId = linked[0].platform_user_id;
+
+    // A confirmed TOTP factor on the global identity.
+    await db.query(
+      `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, is_primary, confirmed_at)
+       VALUES ('platform_user', $1, 'totp', true, now())`,
+      [platformUserId],
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationScope: "all",
+        reason: "تست: بازگشت به کار باید عامل دومرحله‌ای را برگرداند",
+      }),
+    );
+
+    const enrolment = await db.query(
+      `SELECT 1 FROM mfa_enrolments e JOIN users u ON u.platform_user_id = e.subject_id
+        WHERE u.id = $1 AND e.subject_realm = 'platform_user' AND e.method = 'totp'`,
+      [userId],
+    );
+    expect(enrolment.rowCount, "MFA factor must survive offboarding and return with the relink").toBe(1);
+  });
+
+  it("restores the PIN that was active at offboarding when no fresh one is named", async () => {
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Rehire Cashier",
+        pin: "5309",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: استخدام صندوق‌دار برای آزمون بازگشت",
+      }),
+    );
+    const before = await db.query<{ id: string; secret_hash: string; pin_blind_index: string | null }>(
+      `SELECT id, secret_hash, pin_blind_index FROM employee_credentials
+        WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
+      [userId, alpha.businessId],
+    );
+    expect(before.rowCount).toBe(1);
+
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationScope: "all",
+        reason: "تست: بازگشت صندوق‌دار با همان رمز عددی قبلی",
+      }),
+    );
+
+    const after = await db.query<{ id: string; status: string; secret_hash: string; pin_blind_index: string | null; revoked_at: string | null }>(
+      `SELECT id, status, secret_hash, pin_blind_index, revoked_at FROM employee_credentials
+        WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin'`,
+      [userId, alpha.businessId],
+    );
+    expect(after.rowCount).toBe(1);
+    expect(after.rows[0]).toMatchObject({
+      id: before.rows[0].id,
+      status: "active",
+      secret_hash: before.rows[0].secret_hash,
+      pin_blind_index: before.rows[0].pin_blind_index,
+      revoked_at: null,
+    });
+  });
+
+  it("provisions a fresh PIN when the rehire names one", async () => {
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Rehire Waiter",
+        pin: "6204",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: استخدام برای آزمون رمز تازه",
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationScope: "all",
+        pin: "8817",
+        reason: "تست: بازگشت با رمز عددی تازه",
+      }),
+    );
+
+    const active = await db.query<{ secret_hash: string; pin_blind_index: string | null }>(
+      `SELECT secret_hash, pin_blind_index FROM employee_credentials
+        WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
+      [userId, alpha.businessId],
+    );
+    expect(active.rowCount).toBe(1);
+    expect(await bcrypt.compare("8817", active.rows[0].secret_hash)).toBe(true);
+    expect(active.rows[0].pin_blind_index).not.toBeNull();
+  });
+
+  it("refuses to restore a PIN somebody else took meanwhile, and accepts a fresh one", async () => {
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "First Cashier",
+        pin: "4041",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: صندوق‌دار اول برای آزمون تداخل رمز",
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+    // The PIN is free while its owner is offboarded.
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Second Cashier",
+        pin: "4041",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: صندوق‌دار دوم همان رمز را می‌گیرد",
+      }),
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId: alpha.ownerId,
+          locationScope: "all",
+          reason: "تست: بازگشت صندوق‌دار اول بدون رمز تازه",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "pin_taken", status: 409 });
+
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationScope: "all",
+        pin: "7788",
+        reason: "تست: بازگشت صندوق‌دار اول با رمز تازه",
+      }),
+    );
+    const active = await db.query(
+      `SELECT 1 FROM employee_credentials
+        WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
+      [userId, alpha.businessId],
+    );
+    expect(active.rowCount).toBe(1);
+  });
+
+  it("refuses a doorless rehire when nothing can be restored, then accepts a fresh PIN", async () => {
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "kitchen",
+        fullName: "Kitchen Hand",
+        pin: "9022",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: آشپز برای آزمون فقدان رمز",
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+    await db.query("DELETE FROM employee_credentials WHERE employee_id = $1", [userId]);
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId: alpha.ownerId,
+          locationScope: "all",
+          reason: "تست: بازگشت بدون هیچ رمز قابل بازیابی",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "pin_required", status: 409 });
+
+    const still = await db.query<{ membership_status: string; is_active: boolean }>(
+      "SELECT membership_status, is_active FROM users WHERE id = $1",
+      [userId],
+    );
+    expect(still.rows[0]).toMatchObject({ membership_status: "offboarded", is_active: false });
+
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationScope: "all",
+        pin: "3156",
+        reason: "تست: بازگشت آشپز با رمز تازه",
+      }),
+    );
+  });
+
+  it("enforces the reason rule on the write itself", async () => {
+    const { userId } = await hireManager();
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId: alpha.ownerId,
+          locationScope: "all",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "reason_required", status: 400 });
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId: alpha.ownerId,
+          locationScope: "all",
+          reason: "کوتاه",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "reason_too_short", status: 400 });
+  });
+
+  it("keeps the offboarded email reserved: re-invitation is refused, rehire restores the same row", async () => {
+    const { userId } = await hireManager();
+    const { rows: emailRows } = await db.query<{ email: string }>(
+      "SELECT email FROM users WHERE id = $1",
+      [userId],
+    );
+    const email = emailRows[0].email;
+
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    // The retained row keeps its email, so hiring «someone new» with it stops
+    // with a sentence — the way back is the rehire ceremony on this row.
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.createMembership({
+          businessId: alpha.businessId,
+          role: "manager",
+          fullName: "Impersonating Hire",
+          email,
+          password: "strong-password-2",
+          actorId: alpha.ownerId,
+          reason: "تست: تلاش برای گرفتن ایمیل عضو قطع‌همکاری‌شده",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "email_taken", status: 409 });
+
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationScope: "all",
+        reason: "تست: بازگشت همان عضو با همان ایمیل",
+      }),
+    );
+    const restored = await db.query<{ id: string; email: string; membership_status: string }>(
+      "SELECT id, email, membership_status FROM users WHERE id = $1",
+      [userId],
+    );
+    expect(restored.rows[0]).toMatchObject({ id: userId, email, membership_status: "active" });
+  });
+
+  it("refuses a rehire that would grant capabilities the actor does not hold", async () => {
+    // The target: an accountant — the preset carries payroll.manage.
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "accountant",
+        fullName: "Offboarded Accountant",
+        email: `rehire.accountant.${randomUUID().slice(0, 8)}@example.com`,
+        password: "strong-password-3",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: استخدام حسابدار برای آزمون ضدتصعید",
+      }),
+    );
+    // The actor: a manager given team administration but holding none of the
+    // accountant's books permissions.
+    const { userId: actorId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "manager",
+        fullName: "Delegated Team Manager",
+        email: `rehire.actor.${randomUUID().slice(0, 8)}@example.com`,
+        password: "strong-password-4",
+        overrides: { granted: ["team.view", "team.manage", "team.permissions_manage"] },
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: اعطای مدیریت تیم به مدیر برای آزمون",
+      }),
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId,
+          locationScope: "all",
+          reason: "تست: بازگشت حسابدار توسط مدیر بدون دسترسی دفترداری",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "grants_beyond_actor", status: 403 });
+
+    const untouched = await db.query<{ membership_status: string }>(
+      "SELECT membership_status FROM users WHERE id = $1",
+      [userId],
+    );
+    expect(untouched.rows[0].membership_status).toBe("offboarded");
+  });
+
+  it("demands team.permissions.manage for the rehire grant", async () => {
+    const { userId } = await hireManager();
+    const { userId: actorId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "manager",
+        fullName: "Team Manager Without Permissions Manage",
+        email: `rehire.noperm.${randomUUID().slice(0, 8)}@example.com`,
+        password: "strong-password-5",
+        overrides: { granted: ["team.view", "team.manage"] },
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: مدیر تیم بدون مجوز مدیریت دسترسی‌ها",
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId,
+          locationScope: "all",
+          reason: "تست: بازگشت به کار بدون مجوز مدیریت دسترسی",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "permissions_manage_required", status: 403 });
+  });
+
+  it("only an owner may rehire an owner", async () => {
+    // A second owner, so the first may be offboarded without locking out.
+    const { userId: secondOwner } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "owner",
+        fullName: "Second Owner",
+        email: `rehire.owner2.${randomUUID().slice(0, 8)}@example.com`,
+        password: "strong-password-6",
+        actorId: alpha.ownerId,
+        reason: "تست: مالک دوم برای ممکن کردن قطع همکاری مالک",
+      }),
+    );
+    const { userId: adminId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "admin",
+        fullName: "Admin Actor",
+        email: `rehire.admin.${randomUUID().slice(0, 8)}@example.com`,
+        password: "strong-password-7",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: ادمین برای آزمون بازگشت مالک",
+      }),
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, secondOwner, alpha.ownerId),
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId: secondOwner,
+          actorId: adminId,
+          locationScope: "all",
+          reason: "تست: ادمین می‌خواهد مالک را برگرداند",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "owner_only", status: 403 });
+
+    // The owner who remains may.
+    await asBusiness(alpha.businessId, () =>
+      team.rehireMembership({
+        businessId: alpha.businessId,
+        userId: secondOwner,
+        actorId: alpha.ownerId,
+        locationScope: "all",
+        reason: "تست: مالک، مالک دوم را بازمی‌گرداند",
+      }),
+    );
+    const restored = await db.query<{ membership_status: string; role: string }>(
+      "SELECT membership_status, role FROM users WHERE id = $1",
+      [secondOwner],
+    );
+    expect(restored.rows[0]).toMatchObject({ membership_status: "active", role: "owner" });
+  });
+
+  it("never reaches across tenants", async () => {
+    const { userId } = await hireManager();
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    await expect(
+      asBusiness(beta.businessId, () =>
+        team.rehireMembership({
+          businessId: beta.businessId,
+          userId,
+          actorId: beta.ownerId,
+          locationScope: "all",
+          reason: "تست: تلاش کسب‌وکار دیگر برای بازگرداندن عضو",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "not_found", status: 404 });
+  });
+
+  it("rolls back completely when the branch policy is refused", async () => {
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Rollback Cashier",
+        pin: "1177",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: صندوق‌دار برای آزمون بازگشت تراکنش",
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+    const snapshot = await db.query<{ membership_status: string; membership_revision: string; creds: string }>(
+      `SELECT u.membership_status, u.membership_revision::text,
+              (SELECT count(*)::text FROM employee_credentials c
+                WHERE c.employee_id = u.id AND c.status = 'revoked') AS creds
+         FROM users u WHERE u.id = $1`,
+      [userId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.rehireMembership({
+          businessId: alpha.businessId,
+          userId,
+          actorId: alpha.ownerId,
+          locationScope: "selected",
+          locationIds: [beta.locationId],
+          reason: "تست: شعبه‌ای از کسب‌وکار دیگر نباید پذیرفته شود",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "unknown_location", status: 400 });
+
+    const after = await db.query<{ membership_status: string; membership_revision: string; creds: string }>(
+      `SELECT u.membership_status, u.membership_revision::text,
+              (SELECT count(*)::text FROM employee_credentials c
+                WHERE c.employee_id = u.id AND c.status = 'revoked') AS creds
+         FROM users u WHERE u.id = $1`,
+      [userId],
+    );
+    expect(after.rows[0]).toEqual(snapshot.rows[0]);
+  });
+});
+
+describe("the membership owns the login phone, and the personnel file follows (issue #854 pass 4)", () => {
+  it("setMemberPhone travels to the linked party; a party edit cannot travel back", async () => {
+    const partiesMod = await import("../src/lib/parties-service");
+
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Phone Sync Cashier",
+        pin: "5511",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: صندوق‌دار برای آزمون همگام‌سازی شماره",
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      partiesMod.ensureEmployeeParty(alpha.businessId, userId, { displayName: "Phone Sync Cashier" }),
+    );
+
+    // The canonical direction: membership → personnel file.
+    await asBusiness(alpha.businessId, () =>
+      team.setMemberPhone(alpha.businessId, userId, "+989121112233", alpha.ownerId),
+    );
+    let file = await asBusiness(alpha.businessId, () => partiesMod.getPartyByEmployee(alpha.businessId, userId));
+    expect(file?.phone).toBe("+989121112233");
+
+    // The reverse direction is refused: the party may not rewrite the login phone.
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        partiesMod.updateParty(alpha.businessId, file!.id, { phone: "09129998877" }),
+      ),
+    ).rejects.toMatchObject({ code: "identity_phone_managed_by_membership" });
+
+    // Clearing the membership phone empties the file's too.
+    await asBusiness(alpha.businessId, () =>
+      team.setMemberPhone(alpha.businessId, userId, null, alpha.ownerId),
+    );
+    file = await asBusiness(alpha.businessId, () => partiesMod.getPartyByEmployee(alpha.businessId, userId));
+    expect(file?.phone ?? null).toBeNull();
   });
 });

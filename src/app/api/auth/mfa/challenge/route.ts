@@ -42,6 +42,13 @@ export async function POST(request: NextRequest) {
       subjectRealm: "platform_user",
       subjectId: payload.sub,
       email,
+      /*
+       * Issue #854 — stated, not inherited. This is the login interstitial, so
+       * the code it sends is a login code; the default happened to agree, and a
+       * default that agrees is how the enrolment ceremony ended up sending a
+       * login code that its own confirm step refused.
+       */
+      purpose: "mfa_login",
     });
     if (!challenge.ok) {
       if (challenge.error === "rate_limited") {

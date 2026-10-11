@@ -179,7 +179,7 @@ export async function POST(request: NextRequest) {
     ]);
 
     const mfaPolicy = await getMfaPolicy(chosen.businessId);
-    const requiresMfa = mfaAppliesToRole(chosen.role, mfaPolicy.requireForManagers);
+    const requiresMfa = mfaAppliesToRole(chosen.role, mfaPolicy);
 
     let graceNotice: {
       mfaState: "grace";
