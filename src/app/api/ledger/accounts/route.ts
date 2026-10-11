@@ -50,6 +50,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
    */
   const { rows } = await query(
     `SELECT a.id, a.code, a.name, a.type, a.parent_id, p.code AS parent_code,
+            a.currency_code,
             EXISTS (SELECT 1 FROM accounts k WHERE k.parent_id = a.id) AS has_children,
             NOT EXISTS (SELECT 1 FROM accounts k WHERE k.parent_id = a.id) AS is_postable
        FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
@@ -64,7 +65,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.accountsEdit);
   if (error) return error;
 
-  let body: { code?: string; name?: string; type?: string; parentId?: string | null; isContra?: boolean };
+  let body: {
+    code?: string;
+    name?: string;
+    type?: string;
+    parentId?: string | null;
+    isContra?: boolean;
+    currencyCode?: string | null;
+  };
   try {
     body = await request.json();
   } catch {
@@ -79,6 +87,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       type: String(body.type ?? ""),
       parentId: body.parentId ?? null,
       isContra: Boolean(body.isContra),
+      // A foreign-currency financial account names its currency at creation
+      // (issue #863); the service validates the shape and NULLs anything else.
+      currencyCode: typeof body.currencyCode === "string" ? body.currencyCode : null,
     });
     return NextResponse.json(result, { status: 201 });
   } catch (err) {
