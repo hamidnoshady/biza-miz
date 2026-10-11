@@ -224,17 +224,25 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
   const [mutation, setMutation] = useState<Mutation>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
+  const [readinessLoadFailed, setReadinessLoadFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    // Advisory only: a failed read hides the warning rather than claiming the
-    // books are ready, and never blocks the year list below.
+    setReadiness(null);
+    setReadinessLoadFailed(false);
+    // Readiness is advisory. If unavailable, keep final close reachable and let
+    // the close transaction enforce coverage; expose a retry instead of
+    // leaving the user with a permanently disabled action.
     void api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness")
       .then(({ ok, data }) => {
-        if (!cancelled) setReadiness(ok ? data.readiness : null);
+        if (cancelled) return;
+        setReadiness(ok ? data.readiness : null);
+        setReadinessLoadFailed(!ok);
       })
       .catch(() => {
-        if (!cancelled) setReadiness(null);
+        if (cancelled) return;
+        setReadiness(null);
+        setReadinessLoadFailed(true);
       });
     return () => {
       cancelled = true;
@@ -316,7 +324,7 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
     selectedYear && readiness?.closableYearLabels.includes(selectedYear.label),
   );
   const canCloseSelectedYear = Boolean(
-    allPeriodsSoftClosed && selectedYearCoverageReady && !periodsLoadFailed,
+    allPeriodsSoftClosed && (selectedYearCoverageReady || readinessLoadFailed) && !periodsLoadFailed,
   );
   const canManagePeriods = Boolean(canManage && selectedYear && !selectedYear.closedAt);
   const isMutating = mutation !== null;
@@ -441,7 +449,9 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
       ? "فهرست دوره‌ها کامل نیست و سال مالی قابل بستن نیست."
       : allPeriodsSoftClosed
         ? !readiness
-          ? "برای بستن نهایی باید همهٔ دوازده دوره موقت بسته و اسناد تا پایان سال زیر پوشش دوره باشند؛ وضعیت پوشش هنوز در دسترس نیست."
+          ? readinessLoadFailed
+            ? "هر دوازده دوره موقت بسته‌اند؛ بررسی پوشش در دسترس نبود و سرور هنگام بستن نهایی دوباره آن را کنترل می‌کند."
+            : "در حال بررسی پوشش اسناد تا پایان سال…"
           : readiness.closableYearLabels.includes(selectedYear?.label ?? "")
             ? "همهٔ دوازده دوره موقت بسته‌اند و اسناد تا پایان سال پوشش دارند؛ سال برای بستن نهایی آماده است."
             : "همهٔ دوره‌ها موقت بسته‌اند، اما اسنادِ بیرون از دوره تا پایان سال باید با تعریف سال‌های مالی مربوط پوشش داده شوند."
@@ -453,6 +463,19 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
       <ErrorBox>{yearsLoadFailed ? "بارگذاری سال‌های مالی ناموفق بود. می‌توانید دوباره تلاش کنید." : ""}</ErrorBox>
       <ErrorBox>{periodsLoadFailed ? "بارگذاری دوره‌های این سال مالی ناموفق بود. می‌توانید دوباره تلاش کنید." : ""}</ErrorBox>
       <FiscalReadinessBanner readiness={readiness} />
+      {readinessLoadFailed ? (
+        <InfoBox>
+          <p className="font-semibold">بررسی پوشش اسناد در دسترس نیست</p>
+          <p className="mt-1 text-xs leading-5">
+            بستن نهایی فقط پس از بررسی سرور انجام می‌شود؛ اگر سندی بیرون از دوره باشد، درخواست رد خواهد شد.
+          </p>
+          <div className="mt-2">
+            <SecondaryButton onClick={refresh} disabled={isMutating}>
+              تلاش دوباره برای بررسی پوشش
+            </SecondaryButton>
+          </div>
+        </InfoBox>
+      ) : null}
       {!canManage ? (
         <InfoBox>
           <p className="text-sm font-medium">نمایش فقط‌خواندنی</p>

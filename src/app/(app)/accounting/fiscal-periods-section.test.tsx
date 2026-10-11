@@ -49,13 +49,23 @@ function stubFetch(options: {
   periods?: unknown;
   readiness?: unknown;
   failFirstYears?: boolean;
+  failFirstReadiness?: boolean;
+  closeError?: string;
 } = {}) {
   const yearAttempts = { count: 0 };
+  const readinessAttempts = { count: 0 };
   const calls: string[] = [];
   const mock = vi.fn(async (url: string) => {
     calls.push(url);
     if (url === "/api/ledger/fiscal-readiness") {
+      readinessAttempts.count += 1;
+      if (options.failFirstReadiness && readinessAttempts.count === 1) {
+        return { ok: false, status: 503, json: async () => ({ error: "request_failed" }) };
+      }
       return { ok: true, status: 200, json: async () => ({ readiness: options.readiness ?? readiness() }) };
+    }
+    if (url === `/api/ledger/fiscal-years/${fiscalYear.id}/close` && options.closeError) {
+      return { ok: false, status: 409, json: async () => ({ error: options.closeError }) };
     }
     if (url === "/api/ledger/fiscal-years") {
       yearAttempts.count += 1;
@@ -70,7 +80,7 @@ function stubFetch(options: {
     return { ok: true, status: 200, json: async () => ({}) };
   });
   vi.stubGlobal("fetch", mock);
-  return { calls, mock, yearAttempts };
+  return { calls, mock, yearAttempts, readinessAttempts };
 }
 
 async function renderSection(canManage: boolean, options: Parameters<typeof stubFetch>[0] = {}) {
@@ -122,6 +132,45 @@ describe("FiscalPeriodsSection capability-aware controls", () => {
     expect(within(dialog).getByText(/درآمد و هزینه بسته می‌شوند/)).toBeTruthy();
     expect(within(dialog).getByText(/هر دوازده دوره قفل می‌شوند/)).toBeTruthy();
     expect(within(dialog).getByText(/بازگشایی هیچ دوره‌ای ممکن نیست/)).toBeTruthy();
+  });
+
+  it("offers a readiness retry and lets the server check final close when readiness is unavailable", async () => {
+    const allClosed = Array.from({ length: 12 }, (_, i) => period("soft_closed", i + 1));
+    const network = await renderSection(true, {
+      periods: { periods: allClosed },
+      failFirstReadiness: true,
+    });
+
+    expect(await screen.findByText("بررسی پوشش اسناد در دسترس نیست")).toBeTruthy();
+    const closeYear = screen.getByRole("button", { name: "بستن نهایی سال" });
+    expect(closeYear.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/بستن نهایی فقط پس از بررسی سرور انجام می‌شود/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره برای بررسی پوشش" }));
+    await waitFor(() => expect(network.readinessAttempts.count).toBe(2));
+    await waitFor(() => {
+      expect(screen.queryByText("بررسی پوشش اسناد در دسترس نیست")).toBeNull();
+      expect(screen.getByRole("button", { name: "بستن نهایی سال" }).hasAttribute("disabled")).toBe(false);
+    });
+  });
+
+  it("surfaces the server's coverage rejection after an unavailable readiness read", async () => {
+    const allClosed = Array.from({ length: 12 }, (_, i) => period("soft_closed", i + 1));
+    const network = await renderSection(true, {
+      periods: { periods: allClosed },
+      failFirstReadiness: true,
+      closeError: "uncovered_entries_before_close",
+    });
+
+    await screen.findByText("بررسی پوشش اسناد در دسترس نیست");
+    fireEvent.click(screen.getByRole("button", { name: "بستن نهایی سال" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "بستن نهایی سال مالی" }));
+
+    expect(
+      await screen.findByText(/بستن نهایی این سال ممکن نیست: اسنادی با تاریخ پیش از پایان سال/),
+    ).toBeTruthy();
+    expect(network.calls).toContain(`/api/ledger/fiscal-years/${fiscalYear.id}/close`);
   });
 
   it("keeps final close disabled until coverage prerequisites are satisfied", async () => {
