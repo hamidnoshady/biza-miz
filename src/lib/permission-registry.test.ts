@@ -109,6 +109,7 @@ describe("dependencies", () => {
     expect(impliedPermissions([PERMISSIONS.inventoryAdjust])).toContain("inventory.view");
     expect(impliedPermissions([PERMISSIONS.menuEdit])).toContain("menu.view");
     expect(impliedPermissions([PERMISSIONS.ledgerPost])).toContain("ledger.view");
+    expect(impliedPermissions([PERMISSIONS.ledgerClosePeriod])).toContain("ledger.view");
     expect(impliedPermissions([PERMISSIONS.reportsExport])).toContain("reports.view");
   });
 

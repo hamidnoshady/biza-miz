@@ -2215,6 +2215,9 @@ function ReverseDialog({
           "دوره مالی سند اصلی قفل است؛ برگشت در آن دوره ممکن نیست. یک «تاریخ برگشت» در یک دورهٔ باز انتخاب کنید.",
         );
       }
+      if (code === "fiscal_period_not_defined") {
+        return setLocalError("برای تاریخ برگشت سال مالی تعریف نشده است؛ ابتدا سال شمسی مربوط را تعریف کنید.");
+      }
       return setLocalError(resolveErrorMessage(code));
     }
 

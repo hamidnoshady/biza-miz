@@ -618,10 +618,12 @@ const expensesAdapter: EntityAdapter = {
       // text, and the fiscal lock was mistaken for a closed period.
       throw new RowRejection(
         lockCode === "fiscal_period_locked"
-          ? "دورهٔ مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد."
+          ? "دورهٔ مالی این تاریخ قفل شده و امکان ثبت سند وجود ندارد."
           : lockCode === "fiscal_period_soft_closed"
-            ? "دورهٔ مالی این تاریخ بستهٔ موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند."
-            : (expenseErrorMessage(code) ?? `ثبت هزینه ممکن نشد (${code}).`),
+            ? "دورهٔ مالی این تاریخ بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است."
+            : lockCode === "fiscal_period_not_defined"
+              ? "برای این تاریخ سال مالی تعریف نشده است؛ ابتدا سال شمسی مربوط را تعریف کنید."
+              : (expenseErrorMessage(code) ?? `ثبت هزینه ممکن نشد (${code}).`),
       );
     }
   },

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { databaseAuthorizationSettings, getAuthorizationSnapshot } from "./authorization-context";
 import { Pool, type PoolClient } from "pg";
 import {
   businessScope,
@@ -36,11 +37,19 @@ const globalForPg = globalThis as unknown as { pgPool?: Pool };
 function installTenantScoping(pool: Pool): Pool {
   const rawConnect = pool.connect.bind(pool) as typeof pool.connect;
 
-  const applyScope = async (client: PoolClient, scope: TenantScope) => {
+  const applyScope = async (
+    client: PoolClient,
+    scope: TenantScope,
+    authorization: ReturnType<typeof getAuthorizationSnapshot>,
+  ) => {
     const { businessId, bypass } = scopeSettings(scope);
+    const fiscalAuthorization = databaseAuthorizationSettings(scope, authorization);
     await client.query(
-      "SELECT set_config('app.business_id', $1, false), set_config('app.rls_bypass', $2, false)",
-      [businessId, bypass],
+      `SELECT set_config('app.business_id', $1, false),
+              set_config('app.rls_bypass', $2, false),
+              set_config('app.fiscal_actor_id', $3, false),
+              set_config('app.fiscal_close_period', $4, false)`,
+      [businessId, bypass, fiscalAuthorization.actorId, fiscalAuthorization.canCloseFiscalPeriod],
     );
   };
 
@@ -52,10 +61,13 @@ function installTenantScoping(pool: Pool): Pool {
    * statement is an idempotent `set_config`, and a checkout that never
    * connected never reached the server at all.
    */
-  const rawCheckout = async (scope: TenantScope): Promise<PoolClient> => {
+  const rawCheckout = async (
+    scope: TenantScope,
+    authorization: ReturnType<typeof getAuthorizationSnapshot>,
+  ): Promise<PoolClient> => {
     const client = await (rawConnect as () => Promise<PoolClient>)();
     try {
-      await applyScope(client, scope);
+      await applyScope(client, scope, authorization);
       return client;
     } catch (err) {
       client.release(err as Error);
@@ -63,8 +75,11 @@ function installTenantScoping(pool: Pool): Pool {
     }
   };
 
-  const checkout = (scope: TenantScope): Promise<PoolClient> =>
-    withConnectRetry(() => rawCheckout(scope), {
+  const checkout = (
+    scope: TenantScope,
+    authorization: ReturnType<typeof getAuthorizationSnapshot>,
+  ): Promise<PoolClient> =>
+    withConnectRetry(() => rawCheckout(scope, authorization), {
       onRetry: (err, attempt, delay) =>
         console.warn(
           `postgres checkout failed (attempt ${attempt}), retrying in ${delay}ms: ` +
@@ -79,20 +94,21 @@ function installTenantScoping(pool: Pool): Pool {
     // Captured here, before any awaiting, so the scope is the caller's even if
     // the checkout has to queue behind a busy pool.
     const scope = getTenantScope();
+    const authorization = getAuthorizationSnapshot();
 
     // `pool.query()` — which is how `query()` below, and therefore most of the
     // app, reaches the database — calls `connect` in its callback form, so the
     // retry has to cover this branch too, not just the promise one.
     if (typeof callback === "function") {
       const cb = callback as (err?: Error, client?: PoolClient, done?: (r?: unknown) => void) => void;
-      checkout(scope).then(
+      checkout(scope, authorization).then(
         (client) => cb(undefined, client, (err?: unknown) => client.release(err as Error | undefined)),
         (err: Error) => cb(err),
       );
       return undefined;
     }
 
-    return checkout(scope);
+    return checkout(scope, authorization);
   }
 
   pool.connect = scopedConnect as typeof pool.connect;

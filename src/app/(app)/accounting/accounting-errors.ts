@@ -80,8 +80,9 @@ export function errorMessage(code: string | undefined): string {
     journal_line_not_found: "سند انتخاب‌شده معتبر نیست.",
     journal_line_already_reconciled: "این سند در یک تطبیق قفل‌شدهٔ دیگر ثبت شده و دوباره قابل تطبیق نیست.",
     balance_mismatch: "مانده محاسبه‌شده با مانده صورتحساب برابر نیست.",
-    fiscal_period_locked: "دوره مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد.",
-    fiscal_period_soft_closed: "دوره مالی این تاریخ بسته‌ی موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند.",
+    fiscal_period_locked: "دوره مالی این تاریخ قفل شده و ثبت یا ویرایش سند در آن ممکن نیست.",
+    fiscal_period_soft_closed: "دوره مالی این تاریخ بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است.",
+    fiscal_period_not_defined: "برای این تاریخ سال مالی تعریف نشده است. سال شمسی مربوط را تعریف کنید تا ثبت سند در بازهٔ آن ممکن شود.",
     // Phase 16 — manual journal workflow
     draft_not_found: "پیش‌نویس پیدا نشد.",
     entry_not_found: "سند پیدا نشد.",

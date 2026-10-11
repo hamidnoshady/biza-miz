@@ -268,9 +268,11 @@ function errorMessage(code: string | undefined): string {
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     ledger_account_missing: "یکی از حساب‌های مورد نیاز در سرفصل یافت نشد.",
-    fiscal_period_locked: "دوره مالی این تاریخ قفل است.",
+    fiscal_period_locked: "دوره مالی این تاریخ قفل شده و ثبت سند در آن ممکن نیست.",
     fiscal_period_soft_closed:
-      "دوره مالی نیمه‌بسته است؛ فقط مالک یا حسابدار می‌تواند ثبت کند.",
+      "دوره مالی بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است.",
+    fiscal_period_not_defined:
+      "برای این تاریخ سال مالی تعریف نشده است؛ سال شمسی مربوط را تعریف کنید.",
     bad_request: "درخواست نامعتبر بود.",
     unauthorized: "وارد نشده‌اید.",
     forbidden: "دسترسی مجاز نیست.",

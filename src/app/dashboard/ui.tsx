@@ -265,8 +265,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     reconnect_required: "این چاپگر باید دوباره متصل شود.",
     // Phase 7 — ledger
     ledger_account_missing: "یکی از حساب‌های مورد نیاز سیستم در سرفصل حساب‌ها یافت نشد. سرفصل حساب‌ها را بررسی کنید.",
-    fiscal_period_locked: "دورهٔ مالی این تاریخ بسته شده و ثبت سند در آن ممکن نیست.",
-    fiscal_period_soft_closed: "دورهٔ مالی این تاریخ نیمه‌بسته است؛ فقط مالک یا حسابدار می‌تواند در آن سند ثبت کند.",
+    fiscal_period_locked: "دورهٔ مالی این تاریخ قفل شده و ثبت یا ویرایش سند در آن ممکن نیست.",
+    fiscal_period_soft_closed: "دورهٔ مالی این تاریخ بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است.",
+    fiscal_period_not_defined: "برای این تاریخ سال مالی تعریف نشده است. سال شمسی مربوط را تعریف کنید تا ثبت سند در بازهٔ آن ممکن شود.",
     // Phase 16 — سند دستی (manual journal: draft → review → post, and reversal).
     // These reach this shared map whenever a screen shows a manual-journal
     // failure through `errorMessage` rather than the accounting manager's own

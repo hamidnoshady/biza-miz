@@ -109,6 +109,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM payroll_advances");
   await db.query("DELETE FROM payroll_run_lines");
   await db.query("DELETE FROM payroll_runs");
@@ -117,6 +119,7 @@ beforeEach(async () => {
   // Cascades to users, accounts, locations, commission_* and the append-only
   // payroll_pay_term_changes (whose guard lets the cascade of a business through).
   await db.query("DELETE FROM businesses");
+  await db.query("COMMIT");
 
   const bizRow = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Payroll Co', $1) RETURNING id",
@@ -762,7 +765,9 @@ describe("accruePayroll", () => {
       ),
     ).toBe(0);
     // …and the period is not burned: the same period can be booked on another date.
-    const run = await accrue({ periodKey: "1404-01", accrualDate: "2030-01-01" });
+    // Payroll's operational period label may differ from the posting date, but
+    // the journal date still has to be covered after fiscal-year adoption.
+    const run = await accrue({ periodKey: "1404-01", accrualDate: "2025-05-01" });
     expect(run.periodKey).toBe("1404-01");
   });
 });
