@@ -134,6 +134,9 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "get_media_asset", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   // Batch K1 — CRM sales workflow: business-wide (no location dimension) but
   // pinned would not be wrong; agnostic matches the other CRM reads.
+  // Batch K3 — the service-desk lane. Cases read rides listCases the screen
+  // calls, agnostic like the other CRM reads.
+  { name: "list_crm_cases", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_deals", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_leads", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_pipelines", kind: "read", app: "crm", branchPolicy: "agnostic" },
@@ -284,6 +287,12 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "production.formula.deactivate", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "production.formulaInput.set", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "production.formulaInput.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "crm.case.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  // A status move drives the SLA clock (first response, waits, close-out) —
+  // still a normal inbox action on the screen, so mode not always_approve.
+  { actionType: "crm.case.set_status", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.activity.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.activity.update", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.lead.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
   // A convert creates a customer record (and optionally a deal) — the service
   // itself blocks on duplicates unless the caller explicitly acknowledged them.

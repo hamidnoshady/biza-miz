@@ -343,6 +343,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "CRM",
     entity: "Cases & activities",
     routes: ["crm/cases", "crm/activities"],
+    ops: {
+      listDetail: ["list_crm_cases", "list_crm_activities"],
+      create: ["crm.case.save", "crm.activity.create"],
+      update: ["crm.activity.update", "crm.case.set_status"],
+    },
+    note: "writes gate on partiesManage like their routes (the CRM screens share the parties lane); setCaseStatus drives the SLA clock identical to the screen button",
     test: "integration/crm.integration.test.ts",
   },
   {

@@ -79,7 +79,8 @@ import { createSupplierReturn } from "./supplier-return-service";
 import { createSavedReport, deleteSavedReport, updateSavedReport } from "./reports-service";
 import { listPipelines, createPipeline, updatePipeline, moveDealToStage, type StageMoveResult } from "./crm-pipeline-service";
 import { saveLead, convertLead } from "./crm-lead-service";
-import { upsertDeal } from "./crm-service";
+import { upsertDeal, upsertCase, createActivity, updateActivity } from "./crm-service";
+import { setCaseStatus } from "./crm-case-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
 import { createWorkspaceProject, updateWorkspaceProject, createWorkspaceTask, updateWorkspaceTask, WorkspaceError } from "./workspace";
 import { workspaceAccessFlags } from "./workspace-shared";
@@ -2367,6 +2368,79 @@ const crmPipelineUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { pipelineId, updated: true } };
 };
 
+// ── Issue #883 package 2, batch K3 — CRM service desk (cases & activities) ──
+const crmCaseSave: AutopilotExecutor = async (ctx) => {
+  const subject = str(ctx.payload.subject);
+  if (!subject) return fail("subject_required");
+  const saved = await upsertCase(ctx.businessId, {
+    id: str(ctx.payload.id) ?? undefined,
+    subject,
+    body: str(ctx.payload.body) ?? undefined,
+    customerId: (ctx.payload.customerId as string | null | undefined) ?? undefined,
+    status: (str(ctx.payload.status) ?? undefined) as Parameters<typeof upsertCase>[1]["status"],
+    priority: (str(ctx.payload.priority) ?? undefined) as Parameters<typeof upsertCase>[1]["priority"],
+    category: str(ctx.payload.category) ?? undefined,
+    orderId: (ctx.payload.orderId as string | null | undefined) ?? undefined,
+    assigneeUserId: (ctx.payload.assigneeUserId as string | null | undefined) ?? undefined,
+    assignedTo: str(ctx.payload.assignedTo) ?? undefined,
+    resolution: str(ctx.payload.resolution) ?? undefined,
+  });
+  return { ok: true, result: { id: saved.id, subject: saved.subject } };
+};
+
+const crmCaseSetStatus: AutopilotExecutor = async (ctx) => {
+  const caseId = str(ctx.payload.caseId);
+  const status = str(ctx.payload.status);
+  if (!caseId || !status) return fail("invalid_payload");
+  const actor = await crmActor(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const result = await setCaseStatus(ctx.businessId, caseId, status, actor, {
+    comment: str(ctx.payload.comment) ?? undefined,
+    isInternal: ctx.payload.isInternal === true,
+  });
+  if (!result.ok) return fail(result.error ?? "status_failed");
+  return { ok: true, result: { caseId, status } };
+};
+
+const crmActivityCreate: AutopilotExecutor = async (ctx) => {
+  const kind = str(ctx.payload.kind);
+  const subject = str(ctx.payload.subject);
+  if (!kind || !subject) return fail("invalid_payload");
+  const actor = await crmActor(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const created = await createActivity(ctx.businessId, {
+    kind: kind as Parameters<typeof createActivity>[1]["kind"],
+    subject,
+    body: str(ctx.payload.body) ?? undefined,
+    dueAt: (ctx.payload.dueAt as string | null | undefined) ?? undefined,
+    customerId: (ctx.payload.customerId as string | null | undefined) ?? undefined,
+    dealId: (ctx.payload.dealId as string | null | undefined) ?? undefined,
+    caseId: (ctx.payload.caseId as string | null | undefined) ?? undefined,
+    assigneeUserId: (ctx.payload.assigneeUserId as string | null | undefined) ?? undefined,
+    assignedTo: str(ctx.payload.assignedTo) ?? undefined,
+    createdBy: `${actor.name} · MCP`,
+    completed: ctx.payload.completed === true,
+  });
+  return { ok: true, result: { id: created.id, subject: created.subject } };
+};
+
+const crmActivityUpdate: AutopilotExecutor = async (ctx) => {
+  const activityId = str(ctx.payload.activityId);
+  if (!activityId) return fail("invalid_payload");
+  const updated = await updateActivity(ctx.businessId, activityId, {
+    kind: (str(ctx.payload.kind) ?? undefined) as Parameters<typeof updateActivity>[2]["kind"],
+    subject: str(ctx.payload.subject) ?? undefined,
+    body: str(ctx.payload.body) ?? undefined,
+    dueAt: (ctx.payload.dueAt as string | null | undefined) ?? undefined,
+    assigneeUserId: (ctx.payload.assigneeUserId as string | null | undefined) ?? undefined,
+    assignedTo: str(ctx.payload.assignedTo) ?? undefined,
+    customerId: (ctx.payload.customerId as string | null | undefined) ?? undefined,
+    completed: typeof ctx.payload.completed === "boolean" ? ctx.payload.completed : undefined,
+  });
+  if (!updated) return fail("not_found");
+  return { ok: true, result: { activityId, updated: true } };
+};
+
 // ── Issue #883 package 2, batch J — saved reports ────────────────────────────
 const reportSavedCreate: AutopilotExecutor = async (ctx) => {
   const name = str(ctx.payload.name);
@@ -2473,6 +2547,10 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   productionFormulaDeactivate,
   productionFormulaInputSet,
   productionFormulaInputDelete,
+  crmCaseSave,
+  crmCaseSetStatus,
+  crmActivityCreate,
+  crmActivityUpdate,
   crmLeadSave,
   crmLeadConvert,
   crmDealSave,

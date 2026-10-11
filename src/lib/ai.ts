@@ -293,6 +293,12 @@ export type ActionType =
   | "production.formula.deactivate"
   | "production.formulaInput.set"
   | "production.formulaInput.delete"
+  // Batch K3 — CRM service desk: cases + activities. The routes gate on
+  // partiesView/partiesManage (the CRM screens share that), not crmManage.
+  | "crm.case.save"
+  | "crm.case.set_status"
+  | "crm.activity.create"
+  | "crm.activity.update"
   // Batch J — saved reports (reports.view on the screen; validateReportConfig
   // mirrors the route's 400 semantics before a row ever appears).
   | "report.saved.create"
@@ -373,6 +379,10 @@ export type AutopilotExecutorKey =
   | "productionFormulaDeactivate"
   | "productionFormulaInputSet"
   | "productionFormulaInputDelete"
+  | "crmCaseSave"
+  | "crmCaseSetStatus"
+  | "crmActivityCreate"
+  | "crmActivityUpdate"
   | "crmLeadSave"
   | "crmLeadConvert"
   | "crmDealSave"
@@ -1108,6 +1118,42 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف یک مادهٔ اولیه از فرمول",
     payloadHint: "{ formulaId: string, inventoryItemId: string }",
     executor: "productionFormulaInputDelete",
+  },
+  "crm.case.save": {
+    type: "crm.case.save",
+    endpoint: "/api/crm/cases",
+    method: "POST",
+    label: "ثبت یا ویرایش پروندهٔ پشتیبانی — با id ویرایش می‌شود، مثل فرم صفحهٔ پرونده‌ها",
+    payloadHint:
+      '{ id?: string, subject: string /* لازم */, body?: string, customerId?: string|null, status?: "open"|"in_progress"|"waiting"|"resolved"|"closed", priority?: "low"|"normal"|"high"|"urgent", category?: string, orderId?: string|null, assigneeUserId?: string|null, assignedTo?: string, resolution?: string }',
+    executor: "crmCaseSave",
+  },
+  "crm.case.set_status": {
+    type: "crm.case.set_status",
+    endpoint: "/api/crm/cases/[id]/status",
+    method: "POST",
+    label: "تغییر وضعیت پرونده — ساعت SLA و اولین پاسخ دقیقاً مثل صفحه ثبت می‌شوند",
+    payloadHint:
+      '{ caseId: string /* از list_crm_cases */, status: "open"|"in_progress"|"waiting"|"resolved"|"closed", comment?: string, isInternal?: boolean /* یادداشت داخلی، نه پاسخ مشتری */ }',
+    executor: "crmCaseSetStatus",
+  },
+  "crm.activity.create": {
+    type: "crm.activity.create",
+    endpoint: "/api/crm/activities",
+    method: "POST",
+    label: "ثبت فعالیت CRM — تماس، جلسه، پیام، یادداشت، کار، بازدید",
+    payloadHint:
+      '{ kind: "call"|"meeting"|"message"|"note"|"task"|"visit", subject: string /* لازم */, body?: string, dueAt?: string|null, customerId?: string|null, dealId?: string|null, caseId?: string|null, assigneeUserId?: string|null, assignedTo?: string, completed?: boolean }',
+    executor: "crmActivityCreate",
+  },
+  "crm.activity.update": {
+    type: "crm.activity.update",
+    endpoint: "/api/crm/activities/[id]",
+    method: "PATCH",
+    label: "ویرایش یا تیک‌زدن فعالیت — فقط فیلدهای ارسالی نوشته می‌شوند مثل صفحه",
+    payloadHint:
+      '{ activityId: string /* از list_crm_activities */, kind?, subject?, body?, dueAt?: string|null, assigneeUserId?: string|null, assignedTo?: string, customerId?: string|null, completed?: boolean }',
+    executor: "crmActivityUpdate",
   },
   "crm.lead.save": {
     type: "crm.lead.save",
@@ -3140,6 +3186,29 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               queueKey: { type: "string", description: "کلید صف — مثل unassigned_leads یا unowned_work" },
             },
             required: ["queueKey"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_cases",
+          description:
+            "پرونده‌های پشتیبانی CRM با فیلتر وضعیت/اولویت/مسئول/مشتری و جستجو — openOnly فقط بازها، breachedOnly فقط از SLA گذشته‌ها. شناسه برای crm.case.save و crm.case.set_status لازم است.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string" },
+              status: { type: "string", description: "open|in_progress|waiting|resolved|closed" },
+              priority: { type: "string", description: "low|normal|high|urgent" },
+              q: { type: "string", description: "متن آزاد روی موضوع، متن و نام مشتری" },
+              openOnly: { type: "boolean" },
+              breachedOnly: { type: "boolean", description: "فقط پرونده‌هایی که ساعت SLA‌شان تمام‌شده" },
+              assigneeUserId: { type: "string" },
+              unowned: { type: "boolean", description: "فقط پرونده‌های بدون مسئول" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۲۰۰" },
+            },
             additionalProperties: false,
           },
         },

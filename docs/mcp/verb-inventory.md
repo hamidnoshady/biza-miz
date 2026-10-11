@@ -4,8 +4,8 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **96 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **81 write verbs**
+Current surface: **97 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **85 write verbs**
 (**25** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -56,6 +56,7 @@ visible only to connections consented for every branch) and **81 write verbs**
 | `search_kb_articles` | workspace | agnostic | `ai.use` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_media_assets` | workspace | agnostic | `media.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_media_asset` | workspace | agnostic | `media.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_crm_cases` | crm | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_deals` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_leads` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_pipelines` | crm | agnostic | `crm.configure` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -165,6 +166,10 @@ visible only to connections consented for every branch) and **81 write verbs**
 | `write_production_formula_deactivate` | `production.formula.deactivate` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_formulainput_set` | `production.formulaInput.set` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_formulainput_delete` | `production.formulaInput.delete` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_crm_case_save` | `crm.case.save` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_crm_case_set_status` | `crm.case.set_status` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_crm_activity_create` | `crm.activity.create` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_crm_activity_update` | `crm.activity.update` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_lead_save` | `crm.lead.save` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_lead_convert` | `crm.lead.convert` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_deal_save` | `crm.deal.save` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

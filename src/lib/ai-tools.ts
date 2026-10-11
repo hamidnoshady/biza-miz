@@ -63,7 +63,7 @@ import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
-import { listDeals } from "./crm-service";
+import { listDeals, listCases } from "./crm-service";
 import { listLeads } from "./crm-lead-service";
 import { listPipelines } from "./crm-pipeline-service";
 import { crmOverview } from "./crm-overview";
@@ -1753,6 +1753,21 @@ export async function runReadTool(
         limit,
       });
       return { ok: true, data: { count: deals.length, deals } };
+    }
+    case "list_crm_cases": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;
+      const cases = await listCases(businessId, {
+        customerId: typeof args.customerId === "string" && args.customerId.trim() ? args.customerId.trim() : undefined,
+        status: typeof args.status === "string" ? (args.status as "open") : undefined,
+        priority: typeof args.priority === "string" ? (args.priority as "normal") : undefined,
+        q: typeof args.q === "string" && args.q.trim() ? args.q.trim() : undefined,
+        openOnly: args.openOnly === true,
+        breachedOnly: args.breachedOnly === true,
+        assigneeUserId: typeof args.assigneeUserId === "string" && args.assigneeUserId.trim() ? args.assigneeUserId.trim() : undefined,
+        unowned: args.unowned === true,
+        limit,
+      });
+      return { ok: true, data: { count: cases.length, cases } };
     }
     case "list_crm_leads": {
       const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 50;
