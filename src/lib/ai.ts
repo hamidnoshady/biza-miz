@@ -3387,6 +3387,54 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           },
         },
       },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_dashboard",
+          description:
+            "داشبورد فضای کاری — وظایف امروز/عقب‌افتاده/پیش‌رو، پروژه‌ها و پروژه‌هایی که می‌لغزند؛ همان صفحهٔ اول فضای کاری با تقویم روز به وقت محلی.",
+          parameters: {
+            type: "object",
+            properties: {
+              horizonDays: { type: "number", description: "پنجرهٔ روزهای پیش‌رو — پیش‌فرض ۱۴" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_insights",
+          description:
+            "بینش‌های فضای کاری — پروژه‌های در حال لغزش، اعضای بیش‌بار، قراردادهای مسدود و گلوگاه‌ها؛ همان کارت‌های بینش.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_project_report",
+          description:
+            "گزارش وضعیت پروژه‌ها — پیشرفت، وظایف باز/انجام‌شده، تأخیر؛ با projectId فقط همان یکی. فقط برای اعضایی که می‌توانند مالی پروژه را ببینند ستون‌های مالی پر می‌شود.",
+          parameters: {
+            type: "object",
+            properties: {
+              projectId: { type: "string", description: "از list_workspace_projects" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_templates",
+          description:
+            "قالب‌های پروژهٔ فضای کاری — کلید برای workspace.project.create با templateKey؛ فهرستِ همان انتخابگر قالبِ صفحه.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
 
   ];
 

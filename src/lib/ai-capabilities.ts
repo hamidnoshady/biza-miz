@@ -88,6 +88,11 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch K3 — the cases route checks partiesView, its writes partiesManage.
   // Batch L — both routes read on inventoryView, write on inventoryAdjust.
   // Batch M — exactly the routes: menuView to look, menuEdit to move prices.
+  // Batch N1 — every one of these routes checks workspaceView.
+  get_workspace_dashboard: PERMISSIONS.workspaceView,
+  get_workspace_insights: PERMISSIONS.workspaceView,
+  get_workspace_project_report: PERMISSIONS.workspaceView,
+  list_workspace_templates: PERMISSIONS.workspaceView,
   list_price_lists: PERMISSIONS.menuView,
   list_price_list_entries: PERMISSIONS.menuView,
   list_inventory_transfers: PERMISSIONS.inventoryView,

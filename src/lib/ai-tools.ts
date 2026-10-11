@@ -63,6 +63,7 @@ import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
+import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates } from "./workspace";
 import { listDeals, listCases } from "./crm-service";
 import { listInventoryTransfers } from "./transfer-service";
 import { listPriceLists, listPriceEntries } from "./price-lists-service";
@@ -1706,6 +1707,35 @@ export async function runReadTool(
     // the actor only insofar as their workspace flags admit: a reader without
     // workspace.manage sees only their own projects, the screens filter the
     // same way (workspaceOwner flags).
+    // Issue #883 package 2, batch N1 — the workspace overview lane. Each
+    // service builds its OWN visibility from the owner (project membership,
+    // contract access, financials) — constructed exactly like batch H's
+    // list_workspace_projects case does.
+    case "get_workspace_dashboard": {
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const dashboard = await getWorkspaceDashboard(owner, {
+        horizonDays: typeof args.horizonDays === "number" && args.horizonDays > 0 ? Math.min(args.horizonDays, 90) : undefined,
+      });
+      return { ok: true, data: dashboard };
+    }
+    case "get_workspace_insights": {
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const insights = await workspaceInsights(owner);
+      return { ok: true, data: insights };
+    }
+    case "get_workspace_project_report": {
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const report = await projectReport(owner, {
+        projectId: typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : undefined,
+      });
+      return { ok: true, data: { count: report.length, report } };
+    }
+    case "list_workspace_templates": {
+      // Template keys come from the industry catalogue — the read the
+      // project-create dialog runs before workspace.project.create.
+      const templates = await listTemplates(businessId);
+      return { ok: true, data: { count: templates.length, templates } };
+    }
     case "list_workspace_projects": {
       const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;
       const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;

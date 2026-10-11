@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (52)
+### Tenant (51)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -61,7 +61,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
 - **misc.products** (Products (retail) · Product items, attributes, barcode templates) — MCP gap
 - **misc.invoices** (Sales · Sales invoices & voids) — MCP gap
-- **wire.workspace-overview** (Workspace · Workspace dashboard, insights, lookups, reports, search) — MCP gap
 - **vertical_jewelry** (Verticals · Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)) — MCP gap
 - **vertical_cosmetics** (Verticals · Cosmetics (rot management, suppliers, reports)) — partial
 - **vertical_haberdashery** (Verticals · Haberdashery (models, measurements, work orders)) — MCP gap
@@ -92,7 +91,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 20 · partial: 33 · MCP gap: 19 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 21 · partial: 33 · MCP gap: 18 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -166,7 +165,7 @@ Counts — covered: 20 · partial: 33 · MCP gap: 19 · backend gap: 0 · n/a (i
 | Products (retail) | Product items, attributes, barcode templates | (route only) | (route only) | (route only) | (route only) | — | menu.edit, menu.view | — | — | integration/products.integration.test.ts | MCP gap |
 | Products (retail) | Price lists & entries (bulk quick-update)<br>_entries save carries expectedVersion optimistic-lock conflicts back to the caller exactly like the screen; quick_update is always_approve (mass price mutation), everything else mode_ | list_price_list_entries, list_price_lists | priceList.create | priceList.entries.save, priceList.quick_update, priceList.rename | priceList.delete | — | menu.edit, menu.view | connection mode; step-up (always approve) | list_price_list_entries, list_price_lists, priceList.create, priceList.entries.save, priceList.quick_update, priceList.rename, priceList.delete | integration/products.integration.test.ts | covered |
 | Sales | Sales invoices & voids | (route only) | (route only) | — | (route only) | — | orders.amend_closed, orders.view, payments.take | — | — | integration/sales.integration.test.ts | MCP gap |
-| Workspace | Workspace dashboard, insights, lookups, reports, search | (route only) | — | — | — | — | workspace.view | — | — | integration/workspace.integration.test.ts | MCP gap |
+| Workspace | Workspace dashboard, insights, lookups, reports, search<br>_each service derives visibility from the real member row (exactly the screens' owner shape); lookup/search picker endpoints stay route-only (they exist to feed the screens' keyboards, not a conversation)_ | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | — | — | — | — | workspace.view | — | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | integration/workspace.integration.test.ts | covered |
 | Cross-cutting | server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs | (route only) | (route only) | (route only) | (route only) | — | team.permissions_manage | — | — | — | n/a (infra) |
 | Cross-cutting | tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata<br>_credential exchange surface — never an AI-callable verb_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
 | Verticals | Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports) | (route only) | (route only) | (route only) | (route only) | — | inventory.adjust, inventory.view, orders.create, reports.view | — | — | integration/jewelry.integration.test.ts | MCP gap |

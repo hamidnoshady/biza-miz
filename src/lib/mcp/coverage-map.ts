@@ -764,6 +764,10 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Workspace",
     entity: "Workspace dashboard, insights, lookups, reports, search",
     routes: ["workspace/dashboard", "workspace/insights", "workspace/lookups", "workspace/reports", "workspace/search"],
+    ops: {
+      listDetail: ["get_workspace_dashboard", "get_workspace_insights", "get_workspace_project_report"],
+    },
+    note: "each service derives visibility from the real member row (exactly the screens' owner shape); lookup/search picker endpoints stay route-only (they exist to feed the screens' keyboards, not a conversation)",
     test: "integration/workspace.integration.test.ts",
   },
   {

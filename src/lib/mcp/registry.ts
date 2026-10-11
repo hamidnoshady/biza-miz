@@ -127,6 +127,12 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_suppliers", kind: "read", app: "pos", branchPolicy: "agnostic" },
   // Batch H — workspace projects are business-scoped records.
   { name: "list_workspace_projects", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  // Batch N1 — dashboard/insights/report/template lane; agnostic like the
+  // other workspace reads (project rows are business-wide themselves).
+  { name: "get_workspace_dashboard", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "get_workspace_insights", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "get_workspace_project_report", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_workspace_templates", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   // Batch I — knowledge centre (platform catalogue, member-wide) and the
   // media library (business-scoped files).
   { name: "search_kb_articles", kind: "read", app: "workspace", branchPolicy: "agnostic" },
