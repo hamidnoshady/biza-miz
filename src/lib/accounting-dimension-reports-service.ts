@@ -23,7 +23,7 @@ import {
   type MatrixAccountTotal,
   type ProfitRow,
 } from "./accounting-dimension-reports";
-import { listDimensionValues } from "./accounting-dimensions-service";
+import { listDimensionValuesUncapped } from "./accounting-dimensions-service";
 import type { Industry } from "./industries";
 
 export interface DimensionReportScope {
@@ -89,8 +89,11 @@ export async function getAccountDimensionMatrix(
         GROUP BY a.id`,
       [businessId, scope.dateFrom, scope.dateTo, accountType],
     ),
-    // Archived values are included: a historical line still names them.
-    listDimensionValues(businessId, { kind: scope.kind, includeArchived: true }),
+    // Archived values are included: a historical line still names them. The
+    // 2000-row cap is for the picker; reports must read every value so totals
+    // are correct, so we go directly through the service helper that returns
+    // the full list rather than through the capped catalogue.
+    listDimensionValuesUncapped(businessId, { kind: scope.kind, includeArchived: true }),
   ]);
 
   const rows: MatrixAccountRow[] = rowsResult.rows.map((row) => ({
@@ -162,7 +165,7 @@ export async function getProfitAndLossByDimension(
       [businessId, scope.dateFrom, scope.dateTo],
     ),
     getBusinessIndustry(businessId),
-    listDimensionValues(businessId, { kind: scope.kind, includeArchived: true }),
+    listDimensionValuesUncapped(businessId, { kind: scope.kind, includeArchived: true }),
   ]);
 
   const toProfitRow = (row: ProfitSqlRow): ProfitRow => ({

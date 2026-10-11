@@ -52,6 +52,8 @@ function makeCatalog(valuesOverride?: DimensionValueRecord[]) {
     settings: [setting("cost_center", true), setting("profit_center", false), setting("department", false), setting("detail", false)],
     postableValues: values.filter((v) => v.isActive),
     allValues: values,
+    truncated: false,
+    truncatedAt: null,
   };
 }
 
@@ -69,7 +71,7 @@ describe("DimensionFields", () => {
     const { container } = render(
       <DimensionFields
         idPrefix="t"
-        catalog={{ settings: [setting("cost_center", false)], postableValues: [], allValues: [] }}
+        catalog={{ settings: [setting("cost_center", false)], postableValues: [], allValues: [], truncated: false, truncatedAt: null }}
         locationId={BRANCH}
         value={{}}
         onChange={vi.fn()}

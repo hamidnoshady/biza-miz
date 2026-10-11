@@ -5,6 +5,7 @@ import { isDimensionKind, type DimensionKind } from "@/lib/accounting-dimensions
 import {
   AccountingDimensionError,
   createDimensionValue,
+  DIMENSION_VALUE_LIST_CAP,
   listDimensionSettings,
   listDimensionValues,
   type DimensionValueInput,
@@ -29,14 +30,20 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "unknown_dimension_kind" }, { status: 400 });
   }
   const includeArchived = ["1", "true", "yes"].includes((params.get("includeArchived") ?? "").toLowerCase());
-  const [settings, values] = await Promise.all([
+  const [settings, valueList] = await Promise.all([
     listDimensionSettings(session.businessId),
     listDimensionValues(session.businessId, {
       kind: kindParam ? (kindParam as DimensionKind) : undefined,
       includeArchived,
     }),
   ]);
-  return NextResponse.json({ settings, values });
+  return NextResponse.json({
+    settings,
+    values: valueList.values,
+    truncated: valueList.truncated,
+    truncatedAt: valueList.truncated ? DIMENSION_VALUE_LIST_CAP : null,
+    totalLoaded: valueList.values.length,
+  });
 });
 
 /** Creates one value. Its kind must be one of the four; its code is unique per business and kind. */

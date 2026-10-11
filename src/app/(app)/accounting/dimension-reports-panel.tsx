@@ -145,11 +145,16 @@ function reportTable(loaded: Loaded): PlainTable {
 }
 
 export function DimensionReportsPanel({
-  enabledKinds,
+  reportableKinds,
   kindLabel,
   values,
 }: {
-  enabledKinds: readonly DimensionKind[];
+  /**
+   * The kinds the report selector must offer: currently-enabled kinds PLUS any
+   * disabled kind that has values (so historical reports keep their filter even
+   * after the kind is switched off; issue #868).
+   */
+  reportableKinds: readonly DimensionKind[];
   /** The business's name for a kind, the detail kind included. */
   kindLabel: (kind: DimensionKind) => string;
   /** Every value, archived ones included: last year's report still names last year's centres. */
@@ -157,7 +162,7 @@ export function DimensionReportsPanel({
 }) {
   const money = useMoney();
   const [view, setView] = useState<View>("matrix");
-  const [kind, setKind] = useState<DimensionKind>(enabledKinds[0] ?? "cost_center");
+  const [kind, setKind] = useState<DimensionKind>(reportableKinds[0] ?? "cost_center");
   const [dateFrom, setDateFrom] = useState(() => currentJalaliMonthStartIso());
   const [dateTo, setDateTo] = useState(() => todayIsoDate());
   const [accountType, setAccountType] = useState("");
@@ -180,47 +185,71 @@ export function DimensionReportsPanel({
     };
   }, []);
 
-  // A kind the business has since switched off cannot stay selected.
+  // A kind with no data (all values deleted, or the list is empty) cannot stay
+  // selected; fall back to the first reportable kind.
   useEffect(() => {
-    if (enabledKinds.length > 0 && !enabledKinds.includes(kind)) setKind(enabledKinds[0]);
-  }, [enabledKinds, kind]);
+    if (reportableKinds.length > 0 && !reportableKinds.includes(kind)) setKind(reportableKinds[0]);
+  }, [reportableKinds, kind]);
 
   const kindValues = useMemo(() => values.filter((v) => v.kind === kind), [values, kind]);
   const periodProblem = dateFrom > dateTo ? "بازهٔ گزارش برعکس است؛ تاریخ شروع باید پیش از پایان باشد." : "";
   const cardNeedsAccount = view === "card" && !accountId;
 
+  // A stable key that captures the full scope of the report currently being
+  // shown. If any input changes while a request is in flight, the response for
+  // an old scope is discarded, and drill-downs / CSV filenames / headings all
+  // read from this single scope rather than from the live inputs (which may
+  // already have moved on).
+  const scope = useMemo(
+    () => ({ view, kind, dateFrom, dateTo, accountType: view === "matrix" ? accountType : "", accountId: view === "card" ? accountId : "", valueId: view === "card" ? valueId : UNASSIGNED_DIMENSION }),
+    [view, kind, dateFrom, dateTo, accountType, accountId, valueId],
+  );
+
   useEffect(() => {
-    if (periodProblem || enabledKinds.length === 0 || cardNeedsAccount) return;
+    if (periodProblem || reportableKinds.length === 0 || cardNeedsAccount) return;
     const id = ++requestRef.current;
-    const params = new URLSearchParams({ view, kind, dateFrom, dateTo });
-    if (view === "matrix" && accountType) params.set("accountType", accountType);
-    if (view === "card") {
-      params.set("accountId", accountId);
-      params.set("value", valueId);
+    const controller = new AbortController();
+    const params = new URLSearchParams({ view: scope.view, kind: scope.kind, dateFrom: scope.dateFrom, dateTo: scope.dateTo });
+    if (scope.view === "matrix" && scope.accountType) params.set("accountType", scope.accountType);
+    if (scope.view === "card") {
+      params.set("accountId", scope.accountId);
+      params.set("value", scope.valueId);
     }
     setLoading(true);
     setError("");
-    void api<Record<string, unknown>>(`/api/ledger/dimension-reports?${params.toString()}`).then((r) => {
+    void api<Record<string, unknown>>(`/api/ledger/dimension-reports?${params.toString()}`, { signal: controller.signal }).then((r) => {
       if (id !== requestRef.current) return;
       setLoading(false);
+      if (r.aborted) return;
       if (!r.ok) {
         setLoaded(null);
         setError(errorText(typeof r.data.error === "string" ? r.data.error : undefined));
         return;
       }
-      if (view === "card") {
-        setLoaded({ view, report: r.data.statement as unknown as CardStatement });
-      } else if (view === "matrix") {
-        setLoaded({ view, report: r.data as unknown as MatrixReport, kind, dateFrom, dateTo });
+      if (scope.view === "card") {
+        setLoaded({ view: scope.view, report: r.data.statement as unknown as CardStatement });
+      } else if (scope.view === "matrix") {
+        setLoaded({ view: scope.view, report: r.data as unknown as MatrixReport, kind: scope.kind, dateFrom: scope.dateFrom, dateTo: scope.dateTo });
       } else {
-        setLoaded({ view, report: r.data as unknown as ProfitReport });
+        setLoaded({ view: scope.view, report: r.data as unknown as ProfitReport });
       }
     });
-  }, [view, kind, dateFrom, dateTo, accountType, accountId, valueId, periodProblem, cardNeedsAccount, enabledKinds.length]);
+    return () => {
+      controller.abort();
+    };
+  }, [scope, periodProblem, cardNeedsAccount, reportableKinds.length]);
 
   const table = useMemo(() => (loaded && hasContent(loaded) ? reportTable(loaded) : null), [loaded]);
   const reconciled = loaded && loaded.view !== "card" ? loaded.report.reconciled : null;
-  const viewLabel = VIEWS.find((v) => v.key === view)?.label ?? "";
+  // Everything the header / CSV filename / drill reads is taken from `loaded`
+  // (or from `scope` when nothing is loaded yet), never from the live inputs —
+  // the live inputs may have changed since the response we are showing was
+  // fetched, and mismatched headings/drill-hrefs are the stale-data bug.
+  const activeView = loaded?.view ?? view;
+  const activeKind = loaded && "kind" in loaded ? loaded.kind : kind;
+  const activeFrom = loaded && "dateFrom" in loaded ? loaded.dateFrom : dateFrom;
+  const activeTo = loaded && "dateTo" in loaded ? loaded.dateTo : dateTo;
+  const viewLabel = VIEWS.find((v) => v.key === activeView)?.label ?? "";
 
   function exportCsv(): void {
     if (!table) return;
@@ -228,12 +257,12 @@ export function DimensionReportsPanel({
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `dimension-${view}-${kind}-${dateFrom}-${dateTo}.csv`;
+    anchor.download = `dimension-${activeView}-${activeKind}-${activeFrom}-${activeTo}.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
   }
 
-  if (enabledKinds.length === 0) {
+  if (reportableKinds.length === 0) {
     return (
       <EmptyState title="هنوز هیچ بُعدی فعال نشده است">
         برای گزارش به تفکیک بُعد، ابتدا یک نوع بُعد را در «مدیریت ابعاد» فعال و مقدارهایش را تعریف کنید.
@@ -241,7 +270,7 @@ export function DimensionReportsPanel({
     );
   }
 
-  const kindOptions = enabledKinds.map((k) => ({ value: k, label: kindLabel(k) }));
+  const kindOptions = reportableKinds.map((k) => ({ value: k, label: kindLabel(k) }));
 
   return (
     <div className="space-y-4">
@@ -321,8 +350,8 @@ export function DimensionReportsPanel({
 
       <SectionCard
         title={viewLabel}
-        description={`${kindLabel(kind)} · ${isoToJalaliText(dateFrom)} تا ${isoToJalaliText(dateTo)}${
-          view === "matrix" ? " · روی هر مبلغ بزنید تا سطرهای سند آن را ببینید" : ""
+        description={`${kindLabel(activeKind)} · ${isoToJalaliText(activeFrom)} تا ${isoToJalaliText(activeTo)}${
+          activeView === "matrix" ? " · روی هر مبلغ بزنید تا سطرهای سند آن را ببینید" : ""
         }`}
         actions={
           <div className="flex flex-wrap items-center gap-2">

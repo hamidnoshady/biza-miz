@@ -39,7 +39,7 @@ import {
 } from "@/lib/accounting-dimensions";
 import { toPersianDigits } from "@/lib/digits";
 import { DimensionReportsPanel } from "./dimension-reports-panel";
-import { filterDimensionValues, isoToJalaliText } from "./dimension-catalog";
+import { filterDimensionValues, historicalKinds, isoToJalaliText } from "./dimension-catalog";
 
 type SectionTab = "manage" | "reports";
 
@@ -145,6 +145,9 @@ export function DimensionsSection({ canManage }: { canManage: boolean }) {
   }, [load]);
 
   const enabled = useMemo(() => settings.filter((s) => s.isEnabled).map((s) => s.kind), [settings]);
+  /** The kinds a report must offer: currently enabled OR has any value (archived
+   *  included) so a historical filter keeps working after a kind is switched off. */
+  const reportable = useMemo(() => historicalKinds(settings, values), [settings, values]);
   const visibleValues = useMemo(
     () => filterDimensionValues(values, { kind, search, includeArchived }),
     [values, kind, search, includeArchived],
@@ -545,7 +548,7 @@ export function DimensionsSection({ canManage }: { canManage: boolean }) {
             </SectionCard>
           </div>
         ) : (
-          <DimensionReportsPanel enabledKinds={enabled} kindLabel={kindLabel} values={values} />
+          <DimensionReportsPanel reportableKinds={reportable} kindLabel={kindLabel} values={values} />
         )}
       </TabPanel>
     </div>

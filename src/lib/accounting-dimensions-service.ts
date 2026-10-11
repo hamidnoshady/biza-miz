@@ -199,10 +199,21 @@ function toValue(row: ValueRow): DimensionValueRecord {
   };
 }
 
-/** The value records the screens offer. Bounded: a business with thousands of cost centres has a data problem, not a list. */
+/**
+ * The value records the screens offer. Bounded: the UI pickers are bounded
+ * lists, not search APIs, so a cap keeps a catalogue with thousands of
+ * centres from shipping megabytes on every page load. The catalogue response
+ * carries `truncated` when the cap is hit so the screen can warn instead of
+ * silently hiding values.
+ */
 export const DIMENSION_VALUE_LIST_CAP = 2000;
 
-export async function listDimensionValues(
+/**
+ * Internal use by reports and services that need the complete list to compute
+ * totals. The screen catalogue uses `listDimensionValues` which caps at
+ * DIMENSION_VALUE_LIST_CAP so pickers stay bounded.
+ */
+export async function listDimensionValuesUncapped(
   businessId: string,
   options: { kind?: DimensionKind; includeArchived?: boolean } = {},
 ): Promise<DimensionValueRecord[]> {
@@ -211,11 +222,43 @@ export async function listDimensionValues(
       WHERE v.business_id = $1
         AND ($2::text IS NULL OR v.kind = $2::text)
         AND ($3::boolean OR v.is_active)
-      ORDER BY v.kind, v.code
-      LIMIT ${DIMENSION_VALUE_LIST_CAP}`,
+      ORDER BY v.kind, v.code`,
     [businessId, options.kind ?? null, options.includeArchived ?? false],
   );
   return rows.map(toValue);
+}
+
+export interface DimensionValueList {
+  values: DimensionValueRecord[];
+  /** True when more rows exist than the cap returned; pickers should warn. */
+  truncated: boolean;
+  /** Total rows the filter matches (cap + the one extra used to detect truncation). */
+  total: number;
+}
+
+export async function listDimensionValues(
+  businessId: string,
+  options: { kind?: DimensionKind; includeArchived?: boolean } = {},
+): Promise<DimensionValueList> {
+  // Ask for CAP+1 rows so we can tell whether the result was cut off without a
+  // separate COUNT(*) — COUNT(*) on a hot table costs an extra scan.
+  const limit = DIMENSION_VALUE_LIST_CAP + 1;
+  const { rows } = await query<ValueRow>(
+    `${VALUE_SELECT}
+      WHERE v.business_id = $1
+        AND ($2::text IS NULL OR v.kind = $2::text)
+        AND ($3::boolean OR v.is_active)
+      ORDER BY v.kind, v.code
+      LIMIT ${limit}`,
+    [businessId, options.kind ?? null, options.includeArchived ?? false],
+  );
+  const truncated = rows.length > DIMENSION_VALUE_LIST_CAP;
+  const kept = truncated ? rows.slice(0, DIMENSION_VALUE_LIST_CAP) : rows;
+  return {
+    values: kept.map(toValue),
+    truncated,
+    total: rows.length,
+  };
 }
 
 export async function getDimensionValue(businessId: string, id: string): Promise<DimensionValueRecord | null> {

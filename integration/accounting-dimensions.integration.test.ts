@@ -261,7 +261,7 @@ describe("settings: every kind is off until a business switches it on", () => {
 
   it("switching a kind off keeps its values and their history", async () => {
     await dims.saveDimensionSettings(biz.id, user.id, [{ kind: "cost_center", isEnabled: false }]);
-    const values = await dims.listDimensionValues(biz.id, { kind: "cost_center" });
+    const { values } = await dims.listDimensionValues(biz.id, { kind: "cost_center" });
     expect(values.map((v) => v.code)).toContain("CC-HQ");
   });
 });
@@ -335,7 +335,7 @@ describe("value records", () => {
 
   it("never reads another business's value as its own", async () => {
     expect(await dims.getDimensionValue(biz.id, val.otherBusinessCc)).toBeNull();
-    expect((await dims.listDimensionValues(biz.id)).map((v) => v.id)).not.toContain(val.otherBusinessCc);
+    expect((await dims.listDimensionValues(biz.id)).values.map((v) => v.id)).not.toContain(val.otherBusinessCc);
   });
 });
 
@@ -671,7 +671,7 @@ describe("expenses carry their cost centre onto the expense line, and reverse wi
 describe("imports map or refuse an unknown code, and never create one", () => {
   it("resolves a code ignoring case and spaces, and refuses an unknown one without creating it", async () => {
     const { resolveDimensionCode } = await import("../src/lib/accounting-dimensions");
-    const values = await dims.listDimensionValues(biz.id, { kind: "cost_center" });
+    const { values } = await dims.listDimensionValues(biz.id, { kind: "cost_center" });
     expect(resolveDimensionCode(" cc-hq ", values)).toEqual({ status: "resolved", valueId: val.cc });
     expect(resolveDimensionCode("CC-MISSING", values)).toEqual({ status: "unknown" });
 
@@ -734,12 +734,15 @@ describe("concurrency: real contention against the database", () => {
     }
 
     const { rows } = await db.query<{ bad: boolean }>(
-      `WITH RECURSIVE ancestors AS (
-         SELECT id, parent_id FROM accounting_dimension_values WHERE id = ANY($1::uuid[])
+      `WITH RECURSIVE walk AS (
+         SELECT id AS start_id, id AS current_id, parent_id, ARRAY[id]::uuid[] AS path, 0 AS depth
+           FROM accounting_dimension_values WHERE id = ANY($1::uuid[])
          UNION ALL
-         SELECT v.id, v.parent_id FROM accounting_dimension_values v JOIN ancestors a ON v.id = a.parent_id
+         SELECT w.start_id, v.id, v.parent_id, path || v.id, w.depth + 1
+           FROM accounting_dimension_values v JOIN walk w ON v.id = w.parent_id
+          WHERE v.id <> ALL(w.path)
        )
-       SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = ANY($1::uuid[]) GROUP BY id HAVING count(*) > 1) AS bad`,
+       SELECT EXISTS(SELECT 1 FROM walk WHERE current_id = start_id AND depth > 0) AS bad`,
       [[a.id, b.id]],
     );
     expect(rows[0].bad).toBe(false);
@@ -780,6 +783,87 @@ describe("concurrency: real contention against the database", () => {
     try { await db2.query("ROLLBACK"); } catch { /* idle */ }
   });
 
+  it("concurrent opposite reparenting cannot commit a mutual cycle (independent connections, controlled ordering)", async () => {
+    // The actual bug the concurrency hardening guards against: two clients
+    // BEGIN concurrently, each sets the opposite parent (A→B and B→A), and the
+    // two COMMITs race. Without the 0218 advisory lock the deferred trigger
+    // fired in REPEATABLE READ could not see the sibling transaction's row and
+    // allowed both COMMITs, closing a loop. With the lock the second UPDATE
+    // serialises behind the first COMMIT and the cycle check (BEFORE, because
+    // the opposing row is now visible in-statement) refuses to set B.parent=A.
+    //
+    // Ordering is made deterministic with a sentinel xact advisory lock in a
+    // separate namespace: db2 waits on the sentinel, db commits and releases
+    // it, then db2's UPDATE runs against the committed state. The assertion is
+    // that the second UPDATE/COMMIT chain raises dimension_cycle and no cycle
+    // is ever written.
+    const a = await dims.createDimensionValue(biz.id, user.id, { kind: "profit_center", code: `CYC-X-${randomUUID().slice(0, 8)}`, name: "X" });
+    const b = await dims.createDimensionValue(biz.id, user.id, { kind: "profit_center", code: `CYC-Y-${randomUUID().slice(0, 8)}`, name: "Y" });
+
+    for (const c of [db, db2]) {
+      try { await c.query("ROLLBACK"); } catch { /* idle */ }
+    }
+
+    const SENTINEL_TAG = `cyc-sentinel-${randomUUID()}`;
+    await db.query("BEGIN");
+    await db2.query("BEGIN");
+    await db.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2::text))", [SENTINEL_TAG, biz.id]);
+
+    // db sets A.parent = B and acquires the real 0218 parent-lock.
+    await db.query(
+      `UPDATE accounting_dimension_values SET parent_id = $1 WHERE id = $2 AND business_id = $3`,
+      [b.id, a.id, biz.id],
+    );
+
+    // db2 waits on the sentinel (released when db COMMITs), then tries
+    // B.parent = A. The UPDATE itself is expected to throw dimension_cycle
+    // because the BEFORE row-level trigger now sees A.parent = B in the
+    // committed row (0218 serialises the two UPDATEs through the advisory
+    // lock; READ COMMITTED re-reads the row when the lock releases).
+    let err: unknown = null;
+    const blocked = (async () => {
+      await db2.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2::text))", [SENTINEL_TAG, biz.id]);
+      try {
+        await db2.query(
+          `UPDATE accounting_dimension_values SET parent_id = $1 WHERE id = $2 AND business_id = $3`,
+          [a.id, b.id, biz.id],
+        );
+        await db2.query("COMMIT");
+      } catch (e) {
+        err = e;
+        try { await db2.query("ROLLBACK"); } catch { /* aborted */ }
+      }
+    })();
+
+    await db.query("COMMIT");
+    await blocked;
+
+    expect(err).toBeTruthy();
+    expect(String(err)).toMatch(/dimension_cycle|P0001/);
+
+    for (const c of [db, db2]) {
+      try { await c.query("ROLLBACK"); } catch { /* idle */ }
+    }
+
+    // Cycle probe: walk UP the parent chain from each starting node, tracking
+    // the path's depth (to avoid the "any starting node is in the initial
+    // ancestor set" false positive that a naïve count > 1 gives) and refuse if
+    // any node ever revisits itself.
+    const { rows } = await db.query<{ bad: boolean }>(
+      `WITH RECURSIVE walk AS (
+         SELECT id AS start_id, id AS current_id, parent_id, ARRAY[id]::uuid[] AS path, 0 AS depth
+           FROM accounting_dimension_values WHERE id = ANY($1::uuid[])
+         UNION ALL
+         SELECT w.start_id, v.id, v.parent_id, path || v.id, w.depth + 1
+           FROM accounting_dimension_values v JOIN walk w ON v.id = w.parent_id
+          WHERE v.id <> ALL(w.path)
+       )
+       SELECT EXISTS(SELECT 1 FROM walk WHERE current_id = start_id AND depth > 0) AS bad`,
+      [[a.id, b.id]],
+    );
+    expect(rows[0].bad).toBe(false);
+  });
+
   it("an archived value stays in historical queries and blocks no read", async () => {
     const cc = await dims.createDimensionValue(biz.id, user.id, { kind: "cost_center", code: `ARC-${randomUUID().slice(0, 8)}`, name: "To archive" });
     await postManual([
@@ -789,7 +873,7 @@ describe("concurrency: real contention against the database", () => {
     await dims.updateDimensionValue(biz.id, user.id, cc.id, { isActive: false });
 
     // Historical catalogue includes the archived value.
-    const allValues = await dims.listDimensionValues(biz.id, { kind: "cost_center", includeArchived: true });
+    const { values: allValues } = await dims.listDimensionValues(biz.id, { kind: "cost_center", includeArchived: true });
     expect(allValues.some((v) => v.id === cc.id)).toBe(true);
 
     // A new posting with it is refused; the existing posting still reads back.

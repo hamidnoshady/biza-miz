@@ -204,7 +204,16 @@ export async function previewJournalVouchers(
         true,
       );
       if (lines.length === 0) {
-        if (!result.unmappedAccounts.some((row) => row.remoteId === voucher.remoteId)) {
+        // "skippedEmpty" is genuinely empty lines (zero debit and zero credit on
+        // every line). A voucher refused for an unknown/inactive account OR for
+        // an unknown/inactive dimension code must NOT be reported as skipped —
+        // that would hide the refusal from the preview screen and make the
+        // "nothing was imported" look like there was nothing to import.
+        const hasZeroLines = voucher.lines.every((l) => l.debit === 0n && l.credit === 0n);
+        const hasRefusal =
+          result.unmappedAccounts.some((row) => row.remoteId === voucher.remoteId)
+          || result.unmappedDimensions.some((row) => row.remoteId === voucher.remoteId);
+        if (hasZeroLines && !hasRefusal) {
           result.skippedEmpty.push(voucher.remoteId);
         }
         continue;

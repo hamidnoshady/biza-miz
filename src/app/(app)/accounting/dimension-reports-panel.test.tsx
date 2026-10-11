@@ -89,7 +89,7 @@ describe("the matrix report's drill-down", () => {
   it("links the one non-zero value cell to its account and value, over the period the report asked for", async () => {
     const reportUrls = stubFetch();
     render(
-      <DimensionReportsPanel enabledKinds={["cost_center"]} kindLabel={() => "مرکز هزینه"} values={VALUES} />,
+      <DimensionReportsPanel reportableKinds={["cost_center"]} kindLabel={() => "مرکز هزینه"} values={VALUES} />,
     );
 
     const links = await waitFor(() => {

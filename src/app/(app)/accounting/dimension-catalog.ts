@@ -39,6 +39,15 @@ export interface DimensionCatalog {
   postableValues: DimensionValueRecord[];
   /** All values (archived included) for historical filters and reports. */
   allValues: DimensionValueRecord[];
+  /**
+   * True when the catalogue was truncated by `DIMENSION_VALUE_LIST_CAP`. Pickers
+   * must warn so the user knows values exist beyond the list; reaching this cap
+   * means the business has more dimension values than the UI is designed to
+   * browse without search/pagination.
+   */
+  truncated: boolean;
+  /** Where the cap cut, when `truncated` is true. */
+  truncatedAt: number | null;
 }
 
 export type DimensionCatalogLoadResult =
@@ -162,7 +171,7 @@ export async function loadDimensionCatalog(
   if (!result.data || typeof result.data !== "object") {
     return { ok: false, error: "bad_shape" };
   }
-  const data = result.data as { settings?: unknown; values?: unknown };
+  const data = result.data as { settings?: unknown; values?: unknown; truncated?: unknown; truncatedAt?: unknown };
   if (!Array.isArray(data.settings) || !Array.isArray(data.values)) {
     return { ok: false, error: "bad_shape" };
   }
@@ -173,6 +182,8 @@ export async function loadDimensionCatalog(
       settings: data.settings as DimensionSettingRecord[],
       postableValues: allValues.filter((v) => v.isActive),
       allValues,
+      truncated: data.truncated === true,
+      truncatedAt: typeof data.truncatedAt === "number" ? data.truncatedAt : null,
     },
   };
 }
