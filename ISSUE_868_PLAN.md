@@ -207,26 +207,33 @@ Runs: the packaged job `37979722293` (push) and `37979728260` (pull request) pas
 
 # Status — draft PR open
 
-Delivered as draft PR #898 from `arena/10b8596c-biza-miz`. The PR refs #868 and does not close it: the deferred items below are part of the issue and remain open.
+Delivered as draft PR #898 from `arena/10b8596c-biza-miz`. Rebased cleanly onto `origin/main` at `b8b66b2` (PR #875, multicurrency), resolving all five conflicts. The PR refs #868 and does **not** close it: several items in §7 are genuine remaining work, documented below.
 
-Delivered (§6):
+Head after rebase + fixed-asset defaults PATCH: `9df206f8`. CI run 38169234122 is pending on push.
 
-- The line-level model, migration `0216`, the pure rules, the services, and the posting guard on manual journals, drafts and expenses. Reversals mirror the original attribution, including after an archive (`postExactMirrorEntry` carries all four dimension columns through `dimensionMirror: true`).
-- The expense importer: four optional code columns, resolved to this business's own values and refused by name when unknown or archived. Expense duplicate detection now keys on the four dimension IDs too (SQL adapter, not the generic rule registry).
-- Concurrency hardening (migrations `0217` and `0218`): a deferred `CONSTRAINT TRIGGER` re-walks the ancestor chain at COMMIT for cross-row cycles, and a `BEFORE` trigger takes an xact-level advisory lock keyed on (business, kind) so concurrent parent changes serialise; under REPEATABLE READ a deferred trigger alone is not enough. Covered by new tests in `accounting-dimensions.integration.test.ts`.
-- Journal CSV/XLSX export now carries eight dimension columns (کد + نام per kind) with blank cells on unattributed lines (`journal-export.ts`), covered by `journal-export.test.ts`.
-- Reads and reports: the journal's per-kind filters, the trial balance filter, the cost-centre account card, the account × dimension matrix, profit by profit centre, CSV export and print. A non-zero matrix cell drills into the journal lines behind it.
-- Screens: dimension management at `/accounting/dimensions` and the report panel, with searchable selectors and the Project / Cost centre distinction kept in the labels.
-- The desktop size budgets pass on the PR head with the first version's growth removed. The growth was one import: the report panel reached the codec module's spreadsheet and PDF libraries. The fix, the measurements and the follow-ups are in the Desktop payload section above. The staged runtime is 198.150 MiB against 200, and the installed payload 618.583 MiB against 620.
-- Size diagnostics run on every desktop build, after the budgets, and their reports upload even when a budget fails.
-- Truncation banner: when `/api/ledger/dimensions` reports `truncated: true` (the catalogue hit `DIMENSION_VALUE_LIST_CAP` = 2000), the dimensions management screen surfaces a Persian info banner telling the user the list is partial and to search or archive. (`dimensions-section.tsx`)
+Delivered (§6 plus this pass):
 
-Partially delivered in this pass:
-- Holoo Sanad/SanadRow voucher import carries dimension codes per line, resolved transactionally (commit `b091ba6`).
-- Journal CSV/XLSX export includes 8 dimension columns (commit `fbb2b80`).
-- Concurrency hardening with real mutual-cycle proof under independent connections (`0217`/`0218`, commit `fbb2b80`, regression strengthened in `08151db`).
+- The line-level model, migration `0216`, pure rules, services, posting guard on manual journals, drafts, expenses; reversals mirror. Expense & journal-voucher import with four optional code columns; concurrency hardening (`0217`/`0218`); journal CSV export with 8 dimension columns; reads/filters/reports (matrix, profit by centre, cost-centre card, trial-balance filter); screens at `/accounting/dimensions` with management, searchable pickers and Project/Cost-centre distinction. Size diagnostics and budget preservation (198.17 / 618.6 / 161 MiB on Windows).
+- **Fixed-asset attribution** (migration `0219`): four nullable columns on `fixed_assets`, structural BEFORE trigger reusing `accounting_dimension_check_all`, partial indexes; create/depreciation/disposal stamp dimensions on asset/P&L legs; settlement/contra/proceeds legs stay unattributed; reversals mirror through `postExactMirrorEntry(dimensionMirror: true)`; `dimensionValueUsage` counts `fixed_assets` so defaults archive.
+- **Asset default update** (`updateFixedAssetDimensions`, `PATCH /api/ledger/fixed-assets/[id]` with `dimensions`): prospective only, under the asset lock, revalidated with `assertDimensionsPostable`; never rewrites posted acquisition/depreciation/disposal history. Integration test proves month 1 keeps the old centre, month 2 uses the new one.
+- **Tenant isolation on dimensions**: cross-business dimension value (not just an all-zero UUID) is refused when creating an asset.
+- **Catalogue truncation banner** on `/accounting/dimensions` when the 2,000-row cap is hit.
+- Rebase against multicurrency (PR #875) preserves both feature sets: `JournalLineRecord` / `LineRow` / journal export now carry foreign-currency, party and dimension columns side-by-side.
 
-Deferred, with the decision that still needs to be made for each:
+Still open (each is a real piece of work, with the required decision or contract spelled out; not silently omitted):
+
+1. **Catalogue server-side search / pagination.** The 2,000-row combined cap plus client-only search remains; a business with >2,000 values should be served by a bounded `?q=` search endpoint with stable keyset pagination and selected-ID lookup so a picker can resolve an already-saved value even when it falls outside the cap. Requires a new service + API route + picker wiring (manual entry, expenses, journal filter, trial-balance filter, dimension-reports filter, fixed-asset pickers).
+2. **Fixed-asset form pickers.** `fixed-assets-section.tsx` does not yet render `DimensionFields` on the new/edit asset drawer; the backend accepts and persists the field.
+3. **Payroll allocation.** Needs a product decision: per-employee default, per-run allocation, or salary-rule ratios. Do not invent a posting rule the business hasn't chosen.
+4. **Trading postings (purchase/sale/COGS).** Need a profit-centre rule (per-product, per-channel, per-customer group) before the posting engine has anything to read.
+5. **Receipts/payments allocation.** Settling a dimension-filtered invoice across mixed dimensions is a settlement-allocation problem that also changes ageing; not a blind copy-to-cash-leg change.
+6. **Safe bulk assignment** of dimensions on unposted drafts only (with an audit row per changed line).
+7. **Generated opening / carry-forward entries** carrying dimension attribution; aggregates have no natural attribution until the prior year's closing is split by dimension (report-by-dimension already exists, but the carry-forward generator doesn't read it).
+8. **Site/cloud sync contract extension**: `MASTER_SYNC_TABLES` for dimension master data; site events need attribution propagated; requires cloud-side schema.
+9. **Windows packaged base comparison** using `source_ref=7b1b11c54f9ccb19a82fba69b590d10b10da31ba` — session cannot dispatch `workflow_dispatch` (HTTP 403 on the earlier attempt); needs a token with workflow-dispatch permission.
+10. **Visual regression** on `accounting-expenses.png` (4.06%) — matches `main`'s pre-existing figure; not re-recorded. Requires a baseline diff review before any re-record.
+11. **Rollup reports, bulk assignment UI, hybrid site events** remain deferred as documented in §7.
+
 - **Payroll attribution** requires a per-employee / per-run allocation model (cost-centre share percentages per employee, or a run-level choice). Not a code change: a product decision the issue does not resolve. Until that decision, payroll accruals post to «بدون بُعد».
 - **Fixed-asset attribution** (migration `0219`): an asset carries an optional default dimension set. `createFixedAsset` validates it with `assertDimensionsPostable` inside its transaction; the acquisition entry stamps it on the asset (debit) leg. `postDepreciation` stamps it on depreciation expense (debit). `disposeFixedAsset` stamps it on cost credit and gain/loss legs; proceeds and accumulated-depreciation legs stay unattributed. `reverseDepreciation` mirrors through `postExactMirrorEntry(dimensionMirror: true)`. `dimensionValueUsage` counts `fixed_assets` so an asset default archives rather than deletes. `POST /api/ledger/fixed-assets` accepts `dimensions` and answers `AccountingDimensionError` as 400. `PATCH /api/ledger/fixed-assets/[id]` accepts `dimensions` and calls `updateFixedAssetDimensions`, which validates against today/branch under the asset lock and applies the default **prospectively** — posted acquisition/depreciation/disposal rows are not rewritten (the existing journal lines are immutable history), and a new integration test proves the first depreciation month keeps cc1 while a later month under the new default carries cc2. A strengthened isolation test proves a dimension value belonging to another business is refused (not just an all-zeroes UUID).
 - **Trading postings** (purchase, sale, COGS) carry dimension attribution only once the posting engine has a rule (per-product, per-channel, etc.). Without that rule the engine has nothing to read.
