@@ -182,10 +182,12 @@ All commands run in this sandbox on the work commit.
 |---|---|
 | `NODE_OPTIONS=--max-old-space-size=3072 ./node_modules/.bin/tsc --noEmit` | **exit 0**, no output |
 | `./node_modules/.bin/eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run` (full unit suite) | **713 files / 9,361 tests passed**, exit 0, 361.3 s |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (full integration suite, 199 files) | **198 files passed / 1 failed · 2,716 tests passed / 2 failed / 1 skipped**, 2185.0 s |
+| `npx vitest run` (full unit suite) | **722 files / 9,419 tests passed**, exit 0, 311.2 s |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (full integration suite, 200 files) | **200 files passed / 0 failed · 2,763 tests passed / 0 failed / 1 skipped**, 1899.5 s |
 
-PostgreSQL for the integration run: **16.14**, started with the project's own `npm run db:dev:start` on 127.0.0.1:5432. (An earlier draft reported 18.4; that cluster satisfied neither `pg-tools.ts`'s major-16 guard nor the client tools, and inflated the failure count.)
+PostgreSQL for the integration run: **16.14**, started with the project's own `npm run db:dev:start` on 127.0.0.1:5432, with `npm run db:migrate` applied first exactly as CI does (305 migrations; `public` then holds 442 tables and a re-run is correctly a no-op).
+
+The integration suite is **fully green**: 200/200 files, 2,763 passed, 0 failed, 1 skipped, 1899.5 s, from a single uninterrupted process. Two earlier runs of mine reported failures that were both artifacts of how I ran the suite rather than defects, and both are corrected below. No test was skipped, disabled, loosened or re-baselined to reach these numbers; the one skip is `platform-system-backup`'s peer-surface case, conditional on a second server.
 
 **The single failing integration file was my harness error, not a defect — and an earlier draft of this report was wrong about it.**
 
@@ -217,7 +219,7 @@ Test Files  1 passed (1)   Tests  2 passed (2)
 
 An earlier full run of mine reported a second failure, `backup-locks` throwing `DATABASE_URL is required` at *collection*. That was an artifact of how I launched the suite: I relied on `.env` rather than exporting the variable. CI sets `DATABASE_URL` at the **job level** (`test.yml`, integration job `env:`), and exporting it the same way makes the failure disappear — which is what the figures above measure. Worth recording because it means a local run must export `DATABASE_URL` explicitly; `.env` alone is not sufficient once an earlier file has replaced the value.
 
-The 1 skipped test is `platform-system-backup`'s peer-surface case, conditional on a second server. No test was skipped, disabled, loosened or re-baselined to reach these numbers.
+**The second artifact: two overlapping suites.** A run that reported `hybrid-sync` failing 10 tests was contaminated by my own mistake — I had started a second suite while the first was still running, and both were creating and dropping scratch databases on the same cluster for about five minutes. Run on its own, `hybrid-sync` passes **18/18**, and the clean single-process run above has zero failures. Running two integration suites against one cluster concurrently is never valid here.
 
 These are the figures for the committed tree, from one end-to-end run of all 196 files rather than a sample. **All 13 failures are accounted for, and none is an unexplained break:**
 
