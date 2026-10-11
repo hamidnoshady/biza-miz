@@ -84,11 +84,18 @@ ALTER TABLE auth_login_attempts ADD CONSTRAINT auth_login_attempts_outcome_check
 -- shared with the MFA interstitial (`platform_user` / `platform_admin`
 -- realms), whose challenges are bound by their own pending token and gain
 -- nothing from these columns. Only the `employee_phone` realm writes them.
+-- Idempotent on purpose, and not only as a style choice: `purpose` and
+-- `consumed_at` are also added by 0211_auth_hardening (issue #854), which
+-- sorts ahead of this file. Two branches hardened the same table
+-- independently, so a plain ADD COLUMN here fails with "column already
+-- exists" the moment both are present. `IF NOT EXISTS` is the convention the
+-- rest of this directory already follows, and it keeps the migration
+-- forward-only and safe whichever order the two landed in.
 ALTER TABLE mfa_challenges
-    ADD COLUMN business_id  uuid,
-    ADD COLUMN purpose      text,
-    ADD COLUMN destination  text,
-    ADD COLUMN consumed_at  timestamptz;
+    ADD COLUMN IF NOT EXISTS business_id  uuid,
+    ADD COLUMN IF NOT EXISTS purpose      text,
+    ADD COLUMN IF NOT EXISTS destination  text,
+    ADD COLUMN IF NOT EXISTS consumed_at  timestamptz;
 
 -- Verification now looks the challenge up by id, and the send path retires
 -- every older live challenge for the same subject — both are index scans on
