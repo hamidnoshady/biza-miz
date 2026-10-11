@@ -62,6 +62,9 @@ import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listCmsPages, listCmsMedia } from "./cms/website-service";
+import { listRetailInvoices } from "./retail-invoice/list-service";
+import { getRetailInvoiceDetail } from "./retail-invoice/read-service";
+import { toLatinDigits } from "./digits";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
 import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject, listDocuments, getDocument, listDocumentVersions } from "./workspace";
@@ -2063,6 +2066,57 @@ export async function runReadTool(
     // Phase C — the two messaging reads that feed messaging.campaign.create.
     // Both list the business's own rows; the campaign create action still runs
     // through the role-guarded /api/messaging route when a human applies it.
+    // Issue #883 package 2, batch Q — the sales-invoice screens' reads.
+    // The route's filters are mirrored one-for-one (Latin digits, ISO date
+    // bounds, enum guards) so the read answers with exactly what the screen
+    // would list at the same office index.
+    case "list_sales_invoices": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const locationId = pinned.locationId;
+      const q = toLatinDigits(typeof args.q === "string" ? args.q : "").replace(/[٬,]/g, "").trim();
+      const method = typeof args.method === "string" ? args.method : "";
+      if (method && !["cash", "bank", "credit"].includes(method)) {
+        return { ok: false, data: { error: "invalid_payment_method" } };
+      }
+      const rawStatus = typeof args.status === "string" ? args.status : "";
+      if (rawStatus && !["completed", "voided"].includes(rawStatus)) return { ok: false, data: { error: "invalid_invoice_status" } };
+      const isoDate = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+      const dateFrom = isoDate(args.dateFrom);
+      const dateTo = isoDate(args.dateTo);
+      if ((args.dateFrom !== undefined && !dateFrom) || (args.dateTo !== undefined && !dateTo)) {
+        return { ok: false, data: { error: "invalid_date" } };
+      }
+      if (dateFrom && dateTo && dateFrom > dateTo) return { ok: false, data: { error: "invalid_date_range" } };
+      const page = typeof args.page === "number" && Number.isSafeInteger(args.page) && args.page > 0 ? args.page : 1;
+      const pageSize = typeof args.pageSize === "number" && Number.isSafeInteger(args.pageSize) && args.pageSize > 0
+        ? Math.min(args.pageSize, 100)
+        : 20;
+      const result = await listRetailInvoices({
+        businessId,
+        locationId,
+        q,
+        method,
+        status: rawStatus,
+        dateFrom: dateFrom ?? "",
+        dateTo: dateTo ?? "",
+        installmentEligible: args.installmentEligible === true,
+        page,
+        pageSize,
+      });
+      return { ok: true, data: result };
+    }
+    case "get_sales_invoice": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const locationId = pinned.locationId;
+      const invoiceId = typeof args.invoiceId === "string" ? args.invoiceId : "";
+      if (!invoiceId) return { ok: false, data: { error: "invoice_required" } };
+      const detail = await getRetailInvoiceDetail(businessId, locationId, invoiceId);
+      return { ok: true, data: { invoice: detail } };
+    }
     case "list_message_templates": {
       const channel =
         typeof args.channel === "string" && (CAMPAIGN_CHANNELS as readonly string[]).includes(args.channel)

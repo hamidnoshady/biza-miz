@@ -209,6 +209,9 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // like website.post.publish (a human-confirmed publish action).
   { name: "list_cms_pages", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "list_cms_media", kind: "read", app: "website", branchPolicy: "agnostic" },
+  // Batch Q — sales invoices are branch-scoped like every other POS order read.
+  { name: "list_sales_invoices", kind: "read", app: "pos", branchPolicy: "pinned" },
+  { name: "get_sales_invoice", kind: "read", app: "pos", branchPolicy: "pinned" },
 
   // ---- Workspace / AEC (project desk is business-scoped, never branch-scoped) ----
   { name: "get_workspace_project_status", kind: "read", app: "workspace", branchPolicy: "agnostic" },
@@ -372,6 +375,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "website.post.draft", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "website.post.update", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "website.product.upsert", kind: "write", app: "website", risk: "low", approval: "mode" },
+  // Batch Q — voiding a settled receipt reverses ledger postings, restores
+  // batches and unwinds loyalty/commission. Explicit human approval each
+  // time; the mandatory reason is enforced by the service, not the parser.
+  { actionType: "sales.invoice.void", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
 ];
 
 // ---------------------------------------------------------------------------

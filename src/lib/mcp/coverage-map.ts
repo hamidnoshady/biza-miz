@@ -205,6 +205,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "POS",
     entity: "Dining tables & table sessions",
     routes: ["tables", "table-sessions"],
+    note: "MCP gap by design for now: the floor is realtime — every write in these routes broadcasts to the live floor view and (for sessions) coordinates with open orders through ensureSessionForTable; a chat verb that skips the broadcast leaves the till screens stale, so the lanes stay route-only until the session orchestration is extracted like listInventoryTransfers was — see issue #883 follow-ups",
   },
 
   // ============================ Menu & pricing ============================
@@ -770,7 +771,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Sales",
     entity: "Sales invoices & voids",
     routes: ["sales"],
-    test: "integration/sales.integration.test.ts",
+    ops: {
+      listDetail: ["list_sales_invoices", "get_sales_invoice"],
+      lifecycle: ["sales.invoice.void"],
+    },
+    note: "creating an invoice stays register-only: the checkout path coordinates tender queue, loyalty, COGS and outbox in the route — same registered design note as the pos.orders lane; void (the reversal mirror) is service-backed and runs under explicit approval with the service's obstacle codes (batches, dismissed sessions, fiscal locks) verbatim",
+    test: "integration/retail-invoice.integration.test.ts",
   },
   {
     id: "wire.workspace-overview",

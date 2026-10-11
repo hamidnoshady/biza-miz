@@ -213,6 +213,8 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   get_website_status: "Whether a website is connected, its domain, the last connection test, the price/stock push switches and the sync queue counts (pending / failed / dead).",
   list_cms_pages: "The site's pages with publish status (publish stays human-confirmed, off-MCP).",
   list_cms_media: "The site's media library (urls + dimensions for featuredImageId).",
+  list_sales_invoices: "Retail sales invoices of the branch with status, tenders and totals (search by invoice number; page with page/pageSize).",
+  get_sales_invoice: "One retail invoice in full detail (lines, tenders, void state).",
   // Phase C — the messaging reads that feed the campaign-create action.
   list_message_templates: "Saved message templates by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",
   list_message_campaigns: "The business's message campaigns (draft, sending, done) with id, name, channel, status and recipient / sent / delivered / failed counts.",
@@ -1629,6 +1631,28 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         itemIds: { type: "array", items: { type: "string" }, description: "خالی = همهٔ اقلام شعبه" },
       },
       required: ["target", "mode", "value", "round"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_sales_invoice_void",
+    actionType: "sales.invoice.void",
+    english:
+      "Void a settled retail invoice — reverses its postings, stock and loyalty. Always asks a human first; the reason is mandatory.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        invoiceId: id("شناسهٔ فاکتور — از list_sales_invoices"),
+        reason: {
+          type: "string",
+          description: "دلیل ابطال — الزامی، حداقل ۳ و حداکثر ۵۰۰ نویسه",
+          minLength: 3,
+          maxLength: 500,
+        },
+        locationId: id("شعبهٔ فاکتور — اگر پین شعبه دیگری است؛ پیش‌فرض پین"),
+      },
+      required: ["invoiceId", "reason"],
       additionalProperties: false,
     },
   },

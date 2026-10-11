@@ -317,6 +317,9 @@ export type ActionType =
   | "priceList.delete"
   | "priceList.entries.save"
   | "priceList.quick_update"
+  // Batch Q — voiding a settled retail invoice (reversal posting + batch +
+  // loyalty/commission unwind inside the service's own transaction).
+  | "sales.invoice.void"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -353,6 +356,7 @@ export type ActionType =
   | "crm.automation.toggle";
 
 export type AutopilotExecutorKey =
+  | "retailInvoiceVoid"
   | "menuItemPatch"
   | "stockCount"
   | "draftPurchase"
@@ -1282,6 +1286,15 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ updates: [{ priceListId, itemId /* از list_menu_items */, price: number|null /* null = حذف قیمت */, expectedVersion?: string /* version از list_price_list_entries برای تشخیص تداخل */ }] }',
     executor: "priceListEntriesSave",
+  },
+  "sales.invoice.void": {
+    type: "sales.invoice.void",
+    endpoint: "/api/sales/invoices/[id]/void",
+    method: "POST",
+    label: "ابطال فاکتور خرده‌فروشی تسویه‌شده — برگشت ثبت‌های حسابداری، موجودی و امتیاز مشتری؛ نیازمند دلیل و تأیید انسان",
+    payloadHint:
+      '{ invoiceId: string, reason: string /* حداقل ۳ و حداکثر ۵۰۰ نویسه — الزامی */, locationId?: string }',
+    executor: "retailInvoiceVoid",
   },
   "priceList.quick_update": {
     type: "priceList.quick_update",
@@ -2626,6 +2639,45 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             limit: { type: "number", description: "پیش‌فرض ۲۴، سقف ۱۰۰" },
             page: { type: "number", description: "شمارهٔ صفحه — از ۱" },
           },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_sales_invoices",
+        description:
+          "فاکتورهای خرده‌فروشی شعبهٔ فعال — جستجو با شمارهٔ فاکتور، فیلتر وضعیت (completed|voided)، روش تسویه (cash|bank|credit)، بازهٔ تاریخ ISO، فقط فاکتورهای واجد نصب اقساط، صفحه‌بندی. ثبت فاکتور جدید فقط از صندوق؛ بطلان از طریق فعل sales.invoice.void با تأیید انسان.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string", description: "شمارهٔ فاکتور یا ارقام فارسی — نرمال می‌شود" },
+            method: { type: "string", enum: ["cash", "bank", "credit"] },
+            status: { type: "string", enum: ["completed", "voided"] },
+            dateFrom: { type: "string", description: "YYYY-MM-DD" },
+            dateTo: { type: "string", description: "YYYY-MM-DD" },
+            installmentEligible: { type: "boolean", description: "فقط فاکتورهای واجد نصب اقساط" },
+            page: { type: "number" },
+            pageSize: { type: "number", description: "پیش‌فرض ۲۰، سقف ۱۰۰" },
+            locationId: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_sales_invoice",
+        description: "جزئیات کامل یک فاکتور: اقلام، نحوهٔ تسویه، مشتری و وضعیت بطلان.",
+        parameters: {
+          type: "object",
+          properties: {
+            invoiceId: { type: "string" },
+            locationId: { type: "string" },
+          },
+          required: ["invoiceId"],
           additionalProperties: false,
         },
       },

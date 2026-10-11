@@ -21,6 +21,8 @@ import { createStockCount, reverseStockCount } from "./stock-count-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
+import { MIN_REASON_LENGTH, MAX_REASON_LENGTH } from "./order-amendments";
+import { voidRetailInvoice, RetailInvoiceVoidError } from "./retail-invoice-void-service";
 import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
@@ -95,6 +97,7 @@ import {
   deletePriceList,
   savePriceEntries,
   quickUpdatePrices,
+
   type QuickUpdateTarget,
 } from "./price-lists-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
@@ -2640,6 +2643,50 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { moved } };
 };
 
+// ── Issue #883 package 2, batch Q — retail invoice void ────────────────────
+// Mirrors POST /api/sales/invoices/[id]/void one-for-one: mandatory reason in
+// the amendment bounds, one chosen branch, the reversal service inside a
+// single client transaction, the service's own error codes back to the model.
+// The floor broadcast the route emits after COMMIT has no socket here; every
+// state it announces is already durable inside this transaction.
+const retailInvoiceVoid: AutopilotExecutor = async (ctx) => {
+  const invoiceId = str(ctx.payload.invoiceId) ?? str(ctx.payload.id);
+  const reason = (str(ctx.payload.reason) ?? "").trim();
+  if (!invoiceId) return fail("invoice_required");
+  if (reason.length < MIN_REASON_LENGTH) return fail("reason_required");
+  if (reason.length > MAX_REASON_LENGTH) return fail("reason_too_long");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await voidRetailInvoice(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      orderId: invoiceId,
+      actorId: ctx.authorizedByUserId ?? "",
+      reason,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ...result } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if (err instanceof RetailInvoiceVoidError) {
+      // Keep the service's actionable Persian refusal (e.g. «فاکتورهای طلا
+      // قابل ابطال… نیست») — the UI's toast text and the audit trail both
+      // read it, not just the code.
+      return { ok: false, result: { error: "void_failed", message: err.message }, errorCode: "void_failed" };
+    }
+    if (err instanceof MissingLedgerAccountError) return fail("missing_ledger_account");
+    const message = err instanceof Error ? err.message : "";
+    if (message === "fiscal_period_locked" || message === "fiscal_period_soft_closed") return fail(message);
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
 // ── Issue #883 package 2, batch L — transfers & warehouse documents ─────────
 // The four transfer states ride the same client-transaction services as the
 // routes' BEGIN/COMMIT blocks; the document posts through the service's own
@@ -2949,6 +2996,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   priceListDelete,
   priceListEntriesSave,
   priceListQuickUpdate,
+  retailInvoiceVoid,
   transferCreate,
   transferShip,
   transferReceive,

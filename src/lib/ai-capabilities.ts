@@ -120,6 +120,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch O — the CMS content screens' read gates.
   list_cms_pages: PERMISSIONS.cmsView,
   list_cms_media: PERMISSIONS.cmsView,
+  // Batch Q — the sales-invoice screens' read gate.
+  list_sales_invoices: PERMISSIONS.ordersView,
+  get_sales_invoice: PERMISSIONS.ordersView,
   // Batch I — the KB centre is member-wide (requireMember): the ai.use key
   // is the connection's own "may read assistant-side material" baseline, and
   // the same gate that lets the assistant itself read the centre. Media
@@ -243,6 +246,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "priceList.rename": PERMISSIONS.menuEdit,
   "priceList.delete": PERMISSIONS.menuEdit,
   "priceList.entries.save": PERMISSIONS.menuEdit,
+  "sales.invoice.void": PERMISSIONS.ordersAmendClosed,
   "priceList.quick_update": PERMISSIONS.menuEdit,
   "transfer.create": PERMISSIONS.inventoryAdjust,
   "transfer.ship": PERMISSIONS.inventoryAdjust,
