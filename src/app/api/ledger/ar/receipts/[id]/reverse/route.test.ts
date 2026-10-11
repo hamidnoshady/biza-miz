@@ -49,6 +49,27 @@ describe("POST /api/ledger/ar/receipts/[id]/reverse", () => {
     expect(arService.reverseReceipt).not.toHaveBeenCalled();
   });
 
+  it("answers a present-but-misshapen body with 400 instead of reversing or throwing", async () => {
+    for (const body of [null, [], "x", 42]) {
+      const response = await POST(requestWith(body), CONTEXT);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "bad_request" });
+    }
+    expect(arService.reverseReceipt).not.toHaveBeenCalled();
+  });
+
+  it("still reverses with the default memo when the body is absent", async () => {
+    const empty = { json: async () => { throw new Error("empty body"); } } as unknown as NextRequest;
+    const response = await POST(empty, CONTEXT);
+    expect(response.status).toBe(201);
+    expect(arService.reverseReceipt).toHaveBeenCalledWith({
+      businessId: "biz-1",
+      receiptId: RECEIPT_ID,
+      actorId: "approver-1",
+      memo: null,
+    });
+  });
+
   it("maps double-reversal conflicts without mutating the voucher", async () => {
     vi.mocked(arService.reverseReceipt).mockRejectedValue(new ArError("already_reversed", 409));
     const response = await POST(requestWith({}), CONTEXT);

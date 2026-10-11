@@ -178,10 +178,15 @@ export function AccountingManager({
    * there is no unread-member case to represent (the section still accepts
    * `undefined` and treats it as allowed, keeping the API as the gate for any
    * future optional caller).
+   *
+   * The same pair feeds the subledger screens' settle actions: those screens
+   * are readable on `ledger.view`, but settling a balance is exactly these
+   * permissions, the ones the receipts and payments endpoints enforce —
+   * handing each side its own boolean is what keeps a live «دریافت وجه»
+   * button off an auditor's screen.
    */
   const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
   const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
-  const canReverseVouchers = permissions.includes(PERMISSIONS.ledgerApprove);
 
   /**
    * Whether this member may *write* in the expense register (issue #832 §3).
@@ -271,7 +276,6 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
-
   /*
    * Whether this member may run a reconciliation at all.
    *
@@ -279,13 +283,9 @@ export function AccountingManager({
    * mutation behind it — start, tick, complete, discard — requires
    * `finance.reconciliation_manage`. The screen used to draw all of those
    * controls for whoever could open it, so a read-only accountant's every click
-   * came back 403 under a generic error. `undefined` when the page could not
-   * read the member's effective permissions: the section then draws the
-   * controls and the API stays the gate, exactly like `canApproveLedger`.
+   * came back 403 under a generic error.
    */
-  const canManageReconciliation = permissions
-    ? permissions.includes(PERMISSIONS.financeReconciliationManage)
-    : undefined;
+  const canManageReconciliation = permissions.includes(PERMISSIONS.financeReconciliationManage);
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -410,8 +410,8 @@ export function AccountingManager({
           {section === "receipts" ? <ReceiptsPaymentsSection
             canManageReceivables={canManageReceivables}
             canManagePayables={canManagePayables}
-            canReversePayments={canReverseVouchers}
-            canReverseReceipts={canReverseVouchers}
+            canReversePayments={canApproveLedger}
+            canReverseReceipts={canApproveLedger}
           /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}

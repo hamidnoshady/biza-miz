@@ -4,8 +4,8 @@ import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { isoDateToJalali, jalaliMonthLength, jalaliToIsoDate } from "./jalali";
 import { isUuid } from "./uuid";
+import { foldForSearch, searchPattern } from "./sql-search";
 import { businessToday } from "./business-day-service";
-import { normalizePosSearchText } from "./pos-selection";
 import { isValidIsoDate } from "./iso-date";
 import {
   decodeVoucherCursor,
@@ -802,26 +802,6 @@ export async function payInstallmentItem(params: {
   }
 }
 
-/**
- * Folds a column into the alphabet `normalizePosSearchText` folds the typed
- * needle into — Arabic ي/ك to Persian ی/ک and both digit sets to ASCII — so a
- * search behaves like the pickers everywhere else in the app («علي» is found
- * by typing «علی», «۱۲» finds «12»). Kept as inline `translate` rather than a
- * stored function: one expression, no migration needed.
- */
-const SEARCH_FOLD = "translate(%s, 'يك٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', 'یک01234567890123456789')";
-
-/**
- * The `q` argument as a LIKE pattern, or null when there is nothing to search
- * for. The needle is normalized exactly the way the client-side pickers
- * normalize it (same `normalizePosSearchText`), then the LIKE wildcards it may
- * contain are escaped — «%» must find a literal «%», not swallow the table.
- */
-function searchPattern(q: string | undefined): string | null {
-  const needle = normalizePosSearchText(q ?? "");
-  if (!needle) return null;
-  return `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
-}
 
 export interface ReceiptListRow {
   id: string;
@@ -950,9 +930,9 @@ export async function listReceiptsPage(
 
   if (pattern) {
     const p = push(pattern);
-    conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE ${p} ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE ${p} ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
+    conditions.push(`(${foldForSearch("COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE ${p} ESCAPE '\\'
+             OR ${foldForSearch("COALESCE(r.memo, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${foldForSearch("COALESCE(r.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
   }
   if (params.dateFrom) conditions.push(`r.receipt_date >= ${push(params.dateFrom)}::date`);
   if (params.dateTo) conditions.push(`r.receipt_date <= ${push(params.dateTo)}::date`);
@@ -1106,10 +1086,10 @@ export async function listPaymentsPage(
 
   if (pattern) {
     const p = push(pattern);
-    conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE ${p} ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE ${p} ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE ${p} ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
+    conditions.push(`(${foldForSearch("COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE ${p} ESCAPE '\\'
+             OR ${foldForSearch("COALESCE(p.memo, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${foldForSearch("COALESCE(l.name, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${foldForSearch("COALESCE(p.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
   }
   if (params.dateFrom) conditions.push(`p.payment_date >= ${push(params.dateFrom)}::date`);
   if (params.dateTo) conditions.push(`p.payment_date <= ${push(params.dateTo)}::date`);

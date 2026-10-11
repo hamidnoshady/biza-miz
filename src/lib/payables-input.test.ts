@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addDaysIso,
+  isJsonObject,
   isVoucherMethod,
   normalizeBankReference,
   parseExpenseSettlement,
@@ -227,5 +228,19 @@ describe("optionalBodyText", () => {
     expect(optionalBodyText(true)).toBeUndefined();
     expect(optionalBodyText({})).toBeUndefined();
     expect(optionalBodyText(["x"])).toBeUndefined();
+  });
+});
+
+describe("isJsonObject", () => {
+  it("admits only the non-null non-array objects the routes can read fields from", () => {
+    expect(isJsonObject({})).toBe(true);
+    expect(isJsonObject({ customerId: "x" })).toBe(true);
+    expect(isJsonObject(null)).toBe(false);
+    expect(isJsonObject(undefined)).toBe(false);
+    expect(isJsonObject([])).toBe(false);
+    expect(isJsonObject([{ customerId: "x" }])).toBe(false);
+    expect(isJsonObject("x")).toBe(false);
+    expect(isJsonObject(42)).toBe(false);
+    expect(isJsonObject(true)).toBe(false);
   });
 });

@@ -308,6 +308,51 @@ describe("overlapping list requests", () => {
     const more = screen.getByRole("button", { name: "نمایش بیشتر" });
     expect(disabled(more)).toBe(false);
   });
+
+  it("discards a stale listing when the same query refreshes", async () => {
+    const { listCalls } = serveDeferred();
+    renderRegister();
+    await waitFor(() => expect(listCalls).toHaveLength(1));
+
+    // The same query, asked again — no filter moved, so the cursor's query
+    // guard cannot help; only the request token discards the stale answer.
+    fireEvent.click(screen.getByRole("button", { name: "در حال به‌روزرسانی…" }));
+    await waitFor(() => expect(listCalls).toHaveLength(2));
+    expect(listQuery(listCalls[0]).toString()).toBe(listQuery(listCalls[1]).toString());
+
+    listCalls[1].resolve({ receipts: [deferredRow("ردیف تازه")], hasMore: false, nextCursor: null });
+    await screen.findAllByText("ردیف تازه");
+    listCalls[0].resolve({ receipts: [deferredRow("ردیف کهنه")], hasMore: false, nextCursor: null });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryAllByText("ردیف تازه").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("ردیف کهنه")).toHaveLength(0);
+  });
+
+  it("drops a same-query refresh's superseded page without appending and resets the button", async () => {
+    const { listCalls } = serveDeferred();
+    renderRegister();
+    await waitFor(() => expect(listCalls).toHaveLength(1));
+    listCalls[0].resolve({ receipts: [deferredRow("ردیف یک")], hasMore: true, nextCursor: "C1" });
+    await screen.findAllByText("ردیف یک");
+
+    fireEvent.click(screen.getByRole("button", { name: "نمایش بیشتر" }));
+    await waitFor(() => expect(listCalls).toHaveLength(2));
+    // Same query, asked again while the page is in flight: the cursor still
+    // belongs to these filters, so only the request token can orphan it.
+    fireEvent.click(screen.getByRole("button", { name: "به‌روزرسانی" }));
+    await waitFor(() => expect(listCalls).toHaveLength(3));
+
+    listCalls[2].resolve({ receipts: [deferredRow("ردیف دو")], hasMore: true, nextCursor: "C2" });
+    await screen.findAllByText("ردیف دو");
+    expect(screen.queryAllByText("ردیف یک")).toHaveLength(0);
+
+    listCalls[1].resolve({ receipts: [deferredRow("ردیف بیگانه")], hasMore: false, nextCursor: null });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryAllByText("ردیف بیگانه")).toHaveLength(0);
+    expect(screen.queryAllByText("ردیف دو").length).toBeGreaterThan(0);
+    const more = screen.getByRole("button", { name: "نمایش بیشتر" });
+    expect(disabled(more)).toBe(false);
+  });
 });
 
 describe("the «فیلترهای بیشتر» panel", () => {

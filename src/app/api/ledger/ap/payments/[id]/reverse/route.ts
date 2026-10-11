@@ -5,7 +5,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { ApError, MissingLedgerAccountError, reverseApPayment } from "@/lib/ap-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
-import { optionalBodyText } from "@/lib/payables-input";
+import { isJsonObject, optionalBodyText } from "@/lib/payables-input";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -20,9 +20,17 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (error) return error;
 
   const { id } = await ctx.params;
-  let body: { reversalDate?: string; memo?: string } = {};
+  // The body is optional — an absent body reverses on the business-local
+  // date with the default memo — but a *present* body must be an object:
+  // `null` must not throw a TypeError 500, and an array or scalar must not
+  // silently become the default correction. Either is a controlled 400.
+  let body: Record<string, unknown> = {};
   try {
-    body = await request.json();
+    const parsed: unknown = await request.json();
+    if (!isJsonObject(parsed)) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    body = parsed;
   } catch {
     // An empty body means reverse on the business-local date with the default memo.
   }

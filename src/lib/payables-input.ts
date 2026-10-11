@@ -201,6 +201,18 @@ export function optionalBodyText(value: unknown): string | null | undefined {
   return value.trim() || null;
 }
 
+/**
+ * Is this parsed JSON a body the routes can read fields from — a non-null,
+ * non-array object? `request.json()` happily answers `null`, `[]`, `"x"` or
+ * `42`; reading `.customerId` off `null` throws a TypeError 500, while off an
+ * array it silently yields `undefined` — a malformed submission mistaken for
+ * an empty one. Every voucher POST narrows through here first, so the answer
+ * is a controlled 400 before any property is touched.
+ */
+export function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export const VOUCHER_METHOD_LABELS: Record<VoucherMethod, string> = {
   cash: "نقدی",
   bank: "بانکی",

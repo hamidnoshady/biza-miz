@@ -11,11 +11,11 @@
 --     stable per-row value (they are never retried — the value only needs to
 --     be unique), and installments now stamp their own deterministic key, the
 --     way the AP side already did. New receipts must carry a client key.
---   * `idx_journal_entries_business_source` — the register joins each voucher
---     to its original journal entry (list query) and the account filter reads
---     the posting's cash line through that join. Until now that join had only
---     the `business_id` prefix of `idx_journal_entries_business_date` to work
---     with; the composite covers (business, source_type, source_id).
+--   * The register's voucher → original-entry join (list query + account
+--     filter) is covered by `idx_journal_entries_business_source`, owned by
+--     0216_subledger_statement_access.sql: every consumer filters
+--     `source_id` by non-null equality, so that file's partial composite
+--     serves them all and this file creates no second index under the name.
 --
 -- Forward-only; no money or posting is rewritten. The legacy key backfill is
 -- the only data touch, and those values are inert (unique, never re-sent).
@@ -33,9 +33,3 @@ UPDATE ar_receipts
  WHERE idempotency_key IS NULL;
 
 ALTER TABLE ar_receipts ALTER COLUMN idempotency_key SET NOT NULL;
-
--- ---------------------------------------------------------------------------
--- 3. Voucher → original-entry join used by the register and its account filter
--- ---------------------------------------------------------------------------
-CREATE INDEX IF NOT EXISTS idx_journal_entries_business_source
-    ON journal_entries (business_id, source_type, source_id);

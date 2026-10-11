@@ -73,6 +73,29 @@ describe("POST /api/ledger/ap/payments/[id]/reverse", () => {
     expect(apService.reverseApPayment).not.toHaveBeenCalled();
   });
 
+  it("answers a present-but-misshapen body with 400 instead of reversing or throwing", async () => {
+    for (const body of [null, [], "x", 42]) {
+      const response = await POST(requestWith(body), CONTEXT);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "bad_request" });
+    }
+    expect(apService.reverseApPayment).not.toHaveBeenCalled();
+  });
+
+  it("still reverses on the business-local date with the default memo when the body is absent", async () => {
+    const empty = { json: async () => { throw new Error("empty body"); } } as unknown as NextRequest;
+    const response = await POST(empty, CONTEXT);
+    expect(response.status).toBe(201);
+    expect(apService.reverseApPayment).toHaveBeenCalledWith({
+      businessId: "biz-1",
+      locationId: "loc-1",
+      paymentId: PAYMENT_ID,
+      actorId: "approver-1",
+      reversalDate: null,
+      memo: null,
+    });
+  });
+
   it("maps double-reversal conflicts without mutating the voucher", async () => {
     vi.mocked(apService.reverseApPayment).mockRejectedValue(new ApError("already_reversed", 409));
     const response = await POST(requestWith({}), CONTEXT);

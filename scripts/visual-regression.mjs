@@ -32,6 +32,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";
+import { selectVisualScreens } from "./visual-selection.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE_DIR = join(ROOT, "docs", "design", "visual");
@@ -218,6 +219,8 @@ function comparePng(actualBuf, expectedBuf) {
 }
 
 async function main() {
+  const selectedIds = selectVisualScreens(SCREENS.map((screen) => screen.id), process.argv.slice(2), Boolean(process.env.CI));
+  const screens = SCREENS.filter((screen) => selectedIds.includes(screen.id));
   mkdirSync(BASELINE_DIR, { recursive: true });
   rmSync(DIFF_DIR, { recursive: true, force: true });
 
@@ -294,7 +297,7 @@ async function main() {
   /** Screens whose DOM never stopped changing — the other flake source. */
   const unsettled = [];
 
-  for (const screen of SCREENS) {
+  for (const screen of screens) {
     const context = await browser.newContext({
       ...contextOptions,
       viewport: screen.viewport ?? contextOptions.viewport,
@@ -341,6 +344,10 @@ async function main() {
       .catch(() => {
         busyAtCapture.push(screen.id);
       });
+
+    // A cold development compile can temporarily fail the health probe. Never
+    // approve that connection banner as normal UI; a genuinely offline run fails.
+    await page.getByText(/^سرور محلی در دسترس نیست/).waitFor({ state: "hidden", timeout: 45_000 });
 
     // Settled, not merely loaded. Without this the suite is ~10% flaky: a
     // screen whose data arrives in two waves briefly shows content, so the
@@ -465,7 +472,7 @@ async function main() {
     );
     process.exit(1);
   }
-  console.log(`Visual regression: ${SCREENS.length} screen(s) match their baselines.`);
+  console.log(`Visual regression: ${screens.length} screen(s) match their baselines.`);
 }
 
 main().catch((err) => {

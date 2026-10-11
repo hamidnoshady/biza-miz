@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { encodeVoucherCursor } from "../src/lib/voucher-shared";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -261,6 +262,22 @@ describe("listReceiptsPage (issue #829: cursor pagination + filters)", () => {
     ).rejects.toThrow("invalid_method");
   });
 
+  it("refuses a decodable-but-impossible cursor field with invalid_cursor, before Postgres casts it", async () => {
+    // Each of these survives base64url+JSON decoding but would die in the
+    // `(date, created_at, id) < ($1::date, $2::timestamptz, $3::uuid)`
+    // comparison — a 500 — instead of the 400 a bad cursor is.
+    const id = "123e4567-e89b-12d3-a456-426614174000";
+    for (const cursor of [
+      { date: "2026-02-30", createdAt: "2026-02-30T10:00:00.000Z", id },
+      { date: "2026-09-15", createdAt: "not-a-timestamp", id },
+      { date: "2026-09-15", createdAt: "2026-09-15T10:00:00.000Z", id: "unknown" },
+    ]) {
+      await expect(installments.listReceiptsPage(biz.id, { cursor: encodeVoucherCursor(cursor) })).rejects.toThrow(
+        "invalid_cursor",
+      );
+    }
+  });
+
   it("filters by the named cash account and reads its code/name", async () => {
     const a = await addCustomer("علی رضایی");
     const { rows: acctRows } = await db.query<{ id: string }>(
@@ -293,6 +310,22 @@ describe("listPaymentsPage (issue #829: cursor pagination + filters)", () => {
     const second = await installments.listPaymentsPage(biz.id, { limit: 3, cursor: first.nextCursor });
     expect(second.rows.map((r) => r.amount)).toEqual([100]);
     expect(second.hasMore).toBe(false);
+  });
+
+  it("refuses a decodable-but-impossible cursor field with invalid_cursor, before Postgres casts it", async () => {
+    // Same cursor contract as receipts: a shaped-but-impossible date, a
+    // non-timestamp, a non-UUID must each fail decoding with invalid_cursor
+    // rather than in the `::date` / `::timestamptz` / `::uuid` casts.
+    const id = "123e4567-e89b-12d3-a456-426614174000";
+    for (const cursor of [
+      { date: "2026-02-30", createdAt: "2026-02-30T10:00:00.000Z", id },
+      { date: "2026-09-15", createdAt: "not-a-timestamp", id },
+      { date: "2026-09-15", createdAt: "2026-09-15T10:00:00.000Z", id: "unknown" },
+    ]) {
+      await expect(installments.listPaymentsPage(biz.id, { cursor: encodeVoucherCursor(cursor) })).rejects.toThrow(
+        "invalid_cursor",
+      );
+    }
   });
 });
 

@@ -114,6 +114,15 @@ describe("POST /api/ledger/ap/payments", () => {
     expect(apService.payBill).not.toHaveBeenCalled();
   });
 
+  it("answers valid-JSON wrong-shaped bodies with 400 before touching a property", async () => {
+    for (const body of [null, [], "x", 42, true]) {
+      const response = await POST(postRequest(body));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "bad_request" });
+    }
+    expect(apService.payBill).not.toHaveBeenCalled();
+  });
+
   it("returns 200 for a matching retried payment", async () => {
     vi.mocked(apService.payBill).mockResolvedValue({ id: "payment-1", duplicate: true } as never);
     const response = await POST(postRequest({

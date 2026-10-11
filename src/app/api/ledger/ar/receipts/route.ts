@@ -8,7 +8,7 @@ import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { streamVoucherExportCsv, voucherExportFilename } from "@/lib/voucher-export";
-import { isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
+import { isJsonObject, isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS, type VoucherMethod } from "@/lib/payables-input";
 
 /**
  * The «دریافت‌ها» ledger slice — receipt vouchers, newest first, keyset-
@@ -87,18 +87,61 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
 });
 
-interface ReceiptBody {
-  customerId?: string;
-  method?: string;
-  amount?: number;
-  receiptDate?: string;
-  memo?: string;
-  /** The cash/bank/clearing account (an active account of the chosen method); omitted = the method's default. */
-  cashAccountId?: string | null;
-  /** The bank's tracking/reference number. */
-  bankReference?: string | null;
-  /** Client-generated key per logical submission. Required: a retry replays the original voucher. */
-  idempotencyKey?: string;
+interface ParsedReceiptPostBody {
+  customerId: string;
+  method: VoucherMethod;
+  amount: number;
+  receiptDate: string | null;
+  memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+  idempotencyKey: string;
+}
+
+/**
+ * Type-checks the receipt POST body before anything is touched: a wrong-typed
+ * value (a number id, a boolean amount) is a controlled 400, never a
+ * `.trim()` TypeError or a silently coerced meaning (`Number(true) === 1`).
+ * Lives outside POST so the handler reads as the gate it is — permission,
+ * parse, post — with the service call next to the permission that guards it.
+ */
+function parseReceiptPostBody(body: Record<string, unknown>): { ok: true; value: ParsedReceiptPostBody } | { ok: false; response: Record<string, unknown> } {
+  const customerId = optionalBodyText(body.customerId) ?? "";
+  if (!customerId) return { ok: false, response: { error: "customer_required" } };
+  const idempotencyKey = optionalBodyText(body.idempotencyKey) ?? "";
+  if (!idempotencyKey || idempotencyKey.length > 128) {
+    return { ok: false, response: { error: "idempotency_key_required" } };
+  }
+  if (!isVoucherMethod(body.method)) {
+    return { ok: false, response: { error: "invalid_method", allowed: [...VOUCHER_METHODS] } };
+  }
+  const amount = typeof body.amount === "number" || typeof body.amount === "string" ? Number(body.amount) : NaN;
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return { ok: false, response: { error: "invalid_amount" } };
+  }
+  // `receiptDate` goes straight into a `date` column, so a malformed value is
+  // a Postgres `22007` error — an unhandled 500 — rather than the 400 a bad
+  // input is. (Date.parse wouldn't do: it normalises «2024-02-30» to March 1st.)
+  const receiptDate = optionalBodyText(body.receiptDate);
+  if (receiptDate === undefined) {
+    return { ok: false, response: { error: "invalid_date" } };
+  }
+  if (receiptDate && !isValidIsoDate(receiptDate)) {
+    return { ok: false, response: { error: "invalid_date" } };
+  }
+  const memo = optionalBodyText(body.memo);
+  if (memo === undefined) {
+    return { ok: false, response: { error: "invalid_memo" } };
+  }
+  const cashAccountId = optionalBodyText(body.cashAccountId);
+  if (cashAccountId === undefined) {
+    return { ok: false, response: { error: "invalid_cash_account" } };
+  }
+  const bankReference = optionalBodyText(body.bankReference);
+  if (bankReference === undefined) {
+    return { ok: false, response: { error: "invalid_bank_reference" } };
+  }
+  return { ok: true, value: { customerId, method: body.method, amount, receiptDate, memo, cashAccountId, bankReference, idempotencyKey } };
 }
 
 /** Records a customer paying down their AR balance. Same access as posting a manual journal entry. */
@@ -106,51 +149,22 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.financeReceivablesManage);
   if (error) return error;
 
-  let body: ReceiptBody;
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  // Valid JSON of the wrong shape (`null`, an array, a scalar) is a 400
+  // here — before the parser touches a property — never a TypeError 500
+  // (`null`) or a silent empty submission (an array's missing fields).
+  if (!isJsonObject(body)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
-  // Every body field is type-checked before it is touched: a wrong-typed
-  // value (a number id, a boolean amount) is a controlled 400, never a
-  // `.trim()` TypeError or a silently coerced meaning (`Number(true) === 1`).
-  const customerId = optionalBodyText(body.customerId) ?? "";
-  if (!customerId) return NextResponse.json({ error: "customer_required" }, { status: 400 });
-  const idempotencyKey = optionalBodyText(body.idempotencyKey) ?? "";
-  if (!idempotencyKey || idempotencyKey.length > 128) {
-    return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
-  }
-  if (!isVoucherMethod(body.method)) {
-    return NextResponse.json({ error: "invalid_method", allowed: [...VOUCHER_METHODS] }, { status: 400 });
-  }
-  const amount = typeof body.amount === "number" || typeof body.amount === "string" ? Number(body.amount) : NaN;
-  if (!Number.isSafeInteger(amount) || amount <= 0) {
-    return NextResponse.json({ error: "invalid_amount" }, { status: 400 });
-  }
-  // `receiptDate` goes straight into a `date` column, so a malformed value is
-  // a Postgres `22007` error — an unhandled 500 — rather than the 400 a bad
-  // input is. (Date.parse wouldn't do: it normalises «2024-02-30» to March 1st.)
-  const receiptDate = optionalBodyText(body.receiptDate);
-  if (receiptDate === undefined) {
-    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
-  }
-  if (receiptDate && !isValidIsoDate(receiptDate)) {
-    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
-  }
-  const memo = optionalBodyText(body.memo);
-  if (memo === undefined) {
-    return NextResponse.json({ error: "invalid_memo" }, { status: 400 });
-  }
-  const cashAccountId = optionalBodyText(body.cashAccountId);
-  if (cashAccountId === undefined) {
-    return NextResponse.json({ error: "invalid_cash_account" }, { status: 400 });
-  }
-  const bankReference = optionalBodyText(body.bankReference);
-  if (bankReference === undefined) {
-    return NextResponse.json({ error: "invalid_bank_reference" }, { status: 400 });
-  }
+  const parsed = parseReceiptPostBody(body);
+  if (!parsed.ok) return NextResponse.json(parsed.response, { status: 400 });
+  const { customerId, method, amount, receiptDate, memo, cashAccountId, bankReference, idempotencyKey } = parsed.value;
 
   const location = await resolveActiveLocation(session);
 
@@ -159,7 +173,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       businessId: session.businessId,
       locationId: location?.id ?? null,
       customerId,
-      method: body.method,
+      method,
       amount,
       receiptDate,
       memo,

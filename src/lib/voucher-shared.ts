@@ -10,6 +10,8 @@
  */
 
 import type { VoucherMethod } from "./payables-input";
+import { isValidIsoDate } from "./iso-date";
+import { isUuid } from "./uuid";
 
 /** Voucher status filter. */
 export type VoucherStatusFilter = "all" | "active" | "reversed";
@@ -85,20 +87,39 @@ export function encodeVoucherCursor(cursor: VoucherCursor): string {
   return toBase64Url(JSON.stringify(cursor));
 }
 
+/**
+ * Is this string a timestamp the cursor's `::timestamptz` cast accepts —
+ * Postgres `timestamptz::text` output (`2025-04-03 10:00:00+00`) or the ISO
+ * spellings (`2025-04-03T10:00:00.000Z`) — with a real calendar date and
+ * in-range clock fields? The cursor round-trips opaquely (only the server
+ * issues it), but a crafted `?cursor=` reaches the cast, and anything the
+ * cast rejects surfaces as a 500 instead of the 400 a bad cursor is.
+ */
+export function isCursorTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 64) return false;
+  const match = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$/.exec(value);
+  if (!match) return false;
+  if (!isValidIsoDate(match[1])) return false;
+  const hour = Number(match[2]);
+  const minute = Number(match[3]);
+  const second = match[4] === undefined ? 0 : Number(match[4]);
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  return true;
+}
+
 export function decodeVoucherCursor(value: unknown): VoucherCursor | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 512) return null;
   const text = fromBase64Url(value);
   if (!text) return null;
   try {
     const parsed = JSON.parse(text) as Partial<VoucherCursor>;
-    if (
-      typeof parsed.date !== "string" ||
-      typeof parsed.createdAt !== "string" ||
-      typeof parsed.id !== "string"
-    ) {
-      return null;
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(parsed.date)) return null;
+    // Every field is validated semantically — a real ISO date, an
+    // acceptable timestamp, a UUID — so the `::date` / `::timestamptz` /
+    // `::uuid` casts in the list queries never meet a value they reject.
+    // Anything else is not a cursor: the callers answer `invalid_cursor`.
+    if (!isValidIsoDate(parsed.date)) return null;
+    if (!isCursorTimestamp(parsed.createdAt)) return null;
+    if (!isUuid(parsed.id)) return null;
     return { date: parsed.date, createdAt: parsed.createdAt, id: parsed.id };
   } catch {
     return null;

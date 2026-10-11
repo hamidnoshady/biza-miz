@@ -8,7 +8,7 @@ import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { streamVoucherExportCsv, voucherExportFilename } from "@/lib/voucher-export";
-import { isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
+import { isJsonObject, isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
 
 /**
  * The «پرداخت‌ها» ledger slice — payment vouchers, newest first, keyset-
@@ -84,28 +84,21 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
 });
 
-interface PaymentBody {
-  supplierId?: string;
-  method?: string;
-  amount?: number;
-  paymentDate?: string;
-  memo?: string;
-  clientRequestId?: string;
-  /** The cash/bank/clearing account (an active account of the chosen method); omitted = the method's default. */
-  cashAccountId?: string | null;
-  /** The bank's tracking/reference number. */
-  bankReference?: string | null;
-}
-
 /** Records the business paying down a supplier's AP balance. Same access as posting a manual journal entry. */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.financePayablesManage);
   if (error) return error;
 
-  let body: PaymentBody;
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  // Valid JSON of the wrong shape (`null`, an array, a scalar) is a 400
+  // here — before any field is touched — never a TypeError 500 (`null`)
+  // or a silent empty submission (an array's missing fields).
+  if (!isJsonObject(body)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
