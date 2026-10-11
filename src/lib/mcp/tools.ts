@@ -167,6 +167,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   search_kb_articles: "Full-text search of the member knowledge centre (titles + summaries).",
   list_media_assets: "The business's media library, searchable, newest first.",
   get_media_asset: "One media asset's detail record by id.",
+  list_saved_reports: "Standard and custom saved reports with their full configs.",
   get_vat_liability: "Output VAT against input VAT and the net position for a period.",
   get_branch_comparison: "Per-branch order count, revenue, and estimated labour cost.",
   forecast_demand: "A simple demand estimate from the last 28 days' average. Always an estimate, never a promise.",
@@ -1266,6 +1267,59 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         status: { type: "string", enum: ["open", "in_progress", "blocked", "done"] },
       },
       required: ["taskId", "status"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_report_saved_create",
+    actionType: "report.saved.create",
+    english: "Save a custom report definition (validated like the builder screen).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        config: {
+          type: "object",
+          additionalProperties: true,
+          description: "{ view, metric, aggregation, dimension, filters?, sort?, limit? } — از مجموعهٔ معتبر گزارش‌ساز؛ معنای مقادیر در list_reports آمده",
+        },
+      },
+      required: ["name", "config"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_report_saved_update",
+    actionType: "report.saved.update",
+    english: "Rename or re-configure a saved report (validated like the builder screen).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        savedReportId: id("شناسهٔ گزارش ذخیره‌شده — از list_saved_reports"),
+        name: { type: "string" },
+        config: {
+          type: "object",
+          additionalProperties: true,
+          description: "پیکربندی جدید کامل گزارش — با همان وایت‌لیست‌های گزارش‌ساز اعتبارسنجی می‌شود",
+        },
+      },
+      required: ["savedReportId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_report_saved_delete",
+    actionType: "report.saved.delete",
+    english: "Delete one saved report.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        savedReportId: id("شناسهٔ گزارش ذخیره‌شده — از list_saved_reports"),
+      },
+      required: ["savedReportId"],
       additionalProperties: false,
     },
   },

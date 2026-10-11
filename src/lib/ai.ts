@@ -277,6 +277,11 @@ export type ActionType =
   | "task.create"
   | "task.update"
   | "task.status"
+  // Batch J — saved reports (reports.view on the screen; validateReportConfig
+  // mirrors the route's 400 semantics before a row ever appears).
+  | "report.saved.create"
+  | "report.saved.update"
+  | "report.saved.delete"
   // Batch E — branches: structural configuration of the business itself.
   // Membership creation/role changes stay screen-owned for now (access /
   // identity changes carry step-up policy beyond the approval queue).
@@ -347,6 +352,9 @@ export type AutopilotExecutorKey =
   | "promotionUpsert"
   | "promotionToggle"
   | "giftCardIssue"
+  | "reportSavedCreate"
+  | "reportSavedUpdate"
+  | "reportSavedDelete"
   | "supplierReturnCreate"
   | "projectCreate"
   | "projectUpdate"
@@ -1031,6 +1039,31 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر وضعیت تَسک — بازکردن، پیش‌بردن یا بستن",
     payloadHint: '{ taskId: string, status: "open"|"in_progress"|"blocked"|"done" }',
     executor: "taskStatus",
+  },
+  "report.saved.create": {
+    type: "report.saved.create",
+    endpoint: "/api/reports/saved",
+    method: "POST",
+    label: "ذخیرهٔ گزارش سفارشی — با همان اعتبارسنجِ صفحهٔ گزارش‌ها",
+    payloadHint:
+      '{ name: string, config: { view: string, metric: string, aggregation: "sum"|"avg"|"count"|"min"|"max", dimension: string, filters?: {...}, sort?: {...}, limit?: number } } — view/metric/dimension باید از مجموعهٔ وایت‌لیست گزارش‌ساز باشند؛ غلط = همان خطای صفحه',
+    executor: "reportSavedCreate",
+  },
+  "report.saved.update": {
+    type: "report.saved.update",
+    endpoint: "/api/reports/saved/[id]",
+    method: "PATCH",
+    label: "ویرایش نام یا پیکربندی یک گزارش ذخیره‌شده — با همان اعتبارسنج صفحه",
+    payloadHint: "{ savedReportId: string, name?: string, config?: { view, metric, aggregation, dimension, filters?, sort?, limit? } }",
+    executor: "reportSavedUpdate",
+  },
+  "report.saved.delete": {
+    type: "report.saved.delete",
+    endpoint: "/api/reports/saved/[id]",
+    method: "DELETE",
+    label: "حذف یک گزارش ذخیره‌شده",
+    payloadHint: "{ savedReportId: string /* از list_saved_reports */ }",
+    executor: "reportSavedDelete",
   },
   "supplier.return.create": {
     type: "supplier.return.create",
@@ -2876,6 +2909,15 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             required: ["assetId"],
             additionalProperties: false,
           },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_saved_reports",
+          description:
+            "گزارش‌های ذخیره‌شدهٔ کسب‌وکار — استانداردها و سفارشی‌ها با پیکربندی کامل؛ برای «گزارش فروش را اجراکن» اول نگاه کن آیا وجود دارد.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
         },
       },
 

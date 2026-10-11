@@ -67,6 +67,8 @@ import { toggleNotePin, setConsent } from "./crm-service";
 import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
 import { upsertPromotion, setPromotionActive, issueGiftCard } from "./promotions-service";
 import { createSupplierReturn } from "./supplier-return-service";
+import { createSavedReport, deleteSavedReport, updateSavedReport } from "./reports-service";
+import { validateReportConfig, type ReportConfig } from "./reports";
 import { createWorkspaceProject, updateWorkspaceProject, createWorkspaceTask, updateWorkspaceTask, WorkspaceError } from "./workspace";
 import { workspaceAccessFlags } from "./workspace-shared";
 import { effectivePermissions, parseOverrides } from "./permissions";
@@ -2082,6 +2084,48 @@ const taskStatus: AutopilotExecutor = async (ctx) => {
   }
 };
 
+
+// ── Issue #883 package 2, batch J — saved reports ────────────────────────────
+const reportSavedCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  const config = ctx.payload.config;
+  if (!name || !config || typeof config !== "object" || Array.isArray(config)) {
+    return fail("invalid_payload");
+  }
+  // Same gate as POST /api/reports/saved: the builder's own validation, no
+  // SQL-shaped anything — the view/metric/dimension whitelist lives there.
+  const problems = validateReportConfig(config as ReportConfig);
+  if (problems.length > 0) return fail(problems.join(" "));
+  const id = await createSavedReport(ctx.businessId, ctx.authorizedByUserId, name, config as ReportConfig);
+  return { ok: true, result: { id, name } };
+};
+
+const reportSavedUpdate: AutopilotExecutor = async (ctx) => {
+  const savedReportId = str(ctx.payload.savedReportId);
+  if (!savedReportId) return fail("invalid_payload");
+  const name = str(ctx.payload.name);
+  const config = ctx.payload.config;
+  const patch: { name?: string; config?: ReportConfig } = {};
+  if (name) patch.name = name;
+  if (config !== undefined) {
+    if (!config || typeof config !== "object" || Array.isArray(config)) return fail("invalid_payload");
+    const problems = validateReportConfig(config as ReportConfig);
+    if (problems.length > 0) return fail(problems.join(" "));
+    patch.config = config as ReportConfig;
+  }
+  const updated = await updateSavedReport(ctx.businessId, savedReportId, patch);
+  if (!updated) return fail("not_found");
+  return { ok: true, result: { savedReportId, updated: true } };
+};
+
+const reportSavedDelete: AutopilotExecutor = async (ctx) => {
+  const savedReportId = str(ctx.payload.savedReportId);
+  if (!savedReportId) return fail("invalid_payload");
+  const deleted = await deleteSavedReport(ctx.businessId, savedReportId);
+  if (!deleted) return fail("not_found");
+  return { ok: true, result: { savedReportId, deleted: true } };
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -2142,6 +2186,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   taskCreate,
   taskUpdate,
   taskStatus,
+  reportSavedCreate,
+  reportSavedUpdate,
+  reportSavedDelete,
   branchCreate,
   branchUpdate,
   branchLifecycle,

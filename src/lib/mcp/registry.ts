@@ -132,6 +132,8 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "search_kb_articles", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_media_assets", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_media_asset", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  // Batch J — saved reports are business-wide configuration rows.
+  { name: "list_saved_reports", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
@@ -264,6 +266,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "report.saved.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "report.saved.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "report.saved.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "supplier.return.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "promotion.upsert", kind: "write", app: "growth", risk: "low", approval: "mode" },
   { actionType: "promotion.toggle", kind: "write", app: "growth", risk: "low", approval: "mode" },

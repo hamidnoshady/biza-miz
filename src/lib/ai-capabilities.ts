@@ -83,6 +83,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_suppliers: PERMISSIONS.partiesView,
   // Batch H — workspace.view on the project list (the screen's GET gate).
   list_workspace_projects: PERMISSIONS.workspaceView,
+  // Batch J — reports.view, the gate POST /api/reports/saved itself enforces.
+  list_saved_reports: PERMISSIONS.reportsView,
   // Batch I — the KB centre is member-wide (requireMember): the ai.use key
   // is the connection's own "may read assistant-side material" baseline, and
   // the same gate that lets the assistant itself read the centre. Media
@@ -187,6 +189,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "task.create": PERMISSIONS.workspaceManage,
   "task.update": PERMISSIONS.workspaceManage,
   "task.status": PERMISSIONS.workspaceManage,
+  "report.saved.create": PERMISSIONS.reportsView,
+  "report.saved.update": PERMISSIONS.reportsView,
+  "report.saved.delete": PERMISSIONS.reportsView,
   "supplier.return.create": PERMISSIONS.purchasesManage,
   "promotion.upsert": PERMISSIONS.campaignsManage,
   "promotion.toggle": PERMISSIONS.campaignsManage,

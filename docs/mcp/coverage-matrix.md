@@ -60,7 +60,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **config.backup** (Business config · Backup & restore (tenant scope)) — MCP gap
 - **config.billing** (Business config · Tenant billing (plans/packages, wallet, payments)) — MCP gap
 - **config.devices** (Business config · Devices & printing config, pairing) — MCP gap
-- **media.assets** (Media · Media assets, folders, collections, AI transforms) — MCP gap
+- **media.assets** (Media · Media assets, folders, collections, AI transforms) — partial
 - **knowledge.articles** (Knowledge base · Knowledge articles & search) — MCP gap
 - **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
@@ -98,7 +98,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 14 · partial: 32 · MCP gap: 26 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 14 · partial: 33 · MCP gap: 25 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -164,9 +164,9 @@ Counts — covered: 14 · partial: 32 · MCP gap: 26 · backend gap: 0 · n/a (i
 | Business config | Tenant billing (plans/packages, wallet, payments) | (route only) | (route only) | — | (route only) | — | billing.manage, billing.view | — | — | integration/billing.integration.test.ts | MCP gap |
 | Business config | Devices & printing config, pairing | (route only) | (route only) | (route only) | (route only) | — | orders.amend_closed, payments.refund, payments.take, printing.execute, settings.manage | — | — | integration/printing.integration.test.ts | MCP gap |
 | Business config | Onboarding wizard routes<br>_first-run wizard flow — UI-only; nothing to operate once a business exists_ | (route only) | (route only) | — | (route only) | (route only) | settings.manage | — | — | — | n/a (infra) |
-| Media | Media assets, folders, collections, AI transforms | (route only) | (route only) | (route only) | (route only) | — | inventory.view, ledger.view, media.manage, media.view, menu.view, parties.view | — | — | integration/media.integration.test.ts | MCP gap |
+| Media | Media assets, folders, collections, AI transforms | get_media_asset, list_media_assets | (route only) | (route only) | (route only) | — | inventory.view, ledger.view, media.manage, media.view, menu.view, parties.view | — | get_media_asset, list_media_assets | integration/media.integration.test.ts | partial |
 | Knowledge base | Knowledge articles & search | (route only) | — | — | — | — | — | — | — | integration/knowledge.integration.test.ts | MCP gap |
-| Reports | Reports (standard, saved, export, query, drill-down, views) | list_reports, run_report | (route only) | (route only) | (route only) | (route only) | ledger.view, reports.export, reports.view | — | list_reports, run_report | integration/reports.integration.test.ts | partial |
+| Reports | Reports (standard, saved, export, query, drill-down, views)<br>_XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes); dashboard-widget layout save stays UI-only_ | list_reports, list_saved_reports, run_report | report.saved.create | report.saved.update | report.saved.delete | (route only) | ledger.view, reports.export, reports.view | connection mode | list_reports, list_saved_reports, run_report, report.saved.create, report.saved.update, report.saved.delete | integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report | partial |
 | Cross-cutting | Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup<br>_small surfaces; audit-log read is the audit trail_ | describe_app, get_setup_state | (route only) | (route only) | (route only) | — | commission.manage, commission.view, delivery.configure, delivery.manage, inventory.adjust, inventory.view, ledger.close_period, ledger.view | — | describe_app, get_setup_state | integration/security.integration.test.ts | partial |
 | Cross-cutting | Support tickets (tenant side) | (route only) | (route only) | (route only) | (route only) | — | — | — | — | — | n/a (infra) |
 | Products (retail) | Product items, attributes, barcode templates | (route only) | (route only) | (route only) | (route only) | — | menu.edit, menu.view | — | — | integration/products.integration.test.ts | MCP gap |

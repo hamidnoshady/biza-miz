@@ -62,6 +62,7 @@ import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
+import { listSavedReports } from "./reports-service";
 import { getPool } from "./db";
 import { listParties } from "./parties-service";
 import { listAutomations } from "./crm-automation-service";
@@ -1729,6 +1730,11 @@ export async function runReadTool(
       const asset = await getMediaAsset(businessId, assetId);
       if (!asset) return { ok: false, data: { error: "media_not_found" } };
       return { ok: true, data: asset };
+    }
+    // Issue #883 package 2, batch J — saved reports.
+    case "list_saved_reports": {
+      const saved = await listSavedReports(businessId);
+      return { ok: true, data: { count: saved.length, saved } };
     }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);

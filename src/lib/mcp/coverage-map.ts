@@ -670,8 +670,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Reports",
     entity: "Reports (standard, saved, export, query, drill-down, views)",
     routes: ["reports"],
-    ops: { listDetail: ["list_reports", "run_report"] },
-    test: "integration/reports.integration.test.ts",
+    ops: {
+      listDetail: ["list_reports", "run_report", "list_saved_reports"],
+      create: ["report.saved.create"],
+      update: ["report.saved.update"],
+      lifecycle: ["report.saved.delete"],
+    },
+    note: "XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes); dashboard-widget layout save stays UI-only",
+    test: "integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report",
   },
   {
     id: "misc.audit-orders",
