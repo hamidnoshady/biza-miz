@@ -397,10 +397,21 @@ decision: bump both budgets.** Applied in a follow-up commit, the same way the p
 precedent was handled — `build-desktop-installer.yml`'s unpacked-payload budget moves 620→640 MiB,
 `verify-shippables.yml`'s staged-runtime budget moves 200→220 MiB, both with an explanatory comment
 in the workflow and a dated note in `docs/standalone-desktop-app.md` (the prior 2026-10-03 note is
-kept as history, not overwritten). A fresh CI run against the bump commit is in flight; see the
-Gates section for its outcome once it completes. Nothing about this affects the web or Android
-deliverable: no desktop-specific code was touched, and the overage is pure Next.js bundle growth
-from genuine new routes/services.
+kept as history, not overwritten). **Confirmed fixed on CI**: both `desktop shell` (5m39s) and
+`packaged Windows end-to-end` (15m14s) passed against the bump commit, including the "Staged
+runtime stays below pre-package budget" and "Final size report and budgets" steps specifically.
+Nothing about this affects the web or Android deliverable: no desktop-specific code was touched,
+and the overage is pure Next.js bundle growth from genuine new routes/services.
+
+A separate, pre-existing, already-documented flake resurfaced on the *push*-triggered duplicate of
+`test.yml` for this same bump commit: "4.06% of pixels changed, bounds 54,18 1370×830" on
+`docs/design/visual/accounting-expenses.png`, identical in percentage and bounds to the one seen
+earlier on `main`/push-triggered runs of this branch. The *pull_request*-triggered run — the one
+branch protection actually evaluates for this PR — passed visual regression cleanly both times it
+ran. `gh pr view 890` reports `mergeable: MERGEABLE`; `mergeStateStatus: UNSTABLE` only because
+GitHub surfaces the push-triggered run's duplicate failure alongside the passing one, not because
+the required gate failed. Do not re-record the `accounting-expenses` baseline to "fix" this — it is
+the same push-vs-pull_request-context flake already on record, not something this slice caused.
 
 ## Files
 
