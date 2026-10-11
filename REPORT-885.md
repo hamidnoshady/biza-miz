@@ -182,12 +182,14 @@ All commands run in this sandbox on the work commit.
 |---|---|
 | `NODE_OPTIONS=--max-old-space-size=3072 ./node_modules/.bin/tsc --noEmit` | **exit 0**, no output |
 | `./node_modules/.bin/eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run` (full unit suite) | **722 files / 9,419 tests passed**, exit 0, 311.2 s |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (full integration suite, 200 files) | **200 files passed / 0 failed · 2,763 tests passed / 0 failed / 1 skipped**, 1899.5 s |
+| `npx vitest run` (full unit suite) | **738 files / 9,655 tests passed**, exit 0, 410.7 s |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (full integration suite, 203 files) | **203 files passed / 0 failed · 2,940 tests passed / 0 failed / 1 skipped**, 2351.5 s |
 
-PostgreSQL for the integration run: **16.14**, started with the project's own `npm run db:dev:start` on 127.0.0.1:5432, with `npm run db:migrate` applied first exactly as CI does (305 migrations; `public` then holds 442 tables and a re-run is correctly a no-op).
+All figures above are measured at the merged head **`6e5f099b`** — `origin/main` merged into this branch, 0 behind / 26 ahead, with the originally published #885 head `4ad73b9` still an ancestor.
 
-The integration suite is **fully green**: 200/200 files, 2,763 passed, 0 failed, 1 skipped, 1899.5 s, from a single uninterrupted process. Two earlier runs of mine reported failures that were both artifacts of how I ran the suite rather than defects, and both are corrected below. No test was skipped, disabled, loosened or re-baselined to reach these numbers; the one skip is `platform-system-backup`'s peer-surface case, conditional on a second server.
+PostgreSQL for the integration run: **16.14**, started with the project's own `npm run db:dev:start` on 127.0.0.1:5432, with `npm run db:migrate` applied first exactly as CI does (**312 migrations** at this head, including the multicurrency work merged from main; a re-run is correctly a no-op).
+
+The integration suite is **fully green**: 203/203 files, 2,940 passed, 0 failed, 1 skipped, 2351.5 s, from a single uninterrupted process. Two earlier runs of mine reported failures that were both artifacts of how I ran the suite rather than defects, and both are corrected below. No test was skipped, disabled, loosened or re-baselined to reach these numbers; the one skip is `platform-system-backup`'s peer-surface case, conditional on a second server.
 
 **The single failing integration file was my harness error, not a defect — and an earlier draft of this report was wrong about it.**
 
@@ -253,6 +255,10 @@ The most recent completed `test` run on this branch is [`37964824334`](https://g
 | type check | ✓ 2m46s |
 | API guard and permission tests | ✓ 38s |
 | media E2E tests | ✓ 4m40s |
+
+**One job outside `test.yml` is red, and it is not this branch's doing.** `packaged Windows end-to-end` (`build-desktop-installer.yml`) fails on this PR — and it also fails on **`main`'s own head `b8b66b21`**, which contains the main commit this branch merged but *none* of the #885 work (`git merge-base --is-ancestor 4ad73b9 b8b66b21` → false). It fails identically on three unrelated `arena/**` branches, and it was still green at `55a9b7ee`.
+
+What the annotations show is that the package itself builds — "Installer 161.2 MiB; unpacked installed payload 620.2 MiB; PostgreSQL tools 1.1 MiB", version bumped 1.0.42 → 1.0.43 — and the job then exits 1. The exact failing step could not be read: GitHub's log-archive host (`productionresultssa12.blob.core.windows.net`) is not reachable from this sandbox, and every retrieval attempt returned `EOF`. So the *attribution* is established by the ancestry check above and the *cause* is not; it is recorded as an open, pre-existing failure on `main` rather than explained away.
 
 The only annotations are `ubuntu-latest`→Ubuntu 26 migration notices.
 
