@@ -60,6 +60,8 @@ import { listMembers } from "./team-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
+import { searchKbArticles } from "./knowledge-service";
+import { listMediaAssets, getMediaAsset } from "./media-service";
 import { getPool } from "./db";
 import { listParties } from "./parties-service";
 import { listAutomations } from "./crm-automation-service";
@@ -1701,6 +1703,32 @@ export async function runReadTool(
         { includeArchived: args.includeArchived === true, limit, offset },
       );
       return { ok: true, data: { count: projects.length, projects } };
+    }
+    // Issue #883 package 2, batch I — knowledge centre + media library reads.
+    case "search_kb_articles": {
+      const q = String(args.q ?? "").trim();
+      if (!q) return { ok: false, data: { error: "invalid_arguments" } };
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 20) : 6;
+      const hits = await searchKbArticles(q, limit);
+      return { ok: true, data: { count: hits.length, hits } };
+    }
+    case "list_media_assets": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 50) : 12;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const result = await listMediaAssets(businessId, {
+        search: typeof args.search === "string" && args.search.trim() ? args.search.trim() : undefined,
+        kind: typeof args.kind === "string" && args.kind.trim() ? (args.kind.trim() as never) : undefined,
+        limit,
+        offset,
+      });
+      return { ok: true, data: result };
+    }
+    case "get_media_asset": {
+      const assetId = String(args.assetId ?? "").trim();
+      if (!assetId) return { ok: false, data: { error: "invalid_arguments" } };
+      const asset = await getMediaAsset(businessId, assetId);
+      if (!asset) return { ok: false, data: { error: "media_not_found" } };
+      return { ok: true, data: asset };
     }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);

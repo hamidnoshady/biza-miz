@@ -651,6 +651,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Media",
     entity: "Media assets, folders, collections, AI transforms",
     routes: ["media"],
+    // Batch I (#883): library read + single-asset detail. Upload/delete/
+    // transforms stay screen-side for now: the upload is a presign/PUT
+    // byte flow rather than a JSON verb, and AI transforms cost metered
+    // credits (see the ai-media endpoints).
+    ops: { listDetail: ["list_media_assets", "get_media_asset"] },
     test: "integration/media.integration.test.ts",
   },
   {

@@ -2827,6 +2827,57 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           },
         },
       },
+      {
+        type: "function",
+        function: {
+          name: "search_kb_articles",
+          description:
+            "جستجوی متن‌آزاد در دفترچهٔ راهنما (مرکز دانش) — عناوین و خلاصه‌های مقالهٔ هم‌نام؛ برای «راهنمای فلان صفحه کجاست».",
+          parameters: {
+            type: "object",
+            properties: {
+              q: { type: "string", description: "متن واژهٔ جستجو" },
+              limit: { type: "number", description: "۱ تا ۲۰، پیش‌فرض ۶" },
+            },
+            required: ["q"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_media_assets",
+          description:
+            "کتابخانهٔ رسانهٔ کسب‌وکار — جستجو بر نام/برچسب؛ آخرین بارگذاری‌ها ابتدا. پیوند خواندنیِ هر فایل در خروجی آمده است.",
+          parameters: {
+            type: "object",
+            properties: {
+              search: { type: "string" },
+              kind: { type: "string", description: "نوع رسانه (image/video/document/...)" },
+              limit: { type: "number", description: "۱ تا ۵۰، پیش‌فرض ۱۲" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_media_asset",
+          description:
+            "جزییات یک فایل رسانهٔ کسب‌وکار بر پایهٔ شناسه — نام، نوع، اندازه و سرور میزبان؛ دربارهٔ استفاده‌اش از این ابزار اطلاعات نمی‌دهد.",
+          parameters: {
+            type: "object",
+            properties: {
+              assetId: { type: "string", description: "شناسهٔ فایل — از list_media_assets" },
+            },
+            required: ["assetId"],
+            additionalProperties: false,
+          },
+        },
+      },
 
   ];
 

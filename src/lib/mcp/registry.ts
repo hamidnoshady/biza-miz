@@ -127,6 +127,11 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_suppliers", kind: "read", app: "pos", branchPolicy: "agnostic" },
   // Batch H — workspace projects are business-scoped records.
   { name: "list_workspace_projects", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  // Batch I — knowledge centre (platform catalogue, member-wide) and the
+  // media library (business-scoped files).
+  { name: "search_kb_articles", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_media_assets", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "get_media_asset", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
