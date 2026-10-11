@@ -61,6 +61,7 @@ import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } f
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
+import { listCmsPages, listCmsMedia } from "./cms/website-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
 import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject, listDocuments, getDocument, listDocumentVersions } from "./workspace";
@@ -1794,6 +1795,23 @@ export async function runReadTool(
       return { ok: true, data: { count: projects.length, projects } };
     }
     // Issue #883 package 2, batch I — knowledge centre + media library reads.
+    // Issue #883 package 2, batch O — the site's pages & media library.
+    // WebsiteResult errors come back as data so a disconnected site explains
+    // itself instead of throwing (the routes map the same codes to 4xx/503).
+    case "list_cms_pages": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 50;
+      const page = typeof args.page === "number" && args.page >= 1 ? Math.trunc(args.page) : 1;
+      const result = await listCmsPages(businessId, { limit, page });
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: { pages: result.data.pages, totalDocs: result.data.totalDocs, page } };
+    }
+    case "list_cms_media": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 24;
+      const page = typeof args.page === "number" && args.page >= 1 ? Math.trunc(args.page) : 1;
+      const result = await listCmsMedia(businessId, { limit, page });
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: { media: result.data.media, totalDocs: result.data.totalDocs, page } };
+    }
     case "search_kb_articles": {
       const q = String(args.q ?? "").trim();
       if (!q) return { ok: false, data: { error: "invalid_arguments" } };

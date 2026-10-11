@@ -117,6 +117,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_crm_queue: PERMISSIONS.crmView,
   // Batch J — reports.view, the gate POST /api/reports/saved itself enforces.
   list_saved_reports: PERMISSIONS.reportsView,
+  // Batch O — the CMS content screens' read gates.
+  list_cms_pages: PERMISSIONS.cmsView,
+  list_cms_media: PERMISSIONS.cmsView,
   // Batch I — the KB centre is member-wide (requireMember): the ai.use key
   // is the connection's own "may read assistant-side material" baseline, and
   // the same gate that lets the assistant itself read the centre. Media

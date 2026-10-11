@@ -482,7 +482,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Website / CMS",
     entity: "Drafts, pages, website media",
     routes: ["cms/website/drafts", "cms/website/pages", "cms/website/media"],
-    test: "integration/website.integration.test.ts",
+    ops: {
+      listDetail: ["list_website_posts", "list_cms_pages", "list_cms_media"],
+      create: ["website.post.draft"],
+      update: ["website.post.update"],
+    },
+    note: "page publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope",
+    test: "integration/website-sync.integration.test.ts",
   },
   {
     id: "cms.setup-design-domain",

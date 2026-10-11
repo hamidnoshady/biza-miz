@@ -2598,6 +2598,38 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       "get_website_status",
       "وضعیت اتصال وب‌سایت: متصل است یا نه، دامنه، آخرین آزمایش، کلیدهای ارسال قیمت و موجودی، و صف ارسال (در انتظار/ناموفق/متوقف).",
     ),
+    {
+      type: "function",
+      function: {
+        name: "list_cms_pages",
+        description:
+          "برگه‌های سایت با وضعیت (منتشرشده/پیش‌نویس) — انتشار عمداً از MCP بیرون است؛ شناسهٔ برگه برای استناد.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: { type: "number", description: "پیش‌فرض ۵۰، سقف ۱۰۰" },
+            page: { type: "number", description: "شمارهٔ صفحه — از ۱" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_cms_media",
+        description:
+          "رسانه‌های کتابخانهٔ سایت — نشانی و ابعاد برای featuredImageId در دفتر/به‌روزرسانی نوشته؛ بارگذاری بایت عمداً از MCP بیرون است.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: { type: "number", description: "پیش‌فرض ۲۴، سقف ۱۰۰" },
+            page: { type: "number", description: "شمارهٔ صفحه — از ۱" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
     // Phase C — the messaging reads that make the two new campaign writes
     // usable: the assistant needs a template id and a segment id before it can
     // propose `messaging.campaign.create`, and campaign status to answer «کمپینم

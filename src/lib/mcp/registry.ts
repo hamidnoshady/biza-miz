@@ -204,6 +204,11 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_website_posts", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "list_website_products", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "get_website_status", kind: "read", app: "website", branchPolicy: "agnostic" },
+  // Batch O — pages/media are site-side catalogues, business-wide like the
+  // other website reads. Page publish deliberately stays out of MCP exactly
+  // like website.post.publish (a human-confirmed publish action).
+  { name: "list_cms_pages", kind: "read", app: "website", branchPolicy: "agnostic" },
+  { name: "list_cms_media", kind: "read", app: "website", branchPolicy: "agnostic" },
 
   // ---- Workspace / AEC (project desk is business-scoped, never branch-scoped) ----
   { name: "get_workspace_project_status", kind: "read", app: "workspace", branchPolicy: "agnostic" },

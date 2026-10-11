@@ -211,6 +211,8 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_website_posts: "The business's website posts (drafts and published) with id, title, status and dates. Get a post id here before editing it.",
   list_website_products: "Products on the business's website with remote id, title, SKU, price in integer Rial and the site's stock figure.",
   get_website_status: "Whether a website is connected, its domain, the last connection test, the price/stock push switches and the sync queue counts (pending / failed / dead).",
+  list_cms_pages: "The site's pages with publish status (publish stays human-confirmed, off-MCP).",
+  list_cms_media: "The site's media library (urls + dimensions for featuredImageId).",
   // Phase C — the messaging reads that feed the campaign-create action.
   list_message_templates: "Saved message templates by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",
   list_message_campaigns: "The business's message campaigns (draft, sending, done) with id, name, channel, status and recipient / sent / delivered / failed counts.",

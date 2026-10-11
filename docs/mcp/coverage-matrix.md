@@ -38,7 +38,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **growth.messaging** (Growth · Messaging rules & templates) — partial
 - **growth.promotions** (Growth · Promotions & gift cards (issue, expire, redeem)) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
-- **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — MCP gap
+- **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — partial
 - **cms.setup-design-domain** (Website / CMS · Connection, setup/build, design, domain/DNS, CDN) — MCP gap
 - **cms.orders** (Website / CMS · Website orders) — MCP gap
 - **cms.woocommerce** (Website / CMS · WooCommerce manager (posts, queue, syncs)) — MCP gap
@@ -90,7 +90,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 22 · partial: 33 · MCP gap: 17 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 22 · partial: 34 · MCP gap: 16 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -135,7 +135,7 @@ Counts — covered: 22 · partial: 33 · MCP gap: 17 · backend gap: 0 · n/a (i
 | Website / CMS | Posts & products (publish, update) | list_website_posts, list_website_products | website.post.draft | website.post.update, website.product.upsert | (route only) | — | cms.content_manage, cms.publish | connection mode | list_website_posts, list_website_products, website.post.draft, website.post.update, website.product.upsert | integration/website.integration.test.ts | partial |
 | Website / CMS | Website overview & state | get_website_status | — | — | — | — | cms.view | — | get_website_status | integration/website.integration.test.ts | covered |
 | Website / CMS | Order events, revalidate, public website connector endpoints (leads, managers, billing) | (route only) | (route only) | — | (route only) | — | billing.manage, website.view | — | — | — | n/a (infra) |
-| Website / CMS | Drafts, pages, website media | (route only) | (route only) | (route only) | (route only) | — | cms.content_manage, cms.publish, cms.view | — | — | integration/website.integration.test.ts | MCP gap |
+| Website / CMS | Drafts, pages, website media<br>_page publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope_ | list_cms_media, list_cms_pages, list_website_posts | website.post.draft | website.post.update | (route only) | — | cms.content_manage, cms.publish, cms.view | connection mode | list_cms_media, list_cms_pages, list_website_posts, website.post.draft, website.post.update | integration/website-sync.integration.test.ts | partial |
 | Website / CMS | Connection, setup/build, design, domain/DNS, CDN | (route only) | (route only) | (route only) | (route only) | — | cms.configure, cms.view | — | — | integration/website.integration.test.ts | MCP gap |
 | Website / CMS | Website orders | — | — | (route only) | — | — | cms.content_manage | — | — | integration/website.integration.test.ts | MCP gap |
 | Website / CMS | WooCommerce manager (posts, queue, syncs)<br>_wp-manager content/queue are covered by list_website_*; sync verbs are WP-dashboard operations, not business records_ | (route only) | (route only) | — | (route only) | — | woocommerce.manage, woocommerce.sync, woocommerce.view | — | — | — | MCP gap |

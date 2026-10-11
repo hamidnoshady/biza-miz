@@ -4,7 +4,7 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **109 read verbs** (**25** business-wide aggregates —
+Current surface: **111 read verbs** (**25** business-wide aggregates —
 visible only to connections consented for every branch) and **104 write verbs**
 (**30** high-risk, forced through the approval queue even on `apply`-mode connections).
 
@@ -105,6 +105,8 @@ visible only to connections consented for every branch) and **104 write verbs**
 | `list_website_posts` | website | agnostic | `website.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_website_products` | website | agnostic | `website.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_website_status` | website | agnostic | `website.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_cms_pages` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_cms_media` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_workspace_project_status` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_workspace_tasks` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_expiring_contracts` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
