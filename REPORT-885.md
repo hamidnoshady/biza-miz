@@ -1,9 +1,10 @@
 # Issue #885 — Platform-wide login and authentication
 
 **Branch:** `arena/d6aa0a4a-biza-miz`
-**Base commit:** `d14f0e3557253591da3b083771745e87ee244b93`
-**Work commits:** `1ffa97e` (core), `7d3a99f` (L10), `73aefff` (L13), plus report corrections
-**Diff (`d14f0e3` → branch HEAD), code and tests only:** 53 files changed, +6,262 / −371 — 32 modified, 21 added. (This report is excluded from the count, so the figure does not move as the report is edited.)
+**Branched from:** `d14f0e3557253591da3b083771745e87ee244b93`, then synchronised with `main` — the current merge-base with `origin/main` is **`b8b66b21`**, i.e. this branch is **0 behind / 28 ahead**.
+**Diff (`b8b66b21` → branch HEAD), code and tests only:** **57 files changed, +7,076 / −271** — 27 added, 30 modified. (This report is excluded from the count, so the figure does not move as the report is edited.)
+
+An earlier draft of this header reported 53 files / +6,262 measured against `d14f0e3`. That base is stale: it predates the merge of `main`'s accounting and multicurrency work, so it counted main's own changes as this branch's. The figures above are measured against the true merge-base and describe only what this branch contributes.
 
 ---
 
