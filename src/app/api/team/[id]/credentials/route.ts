@@ -19,6 +19,7 @@ import {
   setPin,
   verifyPassword,
 } from "@/lib/team-service";
+import { validatePasswordStrength } from "@/lib/password-reset";
 import {
   checkAuthLockout,
   recordAuthFailure,
@@ -26,6 +27,9 @@ import {
 } from "@/lib/login-lockout-service";
 import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
+import { verifySelfPin } from "@/lib/self-credentials";
+import { auditLoginFailure, checkLoginLockout } from "@/lib/employee-service";
+import { authErrorMessage, AUTH_ERROR_CODES } from "@/lib/auth-contracts";
 
 /**
  * Manages a member's tenant credentials or initiates user-controlled recovery.
@@ -69,8 +73,11 @@ export const PUT = withTenantScope(
     let body: {
       action?: string;
       pin?: string;
+      /** Issue #854 (P1.7) — proof required when rotating your own PIN. */
+      currentPin?: string;
       password?: string;
       currentPassword?: string;
+      confirmPassword?: string;
     };
     try {
       body = await request.json();
@@ -83,13 +90,35 @@ export const PUT = withTenantScope(
         if ((await readDeploymentProfile(session.businessId)).profile === "hybrid") {
           return NextResponse.json({ error: "login_managed_by_cloud" }, { status: 409 });
         }
-        const reset = await requestMemberPasswordReset(session.businessId, id, session.sub);
+        /**
+         * Issue #854 (P0.3) — the tenant administrator triggers delivery and
+         * receives **no credential**.
+         *
+         * This route used to answer with the plaintext one-time reset token, its
+         * `/reset-password?token=…` URL and the target email — and that token is
+         * directly spendable to change the shared `platform_users` password. An
+         * administrator in Business A could therefore start recovery for a
+         * shared identity and redeem their own token, taking over that person's
+         * password in Businesses B and C, which is precisely the boundary #809
+         * set out to create.
+         *
+         * The recovery is now texted to the account holder's own *verified*
+         * phone number and the response says only where it went. There is no
+         * mail transport in this deployment, so an identity with no verified
+         * number anywhere gets `no_verified_channel` — the alternative
+         * (handing the link back to whoever asked) is the vulnerability.
+         */
+        const reset = await requestMemberPasswordReset(session.businessId, id, session.sub, {
+          origin: request.nextUrl.origin,
+        });
         return NextResponse.json({
           ok: true,
-          token: reset.token,
+          deliveredTo: reset.deliveredTo,
+          channel: reset.channel,
           expiresAt: reset.expiresAt,
           email: reset.email,
-          url: `/reset-password?token=${encodeURIComponent(reset.token)}`,
+          /** Stated explicitly so a client cannot assume it may render a link. */
+          credentialReturned: false,
         });
       }
 
@@ -99,11 +128,64 @@ export const PUT = withTenantScope(
       }
 
       if (body.pin !== undefined) {
+        /**
+         * Issue #854 (P1.7): a **self-service** PIN rotation must prove the
+         * current PIN.
+         *
+         * `PUT /api/team/[id]/credentials` allowed a signed-in member to replace
+         * their own PIN with nothing but their session — so an unattended,
+         * unlocked terminal was enough to take the credential over and lock its
+         * owner out of their own shift. The current PIN is now required for
+         * self-rotation, verified against the member's own credential with the
+         * same lockout the lock screen uses. An *administrator* reset keeps
+         * working without it: that is the point of an admin reset, and it is
+         * audited.
+         */
         const pin = toLatinDigits(String(body.pin));
         if (!isValidPin(pin)) {
           return NextResponse.json({ error: "invalid_pin" }, { status: 400 });
         }
-        await setPin(session.businessId, id, pin, session.sub);
+
+        let currentPinVerified = false;
+        if (isSelf) {
+          const offered = String(body.currentPin ?? "");
+          if (!offered) {
+            return NextResponse.json(
+              {
+                error: "current_pin_required",
+                message: "برای تغییر رمز عددی خود، رمز فعلی را وارد کنید.",
+              },
+              { status: 403 },
+            );
+          }
+          const lockout = await checkLoginLockout(session.businessId, session.sub);
+          if (lockout.locked) {
+            return NextResponse.json(
+              { error: "account_locked", lockedUntil: lockout.lockedUntil },
+              { status: 423 },
+            );
+          }
+          currentPinVerified = await verifySelfPin(
+            session.businessId,
+            session.sub,
+            toLatinDigits(offered),
+          );
+          if (!currentPinVerified) {
+            await auditLoginFailure(session.businessId, session.sub, "invalid_pin_rotation");
+            return NextResponse.json(
+              { error: "invalid_current_pin", message: "رمز عددی فعلی نادرست است." },
+              { status: 401 },
+            );
+          }
+          if (pin === toLatinDigits(offered)) {
+            return NextResponse.json({ error: "pin_unchanged" }, { status: 400 });
+          }
+        }
+
+        await setPin(session.businessId, id, pin, session.sub, {
+          selfService: isSelf,
+          currentPinVerified,
+        });
         return NextResponse.json({ ok: true });
       }
 
@@ -152,6 +234,29 @@ export const PUT = withTenantScope(
           return NextResponse.json({ error: "password_unchanged" }, { status: 400 });
         }
 
+        /**
+         * Issue #854 (P2.15 / P2.16 / P2.17): confirmation is validated on the
+         * server, not only in the browser, and the shared validator rejects a
+         * whitespace-only password. The browser's copy of these rules was the
+         * only copy that existed before.
+         */
+        if (body.confirmPassword !== undefined && body.confirmPassword !== body.password) {
+          return NextResponse.json(
+            {
+              error: AUTH_ERROR_CODES.passwordConfirmationMismatch,
+              message: authErrorMessage(AUTH_ERROR_CODES.passwordConfirmationMismatch),
+            },
+            { status: 400 },
+          );
+        }
+        const strength = validatePasswordStrength(body.password);
+        if (!strength.ok) {
+          return NextResponse.json(
+            { error: strength.error, message: authErrorMessage(strength.error) },
+            { status: 400 },
+          );
+        }
+
         const { tokenVersion } = await setPassword(
           session.businessId,
           id,
@@ -173,7 +278,10 @@ export const PUT = withTenantScope(
       return NextResponse.json({ error: "nothing_to_change" }, { status: 400 });
     } catch (err) {
       if (err instanceof TeamError) {
-        return NextResponse.json({ error: err.message }, { status: err.status });
+        return NextResponse.json(
+          { error: err.message, message: authErrorMessage(err.message) },
+          { status: err.status },
+        );
       }
       throw err;
     }

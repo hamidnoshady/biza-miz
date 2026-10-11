@@ -317,12 +317,12 @@ describe("the ledger workspace's own section list", () => {
 });
 
 describe("the ledger tool divisions", () => {
-  it("gives every ledger tool exactly one division, and the tool set is exactly these fifteen", () => {
+  it("gives every ledger tool exactly one division, and the tool set is exactly these sixteen", () => {
     // The contract, written out: a tool added or dropped must change this list
     // on purpose. The tool set is derived from the divisions, so this is the one
     // place the membership is pinned — not a second copy of it.
     const expected = [
-      "trial-balance", "entries", "manual", "chart-of-accounts",
+      "trial-balance", "entries", "manual", "multicurrency", "chart-of-accounts",
       "receivables", "payables", "installments", "cheques",
       "receipts", "expenses", "reconciliation", "fixed-assets",
       "fiscal-periods", "vat", "payroll",
@@ -334,7 +334,7 @@ describe("the ledger tool divisions", () => {
     // The order inside each division is what the page and the in-page rail
     // show, so it is pinned too: the rail's siblings follow this order.
     expect(LEDGER_WORKSPACE_SUBGROUPS.map((subGroup) => subGroup.keys)).toEqual([
-      ["trial-balance", "entries", "manual", "chart-of-accounts"],
+      ["trial-balance", "entries", "manual", "multicurrency", "chart-of-accounts"],
       ["receivables", "payables", "installments", "cheques"],
       ["receipts", "expenses", "reconciliation", "fixed-assets"],
       ["fiscal-periods", "vat", "payroll"],

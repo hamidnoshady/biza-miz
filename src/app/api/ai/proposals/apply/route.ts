@@ -66,6 +66,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "missing_param", message: "اطلاعات لازم برای اجرای پیشنهاد کامل نیست." }, { status: 400 });
   }
 
+  const outbound: Record<string, unknown> = { ...payload };
+  // Destinations that require a client idempotency key get a stable one
+  // derived from the proposal — never model-invented — so a transport retry
+  // replays the original mutation instead of doubling it.
+  if (meta.needsIdempotencyKey && typeof outbound.idempotencyKey !== "string") {
+    outbound.idempotencyKey = `ai-proposal:${auditId}`;
+  }
+
   try {
     const destination = new URL(endpoint, request.url);
     const response = await fetch(destination, {
@@ -75,7 +83,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         ...(request.headers.get("cookie") ? { cookie: request.headers.get("cookie")! } : {}),
         "X-AI-Proposal-Audit": auditId,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(outbound),
       cache: "no-store",
     });
     const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;

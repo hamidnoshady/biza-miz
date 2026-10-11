@@ -129,7 +129,17 @@ export const SETTINGS_TABS: SettingsTab[] = [
     key: "team",
     label: "کاربران و دسترسی‌ها",
     description: "اعضا، دعوت‌ها و مجوزهای اختصاصی",
-    requiredAnyPermission: [PERMISSIONS.teamManage],
+    /**
+     * Issue #854 (P2.1) — `team.view` reaches this tab now.
+     *
+     * `team.view` existed in the registry, was granted to every manager preset,
+     * and led nowhere: the only entry to the roster demanded `team.manage`, so a
+     * member who could legitimately see who works here had no navigation that
+     * showed them. The screen renders read-only for that member (`TeamManager`'s
+     * `canManage`), and every mutation still demands `team.manage` — or
+     * `team.permissions.manage` — server-side.
+     */
+    requiredAnyPermission: [PERMISSIONS.teamView, PERMISSIONS.teamManage],
   },
   {
     key: "printers",

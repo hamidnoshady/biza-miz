@@ -309,9 +309,75 @@ async function main() {
       }
     }
 
+    // ---- A receipt voucher, fully reversed ------------------------------------
+    // The «دریافت و پرداخت» register reads `ar_receipts` directly, so without
+    // a voucher row it photographs as its empty state — and the register's
+    // whole job (method + account, reference, status) would go uncovered.
+    // One bank receipt from سارا محمدی into بانک ملت, then its exact reversal:
+    // the pair nets to zero in every aggregation (her receivables balance,
+    // the trial balance, the journal totals), so no existing baseline moves.
+    const RECEIPT_VOUCHER_NUMBER = 7;
+    const RECEIPT_AMOUNT = 12_500_000;
+    const existingReceipt = await client.query(
+      "SELECT id FROM ar_receipts WHERE business_id = $1 AND voucher_number = $2",
+      [businessId, RECEIPT_VOUCHER_NUMBER],
+    );
+    if (!existingReceipt.rowCount) {
+      const receipt = await client.query(
+        `INSERT INTO ar_receipts
+           (business_id, location_id, customer_id, receipt_date, method, amount, memo,
+            created_by, idempotency_key, request_fingerprint, cash_account_id, bank_reference,
+            voucher_number, created_at)
+         VALUES ($1, $2, $3, '2026-03-11', 'bank', $4, 'بابت فاکتور ۱۲',
+                 NULL, 'visual-fixture-receipt-1',
+                 '9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e',
+                 $5, '1404-777', $6, '2026-03-11T08:30:00.000Z')
+         RETURNING id`,
+        [businessId, locationId, partyIds.get("سارا محمدی"), RECEIPT_AMOUNT, accountIds.get("1020"), RECEIPT_VOUCHER_NUMBER],
+      );
+      const receiptId = receipt.rows[0].id as string;
+      // The original posting and its mirror: same source_type/source_id (that
+      // is how the A/R attribution finds both sides), `*_reversal` kind.
+      const original = await client.query(
+        `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id, posting_kind, posted_at)
+         VALUES ($1, $2, '2026-03-11', 'بابت فاکتور ۱۲', 'ar_receipt', $3, 'ar_receipt', '2026-03-11T08:30:00.000Z')
+         RETURNING id`,
+        [businessId, locationId, receiptId],
+      );
+      for (const line of [
+        { code: "1020", debit: RECEIPT_AMOUNT, credit: 0 },
+        { code: "1200", debit: 0, credit: RECEIPT_AMOUNT },
+      ]) {
+        await client.query(
+          "INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4)",
+          [original.rows[0].id, accountIds.get(line.code), line.debit, line.credit],
+        );
+      }
+      const reversal = await client.query(
+        `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id, posting_kind, posted_at)
+         VALUES ($1, $2, '2026-03-16', 'برگشت دریافت — بابت فاکتور ۱۲', 'ar_receipt', $3, 'ar_receipt_reversal', '2026-03-16T08:30:00.000Z')
+         RETURNING id`,
+        [businessId, locationId, receiptId],
+      );
+      for (const line of [
+        { code: "1200", debit: RECEIPT_AMOUNT, credit: 0 },
+        { code: "1020", debit: 0, credit: RECEIPT_AMOUNT },
+      ]) {
+        await client.query(
+          "INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4)",
+          [reversal.rows[0].id, accountIds.get(line.code), line.debit, line.credit],
+        );
+      }
+      await client.query(
+        `UPDATE ar_receipts SET reversed_at = '2026-03-16T08:30:00.000Z', reversed_by = NULL, reversal_entry_id = $2
+          WHERE id = $1`,
+        [receiptId, reversal.rows[0].id],
+      );
+    }
+
     await client.query("COMMIT");
     console.log(
-      "Visual fixture ready: 6 accounts, 4 journal entries, 3 inventory items, 3 parties, 3 deals, 3 expenses, 2 receivables.",
+      "Visual fixture ready: 6 accounts, 6 journal entries, 3 inventory items, 3 parties, 3 deals, 3 expenses, 2 receivables, 1 reversed receipt.",
     );
   } catch (error) {
     await client.query("ROLLBACK");

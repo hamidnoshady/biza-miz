@@ -92,6 +92,9 @@ let agingRoute: typeof import("../src/app/api/ledger/ar/aging/route");
 let receiptsRoute: typeof import("../src/app/api/ledger/ar/receipts/route");
 let suppliersRoute: typeof import("../src/app/api/ledger/ap/suppliers/route");
 let entryRoute: typeof import("../src/app/api/ledger/entries/[id]/route");
+let paymentsRoute: typeof import("../src/app/api/ledger/ap/payments/route");
+let receiptReverseRoute: typeof import("../src/app/api/ledger/ar/receipts/[id]/reverse/route");
+let paymentReverseRoute: typeof import("../src/app/api/ledger/ap/payments/[id]/reverse/route");
 
 const biz = { id: "", locationId: "" };
 const acct = { cash: "", accountsReceivable: "", revenue: "" };
@@ -159,6 +162,9 @@ beforeAll(async () => {
   receiptsRoute = await import("../src/app/api/ledger/ar/receipts/route");
   suppliersRoute = await import("../src/app/api/ledger/ap/suppliers/route");
   entryRoute = await import("../src/app/api/ledger/entries/[id]/route");
+  paymentsRoute = await import("../src/app/api/ledger/ap/payments/route");
+  receiptReverseRoute = await import("../src/app/api/ledger/ar/receipts/[id]/reverse/route");
+  paymentReverseRoute = await import("../src/app/api/ledger/ap/payments/[id]/reverse/route");
 
   (globalThis as any).__withTenant = (fn: () => Promise<unknown>) => dbLib.withTenant(sessionState.businessId, fn);
 
@@ -194,11 +200,12 @@ async function seedBusiness(): Promise<{ id: string; locationId: string }> {
 }
 
 beforeEach(async () => {
-  await db.query("DELETE FROM journal_lines");
-  await db.query("DELETE FROM journal_entries");
-  await db.query("DELETE FROM ar_receipts");
-  await db.query("DELETE FROM orders");
-  await db.query("DELETE FROM businesses");
+  // One TRUNCATE, not row-by-row DELETEs: after the 50,000-row scale test
+  // the per-row cleanup exceeds the hook budget, wedging every later test's
+  // setup. CASCADE reaches the same dependent rows (parties, users, accounts
+  // and the rest) the old DELETEs removed through `businesses`; the seed
+  // below rebuilds this file's world from nothing either way.
+  await db.query("TRUNCATE journal_lines, journal_entries, ar_receipts, ap_payments, suppliers, orders, businesses CASCADE");
 
   const seeded = await seedBusiness();
   biz.id = seeded.id;
@@ -286,7 +293,7 @@ describe("what the page may offer, and what the API enforces", () => {
     const response = await receiptsRoute.POST(
       jsonRequest("/api/ledger/ar/receipts", {
         method: "POST",
-        body: JSON.stringify({ customerId: customer.id, method: "cash", amount: 200_000, receiptDate: "2025-04-10" }),
+        body: JSON.stringify({ customerId: customer.id, method: "cash", amount: 200_000, receiptDate: "2025-04-10", idempotencyKey: randomUUID() }),
         headers: { "content-type": "application/json" },
       }),
     );
@@ -317,7 +324,7 @@ describe("party integrity at the route boundary", () => {
     return receiptsRoute.POST(
       jsonRequest("/api/ledger/ar/receipts", {
         method: "POST",
-        body: JSON.stringify({ customerId, method: "cash", amount: 100_000 }),
+        body: JSON.stringify({ customerId, method: "cash", amount: 100_000, idempotencyKey: randomUUID() }),
         headers: { "content-type": "application/json" },
       }),
     );
@@ -362,7 +369,7 @@ describe("date integrity at the route boundary", () => {
       const receipt = await receiptsRoute.POST(
         jsonRequest("/api/ledger/ar/receipts", {
           method: "POST",
-          body: JSON.stringify({ customerId: customer.id, method: "cash", amount: 10_000, receiptDate: impossible }),
+          body: JSON.stringify({ customerId: customer.id, method: "cash", amount: 10_000, receiptDate: impossible, idempotencyKey: randomUUID() }),
           headers: { "content-type": "application/json" },
         }),
       );
@@ -385,7 +392,7 @@ describe("date integrity at the route boundary", () => {
     const receipt = await receiptsRoute.POST(
       jsonRequest("/api/ledger/ar/receipts", {
         method: "POST",
-        body: JSON.stringify({ customerId: customer.id, method: "cash", amount: 10_000, receiptDate: "2024-02-29" }),
+        body: JSON.stringify({ customerId: customer.id, method: "cash", amount: 10_000, receiptDate: "2024-02-29", idempotencyKey: randomUUID() }),
         headers: { "content-type": "application/json" },
       }),
     );
@@ -411,6 +418,7 @@ describe("the balance list is a window, and the totals are not", () => {
       method: "cash",
       amount: 100_000,
       receiptDate: "2025-04-03",
+      idempotencyKey: randomUUID(),
       createdBy: sessionState.sub,
     });
 
@@ -514,8 +522,8 @@ describe("subledger pagination at scale", () => {
       FROM generate_series(1, $2::int) n`, [biz.id, count]);
     await db.query(`INSERT INTO suppliers (location_id, party_id, name)
       SELECT $1, id, name FROM parties WHERE business_id = $2`, [biz.locationId, biz.id]);
-    await db.query(`INSERT INTO ar_receipts (business_id, customer_id, method, amount, receipt_date)
-      SELECT $1, id, 'cash', 100, '2025-04-01' FROM parties WHERE business_id = $1`, [biz.id]);
+    await db.query(`INSERT INTO ar_receipts (business_id, customer_id, method, amount, receipt_date, idempotency_key)
+      SELECT $1, id, 'cash', 100, '2025-04-01', 'scale:' || id::text FROM parties WHERE business_id = $1`, [biz.id]);
     await db.query(`INSERT INTO ap_payments (business_id, supplier_id, method, amount, payment_date)
       SELECT $1, id, 'cash', 100, '2025-04-01' FROM suppliers WHERE location_id = $2`, [biz.id, biz.locationId]);
     await db.query(`INSERT INTO journal_entries (business_id, entry_date, source_type, source_id)
@@ -631,4 +639,153 @@ describe("subledger pagination at scale", () => {
     }
     querySpy.mockRestore();
   }, 120_000);
+});
+
+describe("misshapen JSON bodies (controlled 400s, no mutation)", () => {
+  // Valid JSON that is not an object: the routes must answer 400 before a
+  // property is touched — `null` must not throw a TypeError 500, and an
+  // array or scalar must not silently become an empty submission (or, on
+  // the reversal routes, the default correction).
+  const MISSHAPEN = ["null", "[]", "[{\"memo\":\"x\"}]", "\"x\"", "42", "true"];
+
+  function rawPost(url: string, raw: string): NextRequest {
+    return jsonRequest(url, {
+      method: "POST",
+      body: raw,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  async function rowCount(table: "ar_receipts" | "ap_payments" | "journal_entries"): Promise<number> {
+    const { rows } = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`);
+    return rows[0].n;
+  }
+
+  it("refuses a misshapen receipt body with 400 and posts nothing", async () => {
+    sessionState.permissions = new Set(["ledger.view", "finance.receivables_manage"]);
+    for (const raw of MISSHAPEN) {
+      const response = await receiptsRoute.POST(rawPost("/api/ledger/ar/receipts", raw));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "bad_request" });
+    }
+    expect(await rowCount("ar_receipts")).toBe(0);
+    expect(await rowCount("journal_entries")).toBe(0);
+  });
+
+  it("refuses a misshapen payment body with 400 and posts nothing", async () => {
+    sessionState.permissions = new Set(["ledger.view", "finance.payables_manage"]);
+    for (const raw of MISSHAPEN) {
+      const response = await paymentsRoute.POST(rawPost("/api/ledger/ap/payments", raw));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "bad_request" });
+    }
+    expect(await rowCount("ap_payments")).toBe(0);
+    expect(await rowCount("journal_entries")).toBe(0);
+  });
+
+  it("refuses a misshapen receipt-reversal body with 400 and leaves the voucher standing, then reverses on an empty body", async () => {
+    sessionState.permissions = new Set(["ledger.view", "finance.receivables_manage"]);
+    const customer = await partiesService.createCustomer(biz.id, { name: "Ali" });
+    const created = await receiptsRoute.POST(
+      jsonRequest("/api/ledger/ar/receipts", {
+        method: "POST",
+        body: JSON.stringify({
+          customerId: customer.id,
+          method: "cash",
+          amount: 100_000,
+          receiptDate: "2025-04-10",
+          idempotencyKey: randomUUID(),
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(created.status).toBe(201);
+    const receiptId = ((await created.json()) as { receipt: { id: string } }).receipt.id;
+    const ctx = { params: Promise.resolve({ id: receiptId }) };
+    const entriesBefore = await rowCount("journal_entries");
+    expect(entriesBefore).toBe(1);
+
+    sessionState.permissions = new Set(["ledger.view", "ledger.approve"]);
+    for (const raw of MISSHAPEN) {
+      const response = await receiptReverseRoute.POST(rawPost(`/api/ledger/ar/receipts/${receiptId}/reverse`, raw), ctx);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "bad_request" });
+    }
+    const { rows } = await db.query<{ reversed_at: string | null }>(
+      "SELECT reversed_at FROM ar_receipts WHERE id = $1",
+      [receiptId],
+    );
+    expect(rows[0].reversed_at).toBeNull();
+    expect(await rowCount("journal_entries")).toBe(entriesBefore);
+
+    // The defined optional-body behavior: an absent body is the default correction.
+    const reversed = await receiptReverseRoute.POST(
+      jsonRequest(`/api/ledger/ar/receipts/${receiptId}/reverse`, { method: "POST" }),
+      ctx,
+    );
+    expect(reversed.status).toBe(201);
+    const { rows: after } = await db.query<{ reversed_at: string | null }>(
+      "SELECT reversed_at FROM ar_receipts WHERE id = $1",
+      [receiptId],
+    );
+    expect(after[0].reversed_at).not.toBeNull();
+    expect(await rowCount("journal_entries")).toBe(entriesBefore + 1);
+  });
+
+  it("refuses a misshapen payment-reversal body with 400 and leaves the voucher standing, then reverses on an empty body", async () => {
+    sessionState.permissions = new Set(["ledger.view", "finance.payables_manage"]);
+    const supplierRow = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name) VALUES ($1, 'Acme') RETURNING id",
+      [biz.locationId],
+    );
+    const partyRow = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, role) VALUES ($1, 'Acme', 'supplier') RETURNING id",
+      [biz.id],
+    );
+    await db.query("UPDATE suppliers SET party_id = $1 WHERE id = $2", [partyRow.rows[0].id, supplierRow.rows[0].id]);
+    const created = await paymentsRoute.POST(
+      jsonRequest("/api/ledger/ap/payments", {
+        method: "POST",
+        body: JSON.stringify({
+          supplierId: supplierRow.rows[0].id,
+          method: "cash",
+          amount: 100_000,
+          paymentDate: "2025-04-10",
+          clientRequestId: randomUUID(),
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(created.status).toBe(201);
+    const paymentId = ((await created.json()) as { payment: { id: string } }).payment.id;
+    const ctx = { params: Promise.resolve({ id: paymentId }) };
+    const entriesBefore = await rowCount("journal_entries");
+    expect(entriesBefore).toBe(1);
+
+    sessionState.permissions = new Set(["ledger.view", "ledger.approve"]);
+    for (const raw of MISSHAPEN) {
+      const response = await paymentReverseRoute.POST(rawPost(`/api/ledger/ap/payments/${paymentId}/reverse`, raw), ctx);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "bad_request" });
+    }
+    const { rows } = await db.query<{ reversed_at: string | null }>(
+      "SELECT reversed_at FROM ap_payments WHERE id = $1",
+      [paymentId],
+    );
+    expect(rows[0].reversed_at).toBeNull();
+    expect(await rowCount("journal_entries")).toBe(entriesBefore);
+
+    // The defined optional-body behavior: an absent body is the default correction.
+    const reversed = await paymentReverseRoute.POST(
+      jsonRequest(`/api/ledger/ap/payments/${paymentId}/reverse`, { method: "POST" }),
+      ctx,
+    );
+    expect(reversed.status).toBe(201);
+    const { rows: after } = await db.query<{ reversed_at: string | null }>(
+      "SELECT reversed_at FROM ap_payments WHERE id = $1",
+      [paymentId],
+    );
+    expect(after[0].reversed_at).not.toBeNull();
+    expect(await rowCount("journal_entries")).toBe(entriesBefore + 1);
+  });
 });
