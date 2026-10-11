@@ -28,6 +28,15 @@ export interface JournalLineRecord {
   /** Exact Rial, as a decimal string — `journal_lines.debit` is BIGINT. */
   debit: string;
   credit: string;
+  /**
+   * Multicurrency (issue #863): the foreign side of the leg, in minor units of
+   * the entry's transaction currency. Both zero on a base-only leg (an FX
+   * gain/loss line) and on every pre-multicurrency line.
+   */
+  foreignDebit: string;
+  foreignCredit: string;
+  /** The party a foreign receivable/payable leg belongs to, when attributed. */
+  partyId: string | null;
 }
 
 /**
@@ -60,6 +69,18 @@ export interface JournalEntryRecord {
   reversedByName: string | null;
   /** Exact Rial, as a decimal string: by double entry, the sum of the debit column. */
   totalDebit: string;
+  /**
+   * Multicurrency snapshot (issue #863) — null currency means a base-only
+   * entry. A foreign entry carries the currency, the frozen rate (row id and
+   * value), the base it converted into, the rounding policy version and the
+   * base-rial rounding delta it absorbed.
+   */
+  currencyCode: string | null;
+  baseCurrencyCode: string | null;
+  exchangeRateId: string | null;
+  exchangeRate: string | null;
+  roundingVersion: number | null;
+  roundingDelta: string | null;
   lines: JournalLineRecord[];
 }
 
@@ -95,6 +116,12 @@ interface EntryRow extends Record<string, unknown> {
   reversed_by: string | null;
   reversed_by_name: string | null;
   total_debit: string;
+  currency_code: string | null;
+  base_currency_code: string | null;
+  exchange_rate_id: string | null;
+  exchange_rate: string | null;
+  rounding_version: number | null;
+  rounding_delta: string | null;
 }
 
 interface LineRow extends Record<string, unknown> {
@@ -104,6 +131,9 @@ interface LineRow extends Record<string, unknown> {
   account_name: string;
   debit: string;
   credit: string;
+  foreign_debit: string;
+  foreign_credit: string;
+  party_id: string | null;
 }
 
 /**
@@ -184,7 +214,11 @@ const ENTRY_COLUMNS = `je.id, je.entry_date::text AS entry_date, je.posted_at::t
           je.created_by, u.full_name AS created_by_name,
           je.reverses_entry_id, rev.id AS reversed_by_entry_id,
           je.reversed_at::text AS reversed_at, je.reversed_by, ru.full_name AS reversed_by_name,
-          totals.total_debit::text AS total_debit`;
+          totals.total_debit::text AS total_debit,
+          je.currency_code, je.base_currency_code,
+          je.exchange_rate_id::text AS exchange_rate_id,
+          je.exchange_rate::text AS exchange_rate,
+          je.rounding_version, je.rounding_delta::text AS rounding_delta`;
 
 /**
  * The journal's stable read order: the document's own date first, then when it
@@ -202,7 +236,9 @@ async function attachLines(entries: EntryRow[]): Promise<JournalEntryRecord[]> {
   if (entries.length === 0) return [];
   const { rows: lines } = await query<LineRow>(
     `SELECT jl.entry_id, jl.account_id, a.code AS account_code, a.name AS account_name,
-            jl.debit::text AS debit, jl.credit::text AS credit
+            jl.debit::text AS debit, jl.credit::text AS credit,
+            jl.foreign_debit::text AS foreign_debit, jl.foreign_credit::text AS foreign_credit,
+            jl.party_id::text AS party_id
        FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
       WHERE jl.entry_id = ANY($1::uuid[]) ORDER BY jl.entry_id, jl.id`,
     [entries.map((e) => e.id)],
@@ -217,6 +253,9 @@ async function attachLines(entries: EntryRow[]): Promise<JournalEntryRecord[]> {
       accountName: line.account_name,
       debit: line.debit,
       credit: line.credit,
+      foreignDebit: line.foreign_debit,
+      foreignCredit: line.foreign_credit,
+      partyId: line.party_id,
     });
     byEntry.set(line.entry_id, list);
   }
@@ -243,6 +282,12 @@ async function attachLines(entries: EntryRow[]): Promise<JournalEntryRecord[]> {
       // The aggregate is authoritative; the fallback keeps a document whose
       // lines failed to load from reading as «۰».
       totalDebit: row.total_debit ?? journalEntryTotalText(entryLines),
+      currencyCode: row.currency_code,
+      baseCurrencyCode: row.base_currency_code,
+      exchangeRateId: row.exchange_rate_id,
+      exchangeRate: row.exchange_rate,
+      roundingVersion: row.rounding_version,
+      roundingDelta: row.rounding_delta,
       lines: entryLines,
     };
   });

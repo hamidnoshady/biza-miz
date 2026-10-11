@@ -13,8 +13,10 @@
  * rate-limit sentence can live beside the button it describes.
  */
 import { useEffect, useState } from "react";
-import { toPersianDigits } from "@/lib/digits";
+import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
 import { MfaStep } from "./mfa-step";
+import { BusinessPicker, useBusinessSelection } from "./business-picker";
+import { useResendCooldown } from "./use-resend-cooldown";
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
 export type PhoneOtpSendSpec =
@@ -30,6 +32,18 @@ interface RequestResponse {
   message?: string;
   retryAfterMs?: number;
 }
+
+/*
+ * Issue #854 (P1.18) — the multi-business answer to a *verified* code.
+ *
+ * The number matched members of more than one business, so nothing about those
+ * businesses was revealed until the code checked out. What comes back is the
+ * list plus a short-lived selection token; the member names a business and the
+ * server resolves the membership from the proven number, never from the id.
+ *
+ * The step itself lives in `business-picker.tsx` (P1.19) so the password door
+ * renders the same one.
+ */
 
 function phoneOtpErrorMessage(
   code: string | undefined,
@@ -89,6 +103,26 @@ export function PhoneOtpStep({
     method: "totp" | "sms_otp" | null;
     availableMethods: ("totp" | "sms_otp")[];
   } | null>(null);
+  const { selection, capture, clear } = useBusinessSelection();
+
+  /**
+   * Issue #854 (P2.25) — the door's resend button gets the same live cooldown
+   * as every other OTP surface. The parent performs the *first* send just
+   * before mounting this step, so the window starts when we mount; each resend
+   * and each 429 answer then rewrites it from the server's own word.
+   */
+  const {
+    waitSeconds: resendWait,
+    coolingDown,
+    start: startCooldown,
+    applyRetryAfterMs,
+  } = useResendCooldown(60);
+
+  useEffect(() => {
+    startCooldown();
+    // Deliberately once per mount: this mirrors the parent's first send.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     setToken(initialToken);
@@ -118,6 +152,7 @@ export function PhoneOtpStep({
       });
       const data = (await res.json().catch(() => ({}))) as RequestResponse;
       if (res.status === 429) {
+        applyRetryAfterMs(data.retryAfterMs);
         setError(retryAfterMessage(data.retryAfterMs));
         return;
       }
@@ -128,6 +163,7 @@ export function PhoneOtpStep({
       if (data.token) setToken(data.token);
       if (data.maskedPhone) setMaskedPhone(data.maskedPhone);
       setCode("");
+      startCooldown();
       setNotice(`کد تازه به ${toPersianDigits(data.maskedPhone ?? maskedPhone ?? "")} پیامک شد.`);
     } catch {
       setError("ارتباط با سرور برقرار نشد.");
@@ -136,8 +172,14 @@ export function PhoneOtpStep({
     }
   }
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  /**
+   * POST /api/auth/phone-otp/verify with whatever the current step proves.
+   *
+   * One function for all three steps — the typed code, and the business choice
+   * that spends an already-proven code — because they differ only in the body
+   * and in which response shape comes back.
+   */
+  async function verify(body: Record<string, unknown>, bearer: string) {
     setBusy(true);
     setError(null);
     try {
@@ -145,17 +187,26 @@ export function PhoneOtpStep({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${bearer}`,
         },
-        body: JSON.stringify({ code, deviceToken }),
+        body: JSON.stringify(body),
       });
       const data = (await res.json().catch(() => ({}))) as RequestResponse & {
         mfaRequired?: boolean;
         mfaToken?: string;
         mfaMethod?: "totp" | "sms_otp" | null;
         availableMethods?: ("totp" | "sms_otp")[];
+        needsBusinessSelection?: boolean;
+        businesses?: { id: string; name: string }[];
+        selectionToken?: string;
       };
       if (res.ok) {
+        /*
+         * A code that proves a multi-business number answers with the list and a
+         * selection token and *no* session; the shared hook holds that pending
+         * choice so the picker below can finish it.
+         */
+        if (capture(data)) return;
         if (data.mfaRequired && data.mfaToken) {
           setMfaPending({
             token: data.mfaToken,
@@ -176,6 +227,16 @@ export function PhoneOtpStep({
     }
   }
 
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    await verify({ code, deviceToken }, token);
+  }
+
+  async function chooseBusiness(businessId: string) {
+    if (!selection?.token) return;
+    await verify({ businessId, deviceToken }, selection.token);
+  }
+
   if (mfaPending) {
     return (
       <MfaStep
@@ -187,6 +248,21 @@ export function PhoneOtpStep({
         onVerified={onVerified}
         onCancel={() => {
           setMfaPending(null);
+          onCancel();
+        }}
+      />
+    );
+  }
+
+  if (selection) {
+    return (
+      <BusinessPicker
+        selection={selection}
+        busy={busy}
+        error={error}
+        onChoose={(businessId) => void chooseBusiness(businessId)}
+        onCancel={() => {
+          clear();
           onCancel();
         }}
       />
@@ -219,7 +295,7 @@ export function PhoneOtpStep({
         maxLength={6}
         required
         value={code}
-        onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+        onChange={(e) => setCode(normalizeSecurityDigits(e.target.value, 6))}
         placeholder="------"
         aria-label="کد تأیید ۶ رقمی"
         className="w-full rounded-lg border border-input px-3 py-2 text-center text-lg tracking-[0.4em] focus:border-primary focus:outline-none"
@@ -235,11 +311,13 @@ export function PhoneOtpStep({
 
       <button
         type="button"
-        disabled={busy}
+        disabled={busy || coolingDown}
         onClick={() => void resend()}
         className="w-full rounded-lg border border-input py-2.5 text-sm font-semibold transition hover:bg-primary/10 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
       >
-        ارسال دوبارهٔ کد
+        {coolingDown
+          ? `ارسال دوبارهٔ کد (${toPersianDigits(resendWait)})`
+          : "ارسال دوبارهٔ کد"}
       </button>
 
       <div className="text-center">

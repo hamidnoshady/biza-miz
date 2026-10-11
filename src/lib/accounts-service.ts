@@ -39,6 +39,7 @@
  *    after the lock is held.
  */
 import { query, getPool } from "./db";
+import { assertCurrencyAvailable, MulticurrencyError } from "./multicurrency-service";
 import { isUuid } from "./uuid";
 import { toLatinDigits } from "./digits";
 import { AccountsError } from "./accounts-error";
@@ -99,6 +100,14 @@ export interface AccountRow {
   level: AccountLevel;
   normalBalance: NormalBalance;
   isContra: boolean;
+  /**
+   * Multicurrency (issue #863): the account's own currency when it is a
+   * foreign-currency financial account (a foreign bank). NULL = the business
+   * base currency, which is every account until one is flagged. Surfaced so
+   * the chart shows which accounts hold foreign value instead of leaving the
+   * flag visible only at creation time.
+   */
+  currencyCode: string | null;
 }
 
 /**
@@ -129,12 +138,13 @@ export async function listAccounts(businessId: string, options?: { all?: boolean
     level: AccountLevel;
     normal_balance: NormalBalance;
     is_contra: boolean;
+    currency_code: string | null;
   }>(
     `SELECT a.id, a.code, a.name, a.type, a.parent_id, p.code AS parent_code, a.is_active,
             EXISTS (SELECT 1 FROM journal_lines jl WHERE jl.account_id = a.id) AS has_postings,
             EXISTS (SELECT 1 FROM journal_entry_draft_lines dl WHERE dl.account_id = a.id) AS has_draft_postings,
             EXISTS (SELECT 1 FROM accounts c WHERE c.parent_id = a.id) AS has_children,
-            a.level, a.normal_balance, a.is_contra
+            a.level, a.normal_balance, a.is_contra, a.currency_code
        FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
       WHERE a.business_id = $1
         ${onlyActive ? "AND a.is_active" : ""}
@@ -155,6 +165,7 @@ export async function listAccounts(businessId: string, options?: { all?: boolean
     level: r.level,
     normalBalance: r.normal_balance,
     isContra: r.is_contra,
+    currencyCode: r.currency_code,
   }));
 }
 
@@ -460,6 +471,12 @@ export async function createAccount(params: {
   parentId?: string | null;
   isContra?: boolean;
   actorId?: string | null;
+  /**
+   * Multicurrency (issue #863): the account's own currency for a
+   * foreign-currency financial account (a foreign bank). NULL/omitted = the
+   * business's base currency, which is every account until one is flagged.
+   */
+  currencyCode?: string | null;
 }): Promise<{ id: string }> {
   /* The convention is «Latin digits in storage, Persian digits in display»
      (digits.ts), and the add form's own placeholder invites «۶۱۰۰». Storing a
@@ -503,11 +520,28 @@ export async function createAccount(params: {
     );
     if (existing.length > 0) throw new AccountsError("code_in_use", 409);
 
+    // Multicurrency (issue #863). An account that names a currency may only
+    // name one this business has enabled, and never the base currency (that is
+    // what NULL means). The catalogue check is server-side: the form offers the
+    // allowed list, but the API does not trust it.
+    const currencyCode =
+      typeof params.currencyCode === "string" && /^[A-Za-z]{3}$/.test(params.currencyCode)
+        ? params.currencyCode.toUpperCase()
+        : null;
+    if (currencyCode) {
+      try {
+        await assertCurrencyAvailable(params.businessId, currencyCode);
+      } catch (err) {
+        if (err instanceof MulticurrencyError) throw new AccountsError(err.message, err.status);
+        throw err;
+      }
+    }
+
     try {
       const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [params.businessId, parentId, code, name, params.type, level, isContra],
+        `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra, currency_code)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [params.businessId, parentId, code, name, params.type, level, isContra, currencyCode],
       );
       const newId = rows[0].id;
       await recordAccountAudit(client, params.businessId, actorId, "account.created", newId, {
@@ -518,6 +552,7 @@ export async function createAccount(params: {
         parentLabel,
         level,
         isContra,
+        currencyCode,
       });
       return { id: newId };
     } catch (err) {
