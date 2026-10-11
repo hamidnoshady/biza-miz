@@ -63,6 +63,11 @@ import { createCategory, updateCategory, createMenuItem, updateMenuItem } from "
 import { assignBarcode } from "./inventory-item-barcodes-service";
 import { createCustomer, createParty } from "./parties-service";
 import { getSetting, SETTING_KEYS } from "./settings";
+import { toggleNotePin, setConsent } from "./crm-service";
+import { createSegment, updateSegment, archiveSegment } from "./crm-segments-service";
+import { setAutomationActive } from "./crm-automation-service";
+import type { SegmentDefinition } from "./segments";
+import type { ConsentChannel } from "./crm-shared";
 import type { TaxSetting } from "./setup-state";
 import {
   createFixedAsset,
@@ -1617,6 +1622,114 @@ const partySupplierCreate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: created as unknown as Record<string, unknown> };
 };
 
+
+// ── Issue #883 package 2, batch D — CRM notes/consent/segments/automations ───
+// The CRM file, consent registry and rules engine are business-scoped facts,
+// not per-branch views, so their executors never name a branch; a pinned
+// consent is refused by the catalogue pin rule (resolveExecutorLocationName
+// returns null for these keys — see executorTargetLocation's default branch).
+
+const crmNoteDelete: AutopilotExecutor = async (ctx) => {
+  const noteId = str(ctx.payload.noteId);
+  if (!noteId) return fail("invalid_payload");
+  const deleted = await deleteCustomerNote(ctx.businessId, noteId, str(ctx.payload.customerId) ?? undefined);
+  if (!deleted) return fail("not_found");
+  return { ok: true, result: { noteId, deleted: true } };
+};
+
+const crmNotePin: AutopilotExecutor = async (ctx) => {
+  const noteId = str(ctx.payload.noteId);
+  const pinned = ctx.payload.pinned;
+  if (!noteId || typeof pinned !== "boolean") return fail("invalid_payload");
+  const updated = await toggleNotePin(ctx.businessId, noteId, pinned, str(ctx.payload.customerId) ?? undefined);
+  if (!updated) return fail("not_found");
+  return { ok: true, result: { noteId, pinned } };
+};
+
+const crmConsentSet: AutopilotExecutor = async (ctx) => {
+  const customerId = str(ctx.payload.customerId);
+  const channel = str(ctx.payload.channel);
+  const granted = ctx.payload.granted;
+  if (!customerId || (channel !== "sms" && channel !== "email") || typeof granted !== "boolean") {
+    return fail("invalid_payload");
+  }
+  const outcome = await setConsent(ctx.businessId, customerId, {
+    channel: channel as ConsentChannel,
+    granted,
+    source: "staff",
+    note: str(ctx.payload.note) ?? "MCP connection",
+    changedBy: actorOf(ctx) ?? "mcp",
+  });
+  if (!outcome) return fail("customer_not_found");
+  return { ok: true, result: { customerId, channel, granted, changed: outcome.changed } };
+};
+
+const crmSegmentCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  const definition = ctx.payload.definition;
+  if (!name || !definition || typeof definition !== "object" || Array.isArray(definition)) {
+    return fail("invalid_payload");
+  }
+  try {
+    const created = await createSegment(ctx.businessId, {
+      name,
+      description: str(ctx.payload.description) ?? undefined,
+      definition: definition as SegmentDefinition,
+    });
+    return { ok: true, result: { id: created.id, name: created.name } };
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "segment_invalid");
+  }
+};
+
+const crmSegmentUpdate: AutopilotExecutor = async (ctx) => {
+  const segmentId = str(ctx.payload.segmentId);
+  if (!segmentId) return fail("invalid_payload");
+  const definition = ctx.payload.definition;
+  if (definition !== undefined && (!definition || typeof definition !== "object" || Array.isArray(definition))) {
+    return fail("invalid_payload");
+  }
+  try {
+    const updated = await updateSegment(ctx.businessId, segmentId, {
+      name: str(ctx.payload.name) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      definition: definition as SegmentDefinition | undefined,
+    });
+    if (!updated) return fail("not_found");
+    return { ok: true, result: { id: updated.id, name: updated.name } };
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "segment_invalid");
+  }
+};
+
+const crmSegmentArchive: AutopilotExecutor = async (ctx) => {
+  const segmentId = str(ctx.payload.segmentId);
+  if (!segmentId) return fail("invalid_payload");
+  const archived = await archiveSegment(ctx.businessId, segmentId);
+  if (!archived) return fail("not_found");
+  return { ok: true, result: { segmentId, archived: true } };
+};
+
+const crmAutomationToggle: AutopilotExecutor = async (ctx) => {
+  const automationId = str(ctx.payload.automationId);
+  const isActive = ctx.payload.isActive;
+  if (!automationId || typeof isActive !== "boolean") return fail("invalid_payload");
+  // The route's audit actor is the session user; the MCP executor answers with
+  // the authorizing user's name when resolvable, else their id — the audit row
+  // still carries the actor, exactly the trace the screen's PATCH writes.
+  const { rows } = await query<{ full_name: string | null }>(
+    `SELECT full_name FROM users WHERE id = $1`,
+    [ctx.authorizedByUserId],
+  );
+  const actorName = rows[0]?.full_name ?? ctx.authorizedByUserId ?? "mcp";
+  const toggled = await setAutomationActive(ctx.businessId, automationId, isActive, {
+    name: actorName,
+    userId: ctx.authorizedByUserId,
+  });
+  if (!toggled) return fail("not_found");
+  return { ok: true, result: { automationId, isActive } };
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -1668,6 +1781,13 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   barcodeAssign,
   partyCustomerCreate,
   partySupplierCreate,
+  crmNoteDelete,
+  crmNotePin,
+  crmConsentSet,
+  crmSegmentCreate,
+  crmSegmentUpdate,
+  crmSegmentArchive,
+  crmAutomationToggle,
 };
 
 // ---------------------------------------------------------------------------

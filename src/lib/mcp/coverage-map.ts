@@ -296,9 +296,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Customers (profile, notes, tags, relationships, merge, duplicates, consent)",
     routes: ["crm/customers", "parties", "crm/external-profiles"],
     ops: {
-      listDetail: ["get_customer_profile", "find_customers", "get_customer_timeline", "get_at_risk_customers"],
-      create: ["party.customer.create", "party.supplier.create", "customer.note.add", "crm.customer.note"],
-      update: ["crm.customer.tag"],
+      // Batch D (#883): notes reads + lifecycle (delete/pin), consent as a
+      // logged legal event — both live behind the same services the CRM file
+      // of the business uses (parties.view/manage on notes & activities and
+      // crm.consent_manage on consent, exactly the routes' gates).
+      listDetail: ["get_customer_profile", "find_customers", "get_customer_timeline", "get_at_risk_customers", "list_customer_notes", "list_crm_activities"],
+      create: ["party.customer.create", "party.supplier.create", "customer.note.add", "crm.customer.note", "crm.consent.set"],
+      update: ["crm.customer.tag", "crm.note.pin"],
+      delete: ["crm.note.delete"],
     },
     test: "integration/parties.integration.test.ts",
   },
@@ -328,7 +333,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "CRM",
     entity: "Segments, saved views, queues, RFM",
     routes: ["crm/segments", "crm/saved-views", "crm/queues", "crm/rfm"],
-    ops: { listDetail: ["list_customer_segments", "preview_customer_segment", "get_repurchase_candidates"] },
+    ops: {
+      // Batch D (#883): segments beyond read-only — create/update/archive all
+      // ride the crm-segments service the screens use.
+      listDetail: ["list_customer_segments", "preview_customer_segment", "get_repurchase_candidates"],
+      create: ["crm.segment.create"],
+      update: ["crm.segment.update"],
+      lifecycle: ["crm.segment.archive"],
+    },
     test: "integration/crm.integration.test.ts",
   },
   {
@@ -336,6 +348,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "CRM",
     entity: "CRM automations, custom fields, audit",
     routes: ["crm/automations", "crm/custom-fields", "crm/audit"],
+    // Batch D reads the rules and toggles each rule's on/off; rule-shape
+    // editing stays on the screen (the rule DSL is screen-owned).
+    ops: { listDetail: ["list_crm_automations"], update: ["crm.automation.toggle"] },
     test: "integration/crm.integration.test.ts",
   },
   {

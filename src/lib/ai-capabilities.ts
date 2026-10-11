@@ -62,6 +62,11 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch C reads (issue #883): menu tree + barcodes mirror the screens'
   // gates; production lists gate on inventory.view like waste/stock reports.
   get_menu_tree: PERMISSIONS.menuView,
+  // Batch D reads — the same gates the CRM screens answer with.
+  list_customer_notes: PERMISSIONS.partiesView,
+  list_crm_activities: PERMISSIONS.partiesView,
+  // list_customer_segments was already mapped; automations is the new read.
+  list_crm_automations: PERMISSIONS.crmView,
   list_formulas: PERMISSIONS.inventoryView,
   list_production_runs: PERMISSIONS.inventoryView,
   list_item_barcodes: PERMISSIONS.inventoryView,
@@ -150,6 +155,16 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "courier.assign": PERMISSIONS.deliveryManage,
   "customer.note.add": PERMISSIONS.crmManage,
   "crm.customer.tag": PERMISSIONS.crmManage,
+  // Batch D — notes activities follow the notes screen (parties manage),
+  // consent the consent drawer (crm.consent_manage), segments/automechanics
+  // the configure gate the routes themselves use.
+  "crm.note.delete": PERMISSIONS.partiesManage,
+  "crm.note.pin": PERMISSIONS.partiesManage,
+  "crm.consent.set": PERMISSIONS.crmConsentManage,
+  "crm.segment.create": PERMISSIONS.crmConfigure,
+  "crm.segment.update": PERMISSIONS.crmConfigure,
+  "crm.segment.archive": PERMISSIONS.crmConfigure,
+  "crm.automation.toggle": PERMISSIONS.crmConfigure,
   "crm.customer.note": PERMISSIONS.crmManage,
   "journal.manual.propose": PERMISSIONS.ledgerPropose,
   "expense.categorize": PERMISSIONS.financeExpensesManage,

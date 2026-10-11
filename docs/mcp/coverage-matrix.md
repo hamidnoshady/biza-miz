@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (62)
+### Tenant (61)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -37,8 +37,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **crm.deals-leads** (CRM · Deals & leads (handoff, convert)) — MCP gap
 - **crm.cases-activities** (CRM · Cases & activities) — MCP gap
 - **crm.pipelines** (CRM · Pipelines & stages) — MCP gap
-- **crm.segments-views** (CRM · Segments, saved views, queues, RFM) — partial
-- **crm.config** (CRM · CRM automations, custom fields, audit) — MCP gap
+- **crm.config** (CRM · CRM automations, custom fields, audit) — partial
 - **crm.overview** (CRM · CRM overview, members, consent state, data quality) — MCP gap
 - **crm.loyalty** (CRM · Loyalty programs, store credit, redemptions) — partial
 - **growth.settings-campaigns** (Growth · Growth overview, settings, campaign audience, accounting) — partial
@@ -102,7 +101,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 10 · partial: 32 · MCP gap: 30 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 11 · partial: 32 · MCP gap: 29 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -133,12 +132,12 @@ Counts — covered: 10 · partial: 32 · MCP gap: 30 · backend gap: 0 · n/a (i
 | Inventory | Barcodes (lookup, bulk) | list_item_barcodes, list_items_without_barcode | barcode.assign | — | — | (route only) | inventory.adjust, inventory.view | connection mode | list_item_barcodes, list_items_without_barcode, barcode.assign | integration/stock.integration.test.ts | partial |
 | Inventory | Waste & write-downs | get_waste_history | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | get_waste_history | integration/stock.integration.test.ts | partial |
 | Inventory | stock/* routes<br>_legacy alias of the inventory/* surface_ | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, purchases.manage | — | — | — | duplicate surface |
-| CRM | Customers (profile, notes, tags, relationships, merge, duplicates, consent) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline | crm.customer.note, customer.note.add, party.customer.create, party.supplier.create | crm.customer.tag | (route only) | — | crm.consent_manage, crm.manage, crm.merge, crm.view, ledger.view, parties.manage, parties.view | connection mode | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create, crm.customer.tag | integration/parties.integration.test.ts | partial |
+| CRM | Customers (profile, notes, tags, relationships, merge, duplicates, consent) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes | crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create | crm.customer.tag, crm.note.pin | (route only) | — | crm.consent_manage, crm.manage, crm.merge, crm.view, ledger.view, parties.manage, parties.view | connection mode; step-up (always approve) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes, crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create, crm.customer.tag, crm.note.pin | integration/parties.integration.test.ts | partial |
 | CRM | Deals & leads (handoff, convert) | (route only) | (route only) | (route only) | (route only) | — | crm.manage, crm.view | — | — | integration/crm.integration.test.ts | MCP gap |
 | CRM | Cases & activities | (route only) | (route only) | (route only) | (route only) | — | crm.delete, parties.manage, parties.view | — | — | integration/crm.integration.test.ts | MCP gap |
 | CRM | Pipelines & stages | (route only) | (route only) | (route only) | — | — | crm.configure | — | — | integration/crm.integration.test.ts | MCP gap |
-| CRM | Segments, saved views, queues, RFM | get_repurchase_candidates, list_customer_segments, preview_customer_segment | (route only) | (route only) | (route only) | — | crm.configure, crm.manage, crm.view | — | get_repurchase_candidates, list_customer_segments, preview_customer_segment | integration/crm.integration.test.ts | partial |
-| CRM | CRM automations, custom fields, audit | (route only) | (route only) | (route only) | (route only) | — | crm.configure | — | — | integration/crm.integration.test.ts | MCP gap |
+| CRM | Segments, saved views, queues, RFM | get_repurchase_candidates, list_customer_segments, preview_customer_segment | crm.segment.create | crm.segment.update | crm.segment.archive | — | crm.configure, crm.manage, crm.view | connection mode | get_repurchase_candidates, list_customer_segments, preview_customer_segment, crm.segment.create, crm.segment.update, crm.segment.archive | integration/crm.integration.test.ts | covered |
+| CRM | CRM automations, custom fields, audit | list_crm_automations | (route only) | crm.automation.toggle | (route only) | — | crm.configure | step-up (always approve) | list_crm_automations, crm.automation.toggle | integration/crm.integration.test.ts | partial |
 | CRM | CRM overview, members, consent state, data quality | (route only) | — | — | — | — | crm.merge, crm.view | — | — | integration/crm.integration.test.ts | MCP gap |
 | CRM | Loyalty programs, store credit, redemptions | get_repurchase_candidates | (route only) | — | (route only) | — | loyalty.manage, loyalty.redeem, loyalty.view, store_credit.issue, store_credit.payout | — | get_repurchase_candidates | integration/loyalty.integration.test.ts | partial |
 | Growth | Growth overview, settings, campaign audience, accounting | list_message_campaigns, list_message_templates | (route only) | (route only) | — | — | campaigns.manage, growth.view, marketing.configure | — | list_message_campaigns, list_message_templates | integration/crm.integration.test.ts | partial |

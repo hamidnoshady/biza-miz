@@ -55,6 +55,8 @@ import { listShifts } from "./shift-service";
 import { getMenuTree } from "./menu-service";
 import { listFormulas, listRuns } from "./production-service";
 import { listBarcodes, listItemsWithoutBarcode } from "./inventory-item-barcodes-service";
+import { listCustomerNotes, listActivities } from "./crm-service";
+import { listAutomations } from "./crm-automation-service";
 
 /** Case-insensitive contains over a whitelist of row fields — tool-side `q`. */
 function rowMatches(row: Record<string, unknown>, fields: readonly string[], q: string): boolean {
@@ -1589,6 +1591,27 @@ export async function runReadTool(
       if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
       const items = await listItemsWithoutBarcode(pinned.locationId);
       return { ok: true, data: { locationId: pinned.locationId, count: items.length, items } };
+    }
+    // Issue #883 package 2, batch D — CRM lists (business-scoped records;
+    // the customer file is one list per business, not per branch).
+    case "list_customer_notes": {
+      const customerId = String(args.customerId ?? "").trim();
+      if (!customerId) return { ok: false, data: { error: "invalid_arguments" } };
+      const notes = await listCustomerNotes(businessId, customerId);
+      return { ok: true, data: { customerId, count: notes.length, notes } };
+    }
+    case "list_crm_activities": {
+      const activities = await listActivities(businessId, {
+        customerId: typeof args.customerId === "string" && args.customerId.trim() ? args.customerId.trim() : undefined,
+        openOnly: args.openOnly === true ? true : undefined,
+        completedOnly: args.completedOnly === true ? true : undefined,
+        limit: limitArg(args.limit),
+      });
+      return { ok: true, data: { count: activities.length, activities } };
+    }
+    case "list_crm_automations": {
+      const automations = await listAutomations(businessId);
+      return { ok: true, data: { count: automations.length, automations } };
     }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);

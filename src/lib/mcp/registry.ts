@@ -107,6 +107,13 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_production_runs", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "list_item_barcodes", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "list_items_without_barcode", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  // Batch D — CRM records are business-scoped facts; pinned consent pins
+  // refusal on writes via the write-service and is answered by all (agnostic
+  // — the customer file isn't a per-branch view).
+  { name: "list_customer_notes", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  { name: "list_crm_activities", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  // (list_customer_segments exists from before — do not re-add)
+  { name: "list_crm_automations", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
@@ -231,6 +238,16 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "barcode.assign", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "party.customer.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "party.supplier.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  // Batch D — CRM: notes bookkeeping is low; consent is a legal record and
+  // automation toggles re-shape behaviour for every customer at once, so
+  // both ask for explicit approval.
+  { actionType: "crm.note.delete", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.note.pin", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.consent.set", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
+  { actionType: "crm.segment.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.segment.update", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.segment.archive", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.automation.toggle", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
   // CRM
   { actionType: "customer.note.add", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.customer.note", kind: "write", app: "crm", risk: "low", approval: "mode" },

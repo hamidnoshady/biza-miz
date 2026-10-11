@@ -255,7 +255,18 @@ export type ActionType =
   | "menu.category.create"
   | "menu.category.update"
   | "menu.item.update"
-  | "barcode.assign";
+  | "barcode.assign"
+  // Batch D — CRM notes/consent/segments/automations. Consent is a legal
+  // record and its flip is logged with actor + timestamp by the service;
+  // the same service decides who can change it (parties.manage on the
+  // route) — the permission map mirrors that.
+  | "crm.note.delete"
+  | "crm.note.pin"
+  | "crm.consent.set"
+  | "crm.segment.create"
+  | "crm.segment.update"
+  | "crm.segment.archive"
+  | "crm.automation.toggle";
 
 export type AutopilotExecutorKey =
   | "menuItemPatch"
@@ -309,12 +320,19 @@ export type AutopilotExecutorKey =
   | "menuItemUpdate"
   | "barcodeAssign"
   | "partyCustomerCreate"
-  | "partySupplierCreate";
+  | "partySupplierCreate"
+  | "crmNoteDelete"
+  | "crmNotePin"
+  | "crmConsentSet"
+  | "crmSegmentCreate"
+  | "crmSegmentUpdate"
+  | "crmSegmentArchive"
+  | "crmAutomationToggle";
 
 export interface ActionMeta {
   type: ActionType;
   endpoint: string;
-  method: "POST" | "PATCH" | "PUT";
+  method: "POST" | "PATCH" | "PUT" | "DELETE";
   label: string;
   wizardStep?: string;
   payloadHint: string;
@@ -936,6 +954,63 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ inventoryItemId: string /* از find_items در مد inventory */, code?: string /* خالی یعنی سیستم خودش بارکد قابل‌اسکن می‌سازد */, symbology?: "EAN13"|"UPC"|"internal", note?: string }',
     executor: "barcodeAssign",
+  },
+  "crm.note.delete": {
+    type: "crm.note.delete",
+    endpoint: "/api/crm/customers/[id]/notes",
+    method: "DELETE",
+    label: "حذف یادداشت مشتری",
+    payloadHint: "{ noteId: string /* از list_customer_notes */, customerId?: string /* گار نمایهٔ یادداشت — بخش ویرگی */ }",
+    executor: "crmNoteDelete",
+  },
+  "crm.note.pin": {
+    type: "crm.note.pin",
+    endpoint: "/api/crm/customers/[id]/notes",
+    method: "PATCH",
+    label: "سنجاق/برداشتن سنجاق یادداشت",
+    payloadHint: "{ noteId: string /* از list_customer_notes */, pinned: boolean, customerId?: string }",
+    executor: "crmNotePin",
+  },
+  "crm.consent.set": {
+    type: "crm.consent.set",
+    endpoint: "/api/parties/[id]/consent",
+    method: "POST",
+    label: "ثبت رضایت بازاریابی/پیامک — سابقه حقوقی دارد",
+    payloadHint:
+      '{ customerId: string /* از find_customers */, channel: "sms"|"email", granted: boolean, note?: string } — رویداد رضایت با ثبت actress ثبت می شود و رد بازگشت نیست، تغییر جدید یک رویداد تازه است',
+    executor: "crmConsentSet",
+  },
+  "crm.segment.create": {
+    type: "crm.segment.create",
+    endpoint: "/api/crm/segments",
+    method: "POST",
+    label: "ساخت بخش‌بندی مشتریان",
+    payloadHint: "{ name: string, description?: string, definition: { all?: [], any?: [] } /* قوانین بخش‌بندی از list_customer_segments ببینید */ }",
+    executor: "crmSegmentCreate",
+  },
+  "crm.segment.update": {
+    type: "crm.segment.update",
+    endpoint: "/api/crm/segments/[id]",
+    method: "PATCH",
+    label: "ویرایش بخش‌بندی (نام/توضیح/قواعد)",
+    payloadHint: "{ segmentId: string /* از list_customer_segments */, name?: string, description?: string, definition?: {...} }",
+    executor: "crmSegmentUpdate",
+  },
+  "crm.segment.archive": {
+    type: "crm.segment.archive",
+    endpoint: "/api/crm/segments/[id]",
+    method: "DELETE",
+    label: "بایگانی بخش‌بندی مشتریان",
+    payloadHint: "{ segmentId: string /* از list_customer_segments */ }",
+    executor: "crmSegmentArchive",
+  },
+  "crm.automation.toggle": {
+    type: "crm.automation.toggle",
+    endpoint: "/api/crm/automations/[id]",
+    method: "PATCH",
+    label: "فعال/غیرفعال‌کردن رُبات اتوماسیون CRM — روی همه مشتریان اثر دارد",
+    payloadHint: "{ automationId: string /* از list_crm_automations */, isActive: boolean }",
+    executor: "crmAutomationToggle",
   },
   "ar.receipt.record": {
     type: "ar.receipt.record",
@@ -2457,6 +2532,49 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             },
             additionalProperties: false,
           },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_customer_notes",
+          description:
+            "یادداشت‌های یک مشتری به ترتیب سنجاق‌دارها اول و بعد تازه‌ترین‌ها.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string", description: "شناسهٔ مشتری (از find_customers)" },
+            },
+            required: ["customerId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_activities",
+          description:
+            "فعالیت‌های CRM (تماس/جلسه/وظیفه) — قابل تنگ‌کردن به مشتری یا سرنخ معامله؛ فقط خواندنی.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string", description: "تنگ به یک مشتری، اختیاری" },
+              openOnly: { type: "boolean", description: "فقط انجام‌نشده‌ها" },
+              completedOnly: { type: "boolean", description: "فقط انجام‌شده‌ها" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_automations",
+          description:
+            "ربات‌های اتوماسیون CRM — ماشه (trigger)، اقدام و وضعیت فعالی. اجراهایشان (runs) از این ابزار جداست.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
         },
       },
   ];
