@@ -247,6 +247,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "priceList.delete": PERMISSIONS.menuEdit,
   "priceList.entries.save": PERMISSIONS.menuEdit,
   "sales.invoice.void": PERMISSIONS.ordersAmendClosed,
+  "website.order.status": PERMISSIONS.cmsContentManage,
   "priceList.quick_update": PERMISSIONS.menuEdit,
   "transfer.create": PERMISSIONS.inventoryAdjust,
   "transfer.ship": PERMISSIONS.inventoryAdjust,

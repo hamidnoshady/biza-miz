@@ -23,6 +23,7 @@ import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-ser
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
 import { MIN_REASON_LENGTH, MAX_REASON_LENGTH } from "./order-amendments";
 import { voidRetailInvoice, RetailInvoiceVoidError } from "./retail-invoice-void-service";
+import { updateCmsOrderStatus } from "./cms/website-service";
 import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
@@ -2643,6 +2644,19 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { moved } };
 };
 
+// ── Issue #883 package 2, batch R — website order status ───────────────────
+// The route is three lines of guard around this service; the service already
+// normalises every refusal to WebsiteResult codes, so the executor is a
+// pass-through by exact parity (status enum enforced service-side).
+const websiteOrderStatus: AutopilotExecutor = async (ctx) => {
+  const orderId = str(ctx.payload.orderId) ?? str(ctx.payload.id);
+  const status = str(ctx.payload.status);
+  if (!orderId || !status) return fail("invalid_payload");
+  const result = await updateCmsOrderStatus(ctx.businessId, orderId, status);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { order: { ...result.data } } };
+};
+
 // ── Issue #883 package 2, batch Q — retail invoice void ────────────────────
 // Mirrors POST /api/sales/invoices/[id]/void one-for-one: mandatory reason in
 // the amendment bounds, one chosen branch, the reversal service inside a
@@ -2997,6 +3011,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   priceListEntriesSave,
   priceListQuickUpdate,
   retailInvoiceVoid,
+  websiteOrderStatus,
   transferCreate,
   transferShip,
   transferReceive,

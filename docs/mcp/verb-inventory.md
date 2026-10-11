@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **113 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **105 write verbs**
-(**31** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **106 write verbs**
+(**32** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -235,6 +235,7 @@ visible only to connections consented for every branch) and **105 write verbs**
 | `write_website_post_update` | `website.post.update` | website | low | connection write_mode | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_website_product` | `website.product.upsert` | website | low | connection write_mode | `website.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_sales_invoice_void` | `sales.invoice.void` | pos | high | always approval queue (step-up) | `orders.amend_closed` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_website_order_status` | `website.order.status` | website | high | always approval queue (step-up) | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 
 ## Deliberate exclusions (not MCP verbs here by design)
 

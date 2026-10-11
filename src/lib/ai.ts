@@ -320,6 +320,8 @@ export type ActionType =
   // Batch Q — voiding a settled retail invoice (reversal posting + batch +
   // loyalty/commission unwind inside the service's own transaction).
   | "sales.invoice.void"
+  // Batch R — the site's order-status mutation (customer-facing money state).
+  | "website.order.status"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -357,6 +359,7 @@ export type ActionType =
 
 export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
+  | "websiteOrderStatus"
   | "menuItemPatch"
   | "stockCount"
   | "draftPurchase"
@@ -1286,6 +1289,14 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ updates: [{ priceListId, itemId /* از list_menu_items */, price: number|null /* null = حذف قیمت */, expectedVersion?: string /* version از list_price_list_entries برای تشخیص تداخل */ }] }',
     executor: "priceListEntriesSave",
+  },
+  "website.order.status": {
+    type: "website.order.status",
+    endpoint: "/api/cms/website/orders/[id]",
+    method: "PATCH",
+    label: "تغییر وضعیت سفارش سایت (pending/paid/cancelled/refunded) — تغییری مالیِ رو در رو به مشتری؛ سایت قلاب‌های خودش را برای موجودی اجرا می‌کند",
+    payloadHint: '{ orderId: string, status: "pending"|"paid"|"cancelled"|"refunded" }',
+    executor: "websiteOrderStatus",
   },
   "sales.invoice.void": {
     type: "sales.invoice.void",

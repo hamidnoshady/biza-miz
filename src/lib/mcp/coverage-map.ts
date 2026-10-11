@@ -503,7 +503,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Website / CMS",
     entity: "Website orders",
     routes: ["cms/website/orders"],
-    test: "integration/website.integration.test.ts",
+    ops: { lifecycle: ["website.order.status"] },
+    note: "orders are read on the connected site itself — this lane owns only the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock",
+    test: "integration/website-sync.integration.test.ts",
   },
   {
     id: "cms.woocommerce",

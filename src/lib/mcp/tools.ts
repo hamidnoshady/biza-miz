@@ -1635,6 +1635,26 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_website_order_status",
+    actionType: "website.order.status",
+    english:
+      "Change a website order's status (pending/paid/cancelled/refunded) — visible money state on the connected site; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        orderId: id("شناسهٔ سفارش سایت — از فهرست سفارش‌های خود سایت"),
+        status: {
+          type: "string",
+          enum: ["pending", "paid", "cancelled", "refunded"],
+          description: "وضعیت مقصد — همان چهار مقدار پذیرفتهٔ CMS",
+        },
+      },
+      required: ["orderId", "status"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_sales_invoice_void",
     actionType: "sales.invoice.void",
     english:

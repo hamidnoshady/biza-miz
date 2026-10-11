@@ -379,6 +379,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // batches and unwinds loyalty/commission. Explicit human approval each
   // time; the mandatory reason is enforced by the service, not the parser.
   { actionType: "sales.invoice.void", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  // Batch R — paid/refunded/cancelled is customer-facing money state on the
+  // connected site (the CMS's hooks settle stock); explicit approval every time.
+  { actionType: "website.order.status", kind: "write", app: "website", risk: "high", approval: "always_approve" },
 ];
 
 // ---------------------------------------------------------------------------
