@@ -13,13 +13,15 @@
  * `vehicles.cost_view` and the manager renders what it received, so a cashier's
  * browser never holds the owner's costs and margins even in a devtools panel.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { api, ErrorBox, Field, PrimaryButton, SecondaryButton, errorMessage, inputClass } from "../ui";
 import { IndustryManagerShell, type Runner, type ManagerTab } from "../industry-manager-shell";
 import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "../data-table";
 import { FilterChip, FilterChipRow, FilterToolbar, FilterToolbarSearch, SearchField } from "../filters";
-import { VEHICLE_STATE_LABELS, VEHICLE_CONDITION_LABELS, type VehicleState } from "@/lib/automotive";
+import { VEHICLE_STATE_LABELS, VEHICLE_CONDITION_LABELS, VEHICLE_STATES, type VehicleState } from "@/lib/automotive";
+import { VehicleDetailDialog } from "./vehicle-detail-dialog";
 import { formatJalali } from "@/lib/jalali";
 import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { JalaliDatePicker } from "../jalali-date-picker";
@@ -78,9 +80,27 @@ export interface VehicleListItemDto {
   soldPriceRial: number | null;
 }
 
+interface LocationOptionDto {
+  id: string;
+  name: string;
+}
+
+interface VehicleListResponseDto {
+  total: number;
+  vehicles: VehicleListItemDto[];
+  locations?: LocationOptionDto[];
+  activeLocationId?: string | null;
+  selectedLocationId?: string | null;
+  allBranches?: boolean;
+  error?: string;
+  message?: string;
+}
+
 interface OverviewDto {
   onDate: string;
   canSeeCost?: boolean;
+  error?: string;
+  message?: string;
   summary: {
     inStock: number;
     reserved: number;
@@ -103,17 +123,105 @@ function money(value: number | undefined | null): string {
   return value.toLocaleString("fa-IR");
 }
 
-export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
+function branchScopeParams(branchFilter: string): URLSearchParams {
+  const params = new URLSearchParams();
+  if (branchFilter === "all") params.set("allBranches", "1");
+  else if (branchFilter !== "active") params.set("locationId", branchFilter);
+  return params;
+}
+
+async function fetchVehiclePages(
+  baseParams: URLSearchParams,
+  signal: AbortSignal,
+): Promise<{ ok: boolean; status: number; aborted: boolean; data: VehicleListResponseDto }> {
+  const vehicles: VehicleListItemDto[] = [];
+  let offset = 0;
+  let page: { ok: boolean; status: number; aborted: boolean; data: VehicleListResponseDto } | null = null;
+  do {
+    const params = new URLSearchParams(baseParams);
+    params.set("limit", "500");
+    params.set("offset", String(offset));
+    page = await api<VehicleListResponseDto>(`/api/automotive/vehicles?${params.toString()}`, { signal });
+    if (!page.ok || page.aborted) return page;
+    const rows = page.data.vehicles ?? [];
+    vehicles.push(...rows);
+    offset += rows.length;
+    if (rows.length === 0 || offset >= page.data.total) break;
+  } while (true);
+  return page
+    ? { ...page, data: { ...page.data, vehicles } }
+    : { ok: true, status: 200, aborted: false, data: { total: 0, vehicles } };
+}
+
+export function AutomotiveManager({
+  canSeeCost,
+  canCreateVehicle,
+  canEditCost,
+  canOverrideMinPrice,
+  canEditVehicle,
+  canEditPrice,
+  canReserveVehicle,
+  canCancelReservation,
+  canSellVehicle,
+  canRecordCost,
+  canViewLeads,
+  canManageLeads,
+  canCreateCustomer,
+  canTransferVehicle,
+  canArchiveVehicle,
+  canViewMedia,
+  canManageMedia,
+  defaultVatPercent,
+}: {
+  canSeeCost: boolean;
+  canCreateVehicle: boolean;
+  canEditCost: boolean;
+  canOverrideMinPrice: boolean;
+  canEditVehicle: boolean;
+  canEditPrice: boolean;
+  canReserveVehicle: boolean;
+  canCancelReservation: boolean;
+  canSellVehicle: boolean;
+  canRecordCost: boolean;
+  canViewLeads: boolean;
+  canManageLeads: boolean;
+  canCreateCustomer: boolean;
+  canTransferVehicle: boolean;
+  canArchiveVehicle: boolean;
+  canViewMedia: boolean;
+  canManageMedia: boolean;
+  defaultVatPercent: number;
+}) {
   const [section, setSection] = useState<SectionKey>("overview");
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [overview, setOverview] = useState<OverviewDto | null>(null);
   const [vehicles, setVehicles] = useState<VehicleListItemDto[]>([]);
+  const [stockTotal, setStockTotal] = useState(0);
+  const [workflowVehicles, setWorkflowVehicles] = useState<VehicleListItemDto[]>([]);
+  const [locations, setLocations] = useState<LocationOptionDto[]>([]);
+  const [activeLocationId, setActiveLocationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [workflowLoading, setWorkflowLoading] = useState(true);
+  const [workflowError, setWorkflowError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
 
   const [search, setSearch] = useState("");
   const [condition, setCondition] = useState<"all" | "new" | "used">("all");
   const [stateFilter, setStateFilter] = useState<"available" | "reserved" | "sold" | "all">("available");
+  const [branchFilter, setBranchFilter] = useState("active");
+  const [makeFilter, setMakeFilter] = useState("");
+  const [modelFilter, setModelFilter] = useState("");
+  const [modelYearFrom, setModelYearFrom] = useState("");
+  const [modelYearTo, setModelYearTo] = useState("");
+  const [minPriceRial, setMinPriceRial] = useState("");
+  const [maxPriceRial, setMaxPriceRial] = useState("");
+  const [minMileageKm, setMinMileageKm] = useState("");
+  const [maxMileageKm, setMaxMileageKm] = useState("");
+  const [minAgeDays, setMinAgeDays] = useState("");
+  const [maxAgeDays, setMaxAgeDays] = useState("");
+  const [pageIndex, setPageIndex] = useState(0);
+  const pageSize = 25;
 
   const run: Runner = useCallback(async (fn) => {
     const result = await fn();
@@ -126,43 +234,124 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
     return true;
   }, []);
 
+  function updateListFilter(setter: Dispatch<SetStateAction<string>>, value: string) {
+    setter(value);
+    setPageIndex(0);
+  }
+
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
-    const params = new URLSearchParams();
-    if (search.trim()) params.set("q", search.trim());
-    if (condition !== "all") params.set("condition", condition);
-    if (stateFilter === "available") params.set("states", "draft,acquired,in_stock");
-    else if (stateFilter !== "all") params.set("states", stateFilter);
+
+    const overviewParams = branchScopeParams(branchFilter);
+    const stockParams = branchScopeParams(branchFilter);
+    if (search.trim()) stockParams.set("q", search.trim());
+    if (condition !== "all") stockParams.set("condition", condition);
+    if (stateFilter === "available") stockParams.set("states", "draft,acquired,in_stock");
+    else if (stateFilter !== "all") stockParams.set("states", stateFilter);
+    if (makeFilter.trim()) stockParams.set("make", makeFilter.trim());
+    if (modelFilter.trim()) stockParams.set("model", modelFilter.trim());
+    for (const [key, value] of [
+      ["modelYearFrom", modelYearFrom], ["modelYearTo", modelYearTo],
+      ["minPriceRial", minPriceRial], ["maxPriceRial", maxPriceRial],
+      ["minMileageKm", minMileageKm], ["maxMileageKm", maxMileageKm],
+      ["minAgeDays", minAgeDays], ["maxAgeDays", maxAgeDays],
+    ]) {
+      if (value.trim()) stockParams.set(key, value.trim());
+    }
+    stockParams.set("limit", String(pageSize));
+    stockParams.set("offset", String(pageIndex * pageSize));
+    const overviewUrl = `/api/automotive/overview${overviewParams.size ? `?${overviewParams.toString()}` : ""}`;
 
     void (async () => {
       const [overviewResult, stockResult] = await Promise.all([
-        api<OverviewDto>("/api/automotive/overview"),
-        api<{ total: number; vehicles: VehicleListItemDto[] }>(`/api/automotive/vehicles?${params.toString()}`),
+        api<OverviewDto>(overviewUrl, { signal: controller.signal }),
+        api<VehicleListResponseDto>(`/api/automotive/vehicles?${stockParams.toString()}`, { signal: controller.signal }),
       ]);
-      if (cancelled) return;
+      if (cancelled || overviewResult.aborted || stockResult.aborted) return;
       if (overviewResult.ok) setOverview(overviewResult.data);
-      if (stockResult.ok) setVehicles(stockResult.data.vehicles ?? []);
-      if (!overviewResult.ok && !stockResult.ok) setError(errorMessage(stockResult.data as never) || "خطا در دریافت داده‌ها");
+      if (stockResult.ok) {
+        setVehicles(stockResult.data.vehicles ?? []);
+        setStockTotal(stockResult.data.total ?? 0);
+        setLocations(stockResult.data.locations ?? []);
+        setActiveLocationId(stockResult.data.activeLocationId ?? null);
+        const nextTotal = stockResult.data.total ?? 0;
+        if (nextTotal === 0 && pageIndex !== 0) setPageIndex(0);
+        else if (pageIndex > 0 && pageIndex * pageSize >= nextTotal) {
+          setPageIndex(Math.max(0, Math.ceil(nextTotal / pageSize) - 1));
+        }
+      }
+      const failures = [
+        !overviewResult.ok
+          ? `نمای کلی: ${errorMessage(overviewResult.data.error) || overviewResult.data.message || overviewResult.data.error || "خطا در دریافت داده‌ها"}`
+          : null,
+        !stockResult.ok
+          ? `موجودی: ${errorMessage(stockResult.data.error) || stockResult.data.message || stockResult.data.error || "خطا در دریافت داده‌ها"}`
+          : null,
+      ].filter((message): message is string => message !== null);
+      setError(failures.join(" · "));
       setLoading(false);
     })();
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [search, condition, stateFilter, reloadKey]);
+  }, [
+    search, condition, stateFilter, branchFilter, makeFilter, modelFilter,
+    modelYearFrom, modelYearTo, minPriceRial, maxPriceRial,
+    minMileageKm, maxMileageKm, minAgeDays, maxAgeDays, pageIndex, reloadKey,
+  ]);
+
+  // Workflow pickers have their own unfiltered, paginated dataset. Searching or
+  // paging the stock table can therefore never remove a vehicle from a sale,
+  // reservation, expense, or CRM selector.
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    setWorkflowLoading(true);
+    const params = new URLSearchParams({ states: VEHICLE_STATES.join(",") });
+    void (async () => {
+      const result = await fetchVehiclePages(params, controller.signal);
+      if (cancelled || result.aborted) return;
+      if (result.ok) {
+        setWorkflowVehicles(result.data.vehicles ?? []);
+        setWorkflowError("");
+      } else {
+        setWorkflowVehicles([]);
+        setWorkflowError(errorMessage(result.data.error) || result.data.message || result.data.error || "خطا در دریافت خودروهای گردش کار");
+      }
+      setWorkflowLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [reloadKey]);
 
   // §16's "sold this month" — the *same-month* count, not the lifetime `sold`
   // total the summary also carries.
   const soldThisMonth = useMemo(() => overview?.summary.soldThisMonth ?? 0, [overview]);
+  const shellError = [error, workflowError ? `گردش کار خودرو: ${workflowError}` : ""].filter(Boolean).join(" · ");
+  const pageCount = Math.max(1, Math.ceil(stockTotal / pageSize));
+  const activeLocationName = locations.find(({ id }) => id === activeLocationId)?.name;
+  const visibleTabs = useMemo(
+    () => TABS.filter(({ key }) =>
+      (key !== "acquire" || canCreateVehicle) &&
+      (key !== "leads" || canViewLeads) &&
+      (key !== "expenses" || canRecordCost),
+    ),
+    [canCreateVehicle, canViewLeads, canRecordCost],
+  );
 
   return (
     <IndustryManagerShell
       idPrefix="automotive"
       navLabel="بخش‌های نمایشگاه"
-      tabs={TABS}
+      tabs={visibleTabs}
       activeTab={section}
       onTabChange={setSection}
-      error={error}
+      error={shellError}
     >
       {section === "overview" ? (
         <div role="tabpanel" id="automotive-panel-overview" aria-labelledby="automotive-tab-overview" className="space-y-4">
@@ -190,12 +379,12 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
                       ? "—"
                       : `${overview.summary.averageMarginThisMonth.toLocaleString("fa-IR")}٪`
                   }
-                />
+               />
               ) : null}
               <KpiCard
                 label="میانگین روز در انبار"
                 value={overview?.summary.averageAgeDays == null ? "—" : String(overview.summary.averageAgeDays)}
-              />
+             />
               {canSeeCost ? (
                 <>
                   <KpiCard label="ارزش موجودی (ریال)" value={money(overview?.summary.stockValueRial)} />
@@ -221,12 +410,27 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
       {section === "stock" ? (
         <div role="tabpanel" id="automotive-panel-stock" aria-labelledby="automotive-tab-stock" className="space-y-4">
           <FilterToolbar>
-            <FilterToolbarSearch
-              value={search}
-              onChange={setSearch}
-              label="جست‌وجوی خودرو"
-              placeholder="شماره شاسی، VIN، شماره انبار، پلاک، برند/مدل یا نام مشتری"
-            />
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <FilterToolbarSearch
+                value={search}
+                onChange={(value) => updateListFilter(setSearch, value)}
+                label="جست‌وجوی خودرو"
+                placeholder="شماره شاسی، VIN، شماره انبار، پلاک، برند/مدل یا نام مشتری"
+             />
+              <Field label="شعبهٔ موجودی">
+                <select
+                  className={inputClass}
+                  value={branchFilter}
+                  onChange={(event) => updateListFilter(setBranchFilter, event.target.value)}
+                >
+                  <option value="active">شعبهٔ فعال{activeLocationName ? ` — ${activeLocationName}` : ""}</option>
+                  <option value="all">همهٔ شعبه‌های مجاز</option>
+                  {locations.map((branch) => (
+                    <option key={branch.id} value={branch.id}>{branch.name}</option>
+                  ))}
+                </select>
+              </Field>
+            </div>
             <FilterChipRow label="وضعیت">
               {(
                 [
@@ -236,7 +440,11 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
                   ["all", "همه"],
                 ] as const
               ).map(([value, label]) => (
-                <FilterChip key={value} selected={stateFilter === value} onClick={() => setStateFilter(value)}>
+                <FilterChip
+                  key={value}
+                  selected={stateFilter === value}
+                  onClick={() => { setPageIndex(0); setStateFilter(value); }}
+                >
                   {label}
                 </FilterChip>
               ))}
@@ -249,33 +457,69 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
                   ["used", "کارکرده"],
                 ] as const
               ).map(([value, label]) => (
-                <FilterChip key={value} selected={condition === value} onClick={() => setCondition(value)}>
+                <FilterChip
+                  key={value}
+                  selected={condition === value}
+                  onClick={() => { setPageIndex(0); setCondition(value); }}
+                >
                   {label}
                 </FilterChip>
               ))}
             </FilterChipRow>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <Field label="برند">
+                <input className={inputClass} value={makeFilter} onChange={(event) => updateListFilter(setMakeFilter, event.target.value)} />
+              </Field>
+              <Field label="مدل">
+                <input className={inputClass} value={modelFilter} onChange={(event) => updateListFilter(setModelFilter, event.target.value)} />
+              </Field>
+              <Field label="سال ساخت از">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={modelYearFrom} onChange={(event) => updateListFilter(setModelYearFrom, event.target.value)} />
+              </Field>
+              <Field label="سال ساخت تا">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={modelYearTo} onChange={(event) => updateListFilter(setModelYearTo, event.target.value)} />
+              </Field>
+              <Field label="حداقل قیمت فروش (ریال)">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={minPriceRial} onChange={(event) => updateListFilter(setMinPriceRial, event.target.value)} />
+              </Field>
+              <Field label="حداکثر قیمت فروش (ریال)">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={maxPriceRial} onChange={(event) => updateListFilter(setMaxPriceRial, event.target.value)} />
+              </Field>
+              <Field label="حداقل کارکرد (کیلومتر)">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={minMileageKm} onChange={(event) => updateListFilter(setMinMileageKm, event.target.value)} />
+              </Field>
+              <Field label="حداکثر کارکرد (کیلومتر)">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={maxMileageKm} onChange={(event) => updateListFilter(setMaxMileageKm, event.target.value)} />
+              </Field>
+              <Field label="حداقل روز در انبار">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={minAgeDays} onChange={(event) => updateListFilter(setMinAgeDays, event.target.value)} />
+              </Field>
+              <Field label="حداکثر روز در انبار">
+                <PersianNumberInput className={inputClass} inputMode="numeric" value={maxAgeDays} onChange={(event) => updateListFilter(setMaxAgeDays, event.target.value)} />
+              </Field>
+            </div>
           </FilterToolbar>
 
           {loading ? (
             <SectionCardSkeleton />
-          ) : vehicles.length === 0 ? (
+          ) : stockTotal === 0 ? (
             <EmptyState title="خودرویی یافت نشد">با این فیلترها خودرویی در موجودی نیست.</EmptyState>
           ) : (
-            <DataTable caption="موجودی خودرو">
+            <div className="space-y-3">
+              <DataTable caption="موجودی خودرو">
               <DataTableHead>
-                <DataTableRow>
-                  <Th>شماره انبار</Th>
-                  <Th>خودرو</Th>
-                  <Th>نوع</Th>
-                  <Th>کارکرد</Th>
-                  {canSeeCost ? <Th>بهای خرید</Th> : null}
-                  {canSeeCost ? <Th>بهای تمام‌شده</Th> : null}
-                  <Th>قیمت فروش</Th>
-                  {canSeeCost ? <Th>حاشیهٔ بالقوه</Th> : null}
-                  <Th>روز در انبار</Th>
-                  <Th>وضعیت</Th>
-                  <Th>شعبه</Th>
-                </DataTableRow>
+                <Th>شماره انبار</Th>
+                <Th>خودرو</Th>
+                <Th>نوع</Th>
+                <Th>کارکرد</Th>
+                {canSeeCost ? <Th>بهای خرید</Th> : null}
+                {canSeeCost ? <Th>بهای تمام‌شده</Th> : null}
+                <Th>قیمت فروش</Th>
+                {canSeeCost ? <Th>حاشیهٔ بالقوه</Th> : null}
+                <Th>روز در انبار</Th>
+                <Th>وضعیت</Th>
+                <Th>شعبه</Th>
+                <Th>عملیات</Th>
               </DataTableHead>
               <DataTableBody>
                 {vehicles.map((vehicle) => (
@@ -301,17 +545,38 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
                       </StatusBadge>
                     </Td>
                     <Td>{vehicle.locationName ?? "—"}</Td>
+                    <Td>
+                      <SecondaryButton type="button" onClick={() => setSelectedVehicleId(vehicle.serialId)}>
+                        جزئیات
+                        <span className="sr-only"> خودروی {vehicle.stockNumber}</span>
+                      </SecondaryButton>
+                    </Td>
                   </DataTableRow>
                 ))}
               </DataTableBody>
-            </DataTable>
+              </DataTable>
+              <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                <p aria-live="polite" className="text-muted-foreground">
+                  نمایش {Math.min(stockTotal, pageIndex * pageSize + 1).toLocaleString("fa-IR")} تا {Math.min(stockTotal, (pageIndex + 1) * pageSize).toLocaleString("fa-IR")} از {stockTotal.toLocaleString("fa-IR")} خودرو
+                </p>
+                <div className="flex items-center gap-2">
+                  <SecondaryButton type="button" disabled={loading || pageIndex === 0} onClick={() => setPageIndex((page) => Math.max(0, page - 1))}>
+                    قبلی
+                  </SecondaryButton>
+                  <span aria-current="page" className="min-w-20 text-center">صفحهٔ {(pageIndex + 1).toLocaleString("fa-IR")} از {pageCount.toLocaleString("fa-IR")}</span>
+                  <SecondaryButton type="button" disabled={loading || pageIndex + 1 >= pageCount} onClick={() => setPageIndex((page) => Math.min(pageCount - 1, page + 1))}>
+                    بعدی
+                  </SecondaryButton>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       ) : null}
 
       {section === "acquire" ? (
         <div role="tabpanel" id="automotive-panel-acquire" aria-labelledby="automotive-tab-acquire">
-          <AcquireSection run={run} />
+          <AcquireSection run={run} canEditCost={canEditCost} canOverrideMinPrice={canOverrideMinPrice} />
         </div>
       ) : null}
 
@@ -321,26 +586,63 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
           id="automotive-panel-reservations"
           aria-labelledby="automotive-tab-reservations"
         >
-          <ReservationsSection vehicles={vehicles} run={run} />
+          <ReservationsSection
+            vehicles={workflowVehicles}
+            vehiclesLoading={workflowLoading}
+            canReserve={canReserveVehicle}
+            canCancel={canCancelReservation}
+            run={run}
+         />
         </div>
       ) : null}
 
       {section === "sales" ? (
         <div role="tabpanel" id="automotive-panel-sales" aria-labelledby="automotive-tab-sales">
-          <SalesSection vehicles={vehicles} canSeeCost={canSeeCost} run={run} />
+          <SalesSection
+            vehicles={workflowVehicles}
+            vehiclesLoading={workflowLoading}
+            canSeeCost={canSeeCost}
+            canOverrideMinPrice={canOverrideMinPrice}
+            canSell={canSellVehicle}
+            canCreateCustomer={canCreateCustomer}
+            defaultVatPercent={defaultVatPercent}
+            run={run}
+         />
         </div>
       ) : null}
 
       {section === "leads" ? (
         <div role="tabpanel" id="automotive-panel-leads" aria-labelledby="automotive-tab-leads">
-          <LeadsSection vehicles={vehicles} run={run} />
+          <LeadsSection
+            vehicles={workflowVehicles}
+            vehiclesLoading={workflowLoading}
+            canManage={canManageLeads}
+            run={run}
+         />
         </div>
       ) : null}
 
       {section === "expenses" ? (
         <div role="tabpanel" id="automotive-panel-expenses" aria-labelledby="automotive-tab-expenses">
-          <ExpensesSection vehicles={vehicles} run={run} />
+          <ExpensesSection vehicles={workflowVehicles} vehiclesLoading={workflowLoading} canRecord={canRecordCost} run={run} />
         </div>
+      ) : null}
+      {selectedVehicleId ? (
+        <VehicleDetailDialog
+          serialId={selectedVehicleId}
+          activeLocationId={activeLocationId}
+          locations={locations}
+          canSeeCost={canSeeCost}
+          canEditVehicle={canEditVehicle}
+          canEditPrice={canEditPrice}
+          canOverrideMinPrice={canOverrideMinPrice}
+          canTransferVehicle={canTransferVehicle}
+          canArchiveVehicle={canArchiveVehicle}
+          canViewMedia={canViewMedia}
+          canManageMedia={canManageMedia}
+          onClose={() => setSelectedVehicleId(null)}
+          onChanged={() => setReloadKey((key) => key + 1)}
+       />
       ) : null}
     </IndustryManagerShell>
   );
@@ -365,7 +667,7 @@ const SETTLEMENTS = [
   { value: "opening_equity", label: "تراز افتتاحیه" },
 ];
 
-function AcquireSection({ run }: { run: Runner }) {
+function AcquireSection({ run, canEditCost, canOverrideMinPrice }: { run: Runner; canEditCost: boolean; canOverrideMinPrice: boolean }) {
   const [make, setMake] = useState("");
   const [model, setModel] = useState("");
   const [trim, setTrim] = useState("");
@@ -402,14 +704,14 @@ function AcquireSection({ run }: { run: Runner }) {
           stockNumber: stockNumber || null,
           mileageKm: mileageKm ? Number(mileageKm) : null,
           priorOwners: priorOwners ? Number(priorOwners) : null,
-          acquisition: {
+          acquisition: canEditCost ? {
             date: acquisitionDate,
             source: acquisitionSource,
             costRial: Number(purchaseCost || 0),
             settlement,
-          },
+          } : null,
           askingPriceRial: Number(askingPrice || 0),
-          minimumPriceRial: minimumPrice ? Number(minimumPrice) : null,
+          minimumPriceRial: canOverrideMinPrice && minimumPrice ? Number(minimumPrice) : null,
         }),
       });
       if (result.ok) {
@@ -464,7 +766,7 @@ function AcquireSection({ run }: { run: Runner }) {
             value={stockNumber}
             onChange={(event) => setStockNumber(event.target.value)}
             placeholder="خالی بگذارید تا خودکار شماره‌گذاری شود"
-          />
+         />
         </Field>
         <Field label="پلاک">
           <input className={inputClass} value={plateNumber} onChange={(event) => setPlateNumber(event.target.value)} />
@@ -480,47 +782,47 @@ function AcquireSection({ run }: { run: Runner }) {
                 inputMode="numeric"
                 value={priorOwners}
                 onChange={(event) => setPriorOwners(event.target.value)}
-              />
+             />
             </Field>
           </>
         ) : null}
-        <Field label="نحوهٔ خرید">
-          <select className={inputClass} value={acquisitionSource} onChange={(event) => setAcquisitionSource(event.target.value)}>
-            {ACQUISITION_SOURCES.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="تاریخ خرید (YYYY-MM-DD)">
-          <input className={inputClass} value={acquisitionDate} onChange={(event) => setAcquisitionDate(event.target.value)} />
-        </Field>
-        <Field label="بهای خرید (ریال)">
-          <input className={inputClass} inputMode="numeric" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} />
-        </Field>
-        <Field label="طرف حساب پرداخت">
-          <select className={inputClass} value={settlement} onChange={(event) => setSettlement(event.target.value)}>
-            {SETTLEMENTS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </Field>
+        {canEditCost ? (
+          <>
+            <Field label="نحوهٔ خرید">
+              <select className={inputClass} value={acquisitionSource} onChange={(event) => setAcquisitionSource(event.target.value)}>
+                {ACQUISITION_SOURCES.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </Field>
+            <Field as="div" label="تاریخ خرید">
+              <JalaliDatePicker value={acquisitionDate} onChange={setAcquisitionDate} ariaLabel="تاریخ خرید خودرو" />
+            </Field>
+            <Field label="بهای خرید (ریال)">
+              <PersianNumberInput className={inputClass} inputMode="numeric" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} />
+            </Field>
+            <Field label="طرف حساب پرداخت">
+              <select className={inputClass} value={settlement} onChange={(event) => setSettlement(event.target.value)}>
+                {SETTLEMENTS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </Field>
+          </>
+        ) : (
+          <p className="self-center text-xs text-muted-foreground">خودرو به‌صورت پیش‌نویس ثبت می‌شود؛ ثبت خرید و بهای آن به دسترسی مستقل «ویرایش بهای خودرو» نیاز دارد.</p>
+        )}
         <Field label="قیمت فروش (ریال)">
           <input className={inputClass} inputMode="numeric" value={askingPrice} onChange={(event) => setAskingPrice(event.target.value)} />
         </Field>
-        <Field label="حداقل قیمت (ریال)">
-          <input className={inputClass} inputMode="numeric" value={minimumPrice} onChange={(event) => setMinimumPrice(event.target.value)} />
-        </Field>
+        {canOverrideMinPrice ? <Field label="حداقل قیمت (ریال)"><PersianNumberInput className={inputClass} inputMode="numeric" value={minimumPrice} onChange={(event) => setMinimumPrice(event.target.value)} /></Field> : null}
       </div>
       <div className="mt-4 flex items-center gap-2">
         <PrimaryButton onClick={submit} disabled={busy || !make.trim() || !model.trim()}>
           {busy ? "در حال ثبت…" : "ثبت خودرو"}
         </PrimaryButton>
         <span className="text-xs text-muted-foreground">
-          بهای تمام‌شدهٔ مؤثر = بهای خرید + هزینه‌های سرمایه‌ای خودرو.
+          {canEditCost ? "بهای تمام‌شدهٔ مؤثر = بهای خرید + هزینه‌های سرمایه‌ای خودرو." : "ثبت خودرو بدون معاملهٔ خرید، آن را پیش‌نویس نگه می‌دارد تا خرید با دسترسی مالی ثبت شود."}
         </span>
       </div>
     </SectionCard>
@@ -542,7 +844,7 @@ const EXPENSE_CATEGORIES = [
   { value: "other", label: "سایر" },
 ];
 
-function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: Runner }) {
+function ExpensesSection({ vehicles, vehiclesLoading, canRecord, run }: { vehicles: VehicleListItemDto[]; vehiclesLoading: boolean; canRecord: boolean; run: Runner }) {
   const [serialId, setSerialId] = useState("");
   const [category, setCategory] = useState("repair");
   const [posting, setPosting] = useState<"capitalized" | "period_expense">("capitalized");
@@ -554,6 +856,7 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
   const [busy, setBusy] = useState(false);
 
   const selected = vehicles.find((vehicle) => vehicle.serialId === serialId);
+  if (!canRecord) return null;
 
   async function submit() {
     if (!serialId) return;
@@ -588,8 +891,8 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
     <SectionCard title="هزینهٔ خودرو" description="سرمایه‌ای یا دوره‌ای">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="خودرو">
-          <select className={inputClass} value={serialId} onChange={(event) => setSerialId(event.target.value)}>
-            <option value="">— انتخاب خودرو —</option>
+          <select className={inputClass} value={serialId} disabled={vehiclesLoading} onChange={(event) => setSerialId(event.target.value)}>
+            <option value="">{vehiclesLoading ? "در حال دریافت خودروها…" : "— انتخاب خودرو —"}</option>
             {vehicles.map((vehicle) => (
               <option key={vehicle.serialId} value={vehicle.serialId}>
                 {vehicle.stockNumber} — {vehicle.displayName}
@@ -714,9 +1017,10 @@ const DEPOSIT_METHODS = [
   { value: "online", label: "آنلاین" },
 ];
 
-function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: Runner }) {
+function ReservationsSection({ vehicles, vehiclesLoading, canReserve, canCancel, run }: { vehicles: VehicleListItemDto[]; vehiclesLoading: boolean; canReserve: boolean; canCancel: boolean; run: Runner }) {
   const [reservations, setReservations] = useState<VehicleReservationDto[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
 
   const [serialId, setSerialId] = useState("");
@@ -735,9 +1039,14 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
     let cancelled = false;
     setLoading(true);
     void (async () => {
-      const result = await api<{ reservations: VehicleReservationDto[] }>("/api/automotive/reservations");
+      const result = await api<{ reservations: VehicleReservationDto[]; error?: string; message?: string }>("/api/automotive/reservations");
       if (cancelled) return;
-      if (result.ok) setReservations(result.data.reservations ?? []);
+      if (result.ok) {
+        setReservations(result.data.reservations ?? []);
+        setLoadError("");
+      } else {
+        setLoadError(errorMessage(result.data.error) || result.data.message || result.data.error || "خطا در دریافت رزروها");
+      }
       setLoading(false);
     })();
     return () => {
@@ -801,7 +1110,7 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
 
   return (
     <div className="space-y-4">
-      <SectionCard title="رزرو خودرو برای مشتری" description="یک خودرو، یک مشتری، تا یک تاریخ">
+      {canReserve ? <SectionCard title="رزرو خودرو برای مشتری" description="یک خودرو، یک مشتری، تا یک تاریخ">
         <p className="text-xs leading-5 text-muted-foreground">
           خودروی رزروشده تا وقتی رزرو فعال است به نام مشتری دیگری فروخته نمی‌شود؛ ودیعهٔ دریافتی به حساب
           «پیش‌دریافت از مشتری» می‌رود (نه درآمد) و هنگام فروش به همان مشتری از فاکتور کسر می‌شود. رزروی که
@@ -809,8 +1118,8 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
         </p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Field label="خودرو">
-            <select className={inputClass} value={serialId} onChange={(event) => setSerialId(event.target.value)}>
-              <option value="">— انتخاب خودرو —</option>
+            <select className={inputClass} value={serialId} disabled={vehiclesLoading} onChange={(event) => setSerialId(event.target.value)}>
+              <option value="">{vehiclesLoading ? "در حال دریافت خودروها…" : "— انتخاب خودرو —"}</option>
               {reservable.map((vehicle) => (
                 <option key={vehicle.serialId} value={vehicle.serialId}>
                   {vehicle.stockNumber} — {vehicle.displayName}
@@ -831,7 +1140,7 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
               placeholder="18:00"
               value={expiresAtTime}
               onChange={(event) => setExpiresAtTime(event.target.value)}
-            />
+           />
           </Field>
           <Field label="ودیعه (ریال)">
             <input
@@ -839,7 +1148,7 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
               inputMode="numeric"
               value={deposit}
               onChange={(event) => setDeposit(event.target.value.replace(/[^0-9]/g, ""))}
-            />
+           />
           </Field>
           <Field label="روش دریافت ودیعه">
             <select
@@ -867,7 +1176,7 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
                 type="checkbox"
                 checked={depositRefundable}
                 onChange={(event) => setDepositRefundable(event.target.checked)}
-              />
+             />
               ودیعه در صورت لغو به مشتری برگردد
             </label>
           </Field>
@@ -880,9 +1189,10 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
             <span className="text-xs text-muted-foreground">خودروی قابل رزروی در این شعبه موجود نیست.</span>
           ) : null}
         </div>
-      </SectionCard>
+      </SectionCard> : null}
 
       <SectionCard title="رزروهای فعال" description={`${active.length.toLocaleString("fa-IR")} رزرو باز`}>
+        {loadError ? <ErrorBox>{loadError}</ErrorBox> : null}
         {loading ? (
           <SectionCardSkeleton />
         ) : active.length === 0 ? (
@@ -890,14 +1200,12 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
         ) : (
           <DataTable caption="رزروهای فعال">
             <DataTableHead>
-              <DataTableRow>
-                <Th>خودرو</Th>
-                <Th>مشتری</Th>
-                <Th>تا تاریخ</Th>
-                <Th>ودیعه</Th>
-                <Th>استرداد</Th>
-                <Th>آزادسازی</Th>
-              </DataTableRow>
+              <Th>خودرو</Th>
+              <Th>مشتری</Th>
+              <Th>تا تاریخ</Th>
+              <Th>ودیعه</Th>
+              <Th>استرداد</Th>
+              {canCancel ? <Th>آزادسازی</Th> : null}
             </DataTableHead>
             <DataTableBody>
               {active.map((reservation) => (
@@ -926,24 +1234,27 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
                       {HOLD_STATUS_LABELS[reservation.status]}
                     </StatusBadge>
                   </Td>
-                  <Td>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        className={`${inputClass} sm:max-w-xs`}
-                        placeholder="دلیل آزادسازی"
-                        value={releaseReason[reservation.id] ?? ""}
-                        onChange={(event) =>
-                          setReleaseReason((map) => ({ ...map, [reservation.id]: event.target.value }))
-                        }
-                      />
-                      <SecondaryButton
-                        onClick={() => release(reservation.id)}
-                        disabled={busy || !(releaseReason[reservation.id] ?? "").trim()}
-                      >
-                        آزادسازی
-                      </SecondaryButton>
-                    </div>
-                  </Td>
+                  {canCancel ? (
+                    <Td>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          className={`${inputClass} sm:max-w-xs`}
+                          aria-label={`دلیل آزادسازی رزرو ${reservation.stockNumber}`}
+                          placeholder="دلیل آزادسازی"
+                          value={releaseReason[reservation.id] ?? ""}
+                          onChange={(event) =>
+                            setReleaseReason((map) => ({ ...map, [reservation.id]: event.target.value }))
+                          }
+                       />
+                        <SecondaryButton
+                          onClick={() => release(reservation.id)}
+                          disabled={busy || !(releaseReason[reservation.id] ?? "").trim()}
+                        >
+                          آزادسازی
+                        </SecondaryButton>
+                      </div>
+                    </Td>
+                  ) : null}
                 </DataTableRow>
               ))}
             </DataTableBody>
@@ -959,13 +1270,11 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
         ) : (
           <DataTable caption="تاریخچهٔ رزروها">
             <DataTableHead>
-              <DataTableRow>
-                <Th>خودرو</Th>
-                <Th>مشتری</Th>
-                <Th>وضعیت</Th>
-                <Th>ودیعه</Th>
-                <Th>دلیل آزادسازی</Th>
-              </DataTableRow>
+              <Th>خودرو</Th>
+              <Th>مشتری</Th>
+              <Th>وضعیت</Th>
+              <Th>ودیعه</Th>
+              <Th>دلیل آزادسازی</Th>
             </DataTableHead>
             <DataTableBody>
               {reservations
@@ -1015,22 +1324,30 @@ function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]
  * out the hard way.
  */
 
-const VAT_RATES = [0, 6, 9, 10];
-
 function SalesSection({
   vehicles,
+  vehiclesLoading,
   canSeeCost,
+  canOverrideMinPrice,
+  canSell,
+  canCreateCustomer,
+  defaultVatPercent,
   run,
 }: {
   vehicles: VehicleListItemDto[];
+  vehiclesLoading: boolean;
   canSeeCost: boolean;
+  canOverrideMinPrice: boolean;
+  canSell: boolean;
+  canCreateCustomer: boolean;
+  defaultVatPercent: number;
   run: Runner;
 }) {
   const [serialId, setSerialId] = useState("");
   const [customer, setCustomer] = useState<PickerCustomer | null>(null);
   const [price, setPrice] = useState("");
   const [discount, setDiscount] = useState("");
-  const [vatPercent, setVatPercent] = useState(9);
+  const vatPercent = defaultVatPercent;
   const [tenderMethod, setTenderMethod] = useState<"cash" | "bank" | "credit">("cash");
   const [override, setOverride] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1051,8 +1368,7 @@ function SalesSection({
   const depositApplied = Math.min(selected?.reservedDepositRial ?? 0, total);
   const dueNow = total - depositApplied;
 
-  const belowFloor =
-    selected?.minimumPriceRial != null && priceRial < selected.minimumPriceRial && discountRial === 0;
+  const belowFloor = selected?.minimumPriceRial != null && net < selected.minimumPriceRial;
 
   async function submit() {
     if (!selected) return;
@@ -1076,7 +1392,7 @@ function SalesSection({
                 overrideMinPrice: override,
               },
             ],
-            tenders: [{ method: tenderMethod, amount: dueNow }],
+            tenders: dueNow > 0 ? [{ method: tenderMethod, amount: dueNow }] : [],
           }),
         },
       );
@@ -1112,12 +1428,13 @@ function SalesSection({
 
   return (
     <div className="space-y-4">
-      <SectionCard title="فروش خودرو" description="فاکتور خرده‌فروشی با ردیف خودرو">
+      {canSell ? <SectionCard title="فروش خودرو" description="فاکتور خرده‌فروشی با ردیف خودرو">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Field label="خودرو">
             <select
               className={inputClass}
               value={serialId}
+              disabled={vehiclesLoading}
               onChange={(event) => {
                 setSerialId(event.target.value);
                 const next = sellable.find((vehicle) => vehicle.serialId === event.target.value);
@@ -1129,7 +1446,7 @@ function SalesSection({
                 }
               }}
             >
-              <option value="">— انتخاب خودرو —</option>
+              <option value="">{vehiclesLoading ? "در حال دریافت خودروها…" : "— انتخاب خودرو —"}</option>
               {sellable.map((vehicle) => (
                 <option key={vehicle.serialId} value={vehicle.serialId}>
                   {vehicle.stockNumber} — {vehicle.displayName}
@@ -1138,7 +1455,7 @@ function SalesSection({
             </select>
           </Field>
           <Field label="مشتری">
-            <CustomerPicker customer={customer} onChange={setCustomer} idPrefix="automotive-sale" />
+            <CustomerPicker customer={customer} onChange={setCustomer} idPrefix="automotive-sale" canCreate={canCreateCustomer} />
           </Field>
           <Field label="مبلغ خودرو (ریال)">
             <input
@@ -1146,7 +1463,7 @@ function SalesSection({
               inputMode="numeric"
               value={price}
               onChange={(event) => setPrice(event.target.value.replace(/[^0-9]/g, ""))}
-            />
+           />
           </Field>
           <Field label="تخفیف (ریال)">
             <input
@@ -1154,20 +1471,13 @@ function SalesSection({
               inputMode="numeric"
               value={discount}
               onChange={(event) => setDiscount(event.target.value.replace(/[^0-9]/g, ""))}
-            />
+           />
           </Field>
-          <Field label="مالیات بر ارزش افزوده (٪)">
-            <select
-              className={inputClass}
-              value={String(vatPercent)}
-              onChange={(event) => setVatPercent(Number(event.target.value))}
-            >
-              {VAT_RATES.map((rate) => (
-                <option key={rate} value={String(rate)}>
-                  {rate.toLocaleString("fa-IR")}٪
-                </option>
-              ))}
-            </select>
+          <Field label="مالیات بر ارزش افزوده">
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm" aria-live="polite">
+              <span dir="ltr">{vatPercent.toLocaleString("fa-IR")}٪</span>
+              <span className="ms-2 text-muted-foreground">طبق تنظیمات مالیات کسب‌وکار</span>
+            </div>
           </Field>
           <Field label="روش پرداخت">
             <select
@@ -1209,15 +1519,20 @@ function SalesSection({
           ) : null}
         </div>
 
-        {canSeeCost ? (
+        {canOverrideMinPrice ? (
           <label className="mt-3 flex items-center gap-2 text-sm text-foreground">
             <input type="checkbox" checked={override} onChange={(event) => setOverride(event.target.checked)} />
-            فروش زیر حداقل قیمت مجاز است (تجاوز از حداقل قیمت)
+            مجوز من برای فروش زیر حداقل قیمت استفاده شود
           </label>
+        ) : null}
+        {dueNow === 0 && depositApplied > 0 ? (
+          <p className="mt-2 text-xs text-muted-foreground" role="status">
+            تمام مبلغ فاکتور از ودیعهٔ قبلی پوشش داده می‌شود؛ امروز وجهی دریافت نمی‌شود.
+          </p>
         ) : null}
 
         <div className="mt-4">
-          <PrimaryButton onClick={submit} disabled={busy || !selected || priceRial <= 0 || dueNow <= 0}>
+          <PrimaryButton onClick={submit} disabled={busy || !selected || priceRial <= 0}>
             {busy ? "در حال صدور…" : "صدور فاکتور فروش خودرو"}
           </PrimaryButton>
         </div>
@@ -1228,22 +1543,20 @@ function SalesSection({
             علامت خورده و بیعانهٔ رزرو (در صورت وجود) از فاکتور کسر شده است.
           </p>
         ) : null}
-      </SectionCard>
+      </SectionCard> : null}
 
-      <SectionCard title="فروخته‌شده‌ها" description="با امکان برگشت فروش">
+      <SectionCard title="فروخته‌شده‌ها" description={canSell ? "با امکان برگشت فروش" : "فروش‌های ثبت‌شده؛ فقط خواندنی"}>
         {sold.length === 0 ? (
           <EmptyState title="فروشی ثبت نشده">خودروی فروخته‌شده‌ای در این فهرست نیست.</EmptyState>
         ) : (
           <DataTable caption="خودروهای فروخته‌شده">
             <DataTableHead>
-              <DataTableRow>
-                <Th>خودرو</Th>
-                {canSeeCost ? <Th>بهای تمام‌شدهٔ منجمد</Th> : null}
-                <Th>مبلغ فروش</Th>
-                <Th>تاریخ فروش</Th>
-                <Th>وضعیت</Th>
-                <Th>برگشت فروش</Th>
-              </DataTableRow>
+              <Th>خودرو</Th>
+              {canSeeCost ? <Th>بهای تمام‌شدهٔ منجمد</Th> : null}
+              <Th>مبلغ فروش</Th>
+              <Th>تاریخ فروش</Th>
+              <Th>وضعیت</Th>
+              {canSell ? <Th>برگشت فروش</Th> : null}
             </DataTableHead>
             <DataTableBody>
               {sold.map((vehicle) => (
@@ -1258,16 +1571,17 @@ function SalesSection({
                   <Td>
                     <StatusBadge tone="neutral">{VEHICLE_STATE_LABELS[vehicle.state]}</StatusBadge>
                   </Td>
-                  <Td>
+                  {canSell ? <Td>
                     <div className="flex flex-wrap items-center gap-2">
                       <input
                         className={`${inputClass} sm:max-w-xs`}
+                        aria-label={`دلیل برگشت فروش ${vehicle.stockNumber}`}
                         placeholder="دلیل برگشت"
                         value={reversalReason[vehicle.serialId] ?? ""}
                         onChange={(event) =>
                           setReversalReason((map) => ({ ...map, [vehicle.serialId]: event.target.value }))
                         }
-                      />
+                     />
                       <SecondaryButton
                         onClick={() => reverse(vehicle)}
                         disabled={busy || !(reversalReason[vehicle.serialId] ?? "").trim()}
@@ -1275,7 +1589,7 @@ function SalesSection({
                         برگشت فروش
                       </SecondaryButton>
                     </div>
-                  </Td>
+                  </Td> : null}
                 </DataTableRow>
               ))}
             </DataTableBody>
@@ -1371,7 +1685,7 @@ const PREFERENCE_CONDITIONS = [
   { value: "used", label: "کارکرده" },
 ] as const;
 
-function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: Runner }) {
+function LeadsSection({ vehicles, vehiclesLoading, canManage, run }: { vehicles: VehicleListItemDto[]; vehiclesLoading: boolean; canManage: boolean; run: Runner }) {
   const [leads, setLeads] = useState<LeadListDto[]>([]);
   const [leadId, setLeadId] = useState("");
   const [profile, setProfile] = useState<LeadVehicleProfileDto | null>(null);
@@ -1545,15 +1859,16 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
         <SectionCard title="خودروی مورد نظر" description="بازه‌ها برای پیشنهاد خودرو به کار می‌روند">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="برند">
-              <input className={inputClass} value={make} onChange={(event) => setMake(event.target.value)} />
+              <input className={inputClass} value={make} onChange={(event) => setMake(event.target.value)} disabled={!canManage} />
             </Field>
             <Field label="مدل">
-              <input className={inputClass} value={model} onChange={(event) => setModel(event.target.value)} />
+              <input className={inputClass} value={model} onChange={(event) => setModel(event.target.value)} disabled={!canManage} />
             </Field>
             <Field label="نو / کارکرده">
               <select
                 className={inputClass}
                 value={condition}
+                disabled={!canManage}
                 onChange={(event) => setCondition(event.target.value as "new" | "used" | "any")}
               >
                 {PREFERENCE_CONDITIONS.map((option) => (
@@ -1568,36 +1883,40 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
                 className={inputClass}
                 inputMode="numeric"
                 value={yearFrom}
+                disabled={!canManage}
                 onChange={(event) => setYearFrom(digits(event.target.value))}
-              />
+             />
             </Field>
             <Field label="تا سال مدل">
               <input
                 className={inputClass}
                 inputMode="numeric"
                 value={yearTo}
+                disabled={!canManage}
                 onChange={(event) => setYearTo(digits(event.target.value))}
-              />
+             />
             </Field>
             <Field label="حداقل بودجه (ریال)">
               <input
                 className={inputClass}
                 inputMode="numeric"
                 value={budgetFrom}
+                disabled={!canManage}
                 onChange={(event) => setBudgetFrom(digits(event.target.value))}
-              />
+             />
             </Field>
             <Field label="حداکثر بودجه (ریال)">
               <input
                 className={inputClass}
                 inputMode="numeric"
                 value={budgetTo}
+                disabled={!canManage}
                 onChange={(event) => setBudgetTo(digits(event.target.value))}
-              />
+             />
             </Field>
             <Field label="معاوضه">
               <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
-                <input type="checkbox" checked={tradeIn} onChange={(event) => setTradeIn(event.target.checked)} />
+                <input type="checkbox" checked={tradeIn} disabled={!canManage} onChange={(event) => setTradeIn(event.target.checked)} />
                 خودروی مشتری به‌عنوان معاوضه
               </label>
             </Field>
@@ -1605,24 +1924,24 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
               <input
                 className={inputClass}
                 value={tradeInDescription}
-                disabled={!tradeIn}
+                disabled={!canManage || !tradeIn}
                 onChange={(event) => setTradeInDescription(event.target.value)}
-              />
+             />
             </Field>
             <Field label="تست درایو">
               <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
-                <input type="checkbox" checked={testDrive} onChange={(event) => setTestDrive(event.target.checked)} />
+                <input type="checkbox" checked={testDrive} disabled={!canManage} onChange={(event) => setTestDrive(event.target.checked)} />
                 تست درایو درخواست شده است
               </label>
             </Field>
             <Field label="یادداشت">
-              <input className={inputClass} value={notes} onChange={(event) => setNotes(event.target.value)} />
+              <input className={inputClass} value={notes} onChange={(event) => setNotes(event.target.value)} disabled={!canManage} />
             </Field>
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <PrimaryButton onClick={savePreferences} disabled={busy}>
+            {canManage ? <PrimaryButton onClick={savePreferences} disabled={busy}>
               {busy ? "در حال ذخیره…" : "ذخیرهٔ خودروی مورد نظر"}
-            </PrimaryButton>
+            </PrimaryButton> : <p className="text-xs text-muted-foreground">دسترسی «مدیریت CRM» برای ویرایش ترجیحات لازم است.</p>}
             <SecondaryButton onClick={() => setMatchOnly((value) => !value)} disabled={!preferences}>
               {matchOnly ? "نمایش همهٔ موجودی" : "یافتن خودروهای مناسب در موجودی"}
             </SecondaryButton>
@@ -1641,8 +1960,8 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
         <SectionCard title="خودروهای نشان‌داده‌شده" description="کدام شمارهٔ انبار به این مشتری معرفی شده است">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="خودرو">
-              <select className={inputClass} value={linkSerialId} onChange={(event) => setLinkSerialId(event.target.value)}>
-                <option value="">— انتخاب خودرو —</option>
+              <select className={inputClass} value={linkSerialId} disabled={!canManage || vehiclesLoading} onChange={(event) => setLinkSerialId(event.target.value)}>
+                <option value="">{vehiclesLoading ? "در حال دریافت خودروها…" : "— انتخاب خودرو —"}</option>
                 {(matchOnly ? matchedVehicles : vehicles).map((vehicle) => (
                   <option key={vehicle.serialId} value={vehicle.serialId}>
                     {vehicle.stockNumber} — {vehicle.displayName}
@@ -1654,6 +1973,7 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
               <select
                 className={inputClass}
                 value={linkPurpose}
+                disabled={!canManage}
                 onChange={(event) => setLinkPurpose(event.target.value as typeof linkPurpose)}
               >
                 {LINK_PURPOSES.map((option) => (
@@ -1664,14 +1984,14 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
               </select>
             </Field>
             <Field label="یادداشت">
-              <input className={inputClass} value={linkNote} onChange={(event) => setLinkNote(event.target.value)} />
+              <input className={inputClass} value={linkNote} onChange={(event) => setLinkNote(event.target.value)} disabled={!canManage} />
             </Field>
           </div>
-          <div className="mt-3">
+          {canManage ? <div className="mt-3">
             <PrimaryButton onClick={linkVehicle} disabled={busy || !linkSerialId}>
               {busy ? "در حال ثبت…" : "ثبت معرفی خودرو"}
             </PrimaryButton>
-          </div>
+          </div> : null}
 
           <div className="mt-4">
             {(profile?.links ?? []).length === 0 ? (
@@ -1679,12 +1999,10 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
             ) : (
               <DataTable caption="خودروهای نشان‌داده‌شده">
                 <DataTableHead>
-                  <DataTableRow>
-                    <Th>خودرو</Th>
-                    <Th>دلیل</Th>
-                    <Th>یادداشت</Th>
-                    <Th>حذف</Th>
-                  </DataTableRow>
+                  <Th>خودرو</Th>
+                  <Th>دلیل</Th>
+                  <Th>یادداشت</Th>
+                  {canManage ? <Th>حذف</Th> : null}
                 </DataTableHead>
                 <DataTableBody>
                   {(profile?.links ?? []).map((link) => (
@@ -1697,11 +2015,11 @@ function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: 
                         {LINK_PURPOSES.find((purpose) => purpose.value === link.purpose)?.label ?? link.purpose}
                       </Td>
                       <Td>{link.note ?? "—"}</Td>
-                      <Td>
+                      {canManage ? <Td>
                         <SecondaryButton onClick={() => unlinkVehicle(link.serialId)} disabled={busy}>
                           حذف
                         </SecondaryButton>
-                      </Td>
+                      </Td> : null}
                     </DataTableRow>
                   ))}
                 </DataTableBody>

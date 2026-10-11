@@ -30,10 +30,10 @@ import { pairingDataClassification, replicationCatalogue } from "./replication-c
 describe("the automotive deployment-mode classification (§22)", () => {
   it("classifies every automotive record, each to a real entry", () => {
     const keys = new Set(AUTOMOTIVE_SYNC_CLASSIFICATION.map((entry) => entry.key));
-    // §22's list, mapped: the vehicle record, its cost ledger, its price
-    // history, its transfers, and the two CRM lead extensions 0213 added. A
-    // record that silently loses its entry — or is never written down — fails
-    // here, and the database half checks the same list against the schema.
+    // §22's list, mapped: unit identity, costs, price/sale history, transfers,
+    // Media Library links, the two CRM lead extensions and the shared catalogue
+    // half. A record that silently loses its entry — or is never written down —
+    // fails here, and the database half checks the same list against the schema.
     for (const key of [
       "vehicle_units",
       "vehicle_costs",
@@ -41,6 +41,8 @@ describe("the automotive deployment-mode classification (§22)", () => {
       "vehicle_transfers",
       "lead_vehicle_preferences",
       "lead_vehicle_links",
+      "vehicle_sales",
+      "vehicle_media_links",
       "vehicle_catalogue",
     ]) {
       expect(keys.has(key), key).toBe(true);
@@ -71,12 +73,15 @@ describe("the automotive deployment-mode classification (§22)", () => {
   it("claims every table once, and never claims a table twice", () => {
     const all = automotiveClassifiedTables();
     expect(new Set(all).size).toBe(all.length);
-    // The six automotive-specific tables, exactly.
+    // Eight automotive-owned tables, exactly: six vehicle/media/history
+    // tables plus the two CRM lead extensions.
     expect([...all].sort()).toEqual(
       [
         "automotive_vehicle_attributes",
         "automotive_vehicle_costs",
+        "automotive_vehicle_media",
         "automotive_vehicle_price_history",
+        "automotive_vehicle_sales",
         "automotive_vehicle_transfers",
         "crm_lead_vehicle_links",
         "crm_lead_vehicle_preferences",
@@ -120,7 +125,7 @@ describe("the automotive deployment-mode classification (§22)", () => {
     // classified. This is the derived projection; the literal copy the desktop
     // actually receives is asserted in the integration test.
     expect(pairingDataClassification().centralOnlyData).toContain(
-      "Automotive vehicle stock (VIN/chassis identity, landed cost, price history, holds and transfers)",
+      "Automotive vehicle records (VIN/chassis identity, landed cost, price and sale history, holds, transfers and media links)",
     );
     expect(pairingDataClassification().bootstrapMasterData.join(" ")).not.toContain("Automotive vehicle");
   });

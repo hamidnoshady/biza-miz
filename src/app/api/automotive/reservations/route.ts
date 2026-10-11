@@ -21,22 +21,21 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   const url = new URL(request.url);
   const location = await resolveActiveLocation(session);
+  if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
   try {
-    if (location) {
-      const client = await getPool().connect();
-      try {
-        await client.query("BEGIN");
-        await expireVehicleReservations(client, { businessId: session.businessId, locationId: location.id });
-        await client.query("COMMIT");
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      } finally {
-        client.release();
-      }
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await expireVehicleReservations(client, { businessId: session.businessId, locationId: location.id });
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
     const reservations = await listVehicleReservations(session.businessId, {
-      locationId: location?.id ?? null,
+      locationId: location.id,
       serialId: url.searchParams.get("serialId"),
       status: (url.searchParams.get("status") as VehicleHoldStatus | null) ?? null,
     });

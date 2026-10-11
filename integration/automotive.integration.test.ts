@@ -19,7 +19,7 @@
  *   - one business cannot see another's cars.
  */
 import { randomUUID } from "node:crypto";
-import { Client } from "pg";
+import { Client, type PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import type { Industry } from "../src/lib/industries";
@@ -42,6 +42,7 @@ let exact: typeof import("../src/lib/inventory-exact");
 let leads: typeof import("../src/lib/automotive-lead-service");
 let platform: typeof import("../src/lib/platform-service");
 let industryGuard: typeof import("../src/lib/industry-guard");
+let mediaService: typeof import("../src/lib/media-service");
 
 const biz = { id: "", locationId: "", secondLocationId: "", ownerId: "", customerId: "", otherCustomerId: "" };
 const other = { id: "", locationId: "" };
@@ -58,7 +59,7 @@ function maintenanceUrl(): string {
   return url.toString();
 }
 
-async function withTransaction<T>(fn: (client: import("pg").PoolClient) => Promise<T>): Promise<T> {
+async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await dbLib.getPool().connect();
   try {
     await client.query("BEGIN");
@@ -71,6 +72,24 @@ async function withTransaction<T>(fn: (client: import("pg").PoolClient) => Promi
   } finally {
     client.release();
   }
+}
+
+async function backendPid(client: PoolClient): Promise<number> {
+  const { rows } = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+  return rows[0].pid;
+}
+
+async function waitUntilBlocked(observer: PoolClient, blockedPid: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const { rows } = await observer.query<{ blocked: boolean }>(
+      "SELECT cardinality(pg_blocking_pids($1::int)) > 0 AS blocked",
+      [blockedPid],
+    );
+    if (rows[0]?.blocked) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`client ${blockedPid} did not block on the competing vehicle sale`);
 }
 
 async function accountBalance(code: string, businessId = biz.id): Promise<number> {
@@ -100,6 +119,16 @@ async function makeBusiness(slugPrefix: string, industry: Industry = "automotive
   // a tenant that really is a café, down to its ledger.
   await withTransaction((client) => provisioning.seedChartOfAccounts(client, businessId, industry));
   return { businessId, locationId: locRows[0].id };
+}
+
+async function makeMediaAsset(businessId: string, kind: "image" | "video" | "document" = "image") {
+  const mimeType = kind === "image" ? "image/png" : kind === "video" ? "video/mp4" : "application/pdf";
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO media_assets (business_id, kind, file_name, mime_type, byte_size, storage_key, sha256)
+     VALUES ($1, $2, $3, $4, 1, $5, $6) RETURNING id`,
+    [businessId, kind, `${randomUUID().slice(0, 8)}.${kind === "image" ? "png" : kind === "video" ? "mp4" : "pdf"}`, mimeType, `test/${randomUUID()}`, randomUUID().replaceAll("-", "").padEnd(64, "0")],
+  );
+  return { id: rows[0].id, kind };
 }
 
 /** A minimal but complete car, so each test states only what it is testing. */
@@ -183,6 +212,7 @@ beforeEach(async () => {
   await db.query("COMMIT");
 
   await db.query("DELETE FROM automotive_vehicle_transfers");
+  await db.query("DELETE FROM automotive_vehicle_sales");
   await db.query("DELETE FROM automotive_vehicle_price_history");
   await db.query("DELETE FROM automotive_vehicle_costs");
   await db.query("DELETE FROM automotive_vehicle_attributes");
@@ -193,6 +223,7 @@ beforeEach(async () => {
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM items");
+  await db.query("DELETE FROM media_assets");
   await db.query("DELETE FROM accounts");
   await db.query("DELETE FROM platforms").catch(() => {});
   await db.query("DELETE FROM businesses");
@@ -200,6 +231,10 @@ beforeEach(async () => {
   const primary = await makeBusiness("showroom");
   biz.id = primary.businessId;
   biz.locationId = primary.locationId;
+  await db.query(
+    `INSERT INTO settings (business_id, key, value) VALUES ($1, 'tax.config', '{"defaultRate":9}'::jsonb)`,
+    [biz.id],
+  );
   const { rows: secondLoc } = await db.query<{ id: string }>(
     "INSERT INTO locations (business_id, name) VALUES ($1, 'Branch 2') RETURNING id",
     [biz.id],
@@ -258,6 +293,80 @@ describe("vehicle stock", () => {
     expect(vehicle?.mileageKm).toBe(45_000);
     expect(vehicle?.effectiveCostRial).toBe(700_000_000);
     expect(vehicle?.vin).toBe("WBA1A345678901234");
+  });
+
+  it("updates vehicle detail facts without corrupting tenant scope, and records identity edits", async () => {
+    const created = await withTransaction((client) =>
+      automotive.createVehicle(client, {
+        ...carInput({ stockNumber: "IDENTITY-1", vin: "WBA1A345678901234" }),
+        condition: "used",
+        mileageKm: 56_000,
+        priorOwners: 1,
+      }),
+    );
+
+    const updated = await withTransaction((client) =>
+      automotive.updateVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: created.serialId,
+        vin: "1HGCM82633A004352",
+        chassisNumber: "irx-987654321",
+        mileageKm: 75_321,
+        priorOwners: 2,
+        plateNumber: "۲۱ب۱۲۳ ایران ۱۱",
+        bodyConditionNotes: "درِ سمت راننده رنگ‌شده است",
+        actorId: biz.ownerId,
+      }),
+    );
+
+    expect(updated).toMatchObject({
+      serialId: created.serialId,
+      locationId: biz.locationId,
+      vin: "1HGCM82633A004352",
+      chassisNumber: "IRX987654321",
+      mileageKm: 75_321,
+      priorOwners: 2,
+      plateNumber: "۲۱ب۱۲۳ ایران ۱۱",
+      bodyConditionNotes: "درِ سمت راننده رنگ‌شده است",
+    });
+    await expect(automotive.getVehicle(other.id, created.serialId)).resolves.toBeNull();
+
+    const { rows: scopedRows } = await db.query<{
+      business_id: string;
+      location_id: string;
+      vin: string;
+      chassis_number: string;
+      mileage_km: number;
+    }>(
+      `SELECT business_id, location_id, vin, chassis_number, mileage_km
+         FROM automotive_vehicle_attributes WHERE serial_id = $1`,
+      [created.serialId],
+    );
+    expect(scopedRows).toEqual([{
+      business_id: biz.id,
+      location_id: biz.locationId,
+      vin: "1HGCM82633A004352",
+      chassis_number: "IRX987654321",
+      mileage_km: 75_321,
+    }]);
+
+    const { rows: events } = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM domain_events
+        WHERE business_id = $1 AND location_id = $2
+          AND event_type = 'automotive.vehicle_identity_changed'
+          AND source_id = $3`,
+      [biz.id, biz.locationId, created.serialId],
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0].payload).toMatchObject({
+      serialId: created.serialId,
+      stockNumber: created.stockNumber,
+      changes: {
+        vin: { from: "WBA1A345678901234", to: "1HGCM82633A004352" },
+        chassisNumber: { from: null, to: "IRX987654321" },
+      },
+    });
   });
 
   it("reuses one catalogue row for a second car of the same model", async () => {
@@ -371,6 +480,7 @@ describe("acquisition and cost accounting", () => {
       automotive.recordVehicleCost(client, {
         businessId: biz.id,
         serialId: created.serialId,
+        locationId: biz.locationId,
         cost: {
           category: "paint_body",
           posting: "capitalized",
@@ -388,6 +498,7 @@ describe("acquisition and cost accounting", () => {
       automotive.recordVehicleCost(client, {
         businessId: biz.id,
         serialId: created.serialId,
+        locationId: biz.locationId,
         cost: {
           category: "advertising",
           posting: "period_expense",
@@ -408,6 +519,8 @@ describe("acquisition and cost accounting", () => {
     await withTransaction((client) =>
       automotive.voidVehicleCost(client, {
         businessId: biz.id,
+        serialId: created.serialId,
+        locationId: biz.locationId,
         costId: capitalized.id,
         reason: "اشتباه در ثبت",
         actorId: biz.ownerId,
@@ -431,6 +544,7 @@ describe("acquisition and cost accounting", () => {
       automotive.recordVehicleCost(client, {
         businessId: biz.id,
         serialId: created.serialId,
+        locationId: biz.locationId,
         cost: {
           category: "detailing",
           posting: "period_expense",
@@ -456,6 +570,7 @@ describe("pricing", () => {
       automotive.updateVehiclePrice(client, {
         businessId: biz.id,
         serialId: created.serialId,
+        locationId: biz.locationId,
         askingPriceRial: 850_000_000,
         minimumPriceRial: 800_000_000,
         reason: "تخفیف پایان فصل",
@@ -552,6 +667,35 @@ describe("the stock list and dashboard numbers", () => {
     });
     expect(otherBranch.total).toBe(0);
   });
+
+  it("fails closed for an empty branch set and confines multi-branch reads to explicit ids", async () => {
+    const home = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "B-1" })),
+    );
+    const remote = await withTransaction((client) =>
+      automotive.createVehicle(
+        client,
+        carInput({ stockNumber: "B-2", locationId: biz.secondLocationId }),
+      ),
+    );
+
+    const permitted = await automotive.listVehicles({
+      businessId: biz.id,
+      locationIds: [biz.secondLocationId],
+    });
+    expect(permitted.vehicles.map(({ serialId }) => serialId)).toEqual([remote.serialId]);
+    expect(permitted.total).toBe(1);
+
+    const none = await automotive.listVehicles({ businessId: biz.id, locationIds: [] });
+    expect(none).toEqual({ vehicles: [], total: 0 });
+
+    const summary = await automotive.summarizeVehicles(biz.id, {
+      locationIds: [biz.locationId],
+      onDate: "2026-02-01",
+    });
+    expect(summary.inStock).toBe(1);
+    expect((await automotive.getVehicle(biz.id, home.serialId))?.locationId).toBe(biz.locationId);
+  });
 });
 
 describe("branch transfers", () => {
@@ -583,7 +727,7 @@ describe("branch transfers", () => {
     ).rejects.toThrow();
 
     await withTransaction((client) =>
-      automotive.completeVehicleTransfer(client, { businessId: biz.id, transferId, actorId: biz.ownerId }),
+      automotive.completeVehicleTransfer(client, { businessId: biz.id, transferId, locationId: biz.secondLocationId, actorId: biz.ownerId }),
     );
     const moved = await automotive.getVehicle(biz.id, created.serialId);
     expect(moved?.locationId).toBe(biz.secondLocationId);
@@ -603,20 +747,13 @@ describe("branch transfers", () => {
     const created = await withTransaction((client) =>
       automotive.createVehicle(client, carInput({ stockNumber: "T-2" })),
     );
-    const { rows: customer } = await db.query<{ id: string }>(
-      "INSERT INTO parties (business_id, name, role) VALUES ($1, 'آقای رضایی', 'customer') RETURNING id",
-      [biz.id],
-    );
-    await db.query(
-      `INSERT INTO serial_reservations (business_id, location_id, serial_id, customer_id)
-       VALUES ($1, $2, $3, $4)`,
-      [biz.id, biz.locationId, created.serialId, customer[0].id],
-    );
     await withTransaction((client) =>
-      automotive.setVehicleState(client, {
+      reservations.reserveVehicle(client, {
         businessId: biz.id,
+        locationId: biz.locationId,
         serialId: created.serialId,
-        state: "reserved",
+        customerId: biz.customerId,
+        actorId: biz.ownerId,
       }),
     );
 
@@ -630,6 +767,71 @@ describe("branch transfers", () => {
         }),
       ),
     ).rejects.toThrow(/رزرو/);
+  });
+});
+
+describe("vehicle media links", () => {
+  it("links canonical media idempotently, counts its usage, and enforces tenant and branch scope", async () => {
+    const vehicle = await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "MEDIA-1" })));
+    const asset = await makeMediaAsset(biz.id, "image");
+    const foreignAsset = await makeMediaAsset(other.id, "document");
+
+    const first = await withTransaction((client) => automotive.attachVehicleMedia(client, {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      serialId: vehicle.serialId,
+      mediaAssetId: asset.id,
+      category: "photo",
+      title: "تصویر نمای خودرو",
+      actorId: biz.ownerId,
+    }));
+    expect(first).toMatchObject({ mediaAssetId: asset.id, mediaKind: "image", title: "تصویر نمای خودرو" });
+
+    const updated = await withTransaction((client) => automotive.attachVehicleMedia(client, {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      serialId: vehicle.serialId,
+      mediaAssetId: asset.id,
+      category: "inspection",
+      title: "گزارش تصویری بازرسی",
+      description: "نمای سمت راست",
+      actorId: biz.ownerId,
+    }));
+    expect(updated.id).toBe(first.id);
+    expect(updated).toMatchObject({ category: "inspection", title: "گزارش تصویری بازرسی", description: "نمای سمت راست" });
+    expect(await automotive.listVehicleMedia(biz.id, vehicle.serialId, undefined, { locationIds: [biz.locationId] })).toHaveLength(1);
+    expect(await automotive.listVehicleMedia(biz.id, vehicle.serialId, undefined, { locationIds: [biz.secondLocationId] })).toEqual([]);
+
+    expect(await mediaService.mediaAssetUsedByVehicleInLocations(asset.id, biz.id, [biz.locationId])).toBe(true);
+    expect(await mediaService.mediaAssetUsedByVehicleInLocations(asset.id, biz.id, [biz.secondLocationId])).toBe(false);
+    expect(await mediaService.mediaAssetUsedByVehicleInLocations(asset.id, other.id, [other.locationId])).toBe(false);
+    const usage = await mediaService.getMediaAssetUsage(asset.id);
+    expect(usage.vehicles).toEqual([{ id: vehicle.serialId, name: expect.stringContaining("MEDIA-1") }]);
+    expect(mediaService.mediaAssetUsageIsEmpty(usage)).toBe(false);
+
+    await expect(withTransaction((client) => automotive.attachVehicleMedia(client, {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      serialId: vehicle.serialId,
+      mediaAssetId: foreignAsset.id,
+      category: "invoice",
+      title: "فاکتور خرید متعلق به کسب‌وکار دیگر",
+    }))).rejects.toMatchObject({ code: "media_not_found" });
+
+    expect(await withTransaction((client) => automotive.detachVehicleMedia(client, {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      serialId: vehicle.serialId,
+      mediaAssetId: asset.id,
+      actorId: biz.ownerId,
+    }))).toBe(true);
+    expect(await mediaService.mediaAssetUsedByVehicleInLocations(asset.id, biz.id, [biz.locationId])).toBe(false);
+    expect(mediaService.mediaAssetUsageIsEmpty(await mediaService.getMediaAssetUsage(asset.id))).toBe(true);
+    const { rows: originalAsset } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM media_assets WHERE business_id = $1 AND id = $2",
+      [biz.id, asset.id],
+    );
+    expect(originalAsset[0].count).toBe("1");
   });
 });
 
@@ -814,6 +1016,7 @@ describe("reservations and deposits", () => {
     const released = await withTransaction((client) =>
       reservations.releaseVehicleReservation(client, {
         businessId: biz.id,
+        locationId: biz.locationId,
         reservationId: first.id,
         reason: "مشتری منصرف شد",
         actorId: biz.ownerId,
@@ -835,6 +1038,7 @@ describe("reservations and deposits", () => {
     const secondRelease = await withTransaction((client) =>
       reservations.releaseVehicleReservation(client, {
         businessId: biz.id,
+        locationId: biz.locationId,
         reservationId: second.id,
         reason: "مهلت تمام شد",
         actorId: biz.ownerId,
@@ -849,12 +1053,87 @@ describe("reservations and deposits", () => {
       withTransaction((client) =>
         reservations.releaseVehicleReservation(client, {
           businessId: biz.id,
+          locationId: biz.locationId,
           reservationId: first.id,
           reason: "دوباره",
           actorId: biz.ownerId,
         }),
       ),
     ).rejects.toThrow(/بسته شده/);
+  });
+
+  it("expires at the entered local time and refunds a refundable deposit exactly once", async () => {
+    await db.query("UPDATE locations SET timezone = 'America/New_York' WHERE id = $1", [biz.locationId]);
+    const { rows: localTimes } = await db.query<{
+      past_date: string;
+      past_time: string;
+      future_date: string;
+      future_time: string;
+    }>(
+      `WITH local AS (
+         SELECT clock_timestamp() AT TIME ZONE timezone AS current_local
+           FROM locations WHERE id = $1
+       )
+       SELECT (current_local - interval '5 minutes')::date::text AS past_date,
+              to_char(current_local - interval '5 minutes', 'HH24:MI:SS') AS past_time,
+              (current_local + interval '10 minutes')::date::text AS future_date,
+              to_char(current_local + interval '10 minutes', 'HH24:MI:SS') AS future_time
+         FROM local`,
+      [biz.locationId],
+    );
+    // Reserve the future hold first: reserving another vehicle runs expiry for
+    // the branch, so creating the past-due hold last lets this assertion prove
+    // the explicit expiry command rather than its idempotent preflight.
+    const futureCar = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-TIME-FUTURE" })),
+    );
+    const futureHold = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: futureCar.serialId,
+        customerId: biz.customerId,
+        expiresAt: localTimes[0].future_date,
+        expiresAtTime: localTimes[0].future_time,
+        actorId: biz.ownerId,
+      }),
+    );
+
+    const expiredCar = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-TIME-PAST" })),
+    );
+    const expiringHold = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: expiredCar.serialId,
+        customerId: biz.customerId,
+        expiresAt: localTimes[0].past_date,
+        expiresAtTime: localTimes[0].past_time,
+        depositRial: 12_000_000,
+        depositMethod: "cash",
+        depositRefundable: true,
+        actorId: biz.ownerId,
+      }),
+    );
+    expect(await accountBalance("1100")).toBe(12_000_000);
+    expect(await depositBalance()).toBe(12_000_000);
+
+    const count = await withTransaction((client) =>
+      reservations.expireVehicleReservations(client, { businessId: biz.id, locationId: biz.locationId }),
+    );
+    expect(count).toBe(1);
+    expect((await reservations.getVehicleReservation(biz.id, expiringHold.id))?.status).toBe("expired");
+    expect((await reservations.getVehicleReservation(biz.id, futureHold.id))?.status).toBe("active");
+    expect((await automotive.getVehicle(biz.id, expiredCar.serialId))?.state).toBe("in_stock");
+    expect((await automotive.getVehicle(biz.id, futureCar.serialId))?.state).toBe("reserved");
+    expect(await accountBalance("1100")).toBe(0);
+    expect(await depositBalance()).toBe(0);
+    const { rows: refundRows } = await db.query<{ deposit_refund_entry_id: string | null }>(
+      "SELECT deposit_refund_entry_id FROM serial_reservations WHERE id = $1",
+      [expiringHold.id],
+    );
+    expect(refundRows[0].deposit_refund_entry_id).toBeTruthy();
   });
 
   it("expires a hold on read once its business day has passed", async () => {
@@ -911,7 +1190,7 @@ async function sellThroughInvoice(input: {
   price: number;
   discount?: number;
   vatPercent: number;
-  tenderAmount: number;
+  tenderAmount: number | null;
   customerId?: string | null;
   tenderMethod?: "cash" | "bank" | "credit";
 }) {
@@ -923,7 +1202,10 @@ async function sellThroughInvoice(input: {
       locationId: biz.locationId,
       industry: "automotive",
       customerId: input.customerId ?? null,
-      tenders: [{ method: input.tenderMethod ?? "cash", amount: exact.rialText(String(input.tenderAmount)) }],
+      tenders:
+        input.tenderAmount == null
+          ? []
+          : [{ method: input.tenderMethod ?? "cash", amount: exact.rialText(String(input.tenderAmount)) }],
       lines: [
         {
           kind: "vehicle",
@@ -959,6 +1241,7 @@ async function carReadyToSell(stockNumber: string, purchase = 700_000_000, capit
       automotive.recordVehicleCost(client, {
         businessId: biz.id,
         serialId: created.serialId,
+        locationId: biz.locationId,
         createdBy: biz.ownerId,
         cost: {
           category: "repair",
@@ -1054,6 +1337,70 @@ describe("selling the exact car", () => {
     expect(await accountBalance("4590")).toBe(-900_000_000);
   });
 
+  it("serializes simultaneous invoice attempts and posts exactly one vehicle sale", async () => {
+    const car = await carReadyToSell("S-RACE", 700_000_000, 0);
+    const [first, second, observer] = await Promise.all([
+      dbLib.getPool().connect(),
+      dbLib.getPool().connect(),
+      dbLib.getPool().connect(),
+    ]);
+    let firstInTransaction = false;
+    let secondInTransaction = false;
+    const saleInput = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "automotive" as const,
+      customerId: null,
+      tenders: [{ method: "cash" as const, amount: exact.rialText("981000000") }],
+      lines: [{ kind: "vehicle" as const, serialId: car.serialId, price: 900_000_000, discount: 0, vatPercent: 9 }],
+    };
+
+    try {
+      await first.query("BEGIN");
+      firstInTransaction = true;
+      const winningInvoice = await invoiceService.createRetailInvoice(first, saleInput);
+
+      await second.query("BEGIN");
+      secondInTransaction = true;
+      const secondPid = await backendPid(second);
+      const competingInvoice = invoiceService.createRetailInvoice(second, saleInput);
+      // The second invoice has reached the same unit while the first sale is
+      // uncommitted. Prove it is blocked by PostgreSQL before releasing the
+      // winner, rather than relying on two requests that happened to run one
+      // after another in the test scheduler.
+      await waitUntilBlocked(observer, secondPid);
+      await first.query("COMMIT");
+      firstInTransaction = false;
+      await expect(competingInvoice).rejects.toThrow(/فروخته شده/);
+      await second.query("ROLLBACK");
+      secondInTransaction = false;
+
+      expect(winningInvoice.total).toBe("981000000");
+      expect(await accountBalance("4590")).toBe(-900_000_000);
+      expect(await accountBalance("2200")).toBe(-81_000_000);
+      expect(await accountBalance("5194")).toBe(700_000_000);
+
+      const { rows: occurrences } = await db.query<{ sale_id: string; status: string }>(
+        "SELECT sale_id, status FROM automotive_vehicle_sales WHERE business_id = $1 AND serial_id = $2",
+        [biz.id, car.serialId],
+      );
+      expect(occurrences).toHaveLength(1);
+      expect(occurrences[0].status).toBe("active");
+
+      const { rows: lines } = await db.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM order_items WHERE retail_snapshot->>'serialId' = $1",
+        [car.serialId],
+      );
+      expect(lines[0].count).toBe("1");
+    } finally {
+      if (firstInTransaction) await first.query("ROLLBACK").catch(() => {});
+      if (secondInTransaction) await second.query("ROLLBACK").catch(() => {});
+      first.release();
+      second.release();
+      observer.release();
+    }
+  });
+
   it("applies the customer's reservation deposit instead of collecting it twice", async () => {
     const car = await carReadyToSell("S-3", 700_000_000, 0);
     const hold = await withTransaction((client) =>
@@ -1108,6 +1455,41 @@ describe("selling the exact car", () => {
     expect(converted[0].converted_order_id).toBe(invoice.orderId);
   });
 
+  it("checks out a fully prepaid vehicle with no zero-value tender", async () => {
+    const car = await carReadyToSell("S-3-PREPAID", 700_000_000, 0);
+    const hold = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: car.serialId,
+        customerId: biz.customerId,
+        depositRial: 981_000_000,
+        depositMethod: "cash",
+        actorId: biz.ownerId,
+      }),
+    );
+
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 0, // the caller's rate is ignored; tax.config is 9%.
+      tenderAmount: null,
+      customerId: biz.customerId,
+    });
+
+    expect(invoice.total).toBe("981000000");
+    expect(await accountBalance("1100")).toBe(981_000_000);
+    expect(await depositBalance()).toBe(0);
+    expect(await accountBalance("4590")).toBe(-900_000_000);
+    expect(await accountBalance("2200")).toBe(-81_000_000);
+    const { rows: payments } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM payments WHERE order_id = $1",
+      [invoice.orderId],
+    );
+    expect(payments[0].count).toBe("0");
+    expect((await reservations.getVehicleReservation(biz.id, hold.id))?.status).toBe("converted");
+  });
+
   it("refuses a sale to a customer the live hold does not name", async () => {
     const car = await carReadyToSell("S-4", 700_000_000, 0);
     await withTransaction((client) =>
@@ -1152,6 +1534,7 @@ describe("selling the exact car", () => {
         automotive.recordVehicleCost(client, {
           businessId: biz.id,
           serialId: car.serialId,
+          locationId: biz.locationId,
           createdBy: biz.ownerId,
           cost: {
             category: "detailing",
@@ -1168,6 +1551,7 @@ describe("selling the exact car", () => {
       vehicleSales.reverseVehicleSale(client, {
         businessId: biz.id,
         serialId: car.serialId,
+        locationId: biz.locationId,
         reason: "فسخ فروش",
         actorId: biz.ownerId,
       }),
@@ -1187,15 +1571,89 @@ describe("selling the exact car", () => {
     const returned = await automotive.getVehicle(biz.id, car.serialId);
     expect(returned?.state).toBe("returned");
 
-    // The frozen facts the reversal was based on are still on the row (history
-    // is never lost), and the reversal itself is on the record with its reason.
-    const { rows: events } = await db.query<{ payload: { reason?: string } }>(
+    // Current-sale facts are cleared so the unique sold-line guard cannot
+    // strand the returned unit. The immutable occurrence retains exactly what
+    // was reversed, including the frozen basis and mirror-entry ids.
+    const { rows: cleared } = await db.query<{
+      sold_order_item_id: string | null;
+      sold_customer_id: string | null;
+      sold_on: string | null;
+      sale_price_rial: string | null;
+      frozen_effective_cost_rial: string | null;
+      sold_by: string | null;
+    }>(
+      `SELECT sold_order_item_id, sold_customer_id, sold_on::text AS sold_on,
+              sale_price_rial::text AS sale_price_rial,
+              frozen_effective_cost_rial::text AS frozen_effective_cost_rial, sold_by
+         FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2`,
+      [biz.id, car.serialId],
+    );
+    expect(cleared[0]).toEqual({
+      sold_order_item_id: null,
+      sold_customer_id: null,
+      sold_on: null,
+      sale_price_rial: null,
+      frozen_effective_cost_rial: null,
+      sold_by: null,
+    });
+    const { rows: saleHistory } = await db.query<{
+      status: string;
+      order_id: string;
+      sale_price_rial: string;
+      frozen_effective_cost_rial: string;
+      reversal_reason: string;
+      reversal_entry_ids: string[];
+    }>(
+      `SELECT status, order_id, sale_price_rial::text AS sale_price_rial,
+              frozen_effective_cost_rial::text AS frozen_effective_cost_rial,
+              reversal_reason, reversal_entry_ids
+         FROM automotive_vehicle_sales WHERE business_id = $1 AND serial_id = $2`,
+      [biz.id, car.serialId],
+    );
+    expect(saleHistory[0]).toMatchObject({
+      status: "reversed",
+      order_id: invoice.orderId,
+      sale_price_rial: "981000000",
+      frozen_effective_cost_rial: "700000000",
+      reversal_reason: "فسخ فروش",
+    });
+    expect(saleHistory[0].reversal_entry_ids).toHaveLength(2);
+
+    const { rows: events } = await db.query<{ payload: { reason?: string; saleId?: string } }>(
       `SELECT payload FROM domain_events
         WHERE business_id = $1 AND event_type = 'automotive.sale_reversed'`,
       [biz.id],
     );
     expect(events[0].payload.reason).toBe("فسخ فروش");
     expect(invoice.orderId).toBeTruthy();
+
+    await withTransaction((client) =>
+      automotive.relistReturnedVehicle(client, {
+        businessId: biz.id,
+        serialId: car.serialId,
+        locationId: biz.locationId,
+        reason: "بازرسی و تأیید آماده‌بودن برای فروش",
+        actorId: biz.ownerId,
+      }),
+    );
+    expect((await automotive.getVehicle(biz.id, car.serialId))?.state).toBe("in_stock");
+    const resale = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 0,
+      tenderAmount: 981_000_000,
+    });
+    expect(resale.orderId).not.toBe(invoice.orderId);
+    expect((await automotive.getVehicle(biz.id, car.serialId))?.state).toBe("sold");
+    const { rows: occurrences } = await db.query<{ status: string; order_id: string | null }>(
+      `SELECT status, order_id FROM automotive_vehicle_sales
+        WHERE business_id = $1 AND serial_id = $2 ORDER BY created_at`,
+      [biz.id, car.serialId],
+    );
+    expect(occurrences).toEqual([
+      { status: "reversed", order_id: invoice.orderId },
+      { status: "active", order_id: resale.orderId },
+    ]);
   });
 
   it("reads a vehicle line's sale back from the invoice, vehicle named", async () => {
@@ -1274,6 +1732,7 @@ beforeAll(async () => {
   leads = await import("../src/lib/automotive-lead-service");
   platform = await import("../src/lib/platform-service");
   industryGuard = await import("../src/lib/industry-guard");
+  mediaService = await import("../src/lib/media-service");
 });
 
 describe("what a lead is looking for", () => {
@@ -1429,8 +1888,9 @@ describe("what a lead is looking for", () => {
 });
 
 describe("cars shown to a lead", () => {
-  it("records one link per lead and car, and reports it as the reason", async () => {
-    const leadId = await makeLead("آقای نوری");
+  it("includes a linked lead without a preferences row and excludes leads with neither link nor preferences", async () => {
+    const linkedLeadId = await makeLead("آقای نوری");
+    const unlinkedLeadId = await makeLead("خانم احمدی");
     const car = await stockedCar({
       stockNumber: "L-7",
       make: "بی‌ام‌و",
@@ -1440,21 +1900,32 @@ describe("cars shown to a lead", () => {
       askingPriceRial: 3_500_000_000,
     });
 
+    // The dealership has not recorded a preference or shown the car to either
+    // lead, so neither is a match yet.
+    expect(await leads.listLeadsInterestedInVehicle(biz.id, car.serialId)).toEqual([]);
+
     await withTransaction((client) =>
-      leads.linkLeadVehicle(client, { businessId: biz.id, leadId, serialId: car.serialId, actorId: biz.ownerId }),
+      leads.linkLeadVehicle(client, {
+        businessId: biz.id,
+        leadId: linkedLeadId,
+        serialId: car.serialId,
+        locationId: biz.locationId,
+        actorId: biz.ownerId,
+      }),
     );
     // Shown again — this time a test drive. One fact, updated, not two rows.
     await withTransaction((client) =>
       leads.linkLeadVehicle(client, {
         businessId: biz.id,
-        leadId,
+        leadId: linkedLeadId,
         serialId: car.serialId,
+        locationId: biz.locationId,
         purpose: "test_drive",
         actorId: biz.ownerId,
       }),
     );
 
-    const profile = await leads.getLeadVehicleProfile(biz.id, leadId);
+    const profile = await leads.getLeadVehicleProfile(biz.id, linkedLeadId);
     expect(profile).not.toBeNull();
     expect(profile!.links).toHaveLength(1);
     expect(profile!.links[0].purpose).toBe("test_drive");
@@ -1463,15 +1934,21 @@ describe("cars shown to a lead", () => {
 
     // The link is now the reason the lead ranks first for that car.
     const matched = await leads.listLeadsInterestedInVehicle(biz.id, car.serialId);
-    expect(matched[0].leadId).toBe(leadId);
+    expect(matched.map((lead) => lead.leadId)).toEqual([linkedLeadId]);
     expect(matched[0].bestPurpose).toBe("test_drive");
+    expect(matched.map((lead) => lead.leadId)).not.toContain(unlinkedLeadId);
 
     expect(
       await withTransaction((client) =>
-        leads.unlinkLeadVehicle(client, { businessId: biz.id, leadId, serialId: car.serialId }),
+        leads.unlinkLeadVehicle(client, {
+          businessId: biz.id,
+          leadId: linkedLeadId,
+          serialId: car.serialId,
+          locationId: biz.locationId,
+        }),
       ),
     ).toBe(true);
-    expect((await leads.getLeadVehicleProfile(biz.id, leadId))!.links).toEqual([]);
+    expect((await leads.getLeadVehicleProfile(biz.id, linkedLeadId))!.links).toEqual([]);
   });
 
   it("refuses a link to another tenant's lead or another tenant's car", async () => {
@@ -1488,7 +1965,7 @@ describe("cars shown to a lead", () => {
     // My car, their lead id: the lead is re-checked against the active tenant.
     await expect(
       withTransaction((client) =>
-        leads.linkLeadVehicle(client, { businessId: other.id, leadId, serialId: car.serialId }),
+        leads.linkLeadVehicle(client, { businessId: other.id, leadId, serialId: car.serialId, locationId: other.locationId }),
       ),
     ).rejects.toThrow(/سرنخ/);
 
@@ -1499,6 +1976,7 @@ describe("cars shown to a lead", () => {
           businessId: biz.id,
           leadId,
           serialId: "00000000-0000-0000-0000-000000000000",
+          locationId: biz.locationId,
         }),
       ),
     ).rejects.toThrow(/خودرو/);

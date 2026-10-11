@@ -146,6 +146,7 @@ export async function getLeadVehicleProfile(
   businessId: string,
   leadId: string,
   client?: PoolClient,
+  locationIds?: string[],
 ): Promise<LeadVehicleProfile | null> {
   const run = <T extends Record<string, unknown>>(sql: string, params: unknown[]) =>
     client ? client.query<T>(sql, params as never) : query<T>(sql, params as never);
@@ -170,6 +171,10 @@ export async function getLeadVehicleProfile(
     [businessId, leadId],
   )) as unknown as { rows: PreferencesRow[] };
 
+  const linkParams: unknown[] = [businessId, leadId];
+  const linkBranchFilter = locationIds === undefined
+    ? ""
+    : ` AND v.location_id = ANY($${linkParams.push(locationIds)}::uuid[])`;
   const { rows: linkRows } = await run<{
     id: string;
     serial_id: string;
@@ -185,10 +190,10 @@ export async function getLeadVehicleProfile(
     `SELECT k.id, k.serial_id, v.stock_number, v.make, v.model, v.trim, v.model_year,
             k.purpose, k.note, k.created_at::text AS created_at
        FROM crm_lead_vehicle_links k
-       JOIN automotive_vehicle_attributes v ON v.serial_id = k.serial_id
-      WHERE k.business_id = $1 AND k.lead_id = $2
+       JOIN automotive_vehicle_attributes v ON v.serial_id = k.serial_id AND v.business_id = k.business_id
+      WHERE k.business_id = $1 AND k.lead_id = $2${linkBranchFilter}
       ORDER BY k.created_at DESC`,
-    [businessId, leadId],
+    linkParams,
   );
 
   return {
@@ -326,6 +331,7 @@ export interface LinkLeadVehicleInput {
   businessId: string;
   leadId: string;
   serialId: string;
+  locationId: string;
   purpose?: LeadVehicleLinkPurpose;
   note?: string | null;
   actorId?: string | null;
@@ -350,8 +356,10 @@ export async function linkLeadVehicle(
   );
   if (!leadRows[0]) throw new VehicleLeadError("lead_not_found", "سرنخ یافت نشد.", 404);
   const { rows: vehicleRows } = await client.query<{ serial_id: string }>(
-    `SELECT serial_id FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2`,
-    [input.businessId, input.serialId],
+    `SELECT serial_id FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 AND location_id = $3
+      FOR UPDATE`,
+    [input.businessId, input.serialId, input.locationId],
   );
   if (!vehicleRows[0]) throw new VehicleLeadError("vehicle_not_found", "خودرو یافت نشد.", 404);
 
@@ -369,8 +377,15 @@ export async function linkLeadVehicle(
 /** Removes one link. The lead and the car are both re-checked against the tenant. */
 export async function unlinkLeadVehicle(
   client: PoolClient,
-  input: { businessId: string; leadId: string; serialId: string },
+  input: { businessId: string; leadId: string; serialId: string; locationId: string },
 ): Promise<boolean> {
+  const { rows: vehicles } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 AND location_id = $3
+      FOR UPDATE`,
+    [input.businessId, input.serialId, input.locationId],
+  );
+  if (!vehicles[0]) throw new VehicleLeadError("vehicle_not_found", "خودرو یافت نشد.", 404);
   const { rowCount } = await client.query(
     `DELETE FROM crm_lead_vehicle_links
       WHERE business_id = $1 AND lead_id = $2 AND serial_id = $3`,
@@ -403,6 +418,7 @@ export async function listLeadsInterestedInVehicle(
   businessId: string,
   serialId: string,
   client?: PoolClient,
+  locationIds?: string[],
 ): Promise<
   {
     leadId: string;
@@ -414,7 +430,12 @@ export async function listLeadsInterestedInVehicle(
     note: string | null;
   }[]
 > {
-  const params = [businessId, serialId];
+  const params: unknown[] = [businessId, serialId];
+  let branchFilter = "";
+  if (locationIds !== undefined) {
+    if (locationIds.length === 0) return [];
+    branchFilter = ` AND location_id = ANY($${params.push(locationIds)}::uuid[])`;
+  }
   const run = <T extends Record<string, unknown>>(sql: string, values: unknown[]) =>
     client ? client.query<T>(sql, values as never) : query<T>(sql, values as never);
   const { rows } = await run<{
@@ -428,7 +449,7 @@ export async function listLeadsInterestedInVehicle(
   }>(
     `WITH vehicle AS (
        SELECT make, model, condition, model_year, asking_price_rial
-         FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2
+         FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2${branchFilter}
      )
      SELECT l.id AS lead_id, l.name AS lead_name, l.status, l.phone,
             k.purpose, p.budget_to_rial::text AS budget_to_rial, p.notes AS note

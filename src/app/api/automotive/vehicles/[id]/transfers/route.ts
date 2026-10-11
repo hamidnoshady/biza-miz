@@ -3,8 +3,10 @@ import { getPool } from "@/lib/db";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
+import { accessibleLocationsFor } from "@/lib/setup-state";
+import { branchAccessForSession, canAccessLocation } from "@/lib/automotive-access";
 import { listVehicleTransfers, startVehicleTransfer } from "@/lib/automotive-service";
-import { handleAutomotiveError, readBody } from "../../../guard";
+import { handleAutomotiveError, readBody, vehicleBranchResponse } from "../../../guard";
 
 /** §11 — one car's transfer history, newest first. */
 export const GET = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -13,9 +15,17 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const branchError = await vehicleBranchResponse(session, id);
+  if (branchError) return branchError;
+  const branchScope = await accessibleLocationsFor(session);
 
   try {
-    return NextResponse.json({ transfers: await listVehicleTransfers(session.businessId, { serialId: id }) });
+    return NextResponse.json({
+      transfers: await listVehicleTransfers(session.businessId, {
+        serialId: id,
+        locationIds: branchScope.locations.map(({ id: locationId }) => locationId),
+      }),
+    });
   } catch (err) {
     return handleAutomotiveError(err);
   }
@@ -32,18 +42,25 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const branchError = await vehicleBranchResponse(session, id, { mutation: true });
+  if (branchError) return branchError;
+  const branchAccess = await branchAccessForSession(session);
   const body = await readBody(request);
 
   const toLocationId = typeof body.toLocationId === "string" ? body.toLocationId : "";
   if (!toLocationId) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  if (!canAccessLocation(branchAccess, toLocationId)) {
+    return NextResponse.json({ error: "location_not_found" }, { status: 404 });
+  }
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
     const { rows } = await client.query<{ location_id: string }>(
       `SELECT location_id FROM automotive_vehicle_attributes
-        WHERE business_id = $1 AND serial_id = $2`,
-      [session.businessId, id],
+        WHERE business_id = $1 AND serial_id = $2 AND location_id = $3
+        FOR UPDATE`,
+      [session.businessId, id, branchAccess.activeLocationId],
     );
     if (!rows[0]) {
       await client.query("ROLLBACK");

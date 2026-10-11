@@ -4,6 +4,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
 import { getVehicleReservation, releaseVehicleReservation } from "@/lib/automotive-reservation-service";
+import { branchAccessForSession, canAccessLocation, canActInLocation } from "@/lib/automotive-access";
 import { handleAutomotiveError, readBody } from "../../guard";
 
 /** One hold, with its deposit and its own ledger entries. */
@@ -17,6 +18,10 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   try {
     const reservation = await getVehicleReservation(session.businessId, id);
     if (!reservation) return NextResponse.json({ error: "reservation_not_found" }, { status: 404 });
+    const branchAccess = await branchAccessForSession(session);
+    if (!canAccessLocation(branchAccess, reservation.locationId)) {
+      return NextResponse.json({ error: "reservation_not_found" }, { status: 404 });
+    }
     return NextResponse.json({ reservation });
   } catch (err) {
     return handleAutomotiveError(err);
@@ -36,6 +41,15 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const reservation = await getVehicleReservation(session.businessId, id);
+  if (!reservation) return NextResponse.json({ error: "reservation_not_found" }, { status: 404 });
+  const branchAccess = await branchAccessForSession(session);
+  if (!canAccessLocation(branchAccess, reservation.locationId)) {
+    return NextResponse.json({ error: "reservation_not_found" }, { status: 404 });
+  }
+  if (!canActInLocation(branchAccess, reservation.locationId)) {
+    return NextResponse.json({ error: "wrong_location" }, { status: 409 });
+  }
   const body = await readBody(request);
 
   const client = await getPool().connect();
@@ -43,6 +57,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     await client.query("BEGIN");
     const result = await releaseVehicleReservation(client, {
       businessId: session.businessId,
+      locationId: reservation.locationId,
       reservationId: id,
       reason: typeof body.reason === "string" ? body.reason : "",
       refund: typeof body.refund === "boolean" ? body.refund : undefined,

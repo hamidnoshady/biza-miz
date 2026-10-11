@@ -31,8 +31,8 @@ import { query } from "./db";
 import { emitDomainEvent } from "./posting-engine";
 import { rialText } from "./inventory-exact";
 import type { VehicleSettlement } from "./automotive-posting-rules";
-import { businessToday, ensureVehicleState, VehicleError } from "./automotive-service";
-import { holdHasExpired, validateHoldStatusTransition, vehicleDisplayName, type VehicleHoldStatus } from "./automotive";
+import { ensureVehicleState, VehicleError } from "./automotive-service";
+import { validateHoldStatusTransition, vehicleDisplayName, type VehicleHoldStatus } from "./automotive";
 // Side-effect import: registers the automotive.* posting rules.
 import "./automotive-posting-rules";
 
@@ -71,6 +71,7 @@ export interface VehicleReservation {
   depositRefundable: boolean;
   depositNote: string | null;
   depositEntryId: string | null;
+  locationId: string;
   note: string | null;
   releaseReason: string | null;
   createdAt: string;
@@ -82,10 +83,10 @@ const RESERVATION_SELECT = `
          r.customer_id, p.name AS customer_name, r.status, r.expires_at::text AS expires_at,
          r.expires_at_time::text AS expires_at_time, r.deposit_amount_rial::text AS deposit_amount_rial,
          r.deposit_method, r.deposit_refundable, r.deposit_note, r.deposit_ledger_entry_id,
-         r.note, r.release_reason, r.created_at::text AS created_at, r.closed_at::text AS closed_at
+         r.location_id, r.note, r.release_reason, r.created_at::text AS created_at, r.closed_at::text AS closed_at
     FROM serial_reservations r
-    JOIN automotive_vehicle_attributes v ON v.serial_id = r.serial_id
-    LEFT JOIN parties p ON p.id = r.customer_id`;
+    JOIN automotive_vehicle_attributes v ON v.serial_id = r.serial_id AND v.business_id = r.business_id
+    LEFT JOIN parties p ON p.id = r.customer_id AND p.business_id = r.business_id`;
 
 interface ReservationRow {
   [key: string]: unknown;
@@ -106,6 +107,7 @@ interface ReservationRow {
   deposit_refundable: boolean;
   deposit_note: string | null;
   deposit_ledger_entry_id: string | null;
+  location_id: string;
   note: string | null;
   release_reason: string | null;
   created_at: string;
@@ -133,6 +135,7 @@ function mapReservation(row: ReservationRow): VehicleReservation {
     depositRefundable: row.deposit_refundable,
     depositNote: row.deposit_note,
     depositEntryId: row.deposit_ledger_entry_id,
+    locationId: row.location_id,
     note: row.note,
     releaseReason: row.release_reason,
     createdAt: row.created_at,
@@ -161,8 +164,19 @@ export async function reserveVehicle(
   }
   // `credit` is not in the union at all: a deposit is money *received*, so
   // "on account" is a contradiction in terms (0212 excludes it at the column).
-  if (input.expiresAt && !/^\d{4}-\d{2}-\d{2}$/.test(input.expiresAt)) {
-    throw new VehicleError("invalid_date", "تاریخ انقضای رزرو نامعتبر است.");
+  if (input.expiresAt) {
+    const parsed = /^\d{4}-\d{2}-\d{2}$/.test(input.expiresAt)
+      ? new Date(`${input.expiresAt}T00:00:00.000Z`)
+      : null;
+    if (!parsed || !Number.isFinite(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== input.expiresAt) {
+      throw new VehicleError("invalid_date", "تاریخ انقضای رزرو نامعتبر است.");
+    }
+  }
+  if (input.expiresAtTime != null) {
+    const match = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(input.expiresAtTime);
+    if (!input.expiresAt || !match || Number(match[1]) > 23 || Number(match[2]) > 59 || Number(match[3] ?? 0) > 59) {
+      throw new VehicleError("invalid_date", "ساعت انقضای رزرو باید همراه تاریخ و به‌شکل ساعت و دقیقه باشد.");
+    }
   }
   if (!input.customerId) {
     throw new VehicleError("customer_required", "رزرو بدون مشتری معنا ندارد؛ مشتری را انتخاب کنید.");
@@ -177,6 +191,10 @@ export async function reserveVehicle(
     [input.customerId, input.businessId],
   );
   if (!customerRows[0]) throw new VehicleError("customer_not_found", "مشتری یافت نشد.", 404);
+
+  // A stale expired hold must not keep this exact vehicle blocked merely
+  // because nobody opened the reservations list first.
+  await expireVehicleReservations(client, { businessId: input.businessId, locationId: input.locationId });
 
   const { rows: vehicleRows } = await client.query<{
     serial_id: string;
@@ -247,22 +265,71 @@ export async function reserveVehicle(
     });
     depositEntryId = entryId;
     if (entryId) {
-      await client.query(`UPDATE serial_reservations SET deposit_ledger_entry_id = $2 WHERE id = $1`, [
-        reservationId,
-        entryId,
-      ]);
+      await client.query(
+        `UPDATE serial_reservations SET deposit_ledger_entry_id = $3 WHERE id = $1 AND business_id = $2`,
+        [reservationId, input.businessId, entryId],
+      );
     }
   }
 
   await ensureVehicleState(client, {
     businessId: input.businessId,
     serialId: input.serialId,
+    locationId: input.locationId,
     state: "reserved",
     actorId: input.actorId ?? null,
     eventType: "automotive.vehicle_reserved",
+    command: "reservation_created",
   });
 
   return { id: reservationId, depositEntryId };
+}
+
+async function refundReservationDeposit(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    reservation: {
+      id: string;
+      serial_id: string;
+      location_id: string;
+      deposit_amount_rial: string;
+      deposit_method: string | null;
+      deposit_refundable: boolean;
+      deposit_refund_entry_id: string | null;
+    };
+    actorId?: string | null;
+    shouldRefund: boolean;
+  },
+): Promise<string | null> {
+  const { reservation } = input;
+  const amount = Number(reservation.deposit_amount_rial);
+  if (amount <= 0 || !input.shouldRefund || reservation.deposit_refund_entry_id) return null;
+
+  const { entryId } = await emitDomainEvent(client, {
+    businessId: input.businessId,
+    locationId: reservation.location_id,
+    eventType: "automotive.deposit_refunded",
+    payload: {
+      reservationId: reservation.id,
+      serialId: reservation.serial_id,
+      amount: rialText(String(amount)),
+      method: reservation.deposit_method ?? "cash",
+    },
+    sourceType: "automotive_reservation_deposit_refund",
+    sourceId: reservation.id,
+    createdBy: input.actorId ?? null,
+  });
+  if (entryId) {
+    const { rowCount } = await client.query(
+      `UPDATE serial_reservations
+          SET deposit_refund_entry_id = $3, deposit_refunded_at = now()
+        WHERE id = $1 AND business_id = $2 AND deposit_refund_entry_id IS NULL`,
+      [reservation.id, input.businessId, entryId],
+    );
+    if (rowCount !== 1) throw new VehicleError("deposit_already_refunded", "ودیعهٔ رزرو قبلاً بازپرداخت شده است.", 409);
+  }
+  return entryId;
 }
 
 /**
@@ -272,11 +339,32 @@ export async function reserveVehicle(
  */
 export async function releaseVehicleReservation(
   client: PoolClient,
-  input: { businessId: string; reservationId: string; reason: string; actorId?: string | null; refund?: boolean },
+  input: {
+    businessId: string;
+    locationId: string;
+    reservationId: string;
+    reason: string;
+    actorId?: string | null;
+    refund?: boolean;
+  },
 ): Promise<{ refundedEntryId: string | null }> {
   const reason = input.reason?.trim();
   if (!reason) throw new VehicleError("reason_required", "دلیل آزادسازی رزرو الزامی است.");
 
+  // All car commands lock the physical unit before its hold. This is the same
+  // order as selling/reserving and prevents release-vs-sale deadlocks.
+  const { rows: reservationRefs } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM serial_reservations
+      WHERE id = $1 AND business_id = $2 AND location_id = $3`,
+    [input.reservationId, input.businessId, input.locationId],
+  );
+  if (!reservationRefs[0]) throw new VehicleError("reservation_not_found", "رزرو یافت نشد.", 404);
+  const { rows: lockedVehicles } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+    [input.businessId, reservationRefs[0].serial_id],
+  );
+  if (!lockedVehicles[0]) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   const { rows } = await client.query<{
     id: string;
     serial_id: string;
@@ -286,12 +374,13 @@ export async function releaseVehicleReservation(
     deposit_method: string | null;
     deposit_refundable: boolean;
     deposit_ledger_entry_id: string | null;
+    deposit_refund_entry_id: string | null;
   }>(
     `SELECT id, serial_id, location_id, status, deposit_amount_rial::text AS deposit_amount_rial,
-            deposit_method, deposit_refundable, deposit_ledger_entry_id
+            deposit_method, deposit_refundable, deposit_ledger_entry_id, deposit_refund_entry_id
        FROM serial_reservations
-      WHERE id = $1 AND business_id = $2 FOR UPDATE`,
-    [input.reservationId, input.businessId],
+      WHERE id = $1 AND business_id = $2 AND serial_id = $3 AND location_id = $4 FOR UPDATE`,
+    [input.reservationId, input.businessId, reservationRefs[0].serial_id, input.locationId],
   );
   const reservation = rows[0];
   if (!reservation) throw new VehicleError("reservation_not_found", "رزرو یافت نشد.", 404);
@@ -300,91 +389,117 @@ export async function releaseVehicleReservation(
   }
 
   await client.query(
-    `UPDATE serial_reservations SET status = 'released', release_reason = $2, closed_at = now() WHERE id = $1`,
-    [reservation.id, reason],
+      `UPDATE serial_reservations
+          SET status = 'released', release_reason = $3, closed_at = now()
+        WHERE id = $1 AND business_id = $2 AND location_id = $4 AND status = 'active'`,
+    [reservation.id, input.businessId, reason, input.locationId],
   );
 
-  let refundedEntryId: string | null = null;
-  const deposit = Number(reservation.deposit_amount_rial);
-  const shouldRefund = input.refund ?? reservation.deposit_refundable;
-  if (deposit > 0 && shouldRefund) {
-    const { entryId } = await emitDomainEvent(client, {
-      businessId: input.businessId,
-      locationId: reservation.location_id,
-      eventType: "automotive.deposit_refunded",
-      payload: {
-        reservationId: reservation.id,
-        serialId: reservation.serial_id,
-        amount: rialText(String(deposit)),
-        method: reservation.deposit_method ?? "cash",
-      },
-      sourceType: "automotive_reservation_deposit_refund",
-      sourceId: reservation.id,
-      createdBy: input.actorId ?? null,
-    });
-    refundedEntryId = entryId;
-    if (entryId) {
-      await client.query(
-        `UPDATE serial_reservations SET deposit_refund_entry_id = $2, deposit_refunded_at = now() WHERE id = $1`,
-        [reservation.id, entryId],
-      );
-    }
-  }
+  const refundedEntryId = await refundReservationDeposit(client, {
+    businessId: input.businessId,
+    reservation,
+    actorId: input.actorId,
+    shouldRefund: input.refund ?? reservation.deposit_refundable,
+  });
 
   // Only a still-reserved car snaps back to the shelf: a car that moved on
   // (into a sale, a repair, a transfer) must not be dragged back by a release.
   await ensureVehicleState(client, {
     businessId: input.businessId,
     serialId: reservation.serial_id,
+    locationId: input.locationId,
     state: "in_stock",
     actorId: input.actorId ?? null,
     eventType: "automotive.vehicle_reservation_released",
     onlyIfState: "reserved",
+    command: "reservation_released",
   });
 
   return { refundedEntryId };
 }
 
+const RESERVATION_EXPIRY_REACHED_SQL = `(
+  (r.expires_at + coalesce(r.expires_at_time, time '23:59:59.999999'))
+    AT TIME ZONE coalesce(nullif(l.timezone, ''), 'Asia/Tehran')
+) <= statement_timestamp()`;
+
 /**
- * §7's "expired" — evaluated on read, so no cron has to sweep. A hold whose
- * business-local expiry day has passed is closed as `expired` the first time
- * anybody looks at it, which is also the moment the car becomes sellable to
- * anyone again.
+ * §7's expiry is an instant, not midnight on a Gregorian date. Evaluate the
+ * entered local date/time in the reservation branch's IANA timezone. Candidate
+ * discovery is unlocked; each command then locks the vehicle first and the
+ * hold second, matching reserve/sale/release so a simultaneous checkout cannot
+ * deadlock or revive an expired hold.
  */
 export async function expireVehicleReservations(
   client: PoolClient,
   input: { businessId: string; locationId: string },
 ): Promise<number> {
-  const today = await businessToday(client, input.locationId);
-  const { rows } = await client.query<{ id: string; serial_id: string; expires_at: string }>(
-    `SELECT id, serial_id, expires_at::text AS expires_at
-       FROM serial_reservations
-      WHERE business_id = $1 AND location_id = $2 AND status = 'active' AND expires_at IS NOT NULL
-      FOR UPDATE`,
+  const { rows: candidates } = await client.query<{ id: string; serial_id: string }>(
+    `SELECT r.id, r.serial_id
+       FROM serial_reservations r
+       JOIN locations l ON l.id = r.location_id AND l.business_id = r.business_id
+      WHERE r.business_id = $1 AND r.location_id = $2 AND r.status = 'active'
+        AND r.expires_at IS NOT NULL AND ${RESERVATION_EXPIRY_REACHED_SQL}
+      ORDER BY r.serial_id, r.id`,
     [input.businessId, input.locationId],
   );
+
   let expired = 0;
-  for (const reservation of rows) {
-    if (!holdHasExpired({ status: "active", expiresAt: reservation.expires_at }, today)) continue;
-    await client.query(
-      `UPDATE serial_reservations SET status = 'expired', closed_at = now() WHERE id = $1`,
-      [reservation.id],
+  for (const candidate of candidates) {
+    const { rows: lockedVehicles } = await client.query<{ serial_id: string }>(
+      `SELECT serial_id FROM automotive_vehicle_attributes
+        WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+      [input.businessId, candidate.serial_id],
     );
-    await client.query(
-      `UPDATE item_serials SET status = 'in_stock' WHERE id = $1 AND status = 'reserved'`,
-      [reservation.serial_id],
+    if (!lockedVehicles[0]) continue;
+
+    const { rows: holds } = await client.query<{
+      id: string;
+      serial_id: string;
+      location_id: string;
+      deposit_amount_rial: string;
+      deposit_method: string | null;
+      deposit_refundable: boolean;
+      deposit_refund_entry_id: string | null;
+    }>(
+      `SELECT r.id, r.serial_id, r.location_id, r.deposit_amount_rial::text AS deposit_amount_rial,
+              r.deposit_method, r.deposit_refundable, r.deposit_refund_entry_id
+         FROM serial_reservations r
+         JOIN locations l ON l.id = r.location_id AND l.business_id = r.business_id
+        WHERE r.id = $1 AND r.business_id = $2 AND r.location_id = $3
+          AND r.status = 'active' AND r.expires_at IS NOT NULL
+          AND ${RESERVATION_EXPIRY_REACHED_SQL}
+        FOR UPDATE OF r`,
+      [candidate.id, input.businessId, input.locationId],
     );
+    const reservation = holds[0];
+    if (!reservation) continue;
+
     await client.query(
-      `UPDATE automotive_vehicle_attributes SET state = 'in_stock', updated_at = now()
-        WHERE business_id = $1 AND serial_id = $2 AND state = 'reserved'`,
-      [input.businessId, reservation.serial_id],
+      `UPDATE serial_reservations SET status = 'expired', closed_at = now()
+        WHERE id = $1 AND business_id = $2 AND status = 'active'`,
+      [reservation.id, input.businessId],
     );
+    await refundReservationDeposit(client, {
+      businessId: input.businessId,
+      reservation,
+      shouldRefund: reservation.deposit_refundable,
+    });
+    await ensureVehicleState(client, {
+      businessId: input.businessId,
+      serialId: reservation.serial_id,
+      locationId: input.locationId,
+      state: 'in_stock',
+      eventType: 'automotive.vehicle_state_changed',
+      onlyIfState: 'reserved',
+      command: 'reservation_expired',
+    });
     await emitDomainEvent(client, {
       businessId: input.businessId,
-      locationId: input.locationId,
-      eventType: "automotive.vehicle_reservation_expired",
+      locationId: reservation.location_id,
+      eventType: 'automotive.vehicle_reservation_expired',
       payload: { reservationId: reservation.id, serialId: reservation.serial_id },
-      sourceType: "automotive_vehicle",
+      sourceType: 'automotive_vehicle',
       sourceId: reservation.serial_id,
       createdBy: null,
     });
@@ -437,33 +552,61 @@ export async function getVehicleReservation(
  */
 export async function resolveVehicleReservationForSale(
   client: PoolClient,
-  input: { businessId: string; serialId: string; customerId: string | null; saleDate: string; override?: boolean },
+  input: { businessId: string; serialId: string; customerId: string | null; override?: boolean },
 ): Promise<{ reservationId: string; holdCustomerId: string | null; depositRial: number; applied: boolean }> {
   const { rows } = await client.query<{
     id: string;
+    serial_id: string;
     customer_id: string;
-    expires_at: string | null;
+    location_id: string;
     deposit_amount_rial: string;
-    status: string;
+    deposit_method: string | null;
+    deposit_refundable: boolean;
+    deposit_refund_entry_id: string | null;
+    expired: boolean;
   }>(
-    `SELECT id, customer_id, expires_at::text AS expires_at,
-            deposit_amount_rial::text AS deposit_amount_rial, status
-       FROM serial_reservations
-      WHERE business_id = $1 AND serial_id = $2 AND status = 'active'
-      FOR UPDATE`,
+    `SELECT r.id, r.serial_id, r.customer_id, r.location_id,
+            r.deposit_amount_rial::text AS deposit_amount_rial, r.deposit_method,
+            r.deposit_refundable, r.deposit_refund_entry_id,
+            (r.expires_at IS NOT NULL AND ${RESERVATION_EXPIRY_REACHED_SQL}) AS expired
+       FROM serial_reservations r
+       JOIN locations l ON l.id = r.location_id AND l.business_id = r.business_id
+      WHERE r.business_id = $1 AND r.serial_id = $2 AND r.status = 'active'
+      FOR UPDATE OF r`,
     [input.businessId, input.serialId],
   );
   const reservation = rows[0];
   if (!reservation) return { reservationId: "", holdCustomerId: null, depositRial: 0, applied: false };
 
-  const expired = holdHasExpired(
-    { status: "active", expiresAt: reservation.expires_at },
-    input.saleDate,
-  );
-  if (expired) {
-    await client.query(`UPDATE serial_reservations SET status = 'expired', closed_at = now() WHERE id = $1`, [
-      reservation.id,
-    ]);
+  if (reservation.expired) {
+    await client.query(
+      `UPDATE serial_reservations SET status = 'expired', closed_at = now()
+        WHERE id = $1 AND business_id = $2 AND status = 'active'`,
+      [reservation.id, input.businessId],
+    );
+    await refundReservationDeposit(client, {
+      businessId: input.businessId,
+      reservation,
+      shouldRefund: reservation.deposit_refundable,
+    });
+    await ensureVehicleState(client, {
+      businessId: input.businessId,
+      serialId: input.serialId,
+      locationId: reservation.location_id,
+      state: 'in_stock',
+      eventType: 'automotive.vehicle_state_changed',
+      onlyIfState: 'reserved',
+      command: 'reservation_expired',
+    });
+    await emitDomainEvent(client, {
+      businessId: input.businessId,
+      locationId: reservation.location_id,
+      eventType: 'automotive.vehicle_reservation_expired',
+      payload: { reservationId: reservation.id, serialId: input.serialId },
+      sourceType: 'automotive_vehicle',
+      sourceId: input.serialId,
+      createdBy: null,
+    });
     return { reservationId: reservation.id, holdCustomerId: reservation.customer_id, depositRial: 0, applied: false };
   }
 
@@ -487,15 +630,16 @@ export async function resolveVehicleReservationForSale(
 /** Marks the hold as converted by the sale that closed it (§7's audit trail). */
 export async function convertVehicleReservation(
   client: PoolClient,
-  input: { reservationId: string; orderId: string },
+  input: { businessId: string; reservationId: string; orderId: string | null },
 ): Promise<void> {
   if (!input.reservationId) return;
-  await client.query(
+  const { rowCount } = await client.query(
     `UPDATE serial_reservations
-        SET status = 'converted', closed_at = now(), converted_order_id = $2
-      WHERE id = $1 AND status = 'active'`,
-    [input.reservationId, input.orderId],
+        SET status = 'converted', closed_at = now(), converted_order_id = $3
+      WHERE id = $1 AND business_id = $2 AND status = 'active'`,
+    [input.reservationId, input.businessId, input.orderId],
   );
+  if (rowCount !== 1) throw new VehicleError("reservation_closed", "این رزرو دیگر فعال نیست.", 409);
 }
 
 /**

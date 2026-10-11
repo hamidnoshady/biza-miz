@@ -37,6 +37,8 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   // series, so the journal does not grow a code per transition.
   automotive_vehicle: "خودرو",
   automotive_sale: "فروش خودرو",
+  automotive_vehicle_sale: "فروش خودرو",
+  automotive_vehicle_media: "رسانهٔ پروندهٔ خودرو",
   automotive_vehicle_cost: "هزینهٔ خودرو",
   automotive_vehicle_cost_void: "ابطال هزینهٔ خودرو",
   automotive_vehicle_transfer: "انتقال خودرو بین شعب",

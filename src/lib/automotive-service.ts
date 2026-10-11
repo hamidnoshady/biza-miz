@@ -50,10 +50,17 @@ import {
   validatePlateNumber,
   validatePriorOwners,
   validateStockNumber,
+  validateVehicleStateCommand,
   validateVehicleStateTransition,
   validateVehicleYears,
   validateVin,
   wholeRial,
+  VEHICLE_MEDIA_CATEGORIES,
+  VEHICLE_BODY_TYPES,
+  VEHICLE_TRANSMISSIONS,
+  VEHICLE_FUEL_TYPES,
+  VEHICLE_DRIVETRAINS,
+  type VehicleMediaCategory,
   type VehicleAcquisitionSource,
   type VehicleBodyType,
   type VehicleCondition,
@@ -62,6 +69,7 @@ import {
   type VehicleExpensePosting,
   type VehicleFuelType,
   type VehicleState,
+  type VehicleStateCommand,
   type VehicleTransmission,
   type VehicleYearCalendar,
 } from "./automotive";
@@ -431,11 +439,11 @@ const VEHICLE_SELECT = `
     FROM automotive_vehicle_attributes v
     JOIN item_serials s ON s.id = v.serial_id
     LEFT JOIN (
-      SELECT serial_id,
+      SELECT business_id, serial_id,
              sum(amount_rial) FILTER (WHERE posting = 'capitalized') AS capitalized_cost_rial,
              sum(amount_rial) FILTER (WHERE posting = 'period_expense') AS period_expense_rial
-        FROM automotive_vehicle_costs WHERE status = 'active' GROUP BY serial_id
-    ) c ON c.serial_id = v.serial_id`;
+        FROM automotive_vehicle_costs WHERE status = 'active' GROUP BY business_id, serial_id
+    ) c ON c.business_id = v.business_id AND c.serial_id = v.serial_id`;
 
 function mapVehicle(row: VehicleRow, costs: VehicleCostRow[] = []): VehicleDetail {
   const breakdown = computeEffectiveCost({
@@ -508,20 +516,60 @@ function mapVehicle(row: VehicleRow, costs: VehicleCostRow[] = []): VehicleDetai
   };
 }
 
+/** Branch filters for vehicle detail/read models, always sourced from membership, never a request body. */
+export interface VehicleReadScope {
+  locationId?: string | null;
+  locationIds?: string[];
+}
+
+function vehicleBranchFilter(alias: string, params: unknown[], scope?: VehicleReadScope): string | null {
+  if (!scope) return "";
+  if (scope.locationIds !== undefined) {
+    if (scope.locationIds.length === 0) return null;
+    return ` AND ${alias}.location_id = ANY($${params.push(scope.locationIds)}::uuid[])`;
+  }
+  if (scope.locationId) return ` AND ${alias}.location_id = $${params.push(scope.locationId)}`;
+  return "";
+}
+
+/** Lock the physical unit before any branch-scoped mutation and re-check its location under that lock. */
+async function lockVehicleAtBranch(
+  client: PoolClient,
+  businessId: string,
+  serialId: string,
+  locationId: string,
+): Promise<{ state: VehicleState; locationId: string; stockNumber: string }> {
+  const { rows } = await client.query<{ state: VehicleState; location_id: string; stock_number: string }>(
+    `SELECT state, location_id, stock_number FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+    [businessId, serialId],
+  );
+  const vehicle = rows[0];
+  if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
+  if (vehicle.location_id !== locationId) {
+    throw new VehicleError("wrong_location", "این خودرو در شعبهٔ فعال نیست.", 409);
+  }
+  return { state: vehicle.state, locationId: vehicle.location_id, stockNumber: vehicle.stock_number };
+}
+
 /** One car, with its active cost rows — the vehicle detail screen's payload. */
 export async function getVehicle(
   businessId: string,
   serialId: string,
   client?: PoolClient,
+  scope?: VehicleReadScope,
 ): Promise<VehicleDetail | null> {
   const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
     client ? client.query<T>(text, params as never) : query<T>(text, params as never);
-  const { rows } = await run<VehicleRow>(`${VEHICLE_SELECT} WHERE v.business_id = $1 AND v.serial_id = $2`, [
-    businessId,
-    serialId,
-  ]);
+  const params: unknown[] = [businessId, serialId];
+  const branchFilter = vehicleBranchFilter("v", params, scope);
+  if (branchFilter === null) return null;
+  const { rows } = await run<VehicleRow>(
+    `${VEHICLE_SELECT} WHERE v.business_id = $1 AND v.serial_id = $2${branchFilter}`,
+    params,
+  );
   if (!rows[0]) return null;
-  const costs = await listVehicleCosts(businessId, serialId, client);
+  const costs = await listVehicleCosts(businessId, serialId, client, scope);
   return mapVehicle(rows[0], costs);
 }
 
@@ -529,9 +577,13 @@ export async function listVehicleCosts(
   businessId: string,
   serialId: string,
   client?: PoolClient,
+  scope?: VehicleReadScope,
 ): Promise<VehicleCostRow[]> {
   const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
     client ? client.query<T>(text, params as never) : query<T>(text, params as never);
+  const params: unknown[] = [businessId, serialId];
+  const branchFilter = vehicleBranchFilter("v", params, scope);
+  if (branchFilter === null) return [];
   const { rows } = await run<{
     id: string;
     category: VehicleExpenseCategory;
@@ -551,10 +603,12 @@ export async function listVehicleCosts(
             c.vendor_party_id, p.name AS vendor_name, c.document_ref, c.notes, c.status, c.void_reason,
             c.voided_at::text AS voided_at, c.created_at::text AS created_at
        FROM automotive_vehicle_costs c
-       LEFT JOIN parties p ON p.id = c.vendor_party_id
-      WHERE c.business_id = $1 AND c.serial_id = $2
+       JOIN automotive_vehicle_attributes v
+         ON v.business_id = c.business_id AND v.serial_id = c.serial_id
+       LEFT JOIN parties p ON p.id = c.vendor_party_id AND p.business_id = c.business_id
+      WHERE c.business_id = $1 AND c.serial_id = $2${branchFilter}
       ORDER BY c.incurred_on DESC, c.created_at DESC`,
-    [businessId, serialId],
+    params,
   );
   return rows.map((r) => ({
     id: r.id,
@@ -899,11 +953,13 @@ export async function recordVehicleCost(
   input: {
     businessId: string;
     serialId: string;
+    locationId: string;
     cost: VehicleCostInput;
     createdBy?: string | null;
   },
 ): Promise<{ id: string; entryId: string | null; effectiveCostRial: number }> {
-  const vehicle = await getVehicle(input.businessId, input.serialId, client);
+  await lockVehicleAtBranch(client, input.businessId, input.serialId, input.locationId);
+  const vehicle = await getVehicle(input.businessId, input.serialId, client, { locationId: input.locationId });
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   if (vehicle.state === "sold") {
     throw new VehicleError(
@@ -942,6 +998,8 @@ export async function voidVehicleCost(
   client: PoolClient,
   input: {
     businessId: string;
+    serialId: string;
+    locationId: string;
     costId: string;
     reason: string;
     /** Required: 0212's CHECK requires `voided_by`, because a void is an act somebody performed. */
@@ -951,6 +1009,7 @@ export async function voidVehicleCost(
   const reason = input.reason?.trim();
   if (!reason) throw new VehicleError("reason_required", "دلیل ابطال هزینه الزامی است.");
   if (!input.actorId) throw new VehicleError("actor_required", "ثبت‌کنندهٔ ابطال الزامی است.");
+  await lockVehicleAtBranch(client, input.businessId, input.serialId, input.locationId);
 
   const { rows } = await client.query<{
     id: string;
@@ -962,10 +1021,10 @@ export async function voidVehicleCost(
   }>(
     `SELECT c.id, c.serial_id, c.location_id, c.status, c.ledger_entry_id, v.stock_number
        FROM automotive_vehicle_costs c
-       JOIN automotive_vehicle_attributes v ON v.serial_id = c.serial_id
-      WHERE c.id = $1 AND c.business_id = $2
+       JOIN automotive_vehicle_attributes v ON v.serial_id = c.serial_id AND v.business_id = c.business_id
+      WHERE c.id = $1 AND c.business_id = $2 AND c.serial_id = $3 AND v.location_id = $4
       FOR UPDATE OF c`,
-    [input.costId, input.businessId],
+    [input.costId, input.businessId, input.serialId, input.locationId],
   );
   const cost = rows[0];
   if (!cost) throw new VehicleError("cost_not_found", "هزینه یافت نشد.", 404);
@@ -976,8 +1035,8 @@ export async function voidVehicleCost(
   await client.query(
     `UPDATE automotive_vehicle_costs
         SET status = 'void', void_reason = $2, voided_at = now(), voided_by = $3
-      WHERE id = $1`,
-    [cost.id, reason, input.actorId ?? null],
+      WHERE id = $1 AND business_id = $4 AND serial_id = $5`,
+    [cost.id, reason, input.actorId ?? null, input.businessId, input.serialId],
   );
 
   // The mirror is built from what the original entry actually posted, so a
@@ -1024,6 +1083,7 @@ export async function voidVehicleCost(
 export interface UpdateVehiclePriceInput {
   businessId: string;
   serialId: string;
+  locationId: string;
   askingPriceRial?: number;
   minimumPriceRial?: number | null;
   wholesalePriceRial?: number | null;
@@ -1042,10 +1102,14 @@ export async function updateVehiclePrice(
   client: PoolClient,
   input: UpdateVehiclePriceInput,
 ): Promise<{ previousAskingPriceRial: number; askingPriceRial: number }> {
-  const vehicle = await getVehicle(input.businessId, input.serialId, client);
+  await lockVehicleAtBranch(client, input.businessId, input.serialId, input.locationId);
+  const vehicle = await getVehicle(input.businessId, input.serialId, client, { locationId: input.locationId });
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   if (vehicle.state === "archived") {
     throw new VehicleError("vehicle_archived", "خودروی بایگانی‌شده قابل قیمت‌گذاری نیست.", 409);
+  }
+  if (vehicle.state === "sold") {
+    throw new VehicleError("vehicle_sold", "قیمت خودروی فروخته‌شده تغییرپذیر نیست.", 409);
   }
 
   const askingPrice = assertWholeRial(input.askingPriceRial ?? vehicle.askingPriceRial, "قیمت فروش");
@@ -1068,7 +1132,12 @@ export async function updateVehiclePrice(
         ? null
         : assertWholeRial(input.promotionalPriceRial, "قیمت تبلیغاتی");
 
-  if (askingPrice === vehicle.askingPriceRial && minimumPrice === vehicle.minimumPriceRial) {
+  if (
+    askingPrice === vehicle.askingPriceRial &&
+    minimumPrice === vehicle.minimumPriceRial &&
+    wholesale === vehicle.wholesalePriceRial &&
+    promotional === vehicle.promotionalPriceRial
+  ) {
     return { previousAskingPriceRial: vehicle.askingPriceRial, askingPriceRial: askingPrice };
   }
 
@@ -1077,23 +1146,29 @@ export async function updateVehiclePrice(
         SET asking_price_rial = $2, minimum_price_rial = $3, wholesale_price_rial = $4,
             promotional_price_rial = $5, price_changed_at = now(), price_changed_by = $6,
             updated_at = now()
-      WHERE business_id = $7 AND serial_id = $1`,
-    [input.serialId, askingPrice, minimumPrice, wholesale, promotional, input.actorId ?? null, input.businessId],
+      WHERE business_id = $7 AND serial_id = $1 AND location_id = $8`,
+    [input.serialId, askingPrice, minimumPrice, wholesale, promotional, input.actorId ?? null, input.businessId, input.locationId],
   );
 
   await client.query(
     `INSERT INTO automotive_vehicle_price_history
-       (business_id, location_id, serial_id, previous_asking_price_rial, asking_price_rial,
-        minimum_price_rial, wholesale_price_rial, promotional_price_rial, reason, changed_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+       (business_id, location_id, serial_id,
+        previous_asking_price_rial, asking_price_rial,
+        previous_minimum_price_rial, minimum_price_rial,
+        previous_wholesale_price_rial, wholesale_price_rial,
+        previous_promotional_price_rial, promotional_price_rial, reason, changed_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
     [
       input.businessId,
       vehicle.locationId,
       input.serialId,
       vehicle.askingPriceRial,
       askingPrice,
+      vehicle.minimumPriceRial,
       minimumPrice,
+      vehicle.wholesalePriceRial,
       wholesale,
+      vehicle.promotionalPriceRial,
       promotional,
       trimmedOrNull(input.reason),
       input.actorId ?? null,
@@ -1109,6 +1184,12 @@ export async function updateVehiclePrice(
       stockNumber: vehicle.stockNumber,
       previousAskingPriceRial: vehicle.askingPriceRial,
       askingPriceRial: askingPrice,
+      previousMinimumPriceRial: vehicle.minimumPriceRial,
+      minimumPriceRial: minimumPrice,
+      previousWholesalePriceRial: vehicle.wholesalePriceRial,
+      wholesalePriceRial: wholesale,
+      previousPromotionalPriceRial: vehicle.promotionalPriceRial,
+      promotionalPriceRial: promotional,
       reason: trimmedOrNull(input.reason),
     },
     sourceType: "automotive_vehicle",
@@ -1123,8 +1204,11 @@ export interface VehiclePriceHistoryEntry {
   id: string;
   previousAskingPriceRial: number;
   askingPriceRial: number;
+  previousMinimumPriceRial: number | null;
   minimumPriceRial: number | null;
+  previousWholesalePriceRial: number | null;
   wholesalePriceRial: number | null;
+  previousPromotionalPriceRial: number | null;
   promotionalPriceRial: number | null;
   reason: string | null;
   changedBy: string | null;
@@ -1136,15 +1220,22 @@ export async function listVehiclePriceHistory(
   businessId: string,
   serialId: string,
   client?: PoolClient,
+  scope?: VehicleReadScope,
 ): Promise<VehiclePriceHistoryEntry[]> {
   const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
     client ? client.query<T>(text, params as never) : query<T>(text, params as never);
+  const params: unknown[] = [businessId, serialId];
+  const branchFilter = vehicleBranchFilter("v", params, scope);
+  if (branchFilter === null) return [];
   const { rows } = await run<{
     id: string;
     previous_asking_price_rial: string;
     asking_price_rial: string;
+    previous_minimum_price_rial: string | null;
     minimum_price_rial: string | null;
+    previous_wholesale_price_rial: string | null;
     wholesale_price_rial: string | null;
+    previous_promotional_price_rial: string | null;
     promotional_price_rial: string | null;
     reason: string | null;
     changed_by: string | null;
@@ -1152,28 +1243,218 @@ export async function listVehiclePriceHistory(
     changed_at: string;
   }>(
     `SELECT h.id, h.previous_asking_price_rial::text AS previous_asking_price_rial,
-            h.asking_price_rial::text AS asking_price_rial, h.minimum_price_rial::text AS minimum_price_rial,
+            h.asking_price_rial::text AS asking_price_rial,
+            h.previous_minimum_price_rial::text AS previous_minimum_price_rial,
+            h.minimum_price_rial::text AS minimum_price_rial,
+            h.previous_wholesale_price_rial::text AS previous_wholesale_price_rial,
             h.wholesale_price_rial::text AS wholesale_price_rial,
+            h.previous_promotional_price_rial::text AS previous_promotional_price_rial,
             h.promotional_price_rial::text AS promotional_price_rial, h.reason, h.changed_by,
             u.full_name AS changed_by_name, h.changed_at::text AS changed_at
        FROM automotive_vehicle_price_history h
+       JOIN automotive_vehicle_attributes v
+         ON v.business_id = h.business_id AND v.serial_id = h.serial_id
        LEFT JOIN users u ON u.id = h.changed_by
-      WHERE h.business_id = $1 AND h.serial_id = $2
+      WHERE h.business_id = $1 AND h.serial_id = $2${branchFilter}
       ORDER BY h.changed_at DESC`,
-    [businessId, serialId],
+    params,
   );
   return rows.map((r) => ({
     id: r.id,
     previousAskingPriceRial: Number(r.previous_asking_price_rial),
     askingPriceRial: Number(r.asking_price_rial),
+    previousMinimumPriceRial: r.previous_minimum_price_rial == null ? null : Number(r.previous_minimum_price_rial),
     minimumPriceRial: r.minimum_price_rial == null ? null : Number(r.minimum_price_rial),
+    previousWholesalePriceRial: r.previous_wholesale_price_rial == null ? null : Number(r.previous_wholesale_price_rial),
     wholesalePriceRial: r.wholesale_price_rial == null ? null : Number(r.wholesale_price_rial),
+    previousPromotionalPriceRial: r.previous_promotional_price_rial == null ? null : Number(r.previous_promotional_price_rial),
     promotionalPriceRial: r.promotional_price_rial == null ? null : Number(r.promotional_price_rial),
     reason: r.reason,
     changedBy: r.changed_by,
     changedByName: r.changed_by_name,
     changedAt: r.changed_at,
   }));
+}
+
+/* ===========================================================================
+ * Vehicle files — canonical media bytes, vehicle-owned links and labels
+ * ===========================================================================
+ */
+
+export interface VehicleMediaAttachment {
+  id: string;
+  mediaAssetId: string;
+  fileName: string;
+  mimeType: string;
+  mediaKind: "image" | "video" | "document";
+  category: VehicleMediaCategory;
+  title: string;
+  description: string | null;
+  displayOrder: number;
+  deletedAt: string | null;
+  createdAt: string;
+}
+
+export async function listVehicleMedia(
+  businessId: string,
+  serialId: string,
+  client?: PoolClient,
+  scope?: VehicleReadScope,
+): Promise<VehicleMediaAttachment[]> {
+  const params: unknown[] = [businessId, serialId];
+  const branchFilter = vehicleBranchFilter("v", params, scope);
+  if (branchFilter === null) return [];
+  const run = <T extends Record<string, unknown>>(text: string, values: unknown[]) =>
+    client ? client.query<T>(text, values as never) : query<T>(text, values as never);
+  const { rows } = await run<{
+    id: string;
+    media_asset_id: string;
+    file_name: string;
+    mime_type: string;
+    media_kind: "image" | "video" | "document";
+    category: VehicleMediaCategory;
+    title: string;
+    description: string | null;
+    display_order: number;
+    deleted_at: string | null;
+    created_at: string;
+  }>(
+    `SELECT vm.id, vm.media_asset_id, a.file_name, a.mime_type, a.kind AS media_kind,
+            vm.category, vm.title, vm.description, vm.display_order,
+            a.deleted_at::text AS deleted_at, vm.created_at::text AS created_at
+       FROM automotive_vehicle_media vm
+       JOIN automotive_vehicle_attributes v
+         ON v.business_id = vm.business_id AND v.serial_id = vm.serial_id
+       JOIN media_assets a
+         ON a.business_id = vm.business_id AND a.id = vm.media_asset_id
+      WHERE vm.business_id = $1 AND vm.serial_id = $2${branchFilter}
+      ORDER BY vm.display_order, vm.created_at DESC, vm.id`,
+    params,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    mediaAssetId: row.media_asset_id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    mediaKind: row.media_kind,
+    category: row.category,
+    title: row.title,
+    description: row.description,
+    displayOrder: row.display_order,
+    deletedAt: row.deleted_at,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function attachVehicleMedia(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    locationId: string;
+    serialId: string;
+    mediaAssetId: string;
+    category: VehicleMediaCategory;
+    title: string;
+    description?: string | null;
+    actorId?: string | null;
+  },
+): Promise<VehicleMediaAttachment> {
+  await lockVehicleAtBranch(client, input.businessId, input.serialId, input.locationId);
+  if (!(VEHICLE_MEDIA_CATEGORIES as readonly string[]).includes(input.category)) {
+    throw new VehicleError("invalid_media_category", "دسته‌بندی فایل خودرو معتبر نیست.");
+  }
+  const title = input.title.trim();
+  if (!title || title.length > 200) {
+    throw new VehicleError("invalid_vehicle_media", "عنوان فایل باید بین ۱ تا ۲۰۰ نویسه باشد.");
+  }
+  const description = trimmedOrNull(input.description ?? null);
+  if (description && description.length > 2000) {
+    throw new VehicleError("invalid_vehicle_media", "توضیح فایل نباید بیش از ۲۰۰۰ نویسه باشد.");
+  }
+  const { rows: assets } = await client.query<{ id: string; file_name: string }>(
+    `SELECT id, file_name FROM media_assets
+      WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL
+      FOR SHARE`,
+    [input.businessId, input.mediaAssetId],
+  );
+  if (!assets[0]) throw new VehicleError("media_not_found", "فایل در کتابخانهٔ این کسب‌وکار یافت نشد.", 404);
+
+  const { rows: existingRows } = await client.query<{
+    id: string;
+    title: string;
+    category: VehicleMediaCategory;
+    description: string | null;
+  }>(
+    `SELECT id, title, category, description FROM automotive_vehicle_media
+      WHERE business_id = $1 AND serial_id = $2 AND media_asset_id = $3
+      FOR UPDATE`,
+    [input.businessId, input.serialId, input.mediaAssetId],
+  );
+  let relationId: string;
+  let changed = true;
+  if (existingRows[0]) {
+    relationId = existingRows[0].id;
+    changed = existingRows[0].title !== title || existingRows[0].category !== input.category || existingRows[0].description !== description;
+    if (changed) {
+      await client.query(
+        `UPDATE automotive_vehicle_media SET title = $4, category = $5, description = $6
+          WHERE business_id = $1 AND serial_id = $2 AND media_asset_id = $3`,
+        [input.businessId, input.serialId, input.mediaAssetId, title, input.category, description],
+      );
+    }
+  } else {
+    const { rows: orderRows } = await client.query<{ next_order: number }>(
+      `SELECT coalesce(max(display_order) + 1, 0)::int AS next_order
+         FROM automotive_vehicle_media WHERE business_id = $1 AND serial_id = $2`,
+      [input.businessId, input.serialId],
+    );
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO automotive_vehicle_media
+         (business_id, serial_id, media_asset_id, category, title, description, display_order, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      [input.businessId, input.serialId, input.mediaAssetId, input.category, title, description, orderRows[0].next_order, input.actorId ?? null],
+    );
+    relationId = rows[0].id;
+  }
+  if (changed) {
+    await recordDomainEvent(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      eventType: "automotive.vehicle_media_attached",
+      payload: { serialId: input.serialId, mediaAssetId: input.mediaAssetId, category: input.category, title },
+      sourceType: "automotive_vehicle_media",
+      sourceId: relationId,
+      createdBy: input.actorId ?? null,
+    });
+  }
+  const attachment = (await listVehicleMedia(input.businessId, input.serialId, client, { locationId: input.locationId }))
+    .find((entry) => entry.id === relationId);
+  if (!attachment) throw new VehicleError("media_not_found", "فایل پیوست‌شده یافت نشد.", 404);
+  return attachment;
+}
+
+export async function detachVehicleMedia(
+  client: PoolClient,
+  input: { businessId: string; locationId: string; serialId: string; mediaAssetId: string; actorId?: string | null },
+): Promise<boolean> {
+  await lockVehicleAtBranch(client, input.businessId, input.serialId, input.locationId);
+  const { rows } = await client.query<{ id: string; category: VehicleMediaCategory; title: string }>(
+    `DELETE FROM automotive_vehicle_media
+      WHERE business_id = $1 AND serial_id = $2 AND media_asset_id = $3
+      RETURNING id, category, title`,
+    [input.businessId, input.serialId, input.mediaAssetId],
+  );
+  if (!rows[0]) return false;
+  await recordDomainEvent(client, {
+    businessId: input.businessId,
+    locationId: input.locationId,
+    eventType: "automotive.vehicle_media_detached",
+    payload: { serialId: input.serialId, mediaAssetId: input.mediaAssetId, category: rows[0].category, title: rows[0].title },
+    sourceType: "automotive_vehicle_media",
+    sourceId: rows[0].id,
+    createdBy: input.actorId ?? null,
+  });
+  return true;
 }
 
 /* ===========================================================================
@@ -1184,6 +1465,7 @@ export async function listVehiclePriceHistory(
 export interface UpdateVehicleInput {
   businessId: string;
   serialId: string;
+  locationId: string;
   plateNumber?: string | null;
   engineNumber?: string | null;
   registrationDate?: string | null;
@@ -1217,7 +1499,8 @@ export async function updateVehicle(
   client: PoolClient,
   input: UpdateVehicleInput,
 ): Promise<VehicleDetail> {
-  const vehicle = await getVehicle(input.businessId, input.serialId, client);
+  await lockVehicleAtBranch(client, input.businessId, input.serialId, input.locationId);
+  const vehicle = await getVehicle(input.businessId, input.serialId, client, { locationId: input.locationId });
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   if (vehicle.state === "sold") {
     throw new VehicleError("vehicle_sold", "خودروی فروخته‌شده قابل ویرایش نیست.", 409);
@@ -1256,26 +1539,48 @@ export async function updateVehicle(
     if (error) throw new VehicleError("invalid_prior_owners", error);
     patch.prior_owners = input.priorOwners;
   }
-  if (input.registrationDate !== undefined) patch.registration_date = input.registrationDate;
+  if (input.registrationDate !== undefined) {
+    patch.registration_date = input.registrationDate == null ? null : assertIsoDate(input.registrationDate, "تاریخ ثبت");
+  }
   if (input.inspectionNotes !== undefined) patch.inspection_notes = trimmedOrNull(input.inspectionNotes);
   if (input.bodyConditionNotes !== undefined) patch.body_condition_notes = trimmedOrNull(input.bodyConditionNotes);
   if (input.mechanicalNotes !== undefined) patch.mechanical_notes = trimmedOrNull(input.mechanicalNotes);
   if (input.serviceHistory !== undefined) patch.service_history = trimmedOrNull(input.serviceHistory);
   if (input.exteriorColor !== undefined) patch.exterior_color = trimmedOrNull(input.exteriorColor);
   if (input.interiorColor !== undefined) patch.interior_color = trimmedOrNull(input.interiorColor);
-  if (input.bodyType !== undefined) patch.body_type = input.bodyType;
-  if (input.transmission !== undefined) patch.transmission = input.transmission;
-  if (input.fuelType !== undefined) patch.fuel_type = input.fuelType;
-  if (input.drivetrain !== undefined) patch.drivetrain = input.drivetrain;
+  if (input.bodyType !== undefined) {
+    if (input.bodyType !== null && !(VEHICLE_BODY_TYPES as readonly string[]).includes(input.bodyType)) {
+      throw new VehicleError("invalid_vehicle", "نوع بدنهٔ خودرو معتبر نیست.");
+    }
+    patch.body_type = input.bodyType;
+  }
+  if (input.transmission !== undefined) {
+    if (input.transmission !== null && !(VEHICLE_TRANSMISSIONS as readonly string[]).includes(input.transmission)) {
+      throw new VehicleError("invalid_vehicle", "نوع گیربکس خودرو معتبر نیست.");
+    }
+    patch.transmission = input.transmission;
+  }
+  if (input.fuelType !== undefined) {
+    if (input.fuelType !== null && !(VEHICLE_FUEL_TYPES as readonly string[]).includes(input.fuelType)) {
+      throw new VehicleError("invalid_vehicle", "نوع سوخت خودرو معتبر نیست.");
+    }
+    patch.fuel_type = input.fuelType;
+  }
+  if (input.drivetrain !== undefined) {
+    if (input.drivetrain !== null && !(VEHICLE_DRIVETRAINS as readonly string[]).includes(input.drivetrain)) {
+      throw new VehicleError("invalid_vehicle", "نوع محور محرک خودرو معتبر نیست.");
+    }
+    patch.drivetrain = input.drivetrain;
+  }
   if (input.engineSpec !== undefined) patch.engine_spec = trimmedOrNull(input.engineSpec);
 
   const columns = Object.keys(patch);
   if (columns.length > 0) {
-    const assignments = columns.map((column, index) => `${column} = $${index + 2}`);
+    const assignments = columns.map((column, index) => `${column} = $${index + 1}`);
     await client.query(
       `UPDATE automotive_vehicle_attributes SET ${assignments.join(", ")}, updated_at = now()
-        WHERE business_id = $1 AND serial_id = $${columns.length + 2}`,
-      [...columns.map((c) => patch[c]), input.businessId, input.serialId],
+        WHERE business_id = $${columns.length + 1} AND serial_id = $${columns.length + 2} AND location_id = $${columns.length + 3}`,
+      [...columns.map((c) => patch[c]), input.businessId, input.serialId, input.locationId],
     );
   }
 
@@ -1291,7 +1596,7 @@ export async function updateVehicle(
     });
   }
 
-  const updated = await getVehicle(input.businessId, input.serialId, client);
+  const updated = await getVehicle(input.businessId, input.serialId, client, { locationId: input.locationId });
   if (!updated) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   return updated;
 }
@@ -1324,10 +1629,15 @@ export async function ensureVehicleState(
     businessId: string;
     serialId: string;
     state: VehicleState;
+    locationId?: string;
     actorId?: string | null;
     /** Defaults to the generic state-change event; callers name the act that caused it. */
     eventType?: string;
     onlyIfState?: VehicleState;
+    /** State transitions are owned by a domain command, never a generic status setter. */
+    command?: VehicleStateCommand;
+    /** Additional command facts for the audit event, never authoritative state fields. */
+    eventPayload?: Record<string, unknown>;
   },
 ): Promise<void> {
   const { rows } = await client.query<{ state: VehicleState; location_id: string; stock_number: string }>(
@@ -1337,10 +1647,16 @@ export async function ensureVehicleState(
   );
   const vehicle = rows[0];
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
+  if (input.locationId && vehicle.location_id !== input.locationId) {
+    throw new VehicleError("wrong_location", "این خودرو در شعبهٔ فعال نیست.", 409);
+  }
   if (input.onlyIfState && vehicle.state !== input.onlyIfState) return;
+  if (vehicle.state === input.state) return;
 
   const error = validateVehicleStateTransition(vehicle.state, input.state);
   if (error) throw new VehicleError("invalid_state_transition", error, 409);
+  const commandError = validateVehicleStateCommand(vehicle.state, input.state, input.command);
+  if (commandError) throw new VehicleError("state_command_required", commandError, 409);
 
   await client.query(
     `UPDATE automotive_vehicle_attributes SET state = $2, updated_at = now()
@@ -1358,7 +1674,13 @@ export async function ensureVehicleState(
     businessId: input.businessId,
     locationId: vehicle.location_id,
     eventType: input.eventType ?? "automotive.vehicle_state_changed",
-    payload: { serialId: input.serialId, stockNumber: vehicle.stock_number, from: vehicle.state, to: input.state },
+    payload: {
+      ...input.eventPayload,
+      serialId: input.serialId,
+      stockNumber: vehicle.stock_number,
+      from: vehicle.state,
+      to: input.state,
+    },
     sourceType: "automotive_vehicle",
     sourceId: input.serialId,
     createdBy: input.actorId ?? null,
@@ -1375,27 +1697,68 @@ export async function setVehicleState(
   return updated;
 }
 
+/** Moves a returned car back onto the sellable shelf after an explicit inspection decision. */
+export async function relistReturnedVehicle(
+  client: PoolClient,
+  input: { businessId: string; serialId: string; locationId: string; reason: string; actorId?: string | null },
+): Promise<void> {
+  const reason = input.reason?.trim();
+  if (!reason) throw new VehicleError("reason_required", "دلیل بازگشت خودرو به موجودی الزامی است.");
+  await ensureVehicleState(client, {
+    businessId: input.businessId,
+    serialId: input.serialId,
+    locationId: input.locationId,
+    state: "in_stock",
+    actorId: input.actorId ?? null,
+    command: "sale_relisted",
+    eventType: "automotive.vehicle_relisted",
+    eventPayload: { reason },
+  });
+}
+
 /** Archives a car off the board. A sold car keeps its sale; nothing is deleted. */
 export async function archiveVehicle(
   client: PoolClient,
-  input: { businessId: string; serialId: string; reason?: string | null; actorId?: string | null },
+  input: { businessId: string; serialId: string; locationId: string; reason?: string | null; actorId?: string | null },
 ): Promise<void> {
-  const vehicle = await getVehicle(input.businessId, input.serialId, client);
+  // Lock the vehicle before checking holds/transfers, matching every other
+  // lifecycle command's lock order and closing the reservation/archive race.
+  const { rows: vehicleRows } = await client.query<{ state: VehicleState; location_id: string; stock_number: string }>(
+    `SELECT state, location_id, stock_number FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+    [input.businessId, input.serialId],
+  );
+  const vehicle = vehicleRows[0];
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
+  if (vehicle.location_id !== input.locationId) {
+    throw new VehicleError("wrong_location", "این خودرو در شعبهٔ فعال نیست.", 409);
+  }
   if (vehicle.state === "sold") {
     throw new VehicleError("vehicle_sold", "خودروی فروخته‌شده بایگانی نمی‌شود؛ سابقهٔ فروش آن سند حسابداری است.", 409);
   }
-  await setVehicleState(client, {
+  if (vehicle.state === "archived") throw new VehicleError("vehicle_archived", "این خودرو قبلاً بایگانی شده است.", 409);
+  const { rows: openRows } = await client.query<{ held: boolean; transferring: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM serial_reservations
+                     WHERE business_id = $1 AND serial_id = $2 AND status = 'active') AS held,
+            EXISTS (SELECT 1 FROM automotive_vehicle_transfers
+                     WHERE business_id = $1 AND serial_id = $2 AND status = 'in_transit') AS transferring`,
+    [input.businessId, input.serialId],
+  );
+  if (openRows[0]?.held) throw new VehicleError("vehicle_reserved", "ابتدا رزرو فعال را تعیین تکلیف کنید.", 409);
+  if (openRows[0]?.transferring) throw new VehicleError("already_in_transit", "خودروی در حال انتقال بایگانی نمی‌شود.", 409);
+  await ensureVehicleState(client, {
     businessId: input.businessId,
     serialId: input.serialId,
+    locationId: input.locationId,
     state: "archived",
     actorId: input.actorId ?? null,
+    command: "archived",
   });
   await recordDomainEvent(client, {
     businessId: input.businessId,
-    locationId: vehicle.locationId,
+    locationId: vehicle.location_id,
     eventType: "automotive.vehicle_archived",
-    payload: { serialId: input.serialId, stockNumber: vehicle.stockNumber, reason: trimmedOrNull(input.reason) },
+    payload: { serialId: input.serialId, stockNumber: vehicle.stock_number, reason: trimmedOrNull(input.reason) },
     sourceType: "automotive_vehicle",
     sourceId: input.serialId,
     createdBy: input.actorId ?? null,
@@ -1409,8 +1772,10 @@ export async function archiveVehicle(
 
 export interface VehicleListFilters {
   businessId: string;
-  /** Defaults to every branch the caller's scope reaches; §11 keeps one active location per car. */
+  /** One branch when the UI is on a specific lot. */
   locationId?: string | null;
+  /** Explicit authorized branch set for a multi-branch view (empty means no rows). */
+  locationIds?: string[];
   condition?: VehicleCondition | null;
   states?: VehicleState[];
   make?: string | null;
@@ -1419,6 +1784,7 @@ export interface VehicleListFilters {
   modelYearTo?: number | null;
   minPriceRial?: number | null;
   maxPriceRial?: number | null;
+  minMileageKm?: number | null;
   maxMileageKm?: number | null;
   /** §10's stock-age filter, in days in stock. */
   minAgeDays?: number | null;
@@ -1484,7 +1850,12 @@ export async function listVehicles(
   const params: unknown[] = [filters.businessId];
   const where: string[] = ["v.business_id = $1"];
 
-  if (filters.locationId) where.push(`v.location_id = $${params.push(filters.locationId)}`);
+  if (filters.locationIds !== undefined) {
+    if (filters.locationIds.length === 0) where.push("FALSE");
+    else where.push(`v.location_id = ANY($${params.push(filters.locationIds)}::uuid[])`);
+  } else if (filters.locationId) {
+    where.push(`v.location_id = $${params.push(filters.locationId)}`);
+  }
   if (filters.condition) where.push(`v.condition = $${params.push(filters.condition)}`);
   if (filters.states && filters.states.length > 0) {
     where.push(`v.state = ANY($${params.push(filters.states)}::text[])`);
@@ -1495,17 +1866,21 @@ export async function listVehicles(
   if (filters.modelYearTo != null) where.push(`v.model_year <= $${params.push(filters.modelYearTo)}`);
   if (filters.minPriceRial != null) where.push(`v.asking_price_rial >= $${params.push(filters.minPriceRial)}`);
   if (filters.maxPriceRial != null) where.push(`v.asking_price_rial <= $${params.push(filters.maxPriceRial)}`);
+  if (filters.minMileageKm != null) {
+    where.push(`coalesce(v.mileage_km, 0) >= $${params.push(filters.minMileageKm)}`);
+  }
   if (filters.maxMileageKm != null) {
     where.push(`coalesce(v.mileage_km, 0) <= $${params.push(filters.maxMileageKm)}`);
   }
+  const branchToday = "app_business_date(statement_timestamp(), coalesce(nullif(l.timezone, ''), 'Asia/Tehran'), l.business_day_start_minutes)";
   if (filters.minAgeDays != null) {
     where.push(
-      `coalesce(v.acquisition_date, v.created_at::date) <= CURRENT_DATE - $${params.push(filters.minAgeDays)}::int`,
+      `(${branchToday} - coalesce(v.acquisition_date, v.created_at::date)) >= $${params.push(filters.minAgeDays)}::int`,
     );
   }
   if (filters.maxAgeDays != null) {
     where.push(
-      `coalesce(v.acquisition_date, v.created_at::date) >= CURRENT_DATE - $${params.push(filters.maxAgeDays)}::int`,
+      `(${branchToday} - coalesce(v.acquisition_date, v.created_at::date)) <= $${params.push(filters.maxAgeDays)}::int`,
     );
   }
 
@@ -1535,17 +1910,19 @@ export async function listVehicles(
   // needs it too (a filtered count must agree with the rows it counts).
   const FROM_SQL = `
     FROM automotive_vehicle_attributes v
-    LEFT JOIN locations l ON l.id = v.location_id
+    LEFT JOIN locations l ON l.id = v.location_id AND l.business_id = v.business_id
     LEFT JOIN (
-      SELECT serial_id, sum(amount_rial) FILTER (WHERE posting = 'capitalized') AS capitalized_cost_rial
-        FROM automotive_vehicle_costs WHERE status = 'active' GROUP BY serial_id
-    ) c ON c.serial_id = v.serial_id
+      SELECT business_id, serial_id,
+             sum(amount_rial) FILTER (WHERE posting = 'capitalized') AS capitalized_cost_rial
+        FROM automotive_vehicle_costs WHERE status = 'active'
+       GROUP BY business_id, serial_id
+    ) c ON c.business_id = v.business_id AND c.serial_id = v.serial_id
     LEFT JOIN LATERAL (
       SELECT p.name AS customer_name, sr.customer_id, sr.expires_at::text AS expires_until,
              sr.deposit_amount_rial
         FROM serial_reservations sr
-        LEFT JOIN parties p ON p.id = sr.customer_id
-       WHERE sr.serial_id = v.serial_id AND sr.status = 'active'
+        LEFT JOIN parties p ON p.id = sr.customer_id AND p.business_id = sr.business_id
+       WHERE sr.business_id = v.business_id AND sr.serial_id = v.serial_id AND sr.status = 'active'
        ORDER BY sr.created_at DESC LIMIT 1
     ) hold ON true`;
 
@@ -1566,6 +1943,7 @@ export async function listVehicles(
     asking_price_rial: string;
     minimum_price_rial: string | null;
     acquired_on: string;
+    business_today: string;
     vin: string | null;
     chassis_number: string | null;
     plate_number: string | null;
@@ -1591,6 +1969,7 @@ export async function listVehicles(
             v.asking_price_rial::text AS asking_price_rial,
             v.minimum_price_rial::text AS minimum_price_rial,
             coalesce(v.acquisition_date, v.created_at::date)::text AS acquired_on,
+            app_business_date(statement_timestamp(), coalesce(nullif(l.timezone, ''), 'Asia/Tehran'), l.business_day_start_minutes)::text AS business_today,
             v.vin, v.chassis_number, v.plate_number,
             hold.customer_name AS reserved_for_name, hold.customer_id AS reserved_for_customer_id,
             hold.deposit_amount_rial::text AS reserved_deposit_rial,
@@ -1608,7 +1987,6 @@ export async function listVehicles(
     params,
   );
 
-  const today = new Date().toISOString().slice(0, 10);
   return {
     vehicles: rows.map((row) => {
       const effective = Number(row.effective_cost_rial);
@@ -1638,7 +2016,7 @@ export async function listVehicles(
         minimumPriceRial: row.minimum_price_rial == null ? null : Number(row.minimum_price_rial),
         potentialMarginRial: asking - effective,
         acquiredOn,
-        daysInStock: daysInStock({ acquiredOn }, today),
+        daysInStock: daysInStock({ acquiredOn }, row.business_today),
         vin: row.vin,
         chassisNumber: row.chassis_number,
         plateNumber: row.plate_number,
@@ -1661,7 +2039,7 @@ export async function listVehicles(
  */
 export async function summarizeVehicles(
   businessId: string,
-  options: { locationId?: string | null; onDate: string },
+  options: { locationId?: string | null; locationIds?: string[]; onDate: string },
   client?: PoolClient,
 ): Promise<{
   inStock: number;
@@ -1681,7 +2059,12 @@ export async function summarizeVehicles(
   const { summarizeVehicleStock } = await import("./automotive");
   const params: unknown[] = [businessId];
   let where = "v.business_id = $1";
-  if (options.locationId) where += ` AND v.location_id = $${params.push(options.locationId)}`;
+  if (options.locationIds !== undefined) {
+    if (options.locationIds.length === 0) where += " AND FALSE";
+    else where += ` AND v.location_id = ANY($${params.push(options.locationIds)}::uuid[])`;
+  } else if (options.locationId) {
+    where += ` AND v.location_id = $${params.push(options.locationId)}`;
+  }
   const run = <T extends Record<string, unknown>>(text: string, values: unknown[]) =>
     client ? client.query<T>(text, values as never) : query<T>(text, values as never);
   const { rows } = await run<{
@@ -1690,6 +2073,7 @@ export async function summarizeVehicles(
     effective_cost_rial: string;
     asking_price_rial: string;
     acquired_on: string;
+    business_today: string;
     sold_on: string | null;
     sale_price_rial: string | null;
     vat_rial: string;
@@ -1700,27 +2084,33 @@ export async function summarizeVehicles(
             -- must not make the board disagree with the ledger about a car that
             -- has already gone.
             coalesce(
+              sale.frozen_effective_cost_rial,
               v.frozen_effective_cost_rial,
               v.purchase_cost_rial + coalesce(c.capitalized_cost_rial, 0)
             )::text AS effective_cost_rial,
             v.asking_price_rial::text AS asking_price_rial,
             coalesce(v.acquisition_date, v.created_at::date)::text AS acquired_on,
-            v.sold_on::text AS sold_on, v.sale_price_rial::text AS sale_price_rial,
-            -- The VAT the sale's own revenue entry charged, read from the books
-            -- rather than re-derived from a configured rate: this figure feeds
-            -- the month's margin, and it must agree with what was posted.
+            app_business_date(statement_timestamp(), coalesce(nullif(l.timezone, ''), 'Asia/Tehran'), l.business_day_start_minutes)::text AS business_today,
+            sale.sold_on::text AS sold_on, sale.sale_price_rial::text AS sale_price_rial,
+            -- The active sale occurrence owns the correct per-sale ledger key;
+            -- summing by serial id would mix returns and later resales.
             coalesce((
               SELECT sum(jl.credit) FROM journal_entries e
                 JOIN journal_lines jl ON jl.entry_id = e.id
                 JOIN accounts a ON a.id = jl.account_id
-               WHERE e.business_id = v.business_id AND e.source_id = v.serial_id
+               WHERE e.business_id = sale.business_id AND e.source_id = sale.sale_id
                  AND e.posting_kind = 'automotive_sale_revenue' AND a.code = '2200'
             ), 0)::text AS vat_rial
        FROM automotive_vehicle_attributes v
+       LEFT JOIN locations l ON l.id = v.location_id AND l.business_id = v.business_id
+       LEFT JOIN automotive_vehicle_sales sale
+         ON sale.business_id = v.business_id AND sale.serial_id = v.serial_id AND sale.status = 'active'
        LEFT JOIN (
-         SELECT serial_id, sum(amount_rial) FILTER (WHERE posting = 'capitalized') AS capitalized_cost_rial
-           FROM automotive_vehicle_costs WHERE status = 'active' GROUP BY serial_id
-       ) c ON c.serial_id = v.serial_id
+         SELECT business_id, serial_id,
+                sum(amount_rial) FILTER (WHERE posting = 'capitalized') AS capitalized_cost_rial
+           FROM automotive_vehicle_costs WHERE status = 'active'
+          GROUP BY business_id, serial_id
+       ) c ON c.business_id = v.business_id AND c.serial_id = v.serial_id
       WHERE ${where}`,
     params,
   );
@@ -1732,6 +2122,7 @@ export async function summarizeVehicles(
       effectiveCostRial: Number(row.effective_cost_rial),
       askingPriceRial: Number(row.asking_price_rial),
       acquiredOn: row.acquired_on,
+      businessToday: row.business_today,
       soldOn: row.sold_on,
       salePriceRial: row.sale_price_rial == null ? null : Number(row.sale_price_rial),
       // Net of VAT, and at the frozen cost — the same two numbers the ledger
@@ -1776,6 +2167,14 @@ export async function startVehicleTransfer(
   );
   if (locRows.length !== 2) throw new VehicleError("location_not_found", "شعبهٔ مقصد یافت نشد.", 404);
 
+  // Lock the car before the live-hold check so sale, reserve, archive and
+  // transfer all serialize on the same physical unit.
+  const { rows: lockedVehicleRows } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+    [input.businessId, input.serialId],
+  );
+  if (!lockedVehicleRows[0]) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   const vehicle = await getVehicle(input.businessId, input.serialId, client);
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   if (vehicle.locationId !== input.fromLocationId) {
@@ -1797,6 +2196,12 @@ export async function startVehicleTransfer(
   if (vehicle.state === "transferred") {
     throw new VehicleError("already_in_transit", "این خودرو در حال انتقال است.", 409);
   }
+  const { rows: holdRows } = await client.query<{ active: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM serial_reservations
+                     WHERE business_id = $1 AND serial_id = $2 AND status = 'active') AS active`,
+    [input.businessId, input.serialId],
+  );
+  if (holdRows[0]?.active) throw new VehicleError("vehicle_reserved", "ابتدا رزرو فعال را تعیین تکلیف کنید.", 409);
 
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO automotive_vehicle_transfers
@@ -1832,11 +2237,13 @@ export async function startVehicleTransfer(
     event.id,
   ]);
 
-  await setVehicleState(client, {
+  await ensureVehicleState(client, {
     businessId: input.businessId,
     serialId: input.serialId,
+    locationId: input.fromLocationId,
     state: "transferred",
     actorId: input.actorId ?? null,
+    command: "transfer_started",
   });
   return { transferId: rows[0].id };
 }
@@ -1851,8 +2258,27 @@ export async function startVehicleTransfer(
  */
 export async function completeVehicleTransfer(
   client: PoolClient,
-  input: { businessId: string; transferId: string; /** Required: the transfer row records who accepted it. */ actorId: string },
+  input: {
+    businessId: string;
+    transferId: string;
+    locationId: string;
+    /** Required: the transfer row records who accepted it. */
+    actorId: string;
+  },
 ): Promise<{ serialId: string; toLocationId: string }> {
+  const { rows: transferRefs } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM automotive_vehicle_transfers
+      WHERE id = $1 AND business_id = $2 AND to_location_id = $3`,
+    [input.transferId, input.businessId, input.locationId],
+  );
+  if (!transferRefs[0]) throw new VehicleError("transfer_not_found", "انتقال یافت نشد.", 404);
+  const { rows: lockedVehicles } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+    [input.businessId, transferRefs[0].serial_id],
+  );
+  if (!lockedVehicles[0]) throw new VehicleError("transfer_not_found", "انتقال یافت نشد.", 404);
+
   const { rows } = await client.query<{
     id: string;
     serial_id: string;
@@ -1868,10 +2294,10 @@ export async function completeVehicleTransfer(
     `SELECT t.id, t.serial_id, t.from_location_id, t.to_location_id, t.status, v.stock_number,
             v.make, v.model, v.trim, v.model_year
        FROM automotive_vehicle_transfers t
-       JOIN automotive_vehicle_attributes v ON v.serial_id = t.serial_id
-      WHERE t.id = $1 AND t.business_id = $2
-      FOR UPDATE OF t`,
-    [input.transferId, input.businessId],
+       JOIN automotive_vehicle_attributes v ON v.serial_id = t.serial_id AND v.business_id = t.business_id
+      WHERE t.id = $1 AND t.business_id = $2 AND t.to_location_id = $3
+      FOR UPDATE OF t, v`,
+    [input.transferId, input.businessId, input.locationId],
   );
   const transfer = rows[0];
   if (!transfer) throw new VehicleError("transfer_not_found", "انتقال یافت نشد.", 404);
@@ -1892,11 +2318,11 @@ export async function completeVehicleTransfer(
 
   await client.query(
     `UPDATE automotive_vehicle_attributes
-        SET location_id = $2, state = 'in_stock', updated_at = now()
-      WHERE business_id = $3 AND serial_id = $1`,
+        SET location_id = $2, updated_at = now()
+      WHERE business_id = $3 AND serial_id = $1 AND state = 'transferred'`,
     [transfer.serial_id, transfer.to_location_id, input.businessId],
   );
-  await client.query(`UPDATE item_serials SET item_id = $2, status = 'in_stock' WHERE id = $1`, [
+  await client.query(`UPDATE item_serials SET item_id = $2 WHERE id = $1`, [
     transfer.serial_id,
     destinationItemId,
   ]);
@@ -1906,6 +2332,14 @@ export async function completeVehicleTransfer(
       WHERE id = $1`,
     [transfer.id, input.actorId ?? null],
   );
+  await ensureVehicleState(client, {
+    businessId: input.businessId,
+    serialId: transfer.serial_id,
+    locationId: transfer.to_location_id,
+    state: "in_stock",
+    actorId: input.actorId,
+    command: "transfer_completed",
+  });
 
   await recordDomainEvent(client, {
     businessId: input.businessId,
@@ -1930,16 +2364,30 @@ export async function completeVehicleTransfer(
 /** The sending branch changes its mind: the car snaps back to `in_stock` where it already is. */
 export async function cancelVehicleTransfer(
   client: PoolClient,
-  input: { businessId: string; transferId: string; reason: string; /** Required: 0212 requires `cancelled_by`. */ actorId: string },
+  input: { businessId: string; transferId: string; locationId: string; reason: string; /** Required: 0212 requires `cancelled_by`. */ actorId: string },
 ): Promise<void> {
   const reason = input.reason?.trim();
   if (!reason) throw new VehicleError("reason_required", "دلیل لغو انتقال الزامی است.");
   if (!input.actorId) throw new VehicleError("actor_required", "لغوکنندهٔ انتقال الزامی است.");
 
+  const { rows: transferRefs } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM automotive_vehicle_transfers
+      WHERE id = $1 AND business_id = $2 AND from_location_id = $3`,
+    [input.transferId, input.businessId, input.locationId],
+  );
+  if (!transferRefs[0]) throw new VehicleError("transfer_not_found", "انتقال یافت نشد.", 404);
+  const { rows: lockedVehicles } = await client.query<{ serial_id: string }>(
+    `SELECT serial_id FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+    [input.businessId, transferRefs[0].serial_id],
+  );
+  if (!lockedVehicles[0]) throw new VehicleError("transfer_not_found", "انتقال یافت نشد.", 404);
   const { rows } = await client.query<{ id: string; serial_id: string; from_location_id: string; status: string }>(
-    `SELECT id, serial_id, from_location_id, status FROM automotive_vehicle_transfers
-      WHERE id = $1 AND business_id = $2 FOR UPDATE`,
-    [input.transferId, input.businessId],
+    `SELECT t.id, t.serial_id, t.from_location_id, t.status
+       FROM automotive_vehicle_transfers t
+       JOIN automotive_vehicle_attributes v ON v.serial_id = t.serial_id AND v.business_id = t.business_id
+      WHERE t.id = $1 AND t.business_id = $2 AND t.from_location_id = $3 FOR UPDATE OF t`,
+    [input.transferId, input.businessId, input.locationId],
   );
   const transfer = rows[0];
   if (!transfer) throw new VehicleError("transfer_not_found", "انتقال یافت نشد.", 404);
@@ -1953,11 +2401,14 @@ export async function cancelVehicleTransfer(
       WHERE id = $1`,
     [transfer.id, input.actorId ?? null, reason],
   );
-  await client.query(
-    `UPDATE automotive_vehicle_attributes SET state = 'in_stock', updated_at = now()
-      WHERE business_id = $1 AND serial_id = $2`,
-    [input.businessId, transfer.serial_id],
-  );
+  await ensureVehicleState(client, {
+    businessId: input.businessId,
+    serialId: transfer.serial_id,
+    locationId: transfer.from_location_id,
+    state: "in_stock",
+    actorId: input.actorId,
+    command: "transfer_cancelled",
+  });
   await recordDomainEvent(client, {
     businessId: input.businessId,
     locationId: transfer.from_location_id,
@@ -1974,9 +2425,9 @@ export interface VehicleTransferRow {
   serialId: string;
   stockNumber: string;
   displayName: string;
-  fromLocationId: string;
+  fromLocationId: string | null;
   fromLocationName: string | null;
-  toLocationId: string;
+  toLocationId: string | null;
   toLocationName: string | null;
   status: "in_transit" | "completed" | "cancelled";
   note: string | null;
@@ -1987,13 +2438,19 @@ export interface VehicleTransferRow {
 
 export async function listVehicleTransfers(
   businessId: string,
-  options: { serialId?: string | null; status?: string | null; locationId?: string | null; limit?: number } = {},
+  options: { serialId?: string | null; status?: string | null; locationId?: string | null; locationIds?: string[]; limit?: number } = {},
 ): Promise<VehicleTransferRow[]> {
   const params: unknown[] = [businessId];
   const where = ["t.business_id = $1"];
   if (options.serialId) where.push(`t.serial_id = $${params.push(options.serialId)}`);
   if (options.status) where.push(`t.status = $${params.push(options.status)}`);
-  if (options.locationId) {
+  if (options.locationIds !== undefined) {
+    if (options.locationIds.length === 0) where.push("FALSE");
+    else {
+      const index = params.push(options.locationIds);
+      where.push(`(t.from_location_id = ANY($${index}::uuid[]) OR t.to_location_id = ANY($${index}::uuid[]))`);
+    }
+  } else if (options.locationId) {
     const index = params.push(options.locationId);
     where.push(`(t.from_location_id = $${index} OR t.to_location_id = $${index})`);
   }
@@ -2020,34 +2477,39 @@ export async function listVehicleTransfers(
             t.to_location_id, tl.name AS to_location_name, t.status, t.note, t.cancel_reason,
             t.started_at::text AS started_at, t.completed_at::text AS completed_at
        FROM automotive_vehicle_transfers t
-       JOIN automotive_vehicle_attributes v ON v.serial_id = t.serial_id
-       LEFT JOIN locations fl ON fl.id = t.from_location_id
-       LEFT JOIN locations tl ON tl.id = t.to_location_id
+       JOIN automotive_vehicle_attributes v ON v.serial_id = t.serial_id AND v.business_id = t.business_id
+       LEFT JOIN locations fl ON fl.id = t.from_location_id AND fl.business_id = t.business_id
+       LEFT JOIN locations tl ON tl.id = t.to_location_id AND tl.business_id = t.business_id
       WHERE ${where.join(" AND ")}
       ORDER BY t.started_at DESC
       LIMIT ${Math.min(Math.max(options.limit ?? 100, 1), 500)}`,
     params,
   );
-  return rows.map((row) => ({
-    id: row.id,
-    serialId: row.serial_id,
-    stockNumber: row.stock_number,
-    displayName: vehicleDisplayName({
-      make: row.make,
-      model: row.model,
-      trim: row.trim,
-      modelYear: row.model_year,
-    }),
-    fromLocationId: row.from_location_id,
-    fromLocationName: row.from_location_name,
-    toLocationId: row.to_location_id,
-    toLocationName: row.to_location_name,
-    status: row.status,
-    note: row.note,
-    cancelReason: row.cancel_reason,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-  }));
+  const authorized = options.locationIds === undefined ? null : new Set(options.locationIds);
+  return rows.map((row) => {
+    const canSeeFrom = authorized === null || authorized.has(row.from_location_id);
+    const canSeeTo = authorized === null || authorized.has(row.to_location_id);
+    return {
+      id: row.id,
+      serialId: row.serial_id,
+      stockNumber: row.stock_number,
+      displayName: vehicleDisplayName({
+        make: row.make,
+        model: row.model,
+        trim: row.trim,
+        modelYear: row.model_year,
+      }),
+      fromLocationId: canSeeFrom ? row.from_location_id : null,
+      fromLocationName: canSeeFrom ? row.from_location_name : null,
+      toLocationId: canSeeTo ? row.to_location_id : null,
+      toLocationName: canSeeTo ? row.to_location_name : null,
+      status: row.status,
+      note: row.note,
+      cancelReason: row.cancel_reason,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+    };
+  });
 }
 
 /* ===========================================================================

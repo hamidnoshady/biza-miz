@@ -79,11 +79,11 @@ export const REPLICATION_DOMAIN_DEFINITIONS: readonly ReplicationDomainDefinitio
   // §26’s registers one row up, and the same answer: the desktop is a till, an
   // automotive business does have `pos` (so a paired laptop can sell retail goods),
   // and everything that names a physical car — VIN identity, landed cost, price
-  // history, holds and transfers — stays with the cloud, the only side that can
-  // hold 0212’s per-business uniqueness on a serial. `automotive-sync-
-  // classification.ts` is the audit: every automotive table classified, with what
-  // each would need before it could travel.
-  { key: "automotive_vehicle_stock", label: "Automotive vehicle stock (VIN/chassis identity, landed cost, price history, holds and transfers)", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "single authority over the unit — a VIN is never merged", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "metadata", deploymentProfiles: ["cloud"], notes: "A car is the archetype of a serial: item_serials deliberately does not sync, and a second writer holding the same VINs could sell one car twice. Only the make/model catalogue (items) rides the retail_catalogue feed." },
+  // and sale history, holds, transfers and Media Library links — stays with the
+  // cloud, the only side that can hold 0212’s per-business uniqueness on a serial.
+  // `automotive-sync-classification.ts` audits all eight tenant tables added by
+  // 0212/0213/0215/0216 and states what each would need before it could travel.
+  { key: "automotive_vehicle_stock", label: "Automotive vehicle records (VIN/chassis identity, landed cost, price and sale history, holds, transfers and media links)", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "single authority over the unit — a VIN is never merged", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "metadata", deploymentProfiles: ["cloud"], notes: "A car is the archetype of a serial: item_serials deliberately does not sync, and a second writer holding the same VINs could sell one car twice. Only the make/model catalogue (items) rides the retail_catalogue feed." },
 ] as const;
 
 export function replicationCatalogue(): ReplicationDomain[] {

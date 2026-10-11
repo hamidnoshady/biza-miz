@@ -4,8 +4,8 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
 import { listVehicleCosts, recordVehicleCost } from "@/lib/automotive-service";
-import type { VehicleExpenseCategory, VehicleExpensePosting } from "@/lib/automotive";
-import { handleAutomotiveError, readBody } from "../../../guard";
+import { redactVehicleCostSensitive, type VehicleExpenseCategory, type VehicleExpensePosting } from "@/lib/automotive";
+import { handleAutomotiveError, readBody, vehicleBranchContext } from "../../../guard";
 
 const SETTLEMENTS = new Set(["cash", "bank", "payable", "clearing"]);
 
@@ -16,9 +16,13 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const { access, response: branchError } = await vehicleBranchContext(session, id);
+  if (branchError) return branchError;
 
   try {
-    return NextResponse.json({ costs: await listVehicleCosts(session.businessId, id) });
+    return NextResponse.json({
+      costs: await listVehicleCosts(session.businessId, id, undefined, { locationIds: access.allowedLocationIds }),
+    });
   } catch (err) {
     return handleAutomotiveError(err);
   }
@@ -35,6 +39,9 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const { access, response: branchError } = await vehicleBranchContext(session, id, { mutation: true });
+  if (branchError) return branchError;
+  const locationId = access.activeLocationId!;
   const body = await readBody(request);
 
   const settlement = String(body.settlement ?? "payable");
@@ -44,6 +51,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     const result = await recordVehicleCost(client, {
       businessId: session.businessId,
       serialId: id,
+      locationId,
       cost: {
         category: String(body.category ?? "other") as VehicleExpenseCategory,
         posting: (body.posting === "period_expense" ? "period_expense" : "capitalized") as VehicleExpensePosting,
@@ -57,7 +65,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       createdBy: session.sub,
     });
     await client.query("COMMIT");
-    return NextResponse.json({ ok: true, ...result });
+    return NextResponse.json({ ok: true, ...redactVehicleCostSensitive(result) });
   } catch (err) {
     await client.query("ROLLBACK");
     return handleAutomotiveError(err);

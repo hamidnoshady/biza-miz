@@ -38,6 +38,7 @@ import {
   minimumPriceFloor,
   nextStockNumber,
   normalizeVehicleSearch,
+  redactVehicleCostSensitive,
   normalizeVin,
   summarizeVehicleStock,
   validateChassisNumber,
@@ -46,6 +47,7 @@ import {
   validatePlateNumber,
   validatePriorOwners,
   validateStockNumber,
+  validateVehicleStateCommand,
   validateVehicleStateTransition,
   validateVehicleYears,
   validateVin,
@@ -72,6 +74,7 @@ import {
   VEHICLE_SELLABLE_STATES,
   VEHICLE_STATE_LABELS,
   VEHICLE_STATES,
+  VEHICLE_MEDIA_CATEGORIES,
   VEHICLE_TRANSMISSION_LABELS,
   VEHICLE_TRANSMISSIONS,
   VEHICLE_YEAR_CALENDARS,
@@ -83,6 +86,10 @@ import {
 
 const MIGRATION = "0212_automotive_vehicle_stock.sql";
 const migrationSql = readFileSync(join(process.cwd(), "migrations", MIGRATION), "utf8");
+const mediaPriceMigrationSql = readFileSync(
+  join(process.cwd(), "migrations", "0216_automotive_media_and_price_history.sql"),
+  "utf8",
+);
 
 /**
  * The value list inside a column's `IN ( … )` CHECK, or null when the migration
@@ -208,6 +215,56 @@ describe("the tenant shape the migration must declare", () => {
   });
 });
 
+describe("sale occurrence migration", () => {
+  const sql = readFileSync(
+    join(process.cwd(), "migrations", "0215_automotive_vehicle_sale_occurrences.sql"),
+    "utf8",
+  );
+
+  it("keeps every sale and reversal fact in a tenant-scoped, RLS-enforced history", () => {
+    expect(sql).toMatch(/CREATE TABLE automotive_vehicle_sales/);
+    expect(sql).toMatch(/business_id\s+uuid NOT NULL/);
+    expect(sql).toMatch(/serial_id\s+uuid NOT NULL/);
+    expect(sql).toMatch(/sale_entry_ids\s+uuid\[\]/);
+    expect(sql).toMatch(/reversal_entry_ids\s+uuid\[\]/);
+    expect(sql).toContain("ALTER TABLE automotive_vehicle_sales ENABLE ROW LEVEL SECURITY;");
+    expect(sql).toContain("ALTER TABLE automotive_vehicle_sales FORCE ROW LEVEL SECURITY;");
+    expect(sql).toContain("CREATE POLICY tenant_isolation ON automotive_vehicle_sales FOR ALL");
+    expect(sql).toMatch(/CREATE UNIQUE INDEX uq_automotive_vehicle_one_active_sale[\s\S]*?WHERE status = 'active'/);
+  });
+});
+
+describe("vehicle media and complete price-history migration", () => {
+  it("adds the previous values needed to audit every mutable price field", () => {
+    expect(mediaPriceMigrationSql).toMatch(/ADD COLUMN previous_minimum_price_rial bigint/);
+    expect(mediaPriceMigrationSql).toMatch(/ADD COLUMN previous_wholesale_price_rial bigint/);
+    expect(mediaPriceMigrationSql).toMatch(/ADD COLUMN previous_promotional_price_rial bigint/);
+    expect(mediaPriceMigrationSql).toMatch(/previous_minimum_price_rial IS NULL OR previous_minimum_price_rial >= 0/);
+    expect(mediaPriceMigrationSql).toMatch(/previous_wholesale_price_rial IS NULL OR previous_wholesale_price_rial >= 0/);
+    expect(mediaPriceMigrationSql).toMatch(/previous_promotional_price_rial IS NULL OR previous_promotional_price_rial >= 0/);
+  });
+
+  it("stores tenant-safe links to canonical media assets with forced row-level security", () => {
+    const table = /CREATE TABLE automotive_vehicle_media\s*\(([\s\S]*?)\n\);/.exec(mediaPriceMigrationSql);
+    expect(table).not.toBeNull();
+    expect(table![1]).toMatch(/business_id\s+uuid NOT NULL/);
+    expect(table![1]).toMatch(/serial_id\s+uuid NOT NULL/);
+    expect(table![1]).toMatch(/media_asset_id\s+uuid NOT NULL/);
+    expect(table![1]).toContain("FOREIGN KEY (business_id, serial_id)");
+    expect(table![1]).toContain("FOREIGN KEY (business_id, media_asset_id)");
+    expect(table![1]).toContain("UNIQUE (business_id, serial_id, media_asset_id)");
+    expect(mediaPriceMigrationSql).toContain("ALTER TABLE automotive_vehicle_media ENABLE ROW LEVEL SECURITY;");
+    expect(mediaPriceMigrationSql).toContain("ALTER TABLE automotive_vehicle_media FORCE ROW LEVEL SECURITY;");
+    expect(mediaPriceMigrationSql).toContain("CREATE POLICY tenant_isolation ON automotive_vehicle_media FOR ALL");
+  });
+
+  it("keeps the SQL media categories aligned with the client/service vocabulary", () => {
+    const match = /category\s+text NOT NULL DEFAULT 'photo'\s+CHECK \(category IN \(([^)]+)\)\)/s.exec(mediaPriceMigrationSql);
+    const categories = match ? [...match[1].matchAll(/'([^']+)'/g)].map((entry) => entry[1]) : null;
+    expect(categories).toEqual([...VEHICLE_MEDIA_CATEGORIES]);
+  });
+});
+
 describe("lifecycle", () => {
   it("allows the moves the trade actually makes", () => {
     for (const [from, to] of [
@@ -251,6 +308,16 @@ describe("lifecycle", () => {
   it("is idempotent for an unchanged save and rejects unknown states", () => {
     for (const state of VEHICLE_STATES) expect(validateVehicleStateTransition(state, state)).toBeNull();
     expect(validateVehicleStateTransition("in_stock", "nonsense" as never)).not.toBeNull();
+  });
+
+  it("requires the matching business command for every state-changing edge", () => {
+    expect(validateVehicleStateCommand("in_stock", "sold")).not.toBeNull();
+    expect(validateVehicleStateCommand("in_stock", "sold", "reservation_created")).not.toBeNull();
+    expect(validateVehicleStateCommand("in_stock", "sold", "sale_completed")).toBeNull();
+    expect(validateVehicleStateCommand("sold", "returned", "sale_reversed")).toBeNull();
+    expect(validateVehicleStateCommand("returned", "in_stock", "sale_relisted")).toBeNull();
+    expect(validateVehicleStateCommand("reserved", "in_stock", "reservation_expired")).toBeNull();
+    expect(validateVehicleStateCommand("in_stock", "sold", "sale_completed")).toBeNull();
   });
 
   it("does not call a car in transit, or a sold one, available", () => {
@@ -374,6 +441,41 @@ describe("cost, pricing and margin", () => {
     expect(checkMinimumPrice({ priceRial: 120, minimumPriceRial: 120, overrideAllowed: false }).allowed).toBe(true);
     // A floor of zero is a floor, not an absence.
     expect(checkMinimumPrice({ priceRial: 0, minimumPriceRial: 0, overrideAllowed: false }).allowed).toBe(true);
+  });
+
+  it("enforces the minimum against the price realized after discount", () => {
+    expect(
+      checkMinimumPrice({
+        priceRial: 100,
+        discountRial: 10,
+        minimumPriceRial: 90,
+        overrideAllowed: false,
+      }),
+    ).toEqual({ allowed: true, shortfallRial: 0 });
+    expect(
+      checkMinimumPrice({
+        priceRial: 100,
+        discountRial: 11,
+        minimumPriceRial: 90,
+        overrideAllowed: false,
+      }),
+    ).toEqual({ allowed: false, shortfallRial: 1 });
+    expect(
+      checkMinimumPrice({
+        priceRial: 100,
+        discountRial: 11,
+        minimumPriceRial: 90,
+        overrideAllowed: true,
+      }),
+    ).toEqual({ allowed: true, shortfallRial: 1 });
+    expect(() =>
+      checkMinimumPrice({
+        priceRial: 100,
+        discountRial: 101,
+        minimumPriceRial: 0,
+        overrideAllowed: false,
+      }),
+    ).toThrow(/تخفیف/);
   });
 });
 
@@ -587,6 +689,39 @@ describe("summarizeVehicleStock month figures", () => {
     expect(summary.revenueThisMonthRial).toBe(0);
     expect(summary.grossProfitThisMonthRial).toBe(0);
     expect(summary.averageMarginThisMonth).toBeNull();
+  });
+});
+
+describe("redactVehicleCostSensitive", () => {
+  it("removes the full vehicle cost and floor surface while retaining operational facts", () => {
+    const response = redactVehicleCostSensitive({
+      serialId: "serial-1",
+      askingPriceRial: 900_000_000,
+      purchaseCostRial: 700_000_000,
+      effectiveCostRial: 725_000_000,
+      minimumPriceRial: 800_000_000,
+      previousMinimumPriceRial: 775_000_000,
+      wholesalePriceRial: 850_000_000,
+      previousWholesalePriceRial: 825_000_000,
+      promotionalPriceRial: 875_000_000,
+      previousPromotionalPriceRial: 860_000_000,
+      potentialMarginRial: 175_000_000,
+      costs: [{ amountRial: 25_000_000, vendorName: "Workshop" }],
+    });
+
+    expect(response).toEqual({ serialId: "serial-1", askingPriceRial: 900_000_000, costs: [] });
+  });
+
+  it("redacts the frozen cost from a sold vehicle line without hiding invoice facts", () => {
+    const response = redactVehicleCostSensitive({
+      kind: "vehicle",
+      stockNumber: "A-17",
+      total: "981000000",
+      depositApplied: "20000000",
+      frozenEffectiveCost: "700000000",
+    });
+
+    expect(response).toEqual({ kind: "vehicle", stockNumber: "A-17", total: "981000000", depositApplied: "20000000" });
   });
 });
 

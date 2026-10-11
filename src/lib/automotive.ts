@@ -20,6 +20,49 @@
  */
 import { isoDateToJalali, jalaliMonthLength, jalaliToIsoDate } from "./jalali";
 
+/** Fields that must not cross a vehicle API boundary without `vehicles.cost_view`. */
+export const VEHICLE_COST_SENSITIVE_FIELDS = [
+  "acquisitionCostRial",
+  "purchaseCostRial",
+  "effectiveCostRial",
+  "landedCostRial",
+  "capitalizedCostRial",
+  "periodExpenseRial",
+  "minimumPriceRial",
+  "previousMinimumPriceRial",
+  "wholesalePriceRial",
+  "previousWholesalePriceRial",
+  "promotionalPriceRial",
+  "previousPromotionalPriceRial",
+  "frozenEffectiveCostRial",
+  "frozenEffectiveCost",
+  "potentialMarginRial",
+  "stockValueRial",
+  "askingValueRial",
+  "revenueThisMonthRial",
+  "grossProfitThisMonthRial",
+  "averageMarginThisMonth",
+  "marginRial",
+  "marginPercent",
+  "grossProfitRial",
+  "cost",
+  "costRial",
+] as const;
+
+/**
+ * Apply one cost-redaction policy to automotive-owned response DTOs. This is
+ * intentionally pure so every route can use it and its field list can be
+ * regression-tested without a database. Vehicle cost rows are hidden as a
+ * unit: returning them without their amount would still disclose vendors and
+ * expense history that the permission protects.
+ */
+export function redactVehicleCostSensitive<T extends object>(value: T): T {
+  const visible = { ...value } as Record<string, unknown>;
+  for (const field of VEHICLE_COST_SENSITIVE_FIELDS) delete visible[field];
+  if (Object.prototype.hasOwnProperty.call(visible, "costs")) visible.costs = [];
+  return visible as T;
+}
+
 /* ===========================================================================
  * Condition — new or used, declared, never inferred
  * ===========================================================================
@@ -138,6 +181,66 @@ const VEHICLE_TRANSITIONS: Record<VehicleState, readonly VehicleState[]> = {
  * unit visibly carries the fact that it was sold and came back.
  */
 export const SALE_REVERSAL_STATE = "returned" as const;
+
+/** Domain command which owns a state-changing edge. No API may supply a raw state. */
+export const VEHICLE_STATE_COMMANDS = [
+  "acquisition_completed",
+  "vehicle_qualified",
+  "acquisition_voided",
+  "reservation_created",
+  "reservation_released",
+  "reservation_expired",
+  "sale_completed",
+  "sale_reversed",
+  "sale_relisted",
+  "transfer_started",
+  "transfer_completed",
+  "transfer_cancelled",
+  "archived",
+] as const;
+export type VehicleStateCommand = (typeof VEHICLE_STATE_COMMANDS)[number];
+
+const STATE_EDGE_COMMANDS: Partial<Record<`${VehicleState}->${VehicleState}`, readonly VehicleStateCommand[]>> = {
+  "draft->acquired": ["acquisition_completed"],
+  "draft->in_stock": ["acquisition_completed"],
+  "draft->archived": ["archived"],
+  "acquired->draft": ["acquisition_voided"],
+  "acquired->in_stock": ["vehicle_qualified"],
+  "in_stock->reserved": ["reservation_created"],
+  "in_stock->sold": ["sale_completed"],
+  "in_stock->transferred": ["transfer_started"],
+  "in_stock->archived": ["archived"],
+  "acquired->sold": ["sale_completed"],
+  "acquired->transferred": ["transfer_started"],
+  "acquired->archived": ["archived"],
+  "reserved->in_stock": ["reservation_released", "reservation_expired"],
+  "reserved->sold": ["sale_completed"],
+  "reserved->archived": ["archived"],
+  "sold->returned": ["sale_reversed"],
+  "returned->in_stock": ["sale_relisted"],
+  "returned->archived": ["archived"],
+  "transferred->in_stock": ["transfer_completed", "transfer_cancelled"],
+};
+
+/**
+ * State-machine validity is necessary but not sufficient: a valid edge still
+ * belongs to a business command. In particular, a direct state PATCH must not
+ * masquerade as a posted sale, close a hold without settling its deposit, or
+ * reverse a sale without reversing its ledger entries.
+ */
+export function validateVehicleStateCommand(
+  from: VehicleState,
+  to: VehicleState,
+  command?: VehicleStateCommand,
+): string | null {
+  if (from === to) return null;
+  const edge = `${from}->${to}` as const;
+  const allowed = STATE_EDGE_COMMANDS[edge];
+  if (!allowed || !command || !allowed.includes(command)) {
+    return "تغییر وضعیت فقط از فرمان عملیاتی متناظر امکان‌پذیر است.";
+  }
+  return null;
+}
 
 export function validateVehicleStateTransition(from: VehicleState, to: VehicleState): string | null {
   if (from === to) return null;
@@ -382,7 +485,7 @@ export function computeEffectiveCost(input: VehicleCostBreakdown): VehicleEffect
 
 /** Rial amounts are whole numbers everywhere in this codebase — no decimals in storage. */
 export function wholeRial(value: number, label = "مبلغ"): number {
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+  if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${label} باید یک عدد صحیح و نامنفی (ریال) باشد.`);
   }
   return value;
@@ -432,17 +535,26 @@ export interface MinimumPriceCheck {
   shortfallRial: number;
 }
 
+/**
+ * The floor is a floor on what the dealership actually sells the car for, not
+ * on the sticker before a discount. Keeping discount arithmetic here makes
+ * checkout's warning and the posting service's authorization decision agree.
+ */
 export function checkMinimumPrice(input: {
   priceRial: number;
+  discountRial?: number;
   minimumPriceRial: number | null | undefined;
   /** True when the caller holds `vehicles.override_min_price`. */
   overrideAllowed: boolean;
 }): MinimumPriceCheck {
   const floor = minimumPriceFloor(input.minimumPriceRial);
   const price = wholeRial(input.priceRial, "قیمت");
-  if (floor == null || price >= floor) return { allowed: true, shortfallRial: 0 };
-  if (input.overrideAllowed) return { allowed: true, shortfallRial: floor - price };
-  return { allowed: false, shortfallRial: floor - price };
+  const discount = wholeRial(input.discountRial ?? 0, "تخفیف");
+  if (discount > price) throw new Error("تخفیف نمی‌تواند از قیمت خودرو بیشتر باشد.");
+  const realizedPriceRial = price - discount;
+  if (floor == null || realizedPriceRial >= floor) return { allowed: true, shortfallRial: 0 };
+  const shortfallRial = floor - realizedPriceRial;
+  return { allowed: input.overrideAllowed, shortfallRial };
 }
 
 /* ===========================================================================
@@ -735,6 +847,17 @@ export const VEHICLE_EXPENSE_CATEGORY_LABELS: Record<VehicleExpenseCategory, str
  * moment it is recorded, and changing the decision is a void-and-re-record
  * (which is why costs are voided, never edited).
  */
+export const VEHICLE_MEDIA_CATEGORIES = ["photo", "registration", "inspection", "service_record", "invoice", "other"] as const;
+export type VehicleMediaCategory = (typeof VEHICLE_MEDIA_CATEGORIES)[number];
+export const VEHICLE_MEDIA_CATEGORY_LABELS: Record<VehicleMediaCategory, string> = {
+  photo: "عکس خودرو",
+  registration: "مدارک ثبت و پلاک",
+  inspection: "بازرسی فنی",
+  service_record: "سابقهٔ سرویس",
+  invoice: "فاکتور و رسید",
+  other: "سایر",
+};
+
 export const VEHICLE_EXPENSE_POSTINGS = ["capitalized", "period_expense"] as const;
 export type VehicleExpensePosting = (typeof VEHICLE_EXPENSE_POSTINGS)[number];
 export const VEHICLE_EXPENSE_POSTING_LABELS: Record<VehicleExpensePosting, string> = {
@@ -807,6 +930,8 @@ export interface VehicleStockSummaryInput {
   effectiveCostRial: number;
   askingPriceRial: number;
   acquiredOn: string;
+  /** Optional local business date for branch-specific age and Jalali-month KPIs. */
+  businessToday?: string;
   soldOn?: string | null;
   /** Sale price when sold — the report's realised figure, not the asking price. */
   salePriceRial?: number | null;
@@ -879,9 +1004,13 @@ export function summarizeVehicleStock(
   let costThisMonth = 0;
 
   for (const vehicle of vehicles) {
+    const vehicleDate = vehicle.businessToday ?? onDate;
+    const [vehicleMonthStart, vehicleMonthEnd] = vehicle.businessToday
+      ? jalaliMonthRange(vehicle.businessToday)
+      : [monthStart, monthEnd];
     if (vehicle.state === "sold") {
       sold += 1;
-      if (vehicle.soldOn && vehicle.soldOn >= monthStart && vehicle.soldOn <= monthEnd) {
+      if (vehicle.soldOn && vehicle.soldOn >= vehicleMonthStart && vehicle.soldOn <= vehicleMonthEnd) {
         soldThisMonth += 1;
         // The invoice's *net* revenue is what the ledgers credited; the row's
         // sale price is the VAT-inclusive total, and VAT is never margin.
@@ -896,7 +1025,7 @@ export function summarizeVehicleStock(
 
     stockValueRial += vehicle.effectiveCostRial;
     askingValueRial += vehicle.askingPriceRial;
-    const age = daysInStock({ acquiredOn: vehicle.acquiredOn, soldOn: vehicle.soldOn }, onDate);
+    const age = daysInStock({ acquiredOn: vehicle.acquiredOn, soldOn: vehicle.soldOn }, vehicleDate);
     ageSum += age;
     ageCount += 1;
     const bucket = vehicleAgeBucket(age);

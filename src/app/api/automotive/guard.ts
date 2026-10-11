@@ -16,6 +16,7 @@ import type { Permission } from "@/lib/permissions";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import { VehicleError } from "@/lib/automotive-service";
 import { SerialReservationError } from "@/lib/watch-reservation-service";
+import { canAccessVehicleBranch, canMutateVehicleInActiveBranch, vehicleBranchAccess } from "@/lib/automotive-access";
 
 const ERROR_STATUS: Record<string, number> = {
   invalid_vehicle: 400,
@@ -44,7 +45,16 @@ const ERROR_STATUS: Record<string, number> = {
   cost_already_void: 409,
   transfer_closed: 409,
   invalid_state_transition: 409,
+  invalid_media_category: 400,
+  invalid_vehicle_media: 400,
+  invalid_media_id: 400,
+  media_not_found: 404,
+  state_command_required: 409,
   reservation_closed: 409,
+  sale_occurrence_not_found: 409,
+  sale_state_mismatch: 409,
+  sale_already_reversed: 409,
+  sale_line_attach_failed: 409,
   deposit_already_taken: 409,
   // Nothing wrong with the request: the chart a posting needs is not seeded.
   ledger_account_missing: 409,
@@ -87,6 +97,43 @@ export function handleAutomotiveError(err: unknown): NextResponse {
 export async function holdsPermission(session: SessionPayload, permission: Permission): Promise<boolean> {
   const access = await memberAccessFor(session);
   return access?.permissions.has(permission) ?? false;
+}
+
+/**
+ * Re-read branch membership before serving or mutating a vehicle. For mutations
+ * the caller must be in that branch's active context; read-only access may use
+ * any branch in the member's explicitly permitted set.
+ */
+export async function vehicleBranchContext(
+  session: SessionPayload,
+  serialId: string,
+  options: { mutation?: boolean } = {},
+): Promise<{
+  access: Awaited<ReturnType<typeof vehicleBranchAccess>>;
+  response: NextResponse | null;
+}> {
+  const access = await vehicleBranchAccess(session, serialId);
+  if (!canAccessVehicleBranch(access)) {
+    return { access, response: NextResponse.json({ error: "vehicle_not_found" }, { status: 404 }) };
+  }
+  if (options.mutation && !canMutateVehicleInActiveBranch(access)) {
+    return {
+      access,
+      response: NextResponse.json(
+        { error: "wrong_location", message: "ابتدا شعبه خودروی موردنظر را فعال کنید." },
+        { status: 409 },
+      ),
+    };
+  }
+  return { access, response: null };
+}
+
+export async function vehicleBranchResponse(
+  session: SessionPayload,
+  serialId: string,
+  options: { mutation?: boolean } = {},
+): Promise<NextResponse | null> {
+  return (await vehicleBranchContext(session, serialId, options)).response;
 }
 
 /** Reads a JSON body, returning `{}` rather than throwing on a malformed one. */

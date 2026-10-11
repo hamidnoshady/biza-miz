@@ -6,6 +6,7 @@ import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AutomotiveManager } from "@/app/dashboard/automotive/automotive-manager";
 import { PERMISSIONS } from "@/lib/permissions";
+import { getBusinessVatPercent } from "@/lib/vat-policy-service";
 
 /**
  * §17's manager pages, in the Accounting app's own workspace — the same
@@ -26,6 +27,23 @@ export default async function AutomotivePage() {
   await requireIndustryForPage(session.businessId, "automotive");
 
   const canSeeCost = member.permissions.has(PERMISSIONS.vehiclesCostView);
+  const canCreateVehicle = member.permissions.has(PERMISSIONS.vehiclesCreate);
+  const canEditCost = member.permissions.has(PERMISSIONS.vehiclesCostEdit);
+  const canOverrideMinPrice = member.permissions.has(PERMISSIONS.vehiclesOverrideMinPrice);
+  const canReserveVehicle = member.permissions.has(PERMISSIONS.vehiclesReserve);
+  const canCancelReservation = member.permissions.has(PERMISSIONS.vehiclesReservationCancel);
+  const canSellVehicle = member.permissions.has(PERMISSIONS.vehiclesSell);
+  const canRecordCost = member.permissions.has(PERMISSIONS.vehiclesExpenseRecord);
+  const canViewLeads = member.permissions.has(PERMISSIONS.crmView);
+  const canManageLeads = member.permissions.has(PERMISSIONS.crmManage);
+  const canCreateCustomer = member.permissions.has(PERMISSIONS.partiesManage);
+  const canEditVehicle = member.permissions.has(PERMISSIONS.vehiclesEdit);
+  const canEditPrice = member.permissions.has(PERMISSIONS.vehiclesPriceEdit);
+  const canTransferVehicle = member.permissions.has(PERMISSIONS.vehiclesTransfer);
+  const canArchiveVehicle = member.permissions.has(PERMISSIONS.vehiclesArchive);
+  const canViewMedia = member.permissions.has(PERMISSIONS.mediaView);
+  const canManageMedia = member.permissions.has(PERMISSIONS.mediaManage);
+  const defaultVatPercent = await getBusinessVatPercent(session.businessId);
 
   return (
     <PageShell>
@@ -34,7 +52,26 @@ export default async function AutomotivePage() {
         description="موجودی خودرو، خرید و بهای تمام‌شده، هزینه‌های هر خودرو و شاخص‌های نمایشگاه."
         actions={<KnowledgeHelpButton section="automotive" />}
       />
-      <AutomotiveManager canSeeCost={canSeeCost} />
+      <AutomotiveManager
+        canSeeCost={canSeeCost}
+        canCreateVehicle={canCreateVehicle}
+        canEditCost={canEditCost}
+        canReserveVehicle={canReserveVehicle}
+        canCancelReservation={canCancelReservation}
+        canSellVehicle={canSellVehicle}
+        canRecordCost={canRecordCost}
+        canViewLeads={canViewLeads}
+        canManageLeads={canManageLeads}
+        canCreateCustomer={canCreateCustomer}
+        canOverrideMinPrice={canOverrideMinPrice}
+        canEditVehicle={canEditVehicle}
+        canEditPrice={canEditPrice}
+        canTransferVehicle={canTransferVehicle}
+        canArchiveVehicle={canArchiveVehicle}
+        canViewMedia={canViewMedia}
+        canManageMedia={canManageMedia}
+        defaultVatPercent={defaultVatPercent}
+      />
     </PageShell>
   );
 }

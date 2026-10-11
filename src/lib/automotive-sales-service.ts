@@ -39,6 +39,8 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { checkMinimumPrice } from "./automotive";
+import { ensureVehicleState, VehicleError } from "./automotive-service";
+import { businessVatPercent, type TaxConfig } from "./vat-policy";
 import { rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
 import { computeWatchSalePrice } from "./watch-pricing";
@@ -52,13 +54,10 @@ import {
 import "./automotive-posting-rules";
 import { reverseLiveEntry } from "./retail-invoice-void-service";
 
-export class VehicleSaleError extends Error {
-  code: string;
-  status: number;
+export class VehicleSaleError extends VehicleError {
   constructor(code: string, message: string, status = 409) {
-    super(message);
-    this.code = code;
-    this.status = status;
+    super(code, message, status);
+    this.name = "VehicleSaleError";
   }
 }
 
@@ -69,7 +68,8 @@ export interface SellVehicleInput {
   /** Agreed price of the car itself, Rial, before the discount. */
   price: number;
   discount?: number;
-  vatPercent: number;
+  /** @deprecated Ignored: the sale service always reads `tax.config` for this business. */
+  vatPercent?: number;
   /** The invoice's shared tender queue (retail-tenders.ts). */
   tenders?: RetailTenderQueueEntry[];
   /** A single settlement, for the direct (non-invoice) caller. */
@@ -85,6 +85,10 @@ export interface SellVehicleInput {
 }
 
 export interface VehicleSaleResult {
+  /** Stable identity for this sale occurrence and its idempotent ledger postings. */
+  saleId: string;
+  /** Canonical business tax rate actually applied to the sale. */
+  vatPercent: number;
   serialId: string;
   stockNumber: string;
   displayName: string;
@@ -158,7 +162,7 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
   if (vehicle.location_id !== input.locationId) {
     throw new VehicleSaleError("wrong_location", "این خودرو متعلق به شعبهٔ فعال نیست.", 409);
   }
-  if (vehicle.state === "sold" || vehicle.sold_on) {
+  if (vehicle.state === "sold") {
     throw new VehicleSaleError("vehicle_already_sold", "این خودرو قبلاً فروخته شده است.", 409);
   }
   if (vehicle.state !== "in_stock" && vehicle.state !== "acquired" && vehicle.state !== "reserved") {
@@ -171,28 +175,36 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
     businessId: input.businessId,
     serialId: input.serialId,
     customerId: input.customerId ?? null,
-    saleDate,
   });
 
-  // 4 — the floor.
+  const { rows: taxRows } = await client.query<{ value: TaxConfig | null }>(
+    `SELECT value FROM settings
+      WHERE business_id = $1 AND location_id IS NULL AND key = 'tax.config'`,
+    [input.businessId],
+  );
+  const vatPercent = businessVatPercent(taxRows[0]?.value);
+  const breakdown = computeWatchSalePrice({
+    price: input.price,
+    discount: input.discount ?? 0,
+    vatPercent,
+  });
+
+  // 4 — the floor applies to the realized, pre-VAT price. A discount that
+  // takes the car below its floor is still a below-floor sale, even when the
+  // sticker price itself was above it.
   const floor = checkMinimumPrice({
     priceRial: Math.round(input.price),
+    discountRial: Math.round(input.discount ?? 0),
     minimumPriceRial: vehicle.minimum_price_rial == null ? null : Number(vehicle.minimum_price_rial),
     overrideAllowed: input.overrideMinPrice === true,
   });
   if (!floor.allowed) {
     throw new VehicleSaleError(
       "below_minimum_price",
-      "قیمت فروش از حداقل قیمت تعیین‌شده کمتر است؛ برای عبور از آن مجوز «تجاوز از حداقل قیمت» لازم است.",
+      "قیمت فروش پس از تخفیف از حداقل قیمت تعیین‌شده کمتر است؛ برای عبور از آن مجوز «تجاوز از حداقل قیمت» لازم است.",
       409,
     );
   }
-
-  const breakdown = computeWatchSalePrice({
-    price: input.price,
-    discount: input.discount ?? 0,
-    vatPercent: input.vatPercent,
-  });
 
   // 6 — the deposit the customer already paid is applied (capped at the
   // invoice total; any excess stays on their advance account to be refunded
@@ -258,13 +270,29 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
     createdBy: input.createdBy ?? null,
   });
 
-  // The frozen facts: date, customer, price and cost as they were at this
-  // instant. Nothing later rewrites them.
+  // The state transition belongs to the sale command, not a direct status
+  // write. The invoice, ledger entries, serial state and frozen facts are all
+  // still inside this caller-owned transaction.
+  try {
+    await ensureVehicleState(client, {
+      businessId: input.businessId,
+      serialId: vehicle.serial_id,
+      locationId: input.locationId,
+      state: "sold",
+      actorId: input.createdBy,
+      command: "sale_completed",
+    });
+  } catch (error) {
+    if (error instanceof VehicleError) {
+      throw new VehicleSaleError(error.code, error.message, error.status);
+    }
+    throw error;
+  }
   const { rowCount } = await client.query(
     `UPDATE automotive_vehicle_attributes
-        SET state = 'sold', sold_order_id = $2, sold_customer_id = $3, sold_on = $4,
+        SET sold_order_id = $2, sold_customer_id = $3, sold_on = $4,
             sale_price_rial = $5, frozen_effective_cost_rial = $6, sold_by = $7, updated_at = now()
-      WHERE business_id = $1 AND serial_id = $8 AND state IN ('in_stock', 'acquired', 'reserved')`,
+      WHERE business_id = $1 AND serial_id = $8 AND state = 'sold'`,
     [
       input.businessId,
       input.orderId ?? null,
@@ -276,29 +304,29 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
       vehicle.serial_id,
     ],
   );
-  if (rowCount === 0) {
-    // The belt-and-braces predicate behind the FOR UPDATE: if the row moved
-    // since the locked read, the sale aborts rather than stamping `sold` over
-    // whatever happened in between.
+  if (rowCount !== 1) {
     throw new VehicleSaleError("vehicle_already_sold", "این خودرو دیگر قابل فروش نیست.", 409);
   }
-  await client.query(
-    `UPDATE item_serials SET status = 'sold', sold_at = $2 WHERE id = $1 AND status IN ('in_stock', 'reserved')`,
-    [vehicle.serial_id, saleDate],
-  );
+  await client.query(`UPDATE item_serials SET sold_at = $2 WHERE id = $1 AND status = 'sold'`, [
+    vehicle.serial_id,
+    saleDate,
+  ]);
 
   // 5 — the hold closes as *converted* by this sale, and the invoice that did
   // it is recorded on the hold for the audit trail.
   if (depositAppliesHere && hold.reservationId) {
     await convertVehicleReservation(client, {
+      businessId: input.businessId,
       reservationId: hold.reservationId,
-      orderId: input.orderId ?? "",
+      orderId: input.orderId ?? null,
     });
   }
 
   const marginRial = Number(breakdown.net) - effectiveCost;
 
   return {
+    saleId,
+    vatPercent,
     serialId: vehicle.serial_id,
     stockNumber: vehicle.stock_number,
     displayName: [vehicle.make, vehicle.model, vehicle.trim, vehicle.model_year]
@@ -326,14 +354,48 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
  */
 export async function attachVehicleSaleLine(
   client: PoolClient,
-  input: { businessId: string; serialId: string; orderId: string; orderItemId: string },
+  input: {
+    businessId: string;
+    serialId: string;
+    saleId: string;
+    orderId: string;
+    orderItemId: string;
+    saleEntryIds: string[];
+    vatRatePercent: number;
+  },
 ): Promise<void> {
-  await client.query(
-    `UPDATE automotive_vehicle_attributes
-        SET sold_order_id = coalesce($3, sold_order_id), sold_order_item_id = $4, updated_at = now()
-      WHERE business_id = $1 AND serial_id = $2`,
-    [input.businessId, input.serialId, input.orderId, input.orderItemId],
+  const { rowCount } = await client.query(
+    `WITH current_sale AS (
+       UPDATE automotive_vehicle_attributes
+          SET sold_order_id = coalesce($3, sold_order_id), sold_order_item_id = $4, updated_at = now()
+        WHERE business_id = $1 AND serial_id = $2 AND state = 'sold' AND sold_order_item_id IS NULL
+        RETURNING business_id, location_id, serial_id, sold_order_id, sold_order_item_id,
+                  sold_customer_id, sold_on, sale_price_rial, frozen_effective_cost_rial, sold_by,
+                  coalesce(acquisition_date, created_at::date) AS acquired_on,
+                  stock_number, make, model, trim, model_year, condition
+     )
+     INSERT INTO automotive_vehicle_sales (
+       sale_id, business_id, location_id, serial_id, order_id, order_item_id,
+       customer_id, sold_on, acquired_on, stock_number, make, model, trim, model_year,
+       condition, sale_price_rial, vat_rate_percent, frozen_effective_cost_rial, sold_by, sale_entry_ids
+     )
+     SELECT $5, business_id, location_id, serial_id, sold_order_id, sold_order_item_id,
+            sold_customer_id, sold_on, acquired_on, stock_number, make, model, trim, model_year,
+            condition, sale_price_rial, $7, frozen_effective_cost_rial, sold_by, $6::uuid[]
+       FROM current_sale`,
+    [
+      input.businessId,
+      input.serialId,
+      input.orderId,
+      input.orderItemId,
+      input.saleId,
+      input.saleEntryIds,
+      input.vatRatePercent,
+    ],
   );
+  if (rowCount !== 1) {
+    throw new VehicleSaleError("sale_line_attach_failed", "ردیف فاکتور خودرو با سابقهٔ فروش آن همگام نشد.", 409);
+  }
 }
 
 /**
@@ -364,25 +426,13 @@ export async function attachVehicleSaleLine(
  */
 export async function reverseVehicleSale(
   client: PoolClient,
-  input: { businessId: string; serialId: string; reason: string; actorId?: string | null },
+  input: { businessId: string; serialId: string; locationId: string; reason: string; actorId?: string | null },
 ): Promise<{ reversalEntryIds: string[] }> {
   const reason = input.reason?.trim();
   if (!reason) throw new VehicleSaleError("reason_required", "دلیل برگشت فروش الزامی است.");
 
-  const { rows } = await client.query<{
-    state: string;
-    location_id: string;
-    frozen_effective_cost_rial: string | null;
-    sale_price_rial: string | null;
-    sold_order_id: string | null;
-    sold_order_item_id: string | null;
-    sold_customer_id: string | null;
-    sold_on: string | null;
-    stock_number: string;
-  }>(
-    `SELECT state, location_id, frozen_effective_cost_rial::text AS frozen_effective_cost_rial,
-            sale_price_rial::text AS sale_price_rial, sold_order_id, sold_order_item_id, sold_customer_id,
-            sold_on::text AS sold_on, stock_number
+  const { rows } = await client.query<{ state: string; location_id: string; stock_number: string }>(
+    `SELECT state, location_id, stock_number
        FROM automotive_vehicle_attributes
       WHERE business_id = $1 AND serial_id = $2
       FOR UPDATE`,
@@ -390,16 +440,49 @@ export async function reverseVehicleSale(
   );
   const vehicle = rows[0];
   if (!vehicle) throw new VehicleSaleError("vehicle_not_found", "خودرو یافت نشد.", 404);
+  if (vehicle.location_id !== input.locationId) {
+    throw new VehicleSaleError("wrong_location", "این خودرو در شعبهٔ فعال نیست.", 409);
+  }
   if (vehicle.state !== "sold") {
     throw new VehicleSaleError("not_sold", "این خودرو فروخته نشده است؛ برگشتی برای آن ثبت نمی‌شود.", 409);
   }
 
-  // The entries this sale posted, as the invoice recorded them.
-  let entryIds: string[] = [];
-  if (vehicle.sold_order_item_id) {
+  const { rows: sales } = await client.query<{
+    sale_id: string;
+    location_id: string;
+    order_id: string | null;
+    order_item_id: string | null;
+    customer_id: string | null;
+    sold_on: string;
+    sale_price_rial: string;
+    frozen_effective_cost_rial: string | null;
+    sale_entry_ids: string[];
+  }>(
+    `SELECT sale_id, location_id, order_id, order_item_id, customer_id, sold_on::text AS sold_on,
+            sale_price_rial::text AS sale_price_rial,
+            frozen_effective_cost_rial::text AS frozen_effective_cost_rial, sale_entry_ids
+       FROM automotive_vehicle_sales
+      WHERE business_id = $1 AND serial_id = $2 AND status = 'active'
+      FOR UPDATE`,
+    [input.businessId, input.serialId],
+  );
+  const sale = sales[0];
+  if (!sale) throw new VehicleSaleError("sale_occurrence_not_found", "سابقهٔ فروش فعال این خودرو یافت نشد.", 409);
+  if (sale.location_id !== input.locationId) {
+    throw new VehicleSaleError("wrong_location", "فروش این خودرو متعلق به شعبهٔ فعال نیست.", 409);
+  }
+
+  // New sales store exact posting ids on their occurrence; pre-0215 sales use
+  // the canonical retail line snapshot as a compatibility fallback.
+  let entryIds: string[] = sale.sale_entry_ids ?? [];
+  if (entryIds.length === 0 && sale.order_item_id && sale.order_id) {
     const { rows: lineRows } = await client.query<{
       retail_snapshot: { ledgerEntryIds?: string[] } | null;
-    }>("SELECT retail_snapshot FROM order_items WHERE id = $1", [vehicle.sold_order_item_id]);
+    }>(
+      `SELECT retail_snapshot FROM order_items
+        WHERE id = $1 AND order_id = $2 AND location_id = $3`,
+      [sale.order_item_id, sale.order_id, sale.location_id],
+    );
     entryIds = lineRows[0]?.retail_snapshot?.ledgerEntryIds ?? [];
   }
   if (entryIds.length === 0) {
@@ -417,7 +500,7 @@ export async function reverseVehicleSale(
   for (const entryId of entryIds) {
     const reversalEntryId = await reverseLiveEntry(client, {
       businessId: input.businessId,
-      locationId: vehicle.location_id,
+      locationId: sale.location_id,
       entryId,
       amendmentId,
       memo: `برگشت فروش خودرو${vehicle.stock_number ? ` — ${vehicle.stock_number}` : ""}`,
@@ -426,38 +509,59 @@ export async function reverseVehicleSale(
     if (reversalEntryId) reversalEntryIds.push(reversalEntryId);
   }
 
-  await client.query(
+  await ensureVehicleState(client, {
+    businessId: input.businessId,
+    serialId: input.serialId,
+    locationId: sale.location_id,
+    state: "returned",
+    actorId: input.actorId,
+    command: "sale_reversed",
+  });
+  const { rowCount: clearedSaleFacts } = await client.query(
     `UPDATE automotive_vehicle_attributes
-        SET state = 'returned', updated_at = now()
-      WHERE business_id = $1 AND serial_id = $2 AND state = 'sold'`,
-    [input.businessId, input.serialId],
+        SET sold_order_id = NULL, sold_order_item_id = NULL, sold_customer_id = NULL,
+            sold_on = NULL, sale_price_rial = NULL, frozen_effective_cost_rial = NULL,
+            sold_by = NULL, updated_at = now()
+      WHERE business_id = $1 AND serial_id = $2 AND location_id = $4
+        AND state = 'returned' AND sold_order_item_id IS NOT DISTINCT FROM $3`,
+    [input.businessId, input.serialId, sale.order_item_id, input.locationId],
   );
-  // The shared serial status follows the automotive state machine's own
-  // `returned → in_stock` edge (see `ensureVehicleState`): the car is physically
-  // back, and it is the automotive `state` that says whether it may be sold
-  // again.
-  await client.query(`UPDATE item_serials SET status = 'in_stock', sold_at = NULL WHERE id = $1`, [input.serialId]);
+  if (clearedSaleFacts !== 1) {
+    throw new VehicleSaleError("sale_state_mismatch", "واقعیت‌های فروش خودرو با سابقهٔ برگشت همگام نیست.", 409);
+  }
+  await client.query(`UPDATE item_serials SET sold_at = NULL WHERE id = $1`, [input.serialId]);
+  const { rowCount: reversedSales } = await client.query(
+    `UPDATE automotive_vehicle_sales
+        SET status = 'reversed', reversal_reason = $3, reversal_entry_ids = $4::uuid[],
+            reversed_by = $5, reversed_at = now()
+      WHERE sale_id = $1 AND business_id = $2 AND status = 'active'`,
+    [sale.sale_id, input.businessId, reason, reversalEntryIds, input.actorId ?? null],
+  );
+  if (reversedSales !== 1) {
+    throw new VehicleSaleError("sale_already_reversed", "این سابقهٔ فروش قبلاً برگشت شده است.", 409);
+  }
 
   await emitDomainEvent(client, {
     businessId: input.businessId,
-    locationId: vehicle.location_id,
+    locationId: sale.location_id,
     eventType: "automotive.sale_reversed",
     payload: {
       serialId: input.serialId,
       stockNumber: vehicle.stock_number,
-      orderId: vehicle.sold_order_id,
-      orderItemId: vehicle.sold_order_item_id,
-      customerId: vehicle.sold_customer_id,
-      soldOn: vehicle.sold_on,
-      salePriceRial: vehicle.sale_price_rial,
+      saleId: sale.sale_id,
+      orderId: sale.order_id,
+      orderItemId: sale.order_item_id,
+      customerId: sale.customer_id,
+      soldOn: sale.sold_on,
+      salePriceRial: sale.sale_price_rial,
       // The number the reversal was based on: what the books posted, not what
       // the car's cost has become since.
-      frozenEffectiveCostRial: vehicle.frozen_effective_cost_rial,
+      frozenEffectiveCostRial: sale.frozen_effective_cost_rial,
       reversedEntryIds: reversalEntryIds,
       reason,
     },
-    sourceType: "automotive_vehicle",
-    sourceId: input.serialId,
+    sourceType: "automotive_vehicle_sale",
+    sourceId: sale.sale_id,
     createdBy: input.actorId ?? null,
   });
 

@@ -4,7 +4,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
 import { voidVehicleCost } from "@/lib/automotive-service";
-import { handleAutomotiveError, readBody } from "../../../../../guard";
+import { handleAutomotiveError, readBody, vehicleBranchContext } from "../../../../../guard";
 
 /**
  * §5 — a cost is voided, never edited. The row stays with its reason and the
@@ -17,7 +17,10 @@ export const POST = withTenantScope(
     if (error) return error;
     const industryError = await requireIndustryForApi(session, "automotive");
     if (industryError) return industryError;
-    const { costId } = await context.params;
+    const { id, costId } = await context.params;
+    const { access, response: branchError } = await vehicleBranchContext(session, id, { mutation: true });
+    if (branchError) return branchError;
+    const locationId = access.activeLocationId!;
     const body = await readBody(request);
 
     const client = await getPool().connect();
@@ -25,6 +28,8 @@ export const POST = withTenantScope(
       await client.query("BEGIN");
       await voidVehicleCost(client, {
         businessId: session.businessId,
+        serialId: id,
+        locationId,
         costId,
         reason: typeof body.reason === "string" ? body.reason : "",
         actorId: session.sub,

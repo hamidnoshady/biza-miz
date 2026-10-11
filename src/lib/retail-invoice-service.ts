@@ -236,10 +236,20 @@ export async function createRetailInvoice(
     throw new RetailInvoiceError("برای فروش نسیه، انتخاب مشتری الزامی است.");
   }
   let tenderQueue: RetailTenderQueueEntry[];
-  try {
-    tenderQueue = buildTenderQueue(input.tenders);
-  } catch (err) {
-    throw new RetailInvoiceError(err instanceof Error ? err.message : "پرداخت نامعتبر است.");
+  if (input.tenders.length === 0) {
+    // The only zero-cash checkout is a vehicle fully covered by its already-
+    // received reservation deposit. `sellVehicle` verifies that balance inside
+    // this transaction and refuses if any amount remains due.
+    if (input.lines.some((line) => line.kind !== "vehicle")) {
+      throw new RetailInvoiceError("حداقل یک روش پرداخت لازم است.");
+    }
+    tenderQueue = [];
+  } else {
+    try {
+      tenderQueue = buildTenderQueue(input.tenders);
+    } catch (err) {
+      throw new RetailInvoiceError(err instanceof Error ? err.message : "پرداخت نامعتبر است.");
+    }
   }
   const allowed = LINE_KINDS_BY_INDUSTRY[input.industry];
   for (const line of input.lines) {
@@ -334,11 +344,17 @@ export async function createRetailInvoice(
     // the line row exists; stamping it here keeps the car and the invoice
     // inseparable in one transaction.
     if (line.kind === "vehicle") {
+      if (settled.vehicleSaleId == null || settled.vehicleSaleVatPercent == null) {
+        throw new RetailInvoiceError("سابقهٔ فروش خودرو ساخته نشد.");
+      }
       await attachVehicleSaleLine(client, {
         businessId: input.businessId,
         serialId: line.serialId,
+        saleId: settled.vehicleSaleId,
         orderId,
         orderItemId: itemRows[0].id,
+        saleEntryIds: settled.snapshot.ledgerEntryIds ?? [],
+        vatRatePercent: settled.vehicleSaleVatPercent,
       });
     }
 
@@ -505,6 +521,9 @@ interface SettledLine {
    * transaction and a later return/void has something exact to reverse.
    */
   batchAllocations?: BatchAllocation[];
+  /** Posting identity and canonical VAT rate for a vehicle sale-occurrence record. */
+  vehicleSaleId?: string;
+  vehicleSaleVatPercent?: number;
   /**
    * The full sold-line snapshot for `order_items.retail_snapshot` (migration
    * 0174) — everything `getRetailInvoiceDetail`/`getRetailInvoicePrintData`
@@ -691,6 +710,8 @@ async function settleLine(
       vat: sale.vat,
       total: sale.total,
       cost: sale.frozenEffectiveCost,
+      vehicleSaleId: sale.saleId,
+      vehicleSaleVatPercent: sale.vatPercent,
       brandId: vehicleRow.brand_id,
       snapshot: {
         kind: "vehicle",

@@ -32,13 +32,23 @@ export const GET = withTenantScope(async (request: NextRequest, context: { param
   const def = standardReportsFor(industry).find((r) => r.key === key);
   if (!def) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
+  if (["vehicle_stock_valuation", "vehicle_sales_profitability"].includes(key)) {
+    const costAccess = await requirePermission(PERMISSIONS.vehiclesCostView);
+    if (costAccess.error) return costAccess.error;
+  } else if (key === "vehicle_reservations") {
+    const vehicleAccess = await requirePermission(PERMISSIONS.vehiclesView);
+    if (vehicleAccess.error) return vehicleAccess.error;
+  }
+
   const { searchParams } = new URL(request.url);
   const dateFrom = searchParams.get("dateFrom") ?? undefined;
   const dateTo = searchParams.get("dateTo") ?? undefined;
   const compare = searchParams.get("compare") === "1";
 
+  const isAutomotiveReport = ["vehicle_stock_valuation", "vehicle_sales_profitability", "vehicle_reservations"].includes(key);
   const location = reportShape(def) !== "rows" && !["profit_and_loss", "cash_flow", "balance_sheet", "food_cost_variance"].includes(key)
     ? await resolveActiveLocation(session) : null;
+  if (isAutomotiveReport && !location) return NextResponse.json({ error: "no_location" }, { status: 409 });
   return NextResponse.json(await runStandardReport(session.businessId, industry, def, {
     dateFrom, dateTo, compare,
     previousAsOfDate: searchParams.get("previousAsOfDate") ?? undefined,

@@ -768,6 +768,16 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "فروش خودرو",
   },
   {
+    table: "automotive_vehicle_sales",
+    column: "customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The sale occurrence retains the buyer alongside the canonical retail order. A customer merge must move both references together so the surviving CRM record can find every sale without changing its price, tax or ledger history.",
+    preview: true,
+    previewLabel: "خریدار فروش خودرو",
+  },
+  {
     table: "automotive_vehicle_costs",
     column: "vendor_party_id",
     scope: "business",

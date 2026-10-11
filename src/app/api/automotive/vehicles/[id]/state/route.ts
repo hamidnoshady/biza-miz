@@ -3,9 +3,8 @@ import { getPool } from "@/lib/db";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
-import { archiveVehicle, setVehicleState } from "@/lib/automotive-service";
-import type { VehicleState } from "@/lib/automotive";
-import { handleAutomotiveError, readBody } from "../../../guard";
+import { archiveVehicle } from "@/lib/automotive-service";
+import { handleAutomotiveError, readBody, vehicleBranchContext } from "../../../guard";
 
 /**
  * §3 — the lifecycle's one door. Archiving is its own permission
@@ -20,40 +19,39 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const { access, response: branchError } = await vehicleBranchContext(session, id, { mutation: true });
+  if (branchError) return branchError;
+  const locationId = access.activeLocationId!;
   const body = await readBody(request);
 
-  const state = typeof body.state === "string" ? (body.state as VehicleState) : null;
-  if (!state && body.action !== "archive") {
-    return NextResponse.json({ error: "invalid_state" }, { status: 400 });
+  if (body.action !== "archive") {
+    if (typeof body.state !== "string") return NextResponse.json({ error: "invalid_state" }, { status: 400 });
+    return NextResponse.json(
+      {
+        error: "state_command_required",
+        message: "تغییر وضعیت خودرو فقط از فرمان عملیاتی متناظر امکان‌پذیر است.",
+      },
+      { status: 409 },
+    );
   }
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    if (body.action === "archive") {
-      const archive = await requirePermission(PERMISSIONS.vehiclesArchive);
-      if (archive.error) {
-        await client.query("ROLLBACK");
-        return archive.error;
-      }
-      await archiveVehicle(client, {
-        businessId: session.businessId,
-        serialId: id,
-        reason: typeof body.reason === "string" ? body.reason : null,
-        actorId: session.sub,
-      });
-      await client.query("COMMIT");
-      return NextResponse.json({ ok: true });
+    const archive = await requirePermission(PERMISSIONS.vehiclesArchive);
+    if (archive.error) {
+      await client.query("ROLLBACK");
+      return archive.error;
     }
-
-    const vehicle = await setVehicleState(client, {
+    await archiveVehicle(client, {
       businessId: session.businessId,
       serialId: id,
-      state: state!,
+      locationId,
+      reason: typeof body.reason === "string" ? body.reason : null,
       actorId: session.sub,
     });
     await client.query("COMMIT");
-    return NextResponse.json({ ok: true, vehicle });
+    return NextResponse.json({ ok: true });
   } catch (err) {
     await client.query("ROLLBACK");
     return handleAutomotiveError(err);

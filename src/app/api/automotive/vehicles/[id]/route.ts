@@ -9,8 +9,8 @@ import {
   listVehicleTransfers,
   updateVehicle,
 } from "@/lib/automotive-service";
-import type { VehicleBodyType, VehicleDrivetrain, VehicleFuelType, VehicleTransmission } from "@/lib/automotive";
-import { handleAutomotiveError, holdsPermission, readBody } from "../../guard";
+import { redactVehicleCostSensitive, type VehicleBodyType, type VehicleDrivetrain, type VehicleFuelType, type VehicleTransmission } from "@/lib/automotive";
+import { handleAutomotiveError, holdsPermission, readBody, vehicleBranchContext } from "../../guard";
 
 function text(body: Record<string, unknown>, key: string): string | null {
   const value = body[key];
@@ -39,43 +39,47 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const { access, response: branchError } = await vehicleBranchContext(session, id);
+  if (branchError) return branchError;
+  const locationIds = access.allowedLocationIds;
 
   try {
-    const vehicle = await getVehicle(session.businessId, id);
+    const vehicle = await getVehicle(session.businessId, id, undefined, { locationIds });
     if (!vehicle) return NextResponse.json({ error: "vehicle_not_found" }, { status: 404 });
 
-    const canSeeCost = await holdsPermission(session, PERMISSIONS.vehiclesCostView);
+    const [canSeeCost, canSeePriceHistory] = await Promise.all([
+      holdsPermission(session, PERMISSIONS.vehiclesCostView),
+      holdsPermission(session, PERMISSIONS.vehiclesPriceEdit),
+    ]);
     const [priceHistory, transfers] = await Promise.all([
-      listVehiclePriceHistory(session.businessId, id),
-      listVehicleTransfers(session.businessId, { serialId: id, limit: 20 }),
+      canSeeCost || canSeePriceHistory
+        ? listVehiclePriceHistory(session.businessId, id, undefined, { locationIds })
+        : Promise.resolve([]),
+      listVehicleTransfers(session.businessId, {
+        serialId: id,
+        locationIds,
+        limit: 20,
+      }),
     ]);
 
     const payload = {
       vehicle,
       canSeeCost,
+      canSeePriceHistory: canSeeCost || canSeePriceHistory,
       priceHistory,
       transfers,
     };
     if (canSeeCost) return NextResponse.json(payload);
 
-    const {
-      purchaseCostRial,
-      effectiveCostRial,
-      capitalizedCostRial,
-      periodExpenseRial,
-      minimumPriceRial,
-      costs,
-      ...visible
-    } = vehicle;
-    return NextResponse.json({
-      ...payload,
-      vehicle: {
-        ...visible,
-        // The cost *rows* are money too: hidden wholesale, never half-shown.
-        costs: [],
-      },
-      priceHistory: priceHistory.map(({ minimumPriceRial: _floor, ...entry }) => entry),
-    });
+    return NextResponse.json(
+      canSeeCost
+        ? payload
+        : {
+            ...payload,
+            vehicle: redactVehicleCostSensitive(vehicle),
+            priceHistory: priceHistory.map((entry) => redactVehicleCostSensitive(entry)),
+          },
+    );
   } catch (err) {
     return handleAutomotiveError(err);
   }
@@ -92,6 +96,9 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
+  const { access, response: branchError } = await vehicleBranchContext(session, id, { mutation: true });
+  if (branchError) return branchError;
+  const locationId = access.activeLocationId!;
   const body = await readBody(request);
 
   const client = await getPool().connect();
@@ -100,6 +107,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     const vehicle = await updateVehicle(client, {
       businessId: session.businessId,
       serialId: id,
+      locationId,
       vin: present(body, "vin") ? text(body, "vin") : undefined,
       chassisNumber: present(body, "chassisNumber") ? text(body, "chassisNumber") : undefined,
       engineNumber: present(body, "engineNumber") ? text(body, "engineNumber") : undefined,
@@ -121,7 +129,11 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       actorId: session.sub,
     });
     await client.query("COMMIT");
-    return NextResponse.json({ ok: true, vehicle });
+    const canSeeCost = await holdsPermission(session, PERMISSIONS.vehiclesCostView);
+    return NextResponse.json({
+      ok: true,
+      vehicle: canSeeCost ? vehicle : redactVehicleCostSensitive(vehicle),
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     return handleAutomotiveError(err);

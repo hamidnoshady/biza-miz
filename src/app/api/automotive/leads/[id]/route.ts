@@ -9,27 +9,33 @@ import {
   VehicleLeadError,
   type LeadCondition,
 } from "@/lib/automotive-lead-service";
+import { accessibleLocationsFor } from "@/lib/setup-state";
 import { handleAutomotiveError, readBody } from "../../guard";
 
 /**
  * §12 — one lead's car-shaped half: what they are looking for, and the cars
  * they have been shown.
  *
- * Reads need `crm.view` (this is the customer file) *and* the trade check; the
- * write needs `crm.manage`, because it edits the lead. Note the deliberate
- * asymmetry with the rest of `/api/automotive/**`: a workshop's vehicle APIs
- * are `vehicles.*`, but these rows belong to a *lead*, so the CRM's own keys
- * gate them — one resource, one permission.
+ * Automotive reads require `vehicles.view` and the trade check. The preference
+ * write needs `crm.manage`, because it edits CRM-owned lead data. This keeps the
+ * automotive read boundary consistent with the vehicle workspace while leaving
+ * writes under the canonical CRM permission.
  */
 export const GET = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.crmView);
+  const { session, error } = await requirePermission(PERMISSIONS.vehiclesView);
   if (error) return error;
   const industryError = await requireIndustryForApi(session, "automotive");
   if (industryError) return industryError;
   const { id } = await context.params;
 
   try {
-    const profile = await getLeadVehicleProfile(session.businessId, id);
+    const branchScope = await accessibleLocationsFor(session);
+    const profile = await getLeadVehicleProfile(
+      session.businessId,
+      id,
+      undefined,
+      branchScope.locations.map(({ id: locationId }) => locationId),
+    );
     if (!profile) return NextResponse.json({ error: "lead_not_found" }, { status: 404 });
     return NextResponse.json({ profile });
   } catch (err) {

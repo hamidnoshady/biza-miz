@@ -3,17 +3,20 @@ import { getPool } from "@/lib/db";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
-import { resolveActiveLocation } from "@/lib/setup-state";
-import { createVehicle, listVehicles, type CreateVehicleInput, type VehicleCostInput } from "@/lib/automotive-service";
-import type {
-  VehicleState,
-  VehicleAcquisitionSource,
-  VehicleBodyType,
-  VehicleDrivetrain,
-  VehicleExpenseCategory,
-  VehicleFuelType,
-  VehicleTransmission,
-  VehicleYearCalendar,
+import { accessibleLocationsFor, resolveActiveLocation } from "@/lib/setup-state";
+import { createVehicle, listVehicles, type CreateVehicleInput, type VehicleCostInput, type VehicleListFilters } from "@/lib/automotive-service";
+import {
+  redactVehicleCostSensitive,
+  type VehicleState,
+  VEHICLE_CONDITIONS,
+  VEHICLE_STATES,
+  type VehicleAcquisitionSource,
+  type VehicleBodyType,
+  type VehicleDrivetrain,
+  type VehicleExpenseCategory,
+  type VehicleFuelType,
+  type VehicleTransmission,
+  type VehicleYearCalendar,
 } from "@/lib/automotive";
 import { handleAutomotiveError, holdsPermission, readBody } from "../guard";
 
@@ -47,48 +50,113 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (industryError) return industryError;
 
   const url = new URL(request.url);
-  const location = await resolveActiveLocation(session);
-  const states = url.searchParams.get("states");
-  const numeric = (key: string) => {
+  const allBranches = url.searchParams.get("allBranches") === "1";
+  const requestedLocationId = url.searchParams.get("locationId");
+  if (allBranches && requestedLocationId) {
+    return NextResponse.json({ error: "conflicting_location_scope" }, { status: 400 });
+  }
+  const [location, branchScope] = await Promise.all([
+    resolveActiveLocation(session),
+    accessibleLocationsFor(session),
+  ]);
+  const allowedLocationIds = branchScope.locations.map(({ id }) => id);
+  if (requestedLocationId && !allowedLocationIds.includes(requestedLocationId)) {
+    return NextResponse.json({ error: "location_not_found" }, { status: 404 });
+  }
+  if (!allBranches && !requestedLocationId && !location) {
+    return NextResponse.json({ error: "no_location" }, { status: 409 });
+  }
+  if (!allBranches && !requestedLocationId && !allowedLocationIds.includes(location!.id)) {
+    return NextResponse.json({ error: "location_not_found" }, { status: 404 });
+  }
+
+  const parsedNumbers: Record<string, number | null> = {};
+  for (const key of [
+    "modelYearFrom", "modelYearTo", "minPriceRial", "maxPriceRial",
+    "minMileageKm", "maxMileageKm", "minAgeDays", "maxAgeDays", "limit", "offset",
+  ]) {
     const raw = url.searchParams.get(key);
-    if (raw == null || raw === "") return null;
-    const value = Number(raw);
-    return Number.isFinite(value) ? value : null;
-  };
-  const condition = url.searchParams.get("condition");
+    if (raw == null) {
+      parsedNumbers[key] = null;
+      continue;
+    }
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      return NextResponse.json({ error: "invalid_filter", field: key }, { status: 400 });
+    }
+    parsedNumbers[key] = Number(raw);
+  }
+  if (parsedNumbers.limit != null && (parsedNumbers.limit < 1 || parsedNumbers.limit > 500)) {
+    return NextResponse.json({ error: "invalid_filter", field: "limit" }, { status: 400 });
+  }
+  if (parsedNumbers.modelYearFrom != null && parsedNumbers.modelYearTo != null && parsedNumbers.modelYearFrom > parsedNumbers.modelYearTo) {
+    return NextResponse.json({ error: "invalid_filter", field: "modelYear" }, { status: 400 });
+  }
+  if (parsedNumbers.minPriceRial != null && parsedNumbers.maxPriceRial != null && parsedNumbers.minPriceRial > parsedNumbers.maxPriceRial) {
+    return NextResponse.json({ error: "invalid_filter", field: "price" }, { status: 400 });
+  }
+  if (parsedNumbers.minMileageKm != null && parsedNumbers.maxMileageKm != null && parsedNumbers.minMileageKm > parsedNumbers.maxMileageKm) {
+    return NextResponse.json({ error: "invalid_filter", field: "mileage" }, { status: 400 });
+  }
+  if (parsedNumbers.minAgeDays != null && parsedNumbers.maxAgeDays != null && parsedNumbers.minAgeDays > parsedNumbers.maxAgeDays) {
+    return NextResponse.json({ error: "invalid_filter", field: "age" }, { status: 400 });
+  }
+
+  const rawCondition = url.searchParams.get("condition");
+  if (rawCondition !== null && !VEHICLE_CONDITIONS.includes(rawCondition as (typeof VEHICLE_CONDITIONS)[number])) {
+    return NextResponse.json({ error: "invalid_filter", field: "condition" }, { status: 400 });
+  }
+  const rawStates = url.searchParams.get("states");
+  let states: VehicleState[] | undefined;
+  if (rawStates !== null) {
+    const requestedStates = rawStates.split(",").map((state) => state.trim()).filter(Boolean);
+    if (requestedStates.length === 0 || requestedStates.some((state) => !VEHICLE_STATES.includes(state as VehicleState))) {
+      return NextResponse.json({ error: "invalid_filter", field: "states" }, { status: 400 });
+    }
+    states = [...new Set(requestedStates as VehicleState[])];
+  }
+  const make = url.searchParams.get("make")?.trim() || null;
+  const model = url.searchParams.get("model")?.trim() || null;
+  if (make && make.length > 120 || model && model.length > 120) {
+    return NextResponse.json({ error: "invalid_filter", field: "make_model" }, { status: 400 });
+  }
 
   try {
+    const locationIds = allBranches ? allowedLocationIds : undefined;
+    const selectedLocationId = allBranches ? null : requestedLocationId ?? location!.id;
     const result = await listVehicles({
       businessId: session.businessId,
-      // `allBranches=1` is the §15 "branch inventory" view; without it the
-      // caller's own active branch is the scope, never a client-named one.
-      locationId: url.searchParams.get("allBranches") === "1" ? null : (location?.id ?? null),
-      condition: condition === "new" || condition === "used" ? condition : null,
-      states: states ? (states.split(",").filter(Boolean) as VehicleState[]) : undefined,
-      make: url.searchParams.get("make"),
-      model: url.searchParams.get("model"),
-      modelYearFrom: numeric("modelYearFrom"),
-      modelYearTo: numeric("modelYearTo"),
-      minPriceRial: numeric("minPriceRial"),
-      maxPriceRial: numeric("maxPriceRial"),
-      maxMileageKm: numeric("maxMileageKm"),
-      minAgeDays: numeric("minAgeDays"),
-      maxAgeDays: numeric("maxAgeDays"),
-      search: url.searchParams.get("q"),
-      limit: numeric("limit") ?? undefined,
-      offset: numeric("offset") ?? undefined,
+      // Every scope is derived from the authenticated member. A requested
+      // branch is checked against that live set before it reaches the query.
+      locationId: locationIds ? undefined : selectedLocationId,
+      locationIds,
+      condition: rawCondition as VehicleListFilters["condition"],
+      states,
+      make,
+      model,
+      modelYearFrom: parsedNumbers.modelYearFrom,
+      modelYearTo: parsedNumbers.modelYearTo,
+      minPriceRial: parsedNumbers.minPriceRial,
+      maxPriceRial: parsedNumbers.maxPriceRial,
+      minMileageKm: parsedNumbers.minMileageKm,
+      maxMileageKm: parsedNumbers.maxMileageKm,
+      minAgeDays: parsedNumbers.minAgeDays,
+      maxAgeDays: parsedNumbers.maxAgeDays,
+      search: url.searchParams.get("q")?.slice(0, 160) ?? null,
+      limit: parsedNumbers.limit ?? undefined,
+      offset: parsedNumbers.offset ?? undefined,
     });
 
     const canSeeCost = await holdsPermission(session, PERMISSIONS.vehiclesCostView);
-    const total = result.total;
     return NextResponse.json({
-      total,
+      total: result.total,
       canSeeCost,
-      vehicles: result.vehicles.map((vehicle) => {
-        if (canSeeCost) return vehicle;
-        const { purchaseCostRial, effectiveCostRial, potentialMarginRial, minimumPriceRial, ...visible } = vehicle;
-        return visible;
-      }),
+      locations: branchScope.locations.map(({ id, name }) => ({ id, name })),
+      activeLocationId: location?.id ?? null,
+      selectedLocationId,
+      allBranches,
+      vehicles: result.vehicles.map((vehicle) =>
+        canSeeCost ? vehicle : redactVehicleCostSensitive(vehicle),
+      ),
     });
   } catch (err) {
     return handleAutomotiveError(err);
@@ -147,8 +215,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // §6: the asking price travels with the acquisition, but the *floor* is the
   // owner's number — naming one while registering a car is a price decision,
   // not an inventory one.
+  if (body.minimumPriceRial != null && body.minimumPriceRial !== "") {
+    if (!(await holdsPermission(session, PERMISSIONS.vehiclesOverrideMinPrice))) {
+      return NextResponse.json(
+        { error: "MISSING_PERMISSION", permission: PERMISSIONS.vehiclesOverrideMinPrice },
+        { status: 403 },
+      );
+    }
+  }
   if (
-    (body.minimumPriceRial != null && body.minimumPriceRial !== "") ||
     (body.wholesalePriceRial != null && body.wholesalePriceRial !== "") ||
     (body.promotionalPriceRial != null && body.promotionalPriceRial !== "")
   ) {
@@ -158,6 +233,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         { status: 403 },
       );
     }
+  }
+
+  // Registering an acquisition writes purchase cost and ledger settlement; it
+  // is the distinct high-risk cost-edit act, not an incidental part of vehicle
+  // creation. A draft vehicle without acquisition remains available to creators.
+  if (acquisition && !(await holdsPermission(session, PERMISSIONS.vehiclesCostEdit))) {
+    return NextResponse.json(
+      { error: "MISSING_PERMISSION", permission: PERMISSIONS.vehiclesCostEdit },
+      { status: 403 },
+    );
   }
 
   // One permission per act: recording money against a car needs
@@ -213,7 +298,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       createdBy: session.sub,
     });
     await client.query("COMMIT");
-    return NextResponse.json({ ok: true, vehicle: created });
+    const canSeeCost = await holdsPermission(session, PERMISSIONS.vehiclesCostView);
+    return NextResponse.json({
+      ok: true,
+      vehicle: canSeeCost ? created : redactVehicleCostSensitive(created),
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     return handleAutomotiveError(err);

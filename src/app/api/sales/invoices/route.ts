@@ -115,7 +115,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // پیش نمی‌داندش، پس فروش تک‌روشی (اکثریت قریب‌به‌اتفاق فاکتورها) باید بتواند
   // بدون دانستن جمع نهایی، «همه‌چیز را با همین روش بگیر» بفرستد. یک فروش
   // چندروشی هر سهمش را صریح می‌فرستد و فقط آخرین (یا هر یک) سهم را باز می‌گذارد.
-  if (!Array.isArray(body.tenders) || body.tenders.length === 0) {
+  if (!Array.isArray(body.tenders)) {
+    return NextResponse.json({ error: "no_payment" }, { status: 400 });
+  }
+  if (
+    body.tenders.length === 0 &&
+    (!Array.isArray(body.lines) || body.lines.length === 0 || !body.lines.every((line) => line?.kind === "vehicle"))
+  ) {
     return NextResponse.json({ error: "no_payment" }, { status: 400 });
   }
   if (body.tenders.length > MAX_RETAIL_TENDERS) {

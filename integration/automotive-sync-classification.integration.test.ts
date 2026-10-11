@@ -12,7 +12,7 @@
  *   * **nothing is unclassified**: the sweep takes the schema's own table list
  *     (every `automotive_vehicle_*` table plus the two CRM lead extensions 0213
  *     added) and the guard must find no unclaimed table and no claim without a
- *     table — so a seventh vehicle table cannot arrive without a decision, and a
+ *     table — so another vehicle table cannot arrive without a decision, and a
  *     rename cannot leave the audit describing a table nobody has;
  *   * **no classified table is in the master feed**: the `trg_sync_capture`
  *     trigger that makes a table last-write-wins does not exist on any of them
@@ -139,8 +139,9 @@ describe("§22's classification against the schema", () => {
     await client.connect();
     try {
       const tables = await schemaTables(client);
-      // Four vehicle tables in 0212, two lead extensions in 0213.
-      expect(tables.length).toBe(6);
+      // Four vehicle tables in 0212, two CRM extensions in 0213, the sale
+      // occurrence history in 0215, and the Media Library link in 0216.
+      expect(tables.length).toBe(8);
       expect(automotiveSyncClassificationProblems(tables)).toEqual({ uncovered: [], unknown: [] });
 
       // A sanity check on the guard itself: a table the sweep would see and the
@@ -247,6 +248,7 @@ describe("§22's classification against the schema", () => {
         await automotive.recordVehicleCost(client, {
           businessId: created.businessId,
           serialId: car.serialId,
+          locationId: created.locationId,
           createdBy: created.userId,
           cost: {
             category: "repair",
@@ -259,6 +261,7 @@ describe("§22's classification against the schema", () => {
         await automotive.updateVehiclePrice(client, {
           businessId: created.businessId,
           serialId: car.serialId,
+          locationId: created.locationId,
           askingPriceRial: 880_000_000,
         });
         const { rows: leadRows } = await client.query<{ id: string }>(
@@ -279,6 +282,7 @@ describe("§22's classification against the schema", () => {
           businessId: created.businessId,
           leadId: leadRows[0].id,
           serialId: car.serialId,
+          locationId: created.locationId,
           purpose: "test_drive",
           actorId: created.userId,
         });
@@ -324,7 +328,7 @@ describe("§22's classification against the schema", () => {
     expect(snapshotBusiness.industry).toBe("automotive");
     const classification = redeemed.snapshot.dataClassification;
     expect(classification.ongoingDomainEvents.some((event) => event.includes("automotive"))).toBe(false);
-    expect(classification.centralOnlyData.join(" ")).toContain("Automotive vehicle stock");
+    expect(classification.centralOnlyData.join(" ")).toContain("Automotive vehicle records");
     expect(classification.bootstrapMasterData.join(" ")).not.toContain("Automotive vehicle");
 
     const validation = pairingSnapshot.validateSnapshot(JSON.parse(JSON.stringify(redeemed.snapshot)));

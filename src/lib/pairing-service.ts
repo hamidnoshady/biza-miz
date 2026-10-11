@@ -998,13 +998,13 @@ const PAIRING_DATA_CLASSIFICATION = {
     // register. This line is what the operator and the desktop both read, so the
     // absence is stated instead of assumed.
     "AEC project registers (site capture, documents, RFI/submittal and the commercial registers) — cloud-only until a field-capture protocol exists",
-    // Issue #839 §22. The automotive trade is classified the same way, in
-    // `automotive-sync-classification.ts` (every vehicle table in one of the
-    // buckets, with the reason and what a protocol would need first), and the
-    // same answer applies: `item_serials` never syncs, so neither can the VIN
-    // record hanging off it. The till half of the trade still works on a paired
-    // laptop because `pos` is one of its modules and the catalogue does sync.
-    "Automotive vehicle stock (VIN/chassis identity, landed cost, price history, holds and transfers) — cloud-only: a second writer holding the same VINs could sell one car twice",
+    // Issue #839 §22. Automotive unit rows, sale/reversal occurrences, media
+    // links and CRM extensions are all classified in
+    // `automotive-sync-classification.ts`. The same answer applies: `item_serials`
+    // never syncs, so neither can the VIN record hanging off it. The till half
+    // of the trade still works on a paired laptop because `pos` is one of its
+    // modules and the make/model catalogue does sync.
+    "Automotive vehicle records (VIN/chassis identity, landed cost, price and sale history, holds, transfers and media links) — cloud-only: a second writer holding the same VINs could sell one car twice",
   ],
   notYetReplicated: [
     "historical/full orders, tenders, payments, refunds, reservations, and shifts",

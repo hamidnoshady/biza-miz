@@ -86,13 +86,13 @@ export async function vehicleInventoryReport(
             v.minimum_price_rial::text AS minimum_price_rial,
             v.vin, v.plate_number
        FROM automotive_vehicle_attributes v
-       LEFT JOIN locations l ON l.id = v.location_id
+       LEFT JOIN locations l ON l.id = v.location_id AND l.business_id = v.business_id
        LEFT JOIN (
-         SELECT serial_id,
+         SELECT business_id, serial_id,
                 sum(amount_rial) FILTER (WHERE posting = 'capitalized') AS capitalized_cost_rial,
                 sum(amount_rial) FILTER (WHERE posting = 'period_expense') AS period_expense_rial
-           FROM automotive_vehicle_costs WHERE status = 'active' GROUP BY serial_id
-       ) c ON c.serial_id = v.serial_id
+           FROM automotive_vehicle_costs WHERE status = 'active' GROUP BY business_id, serial_id
+       ) c ON c.business_id = v.business_id AND c.serial_id = v.serial_id
       WHERE ${where.join(" AND ")}
       ORDER BY acquired_on, v.stock_number`,
     params,
@@ -154,7 +154,7 @@ interface SalesDbRow {
   trim: string | null;
   model_year: number | null;
   condition: "new" | "used";
-  state: string;
+  sale_status: "active" | "reversed";
   sold_on: string;
   acquired_on: string | null;
   sale_price_rial: string;
@@ -171,34 +171,41 @@ export async function vehicleSalesReport(
   options: { locationId?: string | null; dateFrom?: string | null; dateTo?: string | null },
 ): Promise<VehicleSalesReport> {
   const params: unknown[] = [businessId];
-  const where = ["v.business_id = $1", "v.sold_on IS NOT NULL"];
-  if (options.locationId) where.push(`v.location_id = $${params.push(options.locationId)}`);
-  if (options.dateFrom) where.push(`v.sold_on >= $${params.push(options.dateFrom)}`);
-  if (options.dateTo) where.push(`v.sold_on <= $${params.push(options.dateTo)}`);
+  const where = ["s.business_id = $1"];
+  if (options.locationId) where.push(`s.location_id = $${params.push(options.locationId)}`);
+  if (options.dateFrom) where.push(`s.sold_on >= $${params.push(options.dateFrom)}`);
+  if (options.dateTo) where.push(`s.sold_on <= $${params.push(options.dateTo)}`);
 
   const { rows } = (await query(
-    `SELECT v.serial_id, v.stock_number, v.make, v.model, v.trim, v.model_year, v.condition, v.state,
-            v.sold_on::text AS sold_on,
-            coalesce(v.acquisition_date, v.created_at::date)::text AS acquired_on,
-            coalesce(v.sale_price_rial, 0)::text AS sale_price_rial,
-            coalesce(v.frozen_effective_cost_rial, 0)::text AS frozen_effective_cost_rial,
-            v.location_id, l.name AS location_name,
-            v.sold_by AS salesperson_id, u.full_name AS salesperson_name,
-            -- The VAT the invoice charged: read from the revenue entry the sale
-            -- posted rather than re-derived from a rate, because the rate is
-            -- configured per business and this report must agree with the books.
+    `SELECT s.serial_id, s.stock_number, s.make, s.model, s.trim, s.model_year,
+            s.condition, s.status AS sale_status, s.sold_on::text AS sold_on,
+            s.acquired_on::text AS acquired_on, s.sale_price_rial::text AS sale_price_rial,
+            coalesce(s.frozen_effective_cost_rial, (
+              SELECT sum(jl.debit) FROM journal_entries e
+                JOIN journal_lines jl ON jl.entry_id = e.id
+                JOIN accounts a ON a.id = jl.account_id
+               WHERE e.business_id = s.business_id
+                 AND (e.source_id = s.sale_id OR e.id = ANY(s.sale_entry_ids))
+                 AND e.posting_kind = 'automotive_sale_cogs' AND a.code = '5194'
+            ), 0)::text AS frozen_effective_cost_rial,
+            s.location_id, l.name AS location_name,
+            s.sold_by AS salesperson_id, u.full_name AS salesperson_name,
+            -- The VAT the invoice charged: read by this occurrence's unique
+            -- posting identity, with its canonical captured entry ids as the
+            -- compatibility key for legacy rows lacking a recoverable source id.
             coalesce((
               SELECT sum(jl.credit) FROM journal_entries e
                 JOIN journal_lines jl ON jl.entry_id = e.id
                 JOIN accounts a ON a.id = jl.account_id
-               WHERE e.business_id = v.business_id AND e.source_id = v.serial_id
+               WHERE e.business_id = s.business_id
+                 AND (e.source_id = s.sale_id OR e.id = ANY(s.sale_entry_ids))
                  AND e.posting_kind = 'automotive_sale_revenue' AND a.code = '2200'
             ), 0)::text AS vat_rial
-       FROM automotive_vehicle_attributes v
-       LEFT JOIN locations l ON l.id = v.location_id
-       LEFT JOIN users u ON u.id = v.sold_by
+       FROM automotive_vehicle_sales s
+       LEFT JOIN locations l ON l.id = s.location_id AND l.business_id = s.business_id
+       LEFT JOIN users u ON u.id = s.sold_by AND u.business_id = s.business_id
       WHERE ${where.join(" AND ")}
-      ORDER BY v.sold_on, v.stock_number`,
+      ORDER BY s.sold_on, s.stock_number, s.created_at`,
     params,
   )) as unknown as { rows: SalesDbRow[] };
 
@@ -235,7 +242,7 @@ export async function vehicleSalesReport(
       locationId: row.location_id,
       locationName: row.location_name,
       // A sold-then-returned car: still a sale in the period, visibly reversed.
-      reversed: row.state === "returned",
+      reversed: row.sale_status === "reversed",
     };
   });
 
@@ -310,9 +317,9 @@ export async function vehicleReservationReport(
             r.deposit_refund_entry_id, r.created_at::text AS created_at, r.closed_at::text AS closed_at,
             r.location_id, l.name AS location_name, r.release_reason
        FROM serial_reservations r
-       JOIN automotive_vehicle_attributes v ON v.serial_id = r.serial_id
-       LEFT JOIN parties p ON p.id = r.customer_id
-       LEFT JOIN locations l ON l.id = r.location_id
+       JOIN automotive_vehicle_attributes v ON v.serial_id = r.serial_id AND v.business_id = r.business_id
+       LEFT JOIN parties p ON p.id = r.customer_id AND p.business_id = r.business_id
+       LEFT JOIN locations l ON l.id = r.location_id AND l.business_id = r.business_id
       WHERE ${where.join(" AND ")}
       ORDER BY (r.status = 'active') DESC, r.created_at DESC`,
     params,

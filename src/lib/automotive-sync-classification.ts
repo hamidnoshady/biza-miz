@@ -41,6 +41,9 @@
  *   * `automotive_vehicle_price_history` is an append-only journal of what the
  *     asking price *was*. Merging it field by field would rewrite history, and
  *     the whole reason it exists is that history must not be rewritten.
+ *   * `automotive_vehicle_sales` preserves each sale/reversal occurrence, and
+ *     `automotive_vehicle_media` links a specific unit to a shared Media Library
+ *     asset. Neither is a generic catalogue row.
  *
  * Each entry below therefore carries the write model that put it in its bucket
  * and what a future protocol would have to add first. Changing a classification
@@ -78,6 +81,7 @@ export interface AutomotiveSyncEntry {
     | "append_only_journal"
     | "void_not_edit"
     | "lead_extension"
+    | "vehicle_attachment"
     | "catalogue_row";
   tables: readonly string[];
   reason: string;
@@ -175,6 +179,34 @@ export const AUTOMOTIVE_SYNC_CLASSIFICATION: readonly AutomotiveSyncEntry[] = [
       "the same protocol as `lead_vehicle_preferences`, plus the unit: a link may only be applied where the referenced `item_serials` row resolves, or it defers",
   },
   {
+    key: "vehicle_sales",
+    label: "سوابق فروش و برگشت خودرو",
+    class: "cloud_only",
+    surface: "فروش خودرو / مرجوعی و فروش مجدد",
+    writeModel: "void_not_edit",
+    tables: ["automotive_vehicle_sales"],
+    reason:
+      "One durable occurrence per sale, carrying the frozen price, effective cost, VAT and posting ids; a return marks that occurrence reversed and records its mirror entries without rewriting the original sale. The ordinary retail invoice and ledger remain the canonical financial documents.",
+    conflictRule:
+      "the cloud serializes the active sale per unit; reversals name the original occurrence and ledger entries, and a later resale creates a new occurrence",
+    requirement:
+      "an idempotent sale occurrence id plus the same order, exact unit, expected-state and posting/reversal dependencies on both sides before the history may travel",
+  },
+  {
+    key: "vehicle_media_links",
+    label: "پیوست‌های رسانه‌ای خودرو",
+    class: "cloud_only",
+    surface: "پروندهٔ خودرو / رسانه",
+    writeModel: "vehicle_attachment",
+    tables: ["automotive_vehicle_media"],
+    reason:
+      "This is only the tenant-safe link from one serialized vehicle to a canonical Media Library asset; the bytes and quotas remain owned by `media_assets`. A link to an absent vehicle or a different tenant's asset has no safe local meaning.",
+    conflictRule:
+      "cloud-owned link identity; one link per vehicle/asset pair, with bytes served only by the shared Media Library",
+    requirement:
+      "a vehicle-id and asset-id dependency protocol that transfers or resolves both rows before applying an attachment, with delete/unlink replay made idempotent",
+  },
+  {
     key: "vehicle_catalogue",
     label: "کاتالوگ برند و مدل خودرو",
     class: "cloud_catalogue",
@@ -203,8 +235,8 @@ export function automotiveCloudOnlyTables(): string[] {
 
 /**
  * The CI guard. `tables` is the schema's real automotive table list — from
- * `pg_class`, so a migration that adds a seventh table fails here until
- * somebody classifies it and states what it would need to travel.
+ * `pg_class`, so every new automotive table fails here until somebody
+ * classifies it and states what it would need to travel.
  */
 export function automotiveSyncClassificationProblems(tables: readonly string[]): {
   uncovered: string[];
