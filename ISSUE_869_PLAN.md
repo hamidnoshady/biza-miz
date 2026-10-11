@@ -75,7 +75,7 @@ migration 0215) are extended, not replaced. #869 owns run → approval → settl
       needs a reason), members, the payout form (idempotent, with «everything owed» per member),
       payouts with reversal and journal links, the source-line drill-down (sale, order, item, rule,
       journal entry, CSV), the member statement, and the event trail.
-- [ ] A separate approval-summary card. The totals, warnings and trail stand in for it (see Status).
+- [x] A separate approval-summary card (`ApprovalSummaryCard`): the run's totals, its warnings, who did each step, and the event trail.
 
 ## Phase 6 — documentation and the gates
 
@@ -128,9 +128,13 @@ issue to the code that meets it and to the test that proves it.
 - **Payroll-settled rows are not run lines.** A run excludes rows that payroll already holds and counts
   them in a warning. The member statement shows the settling run or payroll period for each row. The
   issue's «link run lines to the payroll settlement» is met at the statement, not on the line.
-- **No separate approval-summary card.** The totals, the warnings and the event trail serve that purpose.
-- **No unmapped-seller warning.** A sale whose seller has no matching rule never writes an accrual, so
-  the run cannot see it. The warning would have to come from the sales path.
+- **Unmapped sellers are warned, not accrued.** A sale whose seller has no commission rule in force never
+  writes an accrual. The run reads the current sales (by `orders.opened_by`) and the current rules, and
+  warns (`unmapped_seller`) with each seller's line count and sales value (before invoice discounts). The
+  warning does not cover a rule-scoped line for a seller who does have a rule.
+- **Payroll provenance is a count and a period, with a link to the payroll screen.** A run that excludes
+  rows already held by payroll says how many rows, per payroll period (`claimed_by_payroll`). The link
+  goes to `/accounting/payroll`; it does not open the payroll run itself.
 - **No project filter.** Commission has no project dimension in this codebase.
 - **Category-scoped rules never match.** The retail invoice path does not pass a category
   (`retail-invoice-service.ts`). This predates #869 and is unchanged.
@@ -157,42 +161,29 @@ issue to the code that meets it and to the test that proves it.
 
 ## Gates
 
-Final state of the branch, in this sandbox (Node v22.22.3; Postgres 16.14 from `embedded-postgres` on
-127.0.0.1:55432; `NODE_OPTIONS=--max-old-space-size=3072`; the CI throwaway `JWT_SECRET`). The
-sandbox was restored between turns, so dependencies were reinstalled with `npm ci` (exit 0) and
-the database was started fresh and migrated from zero.
+Final state of the branch at the head that carries this section (Node v22.22.3 here, v24 in CI;
+Postgres 16 from `embedded-postgres` on 127.0.0.1:55432; `NODE_OPTIONS=--max-old-space-size=3072`).
+The branch was merged with `origin/main` at `55a9b7ee` before these runs.
 
 | Gate | Command | Result | Exit |
 | --- | --- | --- | --- |
-| Migrations, apply | `npm run db:migrate` (fresh database) | applied 304 migrations, including 0216 and 0217 | 0 |
-| Migrations, re-run | `npm run db:migrate` | "Nothing to do — schema is up to date." | 0 |
+| Migrations | `npm run db:migrate` | up to date | 0 |
 | Type check | `npx tsc --noEmit` | clean | 0 |
-| Lint (CI) | `npm run lint` (`eslint . --max-warnings=0`) | clean | 0 |
-| Unit | `npm test` | 706 files, 9303 tests passing (baseline: 698 files, 9175) | 0 |
-| Database integration (full) | `npm run test:db` | 199 files; 2719 tests passing, 1 skipped | 0 |
+| Lint | `npm run lint` (`eslint . --max-warnings=0`) | clean | 0 |
+| Unit | `npx vitest run` (`npm test`) | 725 files, 9483 tests passing | 0 |
+| Database (full) | `npm run test:db` | 204 files, 2855 tests passing, 1 skipped (`ai-gateway`, pre-existing guard) | 0 |
+| Commission database | `integration/commission-settlement.integration.test.ts` | 17 of 17 (includes the statement-total regression) | 0 |
 | Design | `npm run test:design` | 5 files, 38 tests passing | 0 |
-| Production build | `npm run build` | compiled; all new routes and pages listed | 0 |
+| Production build | `npm run build` | compiled; commission routes listed | 0 |
+| Visual regression | `npm run test:visual` against the production build | 14 of 14 screens match their baselines | 0 |
+| Live browser smoke | `scripts/` smoke run against the production server (see below) | 8 of 8 checks | 0 |
 
-Notes on those results:
+Notes:
 
-- The database suite includes the new `commission-sync-events` file (11 tests) and the existing sync,
-  pairing, tenant-isolation, tenant-export and restore suites, all green on the migrated schema.
-- The first full unit run of the branch failed one test (three source codes had no Persian label);
-  the labels were added and the run above passes.
-- Earlier in the work, the first database run failed one existing sync test (`sync-events`): the
-  generic invariant "an invalid payload dead-letters with an `invalid_` code". The new handlers now
-  validate their fields before refusing, which satisfies it. The file passes.
-- The one skipped database test is the row-level-security case in `ai-gateway.integration.test.ts`,
-  skipped by its own guard because the sandbox database user is a superuser.
-- `npm run build` was killed by the kernel (exit 137) in this sandbox, which has 3.9 GB of RAM and no
-  swap, while the Node build reached about 3.4 GB resident memory. The untouched base commit `7b1b11c`
-  fails the same way (peak 3.46 GB). The build passes with a temporary 4 GB swap file, which was removed
-  afterwards. CI runs the build on its own runners.
-- Node is v22 here and v24 in CI.
-
-Not run:
-
-- Visual regression (no Chromium here) and `npm run test:e2e:media`.
-- Any browser test of the commission screens (none exists in the repository).
-- A live two-machine sync. The desktop side is exercised through `runServerPull` against a stubbed
-  central response, and the central side through the real pull route.
+- `npm run format` does not exist in this repository, so no format gate was run.
+- The `accounting-expenses` baseline that failed in CI at `6884033` (3.67%–4.06%) matches the render at
+  this head. The merged `main` (PR #881, commit `a4e8aa86`) re-recorded `accounting-expenses.png` and
+  `accounting-receivables.png`; this branch carries that baseline. No baseline was re-recorded here.
+- The database suite ran before the final design-lint fix, which only touched a loading placeholder in
+  `commission-run-detail.tsx`. The design suite and the unit suite were re-run after that fix.
+- Not run: `npm run test:e2e:media`, and the CI jobs on the pushed head (see the push report).

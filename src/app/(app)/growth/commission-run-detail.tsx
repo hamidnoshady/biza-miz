@@ -691,7 +691,7 @@ function PayoutFormCard({
               {accountsStatus === "error" ? (
                 <RetryNotice message={accountsError} onRetry={onRetryAccounts} />
               ) : accountsStatus === "loading" ? (
-                <p className="text-sm text-muted-foreground">در حال بارگذاری حساب‌های پرداخت…</p>
+                <LoadingSkeleton rows={1} compact label="در حال بارگذاری حساب‌های پرداخت" />
               ) : null}
               <select className={inputClass} value={choice} onChange={(e) => setChoice(e.target.value)}>
                 {accounts.map((account) => (

@@ -276,6 +276,11 @@ note (a void's reason is required). The run page shows the trail.
   unmapped-seller and payroll-provenance warnings, and direct-write guards.
 - Database, `integration/commission-tenant-isolation.integration.test.ts`: the six settlement
   tables read, updated, deleted and inserted by a non-superuser, non-BYPASSRLS role.
+- Database, `integration/commission-settlement.integration.test.ts` also holds the statement-total regression:
+  600 standalone payouts, reversals on both sides of the 500-row detail window, a real service payout,
+  payroll-paid commission, a return and a second tenant, with exact sums asserted.
+- Unit, `src/app/(app)/growth/use-keyed-request.test.tsx`: a late answer for an earlier seller, page or
+  filter never replaces the current one; superseded requests are aborted; retry and error states.
 - Database, `integration/commission-contention.integration.test.ts`: a calculation held behind
   payroll's advisory lock claims only what payroll did not take; two runs and two payouts racing
   for the same rows; a repeated payout key; a payout that fails after its writes rolls back fully.
@@ -288,4 +293,6 @@ note (a void's reason is required). The run page shows the trail.
 - Amounts are stored as integer Rial and shown in the business's display unit.
 - Category-scoped commission rules never match: the retail invoice path does not pass a category
   (`retail-invoice-service.ts`). This predates #869 and is unchanged.
-- The statement shows at most 500 accruals and 500 payouts per member, with a `truncated` flag.
+- The statement's detail lists show at most 500 accruals and 500 payouts per member, with a `truncated` flag.
+  Its totals (accrued, paid through payroll, paid through runs, unpaid) are database sums over the whole
+  history and are never truncated.
