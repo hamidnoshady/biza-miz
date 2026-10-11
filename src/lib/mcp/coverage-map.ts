@@ -496,7 +496,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Website / CMS",
     entity: "Connection, setup/build, design, domain/DNS, CDN",
     routes: ["cms/website/setup", "cms/website/connect", "cms/website/connection", "cms/website/design", "cms/website/domain", "cms/website/dns", "cms/website/cdn"],
-    test: "integration/website.integration.test.ts",
+    ops: {
+      listDetail: ["get_website_status", "get_website_dns", "get_website_cdn"],
+      update: ["website.domain.set"],
+    },
+    note: "credential paths (connect/disconnect keys, sync-switch toggles) and the domain PURCHASE flow stay route-only: secrets never cross the chat channel and buying a domain is wallet spend — see issue #883 package 2 follow-ups",
+    test: "integration/website-sync.integration.test.ts",
   },
   {
     id: "cms.orders",

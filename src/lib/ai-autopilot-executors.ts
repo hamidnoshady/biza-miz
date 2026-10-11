@@ -26,6 +26,7 @@ import { voidRetailInvoice, RetailInvoiceVoidError } from "./retail-invoice-void
 import { updateCmsOrderStatus } from "./cms/website-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
 import { retryWpQueueRow, retryAllFailedWpQueue, flushWpOutbox } from "./integrations/wp-manager-service";
+import { updateCmsSiteDomain } from "./cms/website-service";
 import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
@@ -2662,6 +2663,17 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch T — the site's domain switch ───────────────
+// One remote call; the service normalises the input (trim/lowercase/strip
+// dot) before the format check, so all the executor passes is the raw string.
+const websiteDomainSet: AutopilotExecutor = async (ctx) => {
+  const domain = str(ctx.payload.domain);
+  if (!domain) return fail("invalid_payload");
+  const result = await updateCmsSiteDomain(ctx.businessId, domain);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { ...result.data } };
+};
+
 // ── Issue #883 package 2, batch S — WooCommerce queue re-pends ─────────────
 // A retry only resets an event that was already approved when it first moved
 // to the shop; flush just wakes the drainer ahead of its timer. Neither can
@@ -3059,6 +3071,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   priceListQuickUpdate,
   retailInvoiceVoid,
   websiteOrderStatus,
+  websiteDomainSet,
   wpQueueRetry,
   wpQueueRetryAllFailed,
   wpQueueFlush,

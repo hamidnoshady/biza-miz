@@ -216,6 +216,9 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_wp_queue", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "get_wp_queue_summary", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "get_wp_overview", kind: "read", app: "website", branchPolicy: "agnostic" },
+  // Batch T — site-level infra reads (agnostic, like every website read).
+  { name: "get_website_dns", kind: "read", app: "website", branchPolicy: "agnostic" },
+  { name: "get_website_cdn", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "get_sales_invoice", kind: "read", app: "pos", branchPolicy: "pinned" },
 
   // ---- Workspace / AEC (project desk is business-scoped, never branch-scoped) ----
@@ -392,6 +395,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "wp.queue.retry", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "wp.queue.retry_all_failed", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "wp.queue.flush", kind: "write", app: "website", risk: "low", approval: "mode" },
+  // Batch T — renaming the live site is a configuration switch with large
+  // blast radius on links; connection mode confirms it, but a good executor
+  // tells the human exactly what it is doing.
+  { actionType: "website.domain.set", kind: "write", app: "website", risk: "low", approval: "mode" },
 ];
 
 // ---------------------------------------------------------------------------

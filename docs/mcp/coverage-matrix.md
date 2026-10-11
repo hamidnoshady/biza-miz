@@ -39,7 +39,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **growth.promotions** (Growth · Promotions & gift cards (issue, expire, redeem)) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
 - **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — partial
-- **cms.setup-design-domain** (Website / CMS · Connection, setup/build, design, domain/DNS, CDN) — MCP gap
+- **cms.setup-design-domain** (Website / CMS · Connection, setup/build, design, domain/DNS, CDN) — partial
 - **cms.orders** (Website / CMS · Website orders) — partial
 - **cms.woocommerce** (Website / CMS · WooCommerce manager (posts, queue, syncs)) — partial
 - **workspace.projects** (Workspace · Projects, members, phases) — partial
@@ -90,7 +90,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 22 · partial: 37 · MCP gap: 13 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 22 · partial: 38 · MCP gap: 12 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -136,7 +136,7 @@ Counts — covered: 22 · partial: 37 · MCP gap: 13 · backend gap: 0 · n/a (i
 | Website / CMS | Website overview & state | get_website_status | — | — | — | — | cms.view | — | get_website_status | integration/website.integration.test.ts | covered |
 | Website / CMS | Order events, revalidate, public website connector endpoints (leads, managers, billing) | (route only) | (route only) | — | (route only) | — | billing.manage, website.view | — | — | — | n/a (infra) |
 | Website / CMS | Drafts, pages, website media<br>_page publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope_ | list_cms_media, list_cms_pages, list_website_posts | website.post.draft | website.post.update | (route only) | — | cms.content_manage, cms.publish, cms.view | connection mode | list_cms_media, list_cms_pages, list_website_posts, website.post.draft, website.post.update | integration/website-sync.integration.test.ts | partial |
-| Website / CMS | Connection, setup/build, design, domain/DNS, CDN | (route only) | (route only) | (route only) | (route only) | — | cms.configure, cms.view | — | — | integration/website.integration.test.ts | MCP gap |
+| Website / CMS | Connection, setup/build, design, domain/DNS, CDN<br>_credential paths (connect/disconnect keys, sync-switch toggles) and the domain PURCHASE flow stay route-only: secrets never cross the chat channel and buying a domain is wallet spend — see issue #883 package 2 follow-ups_ | get_website_cdn, get_website_dns, get_website_status | (route only) | website.domain.set | (route only) | — | cms.configure, cms.view | connection mode | get_website_cdn, get_website_dns, get_website_status, website.domain.set | integration/website-sync.integration.test.ts | partial |
 | Website / CMS | Website orders<br>_orders are read on the connected site itself — this lane owns only the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock_ | — | — | (route only) | website.order.status | — | cms.content_manage | step-up (always approve) | website.order.status | integration/website-sync.integration.test.ts | partial |
 | Website / CMS | WooCommerce manager (posts, queue, syncs)<br>_content/queue reads ride list_website_* plus these manager views; retry/flush only re-pend events the shop already approved or wake the drainer early — connection resolution follows the screens (single active shop implicit, several need connectionId)_ | get_wp_overview, get_wp_queue_summary, list_wp_queue | (route only) | — | (route only) | wp.queue.flush, wp.queue.retry, wp.queue.retry_all_failed | woocommerce.manage, woocommerce.sync, woocommerce.view | connection mode | get_wp_overview, get_wp_queue_summary, list_wp_queue, wp.queue.flush, wp.queue.retry, wp.queue.retry_all_failed | — | partial |
 | Workspace | Projects, members, phases | get_workspace_project_status, list_workspace_projects | project.create | project.update | (route only) | — | workspace.manage, workspace.view | connection mode | get_workspace_project_status, list_workspace_projects, project.create, project.update | integration/workspace.integration.test.ts | partial |

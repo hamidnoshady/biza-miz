@@ -327,6 +327,8 @@ export type ActionType =
   | "wp.queue.retry"
   | "wp.queue.retry_all_failed"
   | "wp.queue.flush"
+  // Batch T — the site's public identity write (domain change).
+  | "website.domain.set"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -365,6 +367,7 @@ export type ActionType =
 export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
   | "websiteOrderStatus"
+  | "websiteDomainSet"
   | "wpQueueRetry"
   | "wpQueueRetryAllFailed"
   | "wpQueueFlush"
@@ -1321,6 +1324,14 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "ارسال فوری صف خروجی به فروشگاه (RPC برای اتصال پلاگین، تخلیه برای REST)",
     payloadHint: '{ connectionId?: string }',
     executor: "wpQueueFlush",
+  },
+  "website.domain.set": {
+    type: "website.domain.set",
+    endpoint: "/api/cms/website/domain",
+    method: "PUT",
+    label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
+    payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
+    executor: "websiteDomainSet",
   },
   "website.order.status": {
     type: "website.order.status",
@@ -2723,6 +2734,22 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           required: ["invoiceId"],
           additionalProperties: false,
         },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_website_dns",
+        description: "وضعیت DNS دامنهٔ سایت — رکوردها، nameserverها و تأیید (برای «چرا دامنه‌ام وصل نشد؟»).",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_website_cdn",
+        description: "وضعیت CDN سایت — حالت کش و آمار پس‌زدگی/دفع.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
       },
     },
     {

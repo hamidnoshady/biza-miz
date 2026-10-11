@@ -61,7 +61,7 @@ import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } f
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
-import { listCmsPages, listCmsMedia } from "./cms/website-service";
+import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/website-service";
 import { listRetailInvoices } from "./retail-invoice/list-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
 import { wpOverviewStats, wpQueue, wpQueueSummary } from "./integrations/wp-manager-service";
@@ -2091,6 +2091,17 @@ export async function runReadTool(
     // Connection resolution mirrors the screens: an explicit connectionId is
     // honoured; otherwise the single active woocommerce connection answers,
     // and zero or many ask the model to name one.
+    // Issue #883 package 2, batch T — website infra reads (DNS/CDN status).
+    case "get_website_dns": {
+      const result = await cmsWebsiteDns(businessId);
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: result.data };
+    }
+    case "get_website_cdn": {
+      const result = await cmsSiteCdn(businessId);
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: result.data };
+    }
     case "list_wp_queue": {
       const conn = await resolveWpConnection(businessId, args);
       if ("error" in conn) return { ok: false, data: { error: conn.error } };

@@ -218,6 +218,8 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_wp_queue: "The WooCommerce sync queue — pending/failed/dead outbox jobs (stock, prices, products, orders) plus failed inbound events.",
   get_wp_queue_summary: "Queue counters for one connected shop.",
   get_wp_overview: "The WooCommerce manager dashboard counts.",
+  get_website_dns: "DNS status of the site's domain (records, nameservers, verification).",
+  get_website_cdn: "CDN status of the site (cache mode, purge state).",
   // Phase C — the messaging reads that feed the campaign-create action.
   list_message_templates: "Saved message templates by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",
   list_message_campaigns: "The business's message campaigns (draft, sending, done) with id, name, channel, status and recipient / sent / delivered / failed counts.",
@@ -1634,6 +1636,23 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         itemIds: { type: "array", items: { type: "string" }, description: "خالی = همهٔ اقلام شعبه" },
       },
       required: ["target", "mode", "value", "round"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_website_domain_set",
+    actionType: "website.domain.set",
+    english: "Change the live site's domain — the public identity of the shop; old links break.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: {
+          type: "string",
+          description: "دامنهٔ کامل بدون پروتکل — مثل shop.example.com",
+        },
+      },
+      required: ["domain"],
       additionalProperties: false,
     },
   },

@@ -127,6 +127,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_wp_queue: PERMISSIONS.woocommerceView,
   get_wp_queue_summary: PERMISSIONS.woocommerceView,
   get_wp_overview: PERMISSIONS.woocommerceView,
+  // Batch T — the website infra reads.
+  get_website_dns: PERMISSIONS.cmsView,
+  get_website_cdn: PERMISSIONS.cmsView,
   // Batch I — the KB centre is member-wide (requireMember): the ai.use key
   // is the connection's own "may read assistant-side material" baseline, and
   // the same gate that lets the assistant itself read the centre. Media
@@ -252,6 +255,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "priceList.entries.save": PERMISSIONS.menuEdit,
   "sales.invoice.void": PERMISSIONS.ordersAmendClosed,
   "website.order.status": PERMISSIONS.cmsContentManage,
+  "website.domain.set": PERMISSIONS.cmsConfigure,
   "wp.queue.retry": PERMISSIONS.woocommerceSync,
   "wp.queue.retry_all_failed": PERMISSIONS.woocommerceSync,
   "wp.queue.flush": PERMISSIONS.woocommerceSync,
