@@ -113,4 +113,3 @@ export function canViewAccountingSection(
 export function canOpenLedger(permissions: ReadonlySet<string>): boolean {
   return permissions.has(ACCOUNTING_DOOR_PERMISSION);
 }
-
