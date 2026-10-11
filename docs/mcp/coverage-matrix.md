@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (56)
+### Tenant (55)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -30,7 +30,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **inventory.warehouses-transfers** (Inventory · Warehouses, transfers, warehouse documents) — MCP gap
 - **inventory.counts** (Inventory · Stock counts / periodic closings / visual count scans) — partial
 - **inventory.purchases-suppliers** (Inventory · Purchases, supplier returns, suppliers) — partial
-- **inventory.production** (Inventory · Production formulas & runs, modifier recipes) — partial
 - **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
 - **crm.cases-activities** (CRM · Cases & activities) — MCP gap
@@ -96,7 +95,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 16 · partial: 33 · MCP gap: 23 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 17 · partial: 32 · MCP gap: 23 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -123,7 +122,7 @@ Counts — covered: 16 · partial: 33 · MCP gap: 23 · backend gap: 0 · n/a (i
 | Inventory | Warehouses, transfers, warehouse documents | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | — | integration/stock.integration.test.ts | MCP gap |
 | Inventory | Stock counts / periodic closings / visual count scans | get_stock_count, list_stock_counts | (route only) | (route only) | (route only) | — | inventory.adjust, inventory.view | — | get_stock_count, list_stock_counts | integration/stock.integration.test.ts | partial |
 | Inventory | Purchases, supplier returns, suppliers | get_supplier_performance, list_suppliers | inventory.reorder.draftPO, supplier.return.create | (route only) | (route only) | — | inventory.view, parties.manage, purchases.manage | connection mode; step-up (always approve) | get_supplier_performance, list_suppliers, inventory.reorder.draftPO, supplier.return.create | integration/purchases.integration.test.ts | partial |
-| Inventory | Production formulas & runs, modifier recipes | list_formulas, list_production_runs | (route only) | (route only) | inventory.production.run | — | inventory.adjust, inventory.view | step-up (always approve) | list_formulas, list_production_runs, inventory.production.run | integration/production.integration.test.ts | partial |
+| Inventory | Production formulas & runs, modifier recipes<br>_the run itself is inventory.production.run (reversible via its own undo); formula shell/lines/edit/deactivate close the CRUD ring around it; modifier recipe assignment stays route-only (menu-screen layout, covered by recipe.assign elsewhere)_ | list_formulas, list_production_runs | production.formula.create, production.formulaInput.set | inventory.production.run, production.formula.update | production.formula.deactivate, production.formulaInput.delete | — | inventory.adjust, inventory.view | connection mode; step-up (always approve) | list_formulas, list_production_runs, production.formula.create, production.formulaInput.set, inventory.production.run, production.formula.update, production.formula.deactivate, production.formulaInput.delete | integration/production-runs.integration.test.ts | covered |
 | Inventory | Barcodes (lookup, bulk) | list_item_barcodes, list_items_without_barcode | barcode.assign | — | — | (route only) | inventory.adjust, inventory.view | connection mode | list_item_barcodes, list_items_without_barcode, barcode.assign | integration/stock.integration.test.ts | partial |
 | Inventory | Waste & write-downs | get_waste_history | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | get_waste_history | integration/stock.integration.test.ts | partial |
 | Inventory | stock/* routes<br>_legacy alias of the inventory/* surface_ | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, purchases.manage | — | — | — | duplicate surface |

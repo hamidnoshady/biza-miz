@@ -28,8 +28,17 @@ import { createDraft, deleteDraft, ManualJournalError } from "./manual-journal-s
 import { updateCustomer } from "./parties-service";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
 import { isWasteReason, recordWaste } from "./waste-service";
-import { recordProductionRun, reverseProductionRun, ProductionError } from "./production-service";
-import { positiveQuantityText, type QuantityText, type RialText } from "./inventory-exact";
+import {
+  createFormula,
+  updateFormula,
+  deleteFormula,
+  setFormulaInput,
+  deleteFormulaInput,
+  recordProductionRun,
+  reverseProductionRun,
+  ProductionError,
+} from "./production-service";
+import { positiveQuantityText, rialText, type QuantityText, type RialText } from "./inventory-exact";
 import { draftWebsitePost, updateWebsitePost, upsertWebsiteProduct } from "./website/content-service";
 import { queueTriggeredMessageCampaign } from "./message-campaigns-service";
 import type { PurchaseItemInput } from "./purchase-lines";
@@ -2088,6 +2097,122 @@ const taskStatus: AutopilotExecutor = async (ctx) => {
 };
 
 
+// ── Issue #883 package 2, batch D — production formulas ─────────────────────
+// All callers here write through createFormula/updateFormula/... — the same
+// functions the routes use, ProductionError.code surfaced as the failure code
+// like the route maps it. The run itself is inventory.production.run, which
+// already ships a reversible executor; it is deliberately not duplicated.
+function failProduction(err: unknown): AutopilotExecutionResult {
+  if (err instanceof ProductionError) return fail(err.code);
+  if (err instanceof Error && err.message === "invalid_rial") return fail("invalid_conversion_cost");
+  if (err instanceof Error && (err.message === "invalid_quantity" || err.message === "invalid_input"))
+    return fail("invalid_quantity");
+  throw err;
+}
+
+const productionFormulaCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  const outputInventoryItemId = str(ctx.payload.outputInventoryItemId);
+  const outputQuantityRaw = ctx.payload.outputQuantity;
+  const conversionCostRaw = ctx.payload.conversionCostRial;
+  if (!name || !outputInventoryItemId || outputQuantityRaw == null) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  try {
+    const created = await createFormula({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      name,
+      outputInventoryItemId,
+      // Text values, not numbers: the form posts strings and so do we — the
+      // validators reject anything non-canonical with the route's own codes.
+      outputQuantity: positiveQuantityText(String(outputQuantityRaw)),
+      conversionCostRial: rialText(conversionCostRaw == null ? "0" : String(conversionCostRaw)),
+      notes: str(ctx.payload.notes),
+      createdBy: ctx.authorizedByUserId,
+    });
+    return { ok: true, result: { id: created.id, name } };
+  } catch (err) {
+    return failProduction(err);
+  }
+};
+
+async function formulaLocationOf(formulaId: string): Promise<string | null> {
+  const { rows } = await query<{ location_id: string }>(`SELECT location_id FROM production_formulas WHERE id = $1`, [formulaId]);
+  return rows[0]?.location_id ?? null;
+}
+
+const productionFormulaUpdate: AutopilotExecutor = async (ctx) => {
+  const formulaId = str(ctx.payload.formulaId);
+  if (!formulaId) return fail("invalid_payload");
+  const locationId = await formulaLocationOf(formulaId);
+  if (!locationId) return fail("not_found");
+  try {
+    await updateFormula({
+      locationId,
+      formulaId,
+      name: str(ctx.payload.name) ?? undefined,
+      outputQuantity:
+        ctx.payload.outputQuantity == null ? undefined : positiveQuantityText(String(ctx.payload.outputQuantity)),
+      conversionCostRial:
+        ctx.payload.conversionCostRial == null ? undefined : rialText(String(ctx.payload.conversionCostRial)),
+      notes: ctx.payload.notes === null ? null : str(ctx.payload.notes) ?? undefined,
+      isActive: typeof ctx.payload.isActive === "boolean" ? ctx.payload.isActive : undefined,
+    });
+    return { ok: true, result: { formulaId, updated: true } };
+  } catch (err) {
+    return failProduction(err);
+  }
+};
+
+const productionFormulaDeactivate: AutopilotExecutor = async (ctx) => {
+  const formulaId = str(ctx.payload.formulaId);
+  if (!formulaId) return fail("invalid_payload");
+  const locationId = await formulaLocationOf(formulaId);
+  if (!locationId) return fail("not_found");
+  try {
+    await deleteFormula(locationId, formulaId);
+    return { ok: true, result: { formulaId, deactivated: true } };
+  } catch (err) {
+    return failProduction(err);
+  }
+};
+
+const productionFormulaInputSet: AutopilotExecutor = async (ctx) => {
+  const formulaId = str(ctx.payload.formulaId);
+  const inventoryItemId = str(ctx.payload.inventoryItemId);
+  const quantityRaw = ctx.payload.quantity;
+  if (!formulaId || !inventoryItemId || quantityRaw == null) return fail("invalid_payload");
+  const locationId = await formulaLocationOf(formulaId);
+  if (!locationId) return fail("not_found");
+  try {
+    await setFormulaInput({
+      locationId,
+      formulaId,
+      inventoryItemId,
+      quantity: positiveQuantityText(String(quantityRaw)),
+    });
+    return { ok: true, result: { formulaId, inventoryItemId } };
+  } catch (err) {
+    return failProduction(err);
+  }
+};
+
+const productionFormulaInputDelete: AutopilotExecutor = async (ctx) => {
+  const formulaId = str(ctx.payload.formulaId);
+  const inventoryItemId = str(ctx.payload.inventoryItemId);
+  if (!formulaId || !inventoryItemId) return fail("invalid_payload");
+  const locationId = await formulaLocationOf(formulaId);
+  if (!locationId) return fail("not_found");
+  try {
+    await deleteFormulaInput({ locationId, formulaId, inventoryItemId });
+    return { ok: true, result: { formulaId, inventoryItemId, deleted: true } };
+  } catch (err) {
+    return failProduction(err);
+  }
+};
+
 // ── Issue #883 package 2, batch K1 — CRM sales workflow (leads/deals/pipelines)
 // All three services take an explicit actor { name, userId } — the same member
 // row the workspace executors resolved first supplies it here too.
@@ -2343,6 +2468,11 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   taskCreate,
   taskUpdate,
   taskStatus,
+  productionFormulaCreate,
+  productionFormulaUpdate,
+  productionFormulaDeactivate,
+  productionFormulaInputSet,
+  productionFormulaInputDelete,
   crmLeadSave,
   crmLeadConvert,
   crmDealSave,

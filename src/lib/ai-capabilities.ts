@@ -194,6 +194,12 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "task.create": PERMISSIONS.workspaceManage,
   "task.update": PERMISSIONS.workspaceManage,
   "task.status": PERMISSIONS.workspaceManage,
+  // Batch D — the production routes all gate on inventoryAdjust.
+  "production.formula.create": PERMISSIONS.inventoryAdjust,
+  "production.formula.update": PERMISSIONS.inventoryAdjust,
+  "production.formula.deactivate": PERMISSIONS.inventoryAdjust,
+  "production.formulaInput.set": PERMISSIONS.inventoryAdjust,
+  "production.formulaInput.delete": PERMISSIONS.inventoryAdjust,
   "crm.lead.save": PERMISSIONS.crmManage,
   "crm.lead.convert": PERMISSIONS.crmManage,
   "crm.deal.save": PERMISSIONS.crmManage,

@@ -272,8 +272,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Production formulas & runs, modifier recipes",
     routes: ["inventory/production", "inventory/recipes", "inventory/modifier-recipes"],
-    ops: { listDetail: ["list_formulas", "list_production_runs"], lifecycle: ["inventory.production.run"] },
-    test: "integration/production.integration.test.ts",
+    ops: {
+      listDetail: ["list_formulas", "list_production_runs"],
+      create: ["production.formula.create", "production.formulaInput.set"],
+      update: ["production.formula.update", "inventory.production.run"],
+      lifecycle: ["production.formula.deactivate", "production.formulaInput.delete"],
+    },
+    note: "the run itself is inventory.production.run (reversible via its own undo); formula shell/lines/edit/deactivate close the CRUD ring around it; modifier recipe assignment stays route-only (menu-screen layout, covered by recipe.assign elsewhere)",
+    test: "integration/production-runs.integration.test.ts",
   },
   {
     id: "inventory.barcodes",

@@ -271,6 +271,13 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  // Batch D — production formulas. The run itself is inventory.production.run
+  // (pre-existing, reversible via its own undo path — not duplicated here).
+  { actionType: "production.formula.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "production.formula.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "production.formula.deactivate", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "production.formulaInput.set", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "production.formulaInput.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "crm.lead.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
   // A convert creates a customer record (and optionally a deal) — the service
   // itself blocks on duplicates unless the caller explicitly acknowledged them.

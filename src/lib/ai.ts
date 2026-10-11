@@ -286,6 +286,13 @@ export type ActionType =
   | "crm.deal.move_stage"
   | "crm.pipeline.create"
   | "crm.pipeline.update"
+  // Batch D — production: formulas, runs, reverse. record/reverse run inside a
+  // pool client transaction like the route's own BEGIN/COMMIT block.
+  | "production.formula.create"
+  | "production.formula.update"
+  | "production.formula.deactivate"
+  | "production.formulaInput.set"
+  | "production.formulaInput.delete"
   // Batch J — saved reports (reports.view on the screen; validateReportConfig
   // mirrors the route's 400 semantics before a row ever appears).
   | "report.saved.create"
@@ -361,6 +368,11 @@ export type AutopilotExecutorKey =
   | "promotionUpsert"
   | "promotionToggle"
   | "giftCardIssue"
+  | "productionFormulaCreate"
+  | "productionFormulaUpdate"
+  | "productionFormulaDeactivate"
+  | "productionFormulaInputSet"
+  | "productionFormulaInputDelete"
   | "crmLeadSave"
   | "crmLeadConvert"
   | "crmDealSave"
@@ -1054,6 +1066,48 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر وضعیت تَسک — بازکردن، پیش‌بردن یا بستن",
     payloadHint: '{ taskId: string, status: "open"|"in_progress"|"blocked"|"done" }',
     executor: "taskStatus",
+  },
+  "production.formula.create": {
+    type: "production.formula.create",
+    endpoint: "/api/inventory/production/formulas",
+    method: "POST",
+    label: "ساخت فرمول تولید — ورودی‌ها را بعداً با production.formulaInput.set اضافه کن",
+    payloadHint:
+      '{ name: string /* لازم و یکتا در شعبه */, outputInventoryItemId: string /* از list_inventory_items */, outputQuantity: string /* عددی اعشاری به صورت متن */, conversionCostRial?: string /* ریال، عدد صحیح به صورت متن، پیش‌فرض 0 */, notes?: string }',
+    executor: "productionFormulaCreate",
+  },
+  "production.formula.update": {
+    type: "production.formula.update",
+    endpoint: "/api/inventory/production/formulas/[id]",
+    method: "PATCH",
+    label: "ویرایش فرمول تولید",
+    payloadHint:
+      '{ formulaId: string /* از list_production_formulas */, name?: string, outputQuantity?: string, conversionCostRial?: string, notes?: string|null, isActive?: boolean }',
+    executor: "productionFormulaUpdate",
+  },
+  "production.formula.deactivate": {
+    type: "production.formula.deactivate",
+    endpoint: "/api/inventory/production/formulas/[id]",
+    method: "DELETE",
+    label: "غیرفعال‌کردن فرمول — ردیف‌های تولید گذشته حفظ می‌شود، مثل دکمهٔ صفحه",
+    payloadHint: "{ formulaId: string /* از list_production_formulas */ }",
+    executor: "productionFormulaDeactivate",
+  },
+  "production.formulaInput.set": {
+    type: "production.formulaInput.set",
+    endpoint: "/api/inventory/production/formulas/[id]/inputs",
+    method: "PUT",
+    label: "افزودن/تغییر مادهٔ اولیهٔ فرمول — حلقهٔ تولید بررسی می‌شود، مثل صفحه",
+    payloadHint: "{ formulaId: string, inventoryItemId: string, quantity: string /* عددی اعشاری به صورت متن */ }",
+    executor: "productionFormulaInputSet",
+  },
+  "production.formulaInput.delete": {
+    type: "production.formulaInput.delete",
+    endpoint: "/api/inventory/production/formulas/[id]/inputs",
+    method: "DELETE",
+    label: "حذف یک مادهٔ اولیه از فرمول",
+    payloadHint: "{ formulaId: string, inventoryItemId: string }",
+    executor: "productionFormulaInputDelete",
   },
   "crm.lead.save": {
     type: "crm.lead.save",
