@@ -148,6 +148,11 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_orders: "Orders of one branch, newest first, filtered by status.",
   get_order: "One order with its items, totals, payments and table.",
   list_shifts: "Staff shifts with per-shift cash summaries — the leader's register view.",
+  get_menu_tree: "Categories and items of one branch's menu — the full tree, prices included.",
+  list_formulas: "Production formulas (recipes) of one branch.",
+  list_production_runs: "Production runs of one branch, newest first.",
+  list_item_barcodes: "Barcodes assigned to a warehouse item.",
+  list_items_without_barcode: "Warehouse items of one branch that have no scannable barcode yet.",
   get_vat_liability: "Output VAT against input VAT and the net position for a period.",
   get_branch_comparison: "Per-branch order count, revenue, and estimated labour cost.",
   forecast_demand: "A simple demand estimate from the last 28 days' average. Always an estimate, never a promise.",
@@ -265,8 +270,8 @@ const id = (description: string) => ({ type: "string", description });
  *     the owner supplied that fact in advance. A model in a chat window has
  *     supplied nothing, so it is back to the Phase 31 position.
  *   * **Actions with no executor are absent** — the setup-wizard six, the live
- *     floor five (reservations, tables, courier), `menu.item.create`, and
- *     Phase 38's `website.post.publish`. Their absence is not an omission to
+ *     floor five (reservations, tables, courier), and Phase 38's
+ *     `website.post.publish`. Their absence is not an omission to
  *     fix by writing an executor: each was left without one deliberately (see
  *     their entries in `ai.ts`). Publishing in particular is the moment a text
  *     becomes public under the business's name; an MCP client may draft it,
@@ -1015,6 +1020,138 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         closingFloat: money("شمارش نقدی به ریال، اختیاری"),
       },
       required: ["shiftId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_menu_category_create",
+    actionType: "menu.category.create",
+    english: "Create a menu category at one branch.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        locationId: id("شناسهٔ شعبه؛ خالی فقط اگر اتصال به همان شعبه پین شده"),
+        name: { type: "string", description: "نام دستهٔ منو — یکتا در همان شعبه" },
+        taxRate: { type: "number", description: "نرخ مالیات درصدی — خالی یعنی نرخ پیش‌فرض کسب‌وکار" },
+        sortOrder: { type: "number", description: "ترتیب نمایش در کارت منو" },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_menu_category_update",
+    actionType: "menu.category.update",
+    english: "Rename/reprice-tax/activate-toggle a menu category.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        categoryId: id("شناسهٔ دستهٔ منو — از get_menu_tree"),
+        name: { type: "string", description: "نام جدید" },
+        taxRate: { type: "number" },
+        sortOrder: { type: "number" },
+        isActive: { type: "boolean", description: "false یعنی دسته از منو پنهان می‌شود" },
+      },
+      required: ["categoryId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_menu_item_create",
+    actionType: "menu.item.create",
+    english: "Add an item to a menu category — its price flows into every later invoice.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        categoryId: id("شناسهٔ دستهٔ منو — از get_menu_tree"),
+        name: { type: "string" },
+        price: money("قیمت به ریال"),
+        sku: { type: "string", description: "کد کالای اختیاری" },
+        description: { type: "string" },
+        sortOrder: { type: "number" },
+      },
+      required: ["categoryId", "name", "price"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_menu_item_update",
+    actionType: "menu.item.update",
+    english: "Reprice or rename a menu item, or hide it from the floor.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        menuItemId: id("شناسهٔ آیتم — از find_items یا get_menu_tree"),
+        name: { type: "string" },
+        price: money("قیمت جدید به ریال"),
+        sku: { type: "string" },
+        description: { type: "string" },
+        isActive: { type: "boolean" },
+      },
+      required: ["menuItemId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_barcode_assign",
+    actionType: "barcode.assign",
+    english: "Assign (or auto-mint) a scannable barcode to a warehouse item.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        inventoryItemId: id("شناسهٔ کالای انبار — از find_items در مد inventory"),
+        code: { type: "string", description: "صریح؛ خالی یعنی سیستم یک کد قابل‌اسکن می‌سازد" },
+        symbology: {
+          type: "string",
+          enum: ["EAN13", "UPC", "internal"],
+          description: "نویسهٔ بارکد؛ «internal» یعنی کد داخلیِ مینت‌شده — خالی یعنی تشخیص خودکار",
+        },
+        note: { type: "string" },
+      },
+      required: ["inventoryItemId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_party_customer_create",
+    actionType: "party.customer.create",
+    english: "Create a customer record (identity + contact only, no accounting fields).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "نام نمایشی مشتری" },
+        phone: { type: "string" },
+        email: { type: "string" },
+        address: { type: "string" },
+        notes: { type: "string" },
+        birthday: { type: "string", description: "YYYY-MM-DD" },
+        tags: { type: "array", items: { type: "string" } },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_party_supplier_create",
+    actionType: "party.supplier.create",
+    english: "Create a supplier record (identity + contact only, no accounting fields).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "نام نمایشی تأمین‌کننده" },
+        phone: { type: "string" },
+        email: { type: "string" },
+        address: { type: "string" },
+        notes: { type: "string" },
+      },
+      required: ["name"],
       additionalProperties: false,
     },
   },

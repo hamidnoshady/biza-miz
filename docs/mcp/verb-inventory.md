@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **69 read verbs** (**23** business-wide aggregates —
-visible only to connections consented for every branch) and **41 write verbs**
-(**17** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **74 read verbs** (**23** business-wide aggregates —
+visible only to connections consented for every branch) and **48 write verbs**
+(**19** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -37,6 +37,11 @@ visible only to connections consented for every branch) and **41 write verbs**
 | `list_orders` | pos | agnostic | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_order` | pos | agnostic | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_shifts` | pos | agnostic | `team.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_menu_tree` | pos | agnostic | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_formulas` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_production_runs` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_item_barcodes` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_items_without_barcode` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_vat_liability` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `run_accounting_review` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_accounts` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -121,6 +126,13 @@ visible only to connections consented for every branch) and **41 write verbs**
 | `write_fixed_asset_create` | `fixed-asset.create` | accounting | low | connection write_mode | `finance.assets_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_fixed_asset_depreciate` | `fixed-asset.depreciate` | accounting | high | always approval queue (step-up) | `finance.assets_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_fixed_asset_dispose` | `fixed-asset.dispose` | accounting | high | always approval queue (step-up) | `finance.assets_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_menu_category_create` | `menu.category.create` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_menu_category_update` | `menu.category.update` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_menu_item_create` | `menu.item.create` | pos | high | always approval queue (step-up) | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_menu_item_update` | `menu.item.update` | pos | high | always approval queue (step-up) | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_barcode_assign` | `barcode.assign` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_party_customer_create` | `party.customer.create` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_party_supplier_create` | `party.supplier.create` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_customer_note` | `customer.note.add` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_customer_note` | `crm.customer.note` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_customer_tag` | `crm.customer.tag` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

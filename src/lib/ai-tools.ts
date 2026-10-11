@@ -52,6 +52,9 @@ import { listAdvances } from "./payroll-advances-service";
 import { listReconciliations } from "./reconciliation-service";
 import { listOrders, getOrderDetail, isOrderStatus } from "./order-read-service";
 import { listShifts } from "./shift-service";
+import { getMenuTree } from "./menu-service";
+import { listFormulas, listRuns } from "./production-service";
+import { listBarcodes, listItemsWithoutBarcode } from "./inventory-item-barcodes-service";
 
 /** Case-insensitive contains over a whitelist of row fields — tool-side `q`. */
 function rowMatches(row: Record<string, unknown>, fields: readonly string[], q: string): boolean {
@@ -1538,6 +1541,55 @@ export async function runReadTool(
       return { ok: true, data: page };
     }
 
+    // Issue #883 package 2, batch C — menu catalogue + barcode hygiene reads.
+    // Same pin rule as list_orders: the branch resolves the same way on every
+    // screen, and the answer carries the branch id it speaks for.
+    case "get_menu_tree": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const tree = await getMenuTree(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, tree } };
+    }
+    case "list_formulas": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const formulas = await listFormulas(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: formulas.length, formulas } };
+    }
+    case "list_production_runs": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const limit = limitArg(args.limit);
+      const runs = await listRuns(pinned.locationId, limit);
+      return { ok: true, data: { locationId: pinned.locationId, count: runs.length, runs } };
+    }
+    case "list_item_barcodes": {
+      const inventoryItemId = String(args.inventoryItemId ?? "").trim();
+      if (!inventoryItemId) return { ok: false, data: { error: "invalid_arguments" } };
+      // Branch consent: the item's branch must be inside the pin, exactly like
+      // get_order guards an order's branch.
+      const { rows: itemBranch } = await query<{ location_id: string }>(
+        `SELECT location_id FROM inventory_items WHERE id = $1 AND business_id = $2`,
+        [inventoryItemId, businessId],
+      );
+      const itemBranchId = itemBranch[0]?.location_id;
+      if (!itemBranchId) return { ok: false, data: { error: "item_not_found" } };
+      if (mcpScope && mcpScope.allowedBranchIds !== null && !mcpScope.allowedBranchIds.includes(itemBranchId)) {
+        return { ok: false, data: { error: "branch_out_of_consent" } };
+      }
+      const barcodes = await listBarcodes(inventoryItemId);
+      return { ok: true, data: { inventoryItemId, count: barcodes.length, barcodes } };
+    }
+    case "list_items_without_barcode": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const items = await listItemsWithoutBarcode(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: items.length, items } };
+    }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);
       return {

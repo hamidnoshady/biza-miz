@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (63)
+### Tenant (62)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -26,13 +26,12 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
 - **pos.tables** (POS · Dining tables & table sessions) — MCP gap
-- **pos.menu** (Menu · Menu categories, items, modifier groups, modifiers, reorder) — partial
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
 - **inventory.warehouses-transfers** (Inventory · Warehouses, transfers, warehouse documents) — MCP gap
 - **inventory.counts** (Inventory · Stock counts / periodic closings / visual count scans) — MCP gap
 - **inventory.purchases-suppliers** (Inventory · Purchases, supplier returns, suppliers) — partial
 - **inventory.production** (Inventory · Production formulas & runs, modifier recipes) — partial
-- **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — MCP gap
+- **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
 - **crm.customers** (CRM · Customers (profile, notes, tags, relationships, merge, duplicates, consent)) — partial
 - **crm.deals-leads** (CRM · Deals & leads (handoff, convert)) — MCP gap
@@ -103,7 +102,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 9 · partial: 32 · MCP gap: 31 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 10 · partial: 32 · MCP gap: 30 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -125,16 +124,16 @@ Counts — covered: 9 · partial: 32 · MCP gap: 31 · backend gap: 0 · n/a (in
 | POS | Kitchen display / floor / waiter queues<br>_read-only live queues; writes happen through order item actions_ | get_table_turnover_rate | (route only) | (route only) | (route only) | — | kitchen.view, tables.edit, tables.manage | — | get_table_turnover_rate | — | partial |
 | POS | Reservations | get_reservation_conflicts | (route only) | (route only) | (route only) | — | reservations.manage, reservations.view | — | get_reservation_conflicts | integration/reservations.integration.test.ts | partial |
 | POS | Dining tables & table sessions | (route only) | (route only) | (route only) | (route only) | — | tables.edit, tables.manage | — | — | — | MCP gap |
-| Menu | Menu categories, items, modifier groups, modifiers, reorder | find_items, get_menu_performance | (route only) | menu.item.priceUpdate | menu.item.disable | — | ledger.view, menu.edit, menu.view | connection mode | find_items, get_menu_performance, menu.item.priceUpdate, menu.item.disable | integration/menu.integration.test.ts | partial |
+| Menu | Menu categories, items, modifier groups, modifiers, reorder | find_items, get_menu_performance, get_menu_tree | menu.category.create, menu.item.create | menu.category.update, menu.item.priceUpdate, menu.item.update | menu.item.disable | — | ledger.view, menu.edit, menu.view | connection mode; step-up (always approve) | find_items, get_menu_performance, get_menu_tree, menu.category.create, menu.item.create, menu.category.update, menu.item.priceUpdate, menu.item.update, menu.item.disable | integration/menu.integration.test.ts | covered |
 | Inventory | Stock items & stock levels | forecast_demand, get_stock_valuation | inventory.adjustment.propose | (route only) | (route only) | (route only) | inventory.adjust, inventory.view, parties.manage, purchases.manage | connection mode | forecast_demand, get_stock_valuation, inventory.adjustment.propose | integration/stock.integration.test.ts | partial |
 | Inventory | Warehouses, transfers, warehouse documents | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | — | integration/stock.integration.test.ts | MCP gap |
 | Inventory | Stock counts / periodic closings / visual count scans | (route only) | (route only) | (route only) | (route only) | — | inventory.adjust, inventory.view | — | — | integration/stock.integration.test.ts | MCP gap |
 | Inventory | Purchases, supplier returns, suppliers | get_supplier_performance | inventory.reorder.draftPO | (route only) | (route only) | — | inventory.view, parties.manage, purchases.manage | connection mode | get_supplier_performance, inventory.reorder.draftPO | integration/purchases.integration.test.ts | partial |
-| Inventory | Production formulas & runs, modifier recipes | (route only) | (route only) | (route only) | inventory.production.run | — | inventory.adjust, inventory.view | step-up (always approve) | inventory.production.run | integration/production.integration.test.ts | partial |
-| Inventory | Barcodes (lookup, bulk) | (route only) | (route only) | — | — | (route only) | inventory.adjust, inventory.view | — | — | integration/stock.integration.test.ts | MCP gap |
+| Inventory | Production formulas & runs, modifier recipes | list_formulas, list_production_runs | (route only) | (route only) | inventory.production.run | — | inventory.adjust, inventory.view | step-up (always approve) | list_formulas, list_production_runs, inventory.production.run | integration/production.integration.test.ts | partial |
+| Inventory | Barcodes (lookup, bulk) | list_item_barcodes, list_items_without_barcode | barcode.assign | — | — | (route only) | inventory.adjust, inventory.view | connection mode | list_item_barcodes, list_items_without_barcode, barcode.assign | integration/stock.integration.test.ts | partial |
 | Inventory | Waste & write-downs | get_waste_history | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | get_waste_history | integration/stock.integration.test.ts | partial |
 | Inventory | stock/* routes<br>_legacy alias of the inventory/* surface_ | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, purchases.manage | — | — | — | duplicate surface |
-| CRM | Customers (profile, notes, tags, relationships, merge, duplicates, consent) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline | crm.customer.note, customer.note.add | crm.customer.tag | (route only) | — | crm.consent_manage, crm.manage, crm.merge, crm.view, ledger.view, parties.manage, parties.view | connection mode | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, crm.customer.note, customer.note.add, crm.customer.tag | integration/parties.integration.test.ts | partial |
+| CRM | Customers (profile, notes, tags, relationships, merge, duplicates, consent) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline | crm.customer.note, customer.note.add, party.customer.create, party.supplier.create | crm.customer.tag | (route only) | — | crm.consent_manage, crm.manage, crm.merge, crm.view, ledger.view, parties.manage, parties.view | connection mode | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create, crm.customer.tag | integration/parties.integration.test.ts | partial |
 | CRM | Deals & leads (handoff, convert) | (route only) | (route only) | (route only) | (route only) | — | crm.manage, crm.view | — | — | integration/crm.integration.test.ts | MCP gap |
 | CRM | Cases & activities | (route only) | (route only) | (route only) | (route only) | — | crm.delete, parties.manage, parties.view | — | — | integration/crm.integration.test.ts | MCP gap |
 | CRM | Pipelines & stages | (route only) | (route only) | (route only) | — | — | crm.configure | — | — | integration/crm.integration.test.ts | MCP gap |

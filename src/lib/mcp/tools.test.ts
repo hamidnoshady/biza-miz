@@ -83,15 +83,18 @@ describe("write tools", () => {
   });
 
   it("never exposes an action with no server-side executor", () => {
-    // The setup-wizard six, the live floor five, and menu.item.create were each
-    // left without an executor deliberately.
+    // The setup-wizard six and the live floor five are left without an
+    // executor deliberately. menu.item.create USED to be on that list —
+    // issue #883 batch C closed it: the executor now mirrors the designer's
+    // POST /api/menu/items service, so the tool must be exposed here too.
     for (const tool of mcpWriteTools()) {
       const type = tool.binding.kind === "write" ? tool.binding.actionType : ("" as ActionType);
       expect(ACTION_CATALOG[type].executor).toBeTruthy();
     }
     const names = mcpWriteTools().map((tool) => tool.descriptor.name);
     expect(names).not.toContain("write_reservation");
-    expect(names).not.toContain("write_menu_item_create");
+    // Exposed since batch C (#883) with menuItemCreate as executor.
+    expect(names).toContain("write_menu_item_create");
   });
 
   it("binds each tool to the executor its catalogue entry names, not to a new path", () => {

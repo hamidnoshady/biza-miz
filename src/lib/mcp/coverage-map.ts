@@ -214,9 +214,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Menu categories, items, modifier groups, modifiers, reorder",
     routes: ["menu"],
     ops: {
-      listDetail: ["find_items", "get_menu_performance"],
+      // Batch C (#883) put the whole menu-designer surface on the catalogue:
+      // categories + items create/update through the shared services, the
+      // full menu tree as a read, modifier groups still as they were.
+      listDetail: ["find_items", "get_menu_performance", "get_menu_tree"],
+      create: ["menu.category.create", "menu.item.create"],
       lifecycle: ["menu.item.disable"],
-      update: ["menu.item.priceUpdate"],
+      update: ["menu.category.update", "menu.item.update", "menu.item.priceUpdate"],
     },
     test: "integration/menu.integration.test.ts",
   },
@@ -257,7 +261,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Production formulas & runs, modifier recipes",
     routes: ["inventory/production", "inventory/recipes", "inventory/modifier-recipes"],
-    ops: { lifecycle: ["inventory.production.run"] },
+    ops: { listDetail: ["list_formulas", "list_production_runs"], lifecycle: ["inventory.production.run"] },
     test: "integration/production.integration.test.ts",
   },
   {
@@ -265,6 +269,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Barcodes (lookup, bulk)",
     routes: ["inventory/barcodes", "barcodes"],
+    ops: { listDetail: ["list_item_barcodes", "list_items_without_barcode"], create: ["barcode.assign"] },
     test: "integration/stock.integration.test.ts",
   },
   {
@@ -292,7 +297,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["crm/customers", "parties", "crm/external-profiles"],
     ops: {
       listDetail: ["get_customer_profile", "find_customers", "get_customer_timeline", "get_at_risk_customers"],
-      create: ["customer.note.add", "crm.customer.note"],
+      create: ["party.customer.create", "party.supplier.create", "customer.note.add", "crm.customer.note"],
       update: ["crm.customer.tag"],
     },
     test: "integration/parties.integration.test.ts",

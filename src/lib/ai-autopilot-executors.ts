@@ -17,7 +17,6 @@
  */
 import { getPool, query } from "./db";
 import type { AutopilotExecutorKey } from "./ai";
-import { updateMenuItem } from "./menu-service";
 import { createStockCount, reverseStockCount } from "./stock-count-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -60,6 +59,11 @@ import { createOrder } from "./order-mutations";
 import type { CartItemInput } from "./order-cart";
 import { ShiftError, openShift, closeOwnShift, closeShiftById } from "./shift-service";
 import { randomUUID } from "crypto";
+import { createCategory, updateCategory, createMenuItem, updateMenuItem } from "./menu-service";
+import { assignBarcode } from "./inventory-item-barcodes-service";
+import { createCustomer, createParty } from "./parties-service";
+import { getSetting, SETTING_KEYS } from "./settings";
+import type { TaxSetting } from "./setup-state";
 import {
   createFixedAsset,
   disposeFixedAsset,
@@ -729,7 +733,37 @@ export async function executorTargetLocation(
   try {
     switch (executorKey) {
       case "menuItemPatch":
+      case "menuItemUpdate":
         return menuItemId ? await locationOfMenuItem(menuItemId) : null;
+      // Batch C — the other menu/barcode writes resolve their branch from the
+      // target row; party records are business-scoped facts (default branch).
+      case "menuCategoryCreate": {
+        return str(payload.locationId);
+      }
+      case "menuCategoryUpdate": {
+        const categoryId = str(payload.categoryId);
+        if (!categoryId) return null;
+        const { rows } = await query<{ location_id: string }>(
+          `SELECT location_id FROM menu_categories WHERE id = $1`,
+          [categoryId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "menuItemCreate": {
+        const categoryId = str(payload.categoryId);
+        if (!categoryId) return null;
+        const { rows } = await query<{ location_id: string }>(
+          `SELECT location_id FROM menu_categories WHERE id = $1`,
+          [categoryId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "barcodeAssign": {
+        const id = inventoryItemId;
+        if (!id) return null;
+        const location = await locationOfInventoryItems([id]);
+        return location === "mixed" ? null : location;
+      }
       case "orderDiscount":
         return orderId ? await locationOfOrder(orderId) : null;
       case "stockCount":
@@ -1441,6 +1475,148 @@ const shiftClose: AutopilotExecutor = async (ctx) => {
   }
 };
 
+
+// ── Issue #883 package 2, batch C — menu catalogue, barcodes, parties ───────
+// Price/name structure of a menu and the barcode on a pack change what the
+// till pads into each invoice line; the same rules the screens apply run in
+// these services (uniqueness within branch, valid symbology, image asset in
+// the tenant's own library).
+
+const defaultTaxRateOf = async (businessId: string): Promise<number> => {
+  const tax = await getSetting<TaxSetting>(businessId, SETTING_KEYS.tax);
+  return tax?.defaultRate ?? 0;
+};
+
+const menuCategoryCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const result = await createCategory(branch.locationId, {
+    name,
+    taxRate: typeof ctx.payload.taxRate === "number" ? ctx.payload.taxRate : undefined,
+    sortOrder: int(ctx.payload.sortOrder) ?? undefined,
+  }, await defaultTaxRateOf(ctx.businessId));
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { id: result.id } };
+};
+
+const menuCategoryUpdate: AutopilotExecutor = async (ctx) => {
+  const categoryId = str(ctx.payload.categoryId);
+  if (!categoryId) return fail("invalid_payload");
+  const name = str(ctx.payload.name);
+  const isActive = ctx.payload.isActive;
+  if (name === null && isActive === undefined) return fail("invalid_payload");
+  const { rows } = await query<{ location_id: string }>(`SELECT location_id FROM menu_categories WHERE id = $1`, [categoryId]);
+  const locationId = rows[0]?.location_id;
+  if (!locationId) return fail("not_found");
+  // Branch consent: the category must live at a consented branch.
+  const result = await updateCategory(locationId, categoryId, {
+    name: name ?? undefined,
+    taxRate: typeof ctx.payload.taxRate === "number" ? ctx.payload.taxRate : undefined,
+    sortOrder: int(ctx.payload.sortOrder) ?? undefined,
+    isActive: typeof isActive === "boolean" ? isActive : undefined,
+  });
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { id: categoryId } };
+};
+
+const menuItemCreate: AutopilotExecutor = async (ctx) => {
+  const categoryId = str(ctx.payload.categoryId);
+  const name = str(ctx.payload.name);
+  const price = typeof ctx.payload.price === "number" && Number.isFinite(ctx.payload.price) ? ctx.payload.price : null;
+  if (!categoryId || !name || price === null) return fail("invalid_payload");
+  const { rows } = await query<{ location_id: string }>(`SELECT location_id FROM menu_categories WHERE id = $1`, [categoryId]);
+  const locationId = rows[0]?.location_id;
+  if (!locationId) return fail("not_found");
+  const result = await createMenuItem(locationId, ctx.businessId, {
+    categoryId,
+    name,
+    price,
+    description: str(ctx.payload.description),
+    sku: str(ctx.payload.sku),
+    sortOrder: int(ctx.payload.sortOrder) ?? undefined,
+  });
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { id: result.id } };
+};
+
+const menuItemUpdate: AutopilotExecutor = async (ctx) => {
+  const menuItemId = str(ctx.payload.menuItemId);
+  if (!menuItemId) return fail("invalid_payload");
+  const locationId = await locationOfMenuItem(menuItemId);
+  if (!locationId) return fail("not_found");
+  const name = str(ctx.payload.name);
+  const description = str(ctx.payload.description);
+  const sku = str(ctx.payload.sku);
+  const price = typeof ctx.payload.price === "number" && Number.isFinite(ctx.payload.price) ? ctx.payload.price : null;
+  const isActive = ctx.payload.isActive;
+  if (name === null && description === null && sku === null && price === null && isActive === undefined) {
+    return fail("invalid_payload");
+  }
+  const result = await updateMenuItem(locationId, menuItemId, {
+    name: name ?? undefined,
+    price: price ?? undefined,
+    description,
+    sku,
+    isActive: typeof isActive === "boolean" ? isActive : undefined,
+  }, ctx.businessId);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { id: menuItemId } };
+};
+
+const barcodeAssign: AutopilotExecutor = async (ctx) => {
+  const inventoryItemId = str(ctx.payload.inventoryItemId);
+  if (!inventoryItemId) return fail("invalid_payload");
+  try {
+    const rawSymbology = str(ctx.payload.symbology);
+    const symbology =
+      rawSymbology === "EAN13" || rawSymbology === "UPC" || rawSymbology === "internal"
+        ? (rawSymbology as import("./barcode").BarcodeSymbology)
+        : null;
+    const assigned = await assignBarcode(inventoryItemId, {
+      code: str(ctx.payload.code),
+      symbology,
+      note: str(ctx.payload.note),
+    });
+    return { ok: true, result: assigned as unknown as Record<string, unknown> };
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "barcode_assign_failed");
+  }
+};
+
+const partyCustomerCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("invalid_payload");
+  const created = await createCustomer(ctx.businessId, {
+    name,
+    phone: str(ctx.payload.phone),
+    email: str(ctx.payload.email),
+    address: str(ctx.payload.address),
+    notes: str(ctx.payload.notes),
+    birthday: str(ctx.payload.birthday),
+    tags: Array.isArray(ctx.payload.tags) ? ctx.payload.tags.filter((t): t is string => typeof t === "string") : undefined,
+  });
+  return { ok: true, result: created as unknown as Record<string, unknown> };
+};
+
+const partySupplierCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("invalid_payload");
+  const created = await createParty(ctx.businessId, {
+    role: "Supplier",
+    personType: "Real",
+    displayName: name,
+    firstName: name,
+    phone: str(ctx.payload.phone),
+    email: str(ctx.payload.email),
+    address: str(ctx.payload.address),
+    notes: str(ctx.payload.notes),
+  });
+  return { ok: true, result: created as unknown as Record<string, unknown> };
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -1485,6 +1661,13 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   shiftStart,
   shiftEnd,
   shiftClose,
+  menuCategoryCreate,
+  menuCategoryUpdate,
+  menuItemCreate,
+  menuItemUpdate,
+  barcodeAssign,
+  partyCustomerCreate,
+  partySupplierCreate,
 };
 
 // ---------------------------------------------------------------------------

@@ -59,6 +59,13 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_branch_comparison: PERMISSIONS.reportsView,
   forecast_demand: PERMISSIONS.inventoryView,
   get_menu_item_details: PERMISSIONS.menuView,
+  // Batch C reads (issue #883): menu tree + barcodes mirror the screens'
+  // gates; production lists gate on inventory.view like waste/stock reports.
+  get_menu_tree: PERMISSIONS.menuView,
+  list_formulas: PERMISSIONS.inventoryView,
+  list_production_runs: PERMISSIONS.inventoryView,
+  list_item_barcodes: PERMISSIONS.inventoryView,
+  list_items_without_barcode: PERMISSIONS.inventoryView,
   get_bill_split_preview: PERMISSIONS.ordersView,
   get_near_expiry_items: PERMISSIONS.inventoryView,
   get_staff_commission: PERMISSIONS.payrollView,
@@ -189,6 +196,15 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "shift.start": PERMISSIONS.ordersCreate,
   "shift.end": PERMISSIONS.ordersCreate,
   "shift.close": PERMISSIONS.teamManage,
+  // Batch C — same key as the route gates. Categories/items follow the menu
+  // designer (menu.edit); barcode assignment follows the barcode screen
+  // (inventory.uniforms → inventory.manage on the route) — permissions.ts
+  // comment block at inventoryManage is the authority here.
+  "menu.category.create": PERMISSIONS.menuEdit,
+  "menu.category.update": PERMISSIONS.menuEdit,
+  "menu.item.update": PERMISSIONS.menuEdit,
+  // Route /api/inventory/barcodes POST gates on inventory.adjust.
+  "barcode.assign": PERMISSIONS.inventoryAdjust,
 };
 
 export function aiToolPermission(name: string): Permission | null {

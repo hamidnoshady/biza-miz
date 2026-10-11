@@ -246,7 +246,16 @@ export type ActionType =
   | "order.create"
   | "shift.start"
   | "shift.end"
-  | "shift.close";
+  | "shift.close"
+  // Batch C — menu catalogue, inventory barcode hygiene and party records.
+  // menu.item.create already existed as a catalog entry without an executor
+  // (deliberately — see its comment); batches A–C close that gap by assigning
+  // it the service-backed executor below, since the approval-queue risk model
+  // proved out for the other writes.
+  | "menu.category.create"
+  | "menu.category.update"
+  | "menu.item.update"
+  | "barcode.assign";
 
 export type AutopilotExecutorKey =
   | "menuItemPatch"
@@ -293,7 +302,14 @@ export type AutopilotExecutorKey =
   | "orderCreate"
   | "shiftStart"
   | "shiftEnd"
-  | "shiftClose";
+  | "shiftClose"
+  | "menuCategoryCreate"
+  | "menuCategoryUpdate"
+  | "menuItemCreate"
+  | "menuItemUpdate"
+  | "barcodeAssign"
+  | "partyCustomerCreate"
+  | "partySupplierCreate";
 
 export interface ActionMeta {
   type: ActionType;
@@ -567,6 +583,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "افزودن آیتم جدید به منو",
     payloadHint:
       "{ categoryId: string, name: string, price: number /* ریال صحیح */, description?: string, sku?: string }",
+    executor: "menuItemCreate",
   },
   // Phase 38 — the website manager's four writes, through the WebsiteAdapter.
   // Three of them produce something a human still has to publish, so they are
@@ -635,6 +652,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "افزودن مشتری جدید",
     payloadHint:
       '{ role: "Customer", roles: ["Customer"], personType: "Real"|"Legal", displayName: string, contactInfo?: { mobile?: string, phone?: string, email?: string } } — فقط اطلاعات هویتی و تماس؛ فیلدهای حسابداری (کد حسابداری، درصد مالیات، اطلاعات بانکی) را اینجا نگذار',
+    executor: "partyCustomerCreate",
   },
   "party.supplier.create": {
     type: "party.supplier.create",
@@ -643,6 +661,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "افزودن تأمین‌کننده جدید",
     payloadHint:
       '{ role: "Supplier", roles: ["Supplier"], personType: "Real"|"Legal", displayName: string, contactInfo?: { mobile?: string, phone?: string, email?: string } } — فقط اطلاعات هویتی و تماس؛ فیلدهای حسابداری را اینجا نگذار',
+    executor: "partySupplierCreate",
   },
   // Creating a campaign only materialises a *draft* — nothing is sent. Launching
   // (`action: "launch"`) is deliberately not a catalogue action: a send that
@@ -883,6 +902,40 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "بستن اداری شیفت باز",
     payloadHint: "{ shiftId: string /* از list_shifts */, closingFloat?: number }",
     executor: "shiftClose",
+  },
+  "menu.category.create": {
+    type: "menu.category.create",
+    endpoint: "/api/menu/categories",
+    method: "POST",
+    label: "ایجاد دستهٔ منو در یک شعبه",
+    payloadHint:
+      '{ locationId?: string /* id یا نام شعبه؛ خالی یعنی فقط وقتی consent یک شعبه را ثابت کرده */, name: string, taxRate?: number, sortOrder?: number }',
+    executor: "menuCategoryCreate",
+  },
+  "menu.category.update": {
+    type: "menu.category.update",
+    endpoint: "/api/menu/categories/[id]",
+    method: "PATCH",
+    label: "ویرایش دستهٔ منو",
+    payloadHint: "{ categoryId: string /* از get_menu_tree */, name?: string, taxRate?: number, sortOrder?: number, isActive?: boolean }",
+    executor: "menuCategoryUpdate",
+  },
+  "menu.item.update": {
+    type: "menu.item.update",
+    endpoint: "/api/menu/items/[id]",
+    method: "PATCH",
+    label: "ویرایش آیتم منو — قیمت فاکتورهای بعدی را عوض می‌کند",
+    payloadHint: "{ menuItemId: string /* از find_items یا get_menu_tree */, name?: string, price?: number /* به ریال */, sku?: string, description?: string, isActive?: boolean }",
+    executor: "menuItemUpdate",
+  },
+  "barcode.assign": {
+    type: "barcode.assign",
+    endpoint: "/api/inventory/barcodes",
+    method: "POST",
+    label: "تخصیص بارکد به کالای انبار",
+    payloadHint:
+      '{ inventoryItemId: string /* از find_items در مد inventory */, code?: string /* خالی یعنی سیستم خودش بارکد قابل‌اسکن می‌سازد */, symbology?: "EAN13"|"UPC"|"internal", note?: string }',
+    executor: "barcodeAssign",
   },
   "ar.receipt.record": {
     type: "ar.receipt.record",
@@ -2325,6 +2378,82 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               status: { type: "string", enum: ["open", "closed"], description: "باز یا بسته، اختیاری" },
               limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
               offset: { type: "number", description: "ردیف شروع صفحهٔ بعد، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_menu_tree",
+          description:
+            "درخت کامل منوی یک شعبه: دسته‌ها و آیتم‌ها با قیمت. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال)، یا id شعبه.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_formulas",
+          description:
+            "فرمول‌های تولید (دستور پخت) یک شعبه — منظاب و اجراهای تولید از این فرمول‌ها جداست.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_production_runs",
+          description:
+            "اجراهای تولید یک شعبه به ترتیب جدیدترین. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال).",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_item_barcodes",
+          description: "بارکدهای ضمیمه‌شده به یک کالای انبار. شعبهٔ کالا باید داخل منظاب اتصال باشد.",
+          parameters: {
+            type: "object",
+            properties: {
+              inventoryItemId: { type: "string", description: "شناسهٔ کالای انبار" },
+            },
+            required: ["inventoryItemId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_items_without_barcode",
+          description:
+            "کالاهای انبار یک شعبه که هنوز بارکد قابل‌اسکن ندارند — ورودی کار بارکدچی. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال).",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
             },
             additionalProperties: false,
           },

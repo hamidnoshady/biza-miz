@@ -99,6 +99,14 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_orders", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_order", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "list_shifts", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  // Batch C — menu catalogue, production and barcode hygiene. Everything
+  // answers per-branch facts and resolves the branch the same way list_orders
+  // does (pinned consent / explicit param), so the policy stays agnostic.
+  { name: "get_menu_tree", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_formulas", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_production_runs", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_item_barcodes", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_items_without_barcode", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
@@ -214,6 +222,15 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "fixed-asset.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
   { actionType: "fixed-asset.depreciate", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "fixed-asset.dispose", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  // Batch C — POS catalogue and barcode hygiene (approval mode = write tool's
+  // setting; repricing stays explicit, not silent cron).
+  { actionType: "menu.category.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "menu.category.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "menu.item.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "menu.item.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "barcode.assign", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "party.customer.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "party.supplier.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
   // CRM
   { actionType: "customer.note.add", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.customer.note", kind: "write", app: "crm", risk: "low", approval: "mode" },
