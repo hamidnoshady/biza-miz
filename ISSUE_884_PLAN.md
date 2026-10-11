@@ -358,6 +358,47 @@ fresh `npm ci`:
   `config/native-bridge-contract.json` generically, so it already covers the new command and the
   version bump to 2 without being told about either by name. `android-build.yml` is the verifier.
 
+On GitHub, commit `77ce640` (this slice, pushed on top of `522545d`): `test.yml`'s `required`
+fan-in job (named "all checks passed" on the check-runs API, `needs:` every `test.yml` job) is
+**confirmed green on the pull-request-triggered run** — type check, unit tests, integration tests
+(real database, 2118s locally / similar on CI), production build, data transfer engine, ESLint,
+API guard and permission tests, design checks, media E2E tests and visual regression all passed.
+`android-build.yml` is green too (web native bridge tests, Gradle lint, JVM unit tests, the debug
+APK). The PR's `mergeable` is `MERGEABLE` (branch protection is satisfied); `mergeStateStatus` is
+`UNSTABLE` only because of the two non-required Windows size-budget failures below, not because of
+anything in the required gate. (The *push*-triggered duplicate run of the same commit separately
+hit the pre-existing, already-documented flaky "4.06% of pixels changed" `accounting-expenses`
+visual-regression diff — confirmed via its check-run annotation — which is why that run's own
+fan-in failed; the pull_request run that actually gates the PR did not hit it.) Per `CLAUDE.md`'s
+CI table, `test.yml` is the only workflow that fans into a `required` status check;
+`verify-shippables.yml` and `build-desktop-installer.yml` run automatically but are not documented
+there as required, and this was confirmed directly: their failing jobs are absent from the
+`required`/"all checks passed" job's `needs:` list in `.github/workflows/test.yml`.
+
+**Two Windows-only size budgets failed, and need an owner decision before this slice is
+release-ready on desktop, even though they do not block the `required` gate:**
+
+- `build-desktop-installer.yml`'s "Final size report and budgets" step measured the unpacked
+  installed payload at **621.4 MiB**, over its **620 MiB** budget
+  (`.github/workflows/build-desktop-installer.yml`). The same job on `main`'s most recent run
+  (same day, commit `55a9b7ee`) measured **618.6 MiB** — a 1.4 MiB margin that this slice's new
+  production code (five API routes, the device-registry service, the migration, the bridge
+  contract/runtime additions) was enough to cross by itself.
+- `verify-shippables.yml`'s "desktop shell" job failed the same way on its "Staged runtime stays
+  below pre-package budget" step (200 MiB budget); the exact MiB figure could not be read because
+  job logs are not reachable from this sandbox (blob storage host is blocked), but it is the same
+  `.next/standalone` + `migrations/` payload the installer budget measures, grown by the same
+  commit, so it is almost certainly the same cause rather than a second, unrelated issue.
+
+Both budgets are commented in their workflows as **deliberately tight, reviewed gates** ("leaves
+nothing to hide" / "a runaway detector"), not auto-tuned numbers — bumping either is a product/ops
+call, not a code fix, and this plan does not change them without the owner's sign-off. The options
+once the owner is asked: (a) raise the two budgets to restore a working margin (a small bump, e.g.
++10–20 MiB each, given the overage itself is only ~3 MiB), (b) accept that this slice's desktop
+build stays red until a separate size-reduction pass runs, or (c) something else the owner
+prefers. Nothing about this affects the web or Android deliverable: no desktop-specific code was
+touched, and the overage is pure Next.js bundle growth from genuine new routes/services.
+
 ## Files
 
 
