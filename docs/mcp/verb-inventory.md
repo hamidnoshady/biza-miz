@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **81 read verbs** (**23** business-wide aggregates —
-visible only to connections consented for every branch) and **61 write verbs**
-(**24** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **84 read verbs** (**23** business-wide aggregates —
+visible only to connections consented for every branch) and **62 write verbs**
+(**25** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -49,6 +49,9 @@ visible only to connections consented for every branch) and **61 write verbs**
 | `list_team_members` | workspace | agnostic | `team.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_promotions` | growth | agnostic | `campaigns.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_gift_card_status` | growth | agnostic | `gift_cards.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_stock_counts` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_stock_count` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_suppliers` | pos | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_vat_liability` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `run_accounting_review` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_accounts` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -140,6 +143,7 @@ visible only to connections consented for every branch) and **61 write verbs**
 | `write_barcode_assign` | `barcode.assign` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_party_customer_create` | `party.customer.create` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_party_supplier_create` | `party.supplier.create` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_supplier_return_create` | `supplier.return.create` | pos | high | always approval queue (step-up) | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_promotion_upsert` | `promotion.upsert` | growth | low | connection write_mode | `campaigns.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_promotion_toggle` | `promotion.toggle` | growth | low | connection write_mode | `campaigns.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_gift_card_issue` | `gift_card.issue` | growth | high | always approval queue (step-up) | `gift_cards.issue` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

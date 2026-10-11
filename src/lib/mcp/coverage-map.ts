@@ -246,6 +246,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Stock counts / periodic closings / visual count scans",
     routes: ["inventory/stock-counts", "inventory/periodic-closings", "inventory/visual-count-scans", "inventory/visual-profiles"],
+    ops: {
+      // Batch G (#883): the list detail share one service (the route's GET was
+      // extracted into listStockCounts verbatim); the create/reverse pair
+      // rides the earlier stock_count verbs.
+      listDetail: ["list_stock_counts", "get_stock_count"],
+    },
     test: "integration/stock.integration.test.ts",
   },
   {
@@ -253,7 +259,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Purchases, supplier returns, suppliers",
     routes: ["inventory/purchases", "inventory/supplier-returns", "inventory/suppliers"],
-    ops: { listDetail: ["get_supplier_performance"], create: ["inventory.reorder.draftPO"] },
+    ops: {
+      // Batch G (#883): suppliers directory read + the supplier-return voucher
+      // (stock-out + settlement posting, same tx as the route).
+      listDetail: ["get_supplier_performance", "list_suppliers"],
+      create: ["inventory.reorder.draftPO", "supplier.return.create"],
+    },
     test: "integration/purchases.integration.test.ts",
   },
   {

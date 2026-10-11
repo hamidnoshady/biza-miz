@@ -74,6 +74,13 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch F reads — campaigns.view on promotions, giftCards.view on cards.
   list_promotions: PERMISSIONS.campaignsView,
   get_gift_card_status: PERMISSIONS.giftCardsView,
+  // Batch G reads — inventory.view on counts (the screen's GET gate), the
+  // parties directory needs suppliersPage-style inventory view like its route
+  // (/api/inventory/purchases tenant-of-purchases-view; here suppliers read
+  // mirrors parties.view from the party screens).
+  list_stock_counts: PERMISSIONS.inventoryView,
+  get_stock_count: PERMISSIONS.inventoryView,
+  list_suppliers: PERMISSIONS.partiesView,
   list_formulas: PERMISSIONS.inventoryView,
   list_production_runs: PERMISSIONS.inventoryView,
   list_item_barcodes: PERMISSIONS.inventoryView,
@@ -165,6 +172,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   // Batch D — notes activities follow the notes screen (parties manage),
   // consent the consent drawer (crm.consent_manage), segments/automechanics
   // the configure gate the routes themselves use.
+  "supplier.return.create": PERMISSIONS.purchasesManage,
   "promotion.upsert": PERMISSIONS.campaignsManage,
   "promotion.toggle": PERMISSIONS.campaignsManage,
   "gift_card.issue": PERMISSIONS.giftCardsIssue,

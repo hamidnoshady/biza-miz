@@ -66,6 +66,8 @@ import { getSetting, SETTING_KEYS } from "./settings";
 import { toggleNotePin, setConsent } from "./crm-service";
 import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
 import { upsertPromotion, setPromotionActive, issueGiftCard } from "./promotions-service";
+import { createSupplierReturn } from "./supplier-return-service";
+import type { Role } from "./auth-edge";
 import { getGrowthSettings } from "./growth-settings-service";
 import { createSegment, updateSegment, archiveSegment } from "./crm-segments-service";
 import { setAutomationActive } from "./crm-automation-service";
@@ -746,7 +748,10 @@ export async function executorTargetLocation(
       // Batch C — the other menu/barcode writes resolve their branch from the
       // target row; party records are business-scoped facts (default branch).
       case "menuCategoryCreate":
-      case "giftCardIssue": {
+      case "giftCardIssue":
+      // A return inherits the issue branch the same way the voucher's route
+      // resolves it from the payload.
+      case "supplierReturnCreate": {
         // Gift cards name the issue branch in the payload (id-or-name, like the
         // route's resolveActiveLocation fallback); promotions and parties stay
         // business-scoped (default null ⇒ pinned consents refuse via the write
@@ -1880,6 +1885,57 @@ const giftCardIssue: AutopilotExecutor = async (ctx) => {
   }
 };
 
+
+// ── Issue #883 package 2, batch G — supplier returns (purchases.manage) ─────
+const supplierReturnCreate: AutopilotExecutor = async (ctx) => {
+  const purchaseId = str(ctx.payload.purchaseId);
+  const settlementMethod = str(ctx.payload.settlementMethod);
+  const reason = str(ctx.payload.reason);
+  const idempotencyKey = str(ctx.payload.idempotencyKey);
+  const lines = Array.isArray(ctx.payload.lines) ? (ctx.payload.lines as Record<string, unknown>[]) : [];
+  if (!purchaseId || !reason || !idempotencyKey || lines.length === 0) return fail("invalid_payload");
+  if (settlementMethod !== "accounts_payable" && settlementMethod !== "cash" && settlementMethod !== "bank" && settlementMethod !== "supplier_receivable") {
+    return fail("invalid_payload");
+  }
+  const parsedLines = lines.map((line) => ({
+    purchaseItemId: str(line.purchaseItemId) ?? "",
+    inventoryLotId: str(line.inventoryLotId),
+    quantity: positiveQuantityText(str(line.quantity) ?? "0"),
+  }));
+  if (parsedLines.some((line) => !line.purchaseItemId)) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  // The route passes the session role as the sync actor; the connection's
+  // authorizing user plays that part here.
+  // The route's POST never runs without a session user; a write with no
+  // authorizer is a server bug, not a client one — fail loudly like the rest.
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const { rows } = await query<{ role: string }>(`SELECT role FROM users WHERE id = $1`, [ctx.authorizedByUserId]);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await createSupplierReturn(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      purchaseId,
+      settlementMethod: settlementMethod as "accounts_payable" | "cash" | "bank" | "supplier_receivable",
+      reason,
+      idempotencyKey,
+      createdBy: ctx.authorizedByUserId,
+      sync: { actorRole: (rows[0]?.role ?? "Owner") as Role },
+      lines: parsedLines,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: result as unknown as Record<string, unknown> };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return fail(err instanceof Error ? err.message : "supplier_return_failed");
+  } finally {
+    client.release();
+  }
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -1934,6 +1990,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   promotionUpsert,
   promotionToggle,
   giftCardIssue,
+  supplierReturnCreate,
   branchCreate,
   branchUpdate,
   branchLifecycle,

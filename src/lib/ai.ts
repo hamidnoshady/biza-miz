@@ -266,6 +266,9 @@ export type ActionType =
   | "promotion.upsert"
   | "promotion.toggle"
   | "gift_card.issue"
+  // Batch G — supplier returns: stock out + settlement posting in one tx
+  // (purchases.manage; cash/bank/AP settlement touches money ⇒ always_approve).
+  | "supplier.return.create"
   // Batch E — branches: structural configuration of the business itself.
   // Membership creation/role changes stay screen-owned for now (access /
   // identity changes carry step-up policy beyond the approval queue).
@@ -336,6 +339,7 @@ export type AutopilotExecutorKey =
   | "promotionUpsert"
   | "promotionToggle"
   | "giftCardIssue"
+  | "supplierReturnCreate"
   | "branchCreate"
   | "branchUpdate"
   | "branchLifecycle"
@@ -972,6 +976,15 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ inventoryItemId: string /* از find_items در مد inventory */, code?: string /* خالی یعنی سیستم خودش بارکد قابل‌اسکن می‌سازد */, symbology?: "EAN13"|"UPC"|"internal", note?: string }',
     executor: "barcodeAssign",
+  },
+  "supplier.return.create": {
+    type: "supplier.return.create",
+    endpoint: "/api/inventory/supplier-returns",
+    method: "POST",
+    label: "برگشت خرید به تأمین‌کننده — کاهش موجودی + ثبت تسویه",
+    payloadHint:
+      '{ locationId?: string, purchaseId: string /* از list_purchases */, settlementMethod: "accounts_payable"|"cash"|"bank"|"supplier_receivable", reason: string, idempotencyKey: string /* کلید ایمن تکرار */, lines: [{ purchaseItemId: string, inventoryLotId?: string|null, quantity: string /* مثبت */ }] }',
+    executor: "supplierReturnCreate",
   },
   "promotion.upsert": {
     type: "promotion.upsert",
@@ -2694,7 +2707,55 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             additionalProperties: false,
           },
         },
+      },      {
+        type: "function",
+        function: {
+          name: "list_stock_counts",
+          description:
+            "شمارش‌های انبار یک شعبه به ترتیب جدیدترین — خطوط، کمبود/افزون به ریال. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال).",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
       },
+      {
+        type: "function",
+        function: {
+          name: "get_stock_count",
+          description: "جزییات یک شمارش انبار — هر خط با تعداد شماره‌دهی و انحراف.",
+          parameters: {
+            type: "object",
+            properties: {
+              countId: { type: "string", description: "شناسهٔ شمارش — از list_stock_counts" },
+            },
+            required: ["countId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_suppliers",
+          description:
+            "تأمین‌کننده‌های کسب‌وکار با صفحه‌بندی — همانم سرویسی که صفحهٔ اشخاص/تأمین‌کننده ازش می‌خواند.",
+          parameters: {
+            type: "object",
+            properties: {
+              q: { type: "string", description: "جستجو در نام/تلفن" },
+              includeInactive: { type: "boolean" },
+              page: { type: "number", description: "۱-بر، پیش‌فرض ۱" },
+              pageSize: { type: "number", description: "۱ تا ۵۰، پیش‌فرض ۲۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+
   ];
 
   const receiptTool: OpenAiTool = {

@@ -28,7 +28,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **pos.tables** (POS · Dining tables & table sessions) — MCP gap
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
 - **inventory.warehouses-transfers** (Inventory · Warehouses, transfers, warehouse documents) — MCP gap
-- **inventory.counts** (Inventory · Stock counts / periodic closings / visual count scans) — MCP gap
+- **inventory.counts** (Inventory · Stock counts / periodic closings / visual count scans) — partial
 - **inventory.purchases-suppliers** (Inventory · Purchases, supplier returns, suppliers) — partial
 - **inventory.production** (Inventory · Production formulas & runs, modifier recipes) — partial
 - **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
@@ -99,7 +99,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 13 · partial: 32 · MCP gap: 27 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 13 · partial: 33 · MCP gap: 26 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -124,8 +124,8 @@ Counts — covered: 13 · partial: 32 · MCP gap: 27 · backend gap: 0 · n/a (i
 | Menu | Menu categories, items, modifier groups, modifiers, reorder | find_items, get_menu_performance, get_menu_tree | menu.category.create, menu.item.create | menu.category.update, menu.item.priceUpdate, menu.item.update | menu.item.disable | — | ledger.view, menu.edit, menu.view | connection mode; step-up (always approve) | find_items, get_menu_performance, get_menu_tree, menu.category.create, menu.item.create, menu.category.update, menu.item.priceUpdate, menu.item.update, menu.item.disable | integration/menu.integration.test.ts | covered |
 | Inventory | Stock items & stock levels | forecast_demand, get_stock_valuation | inventory.adjustment.propose | (route only) | (route only) | (route only) | inventory.adjust, inventory.view, parties.manage, purchases.manage | connection mode | forecast_demand, get_stock_valuation, inventory.adjustment.propose | integration/stock.integration.test.ts | partial |
 | Inventory | Warehouses, transfers, warehouse documents | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | — | integration/stock.integration.test.ts | MCP gap |
-| Inventory | Stock counts / periodic closings / visual count scans | (route only) | (route only) | (route only) | (route only) | — | inventory.adjust, inventory.view | — | — | integration/stock.integration.test.ts | MCP gap |
-| Inventory | Purchases, supplier returns, suppliers | get_supplier_performance | inventory.reorder.draftPO | (route only) | (route only) | — | inventory.view, parties.manage, purchases.manage | connection mode | get_supplier_performance, inventory.reorder.draftPO | integration/purchases.integration.test.ts | partial |
+| Inventory | Stock counts / periodic closings / visual count scans | get_stock_count, list_stock_counts | (route only) | (route only) | (route only) | — | inventory.adjust, inventory.view | — | get_stock_count, list_stock_counts | integration/stock.integration.test.ts | partial |
+| Inventory | Purchases, supplier returns, suppliers | get_supplier_performance, list_suppliers | inventory.reorder.draftPO, supplier.return.create | (route only) | (route only) | — | inventory.view, parties.manage, purchases.manage | connection mode; step-up (always approve) | get_supplier_performance, list_suppliers, inventory.reorder.draftPO, supplier.return.create | integration/purchases.integration.test.ts | partial |
 | Inventory | Production formulas & runs, modifier recipes | list_formulas, list_production_runs | (route only) | (route only) | inventory.production.run | — | inventory.adjust, inventory.view | step-up (always approve) | list_formulas, list_production_runs, inventory.production.run | integration/production.integration.test.ts | partial |
 | Inventory | Barcodes (lookup, bulk) | list_item_barcodes, list_items_without_barcode | barcode.assign | — | — | (route only) | inventory.adjust, inventory.view | connection mode | list_item_barcodes, list_items_without_barcode, barcode.assign | integration/stock.integration.test.ts | partial |
 | Inventory | Waste & write-downs | get_waste_history | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | get_waste_history | integration/stock.integration.test.ts | partial |

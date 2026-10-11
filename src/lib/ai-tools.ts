@@ -58,6 +58,9 @@ import { listBarcodes, listItemsWithoutBarcode } from "./inventory-item-barcodes
 import { listCustomerNotes, listActivities } from "./crm-service";
 import { listMembers } from "./team-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
+import { listStockCounts, getStockCountDetail } from "./stock-count-service";
+import { getPool } from "./db";
+import { listParties } from "./parties-service";
 import { listAutomations } from "./crm-automation-service";
 
 /** Case-insensitive contains over a whitelist of row fields — tool-side `q`. */
@@ -1639,6 +1642,51 @@ export async function runReadTool(
         giftCardHistory(businessId, code),
       ]);
       return { ok: true, data: { code: card.code, balance, isActive: card.isActive, expiresAt: card.expiresAt, history } };
+    }
+    // Issue #883 package 2, batch G — stock counts + suppliers directory.
+    case "list_stock_counts": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const counts = await listStockCounts(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: counts.length, counts } };
+    }
+    case "get_stock_count": {
+      const countId = String(args.countId ?? "").trim();
+      if (!countId) return { ok: false, data: { error: "invalid_arguments" } };
+      // The detail service is keyed by (business, location, count); resolve the
+      // count's own branch and then replay — mirroring get_order's consent hop.
+      const { rows: countBranch } = await query<{ location_id: string }>(
+        `SELECT location_id FROM stock_counts WHERE id = $1`,
+        [countId],
+      );
+      const countLocationId = countBranch[0]?.location_id;
+      if (!countLocationId) return { ok: false, data: { error: "stock_count_not_found" } };
+      if (mcpScope && mcpScope.allowedBranchIds !== null && !mcpScope.allowedBranchIds.includes(countLocationId)) {
+        return { ok: false, data: { error: "branch_out_of_consent" } };
+      }
+      const client = await getPool().connect();
+      try {
+        const detail = await getStockCountDetail(client, { businessId, locationId: countLocationId, countId });
+        if (!detail) return { ok: false, data: { error: "stock_count_not_found" } };
+        return { ok: true, data: detail };
+      } finally {
+        client.release();
+      }
+    }
+    case "list_suppliers": {
+      const page = typeof args.page === "number" && Number.isInteger(args.page) && args.page >= 1 ? args.page : 1;
+      const pageSize = typeof args.pageSize === "number" && Number.isInteger(args.pageSize)
+        ? Math.min(Math.max(args.pageSize, 1), 50)
+        : 20;
+      const result = await listParties(businessId, {
+        roles: ["Supplier"],
+        includeInactive: args.includeInactive === true,
+        q: typeof args.q === "string" ? args.q : undefined,
+        page,
+        pageSize,
+      });
+      return { ok: true, data: { total: result.total, page, pageSize, count: result.parties.length, suppliers: result.parties } };
     }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);

@@ -121,6 +121,10 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // Batch F — growth reads.
   { name: "list_promotions", kind: "read", app: "growth", branchPolicy: "agnostic" },
   { name: "get_gift_card_status", kind: "read", app: "growth", branchPolicy: "agnostic" },
+  // Batch G — inventory readings and the suppliers directory.
+  { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_suppliers", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
@@ -248,6 +252,7 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch D — CRM: notes bookkeeping is low; consent is a legal record and
   // automation toggles re-shape behaviour for every customer at once, so
   // both ask for explicit approval.
+  { actionType: "supplier.return.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "promotion.upsert", kind: "write", app: "growth", risk: "low", approval: "mode" },
   { actionType: "promotion.toggle", kind: "write", app: "growth", risk: "low", approval: "mode" },
   { actionType: "gift_card.issue", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
