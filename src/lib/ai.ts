@@ -329,6 +329,9 @@ export type ActionType =
   | "wp.queue.flush"
   // Batch T — the site's public identity write (domain change).
   | "website.domain.set"
+  // Batch V — product masters (attributes + weight-barcode templates).
+  | "product.attribute.create"
+  | "barcode.template.create"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -368,6 +371,8 @@ export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
   | "websiteOrderStatus"
   | "websiteDomainSet"
+  | "productAttributeCreate"
+  | "barcodeTemplateCreate"
   | "wpQueueRetry"
   | "wpQueueRetryAllFailed"
   | "wpQueueFlush"
@@ -1332,6 +1337,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "product.attribute.create": {
+    type: "product.attribute.create",
+    endpoint: "/api/products/attributes",
+    method: "POST",
+    label: "ساخت ویژگی کالا با گزینه‌هایش (مثل رنگ: قرمز، آبی)",
+    payloadHint: '{ name: string, options: string[], isActive?: boolean, locationId?: string }',
+    executor: "productAttributeCreate",
+  },
+  "barcode.template.create": {
+    type: "barcode.template.create",
+    endpoint: "/api/products/barcode-templates",
+    method: "POST",
+    label: "ساخت قالب بارکد وزنی — پیشوند دو رقمی + واحد وزن",
+    payloadHint: '{ prefix: string /* دو رقم */, weightUnit: "kilograms"|"grams", locationId?: string }',
+    executor: "barcodeTemplateCreate",
   },
   "website.order.status": {
     type: "website.order.status",
@@ -2732,6 +2753,30 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             locationId: { type: "string" },
           },
           required: ["invoiceId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_product_attributes",
+        description: "ویژگی‌های کالا (رنگ/برند/…) با گزینه‌هایشان در شعبهٔ فعال.",
+        parameters: {
+          type: "object",
+          properties: { locationId: { type: "string" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_barcode_templates",
+        description: "قالب‌های بارکد وزنی شعبه — پیشوند و واحد وزن هر قالب.",
+        parameters: {
+          type: "object",
+          properties: { locationId: { type: "string" } },
           additionalProperties: false,
         },
       },

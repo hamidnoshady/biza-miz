@@ -209,6 +209,9 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // like website.post.publish (a human-confirmed publish action).
   { name: "list_cms_pages", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "list_cms_media", kind: "read", app: "website", branchPolicy: "agnostic" },
+  // Batch V — product masters are branch-scoped (pinned) like price lists.
+  { name: "list_product_attributes", kind: "read", app: "pos", branchPolicy: "pinned" },
+  { name: "list_barcode_templates", kind: "read", app: "pos", branchPolicy: "pinned" },
   // Batch Q — sales invoices are branch-scoped like every other POS order read.
   { name: "list_sales_invoices", kind: "read", app: "pos", branchPolicy: "pinned" },
   // Batch S — the WooCommerce manager is a site-level catalogue (agnostic),
@@ -401,6 +404,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // blast radius on links; connection mode confirms it, but a good executor
   // tells the human exactly what it is doing.
   { actionType: "website.domain.set", kind: "write", app: "website", risk: "low", approval: "mode" },
+  // Batch V — catalogue masters behind menuEdit, same tier as price lists.
+  { actionType: "product.attribute.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "barcode.template.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
 ];
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,8 @@ import { updateCmsOrderStatus } from "./cms/website-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
 import { retryWpQueueRow, retryAllFailedWpQueue, flushWpOutbox } from "./integrations/wp-manager-service";
 import { updateCmsSiteDomain } from "./cms/website-service";
+import { createAttributeDefinition } from "./product-attributes-service";
+import { createWeightBarcodeTemplate } from "./weight-barcode-templates-service";
 import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
@@ -2663,6 +2665,39 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch V — product masters ────────────────────────
+// Thin mirrors of the attribute/barcode-template routes: service returns
+// {definition?,error?} / {template?,error?} pairs with the route's own codes.
+const productAttributeCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("missing_fields");
+  const options = Array.isArray(ctx.payload.options)
+    ? (ctx.payload.options as unknown[]).map((o) => (typeof o === "string" ? o : "")).filter((o) => o.trim() !== "")
+    : [];
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const result = await createAttributeDefinition({
+    locationId: branch.locationId,
+    name,
+    options,
+    isActive: ctx.payload.isActive !== false,
+  });
+  if (result.error) return fail(result.error);
+  return { ok: true, result: { definition: result.definition } };
+};
+const barcodeTemplateCreate: AutopilotExecutor = async (ctx) => {
+  const prefix = str(ctx.payload.prefix);
+  const weightUnit = str(ctx.payload.weightUnit);
+  if (!prefix || !weightUnit) return fail("missing_fields");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const result = await createWeightBarcodeTemplate({ locationId: branch.locationId, prefix, weightUnit });
+  if (result.error) return fail(result.error);
+  return { ok: true, result: { template: result.template } };
+};
+
 // ── Issue #883 package 2, batch T — the site's domain switch ───────────────
 // One remote call; the service normalises the input (trim/lowercase/strip
 // dot) before the format check, so all the executor passes is the raw string.
@@ -3072,6 +3107,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   retailInvoiceVoid,
   websiteOrderStatus,
   websiteDomainSet,
+  productAttributeCreate,
+  barcodeTemplateCreate,
   wpQueueRetry,
   wpQueueRetryAllFailed,
   wpQueueFlush,

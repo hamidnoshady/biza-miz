@@ -221,6 +221,8 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   get_website_dns: "DNS status of the site's domain (records, nameservers, verification).",
   get_website_cdn: "CDN status of the site (cache mode, purge state).",
   list_kb_catalogue: "The product help catalogue — categories and articles with slugs for citation.",
+  list_product_attributes: "The branch's product attribute definitions (e.g. colour → red, blue).",
+  list_barcode_templates: "The branch's weight-barcode templates (prefix + weight unit).",
   // Phase C — the messaging reads that feed the campaign-create action.
   list_message_templates: "Saved message templates by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",
   list_message_campaigns: "The business's message campaigns (draft, sending, done) with id, name, channel, status and recipient / sent / delivered / failed counts.",
@@ -1637,6 +1639,39 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         itemIds: { type: "array", items: { type: "string" }, description: "خالی = همهٔ اقلام شعبه" },
       },
       required: ["target", "mode", "value", "round"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_product_attribute_create",
+    actionType: "product.attribute.create",
+    english: "Create one product attribute with its options (no item is touched).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "نام ویژگی — مثل «برند»" },
+        options: { type: "array", items: { type: "string" }, description: "مقادیر قابل‌انتخاب" },
+        isActive: { type: "boolean", description: "پیش‌فرض فعال" },
+        locationId: id("شعبه — اگر پین شعبه دیگری است؛ پیش‌فرض پین"),
+      },
+      required: ["name", "options"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_barcode_template_create",
+    actionType: "barcode.template.create",
+    english: "Create one weight-barcode template (two-digit prefix + weight unit).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        prefix: { type: "string", description: "پیشوند دو رقمی — مثل ۲۱" },
+        weightUnit: { type: "string", enum: ["kilograms", "grams"] },
+        locationId: id("شعبه — اگر پین شعبه دیگری است؛ پیش‌فرض پین"),
+      },
+      required: ["prefix", "weightUnit"],
       additionalProperties: false,
     },
   },

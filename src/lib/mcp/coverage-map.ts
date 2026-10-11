@@ -763,7 +763,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Products (retail)",
     entity: "Product items, attributes, barcode templates",
     routes: ["products/items", "products/attributes", "products/barcode-templates"],
-    test: "integration/products.integration.test.ts",
+    ops: {
+      listDetail: ["list_product_attributes", "list_barcode_templates"],
+      create: ["product.attribute.create", "barcode.template.create"],
+    },
+    note: "products/items create waits for the checkout-input normaliser (tax, barcode-conflict shape) to move out of the route body — same extraction gate as pos.orders; item reads ride list_inventory_items",
+    test: "integration/generic-items.integration.test.ts",
   },
   {
     id: "misc.price-lists",

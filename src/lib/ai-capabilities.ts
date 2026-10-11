@@ -120,6 +120,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch O — the CMS content screens' read gates.
   list_cms_pages: PERMISSIONS.cmsView,
   list_cms_media: PERMISSIONS.cmsView,
+  // Batch V — product masters ride the menu/price-list branch pins.
+  list_product_attributes: PERMISSIONS.menuView,
+  list_barcode_templates: PERMISSIONS.menuView,
   // Batch Q — the sales-invoice screens' read gate.
   list_sales_invoices: PERMISSIONS.ordersView,
   get_sales_invoice: PERMISSIONS.ordersView,
@@ -257,6 +260,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "sales.invoice.void": PERMISSIONS.ordersAmendClosed,
   "website.order.status": PERMISSIONS.cmsContentManage,
   "website.domain.set": PERMISSIONS.cmsConfigure,
+  "product.attribute.create": PERMISSIONS.menuEdit,
+  "barcode.template.create": PERMISSIONS.menuEdit,
   "wp.queue.retry": PERMISSIONS.woocommerceSync,
   "wp.queue.retry_all_failed": PERMISSIONS.woocommerceSync,
   "wp.queue.flush": PERMISSIONS.woocommerceSync,

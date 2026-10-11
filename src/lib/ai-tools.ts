@@ -61,6 +61,8 @@ import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } f
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles, listKbCatalogue } from "./knowledge-service";
+import { listAttributeDefinitions } from "./product-attributes-service";
+import { listWeightBarcodeTemplates } from "./weight-barcode-templates-service";
 import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/website-service";
 import { listRetailInvoices } from "./retail-invoice/list-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
@@ -2095,6 +2097,19 @@ export async function runReadTool(
     // honoured; otherwise the single active woocommerce connection answers,
     // and zero or many ask the model to name one.
     // Issue #883 package 2, batch T — website infra reads (DNS/CDN status).
+    // Issue #883 package 2, batch V — product masters (branch-pinned reads).
+    case "list_product_attributes": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: { definitions: [] } };
+      return { ok: true, data: { definitions: await listAttributeDefinitions(pinned.locationId) } };
+    }
+    case "list_barcode_templates": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: { templates: [] } };
+      return { ok: true, data: { templates: await listWeightBarcodeTemplates(pinned.locationId) } };
+    }
     case "get_website_dns": {
       const result = await cmsWebsiteDns(businessId);
       if (!result.ok) return { ok: false, data: { error: result.error } };

@@ -4,8 +4,8 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **119 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **110 write verbs**
+Current surface: **121 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **112 write verbs**
 (**32** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -107,6 +107,8 @@ visible only to connections consented for every branch) and **110 write verbs**
 | `get_website_status` | website | agnostic | `website.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cms_pages` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cms_media` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_product_attributes` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_barcode_templates` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_sales_invoices` | pos | pinned | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_wp_queue` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_wp_queue_summary` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -246,6 +248,8 @@ visible only to connections consented for every branch) and **110 write verbs**
 | `write_wp_queue_retry_all_failed` | `wp.queue.retry_all_failed` | website | low | connection write_mode | `woocommerce.sync` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_wp_queue_flush` | `wp.queue.flush` | website | low | connection write_mode | `woocommerce.sync` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_website_domain_set` | `website.domain.set` | website | low | connection write_mode | `cms.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_product_attribute_create` | `product.attribute.create` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_barcode_template_create` | `barcode.template.create` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 
 ## Deliberate exclusions (not MCP verbs here by design)
 
