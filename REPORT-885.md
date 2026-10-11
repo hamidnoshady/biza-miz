@@ -187,13 +187,33 @@ All commands run in this sandbox on the work commit.
 
 PostgreSQL for the integration run: **16.14**, started with the project's own `npm run db:dev:start` on 127.0.0.1:5432. (An earlier draft reported 18.4; that cluster satisfied neither `pg-tools.ts`'s major-16 guard nor the client tools, and inflated the failure count.)
 
-**The single failing integration file is pre-existing and environmental.**
+**The single failing integration file was my harness error, not a defect — and an earlier draft of this report was wrong about it.**
 
-| Failing file | Tests | Cause | Mine? |
+| Failing file | Tests | Actual cause | Mine? |
 |---|---|---|---|
-| `runtime-role-regrant` | 2 | `restore_regrant_failed: relation "schema_migrations" does not exist`. Needs a migrated scratch database plus a password-authenticated runtime role; this cluster uses trust auth. Not in this diff. | No — environmental |
+| `runtime-role-regrant` | 2 | `relation "schema_migrations" does not exist` at `create-app-role.ts:108`. The root database `DATABASE_URL` points at had **never been migrated** — `to_regclass('public.schema_migrations')` returned `null` and `pg_tables` counted **0** rows in `public`. | Yes — harness |
 
-Proven rather than assumed: run in a **worktree at `origin/main`** (`git worktree add --detach /home/user/base-wt origin/main`) with the identical command and environment, it fails **identically** — same 2 tests, same `restore_regrant_failed` error. `backup-locks` passes 7/7 in the same run.
+**Root cause, found rather than assumed.** CI does not run the suite against a bare cluster. `test.yml` applies migrations first and proves the second run is a no-op:
+
+```
+- name: Apply migrations
+  run: npm run db:migrate          # test.yml:96-97
+- name: Re-apply migrations (must be a no-op)
+  run: npm run db:migrate          # test.yml:99-100
+- name: Integration tests
+  run: npm run test:db             # test.yml:102-103
+```
+
+I had skipped both migrate steps. Most integration files build their own scratch database and migrate it themselves, so the omission was invisible until a file that targets the *root* database — `runtime-role-regrant` calls `createAppRole`, which grants on `schema_migrations` — reached it.
+
+After `npm run db:migrate` (**305 migrations applied**, `public` now **442 tables**, re-run correctly a no-op), the file passes **2/2**:
+
+```
+✓ integration/runtime-role-regrant.integration.test.ts (2 tests) 129ms
+Test Files  1 passed (1)   Tests  2 passed (2)
+```
+
+**Correcting a claim I made earlier.** I had written that this failure was "proven pre-existing" because it reproduced identically in a worktree at `origin/main`. That reasoning was invalid: I made the *same* harness omission in both worktrees, so the comparison could only ever reproduce my own error. It proved nothing about the code. The correct procedure — the one CI encodes — makes the failure disappear, and no production source file needed to change.
 
 An earlier full run of mine reported a second failure, `backup-locks` throwing `DATABASE_URL is required` at *collection*. That was an artifact of how I launched the suite: I relied on `.env` rather than exporting the variable. CI sets `DATABASE_URL` at the **job level** (`test.yml`, integration job `env:`), and exporting it the same way makes the failure disappear — which is what the figures above measure. Worth recording because it means a local run must export `DATABASE_URL` explicitly; `.env` alone is not sufficient once an earlier file has replaced the value.
 
@@ -203,7 +223,7 @@ These are the figures for the committed tree, from one end-to-end run of all 196
 
 | Failing file | Tests | Cause | Mine? |
 |---|---|---|---|
-**Superseded by the run above.** The earlier 13 failures came from a PostgreSQL 18.4 cluster: `platform-system-backup` (7) hit `pg-tools.ts`'s major-16 guard, and `runtime-database-url` (4) plus `runtime-role-regrant` (2) needed `APP_DB_PASSWORD`. Against the project's own PG 16.14 cluster in the run above, `platform-system-backup` **passes 21/21** and `runtime-database-url` **passes 7/7**; only `runtime-role-regrant` still fails, for the pre-existing reason given above.
+**Superseded by the run above.** The earlier 13 failures came from a PostgreSQL 18.4 cluster: `platform-system-backup` (7) hit `pg-tools.ts`'s major-16 guard, and `runtime-database-url` (4) plus `runtime-role-regrant` (2) needed `APP_DB_PASSWORD`. Against the project's own PG 16.14 cluster, `platform-system-backup` **passes 21/21** and `runtime-database-url` **passes 7/7**. `runtime-role-regrant` turned out to need neither a special cluster nor `APP_DB_PASSWORD` — only the `npm run db:migrate` step CI runs and I had skipped; it now **passes 2/2**.
 
 Both preconditions were re-checked on this box rather than assumed: the `pg_dump` search returns nothing, `env | grep APP_DB_PASSWORD` is empty, and `pg-tools.ts:195` is `if (postgresMajor !== 16) throw`.
 
