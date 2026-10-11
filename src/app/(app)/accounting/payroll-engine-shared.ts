@@ -10,10 +10,11 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali, JALALI_MONTHS, todayJalali } from "@/lib/jalali";
 import { api } from "@/app/dashboard/ui";
 import type { EngineRun, EngineRunStatus, Payslip } from "@/lib/payroll-engine-runs";
-import type { PayrollComponent, PayrollProfile, PayrollRuleSetVersion } from "@/lib/payroll-engine-setup";
+import type { PayrollComponent, PayrollProfile, PayrollRecurringItem, PayrollRuleSetVersion } from "@/lib/payroll-engine-setup";
+import type { PayrollPaymentAccount } from "@/lib/payroll-types";
 import { payrollError } from "./payroll-error";
 
-export type { EngineRun, EngineRunStatus, Payslip, PayrollComponent, PayrollProfile, PayrollRuleSetVersion };
+export type { EngineRun, EngineRunStatus, Payslip, PayrollComponent, PayrollProfile, PayrollRecurringItem, PayrollPaymentAccount, PayrollRuleSetVersion };
 
 export const RUN_STATUS: Record<EngineRunStatus, { label: string; tone: "active" | "positive" | "neutral" | "danger" }> = {
   draft: { label: "پیش‌نویس", tone: "neutral" },
@@ -78,29 +79,42 @@ export function quantityText(n: number): string {
  * overwrites a fresh one.
  */
 export function useEngineData<T>(url: string | null, reloadKey: unknown = 0) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(url !== null);
+  const [state, setState] = useState<{ url: string | null; data: T | null; error: string; loading: boolean }>(() => ({
+    url,
+    data: null,
+    error: "",
+    loading: url !== null,
+  }));
   const seq = useRef(0);
   const load = useCallback(async () => {
     if (url === null) return;
     const mine = ++seq.current;
-    setLoading(true);
+    setState((previous) => ({
+      url,
+      data: previous.url === url ? previous.data : null,
+      error: "",
+      loading: true,
+    }));
     const res = await api<T & { error?: string }>(url);
     if (mine !== seq.current || res.aborted) return;
-    if (res.ok) {
-      setData(res.data);
-      setError("");
-    } else setError(payrollError(res.data.error));
-    setLoading(false);
+    if (res.ok) setState({ url, data: res.data, error: "", loading: false });
+    else setState((previous) => ({
+      url,
+      data: previous.url === url ? previous.data : null,
+      error: payrollError(res.data.error),
+      loading: false,
+    }));
   }, [url]);
   useEffect(() => {
-    void load();
+    if (url !== null) void load();
     // A request counter, not a DOM ref: bumping it on cleanup orphans the in-flight reply.
     const counter = seq;
     return () => {
       counter.current++;
     };
-  }, [load, reloadKey]);
-  return { data, error, loading, reload: load };
+  }, [load, reloadKey, url]);
+  const visible = state.url === url
+    ? state
+    : { url, data: null, error: "", loading: url !== null };
+  return { data: visible.data, error: visible.error, loading: visible.loading, reload: load };
 }

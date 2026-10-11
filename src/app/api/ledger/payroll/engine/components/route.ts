@@ -1,14 +1,18 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { listComponents, saveComponent } from "@/lib/payroll-engine-setup";
+import { listComponents, listPayrollPostingAccounts, saveComponent } from "@/lib/payroll-engine-setup";
 import { badRequest, payrollErrorResponse, readJsonObject } from "@/lib/payroll-http";
 
 /** Issue #865 — the payroll component catalogue (seeded with the defaults on first read). `payroll.view`. */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.payrollView);
   if (error) return error;
-  return NextResponse.json({ components: await listComponents(session.businessId) });
+  const [components, accounts] = await Promise.all([
+    listComponents(session.businessId),
+    listPayrollPostingAccounts(session.businessId),
+  ]);
+  return NextResponse.json({ components, accounts });
 });
 
 /** Adds a business-defined earning or deduction component. `payroll.manage`. */

@@ -356,23 +356,83 @@ function parseRunInputs(raw: unknown, supplemental: boolean): Record<string, Eng
       }
       entry[k] = n;
     }
-    if (v.items !== undefined && v.items !== null) {
-      if (!Array.isArray(v.items) || v.items.length > 50) throw new PayrollError("invalid_inputs", 400, userId);
-      entry.items = v.items.map((item) => {
-        const it = item as Record<string, unknown> | null;
-        if (typeof it !== "object" || it === null || typeof it.code !== "string") throw new PayrollError("invalid_inputs", 400, userId);
-        let amount: bigint;
-        const text = typeof it.amount === "string" ? it.amount.trim() : it.amount;
-        if (supplemental && typeof text === "string" && text.startsWith("-")) amount = -parseRialInput(text.slice(1));
-        else if (supplemental && typeof text === "number" && text < 0) amount = -parseRialInput(-text);
-        else amount = parseRialInput(text);
-        if (amount > MAX_RIAL || -amount > MAX_RIAL) throw new PayrollError("amount_out_of_range", 400, userId);
-        return { code: it.code, amount: amount.toString() };
-      });
-    }
+    if (v.items !== undefined && v.items !== null) entry.items = parseRunInputItems(v.items, supplemental, userId);
     out[userId] = entry;
   }
   return out;
+}
+
+function parseRunInputItems(raw: unknown, supplemental: boolean, userId: string): EngineRunEmployeeInput["items"] {
+  if (!Array.isArray(raw) || raw.length > 50) throw new PayrollError("invalid_inputs", 400, userId);
+  return raw.map((item) => {
+    const it = item as Record<string, unknown> | null;
+    if (typeof it !== "object" || it === null || typeof it.code !== "string" || !/^[A-Z0-9_]{2,32}$/.test(it.code)) {
+      throw new PayrollError("invalid_inputs", 400, userId);
+    }
+    let amount: bigint;
+    const text = typeof it.amount === "string" ? it.amount.trim() : it.amount;
+    if (supplemental && typeof text === "string" && text.startsWith("-")) amount = -parseRialInput(text.slice(1));
+    else if (supplemental && typeof text === "number" && text < 0) amount = -parseRialInput(-text);
+    else amount = parseRialInput(text);
+    if (!supplemental && amount < 0n) throw new PayrollError("invalid_amount", 400, userId);
+    if (amount > MAX_RIAL || -amount > MAX_RIAL) throw new PayrollError("amount_out_of_range", 400, userId);
+    return { code: it.code, amount: amount.toString() };
+  });
+}
+
+type EngineRunInputPatch = {
+  overtimeHours?: number | null;
+  unpaidLeaveDays?: number | null;
+  items?: Array<{ code: string; amount: string }> | null;
+};
+
+/**
+ * A PATCH is a typed per-employee merge by default. Missing fields are kept;
+ * explicit null clears one field and an empty `items` array clears only that
+ * employee's run items. `replace` is an explicit, opt-in full replacement.
+ */
+function parseRunInputPatch(raw: unknown, supplemental: boolean): Record<string, EngineRunInputPatch> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new PayrollError("invalid_inputs", 400, "inputs");
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > 2000) throw new PayrollError("invalid_inputs", 400, "inputs");
+  const out: Record<string, EngineRunInputPatch> = {};
+  for (const [userId, value] of entries) {
+    if (!isUuid(userId) || typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new PayrollError("invalid_inputs", 400, userId);
+    }
+    const source = value as Record<string, unknown>;
+    if (Object.keys(source).some((key) => !["overtimeHours", "unpaidLeaveDays", "items"].includes(key))) {
+      throw new PayrollError("invalid_inputs", 400, userId);
+    }
+    const nonNull: Record<string, unknown> = {};
+    for (const key of ["overtimeHours", "unpaidLeaveDays", "items"] as const) {
+      if (source[key] !== undefined && source[key] !== null) nonNull[key] = source[key];
+    }
+    const parsed = parseRunInputs({ [userId]: nonNull }, supplemental)[userId] ?? {};
+    const patch: EngineRunInputPatch = {};
+    for (const key of ["overtimeHours", "unpaidLeaveDays"] as const) {
+      if (source[key] === null) patch[key] = null;
+      else if (source[key] !== undefined) patch[key] = parsed[key];
+    }
+    if (source.items === null) patch.items = null;
+    else if (source.items !== undefined) patch.items = parsed.items ?? [];
+    out[userId] = patch;
+  }
+  return out;
+}
+
+async function assertRunInputEmployees(client: PoolClient, businessId: string, userIds: readonly string[]): Promise<void> {
+  const uniqueIds = [...new Set(userIds)];
+  if (uniqueIds.length === 0) return;
+  const { rows } = await client.query<{ user_id: string }>(
+    `SELECT p.user_id FROM payroll_employee_profiles p
+       JOIN users u ON u.id = p.user_id AND u.business_id = p.business_id
+      WHERE p.business_id = $1 AND p.user_id = ANY($2::uuid[]) AND p.is_active AND u.is_active`,
+    [businessId, uniqueIds],
+  );
+  const missing = uniqueIds.find((id) => !rows.some((row) => row.user_id === id));
+  if (missing) throw new PayrollError("employee_not_in_payroll", 400, missing);
 }
 
 
@@ -399,28 +459,68 @@ export async function createEngineRun(params: {
   const accrual = normalizeOptionalIsoDate(params.accrualDate);
   if (!accrual.ok) throw new PayrollError("invalid_accrual_date");
   if (params.includeCommission !== undefined && typeof params.includeCommission !== "boolean") throw new PayrollError("invalid_inputs", 400, "includeCommission");
-  const note = params.note === undefined || params.note === null || params.note === "" ? null : params.note;
-  if (note !== null && (typeof note !== "string" || note.length > 500)) throw new PayrollError("invalid_inputs", 400, "note");
+  const rawNote = params.note === undefined || params.note === null ? null : params.note;
+  if (rawNote !== null && (typeof rawNote !== "string" || rawNote.length > 500)) throw new PayrollError("invalid_inputs", 400, "note");
+  const note = typeof rawNote === "string" ? rawNote.trim() || null : null;
   const inputs = parseRunInputs(params.inputs, runType === "supplemental");
+  const includeCommission = params.includeCommission === true;
   const idempotencyKey = normalizeIdempotencyKey(params.idempotencyKey);
 
   const today = await businessToday(params.businessId);
   if (period.startsOn > today) throw new PayrollError("period_in_future");
-  const accrualDate = accrual.value ?? defaultPayrollAccrualDate(period, today);
+  const requestedAccrualDate = accrual.value;
+  const accrualDate = requestedAccrualDate ?? defaultPayrollAccrualDate(period, today);
   if (accrualDate < period.startsOn) throw new PayrollError("invalid_accrual_date");
 
   const outcome = await inTransaction(async (client) => {
     await lockPayroll(client, params.businessId);
     if (idempotencyKey) {
-      const { rows } = await client.query<{ id: string; period_key: string; run_type: string }>(
-        `SELECT id, period_key, run_type FROM payroll_engine_runs WHERE business_id = $1 AND idempotency_key = $2`,
+      const { rows } = await client.query<{ id: string; idempotency_payload: Record<string, unknown> | null }>(
+        `SELECT id, idempotency_payload FROM payroll_engine_runs WHERE business_id = $1 AND idempotency_key = $2`,
         [params.businessId, idempotencyKey],
       );
-      if (rows[0]) {
-        if (rows[0].period_key !== period.key || rows[0].run_type !== runType) throw new PayrollError("idempotency_key_conflict", 409);
+      const original = rows[0]?.idempotency_payload;
+      if (rows[0] && original) {
+        // Pre-0218 runs did not persist their create request. Their mutable
+        // draft cannot prove what the original inputs were, so fail closed
+        // rather than infer an identity from later edits.
+        if (original.legacy === true) throw new PayrollError("idempotency_key_conflict", 409);
+        const effectiveAccrualDate =
+          requestedAccrualDate === null && original.accrualDateMode === "server_default" && typeof original.accrualDate === "string"
+            ? original.accrualDate
+            : accrualDate;
+        const requestPayload = {
+          version: 1,
+          periodKey: period.key,
+          runType,
+          accrualDate: effectiveAccrualDate,
+          accrualDateMode: requestedAccrualDate === null ? "server_default" : "explicit",
+          includeCommission,
+          inputs,
+          note,
+        };
+        const { rows: equal } = await client.query<{ same: boolean }>(
+          `SELECT $1::jsonb = $2::jsonb AS same`,
+          [JSON.stringify(original), JSON.stringify(requestPayload)],
+        );
+        if (!equal[0]?.same) throw new PayrollError("idempotency_key_conflict", 409);
         return { id: rows[0].id, replay: true };
       }
+      if (rows[0]) throw new PayrollError("idempotency_key_conflict", 409);
     }
+
+    const idempotencyPayload = idempotencyKey
+      ? {
+          version: 1,
+          periodKey: period.key,
+          runType,
+          accrualDate,
+          accrualDateMode: requestedAccrualDate === null ? "server_default" : "explicit",
+          includeCommission,
+          inputs,
+          note,
+        }
+      : null;
 
     // #835 owns a month it already accrued (journal-level) — never book it twice.
     const { rows: legacy } = await client.query<{ id: string }>(
@@ -441,12 +541,24 @@ export async function createEngineRun(params: {
       if (open) throw new PayrollError("open_run_exists", 409, { runId: open.id });
     }
 
+    await assertRunInputEmployees(client, params.businessId, Object.keys(inputs));
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO payroll_engine_runs (business_id, period_key, run_type, sequence, accrual_date, include_commission, note, inputs,
-                                        idempotency_key, created_by)
+                                        idempotency_key, idempotency_payload, created_by)
        VALUES ($1, $2, $3, COALESCE((SELECT max(sequence) FROM payroll_engine_runs WHERE business_id = $1 AND period_key = $2), 0) + 1,
-               $4, $5, $6, $7, $8, $9) RETURNING id`,
-      [params.businessId, period.key, runType, accrualDate, params.includeCommission === true, note, JSON.stringify(inputs), idempotencyKey, params.actorId],
+               $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+      [
+        params.businessId,
+        period.key,
+        runType,
+        accrualDate,
+        includeCommission,
+        note,
+        JSON.stringify(inputs),
+        idempotencyKey,
+        idempotencyPayload ? JSON.stringify(idempotencyPayload) : null,
+        params.actorId,
+      ],
     );
     return { id: rows[0].id, replay: false };
   });
@@ -458,7 +570,7 @@ async function lockRun(client: PoolClient, businessId: string, runId: string): P
   await lockPayroll(client, businessId);
   const { rows } = await client.query<RunRow & { business_id: string }>(
     `SELECT r.id, r.business_id, r.period_key, r.run_type, r.sequence, r.status, r.accrual_date::text AS accrual_date,
-            r.include_commission, r.inputs FROM payroll_engine_runs r
+            r.include_commission, r.note, r.inputs FROM payroll_engine_runs r
       WHERE r.business_id = $1 AND r.id = $2 FOR UPDATE`,
     [businessId, runId],
   );
@@ -474,21 +586,82 @@ function assertTransition(from: EngineRunStatus, to: EngineRunStatus): void {
   }
 }
 
-/** Replaces a not-yet-approved run's inputs; it goes back to draft and must be recalculated. */
-export async function updateEngineRunInputs(params: { businessId: string; runId: string; inputs: unknown; includeCommission?: unknown; note?: unknown }): Promise<EngineRun> {
+/** Updates a draft calculation; omitted employee fields are preserved, not replaced. */
+export async function updateEngineRunInputs(params: {
+  businessId: string;
+  runId: string;
+  inputs?: unknown;
+  inputMode?: unknown;
+  removeEmployeeIds?: unknown;
+  includeCommission?: unknown;
+  note?: unknown;
+}): Promise<EngineRun> {
   await inTransaction(async (client) => {
     const run = await lockRun(client, params.businessId, params.runId);
     if (run.status === "cancelled") throw new PayrollError("run_cancelled", 409);
     if (STANDING.includes(run.status as never)) throw new PayrollError("run_immutable", 409, { status: run.status });
-    const inputs = parseRunInputs(params.inputs, run.run_type === "supplemental");
+
+    const mode = params.inputMode === undefined ? "merge" : params.inputMode;
+    if (mode !== "merge" && mode !== "replace") throw new PayrollError("invalid_inputs", 400, "inputMode");
+    if (mode === "replace" && params.inputs === undefined) throw new PayrollError("invalid_inputs", 400, "inputs");
+    if (mode === "replace" && params.removeEmployeeIds !== undefined) throw new PayrollError("invalid_inputs", 400, "removeEmployeeIds");
     if (params.includeCommission !== undefined && typeof params.includeCommission !== "boolean") throw new PayrollError("invalid_inputs", 400, "includeCommission");
+
+    const supplemental = run.run_type === "supplemental";
+    let inputs: Record<string, EngineRunEmployeeInput>;
+    const changedUsers = new Set<string>();
+    if (mode === "replace") {
+      inputs = parseRunInputs(params.inputs, supplemental);
+      Object.keys(inputs).forEach((userId) => changedUsers.add(userId));
+    } else {
+      inputs = JSON.parse(JSON.stringify(run.inputs ?? {})) as Record<string, EngineRunEmployeeInput>;
+      const patch = parseRunInputPatch(params.inputs, supplemental);
+      const removal = params.removeEmployeeIds === undefined ? [] : params.removeEmployeeIds;
+      if (!Array.isArray(removal) || removal.length > 2000 || removal.some((id) => !isUuid(id))) {
+        throw new PayrollError("invalid_inputs", 400, "removeEmployeeIds");
+      }
+      if (new Set(removal).size !== removal.length) throw new PayrollError("invalid_inputs", 400, "removeEmployeeIds");
+      for (const userId of removal as string[]) {
+        if (!Object.hasOwn(inputs, userId)) throw new PayrollError("employee_input_not_found", 404, userId);
+        delete inputs[userId];
+      }
+      for (const [userId, delta] of Object.entries(patch)) {
+        const next: EngineRunEmployeeInput = { ...(inputs[userId] ?? {}) };
+        for (const key of ["overtimeHours", "unpaidLeaveDays"] as const) {
+          if (delta[key] === null) delete next[key];
+          else if (delta[key] !== undefined) next[key] = delta[key];
+        }
+        if (delta.items === null) delete next.items;
+        else if (delta.items !== undefined) next.items = delta.items;
+        if (Object.keys(next).length === 0) delete inputs[userId];
+        else inputs[userId] = next;
+
+        // Validate every touched identity, even when a zero-valued patch has no
+        // financial effect. Otherwise a manager could put an arbitrary
+        // foreign-tenant UUID into the run's JSONB input document.
+        changedUsers.add(userId);
+      }
+    }
+    await assertRunInputEmployees(client, params.businessId, [...changedUsers]);
+
+    let noteChanged = false;
+    let note: string | null = null;
+    if (params.note !== undefined) {
+      if (params.note !== null && (typeof params.note !== "string" || params.note.length > 500)) {
+        throw new PayrollError("invalid_inputs", 400, "note");
+      }
+      noteChanged = true;
+      note = typeof params.note === "string" ? params.note.trim() || null : null;
+    }
+
     await releaseCommission(client, run.id);
     await client.query(`DELETE FROM payroll_payslips WHERE run_id = $1`, [run.id]);
     await client.query(
       `UPDATE payroll_engine_runs SET inputs = $2, include_commission = COALESCE($3, include_commission),
-              note = COALESCE($4, note), status = 'draft', totals = NULL, calculated_at = NULL, reviewed_at = NULL, reviewed_by = NULL
+              note = CASE WHEN $4 THEN $5::text ELSE note END, status = 'draft', totals = NULL,
+              calculated_at = NULL, reviewed_at = NULL, reviewed_by = NULL
         WHERE id = $1`,
-      [run.id, JSON.stringify(inputs), params.includeCommission ?? null, typeof params.note === "string" ? params.note.slice(0, 500) : null],
+      [run.id, JSON.stringify(inputs), params.includeCommission ?? null, noteChanged, note],
     );
   });
   return mustGetRun(params.businessId, params.runId);
@@ -968,6 +1141,11 @@ export async function employeePayrollCard(businessId: string, userId: string, ye
   if (!isUuid(userId)) throw new PayrollError("invalid_user_id", 400, "userId");
   const jalaliYear = typeof year === "number" ? year : /^\d{4}$/.test(year) ? Number(year) : NaN;
   if (!Number.isInteger(jalaliYear) || jalaliYear < 1300 || jalaliYear > 1599) throw new PayrollError("invalid_period", 400, "year");
+  const { rows: employee } = await poolRunner<{ id: string }>(
+    `SELECT id FROM users WHERE business_id = $1 AND id = $2`,
+    [businessId, userId],
+  );
+  if (!employee[0]) throw new PayrollError("staff_not_found", 404);
   const { rows } = await poolRunner<PayslipRow>(
     `${PAYSLIP_SELECT} WHERE p.business_id = $1 AND p.user_id = $2 AND r.period_key LIKE $3 AND r.status = ANY($4::text[])
       ORDER BY r.period_key, r.sequence`,

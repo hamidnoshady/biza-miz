@@ -163,6 +163,10 @@ export async function recordAdvance(params: {
   if (note && note.length > ADVANCE_NOTE_MAX) throw new PayrollError("note_too_long");
 
   const id = await inTransaction(async (client) => {
+    // A concurrent calculation must see this new advance or run first and leave
+    // the advance for the next period — the same business-wide payroll lock
+    // serializes both decisions with the #835 accrual and the #865 engine.
+    await lockPayroll(client, params.businessId);
     const { rows: member } = await client.query<{ full_name: string }>(
       `SELECT full_name FROM users WHERE id = $1 AND business_id = $2 AND is_active`,
       [params.userId, params.businessId],

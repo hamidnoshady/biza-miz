@@ -12,11 +12,14 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { createAppRole } from "../scripts/create-app-role";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
 
 let databaseName: string;
+let appRole: string;
+let appPassword: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let setup: typeof import("../src/lib/payroll-engine-setup");
@@ -24,6 +27,7 @@ let runs: typeof import("../src/lib/payroll-engine-runs");
 let legacy: typeof import("../src/lib/payroll-service");
 let advances: typeof import("../src/lib/payroll-advances-service");
 let fiscal: typeof import("../src/lib/fiscal-periods-service");
+let commission: typeof import("../src/lib/commission-service");
 
 const biz = { id: "" };
 const owner = { id: "" };
@@ -33,9 +37,13 @@ const staff = { a: "", b: "" };
 const MORDAD = "1404-05";
 const SHAHRIVAR = "1404-06";
 
-function urlFor(database: string): string {
+function urlFor(database: string, user?: { name: string; password: string }): string {
   const url = new URL(rootDatabaseUrl!);
   url.pathname = `/${database}`;
+  if (user) {
+    url.username = user.name;
+    url.password = user.password;
+  }
   return url.toString();
 }
 
@@ -49,6 +57,9 @@ beforeAll(async () => {
     await maintenance.end();
   }
   await runMigrations({ databaseUrl: urlFor(databaseName), quiet: true });
+  appRole = `payroll_engine_rls_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  appPassword = randomUUID();
+  await createAppRole({ databaseUrl: urlFor(databaseName), roleName: appRole, password: appPassword, quiet: true });
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   setup = await import("../src/lib/payroll-engine-setup");
@@ -56,6 +67,7 @@ beforeAll(async () => {
   legacy = await import("../src/lib/payroll-service");
   advances = await import("../src/lib/payroll-advances-service");
   fiscal = await import("../src/lib/fiscal-periods-service");
+  commission = await import("../src/lib/commission-service");
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
 }, 120_000);
@@ -68,6 +80,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+    if (appRole) await maintenance.query(`DROP ROLE IF EXISTS "${appRole}"`);
   } finally {
     await maintenance.end();
   }
@@ -113,8 +126,30 @@ beforeEach(async () => {
       taxBrackets: [{ upToRial: 200_000_000, ratePercent: 10 }, { upToRial: null, ratePercent: 20 }],
     },
   });
-  await setup.saveProfile({ businessId: biz.id, actorId: owner.id, userId: staff.a, body: { baseSalary: "150000000", payrollCode: "P-1", costAllocation: [{ percent: 60, label: "شعبه ۱" }, { percent: 40, label: "شعبه ۲" }] } });
-  await setup.saveProfile({ businessId: biz.id, actorId: owner.id, userId: staff.b, body: { baseSalary: 90_000_000, insuranceProfile: { insured: false }, taxProfile: { exempt: true } } });
+  await setup.saveProfile({
+    businessId: biz.id,
+    actorId: owner.id,
+    userId: staff.a,
+    body: {
+      baseSalary: "150000000",
+      payrollCode: "P-1",
+      insuranceProfile: { insured: false },
+      taxProfile: { exempt: true },
+      paymentDestination: { method: "cash" },
+      costAllocation: [{ percent: 60, label: "شعبه ۱" }, { percent: 40, label: "شعبه ۲" }],
+    },
+  });
+  await setup.saveProfile({
+    businessId: biz.id,
+    actorId: owner.id,
+    userId: staff.b,
+    body: {
+      baseSalary: 90_000_000,
+      insuranceProfile: { insured: false },
+      taxProfile: { exempt: true },
+      paymentDestination: { method: "cash" },
+    },
+  });
 });
 
 const actor = () => ({ businessId: biz.id, actorId: owner.id });
@@ -135,8 +170,39 @@ async function balance(code: string): Promise<bigint> {
   return BigInt(rows[0].b);
 }
 
+/** Wait for Postgres itself to report a blocked advisory lock matching blockerPid. */
+async function waitForAdvisoryWait(blockerPid: number): Promise<number> {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const { rows } = await db.query<{ pid: number }>(
+      `SELECT blocked.pid
+         FROM pg_locks blocked
+         JOIN pg_stat_activity waiter ON waiter.pid = blocked.pid
+         JOIN pg_locks held ON held.locktype = 'advisory' AND held.granted
+                           AND held.classid = blocked.classid AND held.objid = blocked.objid
+                           AND held.objsubid = blocked.objsubid AND held.pid = $1
+        WHERE blocked.locktype = 'advisory' AND NOT blocked.granted
+          AND waiter.wait_event_type = 'Lock' AND waiter.wait_event = 'advisory'
+          AND waiter.query LIKE '%pg_advisory_xact_lock%'
+        LIMIT 1`,
+      [blockerPid],
+    );
+    if (rows[0]) return rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("payroll mutation never waited on the held business advisory lock");
+}
+
 describe("payroll engine — workflow", () => {
   it("calculates, approves, posts, pays and closes a month with exact figures", async () => {
+    await setup.saveProfile({
+      ...actor(),
+      userId: staff.a,
+      body: {
+        insuranceProfile: { insured: true, insuranceNumber: "12345678901" },
+        taxProfile: { exempt: false, nationalId: "0084575980" },
+      },
+    });
     const housing = (await setup.listComponents(biz.id)).find((c) => c.code === "HOUSING")!;
     await setup.addItem({ ...actor(), body: { userId: staff.a, componentId: housing.id, amount: "10000000", effectiveFrom: "2025-01-01" } });
 
@@ -188,6 +254,41 @@ describe("payroll engine — workflow", () => {
     expect(cost.allocation).toHaveLength(2);
   });
 
+  it("pays from the selected canonical leaf account on the selected date and rejects foreign or clearing accounts", async () => {
+    const bankRoot = (await db.query<{ id: string }>("SELECT id FROM accounts WHERE business_id = $1 AND code = '1110'", [biz.id])).rows[0].id;
+    const selected = (await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, parent_id, code, name, type) VALUES ($1, $2, '11101', 'Operating bank', 'asset') RETURNING id`,
+      [biz.id, bankRoot],
+    )).rows[0].id;
+    const clearing = (await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1120', 'Card clearing', 'asset') RETURNING id`,
+      [biz.id],
+    )).rows[0].id;
+    const foreignBusiness = await otherBusiness();
+    const foreignAccount = (await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1110', 'Foreign bank', 'asset') RETURNING id`,
+      [foreignBusiness],
+    )).rows[0].id;
+
+    const run = await approvedRun();
+    await runs.postEngineRun({ ...actor(), runId: run.id });
+    await expect(runs.payEngineRun({ ...actor(), runId: run.id, paymentAccountId: foreignAccount, paidDate: "2025-08-25" })).rejects.toThrow("invalid_payment_account");
+    await expect(runs.payEngineRun({ ...actor(), runId: run.id, paymentAccountId: clearing, paidDate: "2025-08-25" })).rejects.toThrow("invalid_payment_account");
+
+    const paid = await runs.payEngineRun({ ...actor(), runId: run.id, method: "cash", paymentAccountId: selected, paidDate: "2025-08-25" });
+    expect(paid.status).toBe("paid");
+    expect(paid.paidDate).toBe("2025-08-25");
+    expect(paid.paymentEntryId).toBeTruthy();
+    const entry = await db.query<{ entry_date: string }>("SELECT entry_date::text AS entry_date FROM journal_entries WHERE id = $1", [paid.paymentEntryId]);
+    expect(entry.rows[0].entry_date).toBe("2025-08-25");
+    const lines = await db.query<{ account_id: string; credit: string }>(
+      "SELECT account_id, credit::text AS credit FROM journal_lines WHERE entry_id = $1",
+      [paid.paymentEntryId],
+    );
+    const payout = lines.rows.find((line) => line.account_id === selected);
+    expect(payout?.credit).toBe(run.totals?.netPay);
+  });
+
   it("keeps an approved run and its payslips immutable, in the service and in the database", async () => {
     const run = await approvedRun();
     await expect(runs.calculateEngineRun({ ...actor(), runId: run.id })).rejects.toThrow("run_immutable");
@@ -207,6 +308,7 @@ describe("payroll engine — workflow", () => {
   });
 
   it("preserves the rule version a run used after a new version is entered", async () => {
+    await setup.saveProfile({ ...actor(), userId: staff.a, body: { insuranceProfile: { insured: true, insuranceNumber: "12345678901" } } });
     const run = await approvedRun();
     await setup.createRuleSet({ ...actor(), title: "نسخه جدید", effectiveFrom: "2025-03-21", rules: { employeeInsurancePercent: 9 } });
     const again = await runs.getEngineRun(biz.id, run.id);
@@ -216,6 +318,14 @@ describe("payroll engine — workflow", () => {
   });
 
   it("corrects a month with a supplemental run computed on the cumulative month", async () => {
+    await setup.saveProfile({
+      ...actor(),
+      userId: staff.a,
+      body: {
+        insuranceProfile: { insured: true, insuranceNumber: "12345678901" },
+        taxProfile: { exempt: false, nationalId: "0084575980" },
+      },
+    });
     const run = await approvedRun();
     await runs.postEngineRun({ ...actor(), runId: run.id });
     await expect(runs.createEngineRun({ ...actor(), periodKey: MORDAD })).rejects.toThrow("period_already_has_run");
@@ -231,6 +341,91 @@ describe("payroll engine — workflow", () => {
     await runs.postEngineRun({ ...actor(), runId: supp.id });
     expect(await balance("2470")).toBe(17_900_000n);
     expect((await runs.payrollLiabilityReconciliation(biz.id)).reconciled).toBe(true);
+  });
+
+  it("merges one typed input without losing allowances, deductions, other employees or inactive inputs", async () => {
+    const original = {
+      [staff.a]: { overtimeHours: 2, unpaidLeaveDays: 1, items: [{ code: "BONUS", amount: "1000000" }, { code: "CHILD", amount: "250000" }] },
+      [staff.b]: { overtimeHours: 3, unpaidLeaveDays: 0, items: [{ code: "MEAL", amount: "750000" }] },
+    };
+    const run = await runs.createEngineRun({ ...actor(), periodKey: MORDAD, inputs: original });
+    await setup.saveProfile({ ...actor(), userId: staff.b, body: { isActive: false } });
+
+    await runs.updateEngineRunInputs({ ...actor(), runId: run.id, inputMode: "merge", inputs: { [staff.a]: { overtimeHours: 4 } } });
+    const merged = (await runs.getEngineRun(biz.id, run.id))!.inputs!;
+    expect(merged[staff.a]).toEqual({ overtimeHours: 4, unpaidLeaveDays: 1, items: original[staff.a].items });
+    expect(merged[staff.b]).toEqual(original[staff.b]);
+
+    await runs.updateEngineRunInputs({ ...actor(), runId: run.id, inputMode: "merge", removeEmployeeIds: [staff.b] });
+    const explicitlyRemoved = (await runs.getEngineRun(biz.id, run.id))!.inputs!;
+    expect(explicitlyRemoved).toEqual({ [staff.a]: { overtimeHours: 4, unpaidLeaveDays: 1, items: original[staff.a].items } });
+  });
+
+  it("binds create retries to the immutable normalized request, not later draft edits", async () => {
+    const request = {
+      ...actor(),
+      periodKey: "۱۴۰۴-۰۵",
+      runType: "regular",
+      accrualDate: "2025-08-20",
+      includeCommission: true,
+      inputs: { [staff.a]: { overtimeHours: 2, unpaidLeaveDays: 1, items: [{ code: "BONUS", amount: "1250000" }] } },
+      note: "create identity",
+      idempotencyKey: "engine-immutable-request-865-001",
+    };
+    const created = await runs.createEngineRun(request);
+    await runs.updateEngineRunInputs({
+      ...actor(),
+      runId: created.id,
+      inputMode: "merge",
+      inputs: { [staff.a]: { overtimeHours: 4 } },
+      includeCommission: false,
+      note: "draft changed after create",
+    });
+
+    const replay = await runs.createEngineRun({ ...request, periodKey: MORDAD });
+    expect(replay.id).toBe(created.id);
+    expect(replay.idempotentReplay).toBe(true);
+    const current = await runs.getEngineRun(biz.id, created.id);
+    expect(current?.inputs?.[staff.a]).toEqual({ overtimeHours: 4, unpaidLeaveDays: 1, items: [{ code: "BONUS", amount: "1250000" }] });
+    expect(current?.includeCommission).toBe(false);
+    expect(current?.note).toBe("draft changed after create");
+
+    const persisted = (await db.query<{ idempotency_payload: Record<string, unknown> }>("SELECT idempotency_payload FROM payroll_engine_runs WHERE id = $1", [created.id])).rows[0];
+    expect(persisted.idempotency_payload).toMatchObject({
+      version: 1,
+      periodKey: MORDAD,
+      runType: "regular",
+      accrualDate: "2025-08-20",
+      accrualDateMode: "explicit",
+      includeCommission: true,
+      inputs: request.inputs,
+      note: "create identity",
+    });
+
+    await expect(runs.createEngineRun({ ...request, periodKey: MORDAD, accrualDate: "2025-08-21" })).rejects.toThrow("idempotency_key_conflict");
+    await expect(runs.createEngineRun({ ...request, periodKey: MORDAD, includeCommission: false })).rejects.toThrow("idempotency_key_conflict");
+    await expect(runs.createEngineRun({ ...request, periodKey: MORDAD, inputs: { [staff.a]: { overtimeHours: 3 } } })).rejects.toThrow("idempotency_key_conflict");
+  });
+
+  it("does not infer a pre-0218 idempotency request from mutable draft edits", async () => {
+    const key = "legacy-idempotency-865";
+    const row = (await db.query<{ id: string }>(
+      `INSERT INTO payroll_engine_runs (business_id, period_key, run_type, sequence, accrual_date, idempotency_key, idempotency_payload)
+       VALUES ($1, $2, 'regular', 1, '2025-08-22', $3, '{"legacy":true}'::jsonb) RETURNING id`,
+      [biz.id, SHAHRIVAR, key],
+    )).rows[0];
+    await db.query(
+      `UPDATE payroll_engine_runs SET inputs = $2::jsonb, include_commission = false, note = 'edited draft' WHERE id = $1`,
+      [row.id, JSON.stringify({ [staff.a]: { overtimeHours: 4 } })],
+    );
+    await expect(runs.createEngineRun({
+      ...actor(),
+      periodKey: SHAHRIVAR,
+      idempotencyKey: key,
+      includeCommission: false,
+      inputs: { [staff.a]: { overtimeHours: 4 } },
+      note: "edited draft",
+    })).rejects.toThrow("idempotency_key_conflict");
   });
 
   it("is idempotent on create and never books a month that the #835 journal-level payroll holds", async () => {
@@ -274,6 +469,140 @@ describe("payroll engine — workflow", () => {
     await setup.saveComponent({ ...actor(), id: comp.id, body: { insurable: true } });
     expect((await setup.listComponentChanges(biz.id, comp.id)).length).toBe(1);
     await expect(setup.saveComponent({ ...actor(), id: (await setup.listComponents(biz.id)).find((c) => c.code === "TAX")!.id, body: { isActive: false } })).rejects.toThrow("system_component_locked");
+  });
+
+  it("edits the canonical personnel code as text, preserves omission and clears an explicit null", async () => {
+    const code = "۰۰۷";
+    const saved = await setup.saveProfile({ ...actor(), userId: staff.a, body: { employeeCode: code } });
+    expect(saved.employeeCode).toBe(code);
+    expect((await db.query<{ employee_code: string }>("SELECT employee_code FROM employees WHERE id = $1 AND business_id = $2", [staff.a, biz.id])).rows[0].employee_code).toBe(code);
+
+    const preserved = await setup.saveProfile({ ...actor(), userId: staff.a, body: { employmentType: "part_time" } });
+    expect(preserved.employeeCode).toBe(code);
+    const cleared = await setup.saveProfile({ ...actor(), userId: staff.a, body: { employeeCode: null } });
+    expect(cleared.employeeCode).toBeNull();
+    expect((await db.query<{ employee_code: string | null }>("SELECT employee_code FROM employees WHERE id = $1 AND business_id = $2", [staff.a, biz.id])).rows[0].employee_code).toBeNull();
+    expect(await setup.listProfileChanges(biz.id, staff.a)).toHaveLength(4);
+  });
+
+  it("clears a hire date inherited from the canonical team identity when explicitly requested", async () => {
+    await db.query("INSERT INTO employees (id, business_id, hired_at) VALUES ($1, $2, '2025-01-02')", [staff.a, biz.id]);
+    expect((await setup.getProfile(biz.id, staff.a))?.hireDate).toBe("2025-01-02");
+    const profile = await setup.saveProfile({ ...actor(), userId: staff.a, body: { hireDate: null } });
+    expect(profile.hireDate).toBeNull();
+    expect((await db.query<{ hired_at: string | null }>("SELECT hired_at::text FROM employees WHERE id = $1 AND business_id = $2", [staff.a, biz.id])).rows[0].hired_at).toBeNull();
+  });
+
+  it("validates required insurance, tax and bank fields against the canonical in-tenant chart", async () => {
+    const { rows: localBank } = await db.query<{ id: string }>("SELECT id FROM accounts WHERE business_id = $1 AND code = '1110'", [biz.id]);
+    const other = await otherBusiness();
+    const { rows: foreignBank } = await db.query<{ id: string }>(
+      "INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1110', 'Foreign bank', 'asset') RETURNING id",
+      [other],
+    );
+    const valid = await setup.saveProfile({
+      ...actor(),
+      userId: staff.a,
+      body: {
+        employmentType: "part_time",
+        insuranceProfile: { insured: true, insuranceNumber: "12345678901" },
+        taxProfile: { exempt: false, nationalId: "0084575980" },
+        paymentDestination: { method: "bank", paymentAccountId: localBank[0].id, iban: "IR830540102380270014203457", cardNumber: "6037701689095385" },
+      },
+    });
+    expect(valid.employmentType).toBe("part_time");
+    expect(valid.insuranceProfile).toMatchObject({ insured: true, insuranceNumber: "12345678901" });
+    expect(valid.taxProfile).toMatchObject({ exempt: false, nationalId: "0084575980" });
+    expect(valid.paymentDestination).toMatchObject({ method: "bank", paymentAccountId: localBank[0].id, iban: "IR830540102380270014203457" });
+
+    await expect(setup.saveProfile({
+      ...actor(),
+      userId: staff.a,
+      body: { paymentDestination: { method: "bank", paymentAccountId: foreignBank[0].id, iban: "IR830540102380270014203457" } },
+    })).rejects.toThrow("invalid_payment_account");
+    const audit = JSON.stringify(await setup.listProfileChanges(biz.id, staff.a));
+    for (const secret of ["12345678901", "0084575980", "IR830540102380270014203457", "6037701689095385"]) {
+      expect(audit).not.toContain(secret);
+    }
+  });
+
+  it("creates, edits and audits custom components while locking statutory behavior", async () => {
+    const component = await setup.saveComponent({
+      ...actor(),
+      body: { code: "MEAL", name: "Meal allowance", kind: "earning", taxable: true, insurable: false, debitAccountCode: "5200", creditAccountCode: "2300", effectiveFrom: "2025-01-01", effectiveTo: null, isActive: true },
+    });
+    expect(component).toMatchObject({ code: "MEAL", kind: "earning", taxable: true, insurable: false, effectiveFrom: "2025-01-01", isActive: true });
+    const edited = await setup.saveComponent({
+      ...actor(),
+      id: component.id,
+      body: { name: "Meal deduction", kind: "deduction", taxable: false, insurable: false, debitAccountCode: "2490", creditAccountCode: "2300", effectiveFrom: "2025-01-01", effectiveTo: null, isActive: true },
+    });
+    expect(edited).toMatchObject({ name: "Meal deduction", kind: "deduction", taxable: false, debitAccountCode: "2490" });
+    expect(await setup.listComponentChanges(biz.id, component.id)).toHaveLength(2);
+
+    const base = (await setup.listComponents(biz.id)).find((entry) => entry.systemKey === "base_wage")!;
+    expect((await setup.saveComponent({ ...actor(), id: base.id, body: { code: "BASE_WAGE" } })).systemKey).toBe("base_wage");
+    await expect(setup.saveComponent({ ...actor(), id: base.id, body: { taxable: false } })).rejects.toThrow("system_component_locked");
+    await expect(setup.saveComponent({
+      ...actor(),
+      body: { code: "EMPLOYER", name: "Employer", kind: "employer_contribution", debitAccountCode: "5220", creditAccountCode: "2460" },
+    })).rejects.toThrow("system_component_locked");
+  });
+
+  it("retains recurring-item history after end and makes an identical end idempotent", async () => {
+    const component = (await setup.listComponents(biz.id)).find((entry) => entry.code === "HOUSING")!;
+    const item = await setup.addItem({ ...actor(), body: { userId: staff.a, componentId: component.id, amount: "750000", effectiveFrom: "2025-07-23", note: "housing" } });
+    expect(await setup.listItemChanges(biz.id, item.id)).toHaveLength(1);
+    const ended = await setup.endItem({ ...actor(), itemId: item.id, effectiveTo: "2025-08-10" });
+    expect(ended).toMatchObject({ id: item.id, effectiveTo: "2025-08-10" });
+    expect(await setup.listItemChanges(biz.id, item.id)).toHaveLength(2);
+    await setup.endItem({ ...actor(), itemId: item.id, effectiveTo: "2025-08-10" });
+    expect(await setup.listItemChanges(biz.id, item.id)).toHaveLength(2);
+    await expect(setup.addItem({ ...actor(), body: { userId: staff.a, componentId: component.id, amount: "100", effectiveFrom: "2025-01-01", effectiveTo: "2000-01-01" } })).rejects.toThrow("invalid_effective_date");
+  });
+
+  it("reserves commission once for an engine run and releases it on cancellation", async () => {
+    const branch = await location(biz.id, "Counter");
+    await commission.upsertCommissionRule(biz.id, { employeeId: staff.a, kind: "percent", basis: "net", value: 10 });
+    const client = await dbLib.getPool().connect();
+    let accrualId = "";
+    try {
+      await client.query("BEGIN");
+      const result = await commission.accrueCommissionForLine(client, {
+        businessId: biz.id,
+        locationId: branch,
+        employeeId: staff.a,
+        sourceType: "order_item",
+        sourceId: randomUUID(),
+        line: { net: 50_000_000, cost: 0, itemId: randomUUID() },
+      });
+      expect(result.amount).toBe(5_000_000);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    const [commissionRow] = (await db.query<{ id: string }>("SELECT id FROM commission_accruals WHERE business_id = $1 AND employee_id = $2", [biz.id, staff.a])).rows;
+    accrualId = commissionRow.id;
+    const today = (await db.query<{ today: string }>("SELECT CURRENT_DATE::text AS today")).rows[0].today;
+
+    const first = await runs.createEngineRun({ ...actor(), periodKey: MORDAD, accrualDate: today, includeCommission: true });
+    await runs.calculateEngineRun({ ...actor(), runId: first.id });
+    expect((await runs.getEngineRun(biz.id, first.id))?.totals?.commission).toBe("5000000");
+    expect((await runs.listPayslips(biz.id, first.id)).find((slip) => slip.userId === staff.a)?.earnings.find((line) => line.code === "COMMISSION")?.amount).toBe("5000000");
+    expect((await db.query<{ id: string | null }>("SELECT payroll_engine_run_id AS id FROM commission_accruals WHERE id = $1", [accrualId])).rows[0].id).toBe(first.id);
+
+    const competing = await runs.createEngineRun({ ...actor(), periodKey: SHAHRIVAR, accrualDate: today, includeCommission: true });
+    await runs.calculateEngineRun({ ...actor(), runId: competing.id });
+    expect((await runs.getEngineRun(biz.id, competing.id))?.totals?.commission).toBe("0");
+
+    await runs.cancelEngineRun({ ...actor(), runId: first.id });
+    expect((await db.query<{ id: string | null }>("SELECT payroll_engine_run_id AS id FROM commission_accruals WHERE id = $1", [accrualId])).rows[0].id).toBeNull();
+    const retry = await runs.createEngineRun({ ...actor(), periodKey: "1404-07", accrualDate: today, includeCommission: true });
+    await runs.calculateEngineRun({ ...actor(), runId: retry.id });
+    expect((await runs.getEngineRun(biz.id, retry.id))?.totals?.commission).toBe("5000000");
   });
 });
 
@@ -472,7 +801,103 @@ describe("payroll engine — strict report filters", () => {
     await expect(runs.employeePayrollCard(biz.id, staff.a, " 1404")).rejects.toThrow("invalid_period");
     await expect(runs.employeePayrollCard(biz.id, "x", "1404")).rejects.toThrow("invalid_user_id");
     expect((await runs.employeePayrollCard(biz.id, staff.a, "1404")).payslips).toHaveLength(1);
+    const comparison = await runs.periodComparison(biz.id, MORDAD, SHAHRIVAR);
+    expect(comparison.a?.periodKey).toBe(MORDAD);
+    expect(comparison.b).toBeNull();
+    expect(comparison.difference.gross).toBe((-BigInt(comparison.a?.gross ?? "0")).toString());
     await expect(runs.periodComparison(biz.id, MORDAD, "1404-6x")).rejects.toThrow("invalid_period");
+
+    const foreignBusiness = await otherBusiness();
+    const foreignUser = (await db.query<{ id: string }>(
+      "INSERT INTO users (business_id, role, full_name, pin_hash) VALUES ($1, 'owner', 'Foreign', 'x') RETURNING id",
+      [foreignBusiness],
+    )).rows[0].id;
+    await expect(runs.employeePayrollCard(biz.id, foreignUser, "1404")).rejects.toThrow("staff_not_found");
+    await expect(runs.createEngineRun({ ...actor(), periodKey: SHAHRIVAR, inputs: { [foreignUser]: { overtimeHours: 1 } } })).rejects.toThrow("employee_not_in_payroll");
+    const patchable = await runs.createEngineRun({ ...actor(), periodKey: SHAHRIVAR });
+    await expect(runs.updateEngineRunInputs({
+      ...actor(),
+      runId: patchable.id,
+      inputMode: "merge",
+      inputs: { [foreignUser]: { overtimeHours: 0 } },
+    })).rejects.toThrow("employee_not_in_payroll");
+    expect((await runs.getEngineRun(biz.id, patchable.id))?.inputs).toEqual({});
+    const component = (await setup.listComponents(biz.id)).find((entry) => entry.code === "HOUSING")!;
+    await expect(setup.addItem({ ...actor(), body: { userId: foreignUser, componentId: component.id, amount: "100", effectiveFrom: "2025-07-23" } })).rejects.toThrow("staff_not_found");
+  });
+});
+
+describe("payroll engine — recurring-item tenant isolation", () => {
+  it("forces RLS on every payroll tenant table and isolates item-audit reads and writes for a non-bypass role", async () => {
+    const localComponent = (await setup.listComponents(biz.id)).find((entry) => entry.code === "HOUSING")!;
+    const localItem = await setup.addItem({ ...actor(), body: { userId: staff.a, componentId: localComponent.id, amount: "100", effectiveFrom: "2025-07-23" } });
+
+    const other = await otherBusiness();
+    const { rows: foreignUser } = await db.query<{ id: string }>(
+      "INSERT INTO users (business_id, role, full_name, pin_hash) VALUES ($1, 'owner', 'Foreign owner', 'x') RETURNING id",
+      [other],
+    );
+    const foreignComponent = (await setup.listComponents(other)).find((entry) => entry.code === "HOUSING")!;
+    const foreignItem = await setup.addItem({
+      businessId: other,
+      actorId: foreignUser[0].id,
+      body: { userId: foreignUser[0].id, componentId: foreignComponent.id, amount: "200", effectiveFrom: "2025-07-23" },
+    });
+
+    const app = new Client({ connectionString: urlFor(databaseName, { name: appRole, password: appPassword }) });
+    await app.connect();
+    try {
+      const role = (await app.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+        "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+      )).rows[0];
+      expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
+      const tenantTables = [
+        "payroll_rule_sets",
+        "payroll_components",
+        "payroll_component_changes",
+        "payroll_employee_profiles",
+        "payroll_profile_changes",
+        "payroll_employee_items",
+        "payroll_engine_runs",
+        "payroll_payslips",
+        "payroll_employee_item_changes",
+      ];
+      const rls = await app.query<{ table_name: string; row_security: boolean; force_row_security: boolean; tenant_policy: boolean }>(
+        `SELECT c.relname AS table_name, c.relrowsecurity AS row_security,
+                c.relforcerowsecurity AS force_row_security,
+                EXISTS (
+                  SELECT 1 FROM pg_policies p
+                   WHERE p.schemaname = n.nspname AND p.tablename = c.relname
+                     AND p.policyname = 'tenant_isolation' AND p.cmd = 'ALL'
+                ) AS tenant_policy
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = current_schema() AND c.relkind = 'r' AND c.relname = ANY($1::text[])
+          ORDER BY c.relname`,
+        [tenantTables],
+      );
+      expect(rls.rows.map((row) => row.table_name)).toEqual([...tenantTables].sort());
+      expect(rls.rows.every((row) => row.row_security && row.force_row_security && row.tenant_policy)).toBe(true);
+      await app.query("SELECT set_config('app.business_id', $1, false), set_config('app.rls_bypass', '', false)", [biz.id]);
+      const visible = await app.query<{ item_id: string; business_id: string }>(
+        "SELECT item_id, business_id FROM payroll_employee_item_changes ORDER BY item_id",
+      );
+      expect(visible.rows).toEqual([{ item_id: localItem.id, business_id: biz.id }]);
+      expect((await app.query("SELECT id FROM payroll_employee_item_changes WHERE business_id = $1", [other])).rowCount).toBe(0);
+      expect((await app.query("UPDATE payroll_employee_item_changes SET after = '{}'::jsonb WHERE business_id = $1", [other])).rowCount).toBe(0);
+      await expect(app.query("UPDATE payroll_employee_item_changes SET after = '{}'::jsonb WHERE item_id = $1", [localItem.id])).rejects.toMatchObject({ code: "55000" });
+      await expect(app.query(
+        `INSERT INTO payroll_employee_item_changes (business_id, item_id, before, after, changed_by)
+         VALUES ($1, $2, NULL, '{}'::jsonb, $3)`,
+        [other, foreignItem.id, foreignUser[0].id],
+      )).rejects.toMatchObject({ code: "42501" });
+      await expect(app.query(
+        `INSERT INTO payroll_employee_item_changes (business_id, item_id, before, after, changed_by)
+         VALUES ($1, $2, NULL, '{}'::jsonb, $3)`,
+        [biz.id, foreignItem.id, owner.id],
+      )).rejects.toMatchObject({ code: "23503" });
+    } finally {
+      await app.end();
+    }
   });
 });
 
@@ -513,6 +938,38 @@ describe("payroll engine — database identity", () => {
 });
 
 describe("payroll engine — concurrency", () => {
+  it("waits for the shared per-business lock before writing, proven by Postgres lock state", async () => {
+    const blocker = new Client({ connectionString: urlFor(databaseName) });
+    await blocker.connect();
+    let mutation: Promise<unknown> | null = null;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`payroll:${biz.id}`]);
+      const blockerPid = (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      mutation = setup.saveProfile({ ...actor(), userId: staff.a, body: { baseSalary: "155000000" } });
+
+      const waiterPid = await waitForAdvisoryWait(blockerPid);
+      expect(waiterPid).not.toBe(blockerPid);
+      const beforeRelease = (await db.query<{ base_salary: string }>(
+        "SELECT base_salary::text FROM payroll_employee_profiles WHERE business_id = $1 AND user_id = $2",
+        [biz.id, staff.a],
+      )).rows[0].base_salary;
+      expect(beforeRelease).toBe("150000000");
+
+      await blocker.query("COMMIT");
+      await mutation;
+      const afterRelease = (await db.query<{ base_salary: string }>(
+        "SELECT base_salary::text FROM payroll_employee_profiles WHERE business_id = $1 AND user_id = $2",
+        [biz.id, staff.a],
+      )).rows[0].base_salary;
+      expect(afterRelease).toBe("155000000");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      if (mutation) await mutation.catch(() => undefined);
+      await blocker.end();
+    }
+  });
+
   it("posts once under a racing double post", async () => {
     const run = await approvedRun();
     const results = await Promise.allSettled([runs.postEngineRun({ ...actor(), runId: run.id }), runs.postEngineRun({ ...actor(), runId: run.id })]);

@@ -268,6 +268,7 @@ export async function setStaffPayTerms(params: {
   const reason = parseReason(params.reason);
 
   return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
     const { rows } = await client.query<Record<string, string | null>>(
       `SELECT full_name, monthly_wage::text AS monthly_wage,
               monthly_taxable_allowance::text AS monthly_taxable_allowance,

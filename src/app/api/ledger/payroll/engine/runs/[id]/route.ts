@@ -18,7 +18,7 @@ export const GET = withTenantScope(async (_request: Request, ctx: Ctx) => {
   return NextResponse.json({ run, payslips: await listPayslips(session.businessId, id) });
 });
 
-/** Replaces a not-yet-approved run's inputs; it returns to draft. `payroll.manage`. */
+/** Merges typed inputs by default; removal or full replacement must be explicit. `payroll.manage`. */
 export const PATCH = withTenantScope(async (request: Request, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.payrollManage);
   if (error) return error;
@@ -26,7 +26,15 @@ export const PATCH = withTenantScope(async (request: Request, ctx: Ctx) => {
   if (!body) return badRequest();
   const { id } = await ctx.params;
   try {
-    const run = await updateEngineRunInputs({ businessId: session.businessId, runId: id, inputs: body.inputs, includeCommission: body.includeCommission, note: body.note });
+    const run = await updateEngineRunInputs({
+      businessId: session.businessId,
+      runId: id,
+      inputs: body.inputs,
+      inputMode: body.inputMode,
+      removeEmployeeIds: body.removeEmployeeIds,
+      includeCommission: body.includeCommission,
+      note: body.note,
+    });
     return NextResponse.json({ run });
   } catch (err) {
     const response = payrollErrorResponse(err);

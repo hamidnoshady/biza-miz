@@ -13,8 +13,10 @@ import { isUuid } from "./uuid";
 import { normalizeOptionalIsoDate } from "./iso-date";
 import { MAX_RIAL } from "./inventory-exact";
 import { parseRialInput } from "./payroll-amounts";
-import { clientRunner, inTransaction, poolRunner, type Runner } from "./payroll-db";
+import { clientRunner, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
 import { PayrollError } from "./payroll-errors";
+import { asciiDigits, isValidCardNumber, isValidIranianIban, isValidIranianNationalId } from "./parties";
+import { usablePaymentAccounts, type ChartAccountRow } from "./payroll-payment-accounts";
 import {
   DEFAULT_COMPONENTS,
   IRAN_RULE_TEMPLATE,
@@ -90,6 +92,7 @@ export async function createRuleSet(params: {
   if (!parsed.ok) throw new PayrollError(parsed.error, 400, parsed.field ? { field: parsed.field } : undefined);
 
   return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`payroll-rules:${params.businessId}`]);
     const { rows } = await client.query<RuleRow>(
       `INSERT INTO payroll_rule_sets (business_id, version, title, effective_from, rules, created_by)
@@ -158,9 +161,29 @@ export async function ensureCatalogue(client: PoolClient, businessId: string): P
 }
 
 export async function listComponents(businessId: string): Promise<PayrollComponent[]> {
-  await inTransaction((client) => ensureCatalogue(client, businessId));
+  await inTransaction(async (client) => {
+    await lockPayroll(client, businessId);
+    await ensureCatalogue(client, businessId);
+  });
   const { rows } = await poolRunner<ComponentRow>(`${COMPONENT_SELECT} WHERE business_id = $1 ORDER BY kind, code`, [businessId]);
   return rows.map(toComponent);
+}
+
+/**
+ * The small chart projection payroll needs for component posting mappings. It
+ * is intentionally not `/api/ledger/accounts`: payroll readers only see active
+ * posting leaves (code, label and class), never balances or ledger activity.
+ */
+export async function listPayrollPostingAccounts(businessId: string) {
+  const { rows } = await poolRunner<{ id: string; code: string; name: string; type: string }>(
+    `SELECT a.id, a.code, a.name, a.type::text AS type
+       FROM accounts a
+      WHERE a.business_id = $1 AND a.is_active
+        AND NOT EXISTS (SELECT 1 FROM accounts child WHERE child.business_id = a.business_id AND child.parent_id = a.id AND child.is_active)
+      ORDER BY a.code`,
+    [businessId],
+  );
+  return rows;
 }
 
 /** Components in force on `date` (active and inside their effective window). */
@@ -176,14 +199,15 @@ export async function componentsFor(run: Runner, businessId: string, date: strin
 const ACCOUNT_CODE = /^[0-9]{3,8}$/;
 
 /**
- * Creates (no `id`) or edits a component. The system key of a seeded
- * component is fixed (the calculator relies on it) and a system component
- * cannot be deactivated; everything else — name, flags, accounts, effective
- * window — is the business's. Every change is written to the audit table.
+ * Creates (no `id`) or edits a component. A seeded component's `system_key`
+ * is fixed and drives calculation. Its code may be renamed, but its kind,
+ * statutory flags, effective window and active state cannot be changed. Names
+ * and ledger mappings remain business-configurable. Every change is audited.
  */
 export async function saveComponent(params: { businessId: string; actorId: string | null; id?: unknown; body: Record<string, unknown> }): Promise<PayrollComponent> {
   const b = params.body;
   return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
     await ensureCatalogue(client, params.businessId);
     let before: ComponentRow | null = null;
     if (params.id !== undefined) {
@@ -215,6 +239,8 @@ export async function saveComponent(params: { businessId: string; actorId: strin
     if (before?.system_key) {
       if (kind !== before.kind) throw new PayrollError("system_component_locked", 409, "kind");
       if (!isActive) throw new PayrollError("system_component_locked", 409, "isActive");
+      if (taxable !== before.taxable || insurable !== before.insurable) throw new PayrollError("system_component_locked", 409, "statutory_flags");
+      if (from.value !== before.effective_from || to.value !== before.effective_to) throw new PayrollError("system_component_locked", 409, "effective_dates");
     }
     if (!before && kind === "employer_contribution") throw new PayrollError("system_component_locked", 409, "kind");
     const { rows: accounts } = await client.query<{ code: string }>(
@@ -229,12 +255,13 @@ export async function saveComponent(params: { businessId: string; actorId: strin
     try {
       const { rows } = before
         ? await client.query<ComponentRow>(
-            `UPDATE payroll_components SET code=$3, name=$4, taxable=$5, insurable=$6, debit_account_code=$7, credit_account_code=$8,
-                    effective_from=COALESCE($9::date, effective_from), effective_to=$10, is_active=$11, updated_at=now()
+            `UPDATE payroll_components SET code=$3, name=$4, kind=$5, taxable=$6, insurable=$7,
+                    debit_account_code=$8, credit_account_code=$9, effective_from=COALESCE($10::date, effective_from),
+                    effective_to=$11, is_active=$12, updated_at=now()
               WHERE business_id=$1 AND id=$2
               RETURNING id, code, name, kind, system_key, taxable, insurable, debit_account_code, credit_account_code,
                         effective_from::text AS effective_from, effective_to::text AS effective_to, is_active`,
-            [params.businessId, before.id, code, name.trim(), taxable, insurable, debit, credit, from.value, to.value, isActive],
+            [params.businessId, before.id, code, name.trim(), kind, taxable, insurable, debit, credit, from.value, to.value, isActive],
           )
         : await client.query<ComponentRow>(
             `INSERT INTO payroll_components (business_id, code, name, kind, taxable, insurable, debit_account_code, credit_account_code,
@@ -261,7 +288,7 @@ export async function listComponentChanges(businessId: string, componentId: stri
   if (!isUuid(componentId)) return [];
   const { rows } = await poolRunner<{ before: unknown; after: unknown; changed_by_name: string | null; changed_at: string }>(
     `SELECT c.before, c.after, u.full_name AS changed_by_name, c.changed_at::text AS changed_at
-       FROM payroll_component_changes c LEFT JOIN users u ON u.id = c.changed_by
+       FROM payroll_component_changes c LEFT JOIN users u ON u.id = c.changed_by AND u.business_id = c.business_id
       WHERE c.business_id = $1 AND c.component_id = $2 ORDER BY c.changed_at DESC, c.id DESC`,
     [businessId, componentId],
   );
@@ -284,6 +311,7 @@ export interface CostAllocationShare {
 export interface PayrollProfile {
   userId: string;
   fullName: string;
+  /** Canonical personnel code on the shared employee identity. */
   employeeCode: string | null;
   payrollCode: string | null;
   employmentType: (typeof EMPLOYMENT_TYPES)[number];
@@ -333,12 +361,33 @@ const toProfile = (r: ProfileRow): PayrollProfile => ({
   configured: r.configured,
 });
 
+/** Audit records retain change context without copying identity or bank numbers. */
+function profileAuditShape(profile: PayrollProfile) {
+  return {
+    ...profile,
+    insuranceProfile: {
+      insured: profile.insuranceProfile.insured,
+      insuranceNumberStored: Boolean(profile.insuranceProfile.insuranceNumber),
+    },
+    taxProfile: {
+      exempt: profile.taxProfile.exempt,
+      nationalIdStored: Boolean(profile.taxProfile.nationalId),
+    },
+    paymentDestination: {
+      method: profile.paymentDestination.method,
+      paymentAccountId: profile.paymentDestination.paymentAccountId ?? null,
+      ibanStored: Boolean(profile.paymentDestination.iban),
+      cardNumberStored: Boolean(profile.paymentDestination.cardNumber),
+    },
+  };
+}
+
 const PROFILE_SELECT = `SELECT u.id AS user_id, u.full_name, e.employee_code, (p.user_id IS NOT NULL) AS configured,
        p.payroll_code, p.employment_type, COALESCE(p.hire_date, e.hired_at)::text AS hire_date,
        p.termination_date::text AS termination_date, p.base_salary::text AS base_salary,
        p.insurance_profile, p.tax_profile, p.payment_destination, p.cost_allocation, p.is_active
   FROM users u
-  LEFT JOIN employees e ON e.id = u.id
+  LEFT JOIN employees e ON e.id = u.id AND e.business_id = u.business_id
   LEFT JOIN payroll_employee_profiles p ON p.user_id = u.id AND p.business_id = u.business_id`;
 
 export async function listProfiles(businessId: string): Promise<PayrollProfile[]> {
@@ -417,59 +466,120 @@ export async function assertAllocationReferences(run: Runner, businessId: string
 /** Creates or updates a team member's payroll profile, auditing the before/after. */
 export async function saveProfile(params: { businessId: string; actorId: string | null; userId: string; body: Record<string, unknown> }): Promise<PayrollProfile> {
   if (!isUuid(params.userId)) throw new PayrollError("staff_not_found", 404);
-  const current = await getProfile(params.businessId, params.userId);
-  if (!current) throw new PayrollError("staff_not_found", 404);
-  const b = params.body;
-  const pick = <T>(key: string, fallback: T): unknown => (b[key] === undefined ? fallback : b[key]);
+  return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
+    const run = clientRunner(client);
+    const { rows: currentRows } = await run<ProfileRow>(`${PROFILE_SELECT} WHERE u.business_id = $1 AND u.id = $2`, [params.businessId, params.userId]);
+    const current = currentRows[0] ? toProfile(currentRows[0]) : null;
+    if (!current) throw new PayrollError("staff_not_found", 404);
+    const b = params.body;
+    const pick = <T>(key: string, fallback: T): unknown => (b[key] === undefined ? fallback : b[key]);
 
-  const payrollCode = optionalText(pick("payrollCode", current.payrollCode), 40, "payrollCode");
-  const employmentType = pick("employmentType", current.employmentType);
-  if (!EMPLOYMENT_TYPES.includes(employmentType as never)) throw new PayrollError("invalid_profile", 400, "employmentType");
-  const hire = normalizeOptionalIsoDate(pick("hireDate", current.hireDate));
-  const term = normalizeOptionalIsoDate(pick("terminationDate", current.terminationDate));
-  if (!hire.ok) throw new PayrollError("invalid_profile", 400, "hireDate");
-  if (!term.ok) throw new PayrollError("invalid_profile", 400, "terminationDate");
-  if (hire.value && term.value && term.value < hire.value) throw new PayrollError("invalid_profile", 400, "terminationDate");
-  const salary = parseRialInput(pick("baseSalary", current.baseSalary));
-  if (salary > MAX_RIAL) throw new PayrollError("amount_out_of_range", 400, "baseSalary");
+    const employeeCode = optionalText(pick("employeeCode", current.employeeCode), 40, "employeeCode");
+    const payrollCode = optionalText(pick("payrollCode", current.payrollCode), 40, "payrollCode");
+    const rawEmploymentType = pick("employmentType", current.employmentType);
+    if (!EMPLOYMENT_TYPES.includes(rawEmploymentType as never)) throw new PayrollError("invalid_profile", 400, "employmentType");
+    const employmentType = rawEmploymentType as PayrollProfile["employmentType"];
+    const hire = normalizeOptionalIsoDate(pick("hireDate", current.hireDate));
+    const term = normalizeOptionalIsoDate(pick("terminationDate", current.terminationDate));
+    if (!hire.ok) throw new PayrollError("invalid_profile", 400, "hireDate");
+    if (!term.ok) throw new PayrollError("invalid_profile", 400, "terminationDate");
+    if (hire.value && term.value && term.value < hire.value) throw new PayrollError("invalid_profile", 400, "terminationDate");
+    const salary = parseRialInput(pick("baseSalary", current.baseSalary));
+    if (salary > MAX_RIAL) throw new PayrollError("amount_out_of_range", 400, "baseSalary");
 
-  const ins = pick("insuranceProfile", current.insuranceProfile) as Record<string, unknown> | null;
-  if (typeof ins !== "object" || ins === null || typeof ins.insured !== "boolean") throw new PayrollError("invalid_profile", 400, "insuranceProfile");
-  const tax = pick("taxProfile", current.taxProfile) as Record<string, unknown> | null;
-  if (typeof tax !== "object" || tax === null || typeof tax.exempt !== "boolean") throw new PayrollError("invalid_profile", 400, "taxProfile");
-  const dest = pick("paymentDestination", current.paymentDestination) as Record<string, unknown> | null;
-  if (typeof dest !== "object" || dest === null || (dest.method !== "cash" && dest.method !== "bank")) {
-    throw new PayrollError("invalid_profile", 400, "paymentDestination");
-  }
-  if (dest.paymentAccountId !== undefined && dest.paymentAccountId !== null && !isUuid(dest.paymentAccountId)) {
-    throw new PayrollError("invalid_profile", 400, "paymentDestination.paymentAccountId");
-  }
-  const iban = optionalText(dest.iban, 34, "paymentDestination.iban");
-  if (iban && !/^IR[0-9]{24}$/.test(iban.replace(/\s/g, "").toUpperCase())) throw new PayrollError("invalid_iban", 400, "paymentDestination.iban");
-  const allocation = parseCostAllocation(pick("costAllocation", current.costAllocation));
-  await assertAllocationReferences(poolRunner, params.businessId, allocation);
-  const isActive = pick("isActive", current.isActive);
-  if (typeof isActive !== "boolean") throw new PayrollError("invalid_profile", 400, "isActive");
+    const ins = pick("insuranceProfile", current.insuranceProfile) as Record<string, unknown> | null;
+    if (typeof ins !== "object" || ins === null || typeof ins.insured !== "boolean") throw new PayrollError("invalid_profile", 400, "insuranceProfile");
+    const tax = pick("taxProfile", current.taxProfile) as Record<string, unknown> | null;
+    if (typeof tax !== "object" || tax === null || typeof tax.exempt !== "boolean") throw new PayrollError("invalid_profile", 400, "taxProfile");
+    const dest = pick("paymentDestination", current.paymentDestination) as Record<string, unknown> | null;
+    if (typeof dest !== "object" || dest === null || (dest.method !== "cash" && dest.method !== "bank")) {
+      throw new PayrollError("invalid_profile", 400, "paymentDestination");
+    }
+    const destinationMethod = dest.method as PayrollProfile["paymentDestination"]["method"];
+    if (dest.paymentAccountId !== undefined && dest.paymentAccountId !== null && !isUuid(dest.paymentAccountId)) {
+      throw new PayrollError("invalid_profile", 400, "paymentDestination.paymentAccountId");
+    }
+    const rawIban = optionalText(dest.iban, 34, "paymentDestination.iban");
+    const iban = rawIban ? rawIban.replace(/[\s-]/g, "").toUpperCase() : null;
+    if (iban && !isValidIranianIban(iban)) throw new PayrollError("invalid_iban", 400, "paymentDestination.iban");
+    if (dest.method === "bank" && !iban) throw new PayrollError("invalid_iban", 400, "paymentDestination.iban");
+    const rawCardNumber = optionalText(dest.cardNumber, 32, "paymentDestination.cardNumber");
+    const cardNumber = rawCardNumber ? asciiDigits(rawCardNumber) : null;
+    if (cardNumber && !isValidCardNumber(cardNumber)) throw new PayrollError("invalid_card_number", 400, "paymentDestination.cardNumber");
+    const allocation = parseCostAllocation(pick("costAllocation", current.costAllocation));
+    await assertAllocationReferences(run, params.businessId, allocation);
+    const isActive = pick("isActive", current.isActive);
+    if (typeof isActive !== "boolean") throw new PayrollError("invalid_profile", 400, "isActive");
 
-  const next = {
-    payrollCode,
-    employmentType,
-    hireDate: hire.value,
-    terminationDate: term.value,
-    baseSalary: salary.toString(),
-    insuranceProfile: { insured: ins.insured, insuranceNumber: optionalText(ins.insuranceNumber, 20, "insuranceProfile.insuranceNumber") },
-    taxProfile: { exempt: tax.exempt, nationalId: optionalText(tax.nationalId, 10, "taxProfile.nationalId") },
-    paymentDestination: {
-      method: dest.method,
-      paymentAccountId: (dest.paymentAccountId as string | undefined) ?? null,
-      iban: iban ? iban.replace(/\s/g, "").toUpperCase() : null,
-      cardNumber: optionalText(dest.cardNumber, 19, "paymentDestination.cardNumber"),
-    },
-    costAllocation: allocation,
-    isActive,
-  };
+    const rawInsuranceNumber = optionalText(ins.insuranceNumber, 40, "insuranceProfile.insuranceNumber");
+    const insuranceNumber = rawInsuranceNumber ? asciiDigits(rawInsuranceNumber) : null;
+    if (ins.insured && (!insuranceNumber || insuranceNumber.length > 20)) {
+      throw new PayrollError("invalid_insurance_number", 400, "insuranceProfile.insuranceNumber");
+    }
+    const rawNationalId = optionalText(tax.nationalId, 24, "taxProfile.nationalId");
+    const nationalId = rawNationalId ? asciiDigits(rawNationalId) : null;
+    if (nationalId && !isValidIranianNationalId(nationalId)) throw new PayrollError("invalid_national_id", 400, "taxProfile.nationalId");
+    if (!tax.exempt && !nationalId) throw new PayrollError("invalid_national_id", 400, "taxProfile.nationalId");
 
-  await inTransaction(async (client) => {
+    const paymentAccountId = (dest.paymentAccountId as string | undefined) ?? null;
+    if (paymentAccountId) {
+      const { rows } = await run<{ id: string; code: string; name: string; parent_id: string | null; type: ChartAccountRow["type"] }>(
+        `SELECT id, code, name, parent_id, type::text AS type FROM accounts WHERE business_id = $1 AND is_active`,
+        [params.businessId],
+      );
+      const eligible = usablePaymentAccounts(rows.map((r) => ({ id: r.id, code: r.code, name: r.name, parentId: r.parent_id, type: r.type })))
+        .find((account) => account.id === paymentAccountId);
+      if (!eligible || (dest.method === "bank" ? eligible.role !== "bank" : eligible.role === "bank")) {
+        throw new PayrollError("invalid_payment_account", 400, "paymentDestination.paymentAccountId");
+      }
+    }
+
+    const next = {
+      employeeCode,
+      payrollCode,
+      employmentType,
+      hireDate: hire.value,
+      terminationDate: term.value,
+      baseSalary: salary.toString(),
+      insuranceProfile: { insured: ins.insured, insuranceNumber },
+      taxProfile: { exempt: tax.exempt, nationalId },
+      paymentDestination: { method: destinationMethod, paymentAccountId, iban, cardNumber },
+      costAllocation: allocation,
+      isActive,
+    };
+
+    // Personnel code is part of the shared employee identity, not a payroll-only
+    // shadow field. A supplied null/empty value deliberately clears it; an
+    // omitted field preserves the canonical value read above.
+    if (employeeCode !== current.employeeCode) {
+      const { rows: employeeRows } = await client.query<{ id: string }>(
+        `INSERT INTO employees (id, business_id, employee_code) VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO UPDATE SET employee_code = EXCLUDED.employee_code, updated_at = now()
+           WHERE employees.business_id = EXCLUDED.business_id
+         RETURNING id`,
+        [params.userId, params.businessId, employeeCode],
+      );
+      if (!employeeRows[0]) throw new PayrollError("staff_not_found", 404);
+    }
+    if (b.hireDate !== undefined && hire.value !== current.hireDate) {
+      const updated = await client.query(
+        `UPDATE employees SET hired_at = $3::date, updated_at = now()
+          WHERE id = $1 AND business_id = $2`,
+        [params.userId, params.businessId, hire.value],
+      );
+      if (updated.rowCount === 0 && hire.value !== null) {
+        const { rows: employeeRows } = await client.query<{ id: string }>(
+          `INSERT INTO employees (id, business_id, hired_at) VALUES ($1, $2, $3::date)
+           ON CONFLICT (id) DO UPDATE SET hired_at = EXCLUDED.hired_at, updated_at = now()
+             WHERE employees.business_id = EXCLUDED.business_id
+           RETURNING id`,
+          [params.userId, params.businessId, hire.value],
+        );
+        if (!employeeRows[0]) throw new PayrollError("staff_not_found", 404);
+      }
+    }
+
     try {
       await client.query(
         `INSERT INTO payroll_employee_profiles (user_id, business_id, payroll_code, employment_type, hire_date, termination_date, base_salary,
@@ -492,17 +602,24 @@ export async function saveProfile(params: { businessId: string; actorId: string 
     }
     await client.query(
       `INSERT INTO payroll_profile_changes (business_id, user_id, before, after, changed_by) VALUES ($1,$2,$3,$4,$5)`,
-      [params.businessId, params.userId, current.configured ? JSON.stringify(current) : null, JSON.stringify(next), params.actorId],
+      [
+        params.businessId,
+        params.userId,
+        current.configured ? JSON.stringify(profileAuditShape(current)) : null,
+        JSON.stringify(profileAuditShape({ ...current, ...next, configured: true })),
+        params.actorId,
+      ],
     );
+    const { rows: savedRows } = await run<ProfileRow>(`${PROFILE_SELECT} WHERE u.business_id = $1 AND u.id = $2`, [params.businessId, params.userId]);
+    return toProfile(savedRows[0]);
   });
-  return (await getProfile(params.businessId, params.userId))!;
 }
 
 export async function listProfileChanges(businessId: string, userId: string) {
   if (!isUuid(userId)) return [];
   const { rows } = await poolRunner<{ before: unknown; after: unknown; changed_by_name: string | null; changed_at: string }>(
     `SELECT c.before, c.after, u.full_name AS changed_by_name, c.changed_at::text AS changed_at
-       FROM payroll_profile_changes c LEFT JOIN users u ON u.id = c.changed_by
+       FROM payroll_profile_changes c LEFT JOIN users u ON u.id = c.changed_by AND u.business_id = c.business_id
       WHERE c.business_id = $1 AND c.user_id = $2 ORDER BY c.changed_at DESC, c.id DESC`,
     [businessId, userId],
   );
@@ -524,26 +641,33 @@ export interface PayrollRecurringItem {
   effectiveFrom: string;
   effectiveTo: string | null;
   note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  endedAt: string | null;
 }
 
 const ITEM_SELECT = `SELECT i.id, i.user_id, i.component_id, c.code AS component_code, c.name AS component_name, c.kind,
-       i.amount::text AS amount, i.effective_from::text AS effective_from, i.effective_to::text AS effective_to, i.note
-  FROM payroll_employee_items i JOIN payroll_components c ON c.id = i.component_id`;
+       i.amount::text AS amount, i.effective_from::text AS effective_from, i.effective_to::text AS effective_to, i.note,
+       i.created_by, i.created_at::text AS created_at, i.ended_at::text AS ended_at
+  FROM payroll_employee_items i JOIN payroll_components c ON c.id = i.component_id AND c.business_id = i.business_id`;
 
 type ItemRow = Record<string, unknown> & {
   id: string; user_id: string; component_id: string; component_code: string; component_name: string;
   kind: ComponentKind; amount: string; effective_from: string; effective_to: string | null; note: string | null;
+  created_by: string | null; created_at: string; ended_at: string | null;
 };
 
 const toItem = (r: ItemRow): PayrollRecurringItem => ({
   id: r.id, userId: r.user_id, componentId: r.component_id, componentCode: r.component_code, componentName: r.component_name,
   kind: r.kind, amount: r.amount, effectiveFrom: r.effective_from, effectiveTo: r.effective_to, note: r.note,
+  createdBy: r.created_by, createdAt: r.created_at, endedAt: r.ended_at,
 });
 
 export async function listItems(businessId: string, userId?: string): Promise<PayrollRecurringItem[]> {
+  if (userId !== undefined && !isUuid(userId)) throw new PayrollError("invalid_user_id", 400, "userId");
   const { rows } = await poolRunner<ItemRow>(
     `${ITEM_SELECT} WHERE i.business_id = $1 AND ($2::uuid IS NULL OR i.user_id = $2) ORDER BY i.effective_from DESC, i.id`,
-    [businessId, userId && isUuid(userId) ? userId : null],
+    [businessId, userId ?? null],
   );
   return rows.map(toItem);
 }
@@ -570,44 +694,99 @@ export async function addItem(params: { businessId: string; actorId: string | nu
   const from = normalizeOptionalIsoDate(b.effectiveFrom);
   const to = normalizeOptionalIsoDate(b.effectiveTo);
   if (!from.ok || !from.value || !to.ok || (to.value && to.value < from.value)) throw new PayrollError("invalid_effective_date");
+  const effectiveFrom = from.value;
+  const effectiveTo = to.value;
   const note = optionalText(b.note, 200, "note");
 
   return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
     const run = clientRunner(client);
     const { rows: users } = await run<{ id: string }>(`SELECT id FROM users WHERE business_id = $1 AND id = $2`, [params.businessId, b.userId]);
     if (!users[0]) throw new PayrollError("staff_not_found", 404);
-    const { rows: comps } = await run<{ kind: string; system_key: string | null }>(
-      `SELECT kind, system_key FROM payroll_components WHERE business_id = $1 AND id = $2`,
+    const { rows: comps } = await run<{ kind: string; system_key: string | null; is_active: boolean; effective_from: string; effective_to: string | null }>(
+      `SELECT kind, system_key, is_active, effective_from::text AS effective_from, effective_to::text AS effective_to
+         FROM payroll_components WHERE business_id = $1 AND id = $2`,
       [params.businessId, b.componentId],
     );
     const comp = comps[0];
     if (!comp) throw new PayrollError("component_not_found", 404);
     const recurringSystem = ["bonus", "loan_installment"];
-    if (comp.kind === "employer_contribution" || (comp.system_key && !recurringSystem.includes(comp.system_key))) {
+    if (!comp.is_active || comp.kind === "employer_contribution" || (comp.system_key && !recurringSystem.includes(comp.system_key))) {
       throw new PayrollError("component_not_enterable", 400, "componentId");
+    }
+    if (effectiveFrom < comp.effective_from || (comp.effective_to !== null && (effectiveTo === null || effectiveTo > comp.effective_to))) {
+      throw new PayrollError("invalid_effective_date", 400, "effectiveFrom");
     }
     const { rows } = await run<{ id: string }>(
       `INSERT INTO payroll_employee_items (business_id, user_id, component_id, amount, effective_from, effective_to, note, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-      [params.businessId, b.userId, b.componentId, amount.toString(), from.value, to.value, note, params.actorId],
+      [params.businessId, b.userId, b.componentId, amount.toString(), effectiveFrom, effectiveTo, note, params.actorId],
     );
-    const { rows: out } = await run<ItemRow>(`${ITEM_SELECT} WHERE i.id = $1`, [rows[0].id]);
-    return toItem(out[0]);
+    const { rows: out } = await run<ItemRow>(`${ITEM_SELECT} WHERE i.business_id = $1 AND i.id = $2`, [params.businessId, rows[0].id]);
+    const item = toItem(out[0]);
+    await run(
+      `INSERT INTO payroll_employee_item_changes (business_id, item_id, before, after, changed_by)
+       VALUES ($1, $2, NULL, $3, $4)`,
+      [params.businessId, item.id, JSON.stringify(item), params.actorId],
+    );
+    return item;
   });
 }
 
-/** Ends a recurring item on `effectiveTo` (default: yesterday's history is kept; the row is never deleted). */
-export async function endItem(params: { businessId: string; itemId: string; effectiveTo: unknown }): Promise<PayrollRecurringItem> {
+/** Ends a recurring item on `effectiveTo`; the row and its before/after audit are retained. */
+export async function endItem(params: {
+  businessId: string;
+  itemId: string;
+  effectiveTo: unknown;
+  actorId: string | null;
+}): Promise<PayrollRecurringItem> {
   if (!isUuid(params.itemId)) throw new PayrollError("item_not_found", 404);
   const to = normalizeOptionalIsoDate(params.effectiveTo);
   if (!to.ok || !to.value) throw new PayrollError("invalid_effective_date", 400, "effectiveTo");
-  const { rows } = await poolRunner<{ id: string }>(
-    `UPDATE payroll_employee_items SET effective_to = $3, ended_at = now()
-      WHERE business_id = $1 AND id = $2 AND effective_from <= $3::date RETURNING id`,
-    [params.businessId, params.itemId, to.value],
+  const effectiveTo = to.value;
+  return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
+    const run = clientRunner(client);
+    const { rows: beforeRows } = await run<ItemRow>(`${ITEM_SELECT} WHERE i.business_id = $1 AND i.id = $2 FOR UPDATE OF i`, [params.businessId, params.itemId]);
+    const before = beforeRows[0];
+    if (!before) throw new PayrollError("item_not_found", 404);
+    if (effectiveTo < before.effective_from) throw new PayrollError("invalid_effective_date", 400, "effectiveTo");
+    if (before.effective_to === effectiveTo && before.ended_at !== null) return toItem(before);
+
+    await run(
+      `UPDATE payroll_employee_items SET effective_to = $3, ended_at = now()
+        WHERE business_id = $1 AND id = $2`,
+      [params.businessId, params.itemId, effectiveTo],
+    );
+    const { rows: afterRows } = await run<ItemRow>(`${ITEM_SELECT} WHERE i.business_id = $1 AND i.id = $2`, [params.businessId, params.itemId]);
+    const item = toItem(afterRows[0]);
+    await run(
+      `INSERT INTO payroll_employee_item_changes (business_id, item_id, before, after, changed_by)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [params.businessId, item.id, JSON.stringify(toItem(before)), JSON.stringify(item), params.actorId],
+    );
+    return item;
+  });
+}
+
+/** Read-only history for one item; a foreign or missing id reveals no rows. */
+export async function listItemChanges(businessId: string, itemId: string) {
+  if (!isUuid(itemId)) return [];
+  const { rows } = await poolRunner<{
+    before: unknown;
+    after: unknown;
+    changed_by: string | null;
+    changed_by_name: string | null;
+    changed_at: string;
+  }>(
+    `SELECT c.before, c.after, c.changed_by, u.full_name AS changed_by_name, c.changed_at::text AS changed_at
+       FROM payroll_employee_item_changes c
+       JOIN payroll_employee_items i ON i.id = c.item_id AND i.business_id = c.business_id
+       LEFT JOIN users u ON u.id = c.changed_by AND u.business_id = c.business_id
+      WHERE c.business_id = $1 AND c.item_id = $2
+      ORDER BY c.changed_at DESC, c.id DESC`,
+    [businessId, itemId],
   );
-  if (!rows[0]) throw new PayrollError("item_not_found", 404);
-  const { rows: out } = await poolRunner<ItemRow>(`${ITEM_SELECT} WHERE i.id = $1`, [rows[0].id]);
-  return toItem(out[0]);
+  return rows.map((row) => ({ before: row.before, after: row.after, changedBy: row.changed_by, changedByName: row.changed_by_name, changedAt: row.changed_at }));
 }
 
