@@ -12,6 +12,7 @@
  */
 import { query } from "./db";
 import { SETTING_KEYS } from "./settings";
+import { revokeTrustedDevicesForBusiness } from "./trusted-device";
 
 export interface MfaPolicy {
   /** Extend the second-factor requirement to `manager` memberships. */
@@ -45,6 +46,7 @@ export async function getMfaPolicy(businessId: string): Promise<MfaPolicy> {
 
 export async function setMfaPolicy(businessId: string, policy: MfaPolicy): Promise<MfaPolicy> {
   const next = normalizeMfaPolicy(policy);
+  const previous = await getMfaPolicy(businessId);
   await query(
     `INSERT INTO settings (business_id, location_id, key, value)
      VALUES ($1, NULL, $2, $3)
@@ -52,5 +54,24 @@ export async function setMfaPolicy(businessId: string, policy: MfaPolicy): Promi
      DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
     [businessId, SETTING_KEYS.mfaPolicy, JSON.stringify(next)],
   );
+
+  // Issue #885 — a policy change invalidates the trust earned under the old one.
+  //
+  // The seven-day device exemption exists to skip a *routine* challenge. When
+  // the owner widens the requirement, every exemption already granted was
+  // earned against a weaker rule, so honouring it would let a manager who had
+  // not been challenged in a week silently skip the very requirement just
+  // switched on. Trust is re-earnable the next time the member verifies, which
+  // is the whole point: this costs one challenge, not access.
+  //
+  // Only on an actual change, so re-saving the same policy does not log
+  // everyone out of their trusted devices for nothing.
+  if (previous.requireForManagers !== next.requireForManagers) {
+    await revokeTrustedDevicesForBusiness({
+      businessId,
+      reason: next.requireForManagers ? "mfa_policy_tightened" : "mfa_policy_changed",
+    });
+  }
+
   return next;
 }

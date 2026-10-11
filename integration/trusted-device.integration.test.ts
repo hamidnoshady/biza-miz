@@ -301,6 +301,109 @@ describe("security events invalidate trust", () => {
     ).toEqual({ trusted: false, reason: "revoked" });
   });
 
+  it("tightening the MFA policy revokes trust earned under the weaker one", async () => {
+    const mfaPolicy = await import("../src/lib/mfa-policy");
+
+    const issued = await dbLib.withTenant(biz.id, () =>
+      trustedDevice.issueTrustedDevice({ businessId: biz.id, userId: member.b }),
+    );
+    expect(
+      await trustedDevice.verifyTrustedDevice({
+        businessId: biz.id,
+        userId: member.b,
+        token: issued.token,
+      }),
+    ).toEqual({ trusted: true, expiresAt: issued.expiresAt });
+
+    // The owner switches the second-factor requirement on for managers. Every
+    // exemption already granted was earned against the weaker rule, so it must
+    // not survive the change.
+    await dbLib.withTenant(biz.id, () =>
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: true }),
+    );
+
+    expect(
+      await trustedDevice.verifyTrustedDevice({
+        businessId: biz.id,
+        userId: member.b,
+        token: issued.token,
+      }),
+    ).toEqual({ trusted: false, reason: "revoked" });
+
+    const { rows } = await db.query<{ revoked_reason: string }>(
+      `SELECT revoked_reason FROM trusted_devices WHERE business_id = $1 AND user_id = $2
+        ORDER BY trusted_at DESC LIMIT 1`,
+      [biz.id, member.b],
+    );
+    expect(rows[0].revoked_reason).toBe("mfa_policy_tightened");
+  });
+
+  it("re-saving an unchanged MFA policy does not take anyone's trust", async () => {
+    const mfaPolicy = await import("../src/lib/mfa-policy");
+
+    // Establish a known baseline first: the test above tightened this same
+    // business's policy, and the settings row persists across tests, so
+    // writing `false` here would be a genuine change rather than a no-op.
+    await dbLib.withTenant(biz.id, () =>
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false }),
+    );
+
+    const issued = await dbLib.withTenant(biz.id, () =>
+      trustedDevice.issueTrustedDevice({ businessId: biz.id, userId: member.a }),
+    );
+
+    // Same value written twice. A no-op policy save must not log a member out
+    // of their trusted devices — that would make the settings screen
+    // destructive to open.
+    await dbLib.withTenant(biz.id, async () => {
+      await mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false });
+      await mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false });
+    });
+
+    expect(
+      await trustedDevice.verifyTrustedDevice({
+        businessId: biz.id,
+        userId: member.a,
+        token: issued.token,
+      }),
+    ).toEqual({ trusted: true, expiresAt: issued.expiresAt });
+  });
+
+  it("a policy change in one business leaves another business's trust alone", async () => {
+    const mfaPolicy = await import("../src/lib/mfa-policy");
+
+    const here = await dbLib.withTenant(biz.id, () =>
+      trustedDevice.issueTrustedDevice({ businessId: biz.id, userId: member.a }),
+    );
+    const elsewhere = await dbLib.withTenant(otherBiz.id, () =>
+      trustedDevice.issueTrustedDevice({ businessId: otherBiz.id, userId: member.a }),
+    );
+
+    await dbLib.withTenant(biz.id, () =>
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: true }),
+    );
+
+    expect(
+      await trustedDevice.verifyTrustedDevice({
+        businessId: biz.id,
+        userId: member.a,
+        token: here.token,
+      }),
+    ).toEqual({ trusted: false, reason: "revoked" });
+
+    // Tenant isolation: the revocation is scoped by business_id, so one
+    // owner's policy decision cannot reach into another tenant's rows.
+    expect(
+      await dbLib.withTenant(otherBiz.id, () =>
+        trustedDevice.verifyTrustedDevice({
+          businessId: otherBiz.id,
+          userId: member.a,
+          token: elsewhere.token,
+        }),
+      ),
+    ).toEqual({ trusted: true, expiresAt: elsewhere.expiresAt });
+  });
+
   it("a global identity's trust is revocable across every membership it holds", async () => {
     const platformUserId = (
       await db.query<{ id: string }>(

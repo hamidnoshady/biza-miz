@@ -376,6 +376,34 @@ export async function revokeTrustedDevicesForPlatformUser(options: {
 }
 
 /**
+ * Drop every live trust in one business.
+ *
+ * Issue #885 — for a security-policy change whose scope is the whole tenant.
+ * Turning on `requireForManagers` changes what "verified" means for every
+ * manager membership at once, so the seven-day exemptions those memberships
+ * earned under the weaker policy have to go. Leaving them would mean a manager
+ * who had not been challenged in a week silently skipped a requirement their
+ * owner had just switched on, which is the one outcome a policy toggle must
+ * never have.
+ *
+ * Tenant-scoped by predicate as well as by RLS, matching
+ * `revokeTrustedDevicesForMember`: the login path reaches this before a
+ * business scope has been entered.
+ */
+export async function revokeTrustedDevicesForBusiness(options: {
+  businessId: string;
+  reason: string;
+}): Promise<number> {
+  const { rowCount } = await query(
+    `UPDATE trusted_devices
+        SET revoked_at = now(), revoked_reason = $2
+      WHERE business_id = $1 AND revoked_at IS NULL`,
+    [options.businessId, options.reason],
+  );
+  return rowCount ?? 0;
+}
+
+/**
  * Pull the trust credential off a request, if the browser is carrying one.
  *
  * Kept here rather than in each route so the cookie name and the
