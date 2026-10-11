@@ -38,6 +38,30 @@ import { nearExpiryBatches } from "./cosmetics-service";
 import { staffCommissionReport } from "./commission-service";
 import { customersDueForRepurchase } from "./loyalty-service";
 import { getCustomerFile } from "./crm-service";
+import { listJournalEntries } from "./journal-service";
+import { decodeJournalCursor } from "./journal-filters";
+import { listAccounts } from "./accounts-service";
+import { listDrafts } from "./manual-journal-service";
+import { getExpense, listExpenses } from "./expense-service";
+import { encodeExpenseCursor, parseExpenseCursor, parseExpenseRegisterStatus } from "./expense-input";
+import { listInstallmentPlans, listPayments, listReceipts } from "./installments-service";
+import { listCheques } from "./cheques-service";
+import { listFixedAssets } from "./fixed-assets-service";
+import { listFiscalYears } from "./fiscal-periods-service";
+import { listAdvances } from "./payroll-advances-service";
+import { listReconciliations } from "./reconciliation-service";
+import { listOrders, getOrderDetail, isOrderStatus } from "./order-read-service";
+import { listShifts } from "./shift-service";
+
+/** Case-insensitive contains over a whitelist of row fields — tool-side `q`. */
+function rowMatches(row: Record<string, unknown>, fields: readonly string[], q: string): boolean {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return true;
+  return fields.some((field) => {
+    const value = row[field];
+    return typeof value === "string" && value.toLowerCase().includes(needle);
+  });
+}
 import { customerTimeline } from "./customer-timeline-service";
 import { listSegmentsWithCounts, previewSegment } from "./crm-segments-service";
 import { listWebsitePostsTool, listWebsiteProductsTool, websiteStatusTool } from "./website/content-service";
@@ -1367,6 +1391,12 @@ export async function runReadTool(
    * future caller path cannot inherit the leak.
    */
   const businessWideOk = !mcpScope || mcpScope.allowedBranchIds === null;
+  // Accounting/CX list reads take a model-supplied `limit`; clamp it so a
+  // verbose prompt cannot ask the register for 10 000 rows in one call.
+  const limitArg = (value: unknown, fallback = 50, max = 100): number => {
+    const parsed = typeof value === "number" ? Math.trunc(value) : fallback;
+    return Math.min(max, Math.max(1, parsed));
+  };
   const businessWideRefusal = (toolFa: string): ToolResult => ({
     ok: false,
     data: {
@@ -1439,6 +1469,75 @@ export async function runReadTool(
     // Scoped to this business's trade, like every other surface that lists
     // reports: offering a jeweller «چرخش میزها» would have the model run an
     // always-empty report and then explain the emptiness as a business fact.
+    // ── POS operations reads (issue #883 package 2, batch B) ────────────────
+    case "list_orders": {
+      // Per-branch facts, exactly like the till screens. The branch resolves
+      // the same way every pinned read does (primary / the one consented / the
+      // explicitly-named one), and the orders answer always carries the branch
+      // it lists so the model cannot confuse contexts.
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const status = typeof args.status === "string" && isOrderStatus(args.status) ? args.status : undefined;
+      const limit = limitArg(args.limit);
+      const orders = await listOrders(pinned.locationId, { status, limit });
+      return { ok: true, data: { locationId: pinned.locationId, count: orders.length, orders } };
+    }
+    case "get_order": {
+      const orderId = String(args.orderId ?? "").trim();
+      if (!orderId) return { ok: false, data: { error: "invalid_arguments" } };
+      const { rows } = await query<{ location_id: string }>(
+        `SELECT location_id FROM orders WHERE id = $1`,
+        [orderId],
+      );
+      const locationId = rows[0]?.location_id;
+      if (!locationId) return { ok: false, data: { error: "order_not_found" } };
+      // Branch consent: an order's branch must be inside the pin.
+      if (mcpScope && mcpScope.allowedBranchIds !== null && !mcpScope.allowedBranchIds.includes(locationId)) {
+        return { ok: false, data: { error: "branch_out_of_consent" } };
+      }
+      const order = await getOrderDetail(locationId, orderId);
+      if (!order) return { ok: false, data: { error: "order_not_found" } };
+      return { ok: true, data: order };
+    }
+    case "list_shifts": {
+      // Team-scoped register: mirrors /api/shifts GET (leader's view of the
+      // whole register). A pinned consent restricts the branches the register
+      // may show; an explicit branch outside the pin is refused.
+      const limit = limitArg(args.limit);
+      const filters: { employeeId?: string; locationId?: string; status?: "open" | "closed"; limit?: number; offset?: number } = {
+        limit,
+        offset: typeof args.offset === "number" && args.offset > 0 ? Math.trunc(args.offset) : 0,
+      };
+      if (typeof args.employeeId === "string") filters.employeeId = args.employeeId;
+      if (args.status === "open" || args.status === "closed") filters.status = args.status;
+      const pin = mcpScope?.allowedBranchIds ?? null;
+      if (pin !== null) {
+        if (typeof args.locationId === "string") {
+          if (pin.length === 0 || !pin.includes(args.locationId)) {
+            return { ok: false, data: { error: "branch_out_of_consent" } };
+          }
+          filters.locationId = args.locationId;
+        } else if (pin.length === 1) {
+          filters.locationId = pin[0];
+        } else if (pin.length === 0) {
+          return { ok: true, data: { shifts: [], hasMore: false, note: "سیم‌سیم مجازیی به هیچ شعبه‌ای اجازهٔ دیدن ندارد." } };
+        } else {
+          // Multi-branch consent without a named branch cannot be answered by
+          // one service call without pulling every branch's register — which
+          // would include branches outside the pin. The model must name one.
+          return {
+            ok: false,
+            data: { error: `فهرست شیفت‌ها تجمیعی نیست و این اتصال به چند شعبه اجازه دارد — شعبهٔ موردنظر را با locationId مشخص کنید.` },
+          };
+        }
+      } else if (typeof args.locationId === "string") {
+        filters.locationId = args.locationId;
+      }
+      const page = await listShifts(businessId, filters);
+      return { ok: true, data: page };
+    }
+
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);
       return {
@@ -1620,6 +1719,140 @@ export async function runReadTool(
 
     case "find_customers":
       return { ok: true, data: await findCustomersTool(businessId, args) };
+
+    // ── Accounting module reads (issue #883 package 2, batch A) ─────────────
+    // Everything below answers out of the same service the ledger routes use.
+    // Account books, reconciliation ledgers and expense registers are the
+    // ledger of one business — a branch pin does not subdivide them — so the
+    // business-wide refusal matches what the branch-scoped reports do above.
+    case "list_accounts": {
+      const accounts = await listAccounts(businessId);
+      const accountType = typeof args.accountType === "string" ? args.accountType : undefined;
+      const includeInactive = args.includeInactive === true;
+      const q = typeof args.q === "string" ? args.q : "";
+      const rows = accounts
+        .filter((account) => (accountType ? account.type === accountType : true))
+        .filter((account) => account.isActive || includeInactive)
+        .filter((account) => !q || account.name.includes(q) || account.code.includes(q));
+      return { ok: true, data: { count: rows.length, accounts: rows } };
+    }
+    case "list_journal_entries": {
+      if (!businessWideOk) return businessWideRefusal("اسناد دفتر روزنامه");
+      const limit = limitArg(args.limit);
+      const entryKind =
+        args.entryKind === "manual" ? ("manual" as const) : args.entryKind === "system" ? ("system" as const) : ("any" as const);
+      const reversalRaw = typeof args.reversalState === "string" ? args.reversalState : "any";
+      const reversalState = (["any", "none", "reversal", "reversed"] as const).includes(
+        reversalRaw as "any" | "none" | "reversal" | "reversed",
+      )
+        ? (reversalRaw as "any" | "none" | "reversal" | "reversed")
+        : ("any" as const);
+      const filters = {
+        dateFrom: typeof args.dateFrom === "string" ? args.dateFrom : null,
+        dateTo: typeof args.dateTo === "string" ? args.dateTo : null,
+        sourceType: typeof args.sourceType === "string" ? args.sourceType : null,
+        q: typeof args.q === "string" ? args.q : null,
+        locationId: null,
+        accountId: typeof args.accountId === "string" ? args.accountId : null,
+        createdBy: null,
+        projectId: null,
+        entryId: null,
+        reversalState,
+        entryKind,
+        amountMin: null,
+        amountMax: null,
+        limit,
+        cursor: (typeof args.cursor === "string" && decodeJournalCursor(args.cursor)) || null,
+      };
+      const page = await listJournalEntries(businessId, filters);
+      return { ok: true, data: page };
+    }
+    case "list_manual_journal_drafts": {
+      return { ok: true, data: { drafts: await listDrafts(businessId) } };
+    }
+    case "list_expenses": {
+      if (!businessWideOk) return businessWideRefusal("دفتر هزینه‌ها");
+      const status = parseExpenseRegisterStatus(typeof args.status === "string" ? args.status : null);
+      const filters = {
+        dateFrom: typeof args.dateFrom === "string" ? args.dateFrom : null,
+        dateTo: typeof args.dateTo === "string" ? args.dateTo : null,
+        accountId: typeof args.accountId === "string" ? args.accountId : null,
+        paymentAccountId: null,
+        locationId: null,
+        status,
+        q: typeof args.q === "string" ? args.q : null,
+        limit: limitArg(args.limit),
+        cursor: (typeof args.cursor === "string" && parseExpenseCursor(args.cursor)) || null,
+      };
+      const page = await listExpenses(businessId, filters);
+      return {
+        ok: true,
+        data: { ...page, nextCursor: page.nextCursor ? encodeExpenseCursor(page.nextCursor) : null },
+      };
+    }
+    case "get_expense": {
+      const expense = await getExpense(businessId, String(args.expenseId ?? ""));
+      if (!expense) return { ok: false, data: { error: "expense_not_found" } };
+      return { ok: true, data: expense };
+    }
+    case "list_receipts": {
+      const limit = limitArg(args.limit);
+      const receipts = await listReceipts(businessId, typeof args.q === "string" ? args.q : undefined);
+      return { ok: true, data: { receipts: cap(receipts, limit) } };
+    }
+    case "list_payments": {
+      const limit = limitArg(args.limit);
+      const payments = await listPayments(businessId, typeof args.q === "string" ? args.q : undefined);
+      return { ok: true, data: { payments: cap(payments, limit) } };
+    }
+    case "list_cheques": {
+      const direction = args.direction === "payable" ? ("payable" as const) : args.direction === "receivable" ? ("receivable" as const) : undefined;
+      const cheques = await listCheques(businessId, direction);
+      return { ok: true, data: { count: cheques.length, cheques: cap(cheques) } };
+    }
+    case "list_fixed_assets": {
+      const assets = await listFixedAssets(businessId);
+      return { ok: true, data: { count: assets.length, assets: cap(assets) } };
+    }
+    case "list_installment_plans": {
+      const direction = args.direction === "payable" ? ("payable" as const) : ("receivable" as const);
+      const statusRaw = typeof args.status === "string" ? args.status : "open";
+      const status = (["open", "settled", "overdue", "all"] as const).includes(
+        statusRaw as "open" | "settled" | "overdue" | "all",
+      )
+        ? (statusRaw as "open" | "settled" | "overdue" | "all")
+        : ("open" as const);
+      const plans = await listInstallmentPlans(businessId, {
+        direction,
+        status,
+        q: typeof args.q === "string" ? args.q : undefined,
+      });
+      return { ok: true, data: { count: plans.length, plans: cap(plans) } };
+    }
+    case "list_fiscal_years": {
+      return { ok: true, data: { years: await listFiscalYears(businessId) } };
+    }
+    case "list_payroll_runs": {
+      const limit = limitArg(args.limit, 6, 12);
+      const { runs } = await listPayrollRuns(businessId, { limit, includeLines: false });
+      return { ok: true, data: { runs } };
+    }
+    case "list_payroll_advances": {
+      const advances = await listAdvances(businessId);
+      return { ok: true, data: { advances: cap(advances) } };
+    }
+    case "list_reconciliations": {
+      if (!businessWideOk) return businessWideRefusal("مغایرت‌گیری‌های بانکی");
+      const accountCode = typeof args.accountCode === "string" ? args.accountCode.trim() : "";
+      const summaries = [];
+      const codes = accountCode
+        ? RECONCILABLE_ACCOUNTS.filter((account) => account === accountCode)
+        : [...RECONCILABLE_ACCOUNTS];
+      for (const account of codes) {
+        summaries.push(...(await listReconciliations(businessId, account as ReconcilableAccount)));
+      }
+      return { ok: true, data: { reconciliations: summaries } };
+    }
 
     case "get_ar_aging": {
       const asOfDate = typeof args.asOfDate === "string" ? args.asOfDate : undefined;

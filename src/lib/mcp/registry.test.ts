@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { ACTION_CATALOG, toolDefinitions, type ActionType } from "../ai";
 import { AI_ACTION_PERMISSION_MAP, AI_TOOL_PERMISSION_MAP } from "../ai-capabilities";
 import { buildMcpVerbInventory } from "./verb-inventory";
+import { buildCoverageMatrix } from "./coverage-matrix";
 import {
   MCP_READ_REGISTRY,
   MCP_WRITE_REGISTRY,
@@ -120,6 +121,19 @@ describe("write registry", () => {
     // checklist, says so. Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts`.
     const committed = readFileSync("docs/mcp/verb-inventory.md", "utf8").replaceAll("\r\n", "\n");
     expect(committed).toBe(buildMcpVerbInventory().replaceAll("\r\n", "\n"));
+  });
+
+  it("the committed coverage matrix matches the coverage map and the live API surface", () => {
+    // Package 1's deliverable: the map claims every route file exactly once
+    // (via prefix matching), the verbs each ops cell names exist in the
+    // registries, and docs/mcp/coverage-matrix.md is what the builder would
+    // emit right now. Failing here means either the map, the routes or the
+    // registries changed without the doc being regenerated.
+    const result = buildCoverageMatrix();
+    expect(result.errors).toEqual([]);
+    expect(result.unclassified).toEqual([]);
+    const committed = readFileSync("docs/mcp/coverage-matrix.md", "utf8").replaceAll("\r\n", "\n");
+    expect(committed).toBe(result.markdown.replaceAll("\r\n", "\n"));
   });
 });
 

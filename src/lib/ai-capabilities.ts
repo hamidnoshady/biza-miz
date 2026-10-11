@@ -33,6 +33,29 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_unreconciled_bank_lines: PERMISSIONS.financeReconciliationManage,
   get_payroll_summary: PERMISSIONS.payrollView,
   get_vat_liability: PERMISSIONS.ledgerView,
+  // ── Accounting module reads (issue #883 package 2, batch A) ────────────────
+  // The route handlers gate the same data on the same keys; the tool map is a
+  // mirror, not a second policy. Module writes exist where the *manage* key
+  // implies the view (see permission implications in permissions.ts).
+  list_accounts: PERMISSIONS.ledgerView,
+  list_journal_entries: PERMISSIONS.ledgerView,
+  list_manual_journal_drafts: PERMISSIONS.ledgerPropose,
+  list_expenses: PERMISSIONS.ledgerView,
+  get_expense: PERMISSIONS.ledgerView,
+  list_receipts: PERMISSIONS.ledgerView,
+  list_payments: PERMISSIONS.ledgerView,
+  list_cheques: PERMISSIONS.ledgerView,
+  list_fixed_assets: PERMISSIONS.ledgerView,
+  list_installment_plans: PERMISSIONS.ledgerView,
+  list_fiscal_years: PERMISSIONS.ledgerView,
+  list_payroll_runs: PERMISSIONS.payrollView,
+  list_payroll_advances: PERMISSIONS.payrollView,
+  list_reconciliations: PERMISSIONS.financeReconciliationManage,
+  list_orders: PERMISSIONS.ordersView,
+  get_order: PERMISSIONS.ordersView,
+  // The shifts register lists *other people's* clock-ins; per shift-service's
+  // own read gate it is a leader's view, never a till's.
+  list_shifts: PERMISSIONS.teamView,
   get_branch_comparison: PERMISSIONS.reportsView,
   forecast_demand: PERMISSIONS.inventoryView,
   get_menu_item_details: PERMISSIONS.menuView,
@@ -137,6 +160,35 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "ar.receipt.record": PERMISSIONS.financeReceivablesManage,
   "project.memory.add": PERMISSIONS.workspaceManage,
   "project.task.add": PERMISSIONS.workspaceManage,
+  // Issue #883 package 2, batch A — accounting writes. Each is the same
+  // permission its route handler enforces on POST/PATCH.
+  "account.create": PERMISSIONS.accountsEdit,
+  "account.update": PERMISSIONS.accountsEdit,
+  "account.disable": PERMISSIONS.accountsEdit,
+  "journal.draft.approve": PERMISSIONS.ledgerApprove,
+  "journal.draft.reject": PERMISSIONS.ledgerApprove,
+  "expense.reverse": PERMISSIONS.financeExpensesManage,
+  "ap.payment.record": PERMISSIONS.financePayablesManage,
+  "ap.payment.reverse": PERMISSIONS.ledgerApprove,
+  "cheque.create": PERMISSIONS.financeChequesManage,
+  "cheque.transition": PERMISSIONS.financeChequesManage,
+  "installment.plan.create": PERMISSIONS.financeInstallmentsManage,
+  "installment.item.pay": PERMISSIONS.financeInstallmentsManage,
+  "reconciliation.create": PERMISSIONS.financeReconciliationManage,
+  "reconciliation.complete": PERMISSIONS.financeReconciliationManage,
+  "payroll.run.accrue": PERMISSIONS.payrollManage,
+  "payroll.run.pay": PERMISSIONS.payrollManage,
+  "payroll.run.void": PERMISSIONS.payrollManage,
+  "payroll.advance.record": PERMISSIONS.payrollManage,
+  "payroll.advance.void": PERMISSIONS.payrollManage,
+  "fixed-asset.create": PERMISSIONS.financeAssetsManage,
+  "fixed-asset.depreciate": PERMISSIONS.financeAssetsManage,
+  "fixed-asset.dispose": PERMISSIONS.financeAssetsManage,
+  // Batch B — POS operations; the same key the route handler requires.
+  "order.create": PERMISSIONS.ordersCreate,
+  "shift.start": PERMISSIONS.ordersCreate,
+  "shift.end": PERMISSIONS.ordersCreate,
+  "shift.close": PERMISSIONS.teamManage,
 };
 
 export function aiToolPermission(name: string): Permission | null {

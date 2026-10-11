@@ -148,6 +148,13 @@ export interface PlatformMcpTool {
   /** Whether callers need to name business(es); bridges plan into one
    * business at a time so per-target results can attribute failure. */
   bridged: boolean;
+  /**
+   * High-risk step-up marker (billing/credits, restore, access/identity,
+   * secrets, mass mutation, tenant deletion, financial posting/reversal,
+   * large exports): the caller must pass `confirm: true` echoing an explicit
+   * preview acceptance, or the call returns a preview instead of acting.
+   */
+  stepUp?: boolean;
   inputSchema: {
     type: "object";
     properties: Record<string, { type: string; enum?: string[]; description?: string }>;

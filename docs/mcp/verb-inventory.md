@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **52 read verbs** (**20** business-wide aggregates —
-visible only to connections consented for every branch) and **14 write verbs**
-(**2** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **69 read verbs** (**23** business-wide aggregates —
+visible only to connections consented for every branch) and **41 write verbs**
+(**17** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -34,8 +34,25 @@ visible only to connections consented for every branch) and **14 write verbs**
 | `get_ap_upcoming` | accounting | business_wide | `finance.payables_manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_unreconciled_bank_lines` | accounting | business_wide | `finance.reconciliation_manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_payroll_summary` | accounting | business_wide | `payroll.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_orders` | pos | agnostic | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_order` | pos | agnostic | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_shifts` | pos | agnostic | `team.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_vat_liability` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `run_accounting_review` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_accounts` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_journal_entries` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_manual_journal_drafts` | accounting | agnostic | `ledger.propose` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_expenses` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_expense` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_receipts` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_payments` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_cheques` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_fixed_assets` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_installment_plans` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_fiscal_years` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_payroll_runs` | accounting | agnostic | `payroll.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_payroll_advances` | accounting | agnostic | `payroll.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_reconciliations` | accounting | business_wide | `finance.reconciliation_manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_customer_profile` | crm | business_wide | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_at_risk_customers` | crm | business_wide | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `find_customers` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -75,8 +92,35 @@ visible only to connections consented for every branch) and **14 write verbs**
 | `write_purchase_draft` | `inventory.reorder.draftPO` | pos | low | connection write_mode | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_stock_count` | `inventory.adjustment.propose` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_expense` | `expense.categorize` | accounting | high | always approval queue (step-up) | `finance.expenses_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_order_create` | `order.create` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_shift_start` | `shift.start` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_shift_end` | `shift.end` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_shift_close` | `shift.close` | pos | low | connection write_mode | `team.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_run` | `inventory.production.run` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_journal_draft` | `journal.manual.propose` | accounting | low | connection write_mode | `ledger.propose` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_account_create` | `account.create` | accounting | low | connection write_mode | `accounts.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_account_update` | `account.update` | accounting | low | connection write_mode | `accounts.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_account_disable` | `account.disable` | accounting | low | connection write_mode | `accounts.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_journal_draft_approve` | `journal.draft.approve` | accounting | high | always approval queue (step-up) | `ledger.approve` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_journal_draft_reject` | `journal.draft.reject` | accounting | low | connection write_mode | `ledger.approve` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_expense_reverse` | `expense.reverse` | accounting | high | always approval queue (step-up) | `finance.expenses_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_ar_receipt_record` | `ar.receipt.record` | accounting | high | always approval queue (step-up) | `finance.receivables_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_ap_payment_record` | `ap.payment.record` | accounting | high | always approval queue (step-up) | `finance.payables_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_ap_payment_reverse` | `ap.payment.reverse` | accounting | high | always approval queue (step-up) | `ledger.approve` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_cheque_create` | `cheque.create` | accounting | low | connection write_mode | `finance.cheques_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_cheque_transition` | `cheque.transition` | accounting | high | always approval queue (step-up) | `finance.cheques_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_installment_plan_create` | `installment.plan.create` | accounting | low | connection write_mode | `finance.installments_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_installment_item_pay` | `installment.item.pay` | accounting | high | always approval queue (step-up) | `finance.installments_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_reconciliation_create` | `reconciliation.create` | accounting | low | connection write_mode | `finance.reconciliation_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_reconciliation_complete` | `reconciliation.complete` | accounting | high | always approval queue (step-up) | `finance.reconciliation_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payroll_run_accrue` | `payroll.run.accrue` | accounting | high | always approval queue (step-up) | `payroll.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payroll_run_pay` | `payroll.run.pay` | accounting | high | always approval queue (step-up) | `payroll.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payroll_run_void` | `payroll.run.void` | accounting | high | always approval queue (step-up) | `payroll.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payroll_advance_record` | `payroll.advance.record` | accounting | high | always approval queue (step-up) | `payroll.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payroll_advance_void` | `payroll.advance.void` | accounting | high | always approval queue (step-up) | `payroll.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fixed_asset_create` | `fixed-asset.create` | accounting | low | connection write_mode | `finance.assets_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fixed_asset_depreciate` | `fixed-asset.depreciate` | accounting | high | always approval queue (step-up) | `finance.assets_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fixed_asset_dispose` | `fixed-asset.dispose` | accounting | high | always approval queue (step-up) | `finance.assets_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_customer_note` | `customer.note.add` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_customer_note` | `crm.customer.note` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_customer_tag` | `crm.customer.tag` | crm | low | connection write_mode | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

@@ -210,7 +210,43 @@ export type ActionType =
   | "project.memory.add"
   /** Phase F pt.3 — the assistant adds an open task to the CURRENT project.
    *  Same project-scoped, ambient-id shape as project.memory.add. */
-  | "project.task.add";
+  | "project.task.add"
+  // Issue #883 package 2 batch A — the accounting module's write vocabulary.
+  // None is eligible for an unattended tick (no autopilotCategory): every one
+  // runs behind an explicit human confirmation — in-chat approval, or the
+  // MCP approval queue (the registry gates the money-shaped ones
+  // always_approve/high).
+  | "account.create"
+  | "account.update"
+  | "account.disable"
+  | "journal.draft.approve"
+  | "journal.draft.reject"
+  | "expense.reverse"
+  | "ap.payment.record"
+  | "ap.payment.reverse"
+  | "cheque.create"
+  | "cheque.transition"
+  | "installment.plan.create"
+  | "installment.item.pay"
+  | "reconciliation.create"
+  | "reconciliation.complete"
+  | "payroll.run.accrue"
+  | "payroll.run.pay"
+  | "payroll.run.void"
+  | "payroll.advance.record"
+  | "payroll.advance.void"
+  | "fixed-asset.create"
+  | "fixed-asset.depreciate"
+  | "fixed-asset.dispose"
+  // Batch B — POS operations: opening an order is the till's normal act
+  // (idempotency-keyed), and shifts are clock records the routes already make
+  // over the same services. Neither moves money by itself — settlement is a
+  // separate, deliberately-not-exposed moment (payment orchestration lives in
+  // the route and stays there until it is extracted into a service).
+  | "order.create"
+  | "shift.start"
+  | "shift.end"
+  | "shift.close";
 
 export type AutopilotExecutorKey =
   | "menuItemPatch"
@@ -227,7 +263,37 @@ export type AutopilotExecutorKey =
   | "websitePostDraft"
   | "websitePostUpdate"
   | "websiteProductUpsert"
-  | "triggeredMessageCampaign";
+  | "triggeredMessageCampaign"
+  // Issue #883 package 2 batch A — accounting writes. Each calls the same
+  // service function the ledger route handler calls; risk/approval policy
+  // lives in mcp/registry.ts, not here.
+  | "accountCreate"
+  | "accountUpdate"
+  | "accountDisable"
+  | "journalDraftApprove"
+  | "journalDraftReject"
+  | "expenseReverse"
+  | "arReceiptRecord"
+  | "apPaymentRecord"
+  | "apPaymentReverse"
+  | "chequeCreate"
+  | "chequeTransition"
+  | "installmentPlanCreate"
+  | "installmentItemPay"
+  | "reconciliationCreate"
+  | "reconciliationComplete"
+  | "payrollRunAccrue"
+  | "payrollRunPay"
+  | "payrollRunVoid"
+  | "payrollAdvanceRecord"
+  | "payrollAdvanceVoid"
+  | "fixedAssetCreate"
+  | "fixedAssetDepreciate"
+  | "fixedAssetDispose"
+  | "orderCreate"
+  | "shiftStart"
+  | "shiftEnd"
+  | "shiftClose";
 
 export interface ActionMeta {
   type: ActionType;
@@ -593,13 +659,239 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
   // Recording an AR receipt moves money, so it is `alwaysConfirm`: a human sees
   // the amount and the customer on the card and clicks. No executor, no
   // category — an unattended tick never records a payment.
+  // ── Issue #883 package 2, batch A — accounting write verbs ────────────────
+  // Route parity is the point of the exercise: every entry's endpoint+payload
+  // is exactly what the tenant UI posts from the matching screens, and the
+  // executor calls the same service the route handler calls. None carries an
+  // autopilotCategory, so none runs unattended; the MCP registry entry decides
+  // risk/approval (money-shaped ones are high risk, always_approve).
+  "account.create": {
+    type: "account.create",
+    endpoint: "/api/ledger/accounts",
+    method: "POST",
+    label: "ایجاد سرفصل جدید",
+    payloadHint:
+      "{ code: string /* کد لاتین ۲–۱۰ رقم در نمودار حساب */, name: string, type: \"asset\"|\"liability\"|\"equity\"|\"revenue\"|\"expense\", parentId?: string /* id سرفصل والد، اختیاری */, isContra?: boolean }",
+    executor: "accountCreate",
+  },
+  "account.update": {
+    type: "account.update",
+    endpoint: "/api/ledger/accounts",
+    method: "PATCH",
+    label: "ویرایش سرفصل",
+    payloadHint: "{ accountId: string, name?: string, parentId?: string|null /* null یعنی بریده از والد */ }",
+    executor: "accountUpdate",
+  },
+  "account.disable": {
+    type: "account.disable",
+    endpoint: "/api/ledger/accounts",
+    method: "PATCH",
+    label: "غیرفعال/فعال‌کردن سرفصل",
+    payloadHint: "{ accountId: string, isActive?: boolean /* پیش‌فرض غیرفعال (false) */ }",
+    executor: "accountDisable",
+  },
+  "journal.draft.approve": {
+    type: "journal.draft.approve",
+    endpoint: "/api/ledger/entries/drafts/[id]/approve",
+    method: "POST",
+    label: "تأیید پیش‌نویس سند دستی",
+    payloadHint: "{ draftId: string }",
+    executor: "journalDraftApprove",
+  },
+  "journal.draft.reject": {
+    type: "journal.draft.reject",
+    endpoint: "/api/ledger/entries/drafts/[id]/reject",
+    method: "POST",
+    label: "رد پیش‌نویس سند دستی",
+    payloadHint: "{ draftId: string, reason: string /* دلیل رد، الزامی */ }",
+    executor: "journalDraftReject",
+  },
+  "expense.reverse": {
+    type: "expense.reverse",
+    endpoint: "/api/ledger/expenses/[id]/reverse",
+    method: "POST",
+    label: "برگشت هزینهٔ ثبت‌شده",
+    payloadHint: "{ expenseId: string, reversalDate?: string /* YYYY-MM-DD */, memo?: string }",
+    executor: "expenseReverse",
+  },
+  "ap.payment.record": {
+    type: "ap.payment.record",
+    endpoint: "/api/ledger/ap/payments",
+    method: "POST",
+    label: "ثبت پرداخت به تأمین‌کننده",
+    payloadHint:
+      "{ supplierId: string, amount: number /* ریال صحیح */, method?: \"cash\"|\"bank\" /* پیش‌فرض cash */, paymentDate?: string, cashAccountId?: string, bankReference?: string, locationId?: string, memo?: string, clientRequestId?: string }",
+    executor: "apPaymentRecord",
+  },
+  "ap.payment.reverse": {
+    type: "ap.payment.reverse",
+    endpoint: "/api/ledger/ap/payments/[id]/reverse",
+    method: "POST",
+    label: "برگشت پرداخت به تأمین‌کننده",
+    payloadHint: "{ paymentId: string, reversalDate?: string, memo?: string }",
+    executor: "apPaymentReverse",
+  },
+  "cheque.create": {
+    type: "cheque.create",
+    endpoint: "/api/ledger/cheques",
+    method: "POST",
+    label: "ثبت چک",
+    payloadHint:
+      "{ direction: \"receivable\"|\"payable\", serialNumber: string, bankName: string, amount: number, dueDate: string, counterpartyName: string, sayadId?: string, accountNumber?: string, issueDate?: string, customerId?: string /* فقط receivable */, supplierId?: string /* فقط payable */, locationId?: string, memo?: string }",
+    executor: "chequeCreate",
+  },
+  "cheque.transition": {
+    type: "cheque.transition",
+    endpoint: "/api/ledger/cheques/[id]/[action]",
+    method: "POST",
+    label: "تغییر وضعیت چک",
+    payloadHint:
+      "{ chequeId: string, action: \"deposit\"|\"endorse\"|\"clear\"|\"bounce\"|\"present\"|\"cancel\", endorsedToSupplierId?: string /* فقط برای endorse */, occurredOn?: string, memo?: string }",
+    executor: "chequeTransition",
+  },
+  "installment.plan.create": {
+    type: "installment.plan.create",
+    endpoint: "/api/ledger/installments",
+    method: "POST",
+    label: "ساخت طرح اقساط",
+    payloadHint:
+      "{ direction: \"receivable\"|\"payable\", partyId: string /* مشتری یا تأمین‌کننده */, principal: number, installmentCount: number, firstDueDate: string, intervalMonths?: number, downPayment?: number, interestPercent?: number, lateFeePercent?: number, note?: string, locationId?: string }",
+    executor: "installmentPlanCreate",
+  },
+  "installment.item.pay": {
+    type: "installment.item.pay",
+    endpoint: "/api/ledger/installments/[id]/pay",
+    method: "POST",
+    label: "تسویهٔ یک قسط",
+    payloadHint: "{ planId: string, itemId: string, method?: \"cash\"|\"bank\", memo?: string }",
+    executor: "installmentItemPay",
+  },
+  "reconciliation.create": {
+    type: "reconciliation.create",
+    endpoint: "/api/ledger/reconciliations",
+    method: "POST",
+    label: "شروع مغایرت‌گیری بانکی",
+    payloadHint:
+      "{ accountCode: \"cash\"|\"bank\"|\"bankClearing\", statementDate: string /* YYYY-MM-DD */, statementBalance: number /* ماندهٔ صورتحساب به ریال صحیح */ }",
+    executor: "reconciliationCreate",
+  },
+  "reconciliation.complete": {
+    type: "reconciliation.complete",
+    endpoint: "/api/ledger/reconciliations/[id]/complete",
+    method: "POST",
+    label: "اتمام مغایرت‌گیری",
+    payloadHint: "{ reconciliationId: string }",
+    executor: "reconciliationComplete",
+  },
+  "payroll.run.accrue": {
+    type: "payroll.run.accrue",
+    endpoint: "/api/ledger/payroll/runs",
+    method: "POST",
+    label: "تسهیم حقوق ماه (accrual)",
+    payloadHint:
+      "{ periodKey: string /* «1403-05» شمسی */, accrualDate?: string, overtime?: { [userId: string]: number }, idempotencyKey?: string }",
+    executor: "payrollRunAccrue",
+  },
+  "payroll.run.pay": {
+    type: "payroll.run.pay",
+    endpoint: "/api/ledger/payroll/runs/[id]/pay",
+    method: "POST",
+    label: "پرداخت اجرای حقوق",
+    payloadHint: "{ runId: string, method?: \"cash\"|\"bank\", paymentAccountId?: string, paidDate?: string }",
+    executor: "payrollRunPay",
+  },
+  "payroll.run.void": {
+    type: "payroll.run.void",
+    endpoint: "/api/ledger/payroll/runs/[id]/void",
+    method: "POST",
+    label: "ابطال اجرای حقوق",
+    payloadHint: "{ runId: string }",
+    executor: "payrollRunVoid",
+  },
+  "payroll.advance.record": {
+    type: "payroll.advance.record",
+    endpoint: "/api/ledger/payroll/advances",
+    method: "POST",
+    label: "ثبت مساعدهٔ کارمند",
+    payloadHint:
+      "{ userId: string, amount: number /* ریال صحیح مثبت */, method?: \"cash\"|\"bank\", paymentAccountId?: string, advanceDate?: string, note?: string }",
+    executor: "payrollAdvanceRecord",
+  },
+  "payroll.advance.void": {
+    type: "payroll.advance.void",
+    endpoint: "/api/ledger/payroll/advances/[id]/void",
+    method: "POST",
+    label: "ابطال مساعده",
+    payloadHint: "{ advanceId: string }",
+    executor: "payrollAdvanceVoid",
+  },
+  "fixed-asset.create": {
+    type: "fixed-asset.create",
+    endpoint: "/api/ledger/fixed-assets",
+    method: "POST",
+    label: "ثبت دارایی ثابت",
+    payloadHint:
+      "{ name: string, acquisitionDate: string, cost: number /* بهای تمام‌شده، ریال صحیح */, usefulLifeMonths: number, salvageValue?: number, inServiceDate?: string, locationId?: string }",
+    executor: "fixedAssetCreate",
+  },
+  "fixed-asset.depreciate": {
+    type: "fixed-asset.depreciate",
+    endpoint: "/api/ledger/fixed-assets/[id]/depreciate",
+    method: "POST",
+    label: "ثبت استهلاک دوره",
+    payloadHint: "{ fixedAssetId: string, periodKey?: string, periodLabel?: string, entryDate?: string }",
+    executor: "fixedAssetDepreciate",
+  },
+  "fixed-asset.dispose": {
+    type: "fixed-asset.dispose",
+    endpoint: "/api/ledger/fixed-assets/[id]/dispose",
+    method: "POST",
+    label: "خروج دارایی (فروش/اسقاط/بازنشستگی)",
+    payloadHint:
+      "{ fixedAssetId: string, kind: \"sale\"|\"write_off\"|\"retirement\", proceeds?: number /* فقط sale */, proceedsAccountId?: string /* فقط sale */, disposalDate?: string, reason?: string }",
+    executor: "fixedAssetDispose",
+  },
+  "order.create": {
+    type: "order.create",
+    endpoint: "/api/orders",
+    method: "POST",
+    label: "ثبت سفارش جدید",
+    payloadHint:
+      "{ locationId?: string /* id یا نام شعبه؛ خالی یعنی شعبهٔ پیش‌فرض */, orderType: \"dine_in\"|\"takeaway\"|\"delivery\", items: [{ menuItemId: string /* از find_items */, quantity: number, notes?: string }], note?: string, customerId?: string /* از find_customers */, tableId?: string, clientOrderId?: string /* کلید ایمن تکرار — ارسال دوبارهٔ همان کلید همان سفارش قبلی را برمی‌گرداند */ } — سفارش باز می‌کند؛ تسویهٔ مبلغ عمداً در این‌جا نیست (هماهنگی پرداخت در route باقی است تا به سرویس مستقل برسد — نگاه کنید به coverage matrix).",
+    executor: "orderCreate",
+  },
+  "shift.start": {
+    type: "shift.start",
+    endpoint: "/api/shifts/start",
+    method: "POST",
+    label: "شروع شیفت",
+    payloadHint: "{ openingFloat?: number /* صندوق اول شیفت به ریال */, locationId?: string } — شیفت به نام صاحبِ مجوز این اتصال باز می‌شود (مثل ورود کارمند).",
+    executor: "shiftStart",
+  },
+  "shift.end": {
+    type: "shift.end",
+    endpoint: "/api/shifts/end",
+    method: "POST",
+    label: "پایان شیفت من",
+    payloadHint: "{ closingFloat?: number /* شمارش پایان شیفت به ریال */ }",
+    executor: "shiftEnd",
+  },
+  "shift.close": {
+    type: "shift.close",
+    endpoint: "/api/shifts/[id]/close",
+    method: "POST",
+    label: "بستن اداری شیفت باز",
+    payloadHint: "{ shiftId: string /* از list_shifts */, closingFloat?: number }",
+    executor: "shiftClose",
+  },
   "ar.receipt.record": {
     type: "ar.receipt.record",
     endpoint: "/api/ledger/ar/receipts",
     method: "POST",
     label: "ثبت دریافت از مشتری",
     payloadHint:
-      '{ customerId: string /* از find_customers */, method: "cash"|"bank", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد',
+      '{ customerId: string /* از find_customers */, method: "cash"|"bank", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, cashAccountId?: string, bankReference?: string, locationId?: string, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد',
+    executor: "arReceiptRecord",
     alwaysConfirm: true,
   },
   "project.memory.add": {
@@ -1316,6 +1608,186 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       "فاکتورهای باز به تأمین‌کنندگان (بدون تاریخ سررسید ثبت‌شده)، مرتب‌شده بر اساس قدمت برای اولویت پرداخت.",
     ),
     noArgsTool("get_unreconciled_bank_lines", "ردیف‌های دفتر (نقد و بانک در جریان) که هنوز در هیچ مغایرت‌گیری تطبیق نشده‌اند."),
+    {
+      type: "function",
+      function: {
+        name: "list_accounts",
+        description:
+          "دفتر کامل سرفصل‌های حسابداری (کد، نام، نوع حساب دارایی/بدهی/…، والد و فعال/غیرفعال). برای پیدا کردن سرفصل از روی نام یا کد همیشه اول این را صدا بزن.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string", description: "بخشی از نام یا کد سرفصل، اختیاری" },
+            accountType: {
+              type: "string",
+              enum: ["asset", "liability", "equity", "revenue", "expense"],
+              description: "نقش حساب، اختیاری",
+            },
+            includeInactive: { type: "boolean", description: "پیش‌فرض false — غیرفعال‌ها هم آورده شوند" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_journal_entries",
+        description:
+          "اسناد ثبت‌شدهٔ دفتر روزنامه با فیلتر. بعد از صدا زدن run_report یا قبل از بررسی یک سند خاص، از این استفاده کن. صفحه‌بندی با cursor.",
+        parameters: {
+          type: "object",
+          properties: {
+            dateFrom: { type: "string", description: "از تاریخ (ISO)، اختیاری — بازه محدود نگه دار" },
+            dateTo: { type: "string", description: "تا تاریخ (ISO)" },
+            sourceType: { type: "string", description: "نوع منبع سند، مثل sale/expense/purchase/receipt/payment/payroll/manual" },
+            q: { type: "string", description: "جست‌وجو در شرح سند، نام ثبت‌کننده، کد یا نام سرفصل" },
+            accountId: { type: "string", description: "فقط اسنادی که این سرفصل را درگیر کرده‌اند" },
+            entryKind: { type: "string", enum: ["any", "manual", "system"], description: "سیستمی یا دستی" },
+            reversalState: { type: "string", enum: ["any", "none", "reversal", "reversed"], description: "وضعیت برگشت" },
+            limit: { type: "number", description: "حداکثر ردیف (۱ تا ۱۰۰)، پیش‌فرض ۵۰" },
+            cursor: { type: "string", description: "nextCursorٔ پاسخ قبلی برای صفحهٔ بعد" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_manual_journal_drafts",
+        description: "پیش‌نویس‌های سند دستی در انتظار بررسی — دستهٔ ثبت‌کننده و تأییدکننده را با هم برمی‌گرداند.",
+        parameters: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_expenses",
+        description: "دفتر هزینه‌ها با فیلتر تاریخ، وضعیت ثبت (در انتظار/ثبت‌شده/برگشت‌خورده) و جست‌وجو. صفحه‌بندی با cursor.",
+        parameters: {
+          type: "object",
+          properties: {
+            dateFrom: { type: "string", description: "از تاریخ (ISO)" },
+            dateTo: { type: "string", description: "تا تاریخ (ISO)" },
+            status: { type: "string", enum: ["recorded", "pending", "reversed"] },
+            accountId: { type: "string", description: "سرفصل هزینه، اختیاری" },
+            q: { type: "string" },
+            limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            cursor: { type: "string", description: "nextCursorٔ پاسخ قبلی" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_expense",
+        description: "جزئیات کامل یک هزینه + خطوط سندی که زده (اگر ثبت شده باشد).",
+        parameters: {
+          type: "object",
+          properties: { expenseId: { type: "string", description: "شناسهٔ هزینه (از list_expenses)" } },
+          required: ["expenseId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_receipts",
+        description: "حواله‌های دریافتی از طرف‌ها (مشتری/تأمین‌کننده) به ترتیب جدیدترین. صفحه‌بندی با limit.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string", description: "نام طرف، مبلغ یا شرح" },
+            limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_payments",
+        description: "حواله‌های پرداختنی به طرف‌ها. صفحه‌بندی با limit.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string" },
+            limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_cheques",
+        description:
+          "چک‌ها به تفکیک جهت (دریافتنی/پرداختنی)، هر جهت به ترتیب تاریخ سررسید با چک‌های زنده (در انتظار/در وضعیت پیگیری) در ابتدای فهرست.",
+        parameters: {
+          type: "object",
+          properties: {
+            direction: { type: "string", enum: ["receivable", "payable"], description: "دریافتنی=receivable، پرداختنی=payable، اختیاری" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    noArgsTool("list_fixed_assets", "فهرست دارایی‌های ثابت فعال با تاریخ خرید و مبلغ بهای تمام‌شده."),
+    {
+      type: "function",
+      function: {
+        name: "list_installment_plans",
+        description: "اقساط باز یا تسویه‌شدهٔ فروش/خرید با تاریخ بعدی و ماندهٔ هر امور.",
+        parameters: {
+          type: "object",
+          properties: {
+            direction: { type: "string", enum: ["receivable", "payable"], description: "receivable=اقساط فروش به مشتری، payable=اقساط خرید از تأمین‌کننده" },
+            status: { type: "string", enum: ["open", "settled", "overdue", "all"] },
+            q: { type: "string", description: "نام مشتری یا تأمین‌کننده" },
+          },
+          required: ["direction"],
+          additionalProperties: false,
+        },
+      },
+    },
+    noArgsTool("list_fiscal_years", "سال‌های مالی با وضعیت فراز/نویسه و تاریخ شروع و پایان هرکدام."),
+    {
+      type: "function",
+      function: {
+        name: "list_payroll_runs",
+        description: "اجراهای حقوق و دستمزد با تاریخ/وضعیت (آماده/پرداخت‌شده/برگشتی). برای یک اجرأ خاص از روی شناخته‌شده از pay run IDs.",
+        parameters: {
+          type: "object",
+          properties: { limit: { type: "number", description: "۱ تا ۱۲ اجرای اخیر، پیش‌فرض ۶" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    noArgsTool("list_payroll_advances", "مساعده‌های باز هر کارمند با مبلغ و تاریخ ثبت."),
+    {
+      type: "function",
+      function: {
+        name: "list_reconciliations",
+        description: "فهرست مغایرت‌گیری‌های صورتحساب بانکی (راه‌اندازی‌هاشده، شرو‌ع‌شده یا کامل‌شده) به تفکیک حساب تطبیق‌پذیر.",
+        parameters: {
+          type: "object",
+          properties: {
+            accountCode: { type: "string", description: "کد حساب تطبیق‌پذیر؛ خالی یعنی همهٔ حساب‌ها" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
     noArgsTool("get_payroll_summary", "خلاصه اجراهای اخیر حقوق و دستمزد و مجموع حقوق ماهانه کارکنان فعال."),
     dateRangeTool("get_vat_liability", "مالیات بر ارزش افزوده فروش در برابر خرید و وضعیت بدهی خالص برای یک بازه."),
     dateRangeTool(
@@ -1810,6 +2282,54 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
         },
       },
     },
+      {
+        type: "function",
+        function: {
+          name: "list_orders",
+          description:
+            "فهرست سفارش‌های یک شعبه به ترتیب جدیدترین با فیلتر وضعیت. شعبه: خالی یعنی شعبهٔ پیش‌فرض (بدون اتصال محدود‌شده)، یا id شعبهٔ خاص.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+              status: { type: "string", enum: ["open", "held", "completed", "voided"], description: "وضعیت سفارش، اختیاری" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_order",
+          description: "جزئیات کامل یک سفارش: اقلام، مبلغ کل، پرداخت‌ها، میز و وضعیت. شناسه را از list_orders بگیر.",
+          parameters: {
+            type: "object",
+            properties: { orderId: { type: "string", description: "شناسهٔ سفارش" } },
+            required: ["orderId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_shifts",
+          description: "شیفت‌های کارکنان با کارمند/شعبه/وضعیت (باز یا بسته) — همراه خلاصهٔ صندوق هر شیفت.",
+          parameters: {
+            type: "object",
+            properties: {
+              employeeId: { type: "string", description: "دیدن شیفت‌های یک کارمند خاص، اختیاری" },
+              locationId: { type: "string", description: "دیدن شیفت‌های یک شعبه، اختیاری" },
+              status: { type: "string", enum: ["open", "closed"], description: "باز یا بسته، اختیاری" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+              offset: { type: "number", description: "ردیف شروع صفحهٔ بعد، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
   ];
 
   const receiptTool: OpenAiTool = {

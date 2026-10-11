@@ -34,6 +34,38 @@ import { positiveQuantityText, type QuantityText, type RialText } from "./invent
 import { draftWebsitePost, updateWebsitePost, upsertWebsiteProduct } from "./website/content-service";
 import { queueTriggeredMessageCampaign } from "./message-campaigns-service";
 import type { PurchaseItemInput } from "./purchase-lines";
+// Issue #883 package 2, batch A — accounting services (batch verbs).
+import { AccountsError, createAccount, updateAccount } from "./accounts-service";
+import { approveDraft, rejectDraft } from "./manual-journal-service";
+import { ArError, receivePayment } from "./ar-service";
+import { ApError, payBill, reverseApPayment } from "./ap-service";
+import { ChequeError, recordCheque, transitionCheque } from "./cheques-service";
+import { CHEQUE_ACTIONS } from "./cheques";
+import { createInstallmentPlan, InstallmentError, payInstallmentItem } from "./installments-service";
+import {
+  completeReconciliation,
+  createReconciliation,
+  ReconciliationError,
+  RECONCILABLE_ACCOUNTS,
+  type ReconcilableAccount,
+} from "./reconciliation-service";
+import {
+  accruePayroll,
+  payPayroll,
+  voidPayrollRun,
+} from "./payroll-service";
+import { PayrollError } from "./payroll-errors";
+import { recordAdvance, voidAdvance } from "./payroll-advances-service";
+import { createOrder } from "./order-mutations";
+import type { CartItemInput } from "./order-cart";
+import { ShiftError, openShift, closeOwnShift, closeShiftById } from "./shift-service";
+import { randomUUID } from "crypto";
+import {
+  createFixedAsset,
+  disposeFixedAsset,
+  FixedAssetError,
+  postDepreciation,
+} from "./fixed-assets-service";
 
 export interface AutopilotExecutionResult {
   ok: boolean;
@@ -277,7 +309,7 @@ const draftPurchase: AutopilotExecutor = async (ctx) => {
       result: { purchaseId: created.id, total: created.total, locationId, status: "draft" },
     };
   } catch (err) {
-    if (err instanceof PurchaseServiceError) return fail(err.code);
+    if (err instanceof PurchaseServiceError) return fail(err.message);
     return fail(err instanceof Error ? err.message : "draft_purchase_failed");
   }
 };
@@ -327,7 +359,7 @@ const expense: AutopilotExecutor = async (ctx) => {
       dueDate: ctx.payload.dueDate,
     });
   } catch (err) {
-    if (err instanceof PayablesInputError) return fail(err.code);
+    if (err instanceof PayablesInputError) return fail(err.message);
     throw err;
   }
   if (settlement.settlement === "paid" && !paymentAccountId) return fail("invalid_payload");
@@ -714,6 +746,82 @@ export async function executorTargetLocation(
         const location = await locationOfInventoryItems(ids);
         return location === "mixed" ? null : location;
       }
+      // Issue #883 batch A — the accounting writes that name a branch in their
+      // payload resolve it here so a branch-pinned MCP connection physically
+      // cannot execute them for another branch; the rest (journal drafts,
+      // accounts, cheques, payroll) are business-scoped facts with no branch.
+      case "expenseReverse": {
+        const expenseId = str(payload.expenseId);
+        if (!expenseId) return null;
+        const { rows } = await query<{ location_id: string | null }>(
+          `SELECT location_id FROM expenses WHERE id = $1`,
+          [expenseId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "apPaymentReverse": {
+        const paymentId = str(payload.paymentId);
+        if (!paymentId) return null;
+        const { rows } = await query<{ location_id: string | null }>(
+          `SELECT location_id FROM ap_payments WHERE id = $1`,
+          [paymentId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "chequeTransition": {
+        const chequeId = str(payload.chequeId);
+        if (!chequeId) return null;
+        const { rows } = await query<{ location_id: string | null }>(
+          `SELECT location_id FROM cheques WHERE id = $1`,
+          [chequeId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "installmentItemPay": {
+        const planId = str(payload.planId);
+        if (!planId) return null;
+        const { rows } = await query<{ location_id: string | null }>(
+          `SELECT location_id FROM installments WHERE id = $1`,
+          [planId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "payrollRunPay":
+      case "payrollRunVoid": {
+        const runId = str(payload.runId);
+        if (!runId) return null;
+        const { rows } = await query<{ location_id: string | null }>(
+          `SELECT location_id FROM payroll_runs WHERE id = $1`,
+          [runId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "fixedAssetDepreciate":
+      case "fixedAssetDispose": {
+        const fixedAssetId = str(payload.fixedAssetId);
+        if (!fixedAssetId) return null;
+        const { rows } = await query<{ location_id: string | null }>(
+          `SELECT location_id FROM fixed_assets WHERE id = $1`,
+          [fixedAssetId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "shiftClose": {
+        const shiftId = str(payload.shiftId);
+        if (!shiftId) return null;
+        const { rows } = await query<{ location_id: string | null }>(
+          `SELECT location_id FROM employee_shifts WHERE id = $1`,
+          [shiftId],
+        );
+        return rows[0]?.location_id ?? null;
+      }
+      case "orderCreate":
+      case "shiftStart": {
+        // The branch rides in the payload as the route accepts it (id or
+        // null = primary); the consent check below compares sensibly against
+        // it directly because these tools are branch-scoped by design.
+        return str(payload.locationId);
+      }
       default:
         return null;
     }
@@ -721,6 +829,617 @@ export async function executorTargetLocation(
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #883 package 2, batch A — accounting executors.
+//
+// Same rule as every executor above: each calls the service function the
+// ledger route handler calls, with `ctx.authorizedByUserId` handed over as the
+// actor (`createdBy`). Payloads that point at an existing record name it by id
+// and the service refuses 404/410 the same way the route answers; payloads
+// that create money attach the branch the same way (`chosenLocation`).
+// Nothing here writes SQL.
+// ---------------------------------------------------------------------------
+
+const actorOf = (ctx: AutopilotExecutorContext): string | null => ctx.authorizedByUserId;
+
+const accountCreate: AutopilotExecutor = async (ctx) => {
+  const code = str(ctx.payload.code);
+  const name = str(ctx.payload.name);
+  const type = str(ctx.payload.type);
+  if (!code || !name || !type) return fail("invalid_payload");
+  try {
+    const created = await createAccount({
+      businessId: ctx.businessId,
+      code,
+      name,
+      type,
+      parentId: str(ctx.payload.parentId),
+      isContra: ctx.payload.isContra === true,
+    });
+    return { ok: true, result: created };
+  } catch (err) {
+    if (err instanceof AccountsError) return fail(err.message);
+    throw err;
+  }
+};
+
+const accountUpdate: AutopilotExecutor = async (ctx) => {
+  const accountId = str(ctx.payload.accountId);
+  if (!accountId) return fail("invalid_payload");
+  try {
+    await updateAccount({
+      businessId: ctx.businessId,
+      id: accountId,
+      actorId: actorOf(ctx),
+      name: str(ctx.payload.name) ?? undefined,
+      parentId: ctx.payload.parentId === null ? null : (str(ctx.payload.parentId) ?? undefined),
+      reparent: ctx.payload.parentId !== undefined,
+    });
+    return { ok: true, result: { accountId } };
+  } catch (err) {
+    if (err instanceof AccountsError) return fail(err.message);
+    throw err;
+  }
+};
+
+const accountDisable: AutopilotExecutor = async (ctx) => {
+  const accountId = str(ctx.payload.accountId);
+  if (!accountId) return fail("invalid_payload");
+  try {
+    await updateAccount({
+      businessId: ctx.businessId,
+      id: accountId,
+      actorId: actorOf(ctx),
+      isActive: ctx.payload.isActive === undefined ? false : ctx.payload.isActive === true,
+    });
+    return { ok: true, result: { accountId } };
+  } catch (err) {
+    if (err instanceof AccountsError) return fail(err.message);
+    throw err;
+  }
+};
+
+const journalDraftApprove: AutopilotExecutor = async (ctx) => {
+  const draftId = str(ctx.payload.draftId);
+  if (!draftId) return fail("invalid_payload");
+  const actor = actorOf(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  try {
+    const posted = await approveDraft({ businessId: ctx.businessId, locationId: null, draftId, actorId: actor });
+    return { ok: true, result: posted };
+  } catch (err) {
+    if (err instanceof ManualJournalError) return fail(err.message);
+    throw err;
+  }
+};
+
+const journalDraftReject: AutopilotExecutor = async (ctx) => {
+  const draftId = str(ctx.payload.draftId);
+  if (!draftId) return fail("invalid_payload");
+  const actor = actorOf(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  try {
+    const rejected = await rejectDraft({
+      businessId: ctx.businessId,
+      draftId,
+      actorId: actor,
+      reason: str(ctx.payload.reason),
+      requireReason: true,
+    });
+    return { ok: true, result: rejected };
+  } catch (err) {
+    if (err instanceof ManualJournalError) return fail(err.message);
+    throw err;
+  }
+};
+
+const expenseReverse: AutopilotExecutor = async (ctx) => {
+  const expenseId = str(ctx.payload.expenseId);
+  if (!expenseId) return fail("invalid_payload");
+  const actor = actorOf(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  try {
+    const reversal = await reverseExpense({
+      businessId: ctx.businessId,
+      expenseId,
+      actorId: actor,
+      reversalDate: str(ctx.payload.reversalDate),
+      memo: str(ctx.payload.memo),
+    });
+    return { ok: true, result: reversal as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ExpenseError) return fail(err.message);
+    throw err;
+  }
+};
+
+const partyRef = (payload: Record<string, unknown>): { customerId: string | null; supplierId: string | null } => {
+  // Accept the direction-shaped ids first, then the generic customer/supplier
+  // pair — cheques carry their own constraint check, so a mispaired id
+  // surfaces as the same error code the route answers, never a silent swap.
+  return {
+    customerId: str(payload.customerId),
+    supplierId: str(payload.supplierId),
+  };
+};
+
+const arReceiptRecord: AutopilotExecutor = async (ctx) => {
+  const customerId = str(ctx.payload.customerId) ?? str(ctx.payload.partyId);
+  const amount = int(ctx.payload.amount);
+  const method = ctx.payload.method === "bank" ? "bank" : "cash";
+  if (!customerId || amount === null) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  try {
+    const receipt = await receivePayment({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      customerId,
+      method,
+      amount,
+      receiptDate: str(ctx.payload.receiptDate),
+      memo: str(ctx.payload.memo),
+      createdBy: actorOf(ctx),
+      cashAccountId: str(ctx.payload.cashAccountId),
+      bankReference: str(ctx.payload.bankReference),
+    });
+    return { ok: true, result: receipt as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ArError) return fail(err.message);
+    if (err instanceof PayablesInputError) return fail(err.message);
+    throw err;
+  }
+};
+
+const apPaymentRecord: AutopilotExecutor = async (ctx) => {
+  const supplierId = str(ctx.payload.supplierId) ?? str(ctx.payload.partyId);
+  const amount = int(ctx.payload.amount);
+  const method = ctx.payload.method === "bank" ? "bank" : "cash";
+  if (!supplierId || amount === null) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  try {
+    const payment = await payBill({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      supplierId,
+      method,
+      amount,
+      paymentDate: str(ctx.payload.paymentDate),
+      memo: str(ctx.payload.memo),
+      clientRequestId: str(ctx.payload.clientRequestId) ?? crypto.randomUUID(),
+      createdBy: actorOf(ctx),
+      cashAccountId: str(ctx.payload.cashAccountId),
+      bankReference: str(ctx.payload.bankReference),
+    });
+    return { ok: true, result: payment as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ApError) return fail(err.message);
+    if (err instanceof PayablesInputError) return fail(err.message);
+    throw err;
+  }
+};
+
+const apPaymentReverse: AutopilotExecutor = async (ctx) => {
+  const paymentId = str(ctx.payload.paymentId);
+  if (!paymentId) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, null);
+  if ("error" in branch) return fail(branch.error);
+  try {
+    const reversal = await reverseApPayment({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      paymentId,
+      actorId: actorOf(ctx),
+      reversalDate: str(ctx.payload.reversalDate),
+      memo: str(ctx.payload.memo),
+    });
+    return { ok: true, result: reversal as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ApError) return fail(err.message);
+    throw err;
+  }
+};
+
+const chequeCreate: AutopilotExecutor = async (ctx) => {
+  const direction = ctx.payload.direction === "payable" ? "payable" : "receivable";
+  const amount = int(ctx.payload.amount);
+  const serialNumber = str(ctx.payload.serialNumber);
+  const bankName = str(ctx.payload.bankName);
+  const dueDate = str(ctx.payload.dueDate);
+  const { customerId, supplierId } = partyRef(ctx.payload);
+  const counterpartyName = str(ctx.payload.counterpartyName);
+  if (amount === null || !serialNumber || !bankName || !dueDate || !counterpartyName) {
+    return fail("invalid_payload");
+  }
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  try {
+    const cheque = await recordCheque({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      direction,
+      serialNumber,
+      sayadId: str(ctx.payload.sayadId),
+      bankName,
+      accountNumber: str(ctx.payload.accountNumber),
+      amount,
+      issueDate: str(ctx.payload.issueDate),
+      dueDate,
+      counterpartyName,
+      customerId: direction === "receivable" ? customerId : customerId,
+      supplierId,
+      memo: str(ctx.payload.memo),
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: cheque as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ChequeError) return fail(err.message);
+    throw err;
+  }
+};
+
+const chequeTransition: AutopilotExecutor = async (ctx) => {
+  const chequeId = str(ctx.payload.chequeId);
+  const action = str(ctx.payload.action);
+  if (!chequeId || !action || !CHEQUE_ACTIONS.includes(action as (typeof CHEQUE_ACTIONS)[number])) {
+    return fail("invalid_payload");
+  }
+  const branch = await chosenLocation(ctx.businessId, null);
+  if ("error" in branch) return fail(branch.error);
+  try {
+    const cheque = await transitionCheque({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      chequeId,
+      action: action as (typeof CHEQUE_ACTIONS)[number],
+      endorsedToSupplierId: str(ctx.payload.endorsedToSupplierId),
+      occurredOn: str(ctx.payload.occurredOn),
+      memo: str(ctx.payload.memo),
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: cheque as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ChequeError) return fail(err.message);
+    throw err;
+  }
+};
+
+const installmentPlanCreate: AutopilotExecutor = async (ctx) => {
+  const direction = ctx.payload.direction === "payable" ? "payable" : "receivable";
+  const partyId = str(ctx.payload.partyId);
+  const principal = int(ctx.payload.principal);
+  const installmentCount = int(ctx.payload.installmentCount);
+  const intervalMonths = int(ctx.payload.intervalMonths) ?? 1;
+  const firstDueDate = str(ctx.payload.firstDueDate);
+  if (principal === null || installmentCount === null || !firstDueDate) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  try {
+    const plan = await createInstallmentPlan({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      direction,
+      source: "party",
+      partyId,
+      principal,
+      downPayment: int(ctx.payload.downPayment) ?? undefined,
+      interestPercent: ctx.payload.interestPercent === undefined ? undefined : int(ctx.payload.interestPercent) ?? 0,
+      lateFeePercent: ctx.payload.lateFeePercent === undefined ? undefined : int(ctx.payload.lateFeePercent) ?? 0,
+      installmentCount,
+      intervalMonths,
+      firstDueDate,
+      note: str(ctx.payload.note),
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: plan };
+  } catch (err) {
+    if (err instanceof InstallmentError) return fail(err.message);
+    throw err;
+  }
+};
+
+const installmentItemPay: AutopilotExecutor = async (ctx) => {
+  const planId = str(ctx.payload.planId);
+  const itemId = str(ctx.payload.itemId);
+  const method = ctx.payload.method === "bank" ? "bank" : "cash";
+  if (!planId || !itemId) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, null);
+  if ("error" in branch) return fail(branch.error);
+  try {
+    await payInstallmentItem({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      planId,
+      itemId,
+      method,
+      memo: str(ctx.payload.memo),
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: { planId, itemId } };
+  } catch (err) {
+    if (err instanceof InstallmentError) return fail(err.message);
+    throw err;
+  }
+};
+
+const reconciliationCreate: AutopilotExecutor = async (ctx) => {
+  const accountCode = str(ctx.payload.accountCode);
+  const statementDate = str(ctx.payload.statementDate);
+  const statementBalance = int(ctx.payload.statementBalance);
+  if (!accountCode || !statementDate || statementBalance === null) return fail("invalid_payload");
+  if (!(RECONCILABLE_ACCOUNTS as readonly string[]).includes(accountCode)) return fail("invalid_payload");
+  try {
+    const recon = await createReconciliation({
+      businessId: ctx.businessId,
+      accountCode: accountCode as ReconcilableAccount,
+      statementDate,
+      statementBalance,
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: recon as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ReconciliationError) return fail(err.message);
+    throw err;
+  }
+};
+
+const reconciliationComplete: AutopilotExecutor = async (ctx) => {
+  const reconciliationId = str(ctx.payload.reconciliationId);
+  if (!reconciliationId) return fail("invalid_payload");
+  const actor = actorOf(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  try {
+    const done = await completeReconciliation({
+      businessId: ctx.businessId,
+      reconciliationId,
+      actorId: actor,
+    });
+    return { ok: true, result: done as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ReconciliationError) return fail(err.message);
+    throw err;
+  }
+};
+
+const payrollRunAccrue: AutopilotExecutor = async (ctx) => {
+  const periodKey = str(ctx.payload.periodKey);
+  if (!periodKey) return fail("invalid_payload");
+  try {
+    const run = await accruePayroll({
+      businessId: ctx.businessId,
+      createdBy: actorOf(ctx),
+      periodKey,
+      accrualDate: str(ctx.payload.accrualDate),
+      overtime: (ctx.payload.overtime as Record<string, unknown> | null) ?? null,
+      idempotencyKey: str(ctx.payload.idempotencyKey),
+    });
+    return { ok: true, result: run as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof PayrollError) return fail(err.message);
+    throw err;
+  }
+};
+
+const payrollRunPay: AutopilotExecutor = async (ctx) => {
+  const runId = str(ctx.payload.runId);
+  if (!runId) return fail("invalid_payload");
+  const method = str(ctx.payload.paymentAccountId) ? undefined : ctx.payload.method === "bank" ? "bank" : "cash";
+  try {
+    const run = await payPayroll({
+      businessId: ctx.businessId,
+      runId,
+      method,
+      paymentAccountId: str(ctx.payload.paymentAccountId),
+      paidDate: str(ctx.payload.paidDate),
+      actorId: actorOf(ctx),
+    });
+    return { ok: true, result: run as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof PayrollError) return fail(err.message);
+    throw err;
+  }
+};
+
+const payrollRunVoid: AutopilotExecutor = async (ctx) => {
+  const runId = str(ctx.payload.runId);
+  if (!runId) return fail("invalid_payload");
+  try {
+    const run = await voidPayrollRun({ businessId: ctx.businessId, runId, actorId: actorOf(ctx) });
+    return { ok: true, result: run as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof PayrollError) return fail(err.message);
+    throw err;
+  }
+};
+
+const payrollAdvanceRecord: AutopilotExecutor = async (ctx) => {
+  const userId = str(ctx.payload.userId);
+  const amount = ctx.payload.amount;
+  if (!userId || amount === undefined) return fail("invalid_payload");
+  try {
+    const advance = await recordAdvance({
+      businessId: ctx.businessId,
+      userId,
+      amount,
+      method: ctx.payload.method === "bank" ? "bank" : "cash",
+      paymentAccountId: str(ctx.payload.paymentAccountId),
+      advanceDate: str(ctx.payload.advanceDate),
+      note: str(ctx.payload.note),
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: advance as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof PayrollError) return fail(err.message);
+    throw err;
+  }
+};
+
+const payrollAdvanceVoid: AutopilotExecutor = async (ctx) => {
+  const advanceId = str(ctx.payload.advanceId);
+  if (!advanceId) return fail("invalid_payload");
+  try {
+    const advance = await voidAdvance({ businessId: ctx.businessId, advanceId, actorId: actorOf(ctx) });
+    return { ok: true, result: advance as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof PayrollError) return fail(err.message);
+    throw err;
+  }
+};
+
+const fixedAssetCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  const acquisitionDate = str(ctx.payload.acquisitionDate);
+  const cost = int(ctx.payload.cost);
+  const salvageValue = int(ctx.payload.salvageValue) ?? 0;
+  const usefulLifeMonths = int(ctx.payload.usefulLifeMonths);
+  if (!name || !acquisitionDate || cost === null || usefulLifeMonths === null) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  try {
+    const asset = await createFixedAsset({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      name,
+      acquisitionDate,
+      inServiceDate: str(ctx.payload.inServiceDate),
+      cost,
+      salvageValue,
+      usefulLifeMonths,
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: asset as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof FixedAssetError) return fail(err.message);
+    throw err;
+  }
+};
+
+const fixedAssetDepreciate: AutopilotExecutor = async (ctx) => {
+  const fixedAssetId = str(ctx.payload.fixedAssetId);
+  if (!fixedAssetId) return fail("invalid_payload");
+  try {
+    const posted = await postDepreciation({
+      businessId: ctx.businessId,
+      fixedAssetId,
+      periodKey: str(ctx.payload.periodKey),
+      periodLabel: str(ctx.payload.periodLabel),
+      entryDate: str(ctx.payload.entryDate),
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: posted as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof FixedAssetError) return fail(err.message);
+    throw err;
+  }
+};
+
+const fixedAssetDispose: AutopilotExecutor = async (ctx) => {
+  const fixedAssetId = str(ctx.payload.fixedAssetId);
+  const kind = str(ctx.payload.kind);
+  if (!fixedAssetId || kind !== "sale" && kind !== "write_off" && kind !== "retirement") {
+    return fail("invalid_payload");
+  }
+  try {
+    const disposal = await disposeFixedAsset({
+      businessId: ctx.businessId,
+      fixedAssetId,
+      kind: kind as "sale" | "write_off" | "retirement",
+      disposalDate: str(ctx.payload.disposalDate),
+      proceeds: kind === "sale" ? int(ctx.payload.proceeds) : undefined,
+      proceedsAccountId: str(ctx.payload.proceedsAccountId),
+      reason: str(ctx.payload.reason),
+      createdBy: actorOf(ctx),
+    });
+    return { ok: true, result: disposal as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof FixedAssetError) return fail(err.message);
+    throw err;
+  }
+};
+
+
+// ── Issue #883 package 2, batch B — POS operations executors ────────────────
+// Each mirrors the smallest route its action names: /api/orders POST,
+// /api/shifts/start, /api/shifts/end and /api/shifts/[id]/close POST. The
+// constraint "route and tool share one service" is literal here; the checkout
+// (settle) route is deliberately NOT an executor, since its posting
+// orchestration lives inline in the route for now — see the coverage matrix
+// note on pos.orders.
+const orderCreate: AutopilotExecutor = async (ctx) => {
+  const rawItems = Array.isArray(ctx.payload.items) ? ctx.payload.items : [];
+  const items: CartItemInput[] = [];
+  for (const item of rawItems) {
+    if (item === null || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const menuItemId = str(row.menuItemId);
+    const quantity = typeof row.quantity === "number" && Number.isSafeInteger(row.quantity) ? row.quantity : null;
+    if (!menuItemId || quantity === null || quantity <= 0) continue;
+    const note = str(row.note) ?? str(row.notes);
+    items.push(note ? { menuItemId, quantity, note } : { menuItemId, quantity });
+  }
+  if (items.length === 0) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const created = await createOrder({
+    locationId: branch.locationId,
+    type: ctx.payload.orderType === "dine_in" || ctx.payload.orderType === "delivery" ? ctx.payload.orderType : "takeaway",
+    tableId: str(ctx.payload.tableId),
+    customerId: str(ctx.payload.customerId),
+    note: str(ctx.payload.note),
+    discount: { type: null },
+    items,
+    openedBy: ctx.authorizedByUserId,
+    clientRequestId: str(ctx.payload.clientOrderId) ?? str(ctx.payload.clientRequestId) ?? randomUUID(),
+  });
+  if (!created.ok) return fail(created.error);
+  return { ok: true, result: created.data as unknown as Record<string, unknown> };
+};
+
+const roleOf = (ctx: AutopilotExecutorContext): "cashier" => "cashier";
+
+const shiftStart: AutopilotExecutor = async (ctx) => {
+  const actor = ctx.authorizedByUserId;
+  if (!actor) return fail("no_authorizing_user");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  const openingFloat = int(ctx.payload.openingFloat);
+  try {
+    const shift = await openShift(actor, ctx.businessId, null, openingFloat, branch.locationId, roleOf(ctx));
+    return { ok: true, result: shift as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ShiftError) return fail(err.message);
+    throw err;
+  }
+};
+
+const shiftEnd: AutopilotExecutor = async (ctx) => {
+  const actor = ctx.authorizedByUserId;
+  if (!actor) return fail("no_authorizing_user");
+  const closingFloat = int(ctx.payload.closingFloat);
+  try {
+    const result = await closeOwnShift(actor, ctx.businessId, closingFloat, roleOf(ctx));
+    return { ok: true, result: result as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ShiftError) return fail(err.message);
+    throw err;
+  }
+};
+
+const shiftClose: AutopilotExecutor = async (ctx) => {
+  const shiftId = str(ctx.payload.shiftId);
+  if (!shiftId) return fail("invalid_payload");
+  const closingFloat = int(ctx.payload.closingFloat);
+  try {
+    const result = await closeShiftById(shiftId, ctx.businessId, ctx.authorizedByUserId, closingFloat, "manager");
+    return { ok: true, result: result as unknown as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof ShiftError) return fail(err.message);
+    throw err;
+  }
+};
 
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
@@ -738,6 +1457,34 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   websitePostUpdate,
   websiteProductUpsert,
   triggeredMessageCampaign,
+  // ── Accounting writes (issue #883 package 2, batch A) ──────────────────────
+  accountCreate,
+  accountUpdate,
+  accountDisable,
+  journalDraftApprove,
+  journalDraftReject,
+  expenseReverse,
+  arReceiptRecord,
+  apPaymentRecord,
+  apPaymentReverse,
+  chequeCreate,
+  chequeTransition,
+  installmentPlanCreate,
+  installmentItemPay,
+  reconciliationCreate,
+  reconciliationComplete,
+  payrollRunAccrue,
+  payrollRunPay,
+  payrollRunVoid,
+  payrollAdvanceRecord,
+  payrollAdvanceVoid,
+  fixedAssetCreate,
+  fixedAssetDepreciate,
+  fixedAssetDispose,
+  orderCreate,
+  shiftStart,
+  shiftEnd,
+  shiftClose,
 };
 
 // ---------------------------------------------------------------------------

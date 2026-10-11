@@ -94,8 +94,31 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "get_ap_upcoming", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "get_unreconciled_bank_lines", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "get_payroll_summary", kind: "read", app: "accounting", branchPolicy: "business_wide" },
+  // Batch B — POS operations: everything below answers per-branch facts and
+  // resolves the branch through the consent pins before reading.
+  { name: "list_orders", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "get_order", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_shifts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
+  // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
+  // The account books are business-scoped objects (one ledger per business),
+  // so every read below refuses when the consent is pinned to branches —
+  // answering with a pin would pretend the ledger of one branch exists.
+  { name: "list_accounts", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_journal_entries", kind: "read", app: "accounting", branchPolicy: "business_wide" },
+  { name: "list_manual_journal_drafts", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_expenses", kind: "read", app: "accounting", branchPolicy: "business_wide" },
+  { name: "get_expense", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_receipts", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_payments", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_cheques", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_fixed_assets", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_installment_plans", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_fiscal_years", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_payroll_runs", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_payroll_advances", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  { name: "list_reconciliations", kind: "read", app: "accounting", branchPolicy: "business_wide" },
 
   // ---- CRM ----
   { name: "get_customer_profile", kind: "read", app: "crm", branchPolicy: "business_wide" },
@@ -148,11 +171,49 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Financial posting — this books an expense into the ledger RIGHT NOW, not
   // a draft. Issue #883 step-up: always human-approved, even on apply mode.
   { actionType: "expense.categorize", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  // Batch B — POS operations. Opening an order carries its own idempotency
+  // key and posts nothing to money (settlement is deliberately not a verb
+  // here — payment orchestration is route-bound), and shifts are clock
+  // records under the manager's clock: all follow connection mode.
+  { actionType: "order.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "shift.start", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "shift.end", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "shift.close", kind: "write", app: "pos", risk: "low", approval: "mode" },
   // Production consumes stock and posts its cost to the ledger — same step-up.
   { actionType: "inventory.production.run", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   // Journal drafts are drafts — they post nothing until the books flow takes
   // them; mode-driven approval is honest.
   { actionType: "journal.manual.propose", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  // ── Accounting module verbs (issue #883 package 2, batch A) ───────────────
+  // Chart-of-accounts structure and draft review are reversible bookkeeping:
+  // approval follows the connection's mode. Everything that posts or reverses
+  // money (receipts, payments, reversals, cheque transitions that post the
+  // clearing entry, installment settlement, payroll outflows, asset disposal
+  // with proceeds) is high risk and goes through the approval queue even for
+  // apply-mode connections — same treatment as expense.categorize.
+  { actionType: "account.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "account.update", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "account.disable", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "journal.draft.approve", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "journal.draft.reject", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "expense.reverse", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "ar.receipt.record", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "ap.payment.record", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "ap.payment.reverse", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "cheque.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "cheque.transition", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "installment.plan.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "installment.item.pay", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "reconciliation.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "reconciliation.complete", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "payroll.run.accrue", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "payroll.run.pay", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "payroll.run.void", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "payroll.advance.record", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "payroll.advance.void", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "fixed-asset.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "fixed-asset.depreciate", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "fixed-asset.dispose", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   // CRM
   { actionType: "customer.note.add", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.customer.note", kind: "write", app: "crm", risk: "low", approval: "mode" },
