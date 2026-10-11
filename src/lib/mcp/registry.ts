@@ -132,6 +132,11 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "search_kb_articles", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_media_assets", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_media_asset", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  // Batch K1 — CRM sales workflow: business-wide (no location dimension) but
+  // pinned would not be wrong; agnostic matches the other CRM reads.
+  { name: "list_crm_deals", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  { name: "list_crm_leads", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  { name: "list_crm_pipelines", kind: "read", app: "crm", branchPolicy: "agnostic" },
   // Batch J — saved reports are business-wide configuration rows.
   { name: "list_saved_reports", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
@@ -266,6 +271,14 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "crm.lead.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  // A convert creates a customer record (and optionally a deal) — the service
+  // itself blocks on duplicates unless the caller explicitly acknowledged them.
+  { actionType: "crm.lead.convert", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.deal.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.deal.move_stage", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.pipeline.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.pipeline.update", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "report.saved.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "report.saved.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "report.saved.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },

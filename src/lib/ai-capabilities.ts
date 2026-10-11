@@ -83,6 +83,11 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_suppliers: PERMISSIONS.partiesView,
   // Batch H — workspace.view on the project list (the screen's GET gate).
   list_workspace_projects: PERMISSIONS.workspaceView,
+  // Batch K1 — the routes' own gates: deals/leads read on crmView, writes on
+  // crmManage, pipeline configuration on crmConfigure.
+  list_crm_deals: PERMISSIONS.crmView,
+  list_crm_leads: PERMISSIONS.crmView,
+  list_crm_pipelines: PERMISSIONS.crmConfigure,
   // Batch J — reports.view, the gate POST /api/reports/saved itself enforces.
   list_saved_reports: PERMISSIONS.reportsView,
   // Batch I — the KB centre is member-wide (requireMember): the ai.use key
@@ -189,6 +194,12 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "task.create": PERMISSIONS.workspaceManage,
   "task.update": PERMISSIONS.workspaceManage,
   "task.status": PERMISSIONS.workspaceManage,
+  "crm.lead.save": PERMISSIONS.crmManage,
+  "crm.lead.convert": PERMISSIONS.crmManage,
+  "crm.deal.save": PERMISSIONS.crmManage,
+  "crm.deal.move_stage": PERMISSIONS.crmManage,
+  "crm.pipeline.create": PERMISSIONS.crmConfigure,
+  "crm.pipeline.update": PERMISSIONS.crmConfigure,
   "report.saved.create": PERMISSIONS.reportsView,
   "report.saved.update": PERMISSIONS.reportsView,
   "report.saved.delete": PERMISSIONS.reportsView,

@@ -323,6 +323,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "CRM",
     entity: "Deals & leads (handoff, convert)",
     routes: ["crm/deals", "crm/leads"],
+    ops: {
+      listDetail: ["list_crm_deals", "list_crm_leads"],
+      create: ["crm.lead.save", "crm.deal.save"],
+      update: ["crm.deal.move_stage"],
+      lifecycle: ["crm.lead.convert"],
+    },
+    note: "the services are upserts (optional id), matching the routes' create-vs-update split; convert is transactional and duplicate-guarded, exactly the screen button",
     test: "integration/crm.integration.test.ts",
   },
   {
@@ -337,6 +344,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "CRM",
     entity: "Pipelines & stages",
     routes: ["crm/pipelines"],
+    ops: {
+      listDetail: ["list_crm_pipelines"],
+      create: ["crm.pipeline.create"],
+      update: ["crm.pipeline.update"],
+    },
+    note: "stage set edits (savePipelineStages) stay route-only: structural rework belongs to the settings screen, not a chat turn",
     test: "integration/crm.integration.test.ts",
   },
   {

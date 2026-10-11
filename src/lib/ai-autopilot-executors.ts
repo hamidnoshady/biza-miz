@@ -68,6 +68,9 @@ import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchE
 import { upsertPromotion, setPromotionActive, issueGiftCard } from "./promotions-service";
 import { createSupplierReturn } from "./supplier-return-service";
 import { createSavedReport, deleteSavedReport, updateSavedReport } from "./reports-service";
+import { listPipelines, createPipeline, updatePipeline, moveDealToStage, type StageMoveResult } from "./crm-pipeline-service";
+import { saveLead, convertLead } from "./crm-lead-service";
+import { upsertDeal } from "./crm-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
 import { createWorkspaceProject, updateWorkspaceProject, createWorkspaceTask, updateWorkspaceTask, WorkspaceError } from "./workspace";
 import { workspaceAccessFlags } from "./workspace-shared";
@@ -2085,6 +2088,160 @@ const taskStatus: AutopilotExecutor = async (ctx) => {
 };
 
 
+// ── Issue #883 package 2, batch K1 — CRM sales workflow (leads/deals/pipelines)
+// All three services take an explicit actor { name, userId } — the same member
+// row the workspace executors resolved first supplies it here too.
+async function crmActor(ctx: AutopilotExecutorContext) {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return null;
+  return {
+    name: owner.actorName || ctx.authorizedByUserId || "mcp",
+    userId: ctx.authorizedByUserId,
+  };
+}
+
+const crmLeadSave: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("name_required");
+  const actor = await crmActor(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const saved = await saveLead(
+    ctx.businessId,
+    {
+      id: str(ctx.payload.id) ?? undefined,
+      name,
+      organization: str(ctx.payload.organization) ?? undefined,
+      phone: str(ctx.payload.phone),
+      email: str(ctx.payload.email),
+      source: str(ctx.payload.source) ?? undefined,
+      sourceDetail: str(ctx.payload.sourceDetail) ?? undefined,
+      status: (str(ctx.payload.status) ?? undefined) as Parameters<typeof saveLead>[1]["status"],
+      rating: (str(ctx.payload.rating) ?? undefined) as Parameters<typeof saveLead>[1]["rating"],
+      ownerUserId: str(ctx.payload.ownerUserId),
+      ownerName: str(ctx.payload.ownerName) ?? undefined,
+      notes: str(ctx.payload.notes) ?? undefined,
+      nextAction: str(ctx.payload.nextAction) ?? undefined,
+      nextActionAt: str(ctx.payload.nextActionAt),
+      qualificationReason: str(ctx.payload.qualificationReason) ?? undefined,
+      disqualificationReason: str(ctx.payload.disqualificationReason) ?? undefined,
+      utm: ctx.payload.utm as Record<string, unknown> | undefined,
+    },
+    actor,
+  );
+  if (!saved) return fail("name_required");
+  return { ok: true, result: slimLead(saved) };
+};
+
+function slimLead(lead: NonNullable<Awaited<ReturnType<typeof saveLead>>>) {
+  return { id: lead.id, name: lead.name, status: lead.status, rating: lead.rating };
+}
+
+const crmLeadConvert: AutopilotExecutor = async (ctx) => {
+  const leadId = str(ctx.payload.leadId);
+  if (!leadId) return fail("invalid_payload");
+  const actor = await crmActor(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const result = await convertLead(
+    ctx.businessId,
+    leadId,
+    {
+      partyId: str(ctx.payload.partyId) ?? undefined,
+      createDeal: ctx.payload.createDeal === true,
+      dealTitle: str(ctx.payload.dealTitle) ?? undefined,
+      dealValueRial: int(ctx.payload.dealValueRial) ?? undefined,
+      dealExpectedCloseDate: str(ctx.payload.dealExpectedCloseDate),
+      acknowledgeDuplicates: ctx.payload.acknowledgeDuplicates === true,
+    },
+    actor,
+  );
+  if (!result.ok) {
+    // duplicates_found carries the candidate list — the client must show it to
+    // a person and only retry with acknowledgeDuplicates: true. That rule is
+    // the service's, surfaced here untouched.
+    return {
+      ok: false,
+      errorCode: result.error,
+      result: { error: result.error, duplicates: (result as { duplicates?: unknown[] }).duplicates },
+    };
+  }
+  return { ok: true, result: result.dealId ? { partyId: result.partyId, dealId: result.dealId } : { partyId: result.partyId } };
+};
+
+const crmDealSave: AutopilotExecutor = async (ctx) => {
+  const title = str(ctx.payload.title);
+  if (!title) return fail("title_required");
+  const deal = await upsertDeal(ctx.businessId, {
+    id: str(ctx.payload.id) ?? undefined,
+    title,
+    description: str(ctx.payload.description) ?? undefined,
+    customerId: str(ctx.payload.customerId),
+    stageId: str(ctx.payload.stageId),
+    valueRial: int(ctx.payload.valueRial) ?? undefined,
+    probability: ctx.payload.probability === null ? null : int(ctx.payload.probability),
+    expectedCloseDate: str(ctx.payload.expectedCloseDate),
+    ownerUser: str(ctx.payload.ownerUser) ?? undefined,
+    ownerUserId: str(ctx.payload.ownerUserId),
+    source: str(ctx.payload.source) ?? undefined,
+    lostReason: str(ctx.payload.lostReason),
+    orderId: str(ctx.payload.orderId),
+    createdById: ctx.authorizedByUserId,
+  });
+  return { ok: true, result: { id: deal.id, title: deal.title } };
+};
+
+const crmDealMoveStage: AutopilotExecutor = async (ctx) => {
+  const dealId = str(ctx.payload.dealId);
+  const stageId = str(ctx.payload.stageId);
+  if (!dealId || !stageId) return fail("invalid_payload");
+  const actor = await crmActor(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const result: StageMoveResult = await moveDealToStage(ctx.businessId, dealId, stageId, actor, {
+    note: str(ctx.payload.note) ?? undefined,
+    lostReason: str(ctx.payload.lostReason) ?? undefined,
+    wonReason: str(ctx.payload.wonReason) ?? undefined,
+  });
+  if (!result.ok) return fail(result.error ?? "move_failed");
+  return { ok: true, result: { dealId, stageId, secondsInPreviousStage: result.secondsInPreviousStage ?? null } };
+};
+
+const crmPipelineCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("name_required");
+  const actor = await crmActor(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const result = await createPipeline(
+    ctx.businessId,
+    {
+      name,
+      description: str(ctx.payload.description) ?? undefined,
+      isDefault: ctx.payload.isDefault === true,
+    },
+    actor,
+  );
+  if (!result.ok) return fail(result.error ?? "create_failed");
+  return { ok: true, result: result.pipeline ? { id: result.pipeline.id, name: result.pipeline.name } : { name } };
+};
+
+const crmPipelineUpdate: AutopilotExecutor = async (ctx) => {
+  const pipelineId = str(ctx.payload.pipelineId);
+  if (!pipelineId) return fail("invalid_payload");
+  const actor = await crmActor(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const result = await updatePipeline(
+    ctx.businessId,
+    pipelineId,
+    {
+      name: str(ctx.payload.name) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      isDefault: ctx.payload.isDefault,
+      archived: ctx.payload.archived,
+    } as Parameters<typeof updatePipeline>[2],
+    actor,
+  );
+  if (!result.ok) return fail(result.error ?? "update_failed");
+  return { ok: true, result: { pipelineId, updated: true } };
+};
+
 // ── Issue #883 package 2, batch J — saved reports ────────────────────────────
 const reportSavedCreate: AutopilotExecutor = async (ctx) => {
   const name = str(ctx.payload.name);
@@ -2186,6 +2343,12 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   taskCreate,
   taskUpdate,
   taskStatus,
+  crmLeadSave,
+  crmLeadConvert,
+  crmDealSave,
+  crmDealMoveStage,
+  crmPipelineCreate,
+  crmPipelineUpdate,
   reportSavedCreate,
   reportSavedUpdate,
   reportSavedDelete,

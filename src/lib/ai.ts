@@ -277,6 +277,15 @@ export type ActionType =
   | "task.create"
   | "task.update"
   | "task.status"
+  // Batch K1 — CRM sales workflow: leads, deals, pipelines. The services are
+  // upserts (saveLead/upsertDeal take an optional id), exactly the routes'
+  // create-vs-update split.
+  | "crm.lead.save"
+  | "crm.lead.convert"
+  | "crm.deal.save"
+  | "crm.deal.move_stage"
+  | "crm.pipeline.create"
+  | "crm.pipeline.update"
   // Batch J — saved reports (reports.view on the screen; validateReportConfig
   // mirrors the route's 400 semantics before a row ever appears).
   | "report.saved.create"
@@ -352,6 +361,12 @@ export type AutopilotExecutorKey =
   | "promotionUpsert"
   | "promotionToggle"
   | "giftCardIssue"
+  | "crmLeadSave"
+  | "crmLeadConvert"
+  | "crmDealSave"
+  | "crmDealMoveStage"
+  | "crmPipelineCreate"
+  | "crmPipelineUpdate"
   | "reportSavedCreate"
   | "reportSavedUpdate"
   | "reportSavedDelete"
@@ -1039,6 +1054,58 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر وضعیت تَسک — بازکردن، پیش‌بردن یا بستن",
     payloadHint: '{ taskId: string, status: "open"|"in_progress"|"blocked"|"done" }',
     executor: "taskStatus",
+  },
+  "crm.lead.save": {
+    type: "crm.lead.save",
+    endpoint: "/api/crm/leads",
+    method: "POST",
+    label: "ثبت یا ویرایش سرنخ — با id ویرایش می‌شود، مثل فرم صفحهٔ سرنخ‌ها",
+    payloadHint:
+      '{ id?: string, name: string /* لازم */, phone?: string, email?: string, organization?: string, source?: string, sourceDetail?: string, status?: "new"|"contacted"|"working"|"qualified"|"unqualified"|"converted", rating?: "hot"|"warm"|"cold", ownerUserId?: string, ownerName?: string, notes?: string, nextAction?: string, nextActionAt?: string, qualificationReason?: string, disqualificationReason?: string, utm?: object }',
+    executor: "crmLeadSave",
+  },
+  "crm.lead.convert": {
+    type: "crm.lead.convert",
+    endpoint: "/api/crm/leads/[id]/convert",
+    method: "POST",
+    label: "تبدیل سرنخ به مشتری — با ساخت معامده به‌صورت تراکنشی، همان دکمهٔ صفحه",
+    payloadHint:
+      '{ leadId: string /* از list_crm_leads */, partyId?: string /* اتصال به مشتری موجود */, createDeal?: boolean, dealTitle?: string, dealValueRial?: number, dealExpectedCloseDate?: string|null, acknowledgeDuplicates?: boolean /* فقط بعد از نمایش موارد تکراری به کاربر */ }',
+    executor: "crmLeadConvert",
+  },
+  "crm.deal.save": {
+    type: "crm.deal.save",
+    endpoint: "/api/crm/deals",
+    method: "POST",
+    label: "ثبت یا ویرایش معامده — با id ویرایش می‌شود، مثل فرم کانبان",
+    payloadHint:
+      '{ id?: string, title: string /* لازم */, customerId?: string|null, stageId?: string /* از list_crm_pipelines */, valueRial?: number, probability?: number|null, expectedCloseDate?: string|null, ownerUserId?: string, ownerUser?: string, source?: string, lostReason?: string|null, orderId?: string|null, description?: string }',
+    executor: "crmDealSave",
+  },
+  "crm.deal.move_stage": {
+    type: "crm.deal.move_stage",
+    endpoint: "/api/crm/deals/[id]/stage",
+    method: "POST",
+    label: "جابه‌جایی معامده بین مراحل قیف — همان درگ کانبان با تاریخچهٔ مرحله",
+    payloadHint:
+      '{ dealId: string /* از list_crm_deals */, stageId: string /* از list_crm_pipelines */, note?: string, lostReason?: string /* برای مرحلهٔ باخته */, wonReason?: string /* برای مرحلهٔ برده */ }',
+    executor: "crmDealMoveStage",
+  },
+  "crm.pipeline.create": {
+    type: "crm.pipeline.create",
+    endpoint: "/api/crm/pipelines",
+    method: "POST",
+    label: "ساخت قیف فروش تازه — مثل پنل تنظیمات CRM",
+    payloadHint: '{ name: string /* لازم و یکتا */, description?: string, isDefault?: boolean }',
+    executor: "crmPipelineCreate",
+  },
+  "crm.pipeline.update": {
+    type: "crm.pipeline.update",
+    endpoint: "/api/crm/pipelines/[id]",
+    method: "PATCH",
+    label: "ویرایش یا بایگانی قیف — مثل پنل تنظیمات CRM",
+    payloadHint: '{ pipelineId: string /* از list_crm_pipelines */, name?: string, description?: string, isDefault?: boolean, archived?: boolean }',
+    executor: "crmPipelineUpdate",
   },
   "report.saved.create": {
     type: "report.saved.create",
@@ -2918,6 +2985,66 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           description:
             "گزارش‌های ذخیره‌شدهٔ کسب‌وکار — استانداردها و سفارشی‌ها با پیکربندی کامل؛ برای «گزارش فروش را اجراکن» اول نگاه کن آیا وجود دارد.",
           parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_deals",
+          description:
+            "معامله‌های CRM با فیلتر مرحله/قیف/مالک/مشتری و بازهٔ مبلغ — کارت‌های کانبان؛ openOnly معامله‌های باز را می‌دهد. شناسه‌ها برای crm.deal.save و crm.deal.move_stage لازم‌اند.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string" },
+              stageId: { type: "string" },
+              pipelineId: { type: "string" },
+              ownerUserId: { type: "string" },
+              openOnly: { type: "boolean" },
+              q: { type: "string", description: "جستجو در عنوان معامده یا نام مشتری" },
+              minValueRial: { type: "number" },
+              maxValueRial: { type: "number" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۲۰۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_leads",
+          description:
+            "سرنخ‌های CRM با فیلتر وضعیت/مالک/امتیاز/منشأ — فهرست صفحهٔ سرنخ‌ها با صفحه‌بندی؛ سرنخ‌های موعددار با dueOnly. شناسه برای crm.lead.convert لازم است.",
+          parameters: {
+            type: "object",
+            properties: {
+              status: { type: "string", description: "new|contacted|working|qualified|unqualified|converted یا open" },
+              ownerUserId: { type: "string" },
+              rating: { type: "string", description: "hot|warm|cold" },
+              source: { type: "string" },
+              search: { type: "string" },
+              dueOnly: { type: "boolean", description: "فقط سرنخ‌هایی که اقدام بعدی‌ای به موعد رسیده دارند" },
+              limit: { type: "number", description: "پیش‌فرض ۵۰، سقف ۱۰۰" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_pipelines",
+          description:
+            "قیف‌های فروش با مراحلشان — شناسهٔ مرحله برای crm.deal.save و crm.deal.move_stage لازم است؛ همان دادهٔ پنل تنظیمات CRM.",
+          parameters: {
+            type: "object",
+            properties: {
+              includeArchived: { type: "boolean" },
+            },
+            additionalProperties: false,
+          },
         },
       },
 

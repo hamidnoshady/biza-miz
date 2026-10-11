@@ -63,6 +63,9 @@ import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
+import { listDeals } from "./crm-service";
+import { listLeads } from "./crm-lead-service";
+import { listPipelines } from "./crm-pipeline-service";
 import { getPool } from "./db";
 import { listParties } from "./parties-service";
 import { listAutomations } from "./crm-automation-service";
@@ -1730,6 +1733,42 @@ export async function runReadTool(
       const asset = await getMediaAsset(businessId, assetId);
       if (!asset) return { ok: false, data: { error: "media_not_found" } };
       return { ok: true, data: asset };
+    }
+    // Issue #883 package 2, batch K1 — CRM sales workflow reads.
+    case "list_crm_deals": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;
+      const deals = await listDeals(businessId, {
+        customerId: typeof args.customerId === "string" && args.customerId.trim() ? args.customerId.trim() : undefined,
+        stageId: typeof args.stageId === "string" && args.stageId.trim() ? args.stageId.trim() : undefined,
+        pipelineId: typeof args.pipelineId === "string" && args.pipelineId.trim() ? args.pipelineId.trim() : undefined,
+        ownerUserId: typeof args.ownerUserId === "string" && args.ownerUserId.trim() ? args.ownerUserId.trim() : undefined,
+        openOnly: args.openOnly === true,
+        q: typeof args.q === "string" && args.q.trim() ? args.q.trim() : undefined,
+        minValueRial: typeof args.minValueRial === "number" ? args.minValueRial : undefined,
+        maxValueRial: typeof args.maxValueRial === "number" ? args.maxValueRial : undefined,
+        limit,
+      });
+      return { ok: true, data: { count: deals.length, deals } };
+    }
+    case "list_crm_leads": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 50;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const { leads, total } = await listLeads(businessId, {
+        status: typeof args.status === "string" ? (args.status as "open") : undefined,
+        ownerUserId: typeof args.ownerUserId === "string" && args.ownerUserId.trim() ? args.ownerUserId.trim() : undefined,
+        rating: typeof args.rating === "string" ? (args.rating as "warm") : undefined,
+        source: typeof args.source === "string" && args.source.trim() ? args.source.trim() : undefined,
+        search: typeof args.search === "string" && args.search.trim() ? args.search.trim() : undefined,
+        dueOnly: args.dueOnly === true,
+        limit,
+        offset,
+      });
+      return { ok: true, data: { total, count: leads.length, offset, leads } };
+    }
+    case "list_crm_pipelines": {
+      const includeArchived = args.includeArchived === true;
+      const pipelines = await listPipelines(businessId, { includeArchived });
+      return { ok: true, data: { count: pipelines.length, pipelines } };
     }
     // Issue #883 package 2, batch J — saved reports.
     case "list_saved_reports": {
