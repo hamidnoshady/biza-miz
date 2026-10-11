@@ -55,6 +55,11 @@ interface DoorOption {
  */
 export interface LoginCapabilities {
   deploymentProfile: "cloud" | "hybrid" | "local";
+  /**
+   * Is the server answering this page a local one? Answered from the install's
+   * deployment role, not the business's stored profile — see the route.
+   */
+  localServer: boolean;
   phoneOtpEnforcement: "off" | "grace" | "pending_sms" | "enforced";
   phoneOtpDaysLeft: number | null;
 }
@@ -84,18 +89,24 @@ export function useLoginCapabilities(): LoginCapabilities | null {
 /**
  * Issue #885 L04 — the three cards, worded for what this install can do.
  *
- * The offline card is the one that changes. On a cloud origin it no longer
- * claims «نیازی به اینترنت ندارد», because that was untrue there and pressing
- * it only mounted the same same-origin staff form. On a local or hybrid
- * install the claim is kept — it is accurate about the server being talked to
- * — with the phone-verification prerequisite stated when the policy actually
- * enforces one, so a member does not discover at the keypad that an offline
- * login still needs a fresh SMS after their seven-day window closes.
+ * The offline card is the one that changes. It claims «نیازی به اینترنت
+ * ندارد» only when the server answering the page is a local one; on a hosted
+ * origin the claim was untrue and pressing the card only mounted the same
+ * same-origin staff form. On a local server the claim is kept — accurate about
+ * the server being talked to — with the phone-verification prerequisite stated
+ * when the policy actually enforces one, so a member does not discover at the
+ * keypad that an offline login still needs a fresh SMS after their seven-day
+ * window closes.
  */
 function doorOptions(capabilities: LoginCapabilities | null): DoorOption[] {
-  const localInstall =
-    capabilities?.deploymentProfile === "local" ||
-    capabilities?.deploymentProfile === "hybrid";
+  // Issue #885, gap 8. This used to read `deploymentProfile === "local" ||
+  // "hybrid"`, which is a fact about the *business* and therefore identical on
+  // every origin serving it: a business paired to the cloud stores `hybrid`,
+  // so the hosted login page claimed Internet-free login about itself. Whether
+  // offline login works is a fact about the server answering the page, so the
+  // promise is keyed on that. A missing probe stays false — no claim we cannot
+  // back up.
+  const localInstall = capabilities?.localServer === true;
   const phoneEnforced = capabilities?.phoneOtpEnforcement === "enforced";
 
   return [
@@ -273,9 +284,7 @@ export function ChangeLoginTypeLink({ onClick }: { onClick: () => void }) {
  */
 export function OfflineLoginNote() {
   const capabilities = useLoginCapabilities();
-  const localInstall =
-    capabilities?.deploymentProfile === "local" ||
-    capabilities?.deploymentProfile === "hybrid";
+  const localInstall = capabilities?.localServer === true;
   const phoneEnforced = capabilities?.phoneOtpEnforcement === "enforced";
 
   return (

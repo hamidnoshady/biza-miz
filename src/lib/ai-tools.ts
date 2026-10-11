@@ -60,6 +60,7 @@ import { summarizeFindings } from "./accounting-review";
 import { countPendingCoworkerRuns, listCoworkerJobs } from "./ai-coworker-service";
 import { ACTION_CATALOG, ACTION_TYPES } from "./ai";
 import { RECONCILABLE_ACCOUNT_LABELS, WASTE_REASON_LABELS, labelFor, moneyFields } from "./ai-labels";
+import { sumRialText } from "./money";
 import {
   RECONCILABLE_ACCOUNTS,
   RECONCILABLE_ACCOUNT_CODES,
@@ -1521,15 +1522,21 @@ export async function runReadTool(
       return { ok: true, data: await unreconciledBankLines(businessId) };
 
     case "get_payroll_summary": {
-      const [runs, wages] = await Promise.all([listPayrollRuns(businessId), listStaffWages(businessId)]);
+      // The six newest runs with their lines (a bounded read — the history is
+      // paginated now), and the wage bill summed exactly: amounts are integer
+      // Rial text, so a large payroll cannot round on its way to the model.
+      const [{ runs }, wages] = await Promise.all([
+        listPayrollRuns(businessId, { limit: 6, includeLines: true }),
+        listStaffWages(businessId),
+      ]);
       const staffWithWage = wages.filter((w) => w.monthlyWage !== null);
       return {
         ok: true,
         data: {
-          recentRuns: cap(runs, 6),
+          recentRuns: runs,
           staffCount: wages.length,
           staffWithWageCount: staffWithWage.length,
-          totalMonthlyWageBill: staffWithWage.reduce((sum, w) => sum + (w.monthlyWage ?? 0), 0),
+          totalMonthlyWageBill: sumRialText(staffWithWage.map((w) => w.monthlyWage as string)),
         },
       };
     }

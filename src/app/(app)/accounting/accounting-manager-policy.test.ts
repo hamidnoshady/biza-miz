@@ -8,6 +8,7 @@ describe("AccountingManager account-list loading", () => {
   it("only requires the chart for sections that consume it", () => {
     expect(accountingSectionNeedsAccountList("manual")).toBe(true);
     expect(accountingSectionNeedsAccountList("expenses")).toBe(true);
+    expect(accountingSectionNeedsAccountList("fixed-assets")).toBe(true);
     expect(accountingSectionNeedsAccountList("trial-balance")).toBe(false);
     expect(accountingSectionNeedsAccountList("entries")).toBe(false);
   });

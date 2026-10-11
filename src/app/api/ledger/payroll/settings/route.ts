@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getPayrollSettings, PayrollError, savePayrollSettings } from "@/lib/payroll-service";
+import { getPayrollSettings, savePayrollSettings } from "@/lib/payroll-service";
+import { badRequest, payrollErrorResponse, readJsonObject } from "@/lib/payroll-http";
 
 /**
  * The business's own payroll rates (audit F11): insurance shares, the
@@ -18,24 +19,24 @@ export const GET = withTenantScope(async () => {
   return NextResponse.json({ settings });
 });
 
+/**
+ * Saves the settings document. The body must be a JSON object — a body of `null`
+ * used to parse as «nothing entered» and silently wiped every rate the business
+ * had set.
+ */
 export const PUT = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.payrollManage);
   if (error) return error;
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  }
+  const body = await readJsonObject(request);
+  if (!body) return badRequest();
 
   try {
     const settings = await savePayrollSettings(session.businessId, body);
     return NextResponse.json({ settings });
   } catch (err) {
-    if (err instanceof PayrollError) {
-      return NextResponse.json({ error: err.message, field: err.field }, { status: err.status });
-    }
+    const response = payrollErrorResponse(err);
+    if (response) return response;
     throw err;
   }
 });

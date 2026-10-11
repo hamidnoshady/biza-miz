@@ -166,6 +166,15 @@ describe("postingRulesFor", () => {
   });
 
   describe("the payroll rule", () => {
+    it("says a bank payment leaves the business's own bank account, not card money in transit", () => {
+      const payroll = postingRulesFor({ industry: "food_service" }).find((rule) => rule.key === "payroll")!;
+      const payment = payroll.lines.find((line) => line.side === "debit" && line.code === WELL_KNOWN_CODES.salariesPayable)!;
+      expect(payment.note).toContain(WELL_KNOWN_CODES.bank);
+      expect(payment.note).toContain(`نه ${WELL_KNOWN_CODES.bankClearing}`);
+      // …and that the same payment settles commission, which already sits in 2300.
+      expect(payment.note).toContain("پورسانت");
+    });
+
     it("accrues to wages payable and settles from it, as accruePayroll does", () => {
       const payroll = postingRulesFor({ industry: "food_service" }).find((rule) => rule.key === "payroll")!;
       expect(payroll.lines).toEqual(

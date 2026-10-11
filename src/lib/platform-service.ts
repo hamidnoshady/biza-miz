@@ -15,6 +15,7 @@
  */
 import { getPool, query, withoutTenantScope, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
+import type { MigrationStatus } from "./migration-status-service";
 import type { PoolClient } from "pg";
 import { disableFeatures, seedChartOfAccounts } from "./business-provisioning";
 import { reconcilePaymentMethodsForIndustry } from "./payment-methods-service";
@@ -3178,7 +3179,18 @@ export async function queryAudit(q: AuditQuery = {}): Promise<AuditListResult> {
 
 export interface SystemStatus {
   migrations: { filename: string; appliedAt: string }[];
-  pendingMigrations: number;
+  /**
+   * Retained for existing consumers: ordinary pending + gated/deferred, or null
+   * when the migration inventory could not be read. Never a confident zero
+   * standing in for "unknown" — see `migrationStatus`.
+   */
+  pendingMigrations: number | null;
+  /**
+   * The canonical migration status from `getMigrationStatus()`. Carries the
+   * ordinary/gated split, the stable reason codes and the redacted AI gateway
+   * secret-cutover state that `pendingMigrations` cannot express.
+   */
+  migrationStatus: MigrationStatus;
   pool: { total: number; idle: number; waiting: number };
   rlsEffective: boolean;
   backups: { businessId: string; businessName: string; status: string; ranAt: string | null }[];
@@ -3207,15 +3219,17 @@ export interface PlatformBackupLine {
  * connection pool's live figures, whether RLS is actually being enforced, and
  * the most recent backup run per business. Read-only and cheap — this is a
  * dashboard, not a control surface.
+ *
+ * `migrations` is the canonical status from `getMigrationStatus()` (see
+ * `src/lib/migration-status-service.ts`); the applied-migration list is derived
+ * from it rather than queried again, so the page cannot show two different
+ * answers about the same table.
  */
-export async function systemStatus(pendingMigrations: number): Promise<SystemStatus> {
+export async function systemStatus(migrations: MigrationStatus): Promise<SystemStatus> {
   const pool = getPool();
 
-  const [migrations, backups, counts, rls, backupHealth] = await withoutTenantScope("platform", () =>
+  const [backups, counts, rls, backupHealth] = await withoutTenantScope("platform", () =>
     Promise.all([
-      query<{ filename: string; applied_at: string }>(
-        `SELECT filename, applied_at FROM schema_migrations ORDER BY filename DESC LIMIT 30`,
-      ),
       query<{ business_id: string; business_name: string; status: string; ran_at: string | null }>(
         `SELECT DISTINCT ON (br.business_id)
                 br.business_id, b.name AS business_name, br.status, br.started_at AS ran_at
@@ -3239,8 +3253,12 @@ export async function systemStatus(pendingMigrations: number): Promise<SystemSta
   );
 
   return {
-    migrations: migrations.rows.map((m) => ({ filename: m.filename, appliedAt: m.applied_at })),
-    pendingMigrations,
+    migrations: migrations.applied.map((m) => ({
+      filename: m.filename,
+      appliedAt: m.appliedAt ?? "",
+    })),
+    pendingMigrations: migrations.pendingTotal,
+    migrationStatus: migrations,
     pool: {
       total: pool.totalCount,
       idle: pool.idleCount,

@@ -16,7 +16,9 @@ import {
 import { boundedString, normalizeOtpCode } from "@/lib/login-contract";
 import {
   issueTrustedDevice,
+  readTrustedDeviceToken,
   trustedDeviceCookieOptions,
+  verifyTrustedDevice,
   TRUSTED_DEVICE_COOKIE,
 } from "@/lib/trusted-device";
 import {
@@ -185,6 +187,14 @@ export async function POST(request: NextRequest) {
       graceDaysLeft: number | null;
     } | null = null;
 
+    // Issue #885 — set when a due MFA challenge was waived because this
+    // device already holds trust. It gates trust *issuance* below: a login
+    // that skipped a factor has not completed every factor the account
+    // requires, so it must not start a fresh seven-day period. Without this
+    // guard a trusted device would quietly roll its own trust forward on
+    // every login and never be challenged again.
+    let mfaWaivedByTrust = false;
+
     if (member.platform_user_id) {
       const mfaPolicy = await getMfaPolicy(member.business_id);
       const requiresMfa = mfaAppliesToRole(member.role, mfaPolicy.requireForManagers);
@@ -215,13 +225,42 @@ export async function POST(request: NextRequest) {
           role: member.role,
         });
 
-        if (
-          shouldChallengeMfaOnLogin({
-            hasConfirmedEnrolment: activeEnrolments.length > 0,
-            appliesToRole: requiresMfa,
-            requirement: req,
-          })
-        ) {
+        const challengeDue = shouldChallengeMfaOnLogin({
+          hasConfirmedEnrolment: activeEnrolments.length > 0,
+          appliesToRole: requiresMfa,
+          requirement: req,
+        });
+
+        // Issue #885 — the seven-day trusted-device exemption, applied to the
+        // phone-primary door exactly as the password door applies it. Without
+        // this the two doors disagreed: a device trusted after a full
+        // password+MFA verification was still asked for MFA when the same
+        // member came in through the phone door, which reads as the feature
+        // not working rather than as a second, stricter policy.
+        //
+        // What is *not* waived:
+        //  - the primary proof — the phone OTP above was still redeemed on
+        //    this very request, bound to this challenge, member, tenant,
+        //    ceremony and destination;
+        //  - the distinct-factor rule — `distinctSecondFactorMethods` still
+        //    excludes phone_otp from the MFA methods, so waiving the challenge
+        //    cannot quietly make the phone count as its own second factor;
+        //  - step-up for sensitive actions, which is a separate
+        //    `requireRecentAuth` check on the routes that need it and is
+        //    deliberately not satisfied by routine trust.
+        //
+        // Scoped to this business and this membership, and only consulted when
+        // a challenge is actually due — otherwise it is a query for nothing.
+        const deviceTrust = challengeDue
+          ? await verifyTrustedDevice({
+              businessId: member.business_id,
+              userId: member.id,
+              token: readTrustedDeviceToken(request),
+            })
+          : null;
+        mfaWaivedByTrust = challengeDue && deviceTrust?.trusted === true;
+
+        if (challengeDue && !mfaWaivedByTrust) {
           const mfaToken = await signMfaPendingToken({
             sub: member.platform_user_id,
             method: distinctMethods[0] ?? null,
@@ -290,7 +329,12 @@ export async function POST(request: NextRequest) {
     // this is the one place the seven-day trust may be earned. Best-effort:
     // the login itself is already complete and must not fail because a
     // convenience row could not be written.
-    if (wantsTrust) {
+    //
+    // `!mfaWaivedByTrust` is load-bearing. Trust is earned by *completing*
+    // every factor, not by being exempted from one; if a waived MFA could
+    // re-mint trust, a device would extend its own window indefinitely on
+    // ordinary logins and the seven-day expiry would never bite.
+    if (wantsTrust && !mfaWaivedByTrust) {
       const trust = await issueTrustedDevice({
         businessId: member.business_id,
         userId: member.id,

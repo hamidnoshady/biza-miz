@@ -135,6 +135,19 @@ export async function POST(request: NextRequest) {
       if (["membership.suspend", "membership.offboard"].includes(body.type)) {
         await client.query(`UPDATE employee_sessions SET revoked_at=now() WHERE business_id=$1 AND employee_id=$2 AND revoked_at IS NULL`, [site.businessId, target.id]);
         await client.query(`UPDATE employee_credentials SET status='revoked',revoked_at=now() WHERE business_id=$1 AND employee_id=$2 AND status='active'`, [site.businessId, target.id]);
+        // Issue #885, gap 6 — a disabled membership must not keep a live
+        // seven-day device trust. The two statements above take away the
+        // session and the credentials, but trust is a separate table on its
+        // own clock, and `verifyTrustedDevice` reads it by digest with no
+        // session in play: a browser still holding the cookie would keep
+        // skipping the OTP and MFA challenges for an account that has just
+        // been suspended or offboarded. Same transaction as the rest, so a
+        // command that fails rolls the revocation back with it.
+        //
+        // Scoped by `user_id`, not `platform_user_id`: the offboard branch
+        // above leaves that column in place, but the suspend branch and the
+        // hybrid path both run where chasing it would find nothing.
+        await client.query(`UPDATE trusted_devices SET revoked_at=now(),revoked_reason='membership_disabled' WHERE business_id=$1 AND user_id=$2 AND revoked_at IS NULL`, [site.businessId, target.id]);
       }
       const iamSequence = await appendIamEvent(client, { businessId: site.businessId, type: eventType, entityId: target.id, payload: { ...payload, revision, reason: changes.reason ?? null }, actorUserId: actor.id, origin: "site_command" });
       const result = { ok: true, revision, iamSequence };

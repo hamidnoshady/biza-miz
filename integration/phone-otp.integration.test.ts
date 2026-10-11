@@ -241,23 +241,46 @@ describe("loginRoster routing (the server-side loginMode)", () => {
     expect(modes["پنجرهٔ بسته"]).toBe("pin");
   });
 
-  it("routes by phone state and the 7-day window once enforced", async () => {
+  it("routes by phone state and this device's trust once enforced", async () => {
+    // Issue #885, gap 1. This used to assert the shortcut from the
+    // member-wide `users.otp_login_at` window: two members with verified
+    // numbers, one inside seven days and one outside. That window is no
+    // longer an exemption — verifying on one till must not open the door on
+    // another — so the deciding input is now which member this *device* is
+    // trusted for, resolved once by the route and passed in.
     await setPolicy(biz.id, PAST);
     const hadKey = process.env.KAVENEGAR_API_KEY;
     process.env.KAVENEGAR_API_KEY = "test-key";
     try {
-      const roster = await dbLib.withTenant(biz.id, () =>
-        employeeService.loginRoster(biz.id, null, null),
+      // A device with no trust: every verified member owes the code again,
+      // however recently they verified.
+      const untrusted = await dbLib.withTenant(biz.id, () =>
+        employeeService.loginRoster(biz.id, null, null, null),
       );
-      const modes = Object.fromEntries(roster.map((e) => [e.fullName, e.loginMode]));
+      const untrustedModes = Object.fromEntries(
+        untrusted.map((e) => [e.fullName, e.loginMode]),
+      );
       // No number on file: the PIN still proves who, then the number is set.
-      expect(modes["بی‌شماره"]).toBe("pin_then_otp");
+      expect(untrustedModes["بی‌شماره"]).toBe("pin_then_otp");
       // A number is stored but unproven: straight to the code.
-      expect(modes["تأییدنشده"]).toBe("otp");
-      // Verified inside the window: the 7-day PIN shortcut.
-      expect(modes["پنجرهٔ باز"]).toBe("pin");
-      // Verified but the window closed: the door wants the code again.
-      expect(modes["پنجرهٔ بسته"]).toBe("otp");
+      expect(untrustedModes["تأییدنشده"]).toBe("otp");
+      // Verified, and verified *minutes* ago — still the code, because this
+      // device is not the one that verified it.
+      expect(untrustedModes["پنجرهٔ باز"]).toBe("otp");
+      expect(untrustedModes["پنجرهٔ بسته"]).toBe("otp");
+
+      // The same roster for a device trusted by exactly one member: only that
+      // member gets the PIN pad, and a stale verification elsewhere in the
+      // roster makes no difference either way.
+      const trusted = await dbLib.withTenant(biz.id, () =>
+        employeeService.loginRoster(biz.id, null, null, staff.freshWindow),
+      );
+      const trustedModes = Object.fromEntries(trusted.map((e) => [e.fullName, e.loginMode]));
+      expect(trustedModes["پنجرهٔ باز"]).toBe("pin");
+      // The trust is narrow: it does not leak across the roster.
+      expect(trustedModes["پنجرهٔ بسته"]).toBe("otp");
+      expect(trustedModes["تأییدنشده"]).toBe("otp");
+      expect(trustedModes["بی‌شماره"]).toBe("pin_then_otp");
     } finally {
       if (hadKey === undefined) delete process.env.KAVENEGAR_API_KEY;
       else process.env.KAVENEGAR_API_KEY = hadKey;
@@ -266,7 +289,7 @@ describe("loginRoster routing (the server-side loginMode)", () => {
 });
 
 describe("stampPhoneVerified and the challenge verify", () => {
-  it("opens the 7-day window and routes the member back to the PIN pad", async () => {
+  it("stamps the verification, and routes back to the PIN pad only for a trusted device", async () => {
     await dbLib.withTenant(biz.id, () =>
       phoneOtp.stampPhoneVerified({ businessId: biz.id, userId: staff.unverified, phone: null }),
     );
@@ -274,18 +297,31 @@ describe("stampPhoneVerified and the challenge verify", () => {
       `SELECT phone_verified_at, otp_login_at FROM users WHERE id = $1`,
       [staff.unverified],
     );
+    // The stamp itself is unchanged: `phone_verified_at` is the fact the door
+    // reads, and `otp_login_at` remains as the audit record of when the number
+    // was last proved.
     expect(rows[0].phone_verified_at).not.toBeNull();
     expect(Date.now() - new Date(rows[0].otp_login_at).getTime()).toBeLessThan(60_000);
 
     await setPolicy(biz.id, PAST);
     process.env.KAVENEGAR_API_KEY = "test-key";
     try {
-      const roster = await dbLib.withTenant(biz.id, () =>
-        employeeService.loginRoster(biz.id, null, null),
+      // Issue #885, gap 1: the stamp alone no longer routes the member to the
+      // PIN pad. A device that did not do the verifying still owes the code.
+      const untrusted = await dbLib.withTenant(biz.id, () =>
+        employeeService.loginRoster(biz.id, null, null, null),
       );
-      const entry = roster.find((e) => e.fullName === "تأییدنشده")!;
-      expect(entry.loginMode).toBe("pin");
-      expect(entry.phoneState).toBe("verified");
+      const before = untrusted.find((e) => e.fullName === "تأییدنشده")!;
+      expect(before.phoneState).toBe("verified");
+      expect(before.loginMode).toBe("otp");
+
+      // The device that holds this member's trust does get the PIN pad.
+      const trusted = await dbLib.withTenant(biz.id, () =>
+        employeeService.loginRoster(biz.id, null, null, staff.unverified),
+      );
+      const after = trusted.find((e) => e.fullName === "تأییدنشده")!;
+      expect(after.loginMode).toBe("pin");
+      expect(after.phoneState).toBe("verified");
     } finally {
       delete process.env.KAVENEGAR_API_KEY;
     }
@@ -430,29 +466,98 @@ describe("stampPhoneVerified and the challenge verify", () => {
     expect(refused && !refused.allowed && refused.retryAfterMs).toBeGreaterThan(0);
   });
 
-  it("retires an older live challenge when a newer one is sent", async () => {
-    // Two tabs, two codes. Without this the older row survives, and once the
-    // newest is consumed a read of "the newest live challenge" finds it again.
-    const older = await mintChallenge({ userId: staff.freshWindow, code: "717171" });
-    const newer = await mintChallenge({ userId: staff.freshWindow, code: "818181" });
+  it("retires the superseded code on a real resend, and only the newest redeems", async () => {
+    // Issue #885, gap 7. The test this replaces inserted two `mfa_challenges`
+    // rows by hand and then asserted the *older* code still verified — the
+    // opposite of the policy, and true only because it never ran the send path
+    // that does the retiring. Hand-built rows cannot show retirement at all:
+    // nothing in the fixture had a reason to consume the first one.
+    //
+    // This drives `sendEmployeePhoneOtp` twice, so the retirement CTE in the
+    // send transaction is what actually retires the first challenge, and
+    // asserts the property the policy states: the superseded code is refused
+    // and only the newest one opens the door.
+    //
+    // A fake transport, not a mock of the service: KAVENEGAR_API_KEY makes
+    // `getSmsProvider` return the real KavenegarProvider, and the stubbed
+    // `fetch` stands in for the carrier so the dispatched codes can be read
+    // back. The OTP is generated and hashed by the production path.
+    const dispatched: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = typeof input === "string" ? input : String((input as URL).href ?? input);
+      const token = new URL(url).searchParams.get("token");
+      if (token) dispatched.push(token);
+      return new Response(JSON.stringify({ return: { status: 200, message: "ok" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    process.env.KAVENEGAR_API_KEY = "test-key-not-a-real-key";
 
-    const { rows } = await db.query<{ id: string; consumed_at: Date | null }>(
-      `SELECT id, consumed_at FROM mfa_challenges WHERE id = ANY($1::uuid[])`,
-      [[older, newer]],
-    );
-    // Both are live as inserted; the retirement is the send path's job, so
-    // assert the property that matters — only one may still redeem.
-    const olderResult = await dbLib.withTenant(biz.id, () =>
-      phoneOtp.verifyEmployeePhoneOtp({
-        challengeId: older,
-        userId: staff.freshWindow,
-        businessId: biz.id,
-        purpose: "login",
-        destination: PHONE,
-        code: "717171",
-      }),
-    );
-    expect(olderResult.verified).toBe(true);
-    expect(rows.length).toBe(2);
+    const identityKey = `${biz.id}:${staff.freshWindow}`;
+    try {
+      const sendOnce = async () => {
+        // The per-minute send ceiling is a different rule and would refuse the
+        // second send outright. Clearing this member's reservation rows lets
+        // the resend through; it does not touch the challenge rows the
+        // retirement assertion is about.
+        await db.query(
+          `DELETE FROM auth_login_attempts WHERE realm = 'phone_otp' AND identity_key = $1`,
+          [identityKey],
+        );
+        return dbLib.withTenant(biz.id, () =>
+          phoneOtp.sendEmployeePhoneOtp({
+            businessId: biz.id,
+            userId: staff.freshWindow,
+            phone: PHONE,
+          }),
+        );
+      };
+
+      const first = await sendOnce();
+      const second = await sendOnce();
+      expect(first.allowed && first.challengeId).toBeTruthy();
+      expect(second.allowed && second.challengeId).toBeTruthy();
+      expect(second.allowed && second.challengeId).not.toBe(
+        first.allowed ? first.challengeId : "",
+      );
+
+      // The transport really was asked, twice, with two different codes.
+      expect(dispatched.length).toBe(2);
+      expect(dispatched[0]).not.toBe(dispatched[1]);
+
+      // The older row is retired by the send, not left live.
+      const { rows } = await db.query<{ id: string; consumed_at: Date | null }>(
+        `SELECT id, consumed_at FROM mfa_challenges WHERE id = ANY($1::uuid[]) ORDER BY created_at`,
+        [[first.allowed ? first.challengeId : "", second.allowed ? second.challengeId : ""]],
+      );
+      expect(rows.length).toBe(2);
+      expect(rows[0].consumed_at).not.toBeNull();
+      expect(rows[1].consumed_at).toBeNull();
+
+      // The superseded code is refused even though it is the right digits for
+      // the row it names — this is the assertion the old test inverted.
+      await expect(
+        redeem(first.allowed ? first.challengeId : "", dispatched[0], {
+          userId: staff.freshWindow,
+        }),
+      ).resolves.toEqual({ verified: false, reason: "consumed" });
+
+      // And the newest one still works, so the resend did not lock the member
+      // out of the code they were just sent.
+      await expect(
+        redeem(second.allowed ? second.challengeId : "", dispatched[1], {
+          userId: staff.freshWindow,
+        }),
+      ).resolves.toEqual({ verified: true });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.KAVENEGAR_API_KEY;
+      await db.query(
+        `DELETE FROM auth_login_attempts WHERE realm = 'phone_otp' AND identity_key = $1`,
+        [identityKey],
+      );
+    }
   });
 });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenant } from "@/lib/db";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
+import { deploymentRole } from "@/lib/deployment-role";
 import { requestHost } from "@/lib/host";
 import { resolveLoginBusinessId } from "@/lib/employee-service";
 import { phoneOtpEnforcementFor } from "@/lib/phone-otp";
@@ -19,9 +20,11 @@ import { phoneOtpEnforcementFor } from "@/lib/phone-otp";
  * So the door asks first. This endpoint answers two questions the client is
  * not allowed to answer for itself:
  *
- *  - **Which deployment is this?** `cloud`, `hybrid` or `local`, from the
- *    business's own stored profile. Only on a local or hybrid install is
- *    "no Internet needed" a true statement about the server it is talking to.
+ *  - **Is the server answering a local one?** `localServer`, from this
+ *    process's deployment role. This — not the business's stored profile — is
+ *    what makes "no Internet needed" a true statement about the server the
+ *    page is talking to, because the stored profile is identical on every
+ *    origin serving that business.
  *  - **Can a phone code even be delivered?** The phone-OTP policy pauses as
  *    `pending_sms` when no SMS provider is configured, which is exactly the
  *    local/offline case. When enforcement *is* live, an offline login still
@@ -63,6 +66,30 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       deploymentProfile: deployment.profile,
       /**
+       * Issue #885, gap 8 — is the server answering *this* request a local one?
+       *
+       * `deploymentProfile` is stored per business and describes how that
+       * business relates to the platform; it is the same value on every origin
+       * that serves the business. That makes it the wrong thing to key an
+       * offline promise on, and the gap was live: a business paired to the
+       * cloud stores `hybrid`, and the cloud origin reported `hybrid` too, so
+       * the hosted login page claimed «نیازی به اینترنت ندارد» about itself —
+       * the precise false promise L04 existed to remove, reached by a
+       * different route.
+       *
+       * Whether offline login is available is a fact about the *process*
+       * serving the page, not about the business, so it is answered from the
+       * deployment role: only a site install is the local server the claim
+       * refers to. A central process answers `false` however the business is
+       * profiled, because whatever it serves, it serves over the Internet.
+       *
+       * Kept as a separate field rather than folded into `deploymentProfile`
+       * so the two facts stay independently readable and a client cannot
+       * conflate "this business syncs to a cloud" with "you are talking to a
+       * machine on your own network".
+       */
+      localServer: deploymentRole() === "site",
+      /**
        * `pending_sms` means no provider is configured, which on a local
        * install is the normal state rather than a fault — the door reads it as
        * "phone verification is not required here yet", not as an error.
@@ -87,6 +114,8 @@ export async function GET(request: NextRequest) {
 function neutralCapabilities() {
   return {
     deploymentProfile: "cloud" as const,
+    // Conservative: an install we could not identify makes no offline claim.
+    localServer: false,
     phoneOtpEnforcement: "off" as const,
     phoneOtpDaysLeft: null,
   };

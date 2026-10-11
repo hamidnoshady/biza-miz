@@ -180,18 +180,30 @@ All commands run in this sandbox on the work commit.
 
 | Command | Result |
 |---|---|
-| `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
-| `npx eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run --maxWorkers=2` | **675 files / 8,518 tests passed**, exit 0 |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (**full suite, 196 files**) | **193 files passed / 3 failed · 2447 tests passed / 13 failed / 10 skipped**, 1630.1 s |
+| `NODE_OPTIONS=--max-old-space-size=3072 ./node_modules/.bin/tsc --noEmit` | **exit 0**, no output |
+| `./node_modules/.bin/eslint . --max-warnings=0` | **exit 0** |
+| `npx vitest run` (full unit suite) | **713 files / 9,361 tests passed**, exit 0, 361.3 s |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (full integration suite, 199 files) | **198 files passed / 1 failed · 2,716 tests passed / 2 failed / 1 skipped**, 2185.0 s |
+
+PostgreSQL for the integration run: **16.14**, started with the project's own `npm run db:dev:start` on 127.0.0.1:5432. (An earlier draft reported 18.4; that cluster satisfied neither `pg-tools.ts`'s major-16 guard nor the client tools, and inflated the failure count.)
+
+**The single failing integration file is pre-existing and environmental.**
+
+| Failing file | Tests | Cause | Mine? |
+|---|---|---|---|
+| `runtime-role-regrant` | 2 | `restore_regrant_failed: relation "schema_migrations" does not exist`. Needs a migrated scratch database plus a password-authenticated runtime role; this cluster uses trust auth. Not in this diff. | No — environmental |
+
+Proven rather than assumed: run in a **worktree at `origin/main`** (`git worktree add --detach /home/user/base-wt origin/main`) with the identical command and environment, it fails **identically** — same 2 tests, same `restore_regrant_failed` error. `backup-locks` passes 7/7 in the same run.
+
+An earlier full run of mine reported a second failure, `backup-locks` throwing `DATABASE_URL is required` at *collection*. That was an artifact of how I launched the suite: I relied on `.env` rather than exporting the variable. CI sets `DATABASE_URL` at the **job level** (`test.yml`, integration job `env:`), and exporting it the same way makes the failure disappear — which is what the figures above measure. Worth recording because it means a local run must export `DATABASE_URL` explicitly; `.env` alone is not sufficient once an earlier file has replaced the value.
+
+The 1 skipped test is `platform-system-backup`'s peer-surface case, conditional on a second server. No test was skipped, disabled, loosened or re-baselined to reach these numbers.
 
 These are the figures for the committed tree, from one end-to-end run of all 196 files rather than a sample. **All 13 failures are accounted for, and none is an unexplained break:**
 
 | Failing file | Tests | Cause | Mine? |
 |---|---|---|---|
-| `platform-system-backup` | 7 (+9 skipped) | No `pg_dump` exists anywhere on this box (`find / -name pg_dump -type f` → empty); `src/lib/pg-tools.ts:195` requires client major 16, the embedded server is 18.4, so it raises `postgresql_tool_server_incompatible` before doing any work. `pg-tools.ts` is not in this diff. | No — environmental |
-| `runtime-database-url` | 4 | `APP_DB_PASSWORD is required` (`src/lib/create-app-role.ts:55`). This sandbox's cluster uses trust auth with no password. Not in this diff. | No — environmental |
-| `runtime-role-regrant` | 2 | Same missing-password precondition. Not in this diff. | No — environmental |
+**Superseded by the run above.** The earlier 13 failures came from a PostgreSQL 18.4 cluster: `platform-system-backup` (7) hit `pg-tools.ts`'s major-16 guard, and `runtime-database-url` (4) plus `runtime-role-regrant` (2) needed `APP_DB_PASSWORD`. Against the project's own PG 16.14 cluster in the run above, `platform-system-backup` **passes 21/21** and `runtime-database-url` **passes 7/7**; only `runtime-role-regrant` still fails, for the pre-existing reason given above.
 
 Both preconditions were re-checked on this box rather than assumed: the `pg_dump` search returns nothing, `env | grep APP_DB_PASSWORD` is empty, and `pg-tools.ts:195` is `if (postgresMajor !== 16) throw`.
 
@@ -203,13 +215,39 @@ Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:
 
 Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **9 unit test files and 132 tests** (8,518 − 8,386) with no existing test removed or altered in expectation.
 
-GitHub CI: **no runs or statuses exist** for this repository — the lookup returns empty. There is no CI to report against.
+GitHub CI: **this repository does have CI** — 14 workflows under `.github/workflows/`, and `test.yml` alone runs 10 jobs. An earlier draft of this report claimed no CI existed; that was wrong and is corrected here.
+
+The most recent completed `test` run on this branch is [`37964824334`](https://github.com/hamidnoshady/biza-miz/actions/runs/37964824334) (push of `4ad73b9`), **all 10 jobs green**:
+
+| Job | Result |
+|---|---|
+| unit tests | ✓ 3m55s |
+| **production build** | **✓ 4m24s** (job `113936440462`) |
+| design checks | ✓ 45s |
+| visual regression | ✓ 4m28s |
+| ESLint (noninteractive) | ✓ 1m46s |
+| data transfer engine (real database) | ✓ 1m25s |
+| integration tests (real database) | ✓ 36m8s |
+| type check | ✓ 2m46s |
+| API guard and permission tests | ✓ 38s |
+| media E2E tests | ✓ 4m40s |
+
+The only annotations are `ubuntu-latest`→Ubuntu 26 migration notices.
+
+**On the reported Arm64 production-build failure: I could not confirm it, and the evidence contradicts it.** I checked rather than repeating the claim:
+
+- `grep -riE "arm64|aarch64"` across all 14 workflows returns **no Arm64 runner**. Every `runs-on` is `windows-latest`, `ubuntu-latest`, or a self-hosted `Windows, X64` label.
+- The `production build` job is `test.yml:120-121` and runs on **`windows-latest`** (x64), not Arm64.
+- The only Arm64-class runner in the repository is `macos-14` in `mobile-emulator-acceptance.yml`, and that job boots an **iOS simulator to prove HTTPS/WSS certificate trust** — it does not build the product. It is also `path`-filtered to `electron/` files, so it does not run for this diff at all.
+- The production build in the run above **passed** in 4m24s.
+
+So there is no Arm64 build failure in this repository's CI for me to fix or to list as a blocker. If a specific failing run is being referred to, it is not one I can see on this branch, and I have not invented one to match the expectation. The one real build limitation is the sandbox OOM described in §9, which CI does not share.
 
 ---
 
 ## 9. Genuine remaining issues
 
-**The production build does not complete in this sandbox.** `npm run build` is OOM-killed (exit 137) on a machine with 3.9 GB RAM and no swap. I verified this is environmental, not caused by this work: `git stash`-ing every change and building the untouched base commit `d14f0e3` is killed identically at the same point, with the same exit code. **The build is therefore unverified for both the base and this branch here.** It must be run on CI or a machine with more memory before merge.
+**The production build is verified on CI, and only unverifiable *in this sandbox*.** `npm run build` here is OOM-killed (exit 137) on a machine with 3.9 GB RAM and no swap; building the untouched base commit is killed identically at the same point, so it is a memory ceiling, not a regression. The authoritative result is CI job `113936440462`, `production build` ✓ 4m24s (§8). An earlier draft called the build "unverified" outright; that understated it — it is unverified *locally* and green on CI.
 
 **L10 depends on the deployment having SMTP configured.** The flow is implemented and tested, but it sends through the platform's `platform_message_config` singleton. On an install with no SMTP host, or with no `PLATFORM_BASE_URL`/`POS_DOMAIN`/`ROOT_DOMAIN` to build a link from, the service declines to mint a token and logs why — deliberately, because minting a link that can never be delivered would revoke the user's existing pending token and leave them worse off than before. The client keeps the admin-issued link visible alongside the email form for exactly that case. **An install with neither SMTP nor an admin who can reach the team screen still has no self-service recovery**, and nothing in this change creates one.
 

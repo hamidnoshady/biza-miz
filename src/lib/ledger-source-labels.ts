@@ -81,6 +81,8 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   payroll_payment_void: "ابطال پرداخت حقوق",
   payroll_advance_void: "ابطال مساعده",
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
+  fixed_asset_disposal: "واگذاری دارایی ثابت",
+  fixed_asset_acquisition: "خرید دارایی ثابت",
 
   // Marketing and loyalty
   gift_card: "کارت هدیه",

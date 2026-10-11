@@ -354,7 +354,6 @@ export function SecurityCenterSettings() {
 interface PhoneSelfState {
   phone: string | null;
   phoneState: "none" | "unverified" | "verified";
-  otpWindowOpen: boolean;
   policy: { state: "off" | "grace" | "pending_sms" | "enforced"; daysLeft: number | null };
 }
 

@@ -819,6 +819,23 @@ export async function setPin(
           AND credential_type = 'pin' AND status = 'active'`,
       [userId, businessId],
     );
+    // Issue #885, gap 6 — rotating the PIN invalidates the seven-day device
+    // trust. The trust was earned by proving *this* credential set on that
+    // device; a manager rotating the PIN is exactly the "somebody else now
+    // knows the secret" case, and a browser still holding the cookie must not
+    // keep skipping the OTP and MFA challenges on the strength of a PIN that
+    // no longer exists. Same transaction as the rotation, so a failed change
+    // rolls the revocation back with it.
+    //
+    // A member's own voluntary password change is deliberately *not* here —
+    // see the note in password-reset.ts. This is a third party changing the
+    // credential on the member's behalf.
+    await client.query(
+      `UPDATE trusted_devices
+          SET revoked_at = now(), revoked_reason = 'pin_rotated'
+        WHERE business_id = $2 AND user_id = $1 AND revoked_at IS NULL`,
+      [userId, businessId],
+    );
     await client.query(
       `INSERT INTO employee_credentials
          (employee_id, business_id, credential_type, secret_hash)

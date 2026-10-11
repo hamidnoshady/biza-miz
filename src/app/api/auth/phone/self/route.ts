@@ -26,16 +26,17 @@ import { KavenegarError } from "@/lib/sms-kavenegar";
  * goes through the team screen (`/api/team`), where the member re-verifies it
  * at their next door login; this route is where a member proves their own.
  *
- * A verify here stamps the same facts the door does (`phone_verified_at` +
- * the 7-day `otp_login_at` window) but mints no session — one already exists.
+ * A verify here stamps the same facts the door does (`phone_verified_at`,
+ * and the `otp_login_at` audit stamp of when this number was last proved)
+ * but mints no session — one already exists.
  */
 export const GET = withTenantScope(async () => {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const [row, enforcement] = await Promise.all([
-    query<{ phone_e164: string | null; phone_verified_at: Date | null; otp_login_at: Date | null }>(
-      `SELECT phone_e164, phone_verified_at, otp_login_at FROM users
+    query<{ phone_e164: string | null; phone_verified_at: Date | null }>(
+      `SELECT phone_e164, phone_verified_at FROM users
         WHERE id = $1 AND business_id = $2`,
       [session.sub, session.businessId],
     ),
@@ -43,13 +44,16 @@ export const GET = withTenantScope(async () => {
   ]);
   const member = row.rows[0];
 
+  // Issue #885 — this deliberately reports no "window" flag. The old
+  // `otpWindowOpen` answered "did this *membership* verify a number in the
+  // last seven days", which is member-wide and no longer exempts anything:
+  // the exemption is per account+tenant+device, and the screen that needs to
+  // show it already lists the caller's trusted devices from
+  // /api/auth/trusted-devices. Nothing read the flag, so it is removed rather
+  // than re-pointed at a second source of truth.
   return NextResponse.json({
     phone: member?.phone_e164 ?? null,
     phoneState: memberPhoneState(member?.phone_e164 ?? null, member?.phone_verified_at ?? null),
-    otpWindowOpen: Boolean(
-      member?.otp_login_at &&
-        Date.now() - new Date(member.otp_login_at).getTime() < 7 * 86_400_000,
-    ),
     policy: {
       state: enforcement.state,
       daysLeft: enforcement.daysLeft,

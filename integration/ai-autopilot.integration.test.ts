@@ -19,7 +19,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -31,6 +31,7 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let autopilot: typeof import("../src/lib/ai-autopilot-service");
+let executors: typeof import("../src/lib/ai-autopilot-executors");
 
 const alpha = { businessId: "", locationId: "", userId: "", menuItemId: "", customerId: "" };
 const beta = { businessId: "", locationId: "", userId: "", menuItemId: "", customerId: "" };
@@ -63,6 +64,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   autopilot = await import("../src/lib/ai-autopilot-service");
+  executors = await import("../src/lib/ai-autopilot-executors");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -357,5 +359,151 @@ describe("caps cannot be configured above the server's ceiling", () => {
         [alpha.businessId],
       ),
     ).rejects.toThrow(/max_percent/);
+  });
+});
+
+/*
+ * The expense action's own answers, with a real ledger behind them (issue #832
+ * §15: one rule per business act, whichever door it comes through).
+ *
+ * Two things the pipeline above cannot decide for it. Which *branch* a row
+ * belongs to: the executor read «oldest active branch» out of a private copy of
+ * that query and passed it to `recordExpense` whatever the model had been told, so
+ * «اجارهٔ شعبهٔ شمال» was filed against Main and the number and the date were both
+ * right — a request and a ledger disagreeing quietly, which is the failure this
+ * whole issue is about. And what to call a chart with no Accounts Payable
+ * account: the route answers `ledger_account_missing`, while the action reported
+ * the bare account code as its own failure reason.
+ *
+ * The amount moved to the channel's shared parser in the same change, so a Toman
+ * figure whose ×10 landed on a float artefact is read as the Rial it is, and a
+ * fraction is refused instead of shortened.
+ */
+describe("the expense action's branch, amount and account answers", () => {
+  const cash = { accountId: "", rentId: "", branchId: "", supplierId: "" };
+
+  /*
+   * This suite posts, so it leaves ledger rows behind — and `accounts` is pinned to
+   * `journal_lines` by a foreign key, which the file's own `DELETE FROM businesses`
+   * cannot cascade past. Clearing the write first is what keeps the next test's
+   * fixture reset from erroring out — which is why it is an `afterEach`: the file's
+   * own reset for the next test runs before anything this describe sets up.
+   */
+  afterEach(async () => {
+    await db.query("DELETE FROM journal_lines");
+    await db.query("DELETE FROM journal_entries");
+    await db.query("DELETE FROM expenses");
+    await db.query("DELETE FROM expense_reference_counters");
+  });
+
+  async function seedLedger() {
+    const { rows } = await db.query<{ id: string; code: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '1100', 'Cash', 'asset'), ($1, '5300', 'Rent', 'expense')
+       RETURNING id, code`,
+      [alpha.businessId],
+    );
+    cash.accountId = rows.find((r) => r.code === "1100")!.id;
+    cash.rentId = rows.find((r) => r.code === "5300")!.id;
+    const { rows: branches } = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'شعبهٔ شمال') RETURNING id`,
+      [alpha.businessId],
+    );
+    cash.branchId = branches[0].id;
+    const { rows: suppliers } = await db.query<{ id: string }>(
+      `INSERT INTO suppliers (location_id, name) VALUES ($1, 'Acme') RETURNING id`,
+      [alpha.locationId],
+    );
+    cash.supplierId = suppliers[0].id;
+  }
+
+  function payload(over: Record<string, unknown> = {}) {
+    return {
+      accountId: cash.rentId,
+      paymentAccountId: cash.accountId,
+      amount: 1_200_000,
+      memo: "اجارهٔ فروردین",
+      expenseDate: "2026-04-01",
+      ...over,
+    };
+  }
+
+  async function runExpense(over: Record<string, unknown> = {}) {
+    return dbLib.withTenant(alpha.businessId, () =>
+      executors.AUTOPILOT_EXECUTORS.expense({
+        businessId: alpha.businessId,
+        authorizedByUserId: alpha.userId,
+        payload: payload(over),
+      }),
+    );
+  }
+
+  async function storedRows() {
+    const { rows } = await db.query<{ id: string; location_id: string; amount: string; vat_amount: string }>(
+      `SELECT id, location_id, amount::text, vat_amount::text FROM expenses WHERE business_id = $1 ORDER BY created_at`,
+      [alpha.businessId],
+    );
+    return rows;
+  }
+
+  it("files the expense at the branch the request named — by id or by name", async () => {
+    await seedLedger();
+
+    const byName = await runExpense({ locationId: "شعبه شمال" });
+    expect(byName.ok).toBe(true);
+    // The comparison is the branch form's own uniqueness key, so the ZWNJ an
+    // Iranian typist leaves in the middle of «شعبهٔ» is not a different branch.
+    expect((await storedRows())[0].location_id).toBe(cash.branchId);
+
+    const byId = await runExpense({ locationId: cash.branchId, memo: "اجارهٔ اردیبهشت" });
+    expect(byId.ok).toBe(true);
+    expect((await storedRows())[1].location_id).toBe(cash.branchId);
+  });
+
+  it("keeps the business's default branch when nothing was named", async () => {
+    await seedLedger();
+    expect((await runExpense()).ok).toBe(true);
+    expect((await storedRows())[0].location_id).toBe(alpha.locationId);
+  });
+
+  it("refuses another business's branch, and a name two branches share", async () => {
+    await seedLedger();
+    // Beta's id is a well-formed uuid of a real row in `locations`. The action is
+    // not told that the branch exists elsewhere; it is told it is not one of
+    // *this* business's, which is the only answer tenant isolation can give.
+    const foreign = await runExpense({ locationId: beta.locationId });
+    expect(foreign).toMatchObject({ ok: false, errorCode: "invalid_location" });
+
+    // A second branch answering to the same name. `createBranch` would refuse it;
+    // an owner can still get there by renaming one, and the action must then ask
+    // rather than pick a branch for a posting.
+    await db.query(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'شعبهٔ شمال')`,
+      [alpha.businessId],
+    );
+    const ambiguous = await runExpense({ locationId: "شعبه شمال" });
+    expect(ambiguous).toMatchObject({ ok: false, errorCode: "ambiguous_location" });
+    expect(await storedRows()).toEqual([]);
+  });
+
+  it("refuses a fractional amount and accepts a Toman figure's float residue", async () => {
+    await seedLedger();
+    const fraction = await runExpense({ amount: 1_500.75 });
+    expect(fraction).toMatchObject({ ok: false });
+    expect(await storedRows()).toEqual([]);
+
+    expect((await runExpense({ amount: 1507.0000000000002, memo: "قبوض" })).ok).toBe(true);
+    expect((await storedRows())[0].amount).toBe("1507");
+  });
+
+  it("names a missing Accounts Payable account as the account that is missing", async () => {
+    // Alpha's chart above has no 2100 at all: the owed branch of `recordExpense`
+    // needs it to credit, and it says so with `MissingLedgerAccountError` — which
+    // is not an `ExpenseError`, so it used to fall through to the generic catch
+    // and reach the operator as «ثبت هزینه ممکن نشد (2100)».
+    await seedLedger();
+    const owed = await runExpense({ paymentAccountId: undefined, settlement: "credit", supplierId: cash.supplierId });
+    expect(owed).toMatchObject({ ok: false, errorCode: "ledger_account_missing" });
+    expect(await storedRows()).toEqual([]);
   });
 });

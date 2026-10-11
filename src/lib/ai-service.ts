@@ -19,6 +19,7 @@ import {
   PROJECT_ACTION_TYPES,
 } from "./ai";
 import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
+import { listExpenseCategoryAccounts } from "./expense-service";
 import { validateInputRequest, type InputRequestSpec } from "./ai-input-protocol";
 import { estimateTokens, type AiTokenUsage } from "./ai-billing";
 import { parseResponseCostHeader } from "./ai-gateway";
@@ -38,9 +39,11 @@ import type { Permission } from "./permissions";
 import type { AppKey } from "./apps";
 import { routeTools } from "./ai-tool-routing";
 import {
+  buildReceiptExtractionPrompt,
   parseReceiptExtractionReply,
   RECEIPT_EXTRACTION_SYSTEM_PROMPT,
   RECEIPT_EXTRACTION_USER_PROMPT,
+  type ReceiptAccountCandidate,
   type ReceiptDraftFields,
 } from "./ai-receipt";
 
@@ -633,9 +636,18 @@ interface ReceiptExtractionResult {
  * request rather than folding the image into the main conversation loop —
  * that would resend the image bytes on every later tool round.
  */
-async function extractReceiptDraft(config: AiConfig, dataUrl: string, signal?: AbortSignal): Promise<ReceiptExtractionResult> {
+async function extractReceiptDraft(
+  config: AiConfig,
+  dataUrl: string,
+  signal?: AbortSignal,
+  expenseAccounts?: ReceiptAccountCandidate[],
+): Promise<ReceiptExtractionResult> {
+  // The tenant's own expense chart is the only vocabulary the model may answer
+  // with, and its reply is filtered by the same list (issue #832 §13) — a
+  // hard-coded F&B code set categorises nothing for a customised chart.
+  const systemPrompt = expenseAccounts ? buildReceiptExtractionPrompt(expenseAccounts) : RECEIPT_EXTRACTION_SYSTEM_PROMPT;
   const convo: ProviderMessage[] = [
-    { role: "system", content: RECEIPT_EXTRACTION_SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     {
       role: "user",
       content: [
@@ -647,7 +659,10 @@ async function extractReceiptDraft(config: AiConfig, dataUrl: string, signal?: A
   try {
     const result = await callProvider(config, convo, [], undefined, undefined, signal);
     return {
-      fields: parseReceiptExtractionReply(textOf(result.message.content)),
+      fields: parseReceiptExtractionReply(
+        textOf(result.message.content),
+        expenseAccounts?.map((account) => account.code),
+      ),
       usage: result.usage,
       costUsd: result.costUsd,
     };
@@ -931,7 +946,27 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
           (item) => item.kind === "pdf" && typeof item.extractedText === "string" && item.extractedText,
         );
         if (image) {
-          const extraction = await extractReceiptDraft(config, image.dataUrl!, opts.signal);
+          /*
+           * The tenant's own expense accounts are the model's only vocabulary
+           * (issue #832 §13). Reading them is a database round trip that has
+           * nothing to do with reading the receipt, so a failure here degrades to
+           * "no list" — which the prompt spells out as *make no suggestion*
+           * rather than falling back to the old hard-coded F&B codes. Extraction
+           * is metered work the person already paid for; it must not be lost to a
+           * chart read.
+           */
+          let expenseAccounts: ReceiptAccountCandidate[] | undefined;
+          if (opts.businessId) {
+            try {
+              expenseAccounts = await listExpenseCategoryAccounts(opts.businessId);
+            } catch {
+              // A chart that could not be read is an empty vocabulary: the model is
+              // told to propose no code, rather than being handed the old fixed
+              // list to guess from (§13's whole point).
+              expenseAccounts = [];
+            }
+          }
+          const extraction = await extractReceiptDraft(config, image.dataUrl!, opts.signal, expenseAccounts);
           usage.inputTokens += extraction.usage.inputTokens;
           usage.outputTokens += extraction.usage.outputTokens;
           if (extraction.costUsd !== null) costUsd = (costUsd ?? 0) + extraction.costUsd;

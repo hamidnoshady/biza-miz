@@ -174,6 +174,22 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "رسید دریافت",
   },
   {
+    table: "fixed_assets",
+    column: "custodian_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "An asset's custodian is operational: the register reads it live (history, responsibility), so it must resolve to the surviving party instead of an archived one. No journal line references the custodian — the trial balance is untouched.",
+  },
+  {
+    table: "fixed_assets",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The vendor an asset was bought from is a live register attribute (list, filters, export), not an audit row about the party itself; re-pointing keeps the provenance readable after two supplier files become one. The purchase journal entry is not touched.",
+  },
+  {
     table: "cheques",
     column: "customer_id",
     scope: "business",
@@ -191,6 +207,23 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     reason: "An instalment plan is a live obligation of the person, not of the record that lost a merge.",
     preview: true,
     previewLabel: "قرارداد اقساط",
+  },
+  {
+    table: "expenses",
+    column: "party_id",
+    scope: "business",
+    // An expense survives its party being deleted outright — `ON DELETE SET
+    // NULL` plus the free-text `vendor` snapshot keep the posted fact intact
+    // (issue #832 §12). A merge is a different act: it does not destroy the
+    // record, it declares that two rows were always the same person. Leaving
+    // the link on the loser would strand it on an archived row, and the ledger
+    // question the column exists to answer — «به این شخص/شرکت چقدر پرداختیم» —
+    // would silently lose every expense the loser had.
+    disposition: "move",
+    reason:
+      "The supplier link on a paid expense is a live ledger reference, not an audit annotation; the audit trail is the journal entry and the `vendor` snapshot, which a merge does not touch.",
+    preview: true,
+    previewLabel: "هزینه",
   },
 
   // -- Growth-owned programs ------------------------------------------------

@@ -15,19 +15,27 @@ import {
   describeConnection,
   isValidIpv4,
   isValidPrinterConnection,
+  legacyBehaviorOf,
   legacyTransportLabel,
   normalizeStoredConnection,
+  printerClassOf,
+  printerNeedsReconnect,
+  printerPaper,
   printerTargetOf,
-  resolvedPaperWidthMm,
+  resolvedPaperOf,
   resolvedPort,
+  connectionJsonOf,
 } from "./types";
 
 describe("normalizeStoredConnection — canonical rows pass through", () => {
   it("keeps a windows row with its queue name", () => {
-    const normalized = normalizeStoredConnection({ type: "windows", systemName: "EPSON TM-T20III", paperWidthMm: 80 });
+    const normalized = normalizeStoredConnection({ type: "windows", systemName: "EPSON TM-T20III" });
     expect(normalized.type).toBe("windows");
     expect(normalized.systemName).toBe("EPSON TM-T20III");
     expect(normalized.needsReconnect).toBeUndefined();
+    // Behavioural keys survive the read (nothing is destroyed) but are never
+    // what a decision is made from.
+    expect(printerPaper({ paper: "thermal58", paper_width_mm: null })).toBe("thermal58");
   });
 
   it("keeps a network row and defaults an absent port to 9100 via resolvedPort", () => {
@@ -39,7 +47,7 @@ describe("normalizeStoredConnection — canonical rows pass through", () => {
 });
 
 describe("normalizeStoredConnection — legacy rows", () => {
-  it("maps a legacy `system` row to windows", () => {
+  it("maps a legacy `system` row to windows, keeping the leftover behaviour readable for the transition", () => {
     const normalized = normalizeStoredConnection({
       transport: "system",
       systemName: "POS-80",
@@ -50,16 +58,16 @@ describe("normalizeStoredConnection — legacy rows", () => {
     });
     expect(normalized.type).toBe("windows");
     expect(normalized.systemName).toBe("POS-80");
-    expect(normalized.openDrawer).toBe(true);
-    expect(normalized.isDefault).toBe(true);
     expect(normalized.needsReconnect).toBeUndefined();
+    // The documented, bounded transition read — see legacyBehaviorOf's note.
+    expect(legacyBehaviorOf(normalized)).toEqual({ openDrawer: true, isDefault: true });
   });
 
   it("maps a legacy `network` row (and a pre-transport row with an ip) to network", () => {
     expect(normalizeStoredConnection({ transport: "network", ip: "10.0.0.9", port: 9101 }).type).toBe("network");
     const preTransport = normalizeStoredConnection({ ip: "10.0.0.9", port: 9100, paperWidthMm: 58 });
     expect(preTransport.type).toBe("network");
-    expect(preTransport.paperWidthMm).toBe(58);
+    expect(legacyBehaviorOf(preTransport).paperWidthMm).toBe(58);
   });
 
   it("flags usb / webusb / browser rows as needing reconnection, with identity preserved", () => {
@@ -137,12 +145,37 @@ describe("printerTargetOf", () => {
   });
 });
 
-describe("resolvedPaperWidthMm", () => {
-  it("defaults to 80mm and honours both the explicit width and the paper key", () => {
-    expect(resolvedPaperWidthMm({})).toBe(80);
-    expect(resolvedPaperWidthMm({ paperWidthMm: 58 })).toBe(58);
-    expect(resolvedPaperWidthMm({ paper: "thermal58" })).toBe(58);
-    expect(resolvedPaperWidthMm({ paper: "thermal80" })).toBe(80);
+describe("capability reads — the relational columns decide", () => {
+  it("reads the paper column, falling back to the stored width", () => {
+    expect(printerPaper({ paper: "thermal58" })).toBe("thermal58");
+    expect(printerPaper({ paper: null, paper_width_mm: 58 })).toBe("thermal58");
+    expect(printerPaper({ paper: null, paper_width_mm: 80 })).toBe("thermal80");
+    expect(printerPaper({})).toBeNull();
+  });
+
+  it("defaults the paper by purpose when the row has none", () => {
+    expect(resolvedPaperOf({ kind: "receipt" })).toBe("thermal80");
+    expect(resolvedPaperOf({ kind: "kitchen", paper_width_mm: 58 })).toBe("thermal58");
+    expect(resolvedPaperOf({ kind: "document" })).toBe("a4");
+    expect(resolvedPaperOf({ kind: "label" })).toBe("label57x40");
+  });
+
+  it("derives the class from the paper, then the purpose", () => {
+    expect(printerClassOf({ paper: "a4" })).toBe("page");
+    expect(printerClassOf({ paper: "label57x40" })).toBe("label");
+    expect(printerClassOf({ paper: "thermal80" })).toBe("thermal");
+    expect(printerClassOf({ kind: "document", paper: null })).toBe("page");
+    expect(printerClassOf({ printer_class: "page", paper: "thermal80" })).toBe("page");
+  });
+
+  it("reports a reconnect-required row regardless of its columns", () => {
+    expect(printerNeedsReconnect({ connection: { needsReconnect: true } })).toBe(true);
+    expect(printerNeedsReconnect({ connection: { type: "windows", systemName: "E" } })).toBe(false);
+  });
+
+  it("writes the hardware target and nothing else", () => {
+    expect(connectionJsonOf({ type: "windows", systemName: "EPSON" })).toEqual({ type: "windows", systemName: "EPSON" });
+    expect(connectionJsonOf({ type: "network", ip: "10.0.0.9" })).toEqual({ type: "network", ip: "10.0.0.9", port: 9100 });
   });
 });
 

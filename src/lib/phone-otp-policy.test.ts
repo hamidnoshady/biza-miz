@@ -6,7 +6,7 @@ import {
   normalizePhoneOtpPolicy,
   phoneOtpDaysRemaining,
   phoneOtpEnforcement,
-  pinWindowActive,
+  pinGateCloses,
   otpSendBudgetDecision,
 } from "./phone-otp-policy";
 
@@ -65,24 +65,51 @@ describe("phoneOtpDaysRemaining", () => {
   });
 });
 
-describe("pinWindowActive", () => {
-  const verifiedAt = new Date("2026-09-08T12:00:00Z");
-
-  it("is open inside the 7-day window after the OTP verification", () => {
-    expect(pinWindowActive(verifiedAt, new Date("2026-09-14T11:59:00Z"))).toBe(true);
-    expect(pinWindowActive(verifiedAt, new Date("2026-09-15T11:59:00Z"))).toBe(true);
-    // Exactly seven days later the window has closed — the member owes the
-    // door an OTP again on their next login.
-    expect(pinWindowActive(verifiedAt, new Date("2026-09-15T12:00:00Z"))).toBe(false);
-    expect(pinWindowActive(verifiedAt, new Date("2026-09-16T12:00:00Z"))).toBe(false);
+describe("pinGateCloses", () => {
+  it("never closes before the adoption date, whatever the device's trust", () => {
+    for (const state of ["off", "grace", "pending_sms"] as const) {
+      expect(pinGateCloses({ enforcement: state, phoneState: "none", deviceTrusted: false }))
+        .toBe(false);
+      expect(pinGateCloses({ enforcement: state, phoneState: "verified", deviceTrusted: false }))
+        .toBe(false);
+    }
   });
 
-  it("is closed when there is nothing to anchor it on", () => {
-    expect(pinWindowActive(null, verifiedAt)).toBe(false);
+  it("stays open only for a verified number on a device this member trusted", () => {
+    expect(
+      pinGateCloses({ enforcement: "enforced", phoneState: "verified", deviceTrusted: true }),
+    ).toBe(false);
   });
 
-  it("accepts the ISO-string form the database row arrives as", () => {
-    expect(pinWindowActive("2026-09-10T00:00:00Z", new Date("2026-09-11T00:00:00Z"))).toBe(true);
+  it("closes on a second device even though the membership verified moments ago", () => {
+    // Issue #885, the confirmed finding: the exemption used to hang off the
+    // member-wide `users.otp_login_at` stamp, so verifying on the till exempted
+    // the owner's laptop too. Trust is account+tenant+device, so a different
+    // device is a miss and owes the full challenge — the phone being verified
+    // is no longer enough on its own.
+    expect(
+      pinGateCloses({ enforcement: "enforced", phoneState: "verified", deviceTrusted: false }),
+    ).toBe(true);
+  });
+
+  it("closes when the trust lapsed or was revoked", () => {
+    // Expiry and revocation both surface to the caller as `deviceTrusted:
+    // false` (evaluateDeviceTrust returns "expired"/"revoked"), so each one
+    // re-arms the challenge without a separate rule here.
+    expect(
+      pinGateCloses({ enforcement: "enforced", phoneState: "verified", deviceTrusted: false }),
+    ).toBe(true);
+  });
+
+  it("closes for an unproven or absent number even on a trusted device", () => {
+    // Trust waives the routine assurance challenge; it is never a substitute
+    // for having proved the number in the first place.
+    expect(
+      pinGateCloses({ enforcement: "enforced", phoneState: "unverified", deviceTrusted: true }),
+    ).toBe(true);
+    expect(
+      pinGateCloses({ enforcement: "enforced", phoneState: "none", deviceTrusted: true }),
+    ).toBe(true);
   });
 });
 
@@ -98,26 +125,43 @@ describe("employeeLoginMode", () => {
   it("keeps the plain PIN pad whenever the requirement is not enforced", () => {
     for (const state of ["off", "grace", "pending_sms"] as const) {
       expect(
-        employeeLoginMode({ enforcement: state, phoneState: "none", pinWindow: false }),
+        employeeLoginMode({ enforcement: state, phoneState: "none", deviceTrusted: false }),
       ).toBe("pin");
     }
   });
 
   it("asks PIN first only when no number is on file — PIN proves who, then the number is set", () => {
-    expect(employeeLoginMode({ enforcement: "enforced", phoneState: "none", pinWindow: false }))
-      .toBe("pin_then_otp");
+    expect(
+      employeeLoginMode({ enforcement: "enforced", phoneState: "none", deviceTrusted: false }),
+    ).toBe("pin_then_otp");
   });
 
-  it("goes straight to the OTP when a number is on file but unproven or the window closed", () => {
-    expect(employeeLoginMode({ enforcement: "enforced", phoneState: "unverified", pinWindow: false }))
-      .toBe("otp");
-    expect(employeeLoginMode({ enforcement: "enforced", phoneState: "verified", pinWindow: false }))
-      .toBe("otp");
+  it("goes straight to the OTP when a number is on file but unproven or this device is untrusted", () => {
+    expect(
+      employeeLoginMode({ enforcement: "enforced", phoneState: "unverified", deviceTrusted: false }),
+    ).toBe("otp");
+    expect(
+      employeeLoginMode({ enforcement: "enforced", phoneState: "verified", deviceTrusted: false }),
+    ).toBe("otp");
   });
 
-  it("honours the 7-day PIN shortcut once the phone is verified and the window open", () => {
-    expect(employeeLoginMode({ enforcement: "enforced", phoneState: "verified", pinWindow: true }))
-      .toBe("pin");
+  it("honours the shortcut only when the phone is verified and this device is trusted", () => {
+    expect(
+      employeeLoginMode({ enforcement: "enforced", phoneState: "verified", deviceTrusted: true }),
+    ).toBe("pin");
+  });
+
+  it("routes an unverified number to the OTP even on a device that is trusted", () => {
+    // Issue #885: trust waives the *assurance* challenge. It is never a
+    // substitute for having a proven number on file — a trusted device with
+    // an unverified number still has nothing verified behind it.
+    expect(
+      employeeLoginMode({
+        enforcement: "enforced",
+        phoneState: "unverified",
+        deviceTrusted: true,
+      }),
+    ).toBe("otp");
   });
 });
 

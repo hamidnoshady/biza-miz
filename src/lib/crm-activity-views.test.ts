@@ -5,6 +5,7 @@ import {
   activityViewAssigneeUserId,
   activityViewErrorLine,
   activityViewFilterCount,
+  activityViewListOptions,
   activityViewQuery,
   activityViewSearchParams,
   activityViewUnownedOnly,
@@ -167,6 +168,48 @@ describe("describeActivityView", () => {
       "وضعیت: برنامه‌ریزی‌شده",
       "وضعیت: سررسیدشده",
     ]);
+  });
+});
+
+describe("activityViewListOptions", () => {
+  const options = (state: string, day: { timeZone?: string; startMinutes?: number | null } = {}) =>
+    activityViewListOptions(
+      parseActivityViewFilters(source({ state })).filters,
+      { viewerId: null, today: "2026-10-08", ...day },
+    );
+
+  it("bounds each state by the date it names", () => {
+    // `due` and `today` share the upper bound because «سررسیدشده» is today *or*
+    // already late; only `today` also needs a lower one.
+    expect(options("due")).toMatchObject({ dueOnOrBefore: "2026-10-08", dueOnOrAfter: undefined });
+    expect(options("today")).toMatchObject({ dueOnOrBefore: "2026-10-08", dueOnOrAfter: "2026-10-08" });
+    expect(options("overdue")).toMatchObject({ dueBefore: "2026-10-08", dueOnOrBefore: undefined });
+    expect(options("planned")).toMatchObject({ dueOnOrAfter: "2026-10-09" });
+    expect(options("open")).toMatchObject({ dueOnOrBefore: undefined, dueBefore: undefined });
+  });
+
+  it("carries the branch's day with the date, so the bound is the shop's midnight", () => {
+    // A date is half a bound: `listActivities` compares timestamps, and only the
+    // zone and day start say where «2026-10-08» begins.
+    expect(options("overdue", { timeZone: "Asia/Tehran", startMinutes: null })).toMatchObject({
+      dueBefore: "2026-10-08",
+      dayTimeZone: "Asia/Tehran",
+      dayStartMinutes: null,
+    });
+    // A branch that trades 18:00→03:00 says so with a start, and it travels too.
+    expect(
+      options("today", { timeZone: "Asia/Tehran", startMinutes: 1080 }),
+    ).toMatchObject({ dayTimeZone: "Asia/Tehran", dayStartMinutes: 1080 });
+  });
+
+  it("leaves the day out when the caller has only a date", () => {
+    // The fallback is the historical session-zone comparison, and it must be
+    // explicit rather than silently reusing a zone nobody resolved.
+    expect(options("overdue")).toMatchObject({ dayTimeZone: undefined, dayStartMinutes: undefined });
+    expect(options("overdue", { timeZone: "UTC" })).toMatchObject({
+      dayTimeZone: "UTC",
+      dayStartMinutes: null,
+    });
   });
 });
 

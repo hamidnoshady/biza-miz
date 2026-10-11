@@ -229,6 +229,59 @@ export async function verifyTrustedDevice(options: {
   return decision;
 }
 
+/**
+ * Whose trust is this cookie carrying, for this tenant?
+ *
+ * The roster is read *before* a member is chosen, so unlike
+ * `verifyTrustedDevice` it cannot be handed the user id to scope against.
+ * It answers the inverse question instead: which member of this business does
+ * the presented credential vouch for, if any. The caller then treats exactly
+ * that one member as trusted and nobody else, so a cookie left behind by one
+ * member on a shared till still cannot greet a colleague as trusted.
+ *
+ * Same digest-only lookup and same expiry/revocation rules as
+ * `verifyTrustedDevice`; `businessId` is checked here because there is no
+ * downstream scope check to do it.
+ */
+export async function resolveTrustedDeviceSubject(options: {
+  businessId: string;
+  token: string | null | undefined;
+  now?: Date;
+}): Promise<{ userId: string; expiresAt: Date } | null> {
+  const token = typeof options.token === "string" ? options.token.trim() : "";
+  if (!token.startsWith(TOKEN_PREFIX)) return null;
+
+  const tokenHash = await hashTrustToken(token);
+  const { rows } = await withoutTenantScope("login", () =>
+    query<TrustRow>(
+      `SELECT id, business_id, user_id, expires_at, revoked_at
+         FROM trusted_devices
+        WHERE token_hash = $1
+        LIMIT 1`,
+      [tokenHash],
+    ),
+  );
+  const row = rows[0];
+  if (!row) return null;
+  // A digest found globally still has to belong to the tenant being asked
+  // about, or a cookie minted for another business would name a member here.
+  if (row.business_id !== options.businessId) return null;
+
+  const decision = evaluateDeviceTrust(
+    {
+      id: row.id,
+      businessId: row.business_id,
+      userId: row.user_id,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+    },
+    { businessId: options.businessId, userId: row.user_id },
+    options.now ?? new Date(),
+  );
+  if (!decision.trusted) return null;
+  return { userId: row.user_id, expiresAt: decision.expiresAt };
+}
+
 export interface TrustedDeviceListing {
   id: string;
   deviceLabel: string | null;

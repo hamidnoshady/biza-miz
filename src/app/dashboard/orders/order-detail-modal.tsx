@@ -48,7 +48,6 @@ import { toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import {
   draftOpensDrawer,
-  draftReceiptPayments,
   draftRequiresCustomer,
   emptyPaymentDraft,
   paymentDraftBody,
@@ -58,13 +57,10 @@ import { PaymentWays, usePaymentMethods } from "../payment-ways";
 import { LoadingSkeleton } from "../page-chrome";
 import { formatQueueLabel } from "@/lib/orders";
 import { crmCustomerHref } from "@/app/(app)/crm/crm-routes";
-import { kickDrawer, printReceipt } from "@/lib/printing/client";
-import type { ReceiptData } from "@/lib/receipt-template";
+import { kickDrawer, printSaleReceipt } from "@/lib/printing/client";
 import {
   formatModifierDelta,
   linePriceBreakdown,
-  modifierDeltasOf,
-  modifierNamesLabel,
   modifierQuantity,
   type DisplayModifier,
 } from "@/lib/modifier-display";
@@ -89,7 +85,7 @@ import {
 } from "../modifier-picker";
 import { apiOrQueue } from "../offline-queue";
 import { api, errorMessage } from "../ui";
-import { useBusinessInfo } from "../use-printers";
+import { useBusinessInfo } from "../use-business-info";
 import { ClosedOrderAmendment } from "./closed-order-amendment";
 import { usePromptDialog } from "../prompt-dialog";
 import {
@@ -684,74 +680,18 @@ export function OrderDetailModal({
     );
   }
 
-  function paymentsFromOrderRows(): { label: string; amount: number }[] {
-    return payments.map((payment) => ({
-      label:
-        payment.payment_method_name ??
-        PAYMENT_LABELS[payment.method] ??
-        payment.method,
-      amount: Number(payment.amount),
-    }));
-  }
-
-  /** The receipt for this order as it stands — shared by checkout and reprint. */
-  function buildReceipt(
-    tipAmount: number,
-    receiptPayments: { label: string; amount: number }[],
-  ): ReceiptData | null {
-    if (!order) return null;
-    return {
-      business: {
-        name: business.name,
-        address: business.address,
-        phone: business.phone,
-      },
-      orderLabel: orderLabel(order),
-      orderTypeLabel:
-        order.type === "dine_in"
-          ? `حضوری${order.table_name ? ` — ${order.table_name}` : ""}`
-          : TYPE_LABELS[order.type],
-      issuedAt: new Date().toISOString(),
-      lines: items
-        .filter((it) => it.status !== "voided")
-        .map((it) => {
-          const addOns = addOnsByItem.get(it.id) ?? [];
-          return {
-            name: it.name_snapshot,
-            quantity: it.quantity,
-            lineTotal: linePriceBreakdown({
-              unitPrice: Number(it.unit_price),
-              modifierDeltas: addOns.map((addOn) => addOn.priceDelta),
-              quantity: it.quantity,
-            }).total,
-            modifiersLabel: modifierNamesLabel(addOns) || null,
-          };
-        }),
-      subtotal: Number(order.subtotal),
-      discount: Number(order.discount),
-      tax: Number(order.tax),
-      total: Number(order.total),
-      tip: tipAmount,
-      payments: payments.length > 0 ? paymentsFromOrderRows() : receiptPayments,
-    };
-  }
-
-  /** Reprint of an already-issued bill — no payment, no drawer kick. */
+  /**
+   * Reprint of an already-issued bill — no payment, no drawer kick.
+   *
+   * The document is the server's: it loads the sale from its own rows and
+   * prints it through the «رسید فروش» rule. The screen only names which sale
+   * (and, in the invoice modal, which of the two documents).
+   */
   function reprint() {
-    const receipt = buildReceipt(
-      Number(order?.tip_amount ?? 0),
-      draftReceiptPayments(
-        paymentDraft,
-        paymentMethods,
-        Number(order?.total ?? 0),
-        money.unit,
-      ),
-    );
-    if (!receipt) return;
-    void printReceipt(null, receipt, {
-      requestId: `reprint:${orderId}:${crypto.randomUUID()}`,
-      entityId: orderId ?? undefined,
-    }).then((result) => {
+    if (!orderId) return;
+    const requestId = `reprint:${orderId}:${crypto.randomUUID()}`;
+    const issue = (id: string) => printSaleReceipt(null, orderId, { requestId: id });
+    void issue(requestId).then((result) => {
       if (!result.ok) setError("ارسال رسید به چاپگر ناموفق بود.");
       else toast.success("رسید برای چاپ ارسال شد");
     });
@@ -823,26 +763,15 @@ export function OrderDetailModal({
     await load();
     onChanged?.();
 
-    const receipt = buildReceipt(
-      tipAmount,
-      draftReceiptPayments(paymentDraft, paymentMethods, total, money.unit),
-    );
-    if (receipt) {
+    if (orderId) {
       const receiptRequestId = `receipt:${orderId}`;
-      void printReceipt(null, receipt, {
-        requestId: receiptRequestId,
-        entityId: orderId ?? undefined,
-      }).then((result) => {
+      // The payment is already recorded, so the server's receipt is the settled
+      // bill — including the tip that was just stored with it.
+      const issue = (id: string) => printSaleReceipt(null, orderId, { requestId: id });
+      void issue(receiptRequestId).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ پرداخت با موفقیت ثبت شده است.", {
-            action: {
-              label: "چاپ دوباره",
-              onClick: () =>
-                void printReceipt(null, receipt, {
-                  requestId: `${receiptRequestId}:retry`,
-                  entityId: orderId ?? undefined,
-                }),
-            },
+            action: { label: "چاپ دوباره", onClick: () => void issue(`${receiptRequestId}:retry`) },
           });
         }
         if (

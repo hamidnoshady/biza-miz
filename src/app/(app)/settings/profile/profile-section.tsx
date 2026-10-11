@@ -428,7 +428,6 @@ function SelfSessionsCard({
 interface SelfPhoneStatus {
   phone: string | null;
   phoneState: "none" | "unverified" | "verified";
-  otpWindowOpen?: boolean;
   recentAuth?: boolean;
   error?: string;
   message?: string;

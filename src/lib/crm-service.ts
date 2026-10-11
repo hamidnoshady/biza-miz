@@ -1479,6 +1479,17 @@ export async function listActivities(
     dueBefore?: string;
     /** Only rows due on or after this ISO date — the `planned` state. */
     dueOnOrAfter?: string;
+    /**
+     * The shop's day a `dueOnOrBefore`/`dueBefore`/`dueOnOrAfter` date means:
+     * the branch's timezone and its business-day start, from
+     * `businessDayContext`. Supplying them resolves each date to *that day's*
+     * own start and end; omitting them keeps the historical comparison, where a
+     * date means midnight in the database session's timezone (UTC on a server,
+     * i.e. 03:30 in Tehran — the three and a half hours a night in which «امروز»
+     * and the shop's today used to disagree).
+     */
+    dayTimeZone?: string;
+    dayStartMinutes?: number | null;
     limit?: number;
   } = {},
 ): Promise<CrmActivity[]> {
@@ -1516,19 +1527,42 @@ export async function listActivities(
   }
   if (options.openOnly) where += " AND a.completed_at IS NULL";
   if (options.completedOnly) where += " AND a.completed_at IS NOT NULL";
+  /**
+   * The instant an ISO date's day begins, and the one after it begins.
+   *
+   * With a branch context the day is the shop's: its start is that branch's
+   * business-day start (`date + start minutes` as a *local* wall clock, then
+   * `AT TIME ZONE` — the same arithmetic `app_business_day_start`, migration
+   * 0076, does), and the next day is computed from that date rather than by
+   * adding `interval '1 day'` to an instant, which PostgreSQL would resolve in
+   * the session's timezone. Without one, the historical expression is emitted
+   * unchanged, so a caller holding only a date keeps the behaviour it had.
+   */
+  const dayStartSql = (isoDate: string): string => {
+    const date = params.push(isoDate);
+    if (!options.dayTimeZone) return `(($${date})::date)`;
+    const zone = params.push(options.dayTimeZone);
+    const start = params.push(options.dayStartMinutes ?? null);
+    return `((($${date})::date + coalesce($${start}::int, 0) * interval '1 minute') AT TIME ZONE $${zone}::text)`;
+  };
+  const dayAfterSql = (isoDate: string): string => {
+    const date = params.push(isoDate);
+    if (!options.dayTimeZone) return `(($${date})::date + 1)`;
+    const zone = params.push(options.dayTimeZone);
+    const start = params.push(options.dayStartMinutes ?? null);
+    return `((($${date})::date + 1 + coalesce($${start}::int, 0) * interval '1 minute') AT TIME ZONE $${zone}::text)`;
+  };
   if (options.dueOnOrBefore) {
     // The shop's own day, inclusive: a task due «امروز» is not late until the
-    // business day the server resolved has ended.
-    params.push(options.dueOnOrBefore);
-    where += ` AND a.due_at IS NOT NULL AND a.due_at < (($${params.length})::date + 1)`;
+    // business day the server resolved has ended — so the bound is where the
+    // *next* one starts, in the branch's own zone.
+    where += ` AND a.due_at IS NOT NULL AND a.due_at < ${dayAfterSql(options.dueOnOrBefore)}`;
   }
   if (options.dueBefore) {
-    params.push(options.dueBefore);
-    where += ` AND a.due_at IS NOT NULL AND a.due_at < $${params.length}::date`;
+    where += ` AND a.due_at IS NOT NULL AND a.due_at < ${dayStartSql(options.dueBefore)}`;
   }
   if (options.dueOnOrAfter) {
-    params.push(options.dueOnOrAfter);
-    where += ` AND a.due_at IS NOT NULL AND a.due_at >= $${params.length}::date`;
+    where += ` AND a.due_at IS NOT NULL AND a.due_at >= ${dayStartSql(options.dueOnOrAfter)}`;
   }
   // A caller-supplied limit is clamped rather than trusted: `limit=999999` on a
   // shared endpoint is a way to make one screen read a whole table.

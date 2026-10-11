@@ -44,7 +44,6 @@ import {
 import {
   employeeLoginMode,
   memberPhoneState,
-  pinWindowActive,
   type EmployeeLoginMode,
   type MemberPhoneState,
 } from "./phone-otp-policy";
@@ -1059,7 +1058,6 @@ interface RosterRow extends Record<string, unknown> {
   has_webauthn: boolean;
   phone_e164: string | null;
   phone_verified_at: Date | null;
-  otp_login_at: Date | null;
 }
 
 /**
@@ -1080,6 +1078,7 @@ export async function loginRoster(
   businessId: string,
   locationId?: string | null,
   deviceId?: string | null,
+  trustedUserId?: string | null,
 ): Promise<LoginRosterEntry[]> {
   const profile = (await readDeploymentProfile(businessId)).profile;
   const allowPrivilegedSitePin = profile === "hybrid" || profile === "local";
@@ -1091,7 +1090,7 @@ export async function loginRoster(
   }
   const { rows } = await query<RosterRow>(
     `SELECT u.id, u.full_name, u.role::text AS role, e.photo_url,
-            u.phone_e164, u.phone_verified_at, u.otp_login_at,
+            u.phone_e164, u.phone_verified_at,
             EXISTS (
               SELECT 1 FROM employee_credentials c
                WHERE c.employee_id = u.id AND c.credential_type = 'webauthn' AND c.status = 'active'
@@ -1112,8 +1111,10 @@ export async function loginRoster(
   );
 
   // Phase 42 — one policy read for the whole roster, then the per-member
-  // step is pure (employeeLoginMode): verified-number members inside their
-  // 7-day window keep the PIN pad, everyone else is routed to the OTP.
+  // step is pure (employeeLoginMode). Issue #885: the exemption that keeps a
+  // verified-number member on the PIN pad is this *device's* trust, resolved
+  // once by the route and narrowed to at most one member here, so a shared
+  // till never greets a colleague as trusted because somebody else verified.
   const { state } = await phoneOtpEnforcementFor(businessId);
   return rows.map((row) => {
     const phoneState = memberPhoneState(row.phone_e164, row.phone_verified_at);
@@ -1126,7 +1127,7 @@ export async function loginRoster(
       loginMode: employeeLoginMode({
         enforcement: state,
         phoneState,
-        pinWindow: pinWindowActive(row.otp_login_at),
+        deviceTrusted: trustedUserId != null && trustedUserId === row.id,
       }),
       phoneState,
     };

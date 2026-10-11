@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => ({
   shouldChallengeMfaOnLogin: vi.fn(() => false) as AnyFn,
   graceDaysRemaining: vi.fn(() => null as number | null) as AnyFn,
   issueTrustedDevice: vi.fn(async () => ({ token: "tdev_new", expiresAt: new Date() })) as AnyFn,
+  verifyTrustedDevice: vi.fn(async () => ({ trusted: false, reason: "missing" })) as AnyFn,
 }));
 
 vi.mock("@/lib/phone-otp", () => ({
@@ -81,7 +82,11 @@ vi.mock("@/lib/trusted-device", async () => {
   const actual = await vi.importActual<typeof import("@/lib/trusted-device")>(
     "@/lib/trusted-device",
   );
-  return { ...actual, issueTrustedDevice: mocks.issueTrustedDevice };
+  return {
+    ...actual,
+    issueTrustedDevice: mocks.issueTrustedDevice,
+    verifyTrustedDevice: mocks.verifyTrustedDevice,
+  };
 });
 vi.mock("@/lib/mfa", () => ({
   distinctSecondFactorMethods: mocks.distinctSecondFactorMethods,
@@ -331,5 +336,119 @@ describe("runtime input handling (L14)", () => {
 
     // Over the bound it is dropped rather than forwarded to a row lookup.
     expect(mocks.resolveDeviceId).toHaveBeenCalledWith(null, BUSINESS);
+  });
+});
+
+/**
+ * Issue #885, gap 3 — the phone-primary door must honour trusted-device state
+ * before challenging for MFA, exactly as the password door does.
+ *
+ * Without this the two doors disagreed: a device trusted after a full
+ * password+MFA verification was still asked for MFA when the same member came
+ * in through the phone door. That reads as the feature not working, and it
+ * meant the exemption depended on which door a member happened to use.
+ *
+ * What these tests also pin is what the exemption does *not* reach: the phone
+ * OTP is still redeemed on this request, and a login that skipped a factor
+ * does not get to mint a fresh seven-day trust out of it.
+ */
+describe("trusted-device exemption before MFA (gap 3)", () => {
+  /** An owner with a confirmed TOTP enrolment, so an MFA challenge is due. */
+  function managerWithMfa() {
+    mocks.query.mockResolvedValue({
+      rows: [
+        {
+          id: USER,
+          business_id: BUSINESS,
+          business_slug: "test",
+          business_subdomain: "test",
+          location_id: null,
+          role: "owner",
+          full_name: "مالک",
+          platform_user_id: "99999999-9999-4999-8999-999999999999",
+          identity_active: true,
+          token_version: 1,
+        },
+      ],
+      rowCount: 1,
+    });
+    mocks.mfaAppliesToRole.mockReturnValue(true);
+    mocks.getAccountMfaEnrolments.mockResolvedValue([{ method: "totp", confirmed_at: new Date() }]);
+    mocks.enrolmentRequirement.mockReturnValue("required");
+    mocks.shouldChallengeMfaOnLogin.mockReturnValue(true);
+  }
+
+  it("waives the MFA challenge for a device this member has trusted", async () => {
+    managerWithMfa();
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt: new Date() });
+
+    const res = await POST(request("123456"));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.mfaRequired).toBeUndefined();
+    expect(mocks.signMfaPendingToken).not.toHaveBeenCalled();
+    // The session is the real one — the exemption waives a challenge, it does
+    // not mint anything on its own.
+    expect(res.cookies.get("pos_session")?.value).toBeTruthy();
+  });
+
+  it("still proves the primary factor: the OTP was redeemed before the waiver", async () => {
+    managerWithMfa();
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt: new Date() });
+
+    await POST(request("123456"));
+
+    // Trust is never a substitute for the phone proof; it only skips the
+    // *second* factor. Redemption still happened, bound to the named challenge.
+    expect(mocks.verifyEmployeePhoneOtp).toHaveBeenCalledWith(
+      expect.objectContaining({ challengeId: CHALLENGE, userId: USER, destination: PHONE }),
+    );
+    expect(mocks.stampPhoneVerified).toHaveBeenCalled();
+  });
+
+  it("challenges as usual when the device holds no trust", async () => {
+    managerWithMfa();
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
+
+    const body = await (await POST(request("123456"))).json();
+
+    expect(body.mfaRequired).toBe(true);
+    expect(mocks.signMfaPendingToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("challenges when the trust lapsed or was revoked", async () => {
+    managerWithMfa();
+    for (const reason of ["expired", "revoked"] as const) {
+      mocks.signMfaPendingToken.mockClear();
+      mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason });
+
+      const body = await (await POST(request("123456"))).json();
+
+      expect(body.mfaRequired).toBe(true);
+      expect(mocks.signMfaPendingToken).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("consults trust only when a challenge is actually due", async () => {
+    // No platform identity, so the MFA branch is never entered. Spending a
+    // trusted_devices query on every cashier login would be cost for nothing.
+    await POST(request("123456"));
+
+    expect(mocks.verifyTrustedDevice).not.toHaveBeenCalled();
+  });
+
+  it("does not extend trust on a login whose MFA was waived", async () => {
+    // Load-bearing. Trust is earned by *completing* every factor. If a waived
+    // MFA could re-mint it, a trusted device would roll its own seven-day
+    // window forward on every ordinary login and the expiry would never bite.
+    managerWithMfa();
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt: new Date() });
+
+    const res = await POST(request("123456", { trustDevice: true }));
+
+    expect(res.status).toBe(200);
+    expect(mocks.issueTrustedDevice).not.toHaveBeenCalled();
+    expect(res.cookies.get("pos_trusted_device")).toBeUndefined();
   });
 });

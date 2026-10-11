@@ -12,7 +12,7 @@
  * ceremony, not in what a live challenge row means.
  */
 import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
-import { SignJWT } from "jose";
+import { EncryptJWT, jwtDecrypt } from "jose";
 import { query, withTenantTransaction, withoutTenantScope } from "./db";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
 import { getSmsProvider } from "./sms-config";
@@ -124,15 +124,71 @@ export interface PhonePendingPayload {
 
 const PHONE_PENDING_TTL = "10m";
 
+/**
+ * Issue #885, gap 2 — the pending token is **encrypted**, not merely signed.
+ *
+ * A signed JWT is not a secret. Its payload is base64url, so anyone holding
+ * the response — the member, a script, anybody on the path — could decode the
+ * middle segment and read `uid`, `businessId`, `cid` and `destination`. That
+ * undid the anti-enumeration work at the response layer: the real and the
+ * synthetic answers were made byte-identical on the outside while carrying
+ * plainly different contents inside, so decoding the token was a membership
+ * oracle (and a free disclosure of which challenge row and which number a
+ * code had been sent to).
+ *
+ * `dir` + `A256GCM` over the realm's 256-bit HKDF-derived secret makes the
+ * payload unreadable without that secret. The binding is unchanged — every
+ * field is still carried and still re-checked against the row at verify time
+ * — it simply is no longer legible to the holder.
+ *
+ * Note what this does *not* claim: the two responses are still
+ * distinguishable by length and timing, which is why the request route keeps
+ * its byte-identical body and the anti-enumeration test keeps asserting the
+ * whole response rather than one field. Encryption closes the readable-payload
+ * half of the oracle; it is not a substitute for the rest.
+ */
 export async function signPhonePendingToken(
   payload: Omit<PhonePendingPayload, "realm">,
 ): Promise<string> {
   const secret = await getRealmSecret("phone");
-  return new SignJWT({ ...payload, sub: undefined, uid: payload.sub, realm: "phone" })
-    .setProtectedHeader({ alg: "HS256" })
+  return new EncryptJWT({ ...payload, sub: undefined, uid: payload.sub, realm: "phone" })
+    .setProtectedHeader({ alg: "dir", enc: "A256GCM" })
     .setIssuedAt()
     .setExpirationTime(PHONE_PENDING_TTL)
-    .sign(secret);
+    .encrypt(secret);
+}
+
+/**
+ * Read the payload of a pending token.
+ *
+ * Tries the encrypted form first, then falls back to the signed-only form.
+ * The fallback is transitional and bounded by the ten-minute TTL: at most a
+ * deploy's worth of pre-encryption tokens are ever in flight, and without it
+ * every member mid-verification at the moment of a deploy would be told their
+ * code was wrong. It is a compatibility path, not a second accepted format —
+ * nothing mints the signed form any more.
+ */
+async function decryptPhonePendingToken(token: string): Promise<Record<string, unknown> | null> {
+  const tryWith = async (previous: boolean): Promise<Record<string, unknown> | null> => {
+    // The secret read is *inside* the try, deliberately. `getRealmSecret`
+    // throws rather than returning null when a realm has no previous secret
+    // configured — the common case — and a throw escaping from here would
+    // reject the whole `decrypt ?? verifySigned` expression in
+    // verifyPhonePendingToken, so the signed fallback would never run and
+    // every token still in flight at a deploy would be refused. This is the
+    // same reason verifyWithRealmSecret wraps its own secret read.
+    try {
+      const secret = await getRealmSecret("phone", previous);
+      const { payload } = await jwtDecrypt(token, secret, {
+        keyManagementAlgorithms: ["dir"],
+        contentEncryptionAlgorithms: ["A256GCM"],
+      });
+      return payload as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  return (await tryWith(false)) ?? (await tryWith(true));
 }
 
 /** A token with no subject is the anti-enumeration shape, and is valid. */
@@ -142,8 +198,16 @@ function isPurpose(value: unknown): value is PhoneOtpPurpose {
 
 export async function verifyPhonePendingToken(token: string): Promise<PhonePendingPayload | null> {
   try {
-    const payload = await verifyWithRealmSecret<{
-      realm?: string;
+    // Encrypted form first; the signed form is the transitional fallback for
+    // tokens still in flight from before the deploy (see
+    // decryptPhonePendingToken). Either way the payload is untrusted input:
+    // both branches hand back a loose record, and every field is narrowed
+    // below rather than assumed.
+    const raw =
+      (await decryptPhonePendingToken(token)) ??
+      (await verifyWithRealmSecret<Record<string, unknown>>(token, "phone"));
+    if (!raw || raw.realm !== "phone") return null;
+    const payload = raw as {
       uid?: string | null;
       businessId?: string;
       mayAttachPhone?: boolean;
@@ -151,8 +215,7 @@ export async function verifyPhonePendingToken(token: string): Promise<PhonePendi
       cid?: string | null;
       destination?: string | null;
       purpose?: string;
-    }>(token, "phone");
-    if (!payload || payload.realm !== "phone") return null;
+    };
 
     const sub = payload.uid ?? null;
     // `cid` is null in two legitimate cases, and they are told apart by the

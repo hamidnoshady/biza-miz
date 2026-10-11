@@ -433,7 +433,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     method: "POST",
     label: "پیش‌نویس سند حسابداری دستی",
     payloadHint:
-      "{ entryDate?: string, memo: string, lines: Array<{ accountId: string, debit?: number, credit?: number }> } — مجموع بدهکار باید با مجموع بستانکار برابر باشد؛ فقط به‌صورت پیش‌نویس ثبت می‌شود و برای اعمال روی دفتر نیاز به تأیید جداگانه دارد",
+      "{ entryDate?: string, locationId?: string /* شعبه، با id یا نام دقیق یکی از شعبه‌های همین کسب‌وکار؛ خالی یعنی پیش‌فرض */, memo: string, lines: Array<{ accountId: string, debit?: number, credit?: number }> } — مجموع بدهکار باید با مجموع بستانکار برابر باشد؛ فقط به‌صورت پیش‌نویس ثبت می‌شود و برای اعمال روی دفتر نیاز به تأیید جداگانه دارد",
     autopilotCategory: "money",
     executor: "journalDraft",
     revertible: "always",
@@ -443,11 +443,18 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     endpoint: "/api/ledger/expenses",
     method: "POST",
     label: "ثبت و دسته‌بندی هزینه",
+    // No account codes and no "صندوق یا بانک" list invented here: the model is
+    // pointed at the tenant's own chart (the read tools that list accounts are
+    // how it finds a valid id), and the payment-source rule that decides the
+    // answer lives in `expense-accounts.ts` and is enforced by the service
+    // whatever channel a proposal came from (issue #832 §13, §15).
     payloadHint:
-      "{ accountId: string /* حساب هزینه، کد ۵۲۰۰-۵۹۰۰ */, paymentAccountId: string /* حساب پرداخت: صندوق یا بانک */, amount: number, expenseDate?: string, vendor?: string, memo: string }",
+      "{ accountId: string /* id یک حساب هزینهٔ فعال از سرفصل همین کسب‌وکار */, settlement?: \"paid\"|\"credit\" /* پیش‌فرض paid؛ credit یعنی «پرداخت بعدی» */, paymentAccountId?: string /* فقط برای paid: id حساب پرداخت (صندوق/بانک/تنخواه/تسویه کارت‌خوان) — هر حساب دارایی دیگری رد می‌شود */, supplierId?: string /* فقط برای credit: id تأمین‌کننده در «حساب‌های پرداختنی» */, dueDate?: string /* YYYY-MM-DD اختیاری، سررسید پرداخت */, amount: number /* مبلغ کل به ریال، عدد صحیح — مبلغ کسری رد می‌شود، گِرد نمی‌شود */, vatAmount?: number /* بخش مالیات قابل استرداد از همین مبلغ، در صورت وجود */, expenseDate?: string /* YYYY-MM-DD، نمی‌تواند در آینده باشد */, locationId?: string /* شعبه، با id یا با نام دقیق یکی از شعبهٔ فعال همین کسب‌وکار؛ خالی یعنی شعبهٔ پیش‌فرض */, vendor?: string, partyId?: string /* id شخص در فهرست اشخاص، اختیاری */, memo: string }",
     autopilotCategory: "money",
     executor: "expense",
-    revertible: false,
+    // Issue #832 §1: an expense now has an honest one-click undo — a mirrored
+    // reversal, not a deletion — so the action is reversible like a manual journal.
+    revertible: "always",
   },
 
   "inventory.waste.log": {

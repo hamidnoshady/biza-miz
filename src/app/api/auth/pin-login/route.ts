@@ -18,7 +18,7 @@ import {
   phoneOtpEnforcementFor,
   signPhonePendingToken,
 } from "@/lib/phone-otp";
-import { memberPhoneState, pinWindowActive } from "@/lib/phone-otp-policy";
+import { memberPhoneState, pinGateCloses } from "@/lib/phone-otp-policy";
 import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { pinEligibleRolesSql } from "@/lib/login-eligibility";
@@ -34,7 +34,6 @@ interface UserRow extends Record<string, unknown> {
   pin_hash: string | null;
   phone_e164: string | null;
   phone_verified_at: Date | null;
-  otp_login_at: Date | null;
 }
 
 /**
@@ -135,7 +134,7 @@ export async function POST(request: NextRequest) {
       `SELECT u.id, u.business_id, b.slug::text AS business_slug,
               b.subdomain::text AS business_subdomain, u.location_id,
               u.role, u.full_name, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
-              u.phone_e164, u.phone_verified_at, u.otp_login_at
+              u.phone_e164, u.phone_verified_at
          FROM users u
          JOIN businesses b ON b.id = u.business_id
          LEFT JOIN LATERAL (
@@ -187,21 +186,15 @@ export async function POST(request: NextRequest) {
     // -----------------------------------------------------------------------
     const enforcement = await phoneOtpEnforcementFor(user.business_id);
     const phoneState = memberPhoneState(user.phone_e164, user.phone_verified_at);
-    const windowActive = pinWindowActive(user.otp_login_at);
 
     // The member asked to verify their number this time (the door's optional
     // button, spent during the adoption window). Honour it whenever an OTP
     // can actually be delivered and there is something to verify — a verified
-    // number inside an open window has nothing to do.
+    // number this device is already trusted for has nothing to do.
     const wantsVerification =
       body.verifyPhone === true &&
       phoneState !== "verified" &&
       (enforcement.state === "grace" || enforcement.state === "enforced");
-
-    // Hard gate: past the adoption date (and with SMS configured), the PIN
-    // alone only opens the door inside the 7-day OTP window.
-    const gateClosed =
-      enforcement.state === "enforced" && !(phoneState === "verified" && windowActive);
 
     // -----------------------------------------------------------------------
     // Issue #885 — the seven-day trusted-device exemption.
@@ -214,28 +207,48 @@ export async function POST(request: NextRequest) {
     // was explicitly trusted inside the last seven days is not asked to
     // verify again.
     //
-    // The lookup is scoped to this business *and* this member, so the
-    // membership-wide `otp_login_at` window it supplements cannot do what the
-    // policy forbids: one verified phone exempting every device that
-    // membership signs in from. A different device, a different account or a
-    // different tenant is a miss, and the gate below closes as usual.
+    // The lookup is scoped to this business *and* this member *and* the
+    // presenting device cookie, so a second device that this membership
+    // signs in from is a miss and is challenged in full — even one minute
+    // after the first device verified. That is the whole point of the scope:
+    // `users.otp_login_at` is member-wide, and reading it here would let one
+    // verified phone exempt every till in the shop. It is deliberately *not*
+    // consulted for this decision.
     //
-    // Only consulted when the gate would otherwise shut. On an install where
-    // the policy is not enforced there is no challenge to waive, and asking
-    // the table anyway would be a query per login for nothing.
-    const deviceTrust = gateClosed
-      ? await verifyTrustedDevice({
-          businessId: user.business_id,
-          userId: user.id,
-          token: readTrustedDeviceToken(request),
-        })
-      : null;
+    // Trust is also only ever minted by a completed verification
+    // (mfa/verify, phone-otp/verify), never by an ordinary login, so taking
+    // the exempt path here cannot lengthen it; an expired or revoked row
+    // reads as a miss and the gate shuts again.
+    //
+    // Only consulted while the policy is enforced. Before the adoption date
+    // there is no challenge to waive, and asking the table anyway would be a
+    // query per login for nothing.
+    const deviceTrust =
+      enforcement.state === "enforced"
+        ? await verifyTrustedDevice({
+            businessId: user.business_id,
+            userId: user.id,
+            token: readTrustedDeviceToken(request),
+          })
+        : null;
     const trustExempt = deviceTrust?.trusted === true;
+
+    // Hard gate: past the adoption date (and with SMS configured), the PIN
+    // alone opens the door only for a device this member has trusted inside
+    // the last seven days *and* still has a verified number behind it.
+    // Revoking the trust, letting it lapse, or losing the verified number
+    // each re-arms the challenge on their own. The rule itself is shared with
+    // the roster's routing hint so the two can never disagree.
+    const gateClosed = pinGateCloses({
+      enforcement: enforcement.state,
+      phoneState,
+      deviceTrusted: trustExempt,
+    });
 
     // A member who *asked* to verify their number still gets to, trusted
     // device or not — that is the door's optional button, and honouring it is
     // how a number gets onto file in the first place.
-    if (wantsVerification || (gateClosed && !trustExempt)) {
+    if (wantsVerification || gateClosed) {
       // The PIN was proven — the member may set a number that is not on file
       // yet; every other path through the phone-OTP door may only be sent to
       // a number already stored.

@@ -210,7 +210,9 @@ const DRAFTS: Draft[] = [
 
   // --- Payroll -------------------------------------------------------------
   // Its own group because compensation data is sensitive in a way the rest of
-  // the ledger is not: these keys are owner + accountant, never the manager.
+  // the ledger is not. The default presets give both keys to the owner, the
+  // admin and the accountant and neither to the manager; a business can still
+  // grant or revoke either one per member.
   { key: P.payrollView, group: "payroll", label: "مشاهده حقوق و دستمزد", description: "دیدن احکام حقوقی، لیست‌های حقوق و مبالغ پرداختی پرسنل.", risk: "high", audit: true },
   { key: P.payrollManage, group: "payroll", label: "اجرای حقوق و دستمزد", description: "تعریف حکم حقوقی، صدور لیست حقوق و پرداخت یا ابطال آن.", risk: "critical", audit: true, implies: [P.payrollView] },
 

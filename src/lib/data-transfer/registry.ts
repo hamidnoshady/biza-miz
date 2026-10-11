@@ -27,6 +27,8 @@
 
 import type { Industry } from "../industries";
 import { PERMISSIONS } from "../permissions";
+import { EXPENSE_DUPLICATE_RULES } from "../expense-import";
+import { EXPENSE_SETTLEMENT_LABELS, EXPENSE_SETTLEMENTS } from "../payables-input";
 import type { DataModuleKey, EntityDefinition, EntityField } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -1102,13 +1104,36 @@ const ACCOUNTING_PAYMENTS: EntityDefinition = {
   ],
 };
 
+/**
+ * The two settlements of audit F11, in the words the A/P screens and the expense
+ * form already use. Declared from `payables-input` rather than restated: the
+ * engine's `enum` coercion accepts a value *or* its label, so the only thing this
+ * adds is the Persian spelling an operator types into a cell — and if the service
+ * ever renames a settlement, the label here follows it instead of drifting.
+ */
+const EXPENSE_SETTLEMENT_OPTIONS = EXPENSE_SETTLEMENTS.map((value) => ({
+  value,
+  label: EXPENSE_SETTLEMENT_LABELS[value],
+}));
+
 const ACCOUNTING_EXPENSES: EntityDefinition = {
   key: "accounting.expenses",
   module: "accounting",
   label: "هزینه‌ها",
-  description: "هزینه‌های ثبت‌شده: سرفصل، مبلغ، تاریخ و طرف حساب.",
+  description:
+    "هزینه‌های ثبت‌شده: سرفصل، مبلغ، تاریخ، طرف حساب، مالیات قابل استرداد و نحوهٔ تسویه.",
   exportPermission: PERMISSIONS.ledgerView,
-  importPermission: PERMISSIONS.ledgerPost,
+  /*
+   * `ledger.post` was a second, unintended door to the same business act: a
+   * custom role holding `data.import` + `ledger.post` but *not*
+   * `finance.expenses_manage` could create paid expenses in bulk while being
+   * refused by `POST /api/ledger/expenses` (issue #832 §4). One capability now
+   * means "may create paid operating expenses", wherever the row comes from —
+   * the route, the importer, the assistant. (`data.import` is still required on
+   * top of it by every `/api/data/**` route; `importPermission` decides which
+   * entities a member may write through that door.)
+   */
+  importPermission: PERMISSIONS.financeExpensesManage,
   fields: [
     ID_FIELD,
     {
@@ -1125,11 +1150,17 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
       },
       exportDefault: true,
     },
+    /*
+     * Required of a **paid** row only. `parseExpenseSettlement` — the parser the
+     * form and the API use — is what decides, in the adapter, because a credit row
+     * has no payment account of its own: its credit is the Accounts Payable control
+     * account, derived from the chart. A cell that names a *different* account on
+     * an owed row is refused rather than ignored.
+     */
     {
       key: "paymentAccountCode",
       label: "حساب پرداخت",
       type: "reference",
-      required: true,
       aliases: ["از حساب", "حساب بانکی", "صندوق"],
       relation: {
         entity: "accounting.accounts",
@@ -1137,6 +1168,7 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
         onMissing: "skip",
         label: "حساب پرداخت",
       },
+      hint: "برای «پرداخت‌شده» الزامی است؛ برای «پرداخت بعدی» خالی بگذارید (بستانکار، حساب‌های پرداختنی است).",
       exportDefault: true,
     },
     {
@@ -1144,8 +1176,34 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
       label: "مبلغ",
       type: "money",
       required: true,
-      aliases: ["مبلغ هزینه", "amount"],
-      validation: { min: 1 },
+      /*
+       * The two unit spellings are the export's own headers: `buildExport` names a
+       * money column «مبلغ (تومان)», and a sheet the register wrote has to be a
+       * sheet the register can read back — otherwise the first column an operator
+       * copies from an export is the one the mapper drops. (The suffix is a rule of
+       * the export layer, so every entity's money columns have this gap; only the
+       * expense one is closed here, and closing it engine-wide is a change to
+       * `suggestMapping` rather than to this list.)
+       */
+      aliases: ["مبلغ هزینه", "amount", "مبلغ (تومان)", "مبلغ (ریال)"],
+      // `integral` because the ledger stores whole Rial: a Toman file whose cell
+      // carries a fraction is refused by name, not rounded into a posting nobody
+      // wrote (the same rule `parseExpenseAmount` applies to the API).
+      validation: { min: 1, integral: true },
+      exportDefault: true,
+    },
+    {
+      key: "vatAmount",
+      label: "مالیات قابل استرداد",
+      type: "money",
+      aliases: [
+        "مالیات",
+        "مالیات بر ارزش افزوده",
+        "مالیات قابل استرداد (تومان)",
+        "مالیات قابل استرداد (ریال)",
+      ],
+      validation: { min: 0, integral: true },
+      hint: "بخشی از مبلغ کل، در حساب ۱۲۲۰ بدهکار می‌شود؛ خالی یعنی بدون مالیات.",
       exportDefault: true,
     },
     {
@@ -1156,16 +1214,56 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
       aliases: ["تاریخ هزینه", "date"],
       exportDefault: true,
     },
-    { key: "vendor", label: "طرف حساب", type: "text", aliases: ["فروشنده", "تأمین‌کننده"], exportDefault: true },
-    { key: "memo", label: "شرح", type: "longtext", aliases: ["توضیحات", "بابت"], exportDefault: true },
-  ],
-  duplicateRules: [
     {
-      key: "date_amount_account",
-      label: "تاریخ، مبلغ و سرفصل",
-      fields: ["expenseDate", "amount", "accountCode"],
+      key: "settlement",
+      label: "نحوهٔ تسویه",
+      type: "enum",
+      options: EXPENSE_SETTLEMENT_OPTIONS,
+      hint: "خالی یعنی «پرداخت‌شده». «پرداخت بعدی» بدهی را در «حساب‌های پرداختنی» همان تأمین‌کننده می‌نشیند.",
+      exportDefault: true,
     },
+    {
+      key: "supplier",
+      label: "تأمین‌کننده",
+      type: "text",
+      aliases: ["فروشنده", "حساب تأمین‌کننده"],
+      // Resolved by the adapter through `listSupplierDirectory` — the same
+      // tenant-scoped list the screen's picker reads — by id, exact name or phone.
+      hint: "فقط برای «پرداخت بعدی»؛ نام، شمارهٔ تماس یا شناسهٔ تأمین‌کننده در «حساب‌های پرداختنی».",
+      exportDefault: true,
+    },
+    {
+      key: "dueDate",
+      label: "سررسید پرداخت",
+      type: "date",
+      aliases: ["تاریخ سررسید", "سررسید"],
+      hint: "فقط برای «پرداخت بعدی»؛ برای «تأخیر» در همان فهرست.",
+      exportDefault: true,
+    },
+    {
+      key: "party",
+      label: "شخص (فهرست اشخاص)",
+      type: "text",
+      aliases: ["شخص", "اشخاص"],
+      // Resolved through `searchParties`, so the encrypted columns, the inactive
+      // flag and a merged-away record are all handled by the directory rather
+      // than re-implemented here; an ambiguous name is refused, not guessed.
+      hint: "نام دقیق یا شمارهٔ تماس شخص در «فهرست اشخاص»؛ خالی یعنی بدون پیوند.",
+      exportDefault: true,
+    },
+    // The free-text name the row carries even after the person is deleted (§12) —
+    // hence its own column, and why «تأمین‌کننده» is no longer an alias of it:
+    // with a real supplier column, one header spelling may not name two fields.
+    { key: "vendor", label: "طرف حساب", type: "text", aliases: ["نام طرف حساب"], exportDefault: true },
+    { key: "memo", label: "شرح", type: "longtext", aliases: ["توضیحات", "بابت"], exportDefault: true },
+    // Read-only facts: they travel in an export so a sheet can be tied back to the
+    // ledger, and the engine excludes read-only fields from the mapping, so a
+    // re-import can never overwrite a document number or invent one.
+    { key: "reference", label: "شمارهٔ سند", type: "text", readOnly: true, exportDefault: true },
   ],
+  // Defined once, in `src/lib/expense-import.ts`, because the database-side
+  // lookup the adapter runs has to match the in-file rule the preview promises.
+  duplicateRules: EXPENSE_DUPLICATE_RULES,
 };
 
 // ---------------------------------------------------------------------------

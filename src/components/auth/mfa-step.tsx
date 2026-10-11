@@ -276,11 +276,25 @@ export function MfaStep({
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
+        status?: string;
         error?: string;
         recoveryCodes?: string[];
       };
       if (!res.ok) {
         setError(mfaErrorMessage(data.error, res.status));
+        setCode("");
+        return;
+      }
+      // Issue #885, gap 5 — a 200 is not a verification.
+      //
+      // `res.json().catch(() => ({}))` deliberately swallows a malformed body
+      // so a proxy error page cannot throw out of the submit handler, but that
+      // means `data` can legitimately be `{}`. Treating "the request succeeded"
+      // as "the factor was accepted" would then hand the session over on an
+      // empty object, an HTML error page that happened to return 200, or a
+      // truncated response. Only the route's explicit verdict counts.
+      if (data.status !== "verified") {
+        setError(mfaErrorMessage(undefined, res.status));
         setCode("");
         return;
       }

@@ -13,7 +13,7 @@
 import { usePromptDialog } from "../prompt-dialog";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Ban, PrinterIcon, XIcon } from "lucide-react";
+import { Ban, PrinterIcon, ReceiptIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -26,12 +26,12 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { paymentMethodLabel, CONDITION_GRADE_LABELS } from "@/lib/receipt-template";
-import { printReceipt } from "@/lib/printing/client";
+import { printSaleInvoice, printSaleReceipt } from "@/lib/printing/client";
+import { printerErrorMessage } from "@/lib/printing/errors";
 import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
 import { api, ErrorBox, errorMessageOrRaw } from "../ui";
 import { StatusBadge, LoadingSkeleton } from "../page-chrome";
 import type { RetailInvoiceDetail, RetailInvoiceDetailLine } from "@/lib/retail-invoice/types";
-import type { ReceiptData } from "@/lib/receipt-template";
 
 const PURITY_LABELS: Record<string, string> = { "18": "عیار ۱۸", "21": "عیار ۲۱", "24": "عیار ۲۴" };
 
@@ -162,34 +162,43 @@ export function RetailInvoiceDetailModal({
     }
   }
 
-  async function reprint() {
+  /**
+   * A formal invoice and a customer receipt are two documents, not two
+   * implementations of one: the invoice goes to the «فاکتور» rule (A4/A5, the
+   * page printer) and the receipt to the «رسید فروش» rule (thermal). Each
+   * button names the document it prints, so the same sale can be printed
+   * either way and neither action can silently become the other — which is
+   * exactly what happened when this modal's reprint asked for an invoice
+   * while the sale itself had printed a receipt.
+   *
+   * The document itself comes from the same place the sale's first print got
+   * it: the server loads this invoice's rows (`getRetailInvoicePrintData`) and
+   * renders it through the rule for the named type. The modal only says which
+   * of the two documents the operator pressed.
+   */
+  async function printDocument(documentType: "invoice" | "receipt") {
     if (!invoiceId) return;
     setPrinting(true);
-    const { ok, data } = await api<{ receipt?: ReceiptData; error?: string }>(
-      `/api/sales/invoices/${invoiceId}?view=print`,
-    );
+    const requestId = `reprint:${documentType}:${crypto.randomUUID()}`;
+    const issue = (id: string) =>
+      documentType === "invoice"
+        ? printSaleInvoice(null, invoiceId, { requestId: id })
+        : printSaleReceipt(null, invoiceId, { requestId: id });
+    const result = await issue(requestId);
     setPrinting(false);
-    if (!ok || !data.receipt) {
-      toast.error("اطلاعات چاپ این فاکتور دریافت نشد.");
+    if (result.ok) {
+      toast.success(documentType === "invoice" ? "فاکتور برای چاپ ارسال شد" : "رسید برای چاپ ارسال شد");
       return;
     }
-    const receipt = data.receipt;
-    const requestId = `reprint:${crypto.randomUUID()}`;
-    const result = await printReceipt(null, receipt, { requestId, documentType: "invoice" });
-    if (result.ok) {
-      toast.success("رسید برای چاپ ارسال شد");
-    } else if (result.error === "printer_not_configured") {
-      toast.warning("چاپگری برای این شعبه تنظیم نشده است.", {
-        action: { label: "تنظیمات چاپگر", onClick: () => window.open("/dashboard/settings/printers", "_blank") },
+    if (result.error === "printer_not_configured" || result.error === "printer_unavailable") {
+      toast.warning(printerErrorMessage(result.error), {
+        action: { label: "تنظیمات چاپ", onClick: () => window.open("/dashboard/settings/printers", "_blank") },
       });
-    } else {
-      toast.warning("چاپ رسید انجام نشد.", {
-        action: {
-          label: "چاپ دوباره",
-          onClick: () => void printReceipt(null, receipt, { requestId: `${requestId}:retry`, documentType: "invoice" }),
-        },
-      });
+      return;
     }
+    toast.warning("چاپ انجام نشد.", {
+      action: { label: "چاپ دوباره", onClick: () => void issue(`${requestId}:retry`) },
+    });
   }
 
   const hasLegacyLines = invoice?.lines.some((l) => l.kind === "legacy") ?? false;
@@ -222,12 +231,21 @@ export function RetailInvoiceDetailModal({
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => void reprint()}
+                onClick={() => void printDocument("invoice")}
                 disabled={!invoice || printing}
                 className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-border px-3 text-xs font-semibold text-foreground transition-colors hover:border-amber-300 hover:bg-amber-50 disabled:pointer-events-none disabled:opacity-50 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10"
               >
                 <PrinterIcon aria-hidden="true" className="size-4" />
-                {printing ? "در حال ارسال…" : "چاپ مجدد"}
+                {printing ? "در حال ارسال…" : "چاپ فاکتور"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void printDocument("receipt")}
+                disabled={!invoice || printing}
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-border px-3 text-xs font-semibold text-foreground transition-colors hover:border-amber-300 hover:bg-amber-50 disabled:pointer-events-none disabled:opacity-50 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10"
+              >
+                <ReceiptIcon aria-hidden="true" className="size-4" />
+                چاپ رسید
               </button>
               {canVoid && invoice?.status === "completed" ? (
                 <button

@@ -198,7 +198,15 @@ export const PERMISSIONS = {
   financeReconciliationManage: "finance.reconciliation_manage",
   financeAssetsManage: "finance.assets_manage",
 
-  /** Salary data is narrower than the surrounding ledger. Owner and accountant only. */
+  /**
+   * Salary data is narrower than the surrounding ledger, so it has its own pair
+   * of keys. `payroll.view` reads wage orders, payroll runs and the wage-change
+   * history; `payroll.manage` sets wages and accrues, pays and voids a run (it
+   * implies view). The default presets give both to the owner, the admin and
+   * the accountant and neither to the manager, but a business can grant or
+   * revoke either key per member — so code tests the capability, never a role
+   * name.
+   */
   payrollView: "payroll.view",
   payrollManage: "payroll.manage",
 

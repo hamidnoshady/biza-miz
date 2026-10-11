@@ -576,11 +576,30 @@ function PinLogin() {
       phoneToken?: string;
       maskedPhone?: string | null;
       lockedUntil?: unknown;
+      user?: { id?: string; role?: string; fullName?: string | null };
     };
     setBusy(false);
 
     if (res.status === 423) {
       setError(lockoutMessage(data.lockedUntil));
+      return;
+    }
+
+    // Issue #885, gap 5 — a 200 is not a login.
+    //
+    // The `.catch(() => ({}))` above is deliberate: a proxy error page or a
+    // truncated body must not throw out of this handler, which is the stuck
+    // keypad L05 fixed. But it also means `data` can legitimately be `{}`, and
+    // the old shape read "the request succeeded" as "the PIN was accepted" and
+    // called goNext(). A 200 carrying an empty object, an HTML error page, or
+    // a truncated response therefore navigated into the app with no session
+    // cookie behind it — a broken dashboard and no explanation.
+    //
+    // Only the route's own payload counts: it always names the member it just
+    // minted a session for. Anything else is reported as a failed attempt so
+    // the member can retry instead of being handed an empty app.
+    if (res.ok && !data.user?.id) {
+      setError("پاسخ سرور نامعتبر بود. دوباره تلاش کنید.");
       return;
     }
 

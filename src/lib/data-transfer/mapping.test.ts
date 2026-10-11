@@ -209,6 +209,44 @@ describe("coerceValue", () => {
     expect(result.message?.severity).toBe("error");
   });
 
+  /*
+   * `validation.integral` is the engine's opt-out from its own rounding. A price
+   * list may legitimately arrive as ۱۵۰/۷ تومان and be stored as a whole Rial; a
+   * ledger row may not, because ۱۵۰/۵ rounded to ۱۵۰۸ is a posting that
+   * reconciles with no document. The expense entity turns it on for `amount` and
+   * `vatAmount`, so the refusal is per column and named in that column's words.
+   */
+  it("refuses a fraction where the field stores exact Rial, and rounds where it does not", () => {
+    const expenses = requireEntity("accounting.expenses");
+    const amount = expenses.fields.find((f) => f.key === "amount")!;
+    const price = field("price", products);
+    expect(amount.validation?.integral).toBe(true);
+
+    // ۱۵۰/۷۵ تومان → 1507.5 rial: unrepresentable, so the row says so.
+    const fraction = coerceValue(amount, "150.75", { moneyUnit: "toman" });
+    expect(fraction.value).toBeNull();
+    expect(fraction.message?.message).toContain("صحیح ریال");
+
+    // The same cell on an ordinary money field keeps the old, deliberate rounding.
+    expect(coerceValue(price, "150.75", { moneyUnit: "toman" }).value).toBe(1508);
+  });
+
+  it("accepts the float residue of a Toman conversion as the whole Rial it is", () => {
+    const amount = requireEntity("accounting.expenses").fields.find((f) => f.key === "amount")!;
+    // ۱۵۰/۷ تومان really is 1507 rial; ×10 only makes the binary representation
+    // untidy. Refusing that would refuse arithmetic, not money.
+    expect(coerceValue(amount, "150.7", { moneyUnit: "toman" }).value).toBe(1507);
+    expect(coerceValue(amount, "1507", { moneyUnit: "rial" }).value).toBe(1507);
+  });
+
+  it("keeps VAT in whole Rial too, and lets an empty cell mean no VAT", () => {
+    const vat = requireEntity("accounting.expenses").fields.find((f) => f.key === "vatAmount")!;
+    expect(vat.validation?.integral).toBe(true);
+    expect(coerceValue(vat, "", { moneyUnit: "rial" })).toEqual({ value: null, message: null });
+    expect(coerceValue(vat, "21000", { moneyUnit: "rial" }).value).toBe(21000);
+    expect(coerceValue(vat, "2100.5", { moneyUnit: "rial" }).message?.severity).toBe("error");
+  });
+
   it("validates an email and lower-cases it", () => {
     expect(coerceValue(field("email"), " Ali@Example.COM ", options).value).toBe(
       "ali@example.com",

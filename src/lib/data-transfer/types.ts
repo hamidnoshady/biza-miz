@@ -102,6 +102,15 @@ export interface FieldRelation {
 export interface FieldValidation {
   min?: number;
   max?: number;
+  /**
+   * Money only: the file's value must land on a whole Rial. The codec's Toman
+   * conversion rounds (`۱۵/۷۵` → 1508), which is right for a price list and
+   * wrong for a ledger row — an accounting amount nobody typed is an amount that
+   * will not reconcile. A field that stores integer Rial exactly — an expense's
+   * `amount` and its `vatAmount` — opts in, and the row is refused with its
+   * column named instead of being rounded into the books.
+   */
+  integral?: boolean;
   minLength?: number;
   maxLength?: number;
   /** Source form of a regular expression; compiled once by the validator. */

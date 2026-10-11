@@ -48,6 +48,7 @@ describe("LoginDoorChooser — destination survives a door change (L06)", () => 
   it("carries a validated next onto the manager door instead of dropping it", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
+      localServer: false,
       phoneOtpEnforcement: "off",
       phoneOtpDaysLeft: null,
     });
@@ -66,6 +67,7 @@ describe("LoginDoorChooser — destination survives a door change (L06)", () => 
   it("does not carry an unsafe destination, whatever was passed in", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
+      localServer: false,
       phoneOtpEnforcement: "off",
       phoneOtpDaysLeft: null,
     });
@@ -78,6 +80,7 @@ describe("LoginDoorChooser — destination survives a door change (L06)", () => 
   it("navigates plainly when there is no destination to preserve", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
+      localServer: false,
       phoneOtpEnforcement: "off",
       phoneOtpDaysLeft: null,
     });
@@ -92,6 +95,7 @@ describe("LoginDoorChooser — the offline promise matches the install (L04)", (
   it("does not claim Internet-free login on a cloud origin", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
+      localServer: false,
       phoneOtpEnforcement: "off",
       phoneOtpDaysLeft: null,
     });
@@ -113,6 +117,7 @@ describe("LoginDoorChooser — the offline promise matches the install (L04)", (
   it("keeps the claim on a local install, where it is true", async () => {
     stubCapabilities({
       deploymentProfile: "local",
+      localServer: true,
       phoneOtpEnforcement: "pending_sms",
       phoneOtpDaysLeft: null,
     });
@@ -123,9 +128,66 @@ describe("LoginDoorChooser — the offline promise matches the install (L04)", (
     ).toBeTruthy();
   });
 
+  it("does not claim Internet-free login for a paired business served from the cloud", async () => {
+    // Issue #885, gap 8. A business paired to the cloud stores `hybrid`, and
+    // `deploymentProfile` is the same on every origin serving it. The claim
+    // used to be keyed on that field, so the *hosted* login page for a paired
+    // business asserted «نیازی به اینترنت ندارد» about itself — the exact false
+    // promise L04 existed to remove, arrived at by a different route.
+    //
+    // Same stored profile as the local case above; the only difference is that
+    // this origin is not the local server. That difference is what decides.
+    stubCapabilities({
+      deploymentProfile: "hybrid",
+      localServer: false,
+      phoneOtpEnforcement: "off",
+      phoneOtpDaysLeft: null,
+    });
+    render(<LoginDoorChooser onChoose={() => {}} />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("نیازی به اینترنت ندارد", { exact: false }),
+      ).toBeNull(),
+    );
+    expect(await screen.findByText(/اپلیکیشن محلی/, { exact: false })).toBeTruthy();
+  });
+
+  it("keeps the claim for a paired business when the local server is answering", async () => {
+    // The mirror of the test above: `hybrid` on a site install *is* a local
+    // server, so the claim is true there and must survive the fix.
+    stubCapabilities({
+      deploymentProfile: "hybrid",
+      localServer: true,
+      phoneOtpEnforcement: "off",
+      phoneOtpDaysLeft: null,
+    });
+    render(<LoginDoorChooser onChoose={() => {}} />);
+
+    expect(await screen.findByText("نیازی به اینترنت ندارد")).toBeTruthy();
+  });
+
+  it("makes no claim when the probe answers without the local-server field", async () => {
+    // An older server, or a truncated body: absence must read as "not proven",
+    // never as "local".
+    stubCapabilities({
+      deploymentProfile: "local",
+      phoneOtpEnforcement: "off",
+      phoneOtpDaysLeft: null,
+    });
+    render(<LoginDoorChooser onChoose={() => {}} />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("نیازی به اینترنت ندارد", { exact: false }),
+      ).toBeNull(),
+    );
+  });
+
   it("states the phone-verification prerequisite once enforcement is live", async () => {
     stubCapabilities({
       deploymentProfile: "hybrid",
+      localServer: true,
       phoneOtpEnforcement: "enforced",
       phoneOtpDaysLeft: 0,
     });
@@ -157,6 +219,7 @@ describe("LoginDoorChooser — copy does not over-promise (L16)", () => {
   it("names the mechanism rather than guaranteeing full administrative access", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
+      localServer: false,
       phoneOtpEnforcement: "off",
       phoneOtpDaysLeft: null,
     });
@@ -178,6 +241,7 @@ describe("LoginDoorChooser — copy does not over-promise (L16)", () => {
   it("says the remembered-choice checkbox stores no credential", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
+      localServer: false,
       phoneOtpEnforcement: "off",
       phoneOtpDaysLeft: null,
     });
@@ -197,6 +261,7 @@ describe("OfflineLoginNote — the footnote agrees with the install (L04)", () =
   it("does not repeat the untrue claim on a cloud origin", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
+      localServer: false,
       phoneOtpEnforcement: "off",
       phoneOtpDaysLeft: null,
     });
@@ -211,6 +276,7 @@ describe("OfflineLoginNote — the footnote agrees with the install (L04)", () =
   it("keeps it on a local install, and adds the prerequisite when enforced", async () => {
     stubCapabilities({
       deploymentProfile: "local",
+      localServer: true,
       phoneOtpEnforcement: "enforced",
       phoneOtpDaysLeft: 0,
     });
