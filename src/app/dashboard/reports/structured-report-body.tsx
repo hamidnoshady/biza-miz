@@ -5,12 +5,14 @@ import { ProfitAndLossView, BalanceSheetView, CashFlowView, FoodCostVarianceView
 } from "./ledger-report-view";
 import { TradeReportBody } from "./trade-report-body";
 import type { ReportShape } from "./standard-report-config";
-export function StructuredReportBody({ shape, payload, dateFrom, dateTo, readOnly = false }: {
-  shape: ReportShape; payload: Record<string, unknown>; dateFrom?: string; dateTo?: string; readOnly?: boolean;
+export function StructuredReportBody({ shape, payload, dateFrom, dateTo, scope, readOnly = false }: {
+  shape: ReportShape; payload: Record<string, unknown>; dateFrom?: string; dateTo?: string;
+  /** The scope the document was read at — the drill-downs behind its figures must cover the same rows. */
+  scope?: "branch" | "business-wide"; readOnly?: boolean;
 }) {
   switch (shape) {
-    case "profit_and_loss": return <ProfitAndLossView readOnly={readOnly} report={payload as unknown as ProfitAndLoss | Comparison<ProfitAndLoss>} dateFrom={dateFrom} dateTo={dateTo} />;
-    case "balance_sheet": return <BalanceSheetView readOnly={readOnly} report={payload as unknown as BalanceSheet | Comparison<BalanceSheet>} dateTo={dateTo} />;
+    case "profit_and_loss": return <ProfitAndLossView readOnly={readOnly} scope={scope} report={payload as unknown as ProfitAndLoss | Comparison<ProfitAndLoss>} dateFrom={dateFrom} dateTo={dateTo} />;
+    case "balance_sheet": return <BalanceSheetView readOnly={readOnly} scope={scope} report={payload as unknown as BalanceSheet | Comparison<BalanceSheet>} dateTo={dateTo} />;
     case "cash_flow": return <CashFlowView report={payload as unknown as CashFlow | Comparison<CashFlow>} />;
     case "food_cost_variance": return <FoodCostVarianceView report={payload as unknown as FoodCostVariance} />;
     default: return <TradeReportBody shape={shape} payload={payload} />;

@@ -38,7 +38,9 @@ export const REPORTS_TABS: readonly ReportsTabDef[] = [
   { key: "dashboard", label: "گزارش‌های سنجاق‌شده", capability: "canViewReports" },
   { key: "shift-orders", label: "سفارش‌های شیفت", capability: "canViewReports" },
   { key: "builder", label: "گزارش‌ساز", capability: "canBuildReports" },
-  { key: "growth", label: "رشد و بازاریابی", capability: "canViewReports" },
+  // The tab renders the growth accounting view, whose endpoint is a Growth
+  // surface: it opens with `growth.view`, not `reports.view` (issue #819).
+  { key: "growth", label: "رشد و بازاریابی", capability: "canViewGrowth" },
   // Cross-branch comparison: the consolidated view of every branch, one step
   // more restricted than a single branch's own reports (issue #819).
   { key: "branches", label: "مقایسهٔ شعب", capability: "canViewBusinessWide" },

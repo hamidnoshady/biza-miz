@@ -35,6 +35,7 @@ describe("reportCapabilities", () => {
     expect(REPORT_CAPABILITY_PERMISSIONS.canManageRoleWidgets).toBe(
       PERMISSIONS.reportsDashboardDefaultsManage,
     );
+    expect(REPORT_CAPABILITY_PERMISSIONS.canViewGrowth).toBe(PERMISSIONS.growthView);
   });
 
   it("keeps the four acts independent: a read key grants no manage, export or business-wide", () => {
@@ -45,6 +46,26 @@ describe("reportCapabilities", () => {
     expect(read.canExportReports).toBe(false);
     expect(read.canViewBusinessWide).toBe(false);
     expect(read.canManageRoleWidgets).toBe(false);
+  });
+
+  it("opens the growth tab on growth.view, the permission its endpoint enforces", () => {
+    // Codex review, #819: the tab renders the growth accounting view, whose
+    // data endpoint requires growth.view. A reports.view-only member must not
+    // be offered a tab that 403s on its first request.
+    const reportsOnly = reportCapabilities(new Set([PERMISSIONS.reportsView]));
+    expect(reportsOnly.canViewGrowth).toBe(false);
+
+    const growthReader = reportCapabilities(
+      new Set([PERMISSIONS.reportsView, PERMISSIONS.growthView]),
+    );
+    expect(growthReader.canViewGrowth).toBe(true);
+    expect(canOpenReports(growthReader)).toBe(true);
+
+    // growth.view alone can read the data but does not admit the reports page:
+    // the tab is never a second door into the workspace.
+    const growthOnly = reportCapabilities(new Set([PERMISSIONS.growthView]));
+    expect(growthOnly.canViewGrowth).toBe(true);
+    expect(canOpenReports(growthOnly)).toBe(false);
   });
 
   it("does not let the export key open the builder's save, nor the manage key open a file", () => {
@@ -141,5 +162,6 @@ describe("presets that must keep working (issue #819 regression)", () => {
     expect(capabilities.canViewReports).toBe(true);
     expect(capabilities.canBuildReports).toBe(true);
     expect(capabilities.canViewBusinessWide).toBe(false);
+    expect(capabilities.canViewGrowth).toBe(false);
   });
 });

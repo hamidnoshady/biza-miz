@@ -41,6 +41,7 @@ const CAPABILITIES: ReportCapabilities = {
   canExportReports: false,
   canViewBusinessWide: false,
   canManageRoleWidgets: false,
+  canViewGrowth: false,
 };
 
 /** The engine catalogue, in the shape `/api/reports/views` returns it. */

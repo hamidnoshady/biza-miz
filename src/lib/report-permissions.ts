@@ -52,6 +52,17 @@ export interface ReportCapabilities {
   canViewBusinessWide: boolean;
   /** Replace a *role's* default dashboard widget layout, which every member of that role inherits. */
   canManageRoleWidgets: boolean;
+  /**
+   * Open the «رشد و بازاریابی» tab.
+   *
+   * That tab renders the growth accounting view, whose data endpoint
+   * (`/api/growth/accounting`) is a *Growth* surface gated by `growth.view` —
+   * not by `reports.view`. Gating the tab on the report key instead let a
+   * custom member with `reports.view` alone open a tab that always 403'd on
+   * its first request (issue #819, Codex review): navigation and data must
+   * agree on the permission that opens the section.
+   */
+  canViewGrowth: boolean;
 }
 
 /**
@@ -69,6 +80,7 @@ export const REPORT_CAPABILITY_PERMISSIONS: Record<keyof ReportCapabilities, Per
   canExportReports: PERMISSIONS.reportsExport,
   canViewBusinessWide: PERMISSIONS.reportsBusinessWide,
   canManageRoleWidgets: PERMISSIONS.reportsDashboardDefaultsManage,
+  canViewGrowth: PERMISSIONS.growthView,
 };
 
 /** Maps an effective permission set onto the reporting capabilities above. */
@@ -81,15 +93,18 @@ export function reportCapabilities(permissions: ReadonlySet<string>): ReportCapa
     canExportReports: has(PERMISSIONS.reportsExport),
     canViewBusinessWide: has(PERMISSIONS.reportsBusinessWide),
     canManageRoleWidgets: has(PERMISSIONS.reportsDashboardDefaultsManage),
+    canViewGrowth: has(PERMISSIONS.growthView),
   };
 }
 
 /**
  * Whether the reports workspace admits this member at all.
  *
- * Deliberately *not* "holds any reports capability": every report capability
- * implies `reports.view`, so the read key is the one door and there is no
- * second way to be admitted to a section whose every request would then 403.
+ * Deliberately *not* "holds any reports capability": the report capabilities
+ * that imply `reports.view` make the read key the one door, and the one that
+ * doesn't (`canViewGrowth` rides on `growth.view`) cannot admit the page
+ * either — a growth-only member who somehow reached the tab would get a
+ * redirect from the page's own `reports.view` gate, not a usable section.
  */
 export function canOpenReports(capabilities: ReportCapabilities): boolean {
   return capabilities.canViewReports;

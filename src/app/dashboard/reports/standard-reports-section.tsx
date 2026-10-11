@@ -791,6 +791,7 @@ export function StandardReportsSection({
               chartType={chartType}
               dateFrom={loadedRange.dateFrom}
               dateTo={loadedRange.dateTo}
+              scope={loadedScope}
               error={loadError}
               loading={loading}
               invalidRange={invalidRange}
@@ -876,6 +877,7 @@ function ReportBody({
   chartType,
   dateFrom,
   dateTo,
+  scope,
   error,
   loading,
   invalidRange,
@@ -887,6 +889,8 @@ function ReportBody({
   chartType: ChartType;
   dateFrom: string;
   dateTo: string;
+  /** The scope that produced the visible document — its drill-downs must match it. */
+  scope?: "branch" | "business-wide";
   error: string;
   loading: boolean;
   invalidRange: boolean;
@@ -931,7 +935,7 @@ function ReportBody({
     // internal sections, not a single table.
     return (
       <SectionCard title="نتیجهٔ گزارش">
-        <StructuredReportBody shape={report.shape} payload={document} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />
+        <StructuredReportBody shape={report.shape} payload={document} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} scope={scope} />
       </SectionCard>
     );
   }

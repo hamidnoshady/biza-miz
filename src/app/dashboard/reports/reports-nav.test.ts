@@ -9,8 +9,17 @@ import {
 import { reportCapabilities } from "@/lib/report-permissions";
 import { PERMISSIONS } from "@/lib/permissions";
 
-/** A capability object with every reporting key held. */
-const full = reportCapabilities(new Set(Object.values(PERMISSIONS).filter((key) => key.startsWith("reports."))));
+/**
+ * A capability object with every reporting key held — plus `growth.view`,
+ * the one tab key that is not a `reports.*` permission (the growth tab
+ * renders a Growth surface whose endpoint enforces it).
+ */
+const full = reportCapabilities(
+  new Set([
+    ...Object.values(PERMISSIONS).filter((key) => key.startsWith("reports.")),
+    PERMISSIONS.growthView,
+  ]),
+);
 
 describe("REPORTS_TABS", () => {
   it("lists every section exactly once, first tab first", () => {
@@ -47,6 +56,16 @@ describe("reportsTabsForCapabilities", () => {
     expect(keys).toContain("standard");
     expect(keys).toContain("builder");
     expect(keys).not.toContain("branches");
+    // Codex review, #819: reports.view alone must not offer the growth tab —
+    // its data endpoint requires growth.view, so the tab would only 403.
+    expect(keys).not.toContain("growth");
+  });
+
+  it("offers the growth tab to a member who can actually read its data", () => {
+    const capabilities = reportCapabilities(
+      new Set([PERMISSIONS.reportsView, PERMISSIONS.growthView]),
+    );
+    expect(reportsTabsForCapabilities(capabilities).map((t) => t.key)).toContain("growth");
   });
 
   it("offers the branch comparison to any member actually granted the capability", () => {

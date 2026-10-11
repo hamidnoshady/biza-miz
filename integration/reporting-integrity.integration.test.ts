@@ -485,6 +485,50 @@ describe("branch isolation of report execution (issue #819)", () => {
     expect(consolidated.balanced).toBe(true);
     expect(consolidated.totalAssets).toBe(7_800_000);
   });
+
+  it("keeps a statement drill-down on the same scope as the statement (issue #819, Codex review)", async () => {
+    // A consolidated P&L/balance-sheet figure must drill into the consolidated
+    // postings behind it — and a branch figure into the branch's postings.
+    // `getAccountDrillDown` is what the drill-down route calls after resolving
+    // the scope, so pinning the scope here pins the reconciliation: the
+    // window totals must equal the statement figure for the same scope.
+    const { rows: accountRows } = await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '4300', 'فروش', 'revenue') RETURNING id`,
+      [businessId],
+    );
+    const revenue = accountRows[0].id;
+    const post = async (locationId: string, amount: number) => {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type)
+         VALUES ($1, $2, '2026-08-10', 'آزمون دیل‌داون', 'manual') RETURNING id`,
+        [businessId, locationId],
+      );
+      const id = rows[0].id;
+      await db.query(
+        `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+         VALUES ($1, $2, 0, $3)`,
+        [id, revenue, amount],
+      );
+    };
+    await post(mainId, 1_000_000);
+    await post(otherId, 7_000_000);
+
+    const drill = (locationId: string | undefined) =>
+      dbLib.withTenant(businessId, () =>
+        reportsService.getAccountDrillDown(businessId, "4300", { locationId }),
+      );
+
+    const main = await drill(mainId);
+    expect(main.totalLines).toBe(1);
+    expect(main.totals.credit).toBe("1000000");
+
+    // The consolidated drill-down carries no location — the same postings the
+    // consolidated statement summed — so its figure reconciles too.
+    const consolidated = await drill(undefined);
+    expect(consolidated.totalLines).toBe(2);
+    expect(consolidated.totals.credit).toBe("8000000");
+  });
 });
 
 describe("report filter option scope (issue #819)", () => {
