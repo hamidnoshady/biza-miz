@@ -220,7 +220,20 @@ Delivered (§6):
 - The desktop size budgets pass on the PR head with the first version's growth removed. The growth was one import: the report panel reached the codec module's spreadsheet and PDF libraries. The fix, the measurements and the follow-ups are in the Desktop payload section above. The staged runtime is 198.150 MiB against 200, and the installed payload 618.583 MiB against 620.
 - Size diagnostics run on every desktop build, after the budgets, and their reports upload even when a budget fails.
 
-Deferred (§7), each with its reason in the plan: payroll attribution, fixed assets, trading postings, receipts and payments (by design, since they settle balances), system-generated opening and carry-forward entries, the Holoo journal-voucher import, bulk assignment, hybrid sync of dimensions, rollup reports, and journal CSV attribution columns.
+Partially delivered in this pass:
+- Holoo Sanad/SanadRow voucher import carries dimension codes per line, resolved transactionally (commit `b091ba6`).
+- Journal CSV/XLSX export includes 8 dimension columns (commit `fbb2b80`).
+- Concurrency hardening with real mutual-cycle proof under independent connections (`0217`/`0218`, commit `fbb2b80`, regression strengthened in `08151db`).
+
+Deferred, with the decision that still needs to be made for each:
+- **Payroll attribution** requires a per-employee / per-run allocation model (cost-centre share percentages per employee, or a run-level choice). Not a code change: a product decision the issue does not resolve. Until that decision, payroll accruals post to «بدون بُعد».
+- **Fixed-asset attribution**: acquisition and depreciation should carry an asset-level default dimension set. Adding four nullable columns to `fixed_assets` and threading them through acquisition/depreciation/disposal is a tractable follow-up but touches a 1,800-line service and its lifecycle transitions; not included in this push to avoid lifecycle regression.
+- **Trading postings** (purchase, sale, COGS) carry dimension attribution only once the posting engine has a rule (per-product, per-channel, etc.). Without that rule the engine has nothing to read.
+- **Receipts and payments** are settlement legs; they do not carry a cost centre by design because they settle balances, not incur them. If a receipt against a dimension-filtered invoice must be split by dimension, that is a settlement-allocation change that also affects the ageing report.
+- **System-generated opening/carry-forward entries** do not carry dimensions because they are generated aggregates of prior-period balances; a manual opening entry *is* attributable through the manual-journal path.
+- **Bulk assignment** is safe only on unposted drafts; the API and UI for it are deferred.
+- **Hybrid sync**: dimension master data is cloud-authoritative; site events do not yet carry attribution, so extending the replication contract needs a matching cloud-side schema change.
+- **Rollup reports** over a parent's children are an additive view; parents are already refused as posting targets so totals are not double-counted.
 
 Open at this writing:
 
