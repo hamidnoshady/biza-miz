@@ -4,16 +4,22 @@
  * The anti-enumeration work made the two responses byte-identical on the
  * outside, but the token they both carried was a *signed* JWT, and a signed
  * JWT is not a secret: its payload is base64url, so anybody holding the
- * response could decode the middle segment and read `uid`, `businessId`,
- * `cid` and `destination` straight off it. That made the token itself the
- * oracle the response shape was built to remove — decode it and a real member
- * is instantly distinguishable from the synthetic answer, and the challenge id
- * and destination number come free.
+ * response could decode the middle segment and read `uid`, `businessId` and
+ * the candidate number straight off it. That made the token itself the oracle
+ * the response shape was built to remove — decode it and a real member is
+ * instantly distinguishable from the synthetic answer, and the phone number
+ * comes free.
  *
  * These tests pin the property rather than the mechanism: no segment of the
  * token decodes to anything containing the bound values, the round trip still
  * returns the exact payload (the binding is unchanged, only its legibility),
  * and the two shapes remain indistinguishable to a holder.
+ *
+ * Note on scope: #854 moved the challenge *binding* out of the token and onto
+ * the `mfa_challenges` row, where `redeemOtpChallenge` checks it under
+ * `FOR UPDATE`. That is the stronger place for it and is kept. What remains
+ * here is the narrower claim this file exists for — the token must not leak
+ * what it carries.
  */
 import { SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
@@ -22,7 +28,6 @@ import { signPhonePendingToken, verifyPhonePendingToken } from "./phone-otp";
 
 const BUSINESS = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const USER = "11111111-2222-4333-8444-555555555555";
-const CHALLENGE = "99999999-8888-4777-8666-555555555555";
 const PHONE = "+989121000001";
 
 /** Every base64url segment decoded as UTF-8, ignoring undecodable noise. */
@@ -37,26 +42,40 @@ function decodedSegments(token: string): string[] {
 }
 
 describe("phone pending token opacity (gap 2)", () => {
-  it("does not expose the member, tenant, challenge or destination in any segment", async () => {
+  it("does not expose the member, tenant or candidate number in any segment", async () => {
     const token = await signPhonePendingToken({
       sub: USER,
       businessId: BUSINESS,
       mayAttachPhone: false,
       phone: null,
-      cid: CHALLENGE,
-      destination: PHONE,
-      purpose: "login",
+      candidatePhone: PHONE,
+      multiBusiness: true,
+      otpProven: false,
     });
 
     const visible = decodedSegments(token).join("\n");
     // The whole point: none of the bound values is legible to the holder.
     expect(visible).not.toContain(USER);
     expect(visible).not.toContain(BUSINESS);
-    expect(visible).not.toContain(CHALLENGE);
     expect(visible).not.toContain(PHONE);
     // Nor the field names, which alone would confirm which kind of token it is.
-    expect(visible).not.toContain("destination");
-    expect(visible).not.toContain('"cid"');
+    expect(visible).not.toContain("candidatePhone");
+    expect(visible).not.toContain('"uid"');
+  });
+
+  it("is encrypted rather than merely signed", async () => {
+    const token = await signPhonePendingToken({
+      sub: USER,
+      businessId: BUSINESS,
+      mayAttachPhone: false,
+      phone: null,
+    });
+    // A JWE has five segments (header, encrypted key, iv, ciphertext, tag);
+    // a signed JWS has three. This is the property the fix rests on, asserted
+    // directly rather than inferred from the absence of a plaintext.
+    expect(token.split(".").length).toBe(5);
+    const header = JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString("utf8"));
+    expect(header).toMatchObject({ alg: "dir", enc: "A256GCM" });
   });
 
   it("still round-trips the exact payload, so the binding is unchanged", async () => {
@@ -65,9 +84,9 @@ describe("phone pending token opacity (gap 2)", () => {
       businessId: BUSINESS,
       mayAttachPhone: true,
       phone: PHONE,
-      cid: CHALLENGE,
-      destination: PHONE,
-      purpose: "attach",
+      candidatePhone: PHONE,
+      multiBusiness: false,
+      otpProven: true,
     });
 
     await expect(verifyPhonePendingToken(token)).resolves.toEqual({
@@ -75,9 +94,9 @@ describe("phone pending token opacity (gap 2)", () => {
       businessId: BUSINESS,
       mayAttachPhone: true,
       phone: PHONE,
-      cid: CHALLENGE,
-      destination: PHONE,
-      purpose: "attach",
+      candidatePhone: PHONE,
+      multiBusiness: false,
+      otpProven: true,
       realm: "phone",
     });
   });
@@ -91,36 +110,27 @@ describe("phone pending token opacity (gap 2)", () => {
       businessId: "00000000-0000-0000-0000-000000000000",
       mayAttachPhone: false,
       phone: null,
-      cid: null,
-      destination: null,
-      purpose: "login",
     });
 
     const payload = await verifyPhonePendingToken(token);
     expect(payload?.sub).toBeNull();
-    expect(payload?.cid).toBeNull();
-    expect(payload?.destination).toBeNull();
+    expect(payload?.candidatePhone).toBeNull();
+    expect(payload?.multiBusiness).toBe(false);
   });
 
-  it("refuses a token from another realm", async () => {
+  it("refuses a tampered token rather than yielding a plausible payload", async () => {
     const token = await signPhonePendingToken({
       sub: USER,
       businessId: BUSINESS,
       mayAttachPhone: false,
       phone: null,
-      cid: CHALLENGE,
-      destination: PHONE,
-      purpose: "login",
     });
-    // Tamper with a byte of the ciphertext: GCM must reject it rather than
-    // yielding a plausible-looking payload.
+    // Flip a byte of the ciphertext: GCM must reject it.
     const parts = token.split(".");
     const flipped =
-      parts[2].slice(0, 4) +
-      (parts[2][4] === "A" ? "B" : "A") +
-      parts[2].slice(5);
+      parts[3].slice(0, 4) + (parts[3][4] === "A" ? "B" : "A") + parts[3].slice(5);
     await expect(
-      verifyPhonePendingToken([parts[0], parts[1], flipped, parts[3]].join(".")),
+      verifyPhonePendingToken([parts[0], parts[1], parts[2], flipped, parts[4]].join(".")),
     ).resolves.toBeNull();
   });
 
@@ -134,13 +144,15 @@ describe("phone pending token opacity (gap 2)", () => {
 /**
  * The transitional fallback. A pending token lives ten minutes, so at the
  * moment of a deploy there is always a population of signed-only tokens still
- * in flight. Refusing them would tell every member mid-verification that their
- * code was wrong — a self-inflicted outage at exactly the wrong moment.
+ * in flight — including every one minted by the build running in production
+ * right now. Refusing them would tell every member mid-verification that
+ * their code was wrong: a self-inflicted outage at exactly the wrong moment.
  *
  * This also pins a trap worth recording: `getRealmSecret` *throws* when a realm
  * has no previous secret configured, which is the common case. If that read
- * sits outside the decrypt's try, the throw rejects the whole
- * `decrypt ?? verifySigned` expression and the fallback silently never runs.
+ * sat outside the decrypt's try, the throw would reject the whole
+ * `decrypt ?? verifySigned` expression and the fallback would silently never
+ * run.
  */
 describe("legacy signed tokens still verify (deploy transition)", () => {
   it("accepts a signed-only token minted before the encryption change", async () => {
@@ -150,9 +162,9 @@ describe("legacy signed tokens still verify (deploy transition)", () => {
       businessId: BUSINESS,
       mayAttachPhone: false,
       phone: null,
-      cid: CHALLENGE,
-      destination: PHONE,
-      purpose: "login",
+      candidatePhone: PHONE,
+      multiBusiness: true,
+      otpProven: false,
       realm: "phone",
     })
       .setProtectedHeader({ alg: "HS256" })
@@ -166,9 +178,8 @@ describe("legacy signed tokens still verify (deploy transition)", () => {
     await expect(verifyPhonePendingToken(legacy)).resolves.toMatchObject({
       sub: USER,
       businessId: BUSINESS,
-      cid: CHALLENGE,
-      destination: PHONE,
-      purpose: "login",
+      candidatePhone: PHONE,
+      multiBusiness: true,
     });
   });
 });

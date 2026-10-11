@@ -1,11 +1,12 @@
 /**
  * Phase 24 Wave 2 — the pure part of the two-factor rule.
  *
- * Deliberately free of imports so it can be unit-tested directly and reused by
- * both auth realms: `enrolmentRequirement` answers "does this account have to
- * do something about 2FA right now", and nothing else. Everything that touches
- * the database lives in `mfa-service.ts`.
+ * Runtime-import-free apart from `./roles` (itself import-free), so it can be
+ * unit-tested directly and reused by both auth realms: `enrolmentRequirement`
+ * answers "does this account have to do something about 2FA right now", and
+ * nothing else. Everything that touches the database lives in `mfa-service.ts`.
  */
+import { PASSWORD_ROLES } from "./roles";
 
 export type MfaMethod = "totp" | "sms_otp";
 export type PrimaryAuthMethod = "password" | "phone_otp";
@@ -79,19 +80,81 @@ export function graceDaysRemaining(
 }
 
 /**
+ * Roles that sign in with a password and administer the business.
+ *
+ * Issue #854 (P1.1): `admin` was missing from the MFA requirement entirely.
+ * The role model calls a tenant admin a high-authority tenant administrator —
+ * it holds the business-management keys an owner holds, minus the two that are
+ * owner-only — yet the requirement logic only ever named `owner` and,
+ * optionally, `manager`. An admin could therefore hold `team.manage`,
+ * `settings.manage` and the whole ledger with a password alone, which is the
+ * exact account the second factor exists for.
+ *
+ * `accountant` is included in the privileged *set* (it is a password role that
+ * reaches the ledger, and the issue asks that it be "supported fully") but is
+ * not mandatory by default — see `privilegedMfaBaseline`.
+ */
+export const PRIVILEGED_MFA_ROLES: readonly string[] = PASSWORD_ROLES;
+
+/** Privileged roles whose second factor is not negotiable per business. */
+export const MANDATORY_MFA_ROLES: readonly string[] = ["owner", "admin"];
+
+export function isPrivilegedMfaRole(role: string): boolean {
+  return PRIVILEGED_MFA_ROLES.includes(role);
+}
+
+/**
+ * The baseline requirement for a privileged role, before the business's own
+ * policy is consulted.
+ *
+ *  - `owner`, `admin` — mandatory. Not a setting; the whole point of the rule.
+ *  - `manager` — the documented opt-in (`requireForManagers`), off by default,
+ *    because on a small café the manager role is worn by whoever is on shift
+ *    and a hard 2FA gate there would stop service.
+ *  - `accountant` — configurable, off by default, and fully supported when on.
+ *    An external accountant is frequently a contractor with no company phone,
+ *    so forcing a factor on day one is a support ticket; the business can
+ *    require it.
+ *
+ * Every other role (cashier, waiter, kitchen) signs in by PIN on a shared till
+ * and is out of scope for the password policy — they are covered by the phone
+ * verification door instead, not by a TOTP app.
+ */
+export function privilegedMfaBaseline(
+  role: string,
+  policy: { requireForManagers?: boolean; requireForAccountants?: boolean } = {},
+): boolean {
+  if (MANDATORY_MFA_ROLES.includes(role)) return true;
+  if (role === "manager") return policy.requireForManagers === true;
+  if (role === "accountant") return policy.requireForAccountants === true;
+  return false;
+}
+
+/**
  * Whether a business role has to carry a second factor.
  *
- * `owner` always: it is the full permission set by construction. `manager` is
- * the documented opt-in — a business may extend the requirement to its
- * managers, off by default, because on a small café the manager role is worn
- * by whoever is on shift and a hard 2FA gate there would stop service. Every
- * other role (cashier, waiter, kitchen) signs in by PIN on a shared till and is
- * out of scope for this wave entirely.
+ * Kept as the one predicate every login path calls, now delegating to
+ * `privilegedMfaBaseline` so the role vocabulary lives in one place. Issue #854
+ * P0.6: the PIN door and the phone-OTP door both call *this*, which is what
+ * makes "MFA policy applies consistently across password, phone OTP, PIN,
+ * biometric, invitation, Hybrid and Local login paths" true rather than
+ * aspirational.
+ *
+ * Issue #854 (P1.1) — it takes the **whole policy**, not one boolean.
+ *
+ * It used to be `mfaAppliesToRole(role, extendToManager)`, and every one of the
+ * seven login doors therefore passed `policy.requireForManagers` and dropped
+ * `requireForAccountants` on the floor. The accountant switch existed, was
+ * audited, was rendered — and had no effect on whether an accountant could
+ * actually sign in without a factor. A boolean parameter cannot carry a second
+ * knob, so the parameter is the policy object and a new knob cannot be added
+ * without every caller seeing it.
  */
-export function mfaAppliesToRole(role: string, extendToManager = false): boolean {
-  if (role === "owner") return true;
-  if (role === "manager") return extendToManager;
-  return false;
+export function mfaAppliesToRole(
+  role: string,
+  policy: { requireForManagers?: boolean; requireForAccountants?: boolean } = {},
+): boolean {
+  return privilegedMfaBaseline(role, policy);
 }
 
 /**
@@ -105,6 +168,53 @@ export function isMfaEnrolmentConfirmed(enrolment: MfaEnrolmentLike): boolean {
 
 function isPrimaryFlag(enrolment: MfaEnrolmentLike): boolean {
   return Boolean(enrolment.is_primary ?? enrolment.isPrimary);
+}
+
+/**
+ * Whether an enrolment row is a live **factor** for its account.
+ *
+ * Issue #854 — one definition, because two doors were disagreeing about it. The
+ * SMS branch of the strict verifier accepted any challenge it could find, and
+ * the challenge issuer handed out codes against *any* `sms_otp` row, so an
+ * interactive pending enrolment — one the member had started and not proven —
+ * could receive and redeem a step-up code. Meanwhile the enrolment ceremony
+ * needs the opposite answer for the row it is activating, and the selection
+ * helpers upstream want only the proven ones. Every one of those questions is
+ * this predicate or its negation.
+ *
+ * Two ways to be active:
+ *
+ *  - `confirmed_at` is set: the member proved possession of the factor.
+ *  - It is the **owner-activation bootstrap** SMS factor: created
+ *    `is_primary = true` at business creation, from the number the owner gave
+ *    when the business was made, before their first login has had a chance to
+ *    confirm it. That row is the business's only second factor at that moment,
+ *    so refusing it would lock a brand-new owner out of their own step-up.
+ *
+ * An *interactive* pending enrolment is `is_primary = false` with no
+ * confirmation, and is deliberately neither: it is a setup in progress.
+ */
+export function isActiveMfaEnrolment(enrolment: MfaEnrolmentLike): boolean {
+  if (isMfaEnrolmentConfirmed(enrolment)) return true;
+  return enrolment.method === "sms_otp" && isPrimaryFlag(enrolment);
+}
+
+/**
+ * The phone of the account's live SMS factor, or null when it has none.
+ *
+ * Used to bind an SMS challenge to the factor that is actually protecting the
+ * account (#854): the code must have gone to *this* number, and the factor must
+ * still be live when the code comes back. Deleting the factor or moving it to a
+ * different number therefore invalidates challenges already in flight, because
+ * the answer to this question changes under them.
+ */
+export function activeSmsFactorPhone<T extends MfaEnrolmentLike & { phone_e164?: string | null }>(
+  enrolments: readonly T[],
+): string | null {
+  const sms = enrolments.find(
+    (e) => e.method === "sms_otp" && isActiveMfaEnrolment(e) && Boolean(e.phone_e164),
+  );
+  return sms?.phone_e164 ?? null;
 }
 
 function methodPriority(method: MfaMethod): number {
@@ -173,6 +283,34 @@ export function selectPrimaryMfaEnrolment<T extends MfaEnrolmentLike>(
     return all[0] ?? null;
   }
   return null;
+}
+
+/**
+ * Whether a *login* may confirm a pending enrolment instead of proving an
+ * already-confirmed factor.
+ *
+ * Issue #854 (P1.11) — two ceremonies, one flag, and the flag was wrong in both
+ * directions. The rule this encodes:
+ *
+ *  - An account with **no confirmed factor** that is mid-enrolment must be able
+ *    to finish during login. Otherwise the member who scanned the QR code is
+ *    locked out of their own account until an administrator intervenes.
+ *  - An account that **has** a confirmed factor must never have a pending row
+ *    accepted as its second factor. A half-finished enrolment is not a
+ *    credential: the attacker who started an enrolment on a stolen session
+ *    would otherwise hold a factor they chose.
+ *
+ * So the pending path opens only when it is the account's only way in, and the
+ * caller cannot ask for it by accident — `verifyAndConfirmMfaCode` still
+ * defaults to strict, and this predicate is what a login passes explicitly.
+ */
+export function mayConfirmPendingEnrolmentAtLogin<T extends MfaEnrolmentLike>(
+  enrolments: readonly T[],
+  method: MfaMethod | null,
+): boolean {
+  if (!method) return false;
+  if (enrolments.some(isMfaEnrolmentConfirmed)) return false;
+  return enrolments.some((e) => e.method === method && !isMfaEnrolmentConfirmed(e));
 }
 
 /**

@@ -11,10 +11,16 @@
  * callers: an Owner's second factor and a cashier's door login differ in
  * ceremony, not in what a live challenge row means.
  */
-import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { EncryptJWT, jwtDecrypt } from "jose";
-import { query, withTenantTransaction, withoutTenantScope } from "./db";
+import { query, withoutTenantScope } from "./db";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
+import {
+  consumeAllChallenges,
+  issueOtpChallenge,
+  liveChallengePhone,
+  redeemOtpChallenge,
+  type OtpPurpose,
+} from "./otp-challenge";
 import { getSmsProvider } from "./sms-config";
 import { isMobilePhone, phoneE164 } from "./phone";
 import {
@@ -22,7 +28,6 @@ import {
   normalizePhoneOtpPolicy,
   phoneOtpDaysRemaining,
   phoneOtpEnforcement,
-  otpSendBudgetDecision,
   type PhoneOtpEnforcement,
   type PhoneOtpPolicy,
 } from "./phone-otp-policy";
@@ -78,25 +83,11 @@ export async function phoneOtpEnforcementFor(
 // ---------------------------------------------------------------------------
 
 /**
- * What a phone-OTP code is being asked to prove.
- *
- *  - `login`  — possession of the number on file *is* the credential for this
- *               login.
- *  - `attach` — a PIN-verified member is proving ownership of a number that is
- *               about to be written to `users.phone_e164`.
- *  - `manage` — an already-signed-in member changing their own number in
- *               account settings (`/api/auth/phone/self`). Same proof, a
- *               different ceremony: keeping it separate means a challenge
- *               minted before a session exists cannot be redeemed by one, or
- *               the other way round.
- *
- * The distinction exists because the code is the same six digits either way.
- * Before issue #885 (L02) nothing bound a proof to the ceremony that minted
- * it, so a code earned while attaching a number during a PIN login satisfied
- * any other pending token for the same member — including one whose
- * destination was a different number.
+ * The subject realm the multi-business phone challenge lives under — a
+ * challenge keyed on the *number*, not on a membership, used when the caller has
+ * not yet named (and must not be told) a business.
  */
-export type PhoneOtpPurpose = "login" | "attach" | "manage";
+export const PENDING_PHONE_REALM = "phone_pending";
 
 export interface PhonePendingPayload {
   /** users.id of the member logging in; null on the anti-enumeration path. */
@@ -111,15 +102,37 @@ export interface PhonePendingPayload {
   /** The candidate number to attach (PIN-verified flow, phone not yet on file). */
   phone?: string | null;
   /**
-   * The exact challenge row this token may be redeemed against (L02). Null
-   * only on the anti-enumeration path, where no code was ever sent and the
-   * verify can therefore only ever refuse.
+   * Issue #854 (P1.18): the number a *multi-business* login was started for.
+   * Present only on the path where no business was named, so verification can
+   * resolve the candidate members after the code checks out rather than
+   * publishing them before it does.
    */
-  cid: string | null;
-  /** The E.164 number the bound challenge was actually sent to. */
-  destination: string | null;
-  purpose: PhoneOtpPurpose;
+  candidatePhone?: string | null;
+  /** True when the token represents "a number matched, business not yet chosen". */
+  multiBusiness?: boolean;
+  /**
+   * True once the code for a multi-business login has actually been redeemed.
+   * Only then may the business list be shown, and only then can a business be
+   * chosen — a token that merely started a login cannot be spent as one.
+   */
+  otpProven?: boolean;
   realm: "phone";
+}
+
+/**
+ * The claim shape carried by a pending token, whichever of the two encodings
+ * it arrived in. `uid` rather than `sub` because `jose` reserves `sub` for its
+ * own validated claim and we do not want a caller-supplied one to shadow it.
+ */
+interface PhonePendingClaims {
+  realm?: string;
+  uid?: string | null;
+  businessId?: string;
+  mayAttachPhone?: boolean;
+  phone?: string | null;
+  candidatePhone?: string | null;
+  multiBusiness?: boolean;
+  otpProven?: boolean;
 }
 
 const PHONE_PENDING_TTL = "10m";
@@ -127,120 +140,54 @@ const PHONE_PENDING_TTL = "10m";
 /**
  * Issue #885, gap 2 — the pending token is **encrypted**, not merely signed.
  *
- * A signed JWT is not a secret. Its payload is base64url, so anyone holding
- * the response — the member, a script, anybody on the path — could decode the
- * middle segment and read `uid`, `businessId`, `cid` and `destination`. That
- * undid the anti-enumeration work at the response layer: the real and the
- * synthetic answers were made byte-identical on the outside while carrying
- * plainly different contents inside, so decoding the token was a membership
- * oracle (and a free disclosure of which challenge row and which number a
- * code had been sent to).
+ * A signed HS256 JWT is readable: its middle segment base64-decodes to the
+ * whole payload. That made the anti-enumeration guarantee on the phone door
+ * cosmetic — the synthetic "no such member" response and the real one were
+ * distinguishable by simply looking at the token, because one carried `uid`,
+ * `businessId` and `cid` and the other carried nulls and zeros. Encryption
+ * removes the readable payload entirely, so the two tokens differ only in
+ * length and the route can keep its byte-identical body.
  *
- * `dir` + `A256GCM` over the realm's 256-bit HKDF-derived secret makes the
- * payload unreadable without that secret. The binding is unchanged — every
- * field is still carried and still re-checked against the row at verify time
- * — it simply is no longer legible to the holder.
- *
- * Note what this does *not* claim: the two responses are still
- * distinguishable by length and timing, which is why the request route keeps
- * its byte-identical body and the anti-enumeration test keeps asserting the
- * whole response rather than one field. Encryption closes the readable-payload
- * half of the oracle; it is not a substitute for the rest.
+ * `dir` + `A256GCM` uses the realm secret directly as the content-encryption
+ * key, which keeps the existing key material and rotation working unchanged.
  */
 export async function signPhonePendingToken(
   payload: Omit<PhonePendingPayload, "realm">,
 ): Promise<string> {
   const secret = await getRealmSecret("phone");
-  return new EncryptJWT({ ...payload, sub: undefined, uid: payload.sub, realm: "phone" })
+  return new EncryptJWT({
+    ...payload,
+    sub: undefined,
+    uid: payload.sub,
+    realm: "phone",
+  })
     .setProtectedHeader({ alg: "dir", enc: "A256GCM" })
     .setIssuedAt()
     .setExpirationTime(PHONE_PENDING_TTL)
     .encrypt(secret);
 }
 
-/**
- * Read the payload of a pending token.
- *
- * Tries the encrypted form first, then falls back to the signed-only form.
- * The fallback is transitional and bounded by the ten-minute TTL: at most a
- * deploy's worth of pre-encryption tokens are ever in flight, and without it
- * every member mid-verification at the moment of a deploy would be told their
- * code was wrong. It is a compatibility path, not a second accepted format —
- * nothing mints the signed form any more.
- */
-async function decryptPhonePendingToken(token: string): Promise<Record<string, unknown> | null> {
-  const tryWith = async (previous: boolean): Promise<Record<string, unknown> | null> => {
-    // The secret read is *inside* the try, deliberately. `getRealmSecret`
-    // throws rather than returning null when a realm has no previous secret
-    // configured — the common case — and a throw escaping from here would
-    // reject the whole `decrypt ?? verifySigned` expression in
-    // verifyPhonePendingToken, so the signed fallback would never run and
-    // every token still in flight at a deploy would be refused. This is the
-    // same reason verifyWithRealmSecret wraps its own secret read.
-    try {
-      const secret = await getRealmSecret("phone", previous);
-      const { payload } = await jwtDecrypt(token, secret, {
-        keyManagementAlgorithms: ["dir"],
-        contentEncryptionAlgorithms: ["A256GCM"],
-      });
-      return payload as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  };
-  return (await tryWith(false)) ?? (await tryWith(true));
-}
-
-/** A token with no subject is the anti-enumeration shape, and is valid. */
-function isPurpose(value: unknown): value is PhoneOtpPurpose {
-  return value === "login" || value === "attach" || value === "manage";
-}
-
 export async function verifyPhonePendingToken(token: string): Promise<PhonePendingPayload | null> {
   try {
-    // Encrypted form first; the signed form is the transitional fallback for
-    // tokens still in flight from before the deploy (see
-    // decryptPhonePendingToken). Either way the payload is untrusted input:
-    // both branches hand back a loose record, and every field is narrowed
-    // below rather than assumed.
-    const raw =
-      (await decryptPhonePendingToken(token)) ??
-      (await verifyWithRealmSecret<Record<string, unknown>>(token, "phone"));
-    if (!raw || raw.realm !== "phone") return null;
-    const payload = raw as {
-      uid?: string | null;
-      businessId?: string;
-      mayAttachPhone?: boolean;
-      phone?: string | null;
-      cid?: string | null;
-      destination?: string | null;
-      purpose?: string;
-    };
-
-    const sub = payload.uid ?? null;
-    // `cid` is null in two legitimate cases, and they are told apart by the
-    // route rather than here: the anti-enumeration token (no subject, no code
-    // ever sent) and the PIN door's *pre-send* token, which authorises a send
-    // and only acquires a challenge once that send happens. Requiring a
-    // challenge here would break the second.
-    //
-    // What must not happen is a *redemption* without one, and that is the
-    // verify route's check: a token naming a member but no challenge cannot be
-    // redeemed against anything, because there is nothing to redeem it
-    // against.
-    const cid = typeof payload.cid === "string" && payload.cid ? payload.cid : null;
-
+    // The encrypted read is the normal path. Both secret reads sit *inside*
+    // this try on purpose: `getRealmSecret` throws when a realm has no
+    // previous secret configured, which is the common case, and a throw from
+    // outside the try would reject the whole expression so the fallback below
+    // silently never ran.
+    const secret = await getRealmSecret("phone");
+    const decrypted = await jwtDecrypt<PhonePendingClaims>(token, secret).catch(() => null);
+    const payload =
+      decrypted?.payload ??
+      (await verifyWithRealmSecret<PhonePendingClaims>(token, "phone").catch(() => null));
+    if (!payload || payload.realm !== "phone") return null;
     return {
-      sub,
+      sub: payload.uid ?? null,
       businessId: payload.businessId ?? "",
       mayAttachPhone: payload.mayAttachPhone === true,
       phone: payload.phone ?? null,
-      cid,
-      destination:
-        typeof payload.destination === "string" && payload.destination
-          ? payload.destination
-          : null,
-      purpose: isPurpose(payload.purpose) ? payload.purpose : "login",
+      candidatePhone: payload.candidatePhone ?? null,
+      multiBusiness: payload.multiBusiness === true,
+      otpProven: payload.otpProven === true,
       realm: "phone",
     };
   } catch {
@@ -253,17 +200,7 @@ export async function verifyPhonePendingToken(token: string): Promise<PhonePendi
 // ---------------------------------------------------------------------------
 
 const EMPLOYEE_PHONE_REALM = "employee_phone";
-/** Wrong codes burn the challenge, same ceiling as the MFA interstitial. */
-const MAX_OTP_ATTEMPTS = 5;
-/** Till door: a code must survive a busy shift's worth of SMS lag, not a login form's. */
-const OTP_TTL_MINUTES = 5;
 
-async function hashOtp(otp: string): Promise<string> {
-  const secretKey = await getRealmSecret("platform");
-  return createHmac("sha256", secretKey).update(otp).digest("hex");
-}
-
-/** `+98912***4567` — enough to recognise your own number, not to dial it. */
 export function maskPhoneE164(e164: string): string {
   return e164.length > 8 ? `+${e164.slice(1, 4)}***${e164.slice(-4)}` : "***";
 }
@@ -282,312 +219,150 @@ export function maskPhoneE164(e164: string): string {
  * so the count must happen on the path that spent the money, not be left to
  * each caller to remember.
  */
-export interface OtpSendOutcome {
-  allowed: true;
-  /** The challenge row the caller must bind its pending token to. */
-  challengeId: string;
-}
-
-export type OtpSendResult = OtpSendOutcome | { allowed: false; retryAfterMs: number };
-
-/**
- * A send budget reservation.
- *
- * Deliberately a distinct shape from `OtpSendResult`: at this point no
- * challenge exists yet, so there is no `challengeId` to hand back. Pretending
- * otherwise would let a caller bind a pending token to a challenge that was
- * never issued, which is exactly the class of bug issue #885 L02 removes.
- */
-export type OtpSendReservation =
-  | { allowed: true; reservationId: string }
-  | { allowed: false; retryAfterMs: number };
-
-/**
- * Reserve one send against the membership's budget, atomically.
- *
- * Issue #885 L03: this used to be a read, a comparison, and a write on the
- * way back out — so two requests arriving together both saw "four sent this
- * hour, five allowed" and both spent a message. The check and the record are
- * now one transaction, serialised per membership by an advisory lock, so the
- * fifth concurrent caller is the first one refused rather than the sixth
- * one sent.
- *
- * The lock key is derived from the identity (`businessId:userId`), never from
- * anything the client supplies, so an attacker cannot widen or narrow it.
- *
- * A reservation that is never spent is refunded by `refundOtpSend`; leaving
- * it in place would charge a member for a message that was never delivered.
- */
-export async function reserveOtpSend(options: {
-  businessId: string;
-  userId: string;
-}): Promise<OtpSendReservation> {
-  const identityKey = `${options.businessId}:${options.userId}`;
-
-  return withTenantTransaction(options.businessId, async () => {
-    // Serialises every reservation for this one membership. Scoped to the
-    // transaction, so it is released on commit or rollback with nothing to
-    // leak, and cannot deadlock against a caller that forgets to unlock.
-    await query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [identityKey]);
-
-    const { rows } = await query<{ created_at: Date }>(
-      `SELECT created_at FROM auth_login_attempts
-        WHERE realm = 'phone_otp' AND identity_key = $1
-        ORDER BY created_at DESC LIMIT 40`,
-      [identityKey],
-    );
-
-    const decision = otpSendBudgetDecision(rows.map((r) => r.created_at));
-    if (!decision.allowed) {
-      return { allowed: false, retryAfterMs: decision.retryAfterMs };
-    }
-
-    const { rows: inserted } = await query<{ id: string }>(
-      `INSERT INTO auth_login_attempts (realm, identity_key, outcome)
-       VALUES ('phone_otp', $1, 'reserved')
-       RETURNING id`,
-      [identityKey],
-    );
-    return { allowed: true, reservationId: inserted[0]?.id ?? "" };
-  });
-}
-
-/**
- * Give a reservation back because the message was never delivered.
- *
- * Best-effort and never throws: the dispatch already failed, and turning that
- * into a second failure would only confuse the caller about what went wrong.
- */
-export async function refundOtpSend(reservationId: string): Promise<void> {
-  if (!reservationId) return;
-  await withoutTenantScope("platform", () =>
-    query(`DELETE FROM auth_login_attempts WHERE id = $1 AND realm = 'phone_otp'`, [
-      reservationId,
-    ]),
-  ).catch(() => {});
-}
-
-/**
- * Mint a 6-digit challenge for one member and dispatch it through Kavenegar.
- *
- * Returns the send-side rate limits as a `{ allowed: false, retryAfterMs }`
- * object, mirroring mfa-rate-limit's shape so the UI can render the same
- * «درخواست بعدی تا …» sentence. A Kavenegar dispatch failure is thrown as a
- * KavenegarError for the caller to classify (user-actionable vs operator
- * fault); the challenge row it minted is deleted again on that path, since a
- * code that was never delivered must not sit live for five minutes.
- *
- * The successful send is recorded here — the limiter exists to cap spend, so
- * the count must happen on the path that spent the money, not be left to each
- * caller to remember. Issue #885 L03: it is now recorded *before* the spend,
- * as a reservation, which is what makes the ceiling hold under concurrency.
- *
- * The returned `challengeId` is not optional metadata. The caller binds it
- * into the pending token so the verify half can redeem exactly this row and
- * nothing else (L02); a send that does not hand its id back cannot be
- * verified at all.
- */
 export async function sendEmployeePhoneOtp(options: {
   businessId: string;
   userId: string;
   phone: string;
-  /** Defaults to `login`; the PIN-verified attach flow passes `attach`. */
-  purpose?: PhoneOtpPurpose;
-}): Promise<OtpSendResult> {
-  const purpose = options.purpose ?? "login";
+  /**
+   * What the code authorises. Required rather than defaulted: the whole of
+   * #854 P0.8 is that a code must not be spendable for a purpose it was not
+   * issued for, and a default would silently give every caller the weakest
+   * answer. The candidate phone is bound into the row at the same time.
+   */
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+}): Promise<
+  | { allowed: true; maskedPhone: string; expiresAt: Date }
+  | { allowed: false; retryAfterMs: number }
+> {
+  const identityKey = `${options.businessId}:${options.userId}`;
+  const limit = await checkPhoneOtpRateLimit(identityKey);
+  if (!limit.allowed) return limit;
 
-  const reservation = await reserveOtpSend({
-    businessId: options.businessId,
-    userId: options.userId,
+  const issued = await issueOtpChallenge({
+    subjectRealm: EMPLOYEE_PHONE_REALM,
+    subjectId: options.userId,
+    purpose: options.purpose,
+    candidatePhoneE164: options.phone,
   });
-  if (!reservation.allowed) return reservation;
-
-  const otp = String(randomInt(0, 1_000_000)).padStart(6, "0");
-  const hashed = await hashOtp(otp);
-
-  let challengeId = "";
-  try {
-    // One transaction: retire every older live challenge for this member,
-    // then insert the new one. Without the first statement an attacker (or a
-    // member with two tabs open) could collect several live codes and, after
-    // the newest was consumed, fall back to an older one that was still
-    // inside its five minutes — the "newest challenge" read would simply find
-    // it again.
-    const { rows } = await withoutTenantScope("platform", () =>
-      query<{ id: string }>(
-        `WITH retired AS (
-           UPDATE mfa_challenges
-              SET consumed_at = now()
-            WHERE subject_realm = $1 AND subject_id = $2
-              AND consumed_at IS NULL AND expires_at > now()
-           RETURNING id
-         )
-         INSERT INTO mfa_challenges
-           (subject_realm, subject_id, hashed_otp, expires_at,
-            business_id, purpose, destination)
-         VALUES ($1, $2, $3, now() + interval '1 minute' * $4, $5, $6, $7)
-         RETURNING id`,
-        [
-          EMPLOYEE_PHONE_REALM,
-          options.userId,
-          hashed,
-          OTP_TTL_MINUTES,
-          options.businessId,
-          purpose,
-          options.phone,
-        ],
-      ),
-    );
-    challengeId = rows[0]?.id ?? "";
-    if (!challengeId) throw new Error("phone-otp challenge insert returned no row");
-  } catch (err) {
-    await refundOtpSend(reservation.reservationId);
-    throw err;
-  }
 
   try {
     const provider = await getSmsProvider();
-    await provider.sendOtp(options.phone, otp);
+    await provider.sendOtp(options.phone, issued.code);
   } catch (err) {
-    await withoutTenantScope("platform", () =>
-      query(`DELETE FROM mfa_challenges WHERE id = $1`, [challengeId]),
-    ).catch(() => {});
-    await refundOtpSend(reservation.reservationId);
+    // A code that was never delivered must not sit live for five minutes.
+    await consumeAllChallenges({
+      subjectRealm: EMPLOYEE_PHONE_REALM,
+      subjectId: options.userId,
+      purpose: options.purpose,
+    }).catch(() => {});
     throw err;
   }
 
-  return { allowed: true, challengeId };
+  await withoutTenantScope("platform", () =>
+    query(
+      `INSERT INTO auth_login_attempts (realm, identity_key, outcome)
+       VALUES ('phone_otp', $1, 'success')`,
+      [identityKey],
+    ),
+  );
+
+  return {
+    allowed: true,
+    maskedPhone: maskPhoneE164(options.phone),
+    expiresAt: issued.expiresAt,
+  };
 }
 
-export type PhoneOtpVerifyResult =
-  | { verified: true }
-  | {
-      verified: false;
-      /**
-       *  - `no_challenge`    — no such challenge id exists.
-       *  - `scope_mismatch`  — the row exists but belongs to another member,
-       *                      tenant or ceremony than the token claims (L02).
-       *  - `expired`         — the five minutes elapsed.
-       *  - `consumed`        — already redeemed, or retired by a later send.
-       *  - `wrong_code`      — the code did not match; one attempt burned.
-       *  - `burned`          — the attempt ceiling was reached.
-       */
-      reason:
-        | "no_challenge"
-        | "scope_mismatch"
-        | "expired"
-        | "consumed"
-        | "wrong_code"
-        | "burned";
-    };
-
 /**
- * Check one submitted code against the exact challenge the pending token
- * names, and consume it.
- *
- * Issue #885 L02 and L03 together. The old shape read "the newest live
- * challenge for this member", compared, and then deleted: nothing tied the
- * code to the ceremony that sent it, and the read-then-delete pair let two
- * concurrent valid submissions both pass before either removed the row.
- *
- * Now the challenge is addressed by id and re-checked against the member,
- * tenant, purpose and destination the token carries, so a proof cannot be
- * replayed sideways; and redemption is a single conditional UPDATE whose
- * `consumed_at IS NULL` predicate is re-evaluated under the row lock, so the
- * second of two concurrent valid submissions finds zero rows and is refused.
- *
- * A wrong code burns one attempt and leaves the row live until the ceiling,
- * so a wrong guess cannot be retried forever.
+ * Check one submitted code against the member's newest live challenge.
+ * True consumes the challenge; false burns one attempt and leaves it live
+ * until the ceiling, so a wrong guess cannot be retried forever.
  */
 export async function verifyEmployeePhoneOtp(options: {
-  /** The challenge the pending token is bound to. */
-  challengeId: string;
   userId: string;
-  businessId: string;
-  purpose: PhoneOtpPurpose;
-  /** The number the challenge was sent to; the token's `destination`. */
-  destination: string;
   code: string;
-}): Promise<PhoneOtpVerifyResult> {
-  const fail = (reason: Extract<PhoneOtpVerifyResult, { verified: false }>["reason"]) =>
-    ({ verified: false, reason } as const);
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+  /**
+   * The number this verification is about. When present it must equal the
+   * number the code went to — that is what stops a valid code for A being
+   * submitted while asking the server to persist B (#854 P0.8).
+   */
+  expectedPhoneE164?: string | null;
+}): Promise<boolean> {
+  const result = await redeemOtpChallenge({
+    subjectRealm: EMPLOYEE_PHONE_REALM,
+    subjectId: options.userId,
+    purpose: options.purpose,
+    code: options.code,
+    expectedPhoneE164: options.expectedPhoneE164,
+  });
+  return result.ok;
+}
 
-  if (!options.challengeId) return fail("no_challenge");
+/**
+ * The destination a live employee challenge is waiting on (#854 P2.19).
+ *
+ * Lets the verify screen say «کد به … ارسال شد» after a refresh without ever
+ * reconstructing the number from a masked string, and without trusting the
+ * request body for it.
+ */
+export async function liveEmployeePhoneChallenge(options: {
+  userId: string;
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+}): Promise<{
+  maskedPhone: string | null;
+  /** When the code was sent — the resend cooldown counts from here (P2.25). */
+  requestedAt: string;
+  expiresAt: string;
+  /** The exact number the code went to — the server's copy, not the body's. */
+  candidatePhoneE164: string | null;
+  purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
+} | null> {
+  const live = await liveChallengePhone({
+    subjectRealm: EMPLOYEE_PHONE_REALM,
+    subjectId: options.userId,
+    purpose: options.purpose,
+  });
+  if (!live) return null;
+  return {
+    maskedPhone: live.candidatePhoneE164 ? maskPhoneE164(live.candidatePhoneE164) : null,
+    requestedAt: live.createdAt.toISOString(),
+    expiresAt: live.expiresAt.toISOString(),
+    candidatePhoneE164: live.candidatePhoneE164,
+    purpose: options.purpose,
+  };
+}
 
-  const { rows } = await query<{
-    id: string;
-    subject_id: string;
-    business_id: string | null;
-    purpose: string | null;
-    destination: string | null;
-    hashed_otp: string;
-    attempts: number;
-    expires_at: Date;
-    consumed_at: Date | null;
-  }>(
-    `SELECT id, subject_id, business_id, purpose, destination, hashed_otp,
-            attempts, expires_at, consumed_at
-       FROM mfa_challenges
-      WHERE id = $1 AND subject_realm = $2
-      LIMIT 1`,
-    [options.challengeId, EMPLOYEE_PHONE_REALM],
+export async function checkPhoneOtpRateLimit(
+  identityKey: string,
+): Promise<{ allowed: true } | { allowed: false; retryAfterMs: number }> {
+  const now = new Date();
+  const { rows } = await withoutTenantScope("platform", () =>
+    query<{ created_at: Date }>(
+      `SELECT created_at FROM auth_login_attempts
+        WHERE realm = 'phone_otp' AND identity_key = $1
+        ORDER BY created_at DESC LIMIT 20`,
+      [identityKey],
+    ),
   );
-  const challenge = rows[0];
-  if (!challenge) return fail("no_challenge");
 
-  // The binding check. Every field the token asserts about this challenge is
-  // re-checked against the row, because the token is a claim and the row is
-  // the fact. A null column means the row predates migration 0215 and has no
-  // binding to honour — it cannot be redeemed at all, which is the safe
-  // answer for a row this build did not mint.
-  if (
-    challenge.subject_id !== options.userId ||
-    challenge.business_id !== options.businessId ||
-    challenge.purpose !== options.purpose ||
-    challenge.destination !== options.destination ||
-    challenge.business_id === null ||
-    challenge.purpose === null ||
-    challenge.destination === null
-  ) {
-    return fail("scope_mismatch");
+  if (rows.length > 0) {
+    const last = new Date(rows[0].created_at).getTime();
+    if (now.getTime() - last < 60_000) {
+      return { allowed: false, retryAfterMs: 60_000 - (now.getTime() - last) };
+    }
   }
-
-  if (challenge.consumed_at) return fail("consumed");
-  if (new Date(challenge.expires_at).getTime() <= Date.now()) return fail("expired");
-  if (challenge.attempts >= MAX_OTP_ATTEMPTS) return fail("burned");
-
-  const offered = await hashOtp(options.code.trim());
-  const stored = Buffer.from(challenge.hashed_otp, "hex");
-  const candidate = Buffer.from(offered, "hex");
-  const isMatch = stored.length === candidate.length && timingSafeEqual(stored, candidate);
-
-  if (!isMatch) {
-    await query(
-      `UPDATE mfa_challenges
-          SET attempts = attempts + 1
-        WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
-          AND attempts < $2`,
-      [challenge.id, MAX_OTP_ATTEMPTS],
-    );
-    return fail("wrong_code");
+  const lastHour = rows.filter((r) => now.getTime() - new Date(r.created_at).getTime() < 3_600_000);
+  if (lastHour.length >= 5) {
+    const oldest = new Date(lastHour[4].created_at).getTime();
+    return { allowed: false, retryAfterMs: 3_600_000 - (now.getTime() - oldest) };
   }
-
-  // The atomic single-use. Under READ COMMITTED the losing racer blocks here
-  // until the winner commits, then re-evaluates this predicate against the
-  // committed row — where consumed_at is now set — and updates nothing. One
-  // row, one redemption, regardless of how many requests arrive together.
-  const { rowCount } = await query(
-    `UPDATE mfa_challenges
-        SET consumed_at = now()
-      WHERE id = $1 AND subject_realm = $2
-        AND consumed_at IS NULL AND expires_at > now()
-        AND attempts < $3
-      RETURNING id`,
-    [challenge.id, EMPLOYEE_PHONE_REALM, MAX_OTP_ATTEMPTS],
-  );
-  if (!rowCount) return fail("consumed");
-
-  return { verified: true };
+  const lastDay = rows.filter((r) => now.getTime() - new Date(r.created_at).getTime() < 86_400_000);
+  if (lastDay.length >= 20) {
+    const oldest = new Date(lastDay[19].created_at).getTime();
+    return { allowed: false, retryAfterMs: 86_400_000 - (now.getTime() - oldest) };
+  }
+  return { allowed: true };
 }
 
 // ---------------------------------------------------------------------------

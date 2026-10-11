@@ -319,7 +319,7 @@ describe("security events invalidate trust", () => {
     // exemption already granted was earned against the weaker rule, so it must
     // not survive the change.
     await dbLib.withTenant(biz.id, () =>
-      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: true }),
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: true, requireForAccountants: false }),
     );
 
     expect(
@@ -345,7 +345,7 @@ describe("security events invalidate trust", () => {
     // business's policy, and the settings row persists across tests, so
     // writing `false` here would be a genuine change rather than a no-op.
     await dbLib.withTenant(biz.id, () =>
-      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false }),
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false, requireForAccountants: false }),
     );
 
     const issued = await dbLib.withTenant(biz.id, () =>
@@ -356,8 +356,8 @@ describe("security events invalidate trust", () => {
     // of their trusted devices — that would make the settings screen
     // destructive to open.
     await dbLib.withTenant(biz.id, async () => {
-      await mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false });
-      await mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false });
+      await mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false, requireForAccountants: false });
+      await mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false, requireForAccountants: false });
     });
 
     expect(
@@ -380,7 +380,7 @@ describe("security events invalidate trust", () => {
     );
 
     await dbLib.withTenant(biz.id, () =>
-      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: true }),
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: true, requireForAccountants: false }),
     );
 
     expect(

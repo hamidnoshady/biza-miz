@@ -2,16 +2,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { requestHost } from "@/lib/host";
 import { checkLoginLockout, resolveLoginBusinessId } from "@/lib/employee-service";
-import { boundedString, uuidOrNull } from "@/lib/login-contract";
 import {
+  PENDING_PHONE_REALM,
   canonicalMemberPhone,
+  checkPhoneOtpRateLimit,
   maskPhoneE164,
   sendEmployeePhoneOtp,
   signPhonePendingToken,
   verifyPhonePendingToken,
-  type PhoneOtpPurpose,
 } from "@/lib/phone-otp";
 import { KavenegarError } from "@/lib/sms-kavenegar";
+import { getSmsProvider } from "@/lib/sms-config";
+import {
+  consumeAllChallenges,
+  issueOtpChallenge,
+  phoneDerivedSubject,
+} from "@/lib/otp-challenge";
 
 interface MemberRow extends Record<string, unknown> {
   id: string;
@@ -40,55 +46,14 @@ interface MemberRow extends Record<string, unknown> {
  * that does (a token whose verify can never succeed, no SMS sent) — a door
  * that reads "wrong number" out loud is a free member-number oracle, and the
  * roster already publishes enough names as it is.
- *
- * Issue #885:
- *
- *  - **L01** — this route and its `/verify` twin are pre-session by
- *    definition; the whole point of the door is that nobody is signed in yet.
- *    They were listed in the middleware's rate-limit paths but not in
- *    `PUBLIC_PATHS`, so `handleTenantAuth` answered 401 before the handler
- *    ran and the form showed «مهلت این مرحله تمام شده است» for a number that
- *    had simply never been valid. They are public now, with their own
- *    credential checks and their own limits; the *authenticated* phone
- *    self-service routes (`/api/auth/phone/self`) stay gated.
- *  - **L02** — the send happens *before* the token is signed, so the token
- *    can carry the id of the exact challenge it may be redeemed against,
- *    plus the number it was sent to and what it is proving. Signing first
- *    (the old order) left the token naming nothing, and verification fell
- *    back to "newest challenge for this member" — which any concurrent
- *    ceremony for the same member could satisfy.
- *  - **L15** — on the direct-phone path every failure now collapses to the
- *    same synthetic success. A known-but-locked member used to get 423, a
- *    rate-limited one 429 and an SMS outage 502, which between them answered
- *    "this number is on file" for free. The roster and PIN-proven paths keep
- *    their specific errors, because there the member is already identified by
- *    something they proved.
  */
 export async function POST(request: NextRequest) {
-  let body: {
-    employeeId?: unknown;
-    phone?: unknown;
-    businessId?: unknown;
-    businessSlug?: unknown;
-  };
+  let body: { employeeId?: string; phone?: string; businessId?: string; businessSlug?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-
-  // Issue #885 L14 — bounded runtime validation before anything reaches a
-  // database or a crypto call. A truthy non-string here used to arrive at
-  // `canonicalMemberPhone` and `resolveLoginBusinessId` as an object.
-  const employeeId = uuidOrNull(body.employeeId);
-  const rawPhone = boundedString(body.phone, { max: 32, required: false });
-  const businessIdHint = uuidOrNull(body.businessId);
-  const businessSlug = boundedString(body.businessSlug, { max: 120, required: false });
-  const business = businessIdHint
-    ? { businessId: businessIdHint }
-    : businessSlug
-      ? { businessSlug }
-      : {};
 
   const auth = request.headers.get("authorization");
   const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
@@ -116,33 +81,46 @@ export async function POST(request: NextRequest) {
       const member = rows[0];
       if (!member) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+      let candidatePhone: string | null = null;
       let phone: string | null = member.phone_e164;
-      if (payload.mayAttachPhone && rawPhone) {
-        const candidate = canonicalMemberPhone(rawPhone);
+      if (payload.mayAttachPhone && body.phone) {
+        const candidate = canonicalMemberPhone(body.phone);
         if (!candidate) return NextResponse.json({ error: "invalid_phone" }, { status: 400 });
         // A candidate typed at this step still needs the OTP below to stick;
         // storing it happens in verify, not here.
+        candidatePhone = candidate;
         phone = candidate;
       }
       if (!phone) return NextResponse.json({ error: "phone_missing" }, { status: 400 });
+
+      const token = await signPhonePendingToken({
+        sub: member.id,
+        businessId: payload.businessId!,
+        mayAttachPhone: payload.mayAttachPhone,
+        phone: candidatePhone,
+      });
 
       return dispatchOrError({
         businessId: payload.businessId!,
         userId: member.id,
         phone,
-        mayAttachPhone: payload.mayAttachPhone,
-        // Only a number that is not already on file needs attaching; verify
-        // writes it. Sending it when it equals the stored one would make
-        // `stampPhoneVerified` rewrite a column that was already correct.
-        attachPhone: phone !== member.phone_e164 ? phone : null,
+        token,
+        /**
+         * Issue #854 (P0.8): the purpose is decided from what this token
+         * proved, not from the request body. Attaching or moving a number is a
+         * `change_login_phone` transaction; re-proving the number already on
+         * file is `verify_login_phone`; everything else (below) is a plain
+         * `login`.
+         */
+        purpose: candidatePhone ? "change_login_phone" : "verify_login_phone",
       });
     });
   }
 
   // ------------------------------------------------------------------ 2. roster pick → stored number
-  if (employeeId) {
+  if (body.employeeId) {
     const { businessId, error } = await resolveLoginBusinessId({
-      ...business,
+      ...body,
       host: requestHost(request.headers),
     });
     if (!businessId) {
@@ -150,7 +128,7 @@ export async function POST(request: NextRequest) {
     }
 
     return withTenant(businessId, async () => {
-      const lockout = await checkLoginLockout(businessId, employeeId);
+      const lockout = await checkLoginLockout(businessId, body.employeeId!);
       if (lockout.locked) {
         return NextResponse.json(
           { error: "account_locked", lockedUntil: lockout.lockedUntil },
@@ -161,7 +139,7 @@ export async function POST(request: NextRequest) {
       const { rows } = await query<MemberRow>(
         `SELECT id, full_name, phone_e164 FROM users
           WHERE id = $1 AND business_id = $2 AND is_active`,
-        [employeeId, businessId],
+        [body.employeeId, businessId],
       );
       const member = rows[0];
       if (!member) return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
@@ -169,21 +147,28 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "phone_missing" }, { status: 400 });
       }
 
+      const token = await signPhonePendingToken({
+        sub: member.id,
+        businessId,
+        mayAttachPhone: false,
+        phone: null,
+      });
       return dispatchOrError({
         businessId,
         userId: member.id,
         phone: member.phone_e164,
-        mayAttachPhone: false,
+        token,
+        purpose: "login",
       });
     });
   }
 
   // ------------------------------------------------------------------ 3. direct phone login
-  const phone = canonicalMemberPhone(rawPhone);
+  const phone = canonicalMemberPhone(body.phone);
   if (!phone) return NextResponse.json({ error: "invalid_phone" }, { status: 400 });
 
   const { businessId, error } = await resolveLoginBusinessId({
-    ...business,
+    ...body,
     host: requestHost(request.headers),
   });
 
@@ -200,35 +185,49 @@ export async function POST(request: NextRequest) {
 
       const lockout = await checkLoginLockout(businessId, member.id);
       if (lockout.locked) {
-        // L15: a locked account and an unknown number must be the same
-        // answer. The member is already proved to exist by nothing here —
-        // only by having this number, which is exactly the fact being tested.
-        return antiEnumerationResponse(phone);
+        return NextResponse.json(
+          { error: "account_locked", lockedUntil: lockout.lockedUntil },
+          { status: 423 },
+        );
       }
 
+      const token = await signPhonePendingToken({
+        sub: member.id,
+        businessId,
+        mayAttachPhone: false,
+        phone: null,
+      });
       return dispatchOrError({
         businessId,
         userId: member.id,
         phone,
-        mayAttachPhone: false,
-        suppressDiagnostics: true,
+        token,
+        purpose: "login",
       });
     });
   }
 
   // No origin named a business (a single-box install without host routing).
-  // The number itself may still name exactly one member — the password login's
-  // `needsBusinessSelection` shape, answered for a phone. Cross-tenant by
-  // nature, like /api/auth/login, and on the same documented bypass.
   //
-  // Retained deliberately, with the disclosure it implies: on an install with
-  // no host routing every business belongs to the operator running it, and
-  // there is no tenant boundary here to leak across. A multi-tenant cloud
-  // host always resolves a business, so it never reaches this branch.
+  // Issue #854 (P1.18): the number may match members in several businesses, and
+  // the previous answer listed them — names and ids — *before* any proof that
+  // the caller holds the number. A door that reads a membership list out loud to
+  // anyone who types a number is a free account-enumeration oracle, and the
+  // issue asks for the business selector to appear only after the OTP succeeds.
+  //
+  // So the challenge is minted against the number itself
+  // (`phoneDerivedSubject`), one code and one attempt budget for the phone
+  // rather than one per candidate. `verify` then resolves the candidates and
+  // asks which business — by which point possession has been proven. When only
+  // one business matches, nothing is revealed either: the same `sent` shape
+  // comes back and verification resolves it.
+  //
+  // Cross-tenant by nature, like /api/auth/login, and on the same documented
+  // bypass.
   if (error === "business_required") {
     return withoutTenantScope("login", async () => {
-      const { rows } = await query<{ id: string; full_name: string; business_id: string; business_name: string }>(
-        `SELECT u.id, u.full_name, u.business_id, b.name AS business_name
+      const { rows } = await query<{ id: string }>(
+        `SELECT u.id
            FROM users u
            JOIN businesses b ON b.id = u.business_id
           WHERE u.phone_e164 = $1 AND u.is_active
@@ -236,20 +235,62 @@ export async function POST(request: NextRequest) {
             AND b.status = 'active'`,
         [phone],
       );
+      // Unknown number and known number are answered identically — including
+      // the "no SMS was sent" part, which is why the challenge is only minted
+      // on the hit path and the miss path returns the same token shape.
       if (rows.length === 0) return antiEnumerationResponse(phone);
-      if (rows.length > 1) {
-        return NextResponse.json({
-          needsBusinessSelection: true,
-          businesses: rows.map((r) => ({ id: r.business_id, name: r.business_name })),
-        });
+
+      const subject = await phoneDerivedSubject(phone);
+      const limit = await checkPhoneOtpRateLimit(`phone:${phone}`);
+      if (!limit.allowed) {
+        return NextResponse.json(
+          { error: "rate_limited", retryAfterMs: limit.retryAfterMs },
+          { status: 429 },
+        );
       }
-      const member = rows[0];
-      return dispatchOrError({
-        businessId: member.business_id,
-        userId: member.id,
-        phone,
+
+      const issued = await issueOtpChallenge({
+        subjectRealm: PENDING_PHONE_REALM,
+        subjectId: subject,
+        purpose: "login",
+        candidatePhoneE164: phone,
+      });
+
+      try {
+        const provider = await getSmsProvider();
+        await provider.sendOtp(phone, issued.code);
+      } catch (err) {
+        await consumeAllChallenges({
+          subjectRealm: PENDING_PHONE_REALM,
+          subjectId: subject,
+          purpose: "login",
+        }).catch(() => {});
+        console.error("Phone-OTP dispatch failed", err);
+        const message =
+          err instanceof KavenegarError && !err.operatorFault ? err.message : undefined;
+        return NextResponse.json({ error: "sms_dispatch_failed", message }, { status: 502 });
+      }
+
+      const token = await signPhonePendingToken({
+        sub: null,
+        businessId: "00000000-0000-0000-0000-000000000000",
         mayAttachPhone: false,
-        suppressDiagnostics: true,
+        phone: null,
+        /**
+         * The number is not a secret from the person who typed it, and carrying
+         * it is what lets verification resolve the candidate members without a
+         * server-side session. It is a signed claim, so it cannot be swapped.
+         */
+        candidatePhone: phone,
+        multiBusiness: true,
+      });
+
+      return NextResponse.json({
+        status: "sent",
+        maskedPhone: maskPhoneE164(phone),
+        token,
+        expiresInSeconds: 5 * 60,
+        purpose: "login",
       });
     });
   }
@@ -258,61 +299,34 @@ export async function POST(request: NextRequest) {
 }
 
 /**
- * Send the code, then sign the token that is allowed to redeem it.
- *
- * The order is the fix for issue #885 L02: the challenge row has to exist
- * before the pending token can name it, so the send comes first and the token
- * is minted from what the send actually produced — its id, the number it went
- * to, and what it is being asked to prove. A caller therefore cannot end up
- * holding a token bound to a challenge that was never issued.
- *
- * Shared by all three modes so the Kavenegar user-fault/operator-fault split
- * (see the challenge route's twin comment) is decided in exactly one place.
+ * Send the code, or translate the failure. Shared by all three modes so the
+ * Kavenegar user-fault/operator-fault split (see the challenge route's twin
+ * comment) is decided in exactly one place.
  */
 async function dispatchOrError(options: {
   businessId: string;
   userId: string;
   phone: string;
-  mayAttachPhone: boolean;
-  /**
-   * The candidate number a PIN-verified member typed at the attach step, when
-   * it is not the one already on file. Carried on the token so `verify` can
-   * write it once the code proves ownership; null everywhere else.
-   */
-  attachPhone?: string | null;
-  /**
-   * Collapse every failure into the anti-enumeration shape. Set on the
-   * direct-phone path, where nothing has been proven yet; unset on the roster
-   * and PIN-proven paths, where the member is already identified and a
-   * specific error costs nothing.
-   */
-  suppressDiagnostics?: boolean;
+  token: string;
+  purpose: "login" | "verify_login_phone" | "change_login_phone";
 }): Promise<NextResponse> {
-  // `attach` when the proof is going to write a number to the membership,
-  // `login` when the number on file is itself the credential. Derived from
-  // the token's own claim so the request and verify halves cannot disagree
-  // about which ceremony this is.
-  const purpose: PhoneOtpPurpose = options.mayAttachPhone ? "attach" : "login";
-
-  let challengeId = "";
+  let maskedPhone = maskPhoneE164(options.phone);
   try {
     const sent = await sendEmployeePhoneOtp({
       businessId: options.businessId,
       userId: options.userId,
       phone: options.phone,
-      purpose,
+      purpose: options.purpose,
     });
     if (!sent.allowed) {
-      if (options.suppressDiagnostics) return antiEnumerationResponse(options.phone);
       return NextResponse.json(
         { error: "rate_limited", retryAfterMs: sent.retryAfterMs },
         { status: 429 },
       );
     }
-    challengeId = sent.challengeId;
+    maskedPhone = sent.maskedPhone;
   } catch (err) {
     console.error("Phone-OTP dispatch failed", err);
-    if (options.suppressDiagnostics) return antiEnumerationResponse(options.phone);
     // Only the half of a Kavenegar failure the member can *act on* is theirs
     // to see; an operator-side fault (empty credit, bad key) stays generic so
     // the member is not sent re-typing a number that was never the problem.
@@ -321,25 +335,21 @@ async function dispatchOrError(options: {
     return NextResponse.json({ error: "sms_dispatch_failed", message }, { status: 502 });
   }
 
-  const token = await signPhonePendingToken({
-    sub: options.userId,
-    businessId: options.businessId,
-    mayAttachPhone: options.mayAttachPhone,
-    phone: options.attachPhone ?? null,
-    cid: challengeId,
-    destination: options.phone,
-    purpose,
-  });
-
+  /**
+   * The masked destination comes from the send itself — it is the number the
+   * code actually went to, not the one the body asked for (#854 P0.8).
+   */
   return NextResponse.json({
     status: "sent",
-    maskedPhone: maskPhoneE164(options.phone),
-    token,
+    maskedPhone,
+    token: options.token,
+    expiresInSeconds: 5 * 60,
+    purpose: options.purpose,
   });
 }
 
 /**
- * The answer to a number nothing matched: byte-identical to success minus a
+ * The answer to a number nothing matches: byte-identical to success minus a
  * code ever being sent. The token carries no subject, so its verify can only
  * ever say «کد درست نیست» — the shape holds, the oracle doesn't.
  */
@@ -349,9 +359,6 @@ async function antiEnumerationResponse(phone: string): Promise<NextResponse> {
     businessId: "00000000-0000-0000-0000-000000000000",
     mayAttachPhone: false,
     phone: null,
-    cid: null,
-    destination: null,
-    purpose: "login",
   });
   return NextResponse.json({ status: "sent", maskedPhone: maskPhoneE164(phone), token });
 }

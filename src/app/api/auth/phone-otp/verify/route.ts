@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { query, withTenant } from "@/lib/db";
+import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { SESSION_COOKIE, sessionCookieOptions, signSession, type Role } from "@/lib/auth";
 import { resolveDeviceId } from "@/lib/device-service";
 import {
@@ -9,18 +9,13 @@ import {
   ensureEmployeeProfile,
 } from "@/lib/employee-service";
 import {
+  PENDING_PHONE_REALM,
+  signPhonePendingToken,
   stampPhoneVerified,
   verifyEmployeePhoneOtp,
   verifyPhonePendingToken,
 } from "@/lib/phone-otp";
-import { boundedString, normalizeOtpCode } from "@/lib/login-contract";
-import {
-  issueTrustedDevice,
-  readTrustedDeviceToken,
-  trustedDeviceCookieOptions,
-  verifyTrustedDevice,
-  TRUSTED_DEVICE_COOKIE,
-} from "@/lib/trusted-device";
+import { phoneDerivedSubject, redeemOtpChallenge } from "@/lib/otp-challenge";
 import {
   distinctSecondFactorMethods,
   enrolmentRequirement,
@@ -46,6 +41,7 @@ interface MemberRow extends Record<string, unknown> {
   location_id: string | null;
   role: Role;
   full_name: string;
+  phone_e164: string | null;
   platform_user_id: string | null;
   identity_active: boolean | null;
   token_version: number | null;
@@ -61,7 +57,7 @@ interface MemberRow extends Record<string, unknown> {
  * as both primary and second factor) before minting the tenant session.
  */
 export async function POST(request: NextRequest) {
-  let body: { code?: unknown; deviceToken?: unknown; trustDevice?: unknown };
+  let body: { code?: string; deviceToken?: string; businessId?: string };
   try {
     body = await request.json();
   } catch {
@@ -75,59 +71,130 @@ export async function POST(request: NextRequest) {
   const payload = await verifyPhonePendingToken(bearer);
   if (!payload) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  // Issue #885 L11 — Persian and Arabic-Indic digits are canonicalised before
-  // the shape check, at the API boundary as well as in the input. The old
-  // `/^\d{6}$/` here rejected a code typed on a Persian keyboard even when the
-  // client had already stripped it, because the client stripped it by deleting
-  // those digits rather than converting them.
-  // Issue #885 L14 — the device token names a row; bound it before it reaches
-  // `resolveDeviceId` rather than letting an arbitrary JSON value through.
-  const deviceToken = boundedString(body.deviceToken, { max: 256, required: false });
-  /**
-   * The member ticked «اعتماد به این دستگاه برای ۷ روز». Honouring it is safe
-   * here and only here: this branch is reached after the OTP was verified and
-   * no further factor is outstanding, which is exactly the "all required
-   * verification succeeded" the policy names as the precondition.
-   */
-  const wantsTrust = body.trustDevice === true;
+  const code = body.code ? body.code.trim() : "";
 
-  const code = normalizeOtpCode(body.code);
+  /**
+   * Issue #854 (P1.19) — step three of a multi-business login: the member has
+   * already proven the number (the token says `otpProven`) and is now naming
+   * which business to enter. No second code is asked for; the selection token is
+   * the proof, and it only exists because a code was actually redeemed.
+   */
+  if (payload.otpProven && payload.candidatePhone && body.businessId) {
+    const chosenBusinessId = body.businessId;
+    const provenPhone = payload.candidatePhone;
+    return withTenant(chosenBusinessId, async () => {
+      /**
+       * The membership is resolved by the *number that was proven*, not by an
+       * id the client supplied — so a selection token cannot be spent on a
+       * membership that does not hold this phone.
+       */
+      const { rows } = await query<MemberRow>(
+        `SELECT u.id, u.business_id, b.slug::text AS business_slug,
+                b.subdomain::text AS business_subdomain, u.location_id,
+                u.role, u.full_name, u.phone_e164, u.platform_user_id,
+                p.is_active AS identity_active, p.token_version
+           FROM users u
+           JOIN businesses b ON b.id = u.business_id
+           LEFT JOIN platform_users p ON p.id = u.platform_user_id
+          WHERE u.business_id = $1 AND u.phone_e164 = $2
+            AND u.phone_verified_at IS NOT NULL
+            AND u.is_active AND b.status = 'active'`,
+        [chosenBusinessId, provenPhone],
+      );
+      const member = rows[0];
+      if (!member || member.identity_active === false) {
+        return NextResponse.json({ error: "invalid_phone" }, { status: 401 });
+      }
+      const lockout = await checkLoginLockout(member.business_id, member.id);
+      if (lockout.locked) {
+        return NextResponse.json(
+          { error: "account_locked", lockedUntil: lockout.lockedUntil },
+          { status: 423 },
+        );
+      }
+      return completePhoneLogin(member, {
+        attachPhone: null,
+        deviceToken: body.deviceToken,
+        userAgent: request.headers.get("user-agent"),
+      });
+    });
+  }
+
   if (!/^\d{6}$/.test(code)) {
     return NextResponse.json({ error: "invalid_code" }, { status: 401 });
   }
 
-  // The anti-enumeration token from a number nothing matched: no subject, no
-  // challenge, and the only honest answer is the one a wrong code gets.
-  //
-  // The status and the code both have to match the wrong-code answer, not
-  // merely be "a 401". If this branch answered `unauthorized` instead, a caller
-  // who typed a number could read the response and learn whether it matched a
-  // member — which is precisely the oracle issue #885 L15 asks to remove, and
-  // the request route works to suppress on its side too.
+  /**
+   * Issue #854 (P1.18) — the multi-business path.
+   *
+   * A number that matched members in several businesses was sent a code under a
+   * challenge keyed on the *number* (`phoneDerivedSubject`), and nothing about
+   * those businesses was revealed. The code is verified here; only a successful
+   * proof produces the list, together with a short-lived selection token so the
+   * member can name the business without being asked for another code.
+   */
+  if (payload.multiBusiness && payload.candidatePhone) {
+    const candidate = payload.candidatePhone;
+    return withoutTenantScope("login", async () => {
+      const subject = await phoneDerivedSubject(candidate);
+      const redeemed = await redeemOtpChallenge({
+        subjectRealm: PENDING_PHONE_REALM,
+        subjectId: subject,
+        purpose: "login",
+        code,
+        expectedPhoneE164: candidate,
+      });
+      if (!redeemed.ok) {
+        return NextResponse.json({ error: "invalid_code" }, { status: 401 });
+      }
+
+      const { rows } = await query<{
+        id: string;
+        business_id: string;
+        business_name: string;
+      }>(
+        `SELECT u.id, u.business_id, b.name AS business_name
+           FROM users u
+           JOIN businesses b ON b.id = u.business_id
+          WHERE u.phone_e164 = $1 AND u.is_active
+            AND u.phone_verified_at IS NOT NULL
+            AND b.status = 'active'`,
+        [candidate],
+      );
+
+      const [first] = rows;
+      if (!first) {
+        return NextResponse.json({ error: "invalid_code" }, { status: 401 });
+      }
+
+      const selectionToken = await signPhonePendingToken({
+        sub: null,
+        businessId: "00000000-0000-0000-0000-000000000000",
+        mayAttachPhone: false,
+        phone: null,
+        candidatePhone: candidate,
+        multiBusiness: true,
+        otpProven: true,
+      });
+
+      return NextResponse.json({
+        needsBusinessSelection: true,
+        businesses: rows.map((row) => ({ id: row.business_id, name: row.business_name })),
+        selectionToken,
+      });
+    });
+  }
+
+  /**
+   * The anti-enumeration token from a number nothing matched: no subject, no
+   * challenge, and the only honest answer is the one a wrong code gets.
+   */
   if (!payload.sub) {
     return NextResponse.json({ error: "invalid_code" }, { status: 401 });
   }
 
-  // A named member with no challenge bound to the token. This is a pre-#885
-  // token (the TTL is ten minutes, so at most a deploy's worth are in flight):
-  // it predates the binding and names no row, so there is nothing it could be
-  // redeemed against. Answering differently from a wrong code is safe here and
-  // only here — reaching this branch already required a token naming a real
-  // member, so it discloses nothing an attacker did not already prove.
-  if (!payload.cid || !payload.destination) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-
-  // Locals, not `payload.*`: TypeScript does not carry a property narrowing
-  // into the async callback below, and every one of these is used inside it.
-  const subjectId = payload.sub;
-  const challengeId = payload.cid;
-  const destination = payload.destination;
-  const purpose = payload.purpose;
-  const businessId = payload.businessId;
-
-  return withTenant(businessId, async () => {
-    const lockout = await checkLoginLockout(businessId, subjectId);
+  return withTenant(payload.businessId, async () => {
+    const lockout = await checkLoginLockout(payload.businessId, payload.sub!);
     if (lockout.locked) {
       return NextResponse.json(
         { error: "account_locked", lockedUntil: lockout.lockedUntil },
@@ -135,51 +202,103 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Issue #885 L02/L03 — redeem exactly the challenge this token names, and
-    // only if it still belongs to this member, this tenant, this ceremony and
-    // this destination. The consume is one conditional UPDATE, so two
-    // concurrent valid submissions cannot both be told "verified".
-    const verification = await verifyEmployeePhoneOtp({
-      challengeId,
-      userId: subjectId,
-      businessId,
-      purpose,
-      destination,
+    /**
+     * Issue #854 (P0.8 / P1.17): the challenge is redeemed by purpose — this
+     * door only accepts a `login`/`verify_login_phone` code — and the candidate
+     * phone comes from the challenge row, never from this request body.
+     */
+    const purpose = payload.phone
+      ? "change_login_phone"
+      : payload.mayAttachPhone
+        ? "verify_login_phone"
+        : "login";
+    const ok = await verifyEmployeePhoneOtp({
+      userId: payload.sub!,
       code,
+      purpose,
+      expectedPhoneE164: payload.phone ?? null,
     });
-    if (!verification.verified) {
-      // `scope_mismatch` is a token that does not describe the row it names —
-      // a replay across ceremonies, or a forged claim. It is audited as a
-      // failed login and answered exactly like a wrong code, because the
-      // difference is only interesting server-side.
-      await auditLoginFailure(businessId, subjectId, "invalid_phone_otp");
-      return NextResponse.json(
-        { error: verification.reason === "expired" ? "code_expired" : "invalid_code" },
-        { status: 401 },
-      );
+    if (!ok) {
+      await auditLoginFailure(payload.businessId, payload.sub!, "invalid_phone_otp");
+      return NextResponse.json({ error: "invalid_code" }, { status: 401 });
     }
 
     const { rows } = await query<MemberRow>(
       `SELECT u.id, u.business_id, b.slug::text AS business_slug,
               b.subdomain::text AS business_subdomain, u.location_id,
-              u.role, u.full_name, u.platform_user_id,
+              u.role, u.full_name, u.phone_e164, u.platform_user_id,
               p.is_active AS identity_active, p.token_version
          FROM users u
          JOIN businesses b ON b.id = u.business_id
          LEFT JOIN platform_users p ON p.id = u.platform_user_id
         WHERE u.id = $1 AND u.business_id = $2 AND u.is_active AND b.status = 'active'`,
-      [subjectId, businessId],
+      [payload.sub, payload.businessId],
     );
     const member = rows[0];
     if (!member || member.identity_active === false) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    await stampPhoneVerified({
-      businessId: payload.businessId,
-      userId: member.id,
-      phone: payload.mayAttachPhone ? (payload.phone ?? null) : null,
+    return completePhoneLogin(member, {
+      /**
+       * The number to *attach* — only ever the candidate this pending token
+       * explicitly names, so a body field cannot redirect the write.
+       */
+      attachPhone: payload.mayAttachPhone ? (payload.phone ?? null) : null,
+      deviceToken: body.deviceToken,
+      userAgent: request.headers.get("user-agent"),
     });
+  });
+}
+
+/**
+ * Issue #854 (P0.7) — the terminal step of a phone-OTP login: MFA policy, the
+ * verification stamps, the session.
+ *
+ * Extracted so both entrances reach it — the single-business flow above and the
+ * post-selection step of the multi-business flow — and neither can forget the
+ * ordering that fixed P0.7: **the stamps commit only after every required
+ * challenge has passed.** `stampPhoneVerified` writes `phone_verified_at` *and*
+ * `otp_login_at`, and `otp_login_at` is what opens the 7-day window in which the
+ * PIN door mints a session without any OTP. Stamping before the MFA branch made
+ * this chain mechanical:
+ *
+ *     Owner/Manager → phone OTP succeeds → TOTP step appears
+ *     → user cancels → otp_login_at already updated
+ *     → PIN login succeeds → privileged session without the second factor
+ *
+ * The pending token stays valid for its ten minutes, so an interrupted member
+ * can resume; they simply do not get credit for a ceremony they did not finish.
+ */
+
+    /**
+     * Issue #854 (P0.7) — **nothing is stamped until the whole authentication
+     * transaction has succeeded.**
+     *
+     * `stampPhoneVerified` writes `phone_verified_at` *and* `otp_login_at`, and
+     * `otp_login_at` is what opens the 7-day window in which the PIN door mints
+     * a session without any OTP. Stamping it here — before the MFA branch — made
+     * the exploit chain mechanical:
+     *
+     *     Owner/Manager → phone OTP succeeds → TOTP step appears
+     *     → user cancels → otp_login_at already updated
+     *     → PIN login succeeds → privileged session without the second factor
+     *
+     * So the stamp moves to the end of this handler, after every required step
+     * has passed. The pending token stays valid for its ten minutes, so a member
+     * who is interrupted can resume; they simply do not get credit for a
+     * ceremony they did not finish.
+     */
+async function completePhoneLogin(
+  member: MemberRow,
+  options: { attachPhone: string | null; deviceToken?: string; userAgent: string | null },
+): Promise<NextResponse> {
+    const stamp = () =>
+      stampPhoneVerified({
+        businessId: member.business_id,
+        userId: member.id,
+        phone: options.attachPhone ?? null,
+      });
 
     let graceNotice: {
       mfaState: "grace";
@@ -187,17 +306,9 @@ export async function POST(request: NextRequest) {
       graceDaysLeft: number | null;
     } | null = null;
 
-    // Issue #885 — set when a due MFA challenge was waived because this
-    // device already holds trust. It gates trust *issuance* below: a login
-    // that skipped a factor has not completed every factor the account
-    // requires, so it must not start a fresh seven-day period. Without this
-    // guard a trusted device would quietly roll its own trust forward on
-    // every login and never be challenged again.
-    let mfaWaivedByTrust = false;
-
     if (member.platform_user_id) {
       const mfaPolicy = await getMfaPolicy(member.business_id);
-      const requiresMfa = mfaAppliesToRole(member.role, mfaPolicy.requireForManagers);
+      const requiresMfa = mfaAppliesToRole(member.role, mfaPolicy);
       const allEnrolments = await getAccountMfaEnrolments(
         "platform_user",
         member.platform_user_id,
@@ -225,48 +336,31 @@ export async function POST(request: NextRequest) {
           role: member.role,
         });
 
-        const challengeDue = shouldChallengeMfaOnLogin({
-          hasConfirmedEnrolment: activeEnrolments.length > 0,
-          appliesToRole: requiresMfa,
-          requirement: req,
-        });
-
-        // Issue #885 — the seven-day trusted-device exemption, applied to the
-        // phone-primary door exactly as the password door applies it. Without
-        // this the two doors disagreed: a device trusted after a full
-        // password+MFA verification was still asked for MFA when the same
-        // member came in through the phone door, which reads as the feature
-        // not working rather than as a second, stricter policy.
-        //
-        // What is *not* waived:
-        //  - the primary proof — the phone OTP above was still redeemed on
-        //    this very request, bound to this challenge, member, tenant,
-        //    ceremony and destination;
-        //  - the distinct-factor rule — `distinctSecondFactorMethods` still
-        //    excludes phone_otp from the MFA methods, so waiving the challenge
-        //    cannot quietly make the phone count as its own second factor;
-        //  - step-up for sensitive actions, which is a separate
-        //    `requireRecentAuth` check on the routes that need it and is
-        //    deliberately not satisfied by routine trust.
-        //
-        // Scoped to this business and this membership, and only consulted when
-        // a challenge is actually due — otherwise it is a query for nothing.
-        const deviceTrust = challengeDue
-          ? await verifyTrustedDevice({
-              businessId: member.business_id,
-              userId: member.id,
-              token: readTrustedDeviceToken(request),
-            })
-          : null;
-        mfaWaivedByTrust = challengeDue && deviceTrust?.trusted === true;
-
-        if (challengeDue && !mfaWaivedByTrust) {
+        if (
+          shouldChallengeMfaOnLogin({
+            hasConfirmedEnrolment: activeEnrolments.length > 0,
+            appliesToRole: requiresMfa,
+            requirement: req,
+          })
+        ) {
           const mfaToken = await signMfaPendingToken({
             sub: member.platform_user_id,
             method: distinctMethods[0] ?? null,
             authRealm: "tenant_password",
             businessId: member.business_id,
             primaryAuth: "phone_otp",
+            /**
+             * Issue #854 (GAP 8) — the verified completion context rides the
+             * signed token. `/api/auth/mfa/verify` commits the deferred stamps
+             * from these fields alone (never from the request body), and only
+             * after the second factor passes; an abandoned ceremony therefore
+             * still commits nothing.
+             */
+            phoneCompletion: {
+              membershipId: member.id,
+              provenPhone: options.attachPhone ?? member.phone_e164,
+              attachPhone: options.attachPhone,
+            },
           });
 
           return NextResponse.json({
@@ -276,12 +370,6 @@ export async function POST(request: NextRequest) {
             mfaMethod: distinctMethods[0] ?? null,
             availableMethods: distinctMethods,
             primaryAuth: "phone_otp",
-            // Not all factors are complete yet, so trust is *offered* rather
-            // than granted. The MFA step carries the intent forward and
-            // /api/auth/mfa/verify is what actually issues it — a device that
-            // has not finished every factor must not be trusted by the step
-            // that came before the last one.
-            trustOffered: wantsTrust,
           });
         }
 
@@ -295,13 +383,19 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // The ceremony is complete: no further challenge can be pending, so the
+    // verification stamps commit now (issue #854 P0.7).
+    await stamp();
+
     await ensureEmployeeProfile(member.id, member.business_id);
-    const deviceLabel = request.headers.get("user-agent")?.slice(0, 120) ?? null;
-    const deviceId = await resolveDeviceId(deviceToken, member.business_id);
+    const deviceLabel = options.userAgent?.slice(0, 120) ?? null;
+    const deviceId = await resolveDeviceId(options.deviceToken, member.business_id);
     const { session: employeeSession } = await createSession(member.id, member.business_id, {
       locationId: member.location_id,
       deviceLabel,
       deviceId,
+      loginMethod: "phone_otp",
+      userAgent: options.userAgent ?? null,
     });
 
     const token = await signSession({
@@ -324,33 +418,5 @@ export async function POST(request: NextRequest) {
       ...(graceNotice ?? {}),
     });
     res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
-
-    // Issue #885 — every required factor is now satisfied on this request, so
-    // this is the one place the seven-day trust may be earned. Best-effort:
-    // the login itself is already complete and must not fail because a
-    // convenience row could not be written.
-    //
-    // `!mfaWaivedByTrust` is load-bearing. Trust is earned by *completing*
-    // every factor, not by being exempted from one; if a waived MFA could
-    // re-mint trust, a device would extend its own window indefinitely on
-    // ordinary logins and the seven-day expiry would never bite.
-    if (wantsTrust && !mfaWaivedByTrust) {
-      const trust = await issueTrustedDevice({
-        businessId: member.business_id,
-        userId: member.id,
-        platformUserId: member.platform_user_id,
-        deviceToken,
-        deviceLabel,
-        factorSummary: "phone_otp",
-      }).catch((err) => {
-        console.error("Trusted-device registration failed", err);
-        return null;
-      });
-      if (trust) {
-        res.cookies.set(TRUSTED_DEVICE_COOKIE, trust.token, trustedDeviceCookieOptions());
-      }
-    }
-
     return res;
-  });
 }

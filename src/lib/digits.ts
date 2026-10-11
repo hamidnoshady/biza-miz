@@ -29,6 +29,19 @@ export function toLatinDigits(value: string): string {
 }
 
 /**
+ * Normalize a security-code entry (SMS OTP, PIN, TOTP) before validation:
+ * Persian and Arabic-Indic digits become ASCII, every non-digit is dropped,
+ * and an optional maximum length is enforced. Issue #854 (pass 4) — the old
+ * inputs stripped localized digits with `/\D/g`, so a member typing «۱۲۳» on
+ * a Persian keyboard ended up with an empty field instead of «123»; every
+ * security code input normalizes through this single helper now.
+ */
+export function normalizeSecurityDigits(value: string, maxLength?: number): string {
+  const digits = toLatinDigits(String(value)).replace(/\D/g, "");
+  return maxLength === undefined ? digits : digits.slice(0, maxLength);
+}
+
+/**
  * Convert a potentially localized, grouped number to the canonical text used
  * by state and APIs: ASCII digits, an optional leading `-`, and an optional
  * ASCII decimal point. It intentionally accepts both Persian and Arabic-Indic

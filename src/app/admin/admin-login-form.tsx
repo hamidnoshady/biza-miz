@@ -1,33 +1,21 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { EyeIcon, EyeOffIcon } from "lucide-react";
 import { cardClass } from "@/app/dashboard/page-chrome";
 import {
   MfaStep,
   TENANT_MFA_THEME,
   type MfaMethod,
 } from "@/components/auth/mfa-step";
+import { BusinessPicker, useBusinessSelection } from "@/components/auth/business-picker";
 import { lockoutMessage, useNextPath } from "@/components/auth/login-helpers";
-import {
-  networkErrorMessage,
-  useLoginRequest,
-} from "@/components/auth/use-login-request";
-import { loginErrorMessage, withLoginNextParam } from "@/lib/login-contract";
 import { toPersianDigits } from "@/lib/digits";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
 
 /** What `/api/auth/login` can answer with, beyond the plain success shape. */
 interface LoginResponse {
   error?: string;
-  /**
-   * Issue #885 L08 — a host-routing-off install with more than one business
-   * answers this *without* setting a session. Treating any 2xx as "signed in"
-   * sent the user to a destination they had no session for.
-   */
-  needsBusinessSelection?: boolean;
-  businesses?: { id: string; name: string }[];
   lockedUntil?: string;
   mfaRequired?: boolean;
   mfaToken?: string;
@@ -36,6 +24,9 @@ interface LoginResponse {
   mfaState?: "grace" | "required";
   graceUntil?: string | null;
   graceDaysLeft?: number | null;
+  /** Issue #854 (P1.19) — the multi-business answer, which carries no session. */
+  needsBusinessSelection?: boolean;
+  businesses?: { id: string; name: string }[];
 }
 
 /**
@@ -55,18 +46,7 @@ export default function AdminLoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  /** The password is hidden by default; the toggle is an explicit, labelled action. */
-  const [showPassword, setShowPassword] = useState(false);
-  const [showRecovery, setShowRecovery] = useState(false);
-  /**
-   * Issue #885 L08 — a multi-business install with host routing off answers
-   * `needsBusinessSelection` and sets no session. Until the user picks, the
-   * form must not navigate.
-   */
-  const [businessChoice, setBusinessChoice] = useState<{ id: string; name: string }[] | null>(
-    null,
-  );
-  const { busy, send } = useLoginRequest();
+  const [busy, setBusy] = useState(false);
   /**
    * Phase 24 Wave 2 — the second-factor interstitial.
    *
@@ -81,6 +61,19 @@ export default function AdminLoginForm() {
     availableMethods: MfaMethod[];
   } | null>(null);
   /**
+   * Issue #854 (P1.19) — the missing step.
+   *
+   * A member of two businesses cannot be signed in until they name one, so
+   * `/api/auth/login` answers `{ needsBusinessSelection: true, businesses }`
+   * with **HTTP 200 and no session**. This door treated any `res.ok` as a
+   * successful login and navigated to the destination, which then bounced the
+   * user straight back here — a loop with no explanation on either screen.
+   *
+   * The step is `BusinessPicker` from `components/auth`, the same one the
+   * phone-OTP door renders, so the two cannot drift apart again.
+   */
+  const { selection, capture, clear } = useBusinessSelection();
+  /**
    * The grace nag: `mfaState: "grace"` arrives *alongside* a real session, so
    * this is a prompt, not a gate — the user is already signed in and may
    * dismiss it. Persisted for the length of the visit only; the countdown comes
@@ -94,53 +87,45 @@ export default function AdminLoginForm() {
   }
 
   /**
-   * One attempt, addressed to one business.
+   * Sign in, optionally naming the business.
    *
-   * Issue #885 L05: the request goes through `useLoginRequest`, which aborts
-   * on a timeout, catches a network rejection and always releases `busy` in a
-   * `finally`. The previous shape awaited a bare `fetch` with neither, so a
-   * dropped connection left the button permanently disabled reading «در حال
-   * ورود…» with no way to recover short of reloading.
+   * The password door has no bearer token to replay: `/api/auth/login` requires
+   * `email`+`password` on *every* call (`missing_credentials` otherwise), so the
+   * business-selection round re-sends the same credentials plus the chosen id
+   * and the route re-verifies them. Nothing about the first response is trusted
+   * on the second call, which is why there is no token here.
    */
-  async function attempt(targetBusinessId?: string) {
+  async function submit(e: React.FormEvent | null, businessId?: string) {
+    e?.preventDefault();
+    setBusy(true);
     setError(null);
-    setBusinessChoice(null);
-    const outcome = await send<LoginResponse>((signal) =>
-      fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          password,
-          ...(targetBusinessId ? { businessId: targetBusinessId } : {}),
-        }),
-        signal,
-      }),
-    );
-
-    // A newer attempt superseded this one; its result is not ours to render.
-    if (outcome.stale) return;
-
-    // Issue #885 L09 — a request that never reached the server is its own
-    // message. Calling it "wrong password" sends the user to re-type a
-    // credential that was never the problem.
-    if (outcome.networkError) {
-      setError(networkErrorMessage(outcome.networkError));
-      return;
-    }
-
-    const { status, data } = outcome;
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, ...(businessId ? { businessId } : {}) }),
+    });
+    const data: LoginResponse = await res.json().catch(() => ({}));
+    setBusy(false);
 
     // A locked account answers 423 with the time it unlocks. Reporting that as
     // "wrong email or password" sends the user off to re-check a password that
     // is perfectly correct, and to keep trying, which is exactly what extends
     // the lockout.
-    if (status === 423) {
+    if (res.status === 423) {
       setError(lockoutMessage(data.lockedUntil));
       return;
     }
 
-    if (outcome.ok && data.mfaRequired && data.mfaToken) {
+    /*
+     * The selection request is checked before the MFA interstitial and before
+     * the success path: the response is `res.ok` with no cookie, so treating it
+     * as success is precisely the bug. It is also reachable *after* a wrong
+     * business id on the second round, in which case the list comes back again
+     * and the member simply picks another.
+     */
+    if (res.ok && capture(data)) return;
+
+    if (res.ok && data.mfaRequired && data.mfaToken) {
       setPending({
         token: data.mfaToken,
         method: data.mfaMethod ?? null,
@@ -149,16 +134,7 @@ export default function AdminLoginForm() {
       return;
     }
 
-    // Issue #885 L08 — no session was set here. Ask which business, then
-    // re-attempt with it named; navigating now would land on a destination
-    // this browser has no session for.
-    if (outcome.ok && data.needsBusinessSelection) {
-      setBusinessChoice(data.businesses ?? []);
-      setError(null);
-      return;
-    }
-
-    if (outcome.ok) {
+    if (res.ok) {
       if (data.mfaState === "grace") {
         setGraceNotice({ daysLeft: data.graceDaysLeft ?? null });
         return;
@@ -167,18 +143,26 @@ export default function AdminLoginForm() {
       return;
     }
 
-    setError(loginErrorMessage({ status, code: data.error, retryAfterMs: null }));
-  }
-
-  function submit(e: React.FormEvent) {
-    e.preventDefault();
-    void attempt();
+    setError("ایمیل یا رمز عبور نادرست است.");
   }
 
   // The MFA interstitial and the grace nag replace the form *inside* the same
   // card chrome — MfaStep's theme is only its inner spacing, not a page.
   let body: React.ReactNode;
-  if (pending) {
+  if (selection) {
+    body = (
+      <BusinessPicker
+        selection={selection}
+        busy={busy}
+        error={error}
+        onChoose={(businessId) => void submit(null, businessId)}
+        onCancel={() => {
+          clear();
+          setPassword("");
+        }}
+      />
+    );
+  } else if (pending) {
     body = (
       <MfaStep
         mfaToken={pending.token}
@@ -197,107 +181,54 @@ export default function AdminLoginForm() {
         }}
       />
     );
-  } else if (businessChoice) {
-    body = (
-      <BusinessPicker
-        businesses={businessChoice}
-        busy={busy}
-        onPick={(id) => void attempt(id)}
-        onBack={() => setBusinessChoice(null)}
-      />
-    );
   } else if (graceNotice) {
     body = <GracePrompt daysLeft={graceNotice.daysLeft} onContinue={goNext} />;
   } else {
     body = (
       <form onSubmit={submit} className="space-y-4">
-        <div>
-          <label htmlFor="email" className="mb-1 block text-sm text-muted-foreground">
-            ایمیل
-          </label>
-          <input
-            id="email"
-            type="email"
-            dir="ltr"
-            required
-            // Issue #885 L12/L16 — the autocomplete purpose. Without it the
-            // browser cannot offer to fill a saved credential, and password
-            // managers cannot tell which field is the identifier.
-            autoComplete="username"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
-          />
-        </div>
-        <div>
-          <label htmlFor="password" className="mb-1 block text-sm text-muted-foreground">
-            رمز عبور
-          </label>
-          <div className="relative">
+          <div>
+            <label
+              htmlFor="email"
+              className="mb-1 block text-sm text-muted-foreground"
+            >
+              ایمیل
+            </label>
             <input
-              id="password"
-              // A real toggle, not a second field: screen readers hear the
-              // field's type change, and the button announces its own state.
-              type={showPassword ? "text" : "password"}
+              id="email"
+              type="email"
               dir="ltr"
               required
-              autoComplete="current-password"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="password"
+              className="mb-1 block text-sm text-muted-foreground"
+            >
+              رمز عبور
+            </label>
+            <input
+              id="password"
+              type="password"
+              dir="ltr"
+              required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-input px-3 py-2 pe-11 text-start focus:border-primary focus:outline-none"
+              className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
             />
-            <button
-              type="button"
-              onClick={() => setShowPassword((v) => !v)}
-              aria-pressed={showPassword}
-              aria-label={showPassword ? "پنهان‌کردن رمز عبور" : "نمایش رمز عبور"}
-              className="absolute inset-y-0 end-0 flex w-11 items-center justify-center text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-            >
-              {showPassword ? (
-                <EyeOffIcon className="size-4" aria-hidden="true" />
-              ) : (
-                <EyeIcon className="size-4" aria-hidden="true" />
-              )}
-            </button>
           </div>
-        </div>
-
-        {/*
-          Issue #885 L10 — the recovery path. The panel lets a locked-out
-          manager request a reset link directly; the admin-issued link from
-          the team screen stays available underneath it as the fallback for
-          installs with no SMTP configured.
-        */}
-        <div className="text-end">
+          {error && <p className="text-sm text-destructive">{error}</p>}
           <button
-            type="button"
-            onClick={() => setShowRecovery((v) => !v)}
-            aria-expanded={showRecovery}
-            className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline outline-none focus-visible:ring focus-visible:ring-ring/50"
+            type="submit"
+            disabled={busy}
+            className="w-full rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
           >
-            رمز عبور را فراموش کرده‌اید؟
+            {busy ? "در حال ورود…" : "ورود"}
           </button>
-        </div>
-        {showRecovery ? <RecoveryHelp defaultEmail={email} /> : null}
-
-        {/*
-          Issue #885 L12 — a live region, not an ordinary paragraph. A
-          screen-reader user submitting this form previously heard nothing at
-          all when it failed, because focus stays on the submit button and the
-          error appeared elsewhere in the tree.
-        */}
-        <p aria-live="assertive" role="alert" className="min-h-5 text-sm text-destructive">
-          {error ?? ""}
-        </p>
-
-        <button
-          type="submit"
-          disabled={busy}
-          className="w-full rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
-        >
-          {busy ? "در حال ورود…" : "ورود"}
-        </button>
-      </form>
+        </form>
     );
   }
 
@@ -323,10 +254,7 @@ export default function AdminLoginForm() {
           type="button"
           onClick={() => {
             clearRememberedLoginDoor();
-            // Issue #885 L06 — carry the destination back with the user. The
-            // hard-coded "/login" here is what dropped ?next=/settings/profile
-            // the moment someone switched doors.
-            router.push(withLoginNextParam("/login", next));
+            router.push("/login");
           }}
           className="mx-auto mt-4 block text-center text-xs text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
         >
@@ -382,160 +310,5 @@ function GracePrompt({ daysLeft, onContinue }: { daysLeft: number | null; onCont
         بعداً
       </button>
     </div>
-  );
-}
-
-/**
- * Issue #885 L08 — "which business?" for a multi-business install that does
- * not route by hostname.
- *
- * `/api/auth/login` answers `needsBusinessSelection` with no session set. The
- * old form read any 2xx as "signed in" and navigated, landing the user on a
- * destination their browser had no session for. This is the missing state:
- * pick one, and the attempt runs again with it named.
- *
- * It is a picker over businesses the credentials already matched — the
- * password was proven before this list existed, so naming them here discloses
- * nothing that was not already proven.
- */
-function BusinessPicker({
-  businesses,
-  busy,
-  onPick,
-  onBack,
-}: {
-  businesses: { id: string; name: string }[];
-  busy: boolean;
-  onPick: (businessId: string) => void;
-  onBack: () => void;
-}) {
-  return (
-    <div className="space-y-3">
-      <p className="text-sm text-muted-foreground">
-        این ایمیل به بیش از یک کسب‌وکار دسترسی دارد. کدام را می‌خواهید؟
-      </p>
-      <div className="space-y-2">
-        {businesses.map((business) => (
-          <button
-            key={business.id}
-            type="button"
-            disabled={busy}
-            onClick={() => onPick(business.id)}
-            className="w-full rounded-lg border border-input px-3 py-2.5 text-start text-sm font-semibold transition hover:border-primary/60 hover:bg-primary/5 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
-          >
-            {business.name}
-          </button>
-        ))}
-      </div>
-      <button
-        type="button"
-        onClick={onBack}
-        className="w-full rounded-lg border border-input py-2 text-sm text-muted-foreground transition hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-      >
-        بازگشت
-      </button>
-    </div>
-  );
-}
-
-/**
- * Issue #885 L10 — forgotten-password initiation.
- *
- * Redemption already existed (an admin mints a link from the team screen);
- * what was missing is the half a locked-out manager needs, which is a way to
- * *ask* without first finding someone who can already get in.
- *
- * The request goes to `/api/auth/password-reset/request`, which sends through
- * the deployment's own SMTP settings — the same platform-level transport the
- * scheduled-export delivery uses. Two things follow from how that endpoint is
- * built, and both are reflected in the copy below:
- *
- *   - It answers identically whether or not the address exists, so this panel
- *     must never claim "sent". "If this address is registered…" is the honest
- *     form of the same sentence.
- *   - If SMTP is not configured on this install, nothing arrives. So the
- *     admin-issued path is kept alongside as the fallback that always works,
- *     rather than being replaced by a flow that silently goes nowhere.
- */
-function RecoveryHelp({ defaultEmail }: { defaultEmail: string }) {
-  const [email, setEmail] = useState(defaultEmail);
-  const [sent, setSent] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const { busy, send } = useLoginRequest();
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    const result = await send(() =>
-      fetch("/api/auth/password-reset/request", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      }),
-    );
-    if (result.stale) return;
-    if (result.networkError) {
-      setError(networkErrorMessage(result.networkError));
-      return;
-    }
-    if (result.status === 400) {
-      setError("نشانی ایمیل معتبر نیست.");
-      return;
-    }
-    if (!result.ok) {
-      setError("ارسال درخواست ممکن نشد. کمی دیگر دوباره تلاش کنید.");
-      return;
-    }
-    // Same message for every outcome the server can produce, on purpose.
-    setSent(true);
-  }
-
-  if (sent) {
-    return (
-      <div className="rounded-lg border border-border/80 bg-muted/40 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
-        اگر این نشانی در سامانه ثبت شده باشد، پیوند بازنشانی رمز عبور برایش
-        ارسال می‌شود. پوشهٔ اسپم را هم بررسی کنید. اگر تا چند دقیقه چیزی
-        نرسید، از مدیر یا مالک کسب‌وکار بخواهید پیوند را از صفحهٔ «تیم» صادر
-        کند.
-      </div>
-    );
-  }
-
-  return (
-    <form
-      onSubmit={submit}
-      className="rounded-lg border border-border/80 bg-muted/40 px-3 py-2.5 text-xs leading-5 text-muted-foreground"
-    >
-      <label htmlFor="recovery-email" className="mb-1 block">
-        نشانی ایمیل حساب را وارد کنید تا پیوند بازنشانی ارسال شود.
-      </label>
-      <input
-        id="recovery-email"
-        type="email"
-        dir="ltr"
-        required
-        autoComplete="email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        placeholder="name@example.com"
-        className="mb-2 w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-      />
-      {error ? (
-        <p role="alert" className="mb-2 text-destructive">
-          {error}
-        </p>
-      ) : null}
-      <button
-        type="submit"
-        disabled={busy}
-        className="w-full rounded-md bg-primary py-1.5 font-semibold text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
-      >
-        {busy ? "در حال ارسال…" : "ارسال پیوند بازنشانی"}
-      </button>
-      <p className="mt-2">
-        اگر ایمیل دریافت نکردید، مدیر یا مالک کسب‌وکار می‌تواند همین پیوند را از
-        صفحهٔ «تیم» صادر کند. پیوند یک‌بار مصرف است و ۲۴ ساعت اعتبار دارد.
-      </p>
-    </form>
   );
 }
