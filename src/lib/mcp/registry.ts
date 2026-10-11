@@ -141,7 +141,11 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // Batch L — transfers span two branches by definition and documents carry
   // their location on the row; business-wide listing, so agnostic like orders.
   { name: "list_inventory_transfers", kind: "read", app: "pos", branchPolicy: "agnostic" },
-  { name: "list_warehouse_documents", kind: "read", app: "pos", branchPolicy: "agnostic" },  { name: "list_crm_deals", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  { name: "list_warehouse_documents", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  // Batch M — price lists are branch-scoped rows, but either the pin or the
+  // explicit locationId resolves them; agnostic like menu catalogue reads.
+  { name: "list_price_lists", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_price_list_entries", kind: "read", app: "pos", branchPolicy: "agnostic" },  { name: "list_crm_deals", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_leads", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_pipelines", kind: "read", app: "crm", branchPolicy: "agnostic" },
   // K2 addendum — CRM dashboard/quality/roster surfaces are business-wide by
@@ -294,6 +298,12 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch L — stock-moving between branches / immediate posting: every verb
   // that prices layers sits as a step-up write, exactly like waste count-line
   // commits and inventory.production.run.
+  { actionType: "priceList.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "priceList.rename", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "priceList.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "priceList.entries.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Mass price mutation across (potentially) every item of the branch.
+  { actionType: "priceList.quick_update", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "transfer.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "transfer.ship", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "transfer.receive", kind: "write", app: "pos", risk: "high", approval: "always_approve" },

@@ -88,6 +88,14 @@ import {
   cancelInventoryTransfer,
 } from "./transfer-service";
 import { createWarehouseDocument, parseWarehouseDocumentLines, isWarehouseDocumentKind } from "./warehouse-document-service";
+import {
+  createPriceList,
+  renamePriceList,
+  deletePriceList,
+  savePriceEntries,
+  quickUpdatePrices,
+  type QuickUpdateTarget,
+} from "./price-lists-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
 import { createWorkspaceProject, updateWorkspaceProject, createWorkspaceTask, updateWorkspaceTask, WorkspaceError } from "./workspace";
 import { workspaceAccessFlags } from "./workspace-shared";
@@ -2375,6 +2383,95 @@ const crmPipelineUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { pipelineId, updated: true } };
 };
 
+// ── Issue #883 package 2, batch M — price lists & entries ───────────────────
+// Services answer {list?, error?}/boolean/number — the routes' own branching,
+// so executors fail() with the identical code rather than translating.
+const priceListCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const result = await createPriceList({
+    locationId: branch.locationId,
+    name,
+    currency: str(ctx.payload.currency) ?? undefined,
+  });
+  if (result.error) return fail(result.error);
+  return { ok: true, result: { priceListId: result.list?.id, name: result.list?.name } };
+};
+
+const priceListRename: AutopilotExecutor = async (ctx) => {
+  const priceListId = str(ctx.payload.priceListId);
+  const name = str(ctx.payload.name);
+  if (!priceListId || !name) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const result = await renamePriceList(priceListId, name, branch.locationId);
+  if (result.error) return fail(result.error);
+  return { ok: true, result: { priceListId, name: result.list?.name } };
+};
+
+const priceListDelete: AutopilotExecutor = async (ctx) => {
+  const priceListId = str(ctx.payload.priceListId);
+  if (!priceListId) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const deleted = await deletePriceList(priceListId, branch.locationId);
+  if (!deleted) return fail("not_found");
+  return { ok: true, result: { priceListId, deleted: true } };
+};
+
+const priceListEntriesSave: AutopilotExecutor = async (ctx) => {
+  const raw = ctx.payload.updates;
+  if (!Array.isArray(raw) || raw.length === 0) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const updates = raw.map((cell) => {
+    const c = cell as Record<string, unknown>;
+    return {
+      priceListId: str(c.priceListId) ?? "",
+      itemId: str(c.itemId) ?? "",
+      price: c.price === null ? null : typeof c.price === "number" && Number.isFinite(c.price) ? c.price : NaN,
+      expectedVersion: typeof c.expectedVersion === "string" ? c.expectedVersion : undefined,
+    };
+  });
+  if (updates.some((u) => u.price !== null && Number.isNaN(u.price))) return fail("invalid_payload");
+  const result = await savePriceEntries(updates, {
+    locationId: branch.locationId,
+    businessId: ctx.businessId,
+    userId: ctx.authorizedByUserId,
+  });
+  return { ok: true, result: { touched: result.touched, conflicts: result.conflicts } };
+};
+
+const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
+  const target = ctx.payload.target as QuickUpdateTarget | undefined;
+  const mode = str(ctx.payload.mode);
+  const value = ctx.payload.value;
+  if (!target || typeof target !== "object" || (mode !== "percent" && mode !== "amount")) return fail("invalid_payload");
+  if (typeof value !== "number" || !Number.isFinite(value)) return fail("invalid_value");
+  if (target.kind === "list" && !str(target.priceListId)) return fail("invalid_target");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const itemIds = Array.isArray(ctx.payload.itemIds)
+    ? (ctx.payload.itemIds as unknown[]).map((i) => str(i)).filter((i): i is string => i !== null)
+    : [];
+  const moved = await quickUpdatePrices({
+    target,
+    mode,
+    value,
+    round: ctx.payload.round === true,
+    itemIds,
+    locationId: branch.locationId,
+  });
+  return { ok: true, result: { moved } };
+};
+
 // ── Issue #883 package 2, batch L — transfers & warehouse documents ─────────
 // The four transfer states ride the same client-transaction services as the
 // routes' BEGIN/COMMIT blocks; the document posts through the service's own
@@ -2670,6 +2767,11 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   productionFormulaDeactivate,
   productionFormulaInputSet,
   productionFormulaInputDelete,
+  priceListCreate,
+  priceListRename,
+  priceListDelete,
+  priceListEntriesSave,
+  priceListQuickUpdate,
   transferCreate,
   transferShip,
   transferReceive,

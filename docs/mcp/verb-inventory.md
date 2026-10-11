@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **99 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **90 write verbs**
-(**29** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **101 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **95 write verbs**
+(**30** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -59,6 +59,8 @@ visible only to connections consented for every branch) and **90 write verbs**
 | `list_crm_cases` | crm | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_inventory_transfers` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_warehouse_documents` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_price_lists` | pos | agnostic | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_price_list_entries` | pos | agnostic | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_deals` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_leads` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_pipelines` | crm | agnostic | `crm.configure` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -168,6 +170,11 @@ visible only to connections consented for every branch) and **90 write verbs**
 | `write_production_formula_deactivate` | `production.formula.deactivate` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_formulainput_set` | `production.formulaInput.set` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_formulainput_delete` | `production.formulaInput.delete` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_pricelist_create` | `priceList.create` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_pricelist_rename` | `priceList.rename` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_pricelist_delete` | `priceList.delete` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_pricelist_entries_save` | `priceList.entries.save` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_pricelist_quick_update` | `priceList.quick_update` | pos | high | always approval queue (step-up) | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_transfer_create` | `transfer.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_transfer_ship` | `transfer.ship` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_transfer_receive` | `transfer.receive` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

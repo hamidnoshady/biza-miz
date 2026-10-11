@@ -743,6 +743,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Products (retail)",
     entity: "Price lists & entries (bulk quick-update)",
     routes: ["products/price-lists"],
+    ops: {
+      listDetail: ["list_price_lists", "list_price_list_entries"],
+      create: ["priceList.create"],
+      update: ["priceList.rename", "priceList.entries.save", "priceList.quick_update"],
+      lifecycle: ["priceList.delete"],
+    },
+    note: "entries save carries expectedVersion optimistic-lock conflicts back to the caller exactly like the screen; quick_update is always_approve (mass price mutation), everything else mode",
     test: "integration/products.integration.test.ts",
   },
   {

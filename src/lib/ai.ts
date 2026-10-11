@@ -293,6 +293,14 @@ export type ActionType =
   | "production.formula.deactivate"
   | "production.formulaInput.set"
   | "production.formulaInput.delete"
+  // Batch M — price lists & entries. Service contract copied 1:1 from the
+  // routes (menuView reads, menuEdit writes); quick-update is mass-price
+  // mutation so it lands as always_approve in the registry.
+  | "priceList.create"
+  | "priceList.rename"
+  | "priceList.delete"
+  | "priceList.entries.save"
+  | "priceList.quick_update"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -389,6 +397,11 @@ export type AutopilotExecutorKey =
   | "productionFormulaDeactivate"
   | "productionFormulaInputSet"
   | "productionFormulaInputDelete"
+  | "priceListCreate"
+  | "priceListRename"
+  | "priceListDelete"
+  | "priceListEntriesSave"
+  | "priceListQuickUpdate"
   | "transferCreate"
   | "transferShip"
   | "transferReceive"
@@ -1133,6 +1146,48 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف یک مادهٔ اولیه از فرمول",
     payloadHint: "{ formulaId: string, inventoryItemId: string }",
     executor: "productionFormulaInputDelete",
+  },
+  "priceList.create": {
+    type: "priceList.create",
+    endpoint: "/api/products/price-lists",
+    method: "POST",
+    label: "ساخت فهرست قیمت برای شعبهٔ فعال",
+    payloadHint: "{ name: string /* لازم، یکتا در شعبه */, currency?: string /* پیش‌فرض IRR */ }",
+    executor: "priceListCreate",
+  },
+  "priceList.rename": {
+    type: "priceList.rename",
+    endpoint: "/api/products/price-lists/[id]",
+    method: "PATCH",
+    label: "تغییر نام فهرست قیمت",
+    payloadHint: "{ priceListId: string /* از list_price_lists */, name: string }",
+    executor: "priceListRename",
+  },
+  "priceList.delete": {
+    type: "priceList.delete",
+    endpoint: "/api/products/price-lists/[id]",
+    method: "DELETE",
+    label: "حذف یک فهرست قیمت — با همهٔ قلم‌هایش، مثل دکمهٔ صفحه",
+    payloadHint: "{ priceListId: string }",
+    executor: "priceListDelete",
+  },
+  "priceList.entries.save": {
+    type: "priceList.entries.save",
+    endpoint: "/api/products/price-lists/entries",
+    method: "POST",
+    label: "ذخیرهٔ قیمت‌های یک فهرست — با نسخهٔ موردانتظار، مثل صفحهٔ ویرایش قیمت‌ها",
+    payloadHint:
+      '{ updates: [{ priceListId, itemId /* از list_menu_items */, price: number|null /* null = حذف قیمت */, expectedVersion?: string /* version از list_price_list_entries برای تشخیص تداخل */ }] }',
+    executor: "priceListEntriesSave",
+  },
+  "priceList.quick_update": {
+    type: "priceList.quick_update",
+    endpoint: "/api/products/price-lists/quick-update",
+    method: "POST",
+    label: "افزایش/کاهش انبوه قیمت — درصدی یا مبلغی، با گردکردن اختیاری؛ دقیقاً ستونِ «به‌روزرسانی سریع»",
+    payloadHint:
+      '{ target: { kind: "sale"|"purchase" } | { kind: "list", priceListId: string }, mode: "percent"|"amount", value: number, round: boolean /* گرد به هزار تومان */, itemIds?: string[] /* خالی = همهٔ اقلام شعبه */ }',
+    executor: "priceListQuickUpdate",
   },
   "transfer.create": {
     type: "transfer.create",
@@ -3297,6 +3352,36 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               kind: { type: "string", description: "receipt|issue" },
               locationId: { type: "string" },
               limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۵۰۰ — همان سقف صفحه" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_price_lists",
+          description:
+            "فهرست‌های قیمت شعبه — نام، واحد پول، ترتیب؛ فیلد برای priceList.rename/delete و قیمت‌گذاری فعالیت‌های رشد.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه اگر شعبهٔ پین/فعال غلط است" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_price_list_entries",
+          description:
+            "قیمت‌های تمام فهرست‌های شعبه — هر سلول با itemId و version برای ذخیرهٔ تداخل‌گذار با priceList.entries.save.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string" },
             },
             additionalProperties: false,
           },

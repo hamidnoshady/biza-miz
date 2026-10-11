@@ -172,6 +172,9 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
 
   list_inventory_transfers: "Cross-branch inventory transfers with source/destination names and status.",
   list_warehouse_documents: "Warehouse receipt/issue documents, filterable by kind and location.",
+
+  list_price_lists: "Price lists of a branch (names, currencies, order).",
+  list_price_list_entries: "Every price-list cell of a branch with optimistic-lock versions.",
   list_crm_deals: "CRM deals filtered by stage/pipeline/owner/customer/value — the kanban cards.",
   list_crm_leads: "CRM leads with status/owner/rating/source filters and pagination.",
   list_crm_pipelines: "Sales pipelines with their stages, including stage ids for deal writes.",
@@ -1358,6 +1361,98 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         inventoryItemId: id("مادهٔ اولیه"),
       },
       required: ["formulaId", "inventoryItemId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_pricelist_create",
+    actionType: "priceList.create",
+    english: "Create a price list for the branch.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        currency: { type: "string", description: "پیش‌فرض IRR" },
+        locationId: id("اگر شعبهٔ پین/فعال غلط است"),
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_pricelist_rename",
+    actionType: "priceList.rename",
+    english: "Rename one price list.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        priceListId: id("از list_price_lists"),
+        name: { type: "string" },
+      },
+      required: ["priceListId", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_pricelist_delete",
+    actionType: "priceList.delete",
+    english: "Delete one price list with all its prices.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { priceListId: id("از list_price_lists") },
+      required: ["priceListId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_pricelist_entries_save",
+    actionType: "priceList.entries.save",
+    english: "Save price cells with expected versions (the price screen's save — conflict reports come back like the screen shows).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        updates: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              priceListId: id("از list_price_lists"),
+              itemId: id("از list_menu_items"),
+              price: { type: ["number", "null"], description: "ریال — null یعنی حذف قیمت این سلول" },
+              expectedVersion: { type: "string", description: "version از list_price_list_entries" },
+            },
+            required: ["priceListId", "itemId", "price"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["updates"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_pricelist_quick_update",
+    actionType: "priceList.quick_update",
+    english: "Bulk raise/lower prices by percent or amount, optionally rounded — the screen's quick-update column.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: true,
+          description: '{ kind: "sale" } | { kind: "purchase" } | { kind: "list", priceListId: "…" }',
+        },
+        mode: { type: "string", enum: ["percent", "amount"] },
+        value: { type: "number", description: "percent: مثبت یا منفی — amount: ریالِ اضافه‌شده به هر واحد" },
+        round: { type: "boolean", description: "گرد به هزار تومان" },
+        itemIds: { type: "array", items: { type: "string" }, description: "خالی = همهٔ اقلام شعبه" },
+      },
+      required: ["target", "mode", "value", "round"],
       additionalProperties: false,
     },
   },

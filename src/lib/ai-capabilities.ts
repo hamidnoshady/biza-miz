@@ -87,6 +87,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // crmManage, pipeline configuration on crmConfigure.
   // Batch K3 — the cases route checks partiesView, its writes partiesManage.
   // Batch L — both routes read on inventoryView, write on inventoryAdjust.
+  // Batch M — exactly the routes: menuView to look, menuEdit to move prices.
+  list_price_lists: PERMISSIONS.menuView,
+  list_price_list_entries: PERMISSIONS.menuView,
   list_inventory_transfers: PERMISSIONS.inventoryView,
   list_warehouse_documents: PERMISSIONS.inventoryView,
   list_crm_cases: PERMISSIONS.partiesView,
@@ -212,6 +215,11 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "production.formula.deactivate": PERMISSIONS.inventoryAdjust,
   "production.formulaInput.set": PERMISSIONS.inventoryAdjust,
   "production.formulaInput.delete": PERMISSIONS.inventoryAdjust,
+  "priceList.create": PERMISSIONS.menuEdit,
+  "priceList.rename": PERMISSIONS.menuEdit,
+  "priceList.delete": PERMISSIONS.menuEdit,
+  "priceList.entries.save": PERMISSIONS.menuEdit,
+  "priceList.quick_update": PERMISSIONS.menuEdit,
   "transfer.create": PERMISSIONS.inventoryAdjust,
   "transfer.ship": PERMISSIONS.inventoryAdjust,
   "transfer.receive": PERMISSIONS.inventoryAdjust,

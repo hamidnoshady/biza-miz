@@ -65,6 +65,7 @@ import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
 import { listDeals, listCases } from "./crm-service";
 import { listInventoryTransfers } from "./transfer-service";
+import { listPriceLists, listPriceEntries } from "./price-lists-service";
 import { listWarehouseDocuments, isWarehouseDocumentKind } from "./warehouse-document-service";
 import { listLeads } from "./crm-lead-service";
 import { listPipelines } from "./crm-pipeline-service";
@@ -1758,6 +1759,22 @@ export async function runReadTool(
     }
     // Issue #883 package 2, batch L — the two warehouse lanes' lists, via the
     // services the routes moved to since batch L (single SQL source of truth).
+    // Issue #883 package 2, batch M — price lists (branch-pinned like the
+    // other catalogue reads; the routes read on menuView).
+    case "list_price_lists": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const priceLists = await listPriceLists(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: priceLists.length, priceLists } };
+    }
+    case "list_price_list_entries": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const entries = await listPriceEntries(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: entries.length, entries } };
+    }
     case "list_inventory_transfers": {
       const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 100;
       const transfers = await listInventoryTransfers(businessId, { limit });
