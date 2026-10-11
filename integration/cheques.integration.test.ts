@@ -923,6 +923,69 @@ describe("the register the server filters, pages and totals (issue #828)", () =>
     expect(summary.settled).toEqual({ count: 0, total: 0 });
   });
 
+  it("reads due-date urgency from the accounting position: only an open cheque can be overdue or due soon (issue #828, item 9)", async () => {
+    // Relative to the Tehran day the server uses, so the test is stable whenever it runs.
+    const today = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Tehran",
+    }).format(new Date());
+    const soon = new Date(Date.parse(`${today}T00:00:00Z`) + 3 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+
+    await receivable({
+      amount: 1_000_000,
+      dueDate: "2026-03-10",
+      serialNumber: "OVR-OPEN",
+    });
+    await receivable({
+      amount: 2_000_000,
+      dueDate: soon,
+      serialNumber: "SOON-OPEN",
+    });
+    // Cleared after its due date: settled, never urgent.
+    const clearedLate = await receivable({
+      amount: 4_000_000,
+      dueDate: "2026-03-10",
+      serialNumber: "OVR-CLR",
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: clearedLate.id,
+      action: "deposit",
+      occurredOn: "2026-03-12",
+      createdBy: null,
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: clearedLate.id,
+      action: "clear",
+      occurredOn: "2026-03-15",
+      createdBy: null,
+    });
+    // Bounced after its due date: returned and open, never overdue.
+    const bouncedLate = await receivable({
+      amount: 8_000_000,
+      dueDate: "2026-03-10",
+      serialNumber: "OVR-BNC",
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: bouncedLate.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+
+    const { summary } = await cheques.listCheques(biz.id, {
+      direction: "receivable",
+    });
+    expect(summary.outstanding).toEqual({ count: 2, total: 3_000_000 });
+    expect(summary.overdue).toEqual({ count: 1, total: 1_000_000 });
+    expect(summary.dueSoon).toEqual({ count: 1, total: 2_000_000 });
+    expect(summary.settled).toEqual({ count: 1, total: 4_000_000 });
+    expect(summary.returnedUnresolved).toEqual({ count: 1, total: 8_000_000 });
+  });
+
   it("offers one bank per canonical spelling and filters on it", async () => {
     await receivable({ bankName: "ملت" });
     await receivable({ bankName: "بانک ملت" });

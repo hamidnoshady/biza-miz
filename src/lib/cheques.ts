@@ -1,8 +1,8 @@
 /**
  * Cheques (چک) — the framework-free half.
  *
- * What a cheque can do next, what a صیاد id looks like, and how a due date
- * buckets. No database, no Next.js: this is what `cheques.test.ts` covers, and
+ * What a cheque can do next, what a صیاد id looks like, and what a due date
+ * means for its accounting position. No database, no Next.js: this is what `cheques.test.ts` covers, and
  * what `cheques-service.ts` consults before it posts anything.
  *
  * The one idea worth stating: a cheque is a promise with a date on it, not a
@@ -12,8 +12,6 @@
  * life — which is why the *status* is modelled here and not merely inferred from
  * a balance.
  */
-import { bucketForAge, type AgingBucket } from "./aging";
-
 export const CHEQUE_DIRECTIONS = ["receivable", "payable"] as const;
 export type ChequeDirection = (typeof CHEQUE_DIRECTIONS)[number];
 
@@ -107,6 +105,62 @@ export const CHEQUE_TERMINAL_STATUSES: readonly ChequeStatus[] = CHEQUE_STATUSES
   CHEQUE_DIRECTIONS.every((direction) => isTerminal(direction, status)),
 );
 
+/**
+ * The statuses whose value is still an open asset or liability — the register's
+ * «در جریان» KPI, and the only statuses a due date can make urgent. Everything
+ * else is either contingent (an endorsed cheque: off our books, back if it
+ * bounces), returned (its value sits in 1244/2122 until resolved) or settled.
+ */
+export const CHEQUE_OUTSTANDING_STATUSES: readonly ChequeStatus[] = [
+  "on_hand",
+  "in_collection",
+  "issued",
+];
+
+/** A cheque due within this many days, and still outstanding, is «به‌زودی». */
+export const CHEQUE_DUE_SOON_DAYS = 7;
+
+/**
+ * What a cheque's due date means for its accounting position — the one policy
+ * the register's badges, its overdue/due-soon KPIs and its summary all read.
+ *
+ *   overdue    outstanding, and past its due date
+ *   due_soon   outstanding, due within `CHEQUE_DUE_SOON_DAYS`
+ *   due_later  outstanding, due further away
+ *   contingent endorsed: the debt already moved to the supplier. Follow-up is
+ *              about a bounce that has not happened — never outstanding urgency
+ *   returned   bounced: open until restored or settled, but a due date does not
+ *              make it overdue — its amount is already in 1244/2122
+ *   settled    cleared, cancelled or resolved: nothing is due any more
+ *
+ * Operational openness (`isTerminal`) is not this: a bounced cheque is open for
+ * action and still returned, not contingent or settled.
+ */
+export type ChequeDuePosture =
+  "overdue" | "due_soon" | "due_later" | "contingent" | "returned" | "settled";
+
+/** Whole days from `asOfDate` to `dueDate`: negative once the cheque is overdue. */
+export function daysUntilDue(dueDate: string, asOfDate: string): number {
+  const due = Date.parse(`${dueDate}T00:00:00Z`);
+  const asOf = Date.parse(`${asOfDate}T00:00:00Z`);
+  return Math.floor((due - asOf) / 86_400_000);
+}
+
+/** The due-date posture of a cheque on `asOfDate`. See `ChequeDuePosture`. */
+export function chequeDuePosture(
+  status: ChequeStatus,
+  dueDate: string,
+  asOfDate: string,
+): ChequeDuePosture {
+  if (status === "endorsed") return "contingent";
+  if (status === "bounced") return "returned";
+  if (!CHEQUE_OUTSTANDING_STATUSES.includes(status)) return "settled";
+  const days = daysUntilDue(dueDate, asOfDate);
+  if (days < 0) return "overdue";
+  if (days <= CHEQUE_DUE_SOON_DAYS) return "due_soon";
+  return "due_later";
+}
+
 /** The register's `locationId` value for legacy cheques with no branch recorded. */
 export const LEGACY_UNASSIGNED_LOCATION = "unassigned";
 
@@ -195,40 +249,4 @@ export function canonicalBankName(raw: string): string {
   const folded = foldForComparison(raw);
   const withoutPrefix = folded.replace(/^بانک/u, "");
   return withoutPrefix || folded;
-}
-
-export interface ChequeDueItem {
-  id: string;
-  dueDate: string;
-  amount: number;
-}
-
-export interface ChequeDueBucket {
-  bucket: AgingBucket;
-  count: number;
-  total: number;
-}
-
-/**
- * Group outstanding cheques by how overdue they are, reusing the AR/AP aging
- * buckets (`aging.ts`) rather than inventing a second set — «سررسید گذشته» on a
- * cheque means the same thing to a treasurer as an overdue invoice does, and one
- * vocabulary across the three registers is worth more than a bespoke one here.
- *
- * A cheque not yet due ages to 0, so it lands in the current bucket instead of
- * a negative one.
- */
-export function bucketChequesByDueDate(items: ChequeDueItem[], asOfDate: string): ChequeDueBucket[] {
-  const asOf = Date.parse(`${asOfDate}T00:00:00Z`);
-  const totals = new Map<AgingBucket, ChequeDueBucket>();
-  for (const item of items) {
-    const due = Date.parse(`${item.dueDate}T00:00:00Z`);
-    const ageDays = Math.max(0, Math.floor((asOf - due) / 86_400_000));
-    const bucket = bucketForAge(ageDays);
-    const existing = totals.get(bucket) ?? { bucket, count: 0, total: 0 };
-    existing.count += 1;
-    existing.total += item.amount;
-    totals.set(bucket, existing);
-  }
-  return [...totals.values()];
 }

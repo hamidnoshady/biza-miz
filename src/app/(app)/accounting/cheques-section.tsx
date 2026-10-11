@@ -120,8 +120,11 @@ import { formatJalali, todayIsoDate } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import {
   availableActions,
+  chequeDuePosture,
+  daysUntilDue,
   isTerminal,
   LEGACY_UNASSIGNED_LOCATION,
+  type ChequeDuePosture,
   type ChequeAction,
   type ChequeDirection,
   type ChequeStatus,
@@ -305,22 +308,67 @@ const DIRECTION_META: Record<
 // Helpers
 // ---------------------------------------------------------------------------
 
-function daysBetween(a: string, b: string): number {
-  const da = Date.parse(`${a}T00:00:00Z`);
-  const db = Date.parse(`${b}T00:00:00Z`);
-  return Math.floor((db - da) / 86_400_000);
+/** The label for a cheque with no branch recorded: the legacy, business-wide case. */
+const LEGACY_BRANCH_LABEL = "ثبت قدیمی — بدون شعبه (کل کسب‌وکار)";
+
+/** The branch that owns a cheque, or the explicit legacy label when none is recorded. */
+function branchLabelOf(cheque: Cheque): string {
+  return cheque.locationName ?? LEGACY_BRANCH_LABEL;
 }
 
-function dueState(
-  dueDate: string,
-  status: ChequeStatus,
-): "overdue" | "due_soon" | "ok" | "terminal" {
-  if (["cleared", "bounced", "cancelled"].includes(status)) return "terminal";
-  const t = todayIsoDate();
-  const diff = daysBetween(t, dueDate); // negative = overdue
-  if (diff < 0) return "overdue";
-  if (diff <= 7) return "due_soon";
-  return "ok";
+/**
+ * The due-date badge, read from the domain's posture rather than re-derived
+ * from the status here. Only an outstanding cheque is urgent: an endorsed one
+ * is contingent and a returned one is open for resolution, and neither carries
+ * a due-date urgency; a settled one carries no due-date badge at all.
+ */
+function DueBadge({
+  posture,
+  dueDate,
+}: {
+  posture: ChequeDuePosture;
+  dueDate: string;
+}) {
+  const days = daysUntilDue(dueDate, todayIsoDate());
+  switch (posture) {
+    case "overdue":
+      return (
+        <Badge variant="destructive" className="gap-1">
+          <AlertTriangleIcon className="size-3" />
+          {toPersianDigits(String(-days))} روز گذشته
+        </Badge>
+      );
+    case "due_soon":
+      return (
+        <Badge
+          variant="secondary"
+          className="gap-1 bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-200"
+        >
+          <Clock3Icon className="size-3" />
+          {toPersianDigits(String(days))} روز مانده
+        </Badge>
+      );
+    case "due_later":
+      return (
+        <Badge variant="outline" className="gap-1">
+          <Clock3Icon className="size-3" />
+          {toPersianDigits(String(days))} روز مانده
+        </Badge>
+      );
+    case "contingent":
+      return <Badge variant="secondary">واگذارشده — تعهد احتمالی</Badge>;
+    case "returned":
+      return (
+        <Badge
+          variant="outline"
+          className="border-destructive/40 text-destructive"
+        >
+          برگشتی — نیاز به تعیین‌تکلیف
+        </Badge>
+      );
+    case "settled":
+      return null;
+  }
 }
 
 function errorMessage(code: string | undefined): string {
@@ -1224,12 +1272,16 @@ export function ChequesSection({
                       </TableHeader>
                       <TableBody>
                         {filtered.map((c) => {
-                          const ds = dueState(c.dueDate, c.status);
+                          const posture = chequeDuePosture(
+                            c.status,
+                            c.dueDate,
+                            todayIsoDate(),
+                          );
                           return (
                             <TableRow
                               key={c.id}
                               className={
-                                ds === "overdue"
+                                posture === "overdue"
                                   ? "bg-destructive/[0.03] hover:bg-destructive/[0.06]"
                                   : undefined
                               }
@@ -1243,6 +1295,9 @@ export function ChequesSection({
                                     {c.direction === "receivable" ? "دریافت" : "صدور"}{" "}
                                     {toPersianDigits(formatJalali(c.issueDate))}{" "}
                                     {c.memo ? `· ${c.memo}` : ""}
+                                  </p>
+                                  <p className="truncate text-xs text-muted-foreground">
+                                    شعبه: {branchLabelOf(c)}
                                   </p>
                                 </div>
                               </TableCell>
@@ -1276,35 +1331,7 @@ export function ChequesSection({
                                     <CalendarDaysIcon className="size-3.5 text-muted-foreground" />
                                     {toPersianDigits(formatJalali(c.dueDate))}
                                   </span>
-                                  {ds === "overdue" ? (
-                                    <Badge
-                                      variant="destructive"
-                                      className="gap-1"
-                                    >
-                                      <AlertTriangleIcon className="size-3" />
-                                      {toPersianDigits(
-                                        String(
-                                          Math.abs(
-                                            daysBetween(c.dueDate, todayIsoDate()),
-                                          ),
-                                        ),
-                                      )}{" "}
-                                      روز گذشته
-                                    </Badge>
-                                  ) : ds === "due_soon" ? (
-                                    <Badge
-                                      variant="secondary"
-                                      className="gap-1 bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-200"
-                                    >
-                                      <Clock3Icon className="size-3" />
-                                      {toPersianDigits(
-                                        String(
-                                          daysBetween(todayIsoDate(), c.dueDate),
-                                        ),
-                                      )}{" "}
-                                      روز مانده
-                                    </Badge>
-                                  ) : null}
+                                  <DueBadge posture={posture} dueDate={c.dueDate} />
                                 </div>
                               </TableCell>
                               <TableCell className="font-medium tabular-nums">
@@ -1370,11 +1397,15 @@ export function ChequesSection({
                   {/* Mobile cards */}
                   <div className="grid gap-3 lg:hidden">
                     {filtered.map((c) => {
-                      const ds = dueState(c.dueDate, c.status);
+                      const posture = chequeDuePosture(
+                        c.status,
+                        c.dueDate,
+                        todayIsoDate(),
+                      );
                       return (
                         <Card
                           key={c.id}
-                          className={`overflow-hidden ${ds === "overdue" ? "border-destructive/30" : ""}`}
+                          className={`overflow-hidden ${posture === "overdue" ? "border-destructive/30" : ""}`}
                         >
                           <CardHeader className="pb-3">
                             <div className="flex items-start justify-between gap-3">
@@ -1415,6 +1446,14 @@ export function ChequesSection({
                                   {toPersianDigits(formatJalali(c.dueDate))}
                                 </p>
                               </div>
+                              <div className="col-span-2">
+                                <p className="text-xs text-muted-foreground">
+                                  شعبه
+                                </p>
+                                <p className="mt-1 text-sm">
+                                  {branchLabelOf(c)}
+                                </p>
+                              </div>
                               {c.sayadId ? (
                                 <div className="col-span-2">
                                   <p className="text-xs text-muted-foreground">
@@ -1436,32 +1475,7 @@ export function ChequesSection({
                                 {toPersianDigits(formatJalali(c.issueDate))}
                               </span>
                               <span>·</span>
-                              {ds === "overdue" ? (
-                                <Badge variant="destructive" className="gap-1">
-                                  <AlertTriangleIcon className="size-3" />{" "}
-                                  سررسید گذشته
-                                </Badge>
-                              ) : ds === "due_soon" ? (
-                                <Badge
-                                  variant="secondary"
-                                  className="bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-200"
-                                >
-                                  به‌زودی
-                                </Badge>
-                              ) : (
-                                <Badge variant="outline" className="gap-1">
-                                  <Clock3Icon className="size-3" />{" "}
-                                  {toPersianDigits(
-                                    String(
-                                      Math.max(
-                                        0,
-                                        daysBetween(todayIsoDate(), c.dueDate),
-                                      ),
-                                    ),
-                                  )}{" "}
-                                  روز مانده
-                                </Badge>
-                              )}
+                              <DueBadge posture={posture} dueDate={c.dueDate} />
                             </div>
 
                             {c.memo ? (
@@ -2122,7 +2136,7 @@ function ChequeDetailDialog({
                   currently switched into. */}
               <DetailItem
                 label="شعبه ثبت چک"
-                value={cheque.locationName ?? "ثبت قدیمی — بدون شعبه (کل کسب‌وکار)"}
+                value={branchLabelOf(cheque)}
               />
               {(cheque.replacedByAmount ?? 0) > 0 ? (
                 <DetailItem

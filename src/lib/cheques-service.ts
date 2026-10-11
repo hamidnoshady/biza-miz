@@ -47,8 +47,10 @@ import {
   canonicalSerialNumber,
   CHEQUE_ACTIONS,
   CHEQUE_DIRECTIONS,
+  CHEQUE_OUTSTANDING_STATUSES,
   CHEQUE_STATUSES,
   CHEQUE_TERMINAL_STATUSES,
+  chequeDuePosture,
   escapeLikePattern,
   initialStatus,
   LEGACY_UNASSIGNED_LOCATION,
@@ -270,7 +272,7 @@ export interface ChequeSummary {
 }
 
 export const CHEQUE_STATUS_GROUPS: Record<string, ChequeStatus[]> = {
-  outstanding: ["on_hand", "in_collection", "issued"],
+  outstanding: [...CHEQUE_OUTSTANDING_STATUSES],
   contingent: ["endorsed"],
   returned_unresolved: ["bounced"],
   settled: ["cleared", "cancelled", "resolved"],
@@ -544,7 +546,16 @@ export async function listCheques(
     overdue: { ...bucket },
     dueSoon: { ...bucket },
   };
-  const soonLimit = new Date(Date.parse(`${today}T00:00:00Z`) + 7 * 86_400_000).toISOString().slice(0, 10);
+  const PER_STATUS: Partial<Record<ChequeStatus, keyof ChequeSummary>> = {
+    on_hand: "onHand",
+    in_collection: "inCollection",
+    issued: "issued",
+    endorsed: "contingent",
+    bounced: "returnedUnresolved",
+    cleared: "cleared",
+    cancelled: "cancelled",
+    resolved: "resolved",
+  };
   let total = 0;
   for (const row of summaryRows) {
     const count = Number(row.count);
@@ -554,23 +565,15 @@ export async function listCheques(
       summary[key].count += count;
       summary[key].total += value;
     };
-    const PER_STATUS: Partial<Record<ChequeStatus, keyof ChequeSummary>> = {
-      on_hand: "onHand",
-      in_collection: "inCollection",
-      issued: "issued",
-      endorsed: "contingent",
-      bounced: "returnedUnresolved",
-      cleared: "cleared",
-      cancelled: "cancelled",
-      resolved: "resolved",
-    };
     const own = PER_STATUS[row.status];
     if (own) add(own);
-    if (CHEQUE_STATUS_GROUPS.outstanding.includes(row.status)) {
-      add("outstanding");
-      if (row.due_date < today) add("overdue");
-      else if (row.due_date <= soonLimit) add("dueSoon");
-    } else if (row.status !== "bounced" && row.status !== "endorsed") add("settled");
+    // The due-date policy is the domain's, not this loop's: the same function
+    // decides the register's badges, so a total and a badge cannot disagree.
+    const posture = chequeDuePosture(row.status, row.due_date, today);
+    if (posture === "overdue" || posture === "due_soon" || posture === "due_later") add("outstanding");
+    if (posture === "overdue") add("overdue");
+    if (posture === "due_soon") add("dueSoon");
+    if (posture === "settled") add("settled");
   }
 
   return {

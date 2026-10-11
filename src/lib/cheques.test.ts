@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   availableActions,
+  chequeDuePosture,
+  CHEQUE_DUE_SOON_DAYS,
+  CHEQUE_OUTSTANDING_STATUSES,
+  daysUntilDue,
   canonicalBankName,
   canonicalSerialNumber,
-  bucketChequesByDueDate,
   CHEQUE_ACTIONS,
   CHEQUE_DIRECTIONS,
   CHEQUE_STATUSES,
@@ -216,45 +219,6 @@ describe("normalizeSayadId", () => {
   });
 });
 
-describe("bucketChequesByDueDate", () => {
-  it("puts a cheque not yet due in the current bucket rather than a negative one", () => {
-    const buckets = bucketChequesByDueDate(
-      [{ id: "a", dueDate: "2026-09-01", amount: 1_000_000 }],
-      "2026-08-18",
-    );
-    expect(buckets).toEqual([{ bucket: "current", count: 1, total: 1_000_000 }]);
-  });
-
-  it("ages an overdue cheque into the same buckets AR and AP use", () => {
-    const buckets = bucketChequesByDueDate(
-      [
-        { id: "a", dueDate: "2026-08-01", amount: 100 }, // 17 days
-        { id: "b", dueDate: "2026-07-01", amount: 200 }, // 48 days
-        { id: "c", dueDate: "2026-06-01", amount: 300 }, // 78 days
-        { id: "d", dueDate: "2026-01-01", amount: 400 }, // 229 days
-      ],
-      "2026-08-18",
-    );
-    const byBucket = Object.fromEntries(buckets.map((b) => [b.bucket, b.total]));
-    expect(byBucket).toEqual({ current: 100, d31_60: 200, d61_90: 300, over90: 400 });
-  });
-
-  it("sums several cheques landing in one bucket", () => {
-    const buckets = bucketChequesByDueDate(
-      [
-        { id: "a", dueDate: "2026-08-10", amount: 100 },
-        { id: "b", dueDate: "2026-08-12", amount: 250 },
-      ],
-      "2026-08-18",
-    );
-    expect(buckets).toEqual([{ bucket: "current", count: 2, total: 350 }]);
-  });
-
-  it("returns nothing for nothing", () => {
-    expect(bucketChequesByDueDate([], "2026-08-18")).toEqual([]);
-  });
-});
-
 describe("CHEQUE_TERMINAL_STATUSES", () => {
   it("is exactly the statuses no action can leave, in either direction", () => {
     expect([...CHEQUE_TERMINAL_STATUSES]).toEqual(["cleared", "cancelled", "resolved"]);
@@ -282,5 +246,92 @@ describe("escapeLikePattern", () => {
 
   it("leaves ordinary text, Persian text and digits untouched", () => {
     expect(escapeLikePattern("ملت ۱۲۳")).toBe("ملت ۱۲۳");
+  });
+});
+
+describe("chequeDuePosture — the one due-date policy (issue #828, item 9)", () => {
+  const ASOF = "2026-03-10";
+  const at = (days: number) =>
+    new Date(Date.parse(`${ASOF}T00:00:00Z`) + days * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+
+  it("only outstanding statuses can be overdue or due soon", () => {
+    expect([...CHEQUE_OUTSTANDING_STATUSES].sort()).toEqual([
+      "in_collection",
+      "issued",
+      "on_hand",
+    ]);
+  });
+
+  /**
+   * Every status against every due-date offset that matters: long past, the
+   * day before, the due day itself, the last day of the window, the first day
+   * outside it, and far in the future. A resolved cheque is never urgent, however
+   * late it is.
+   */
+  const offsets = [
+    -400,
+    -1,
+    0,
+    CHEQUE_DUE_SOON_DAYS,
+    CHEQUE_DUE_SOON_DAYS + 1,
+    400,
+  ];
+  const expected: Record<ChequeStatus, (days: number) => string> = {
+    on_hand: (d) =>
+      d < 0 ? "overdue" : d <= CHEQUE_DUE_SOON_DAYS ? "due_soon" : "due_later",
+    in_collection: (d) =>
+      d < 0 ? "overdue" : d <= CHEQUE_DUE_SOON_DAYS ? "due_soon" : "due_later",
+    issued: (d) =>
+      d < 0 ? "overdue" : d <= CHEQUE_DUE_SOON_DAYS ? "due_soon" : "due_later",
+    endorsed: () => "contingent",
+    bounced: () => "returned",
+    cleared: () => "settled",
+    cancelled: () => "settled",
+    resolved: () => "settled",
+  };
+
+  for (const status of Object.keys(expected) as ChequeStatus[]) {
+    it(`${status}: every date offset gets the posture the accounting position allows`, () => {
+      for (const days of offsets) {
+        expect(
+          chequeDuePosture(status, at(days), ASOF),
+          `${status} at ${days} days`,
+        ).toBe(expected[status](days));
+      }
+    });
+  }
+
+  it("never gives a resolved, cleared or cancelled cheque outstanding urgency", () => {
+    for (const status of ["resolved", "cleared", "cancelled"] as const) {
+      for (const days of offsets) {
+        expect(["overdue", "due_soon"]).not.toContain(
+          chequeDuePosture(status, at(days), ASOF),
+        );
+      }
+    }
+  });
+
+  it("keeps a bounced cheque returned, however far past its due date", () => {
+    expect(chequeDuePosture("bounced", at(-400), ASOF)).toBe("returned");
+  });
+
+  it("calls an endorsed cheque contingent, never overdue", () => {
+    expect(chequeDuePosture("endorsed", at(-400), ASOF)).toBe("contingent");
+  });
+
+  it("counts the due-soon window in whole days, inclusive at the edge", () => {
+    expect(chequeDuePosture("issued", at(CHEQUE_DUE_SOON_DAYS), ASOF)).toBe(
+      "due_soon",
+    );
+    expect(chequeDuePosture("issued", at(CHEQUE_DUE_SOON_DAYS + 1), ASOF)).toBe(
+      "due_later",
+    );
+    expect(daysUntilDue(at(-1), ASOF)).toBe(-1);
+  });
+
+  it("uses calendar days, so a due date on the as-of day is not overdue", () => {
+    expect(chequeDuePosture("on_hand", ASOF, ASOF)).toBe("due_soon");
   });
 });

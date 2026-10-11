@@ -18,6 +18,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toPersianDigits } from "@/lib/digits";
+import { todayIsoDate } from "@/lib/jalali";
 import { MoneyProvider } from "@/components/money/money-context";
 import { ChequesSection } from "./cheques-section";
 
@@ -72,14 +73,17 @@ function summary(overrides: Record<string, unknown> = {}) {
 /** Every register URL the component asked for, in order. */
 let registerCalls: string[];
 
-function stubFetch(pageFor: (url: URL) => unknown) {
+function stubFetch(
+  pageFor: (url: URL) => unknown,
+  locations: { id: string; name: string }[] = [],
+) {
   registerCalls = [];
   const fetchMock = vi.fn(async (url: string) => {
     if (url.startsWith("/api/ledger/cheques?")) {
       registerCalls.push(url);
       return { ok: true, status: 200, json: async () => pageFor(new URL(url, "http://t")) };
     }
-    return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+    return { ok: true, status: 200, json: async () => ({ locations, customers: [], suppliers: [] }) };
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
@@ -1293,5 +1297,169 @@ describe("the audit trail, the state and branch filters, and the party rule (iss
     await waitFor(() => expect(creates).toHaveLength(1));
     expect(creates[0].allowUnattributed).toBe(true);
     expect(creates[0].customerId).toBeUndefined();
+  });
+});
+
+/** The Tehran calendar day `days` from today, as the register's dates are stored. */
+function isoOffset(days: number): string {
+  const today = todayIsoDate();
+  return new Date(Date.parse(`${today}T00:00:00Z`) + days * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+describe("the due-date urgency follows the accounting position (issue #828, item 9)", () => {
+  const page = (cheques: unknown[]) => () => ({
+    cheques,
+    total: cheques.length,
+    hasMore: false,
+    banks: [],
+    summary: summary(),
+  });
+
+  it("a resolved, cleared or cancelled cheque past its due date carries no urgency, on desktop or mobile", async () => {
+    stubFetch(
+      page([
+        cheque(1, {
+          status: "resolved",
+          serialNumber: "S-RES",
+          dueDate: isoOffset(-30),
+        }),
+        cheque(2, {
+          status: "cleared",
+          serialNumber: "S-CLR",
+          dueDate: isoOffset(-30),
+        }),
+        cheque(3, {
+          status: "cancelled",
+          serialNumber: "S-CAN",
+          direction: "payable",
+          dueDate: isoOffset(-30),
+        }),
+        cheque(4, {
+          status: "on_hand",
+          serialNumber: "S-OVR",
+          dueDate: isoOffset(-30),
+        }),
+      ]),
+    );
+    renderSection();
+    await screen.findByText(toPersianDigits("S-OVR"));
+
+    // Only the open cheque is overdue; it appears once in the table and once in
+    // the mobile card. The three settled cheques carry no urgency at all.
+    expect(screen.getAllByText(/روز گذشته/)).toHaveLength(2);
+    expect(screen.queryAllByText(/روز مانده/)).toHaveLength(0);
+  });
+
+  it("a bounced cheque reads as returned and an endorsed one as contingent — neither as overdue", async () => {
+    stubFetch(
+      page([
+        cheque(1, {
+          status: "bounced",
+          serialNumber: "S-BNC",
+          dueDate: isoOffset(-60),
+        }),
+        cheque(2, {
+          status: "endorsed",
+          serialNumber: "S-END",
+          dueDate: isoOffset(-60),
+        }),
+      ]),
+    );
+    renderSection();
+    await screen.findByText(toPersianDigits("S-BNC"));
+
+    expect(screen.queryAllByText(/روز گذشته/)).toHaveLength(0);
+    expect(screen.getAllByText("برگشتی — نیاز به تعیین‌تکلیف")).toHaveLength(2);
+    expect(screen.getAllByText("واگذارشده — تعهد احتمالی")).toHaveLength(2);
+  });
+
+  it("an outstanding cheque shows its days to due: due soon inside the window, later outside it", async () => {
+    stubFetch(
+      page([
+        cheque(1, {
+          status: "issued",
+          direction: "payable",
+          serialNumber: "S-SOON",
+          dueDate: isoOffset(3),
+        }),
+        cheque(2, {
+          status: "on_hand",
+          serialNumber: "S-LATER",
+          dueDate: isoOffset(30),
+        }),
+      ]),
+    );
+    renderSection();
+    await screen.findByText(toPersianDigits("S-SOON"));
+
+    expect(
+      screen.getAllByText(toPersianDigits("3") + " روز مانده"),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByText(toPersianDigits("30") + " روز مانده"),
+    ).toHaveLength(2);
+    expect(screen.queryAllByText(/روز گذشته/)).toHaveLength(0);
+  });
+});
+
+describe("the branch a cheque belongs to, in the register (issue #828, item 12)", () => {
+  const LEGACY = /ثبت قدیمی — بدون شعبه \(کل کسب‌وکار\)/;
+  const page = (cheques: unknown[]) => () => ({
+    cheques,
+    total: cheques.length,
+    hasMore: false,
+    banks: [],
+    summary: summary(),
+  });
+
+  it("shows the branch of each cheque on desktop and mobile, and filters by branch when there are several", async () => {
+    stubFetch(
+      page([cheque(1, { locationName: "شعبهٔ مرکزی", serialNumber: "S-A" })]),
+      [
+        { id: "loc-1", name: "مرکزی" },
+        { id: "loc-2", name: "شعبهٔ دو" },
+      ],
+    );
+    renderSection();
+    await screen.findByText(toPersianDigits("S-A"));
+
+    expect(screen.getByText("شعبه: شعبهٔ مرکزی")).toBeTruthy();
+    expect(screen.getAllByText("شعبهٔ مرکزی")).toHaveLength(1);
+    expect(screen.getByRole("combobox", { name: "فیلتر شعبه" })).toBeTruthy();
+  });
+
+  it("still shows the branch in a single-branch business, which has no branch filter", async () => {
+    stubFetch(
+      page([cheque(1, { locationName: "شعبهٔ مرکزی", serialNumber: "S-A" })]),
+      [],
+    );
+    renderSection();
+    await screen.findByText(toPersianDigits("S-A"));
+
+    expect(screen.getByText("شعبه: شعبهٔ مرکزی")).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "فیلتر شعبه" })).toBeNull();
+  });
+
+  it("names a legacy cheque with no branch explicitly on both layouts, never as a blank", async () => {
+    stubFetch(
+      page([
+        cheque(1, {
+          locationId: null,
+          locationName: null,
+          serialNumber: "S-LEG",
+        }),
+      ]),
+      [
+        { id: "loc-1", name: "مرکزی" },
+        { id: "loc-2", name: "شعبهٔ دو" },
+      ],
+    );
+    renderSection();
+    await screen.findByText(toPersianDigits("S-LEG"));
+
+    // One line in the table and one in the mobile card.
+    expect(screen.getAllByText(LEGACY)).toHaveLength(2);
   });
 });
