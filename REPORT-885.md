@@ -237,26 +237,48 @@ The 10 skipped tests are `platform-system-backup`'s own `describe.skip` blocks f
 
 Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
 
-Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **9 unit test files and 132 tests** (8,518 − 8,386) with no existing test removed or altered in expectation.
+Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. At the merged head the same command reports **738 files / 9,655 tests**, exit 0. That total is *not* attributable to #885 alone: merging `main` brought in its own accounting and multicurrency tests, so the 8,386 → 9,655 delta is the sum of both bodies of work and I have not tried to split it. What this branch contributes on its own is the 9 unit test files added in §7, measured against the pre-merge branch head; no existing test was removed, and none had an expectation weakened to obtain green.
 
 GitHub CI: **this repository does have CI** — 14 workflows under `.github/workflows/`, and `test.yml` alone runs 10 jobs. An earlier draft of this report claimed no CI existed; that was wrong and is corrected here.
 
-The most recent completed `test` run on this branch is [`37964824334`](https://github.com/hamidnoshady/biza-miz/actions/runs/37964824334) (push of `4ad73b9`), **all 10 jobs green**:
+The `test.yml` run at the published head **`c05e9429`** is **fully green — all 10 jobs `success`**, reported across the two runs GitHub split it into ([`38170129564`](https://github.com/hamidnoshady/biza-miz/actions/runs/38170129564) and [`38170125462`](https://github.com/hamidnoshady/biza-miz/actions/runs/38170125462)), with the `all checks passed` roll-up job itself `success`:
 
 | Job | Result |
 |---|---|
-| unit tests | ✓ 3m55s |
-| **production build** | **✓ 4m24s** (job `113936440462`) |
-| design checks | ✓ 45s |
-| visual regression | ✓ 4m28s |
-| ESLint (noninteractive) | ✓ 1m46s |
-| data transfer engine (real database) | ✓ 1m25s |
-| integration tests (real database) | ✓ 36m8s |
-| type check | ✓ 2m46s |
-| API guard and permission tests | ✓ 38s |
-| media E2E tests | ✓ 4m40s |
+| unit tests | ✓ 4m53s |
+| **production build** | **✓ 5m4s** |
+| integration tests (real database) | ✓ 42m6s |
+| data transfer engine (real database) | ✓ 1m32s |
+| type check | ✓ 2m26s |
+| ESLint (noninteractive) | ✓ 2m10s |
+| design checks | ✓ 22s |
+| visual regression | ✓ 5m18s |
+| media E2E tests | ✓ 3m57s |
+| API guard and permission tests | ✓ 33s |
 
-**One job outside `test.yml` is red, and it is not this branch's doing.** `packaged Windows end-to-end` (`build-desktop-installer.yml`) fails on this PR — and it also fails on **`main`'s own head `b8b66b21`**, which contains the main commit this branch merged but *none* of the #885 work (`git merge-base --is-ancestor 4ad73b9 b8b66b21` → false). It fails identically on three unrelated `arena/**` branches, and it was still green at `55a9b7ee`.
+This supersedes the earlier figures in this report, which were measured at `4ad73b9` — the head *before* `main` was merged in. The numbers above are the ones that describe the code a reviewer would actually be merging. Two jobs outside `test.yml` are red; both are analysed in §8 below and §9.
+
+**Two jobs outside `test.yml` are red. They have different causes, and only one of them is pre-existing.**
+
+**(a) `desktop shell` (`verify-shippables.yml`, job `114561339250`) — a genuine regression on the merged head, caused by the merge.**
+
+This one *is* attributable to this branch, and the earlier draft of this report did not mention it. The per-step conclusions from the Jobs API locate it exactly: steps 1–12 all `success` — including step 8, *Build production app and staged desktop runtime*, so the production build itself is fine — and step 13, **`Staged runtime stays below pre-package budget`**, is `failure`. That step has exactly one failure mode: `.desktop-runtime` exceeding 200 MiB.
+
+I reproduced it rather than inferring it. Adding swap to get past this sandbox's memory ceiling and running `npm run build && npm run desktop:runtime` at the merged head stages **215.6 MiB** (the script's own figure; `du -sb` = 227,355,383 bytes = 216.8 MiB) against a **200 MiB** budget. Composition: `.next` 138 MiB (`server/app` 108 MiB, `static` 18, `chunks` 12), `node_modules` 80 MiB (`@img` 37, `next` 28, `playwright-core` 7), `migrations` 3 MiB, `public` 1 MiB.
+
+Attribution is a *combination*, and I want to state it precisely rather than assign it to either side:
+
+- `desktop shell` **passed** at this branch's pre-merge head `51189607` (✓ 6m10s).
+- `desktop shell` **passed** on `main` at `b8b66b21` (`verify-shippables` run `38135440182`, job `success`).
+- `desktop shell` **fails** at the merged head `c05e9429`.
+
+So neither parent alone crossed the budget; the merged tree does. The merge brought in 21 new API routes and 77 changed source files from `main`'s accounting/multicurrency work, which grows the traced `.next/server/app`; combined with this branch's 58 changed files the total passes 200 MiB.
+
+Two caveats, stated plainly. The 215.6 MiB figure is a **Linux** measurement; CI runs this job on Windows, where the staged `@img` sharp binaries are `win32-x64` rather than the `linux-x64` + `linuxmusl-x64` pair (37 MiB) present locally, so CI's exact number differs and is unreadable here — the log host is unreachable (§ below). What is not in doubt is the direction: CI ran the same check and failed it.
+
+**I did not raise the 200 MiB budget.** Doing so would be weakening an assertion to obtain green. The two honest resolutions are a deliberate maintainer decision to re-set the budget for the now-larger app, or a genuine reduction of the traced runtime — and the growth is `main`'s routes, not this branch's, so neither is this PR's call to make unilaterally. It is recorded as an open issue in §9.
+
+**(b) `packaged Windows end-to-end` (`build-desktop-installer.yml`) — pre-existing on `main`, not this branch's doing.** It fails on this PR — and it also fails on **`main`'s own head `b8b66b21`**, which contains the main commit this branch merged but *none* of the #885 work (`git merge-base --is-ancestor 4ad73b9 b8b66b21` → false). It fails identically on three unrelated `arena/**` branches, and it was still green at `55a9b7ee`. Its cause is unrelated to (a): it reports a built installer, so it is not the size budget.
 
 What the annotations show is that the package itself builds — "Installer 161.2 MiB; unpacked installed payload 620.2 MiB; PostgreSQL tools 1.1 MiB", version bumped 1.0.42 → 1.0.43 — and the job then exits 1. The exact failing step could not be read: GitHub's log-archive host (`productionresultssa12.blob.core.windows.net`) is not reachable from this sandbox, and every retrieval attempt returned `EOF`. So the *attribution* is established by the ancestry check above and the *cause* is not; it is recorded as an open, pre-existing failure on `main` rather than explained away.
 
@@ -274,6 +296,9 @@ So there is no Arm64 build failure in this repository's CI for me to fix or to l
 ---
 
 ## 9. Genuine remaining issues
+
+**The merged head exceeds the desktop runtime's 200 MiB budget, and `desktop shell` is red because of it.** This is the one item here that is a *regression introduced by this branch's merge*, and it is the first thing a reviewer should look at. Full diagnosis and attribution are in §8; the short form is that the staged runtime measures **215.6 MiB** against a **200 MiB** limit, that neither parent head crossed the limit on its own (`desktop shell` ✓ at pre-merge `51189607`, and ✓ on `main` at `b8b66b21`), and that the merge is what pushed it over. I did **not** raise the budget, because raising a limit to make a check pass is exactly the kind of green I was told not to manufacture. The two honest fixes are a maintainer decision to re-set the budget for the now-larger application, or a real reduction in the traced runtime — and since the growth is `main`'s 21 new API routes rather than this branch's auth work, choosing between them is not this PR's call to make alone.
+
 
 **The production build is verified on CI, and only unverifiable *in this sandbox*.** `npm run build` here is OOM-killed (exit 137) on a machine with 3.9 GB RAM and no swap; building the untouched base commit is killed identically at the same point, so it is a memory ceiling, not a regression. The authoritative result is CI job `113936440462`, `production build` ✓ 4m24s (§8). An earlier draft called the build "unverified" outright; that understated it — it is unverified *locally* and green on CI.
 
