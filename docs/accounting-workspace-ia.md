@@ -80,7 +80,7 @@ so the sidebar has one spelling of a row instead of one per menu.
 
   | division | sections |
   | --- | --- |
-  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، سرفصل حساب‌ها |
+  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، ارز و تسعیر، سرفصل حساب‌ها |
   | دریافتنی و پرداختنی | دریافتنی، پرداختنی، اقساط، چک‌ها |
   | وجوه و هزینه | دریافت و پرداخت، هزینه‌ها، تطبیق بانکی، دارایی ثابت |
   | دوره، مالیات و حقوق | دوره‌های مالی، مالیات، حقوق و دستمزد |
@@ -185,7 +185,7 @@ table for all three roles (migration 0137).
   helper. A non-tool section gets a menu row through
   `accountingWorkspaceGroups()`. `app-ownership.test.ts` fails if a section ends
   up with neither a menu row nor a workspace-page tool, and
-  `accounting-workspace.test.ts` pins the fifteen tools.
+  `accounting-workspace.test.ts` pins the sixteen tools.
 - **A business page the workspace should adopt** — add its href to
   `WORKSPACE_GROUP_SLOTS` in `accounting-workspace.ts`. Do **not** re-declare
   the page: the composer picks it out of the nav the shell already gated, so

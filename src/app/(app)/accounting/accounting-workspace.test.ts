@@ -6,7 +6,7 @@ import {
   canViewAccountingSection,
   LEDGER_WORKSPACE_LABEL,
 } from "./accounting-nav";
-import { roleBasePermissions } from "@/lib/permissions";
+import { PERMISSIONS, roleBasePermissions } from "@/lib/permissions";
 import type { Role } from "@/lib/auth";
 import {
   ACCOUNTING_SECTION_KEYS,
@@ -286,6 +286,55 @@ describe("the «فضای کار حسابداری» workspace page's tool list", 
       .map((entry) => entry.section);
     expect(managerTools).not.toContain("payroll");
     expect(managerTools).toContain("vat");
+  });
+});
+
+describe("the multicurrency workspace (ارز و تسعیر) in the ledger", () => {
+  // «ارز و تسعیر» is a ledger tool: it sits in the books division, opens under
+  // the ledger door, and its APIs check `ledger.view` (reads) and `ledger.post`
+  // (writes). The menu and the page read the same permission helper, so these
+  // assertions pin the one rule for every role — not a separate copy.
+  const multicurrencyHref = accountingSectionHref("multicurrency");
+
+  it("keeps the canonical route and its own division", () => {
+    expect(multicurrencyHref).toBe("/accounting/multicurrency");
+    const books = LEDGER_WORKSPACE_SUBGROUPS.find((subGroup) => subGroup.key === "ledger-books");
+    expect(books?.keys).toContain("multicurrency");
+  });
+
+  it("lists the tool for every role that holds the ledger door, and only them", () => {
+    for (const role of ["owner", "admin", "accountant", "manager"] as const) {
+      const hrefs = ledgerWorkspaceToolGroups(of(role))
+        .flatMap((group) => group.entries)
+        .map((entry) => entry.href);
+      expect(hrefs, `${role} should see «ارز و تسعیر»`).toContain(multicurrencyHref);
+      expect(canViewAccountingSection(of(role), "multicurrency"), role).toBe(true);
+    }
+    for (const role of ["cashier", "waiter", "kitchen"] as const) {
+      expect(canViewAccountingSection(of(role), "multicurrency"), role).toBe(false);
+      expect(
+        ledgerWorkspaceToolGroups(of(role)).flatMap((group) => group.entries).map((entry) => entry.href),
+        role,
+      ).not.toContain(multicurrencyHref);
+    }
+  });
+
+  it("disappears from the page and the door when ledger.view is revoked, even for an owner's other grants", () => {
+    const revoked = new Set(of("owner"));
+    revoked.delete(PERMISSIONS.ledgerView);
+    expect(canViewAccountingSection(revoked, "multicurrency")).toBe(false);
+    expect(ledgerWorkspaceToolGroups(revoked)).toEqual([]);
+    expect(accountingWorkspaceHrefs(accountingWorkspaceGroups({ permissions: revoked, navItems: BUSINESS_NAV }))).not.toContain(
+      multicurrencyHref,
+    );
+  });
+
+  it("lights the ledger row on its own routes and on nothing else", () => {
+    expect(isLedgerWorkspacePathname(multicurrencyHref)).toBe(true);
+    expect(isLedgerWorkspacePathname(`${multicurrencyHref}/`)).toBe(true);
+    expect(isLedgerWorkspacePathname("/accounting/overview")).toBe(false);
+    expect(isLedgerWorkspacePathname("/accounting/reports")).toBe(false);
+    expect(isLedgerWorkspacePathname("/accounting/multicurrency-archive")).toBe(false);
   });
 });
 

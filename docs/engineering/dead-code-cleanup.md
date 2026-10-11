@@ -343,3 +343,37 @@ business's AI budget. Both fixed; `ai-permission-matrix.test.ts` now pins it.
 `crm-deal-handoff.ts` remain documented deliberate retentions in
 `module-reachability.test.ts`. Issue #812 did not touch them and did not make
 them reachable.
+
+## 10. Navigation cleanup (PR #888, the one-link accounting workspace)
+
+Removed after a grep sweep of `src`, `integration`, `scripts`, `electron`,
+`docs`, `AGENTS.md`, `CLAUDE.md` and `README.md` on the integrated tree
+(`main` @ `b8b66b2` merged in). Each row had no production importer, and the
+test that exercised it was either deleted with it or rewritten against the
+surviving code.
+
+| Removed | Where it lived | Evidence it is dead or superseded |
+| --- | --- | --- |
+| `ACCOUNTING_NAV_GROUPS` | `(app)/accounting/accounting-nav.ts` | No production consumer on `main` or the branch. Its only readers were tests. The ledger arrangement now lives in `LEDGER_WORKSPACE_SUBGROUPS`, and the «every section has a home» guard runs against the real menu. |
+| `canOpenAccountingApp` | `(app)/accounting/accounting-nav.ts` | Zero callers. The app door is `ACCOUNTING_DOOR_PERMISSION` through `accountingSectionsFor`. |
+| Local `SettingsSlug` type | `(app)/accounting/accounting-nav.ts` | Zero references. Settings slugs are owned by `src/lib/settings-routes.ts`. |
+| `LEDGER_WORKSPACE_ICON_KEY` | `(app)/accounting/accounting-workspace.ts` | Zero references. The glyph comes from `navIconFor` / `ACCOUNTING_SECTION_ICONS`. |
+| Hand-written `LEDGER_WORKSPACE_SECTION_KEYS` array | `(app)/accounting/accounting-workspace.ts` | Replaced by a derivation from `LEDGER_WORKSPACE_SUBGROUPS`, so the tool set cannot be listed twice. |
+| `use-open-nav-groups.ts` and its test | `dashboard/` | The disclosure hook. The ledger row no longer has a disclosure. |
+| `NavCollapsibleGroup`, `NAV_COLLAPSIBLE_GROUP_TOGGLE_CLASS`, `NAV_SUBGROUP_LABEL_CLASS`, `WorkspaceNavSubGroup` | `dashboard/sidebar-nav-group.tsx`, `(app)/accounting/accounting-app-nav.tsx` | Only the disclosure used them. `sidebar-nav-group.tsx` is now entries-only. |
+| Duplicate `LEDGER_WORKSPACE_LABEL` | `(app)/accounting/accounting-workspace.ts` | One definition remains, in `accounting-nav.ts`. |
+| Per-surface icon tables | sidebar, bottom bar, pin picker | Replaced by the single `navIconFor` map. A test fails if a section's glyph is missing. |
+
+**Kept on purpose** (inspected, not removed):
+
+- `unassignedModules` (`src/lib/apps.ts`) and `modulesForApp`: exported for
+  `apps.test.ts`, which enforces that every module belongs to exactly one app.
+  Deleting them would delete that invariant, not dead code.
+- `isCanonicalAppPathname` (`src/lib/app-routes.ts`): test-only, and the
+  documented reason that no redirect loop can exist (see §2 above).
+- `isKnownSettingsSlug` (`src/lib/settings-routes.ts`): test-only. It is kept
+  pending a decision on whether the settings page should reject unknown slugs
+  explicitly. That is a behaviour change, not cleanup.
+- `ACCOUNTING_SECTIONS` `ledger` and `settings` entries, the `ar`/`ap` legacy
+  keys, and the `/dashboard/ledger?tab=` compatibility redirects: all are live
+  routes or compatibility URLs.
