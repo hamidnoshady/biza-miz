@@ -31,6 +31,12 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
     reversedBy: null,
     reversedByName: null,
     totalDebit: "9007199254740993",
+    currencyCode: null,
+    baseCurrencyCode: null,
+    exchangeRateId: null,
+    exchangeRate: null,
+    roundingVersion: null,
+    roundingDelta: null,
     lines: [
       {
         entryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -39,6 +45,9 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         accountName: "هزینهٔ اجاره",
         debit: "9007199254740993",
         credit: "0",
+        foreignDebit: "0",
+        foreignCredit: "0",
+        partyId: null,
       },
       {
         entryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -47,6 +56,9 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         accountName: "صندوق",
         debit: "0",
         credit: "9007199254740993",
+        foreignDebit: "0",
+        foreignCredit: "0",
+        partyId: null,
       },
     ],
     ...overrides,
@@ -104,6 +116,32 @@ describe("buildJournalExportTable", () => {
     const table = buildJournalExportTable([]);
     expect(table.columns).toHaveLength(JOURNAL_EXPORT_COLUMNS.length);
     expect(table.columns.every((column) => /[\u0600-\u06FF]/.test(column.label))).toBe(true);
+  });
+
+  it("exports the rounding contract beside the rate snapshot (issue #863)", () => {
+    // The audit artefact must carry HOW the base side was derived, not only
+    // the rate: the rounding policy version in force and the absorbed delta,
+    // so every base amount can be recomputed from the foreign side.
+    const document = entry({
+      currencyCode: "EUR",
+      exchangeRateId: "11111111-1111-4111-8111-111111111111",
+      exchangeRate: "61000",
+      roundingVersion: 2,
+      roundingDelta: "1500",
+    });
+    const table = buildJournalExportTable([document]);
+    expect(table.columns.map((c) => c.key)).toContain("roundingVersion");
+    expect(table.columns.map((c) => c.key)).toContain("roundingDelta");
+    for (const row of table.rows) {
+      expect(row.roundingVersion).toBe("2");
+      expect(row.roundingDelta).toBe("1500");
+    }
+  });
+
+  it("leaves the rounding cells empty when the document predates the snapshot", () => {
+    const table = buildJournalExportTable([entry({ roundingVersion: null, roundingDelta: null })]);
+    expect(table.rows[0].roundingVersion).toBe("");
+    expect(table.rows[0].roundingDelta).toBe("");
   });
 });
 

@@ -20,6 +20,12 @@ export const EXEMPT_TABLES = new Set([
   // Its per-business counterpart, business_app_availability, is deliberately
   // absent from this list and is RLS-protected like every other tenant table.
   "app_availability",
+  // Migration 0216 — multicurrency's global half (issue #863). Same shape as
+  // app_availability: a deployment-wide catalogue (ISO code, name, symbol,
+  // minor-unit precision) every business reads, with no business_id column —
+  // the tenant halves (business_currencies, exchange_rates and the rest) are
+  // RLS-protected like every other table and stay in the export.
+  "currencies",
   "platform_admins",
   "platform_audit_log",
   // Phase 24 — Login lockout for password, platform and directory realms. The attempt
