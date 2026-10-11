@@ -71,6 +71,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // team.view on the member list.
   list_branches: PERMISSIONS.locationsManage,
   list_team_members: PERMISSIONS.teamView,
+  // Batch F reads — campaigns.view on promotions, giftCards.view on cards.
+  list_promotions: PERMISSIONS.campaignsView,
+  get_gift_card_status: PERMISSIONS.giftCardsView,
   list_formulas: PERMISSIONS.inventoryView,
   list_production_runs: PERMISSIONS.inventoryView,
   list_item_barcodes: PERMISSIONS.inventoryView,
@@ -162,6 +165,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   // Batch D — notes activities follow the notes screen (parties manage),
   // consent the consent drawer (crm.consent_manage), segments/automechanics
   // the configure gate the routes themselves use.
+  "promotion.upsert": PERMISSIONS.campaignsManage,
+  "promotion.toggle": PERMISSIONS.campaignsManage,
+  "gift_card.issue": PERMISSIONS.giftCardsIssue,
   "branch.create": PERMISSIONS.locationsManage,
   "branch.update": PERMISSIONS.locationsManage,
   "branch.lifecycle": PERMISSIONS.locationsManage,

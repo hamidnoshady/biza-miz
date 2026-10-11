@@ -57,6 +57,7 @@ import { listFormulas, listRuns } from "./production-service";
 import { listBarcodes, listItemsWithoutBarcode } from "./inventory-item-barcodes-service";
 import { listCustomerNotes, listActivities } from "./crm-service";
 import { listMembers } from "./team-service";
+import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listAutomations } from "./crm-automation-service";
 
 /** Case-insensitive contains over a whitelist of row fields — tool-side `q`. */
@@ -1622,6 +1623,22 @@ export async function runReadTool(
     case "list_team_members": {
       const members = await listMembers(businessId);
       return { ok: true, data: { count: members.length, members } };
+    }
+    // Issue #883 package 2, batch F — growth reads.
+    case "list_promotions": {
+      const promotions = await listPromotions(businessId, args.includeInactive === true);
+      return { ok: true, data: { count: promotions.length, promotions } };
+    }
+    case "get_gift_card_status": {
+      const code = String(args.code ?? "").trim();
+      if (!code) return { ok: false, data: { error: "invalid_arguments" } };
+      const card = await getGiftCardByCode(businessId, code);
+      if (!card) return { ok: false, data: { error: "gift_card_not_found" } };
+      const [balance, history] = await Promise.all([
+        giftCardBalance(businessId, code),
+        giftCardHistory(businessId, code),
+      ]);
+      return { ok: true, data: { code: card.code, balance, isActive: card.isActive, expiresAt: card.expiresAt, history } };
     }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);

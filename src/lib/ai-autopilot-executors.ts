@@ -65,6 +65,8 @@ import { createCustomer, createParty } from "./parties-service";
 import { getSetting, SETTING_KEYS } from "./settings";
 import { toggleNotePin, setConsent } from "./crm-service";
 import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
+import { upsertPromotion, setPromotionActive, issueGiftCard } from "./promotions-service";
+import { getGrowthSettings } from "./growth-settings-service";
 import { createSegment, updateSegment, archiveSegment } from "./crm-segments-service";
 import { setAutomationActive } from "./crm-automation-service";
 import type { SegmentDefinition } from "./segments";
@@ -743,7 +745,12 @@ export async function executorTargetLocation(
         return menuItemId ? await locationOfMenuItem(menuItemId) : null;
       // Batch C — the other menu/barcode writes resolve their branch from the
       // target row; party records are business-scoped facts (default branch).
-      case "menuCategoryCreate": {
+      case "menuCategoryCreate":
+      case "giftCardIssue": {
+        // Gift cards name the issue branch in the payload (id-or-name, like the
+        // route's resolveActiveLocation fallback); promotions and parties stay
+        // business-scoped (default null ⇒ pinned consents refuse via the write
+        // gate just like the rest).
         return str(payload.locationId);
       }
       case "menuCategoryUpdate": {
@@ -1799,6 +1806,80 @@ const branchLifecycle: AutopilotExecutor = async (ctx) => {
   }
 };
 
+
+// ── Issue #883 package 2, batch F — growth: promotions + gift cards ──────────
+const promotionUpsert: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  const kind = str(ctx.payload.kind);
+  const value = typeof ctx.payload.value === "number" && Number.isFinite(ctx.payload.value) ? ctx.payload.value : null;
+  if (!name || (kind !== "percent" && kind !== "amount" && kind !== "bundle_price" && kind !== "buy_x_get_y") || value === null) {
+    return fail("invalid_payload");
+  }
+  try {
+    const saved = await upsertPromotion(ctx.businessId, {
+      id: str(ctx.payload.promotionId) ?? undefined,
+      name,
+      kind: kind as "percent" | "amount" | "bundle_price" | "buy_x_get_y",
+      value,
+      minQuantity: int(ctx.payload.minQuantity),
+      itemIds: Array.isArray(ctx.payload.itemIds)
+        ? (ctx.payload.itemIds as unknown[]).filter((x): x is string => typeof x === "string")
+        : undefined,
+      activeFrom: str(ctx.payload.activeFrom),
+      activeTo: str(ctx.payload.activeTo),
+      daysOfWeek: Array.isArray(ctx.payload.daysOfWeek)
+        ? (ctx.payload.daysOfWeek as unknown[]).filter((x): x is number => typeof x === "number")
+        : undefined,
+      timeFrom: str(ctx.payload.timeFrom),
+      timeTo: str(ctx.payload.timeTo),
+      isActive: typeof ctx.payload.isActive === "boolean" ? ctx.payload.isActive : undefined,
+    });
+    return { ok: true, result: { id: saved.id } };
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "promotion_invalid");
+  }
+};
+
+const promotionToggle: AutopilotExecutor = async (ctx) => {
+  const promotionId = str(ctx.payload.promotionId);
+  const isActive = ctx.payload.isActive;
+  if (!promotionId || typeof isActive !== "boolean") return fail("invalid_payload");
+  const toggled = await setPromotionActive(ctx.businessId, promotionId, isActive);
+  if (!toggled) return fail("not_found");
+  return { ok: true, result: { promotionId, isActive } };
+};
+
+const giftCardIssue: AutopilotExecutor = async (ctx) => {
+  const code = str(ctx.payload.code);
+  const initialValue = typeof ctx.payload.initialValue === "number" && Number.isFinite(ctx.payload.initialValue)
+    ? ctx.payload.initialValue
+    : null;
+  if (!code || initialValue === null || initialValue <= 0) return fail("invalid_payload");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const { giftCardValidityMonths } = await getGrowthSettings(ctx.businessId);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const issued = await issueGiftCard(client, {
+      validityMonths: giftCardValidityMonths,
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      code,
+      initialValue,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { id: issued.card.id, code: issued.card.code } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return fail(err instanceof Error ? err.message : "gift_card_failed");
+  } finally {
+    client.release();
+  }
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -1850,6 +1931,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   barcodeAssign,
   partyCustomerCreate,
   partySupplierCreate,
+  promotionUpsert,
+  promotionToggle,
+  giftCardIssue,
   branchCreate,
   branchUpdate,
   branchLifecycle,

@@ -260,6 +260,12 @@ export type ActionType =
   // record and its flip is logged with actor + timestamp by the service;
   // the same service decides who can change it (parties.manage on the
   // route) — the permission map mirrors that.
+  // Batch F — growth: promotions (campaigns.manage) and gift-card issuance
+  // (giftCardsIssue; the liability posting sits inside issueGiftCard's tx,
+  // exactly the route's call shape — hence always_approve).
+  | "promotion.upsert"
+  | "promotion.toggle"
+  | "gift_card.issue"
   // Batch E — branches: structural configuration of the business itself.
   // Membership creation/role changes stay screen-owned for now (access /
   // identity changes carry step-up policy beyond the approval queue).
@@ -327,6 +333,9 @@ export type AutopilotExecutorKey =
   | "barcodeAssign"
   | "partyCustomerCreate"
   | "partySupplierCreate"
+  | "promotionUpsert"
+  | "promotionToggle"
+  | "giftCardIssue"
   | "branchCreate"
   | "branchUpdate"
   | "branchLifecycle"
@@ -963,6 +972,32 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ inventoryItemId: string /* از find_items در مد inventory */, code?: string /* خالی یعنی سیستم خودش بارکد قابل‌اسکن می‌سازد */, symbology?: "EAN13"|"UPC"|"internal", note?: string }',
     executor: "barcodeAssign",
+  },
+  "promotion.upsert": {
+    type: "promotion.upsert",
+    endpoint: "/api/promotions",
+    method: "POST",
+    label: "ایجاد/ویرایش ترفیج — قیمت‌های صندوق را تغییر می‌دهد",
+    payloadHint:
+      '{ promotionId?: string /* وقتی ویرایش است */, name: string, kind: "percent"|"amount"|"bundle_price"|"buy_x_get_y", value: number, minQuantity?: number, itemIds?: string[], activeFrom?: string, activeTo?: string, daysOfWeek?: number[], timeFrom?: string, timeTo?: string, isActive?: boolean }',
+    executor: "promotionUpsert",
+  },
+  "promotion.toggle": {
+    type: "promotion.toggle",
+    endpoint: "/api/promotions",
+    method: "PATCH",
+    label: "فعال/غیرفعال کردن ترفیج",
+    payloadHint: "{ promotionId: string /* از list_promotions */, isActive: boolean }",
+    executor: "promotionToggle",
+  },
+  "gift_card.issue": {
+    type: "gift_card.issue",
+    endpoint: "/api/promotions/gift-cards",
+    method: "POST",
+    label: "صدور کارت هدیه — ارزشش به عنوان بدهی (2420) ثبت می‌شود",
+    payloadHint:
+      "{ locationId?: string /* شعبهٔ صدور؛ خالی یعنی پیش‌فرض connection */, code: string /* کد منحصربه‌فرد کارت */, initialValue: number /* ریال، مثبت */ }",
+    executor: "giftCardIssue",
   },
   "branch.create": {
     type: "branch.create",
@@ -2627,6 +2662,37 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           description:
             "اعضای تیم کسب‌وکار — نام، نقش، وضعیت فعالی و دسترسی شعبه؛ قبل از هر «تغییر فرد» از این ابزار شناسهٔ درست بگیر.",
           parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_promotions",
+          description:
+            "تریج‌های فعال کسب‌وکار — نوع (percent/amount/bundle_price/buy_x_get_y)، مقدار و بازهٔ فعالی. غیرفعال‌ها فقط وقتی که صریح درخواست شوند.",
+          parameters: {
+            type: "object",
+            properties: {
+              includeInactive: { type: "boolean", description: "true یعنی غیرفعال‌ها هم بیایند" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_gift_card_status",
+          description:
+            "مانده و تاریخچهٔ یک کارت هدیه بر اساس کد — درست مثل جستجوی کارت در صفحهٔ رشد.",
+          parameters: {
+            type: "object",
+            properties: {
+              code: { type: "string", description: "کد کارت هدیه" },
+            },
+            required: ["code"],
+            additionalProperties: false,
+          },
         },
       },
   ];

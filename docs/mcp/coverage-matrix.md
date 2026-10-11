@@ -41,7 +41,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **crm.loyalty** (CRM · Loyalty programs, store credit, redemptions) — partial
 - **growth.settings-campaigns** (Growth · Growth overview, settings, campaign audience, accounting) — partial
 - **growth.messaging** (Growth · Messaging rules & templates) — partial
-- **growth.promotions** (Growth · Promotions & gift cards (issue, expire, redeem)) — MCP gap
+- **growth.promotions** (Growth · Promotions & gift cards (issue, expire, redeem)) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
 - **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — MCP gap
 - **cms.setup-design-domain** (Website / CMS · Connection, setup/build, design, domain/DNS, CDN) — MCP gap
@@ -99,7 +99,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 13 · partial: 31 · MCP gap: 28 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 13 · partial: 32 · MCP gap: 27 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -140,7 +140,7 @@ Counts — covered: 13 · partial: 31 · MCP gap: 28 · backend gap: 0 · n/a (i
 | CRM | Loyalty programs, store credit, redemptions | get_repurchase_candidates | (route only) | — | (route only) | — | loyalty.manage, loyalty.redeem, loyalty.view, store_credit.issue, store_credit.payout | — | get_repurchase_candidates | integration/loyalty.integration.test.ts | partial |
 | Growth | Growth overview, settings, campaign audience, accounting | list_message_campaigns, list_message_templates | (route only) | (route only) | — | — | campaigns.manage, growth.view, marketing.configure | — | list_message_campaigns, list_message_templates | integration/crm.integration.test.ts | partial |
 | Growth | Messaging rules & templates | list_message_templates | (route only) | — | crm.customer.note | — | campaigns.manage, campaigns.view | connection mode | list_message_templates, crm.customer.note | integration/crm.integration.test.ts | partial |
-| Growth | Promotions & gift cards (issue, expire, redeem) | (route only) | (route only) | (route only) | (route only) | — | campaigns.manage, campaigns.view, gift_cards.issue, gift_cards.redeem, gift_cards.view | — | — | integration/giftcards.integration.test.ts | MCP gap |
+| Growth | Promotions & gift cards (issue, expire, redeem) | get_gift_card_status, list_promotions | gift_card.issue, promotion.upsert | promotion.toggle | (route only) | — | campaigns.manage, campaigns.view, gift_cards.issue, gift_cards.redeem, gift_cards.view | connection mode; step-up (always approve) | get_gift_card_status, list_promotions, gift_card.issue, promotion.upsert, promotion.toggle | integration/giftcards.integration.test.ts | partial |
 | Website / CMS | Posts & products (publish, update) | list_website_posts, list_website_products | website.post.draft | website.post.update, website.product.upsert | (route only) | — | cms.content_manage, cms.publish | connection mode | list_website_posts, list_website_products, website.post.draft, website.post.update, website.product.upsert | integration/website.integration.test.ts | partial |
 | Website / CMS | Website overview & state | get_website_status | — | — | — | — | cms.view | — | get_website_status | integration/website.integration.test.ts | covered |
 | Website / CMS | Order events, revalidate, public website connector endpoints (leads, managers, billing) | (route only) | (route only) | — | (route only) | — | billing.manage, website.view | — | — | — | n/a (infra) |

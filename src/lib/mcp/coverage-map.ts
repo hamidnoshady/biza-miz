@@ -391,6 +391,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Growth",
     entity: "Promotions & gift cards (issue, expire, redeem)",
     routes: ["promotions"],
+    ops: {
+      // Batch F (#883): promotion create/toggle, gift-card issue (liability
+      // posting rides the route's transaction), card balance+history by code.
+      // Redeem stays till-side (it happens inside a payment, not alone).
+      listDetail: ["list_promotions", "get_gift_card_status"],
+      create: ["promotion.upsert", "gift_card.issue"],
+      update: ["promotion.toggle"],
+    },
     test: "integration/giftcards.integration.test.ts",
   },
 
