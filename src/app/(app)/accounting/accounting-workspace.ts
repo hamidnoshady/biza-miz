@@ -45,9 +45,8 @@ export interface WorkspaceNavEntry {
   /** The Accounting section this entry is, when it is one. Decides the glyph and the active rule. */
   section?: AccountingSectionKey;
   /**
-   * The nav icon key, for an entry drawn from the business nav — and for the
-   * one section row that wears the app's own glyph (`LEDGER_WORKSPACE_ICON_KEY`)
-   * instead of its section map entry.
+   * The nav icon key, for an entry drawn from the business nav. A section entry
+   * needs none: its glyph is its href's entry in the shared nav icon map.
    */
   iconKey?: string;
 }
@@ -169,14 +168,6 @@ export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] =
 
 export const LEDGER_WORKSPACE_GROUP_KEY = "ledger";
 /**
- * The glyph the workspace row wears — the same calculator the workspace rail
- * and the bottom nav already use for «حسابداری», so the row is recognisable at
- * 4rem where its label is hidden. It is the *mapping* (an `NAV_ICONS` key), not
- * a copy of the icon, so the two surfaces can never drift apart.
- */
-export const LEDGER_WORKSPACE_ICON_KEY = "/accounting";
-
-/**
  * Compose the Accounting app's complete menu.
  *
  * `navItems` is the business nav the shell already built and already filtered;
@@ -259,10 +250,7 @@ export function accountingWorkspaceGroups({
   // page (`/accounting/ledger`), which lists the permitted tools under the
   // accountant's own divisions. It appears only for a member the same section
   // gate lets in (`accountingSectionsFor` → the `ledger.view` door).
-  const ledgerWorkspace = sectionEntry("ledger").map((entry) => ({
-    ...entry,
-    iconKey: LEDGER_WORKSPACE_ICON_KEY,
-  }));
+  const ledgerWorkspace = sectionEntry("ledger");
   if (ledgerWorkspace.length > 0) {
     groups.push({
       key: LEDGER_WORKSPACE_GROUP_KEY,
@@ -290,11 +278,6 @@ export function accountingWorkspaceGroups({
   }
 
   return groups;
-}
-
-/** Every href the composed menu offers — what a test and the bottom-nav picker read. */
-export function accountingWorkspaceHrefs(groups: readonly WorkspaceNavGroup[]): string[] {
-  return groups.flatMap((group) => group.entries.map((entry) => entry.href));
 }
 
 /** One heading of the workspace page, with the permitted tools under it. */

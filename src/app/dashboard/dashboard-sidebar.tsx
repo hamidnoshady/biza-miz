@@ -7,7 +7,6 @@ import {
   CalendarDaysIcon,
   CalculatorIcon,
   CheckIcon,
-  CircleIcon,
   ContactIcon,
   FolderIcon,
   GlobeIcon,
@@ -51,7 +50,7 @@ import {
 } from "@/app/(app)/workspace/workspace-app-nav";
 import { AppStateBadge } from "./app-availability-gate";
 import { CreditBadge } from "./credit-badge";
-import { NAV_ICONS } from "./sidebar-nav-icons";
+import { navIconFor } from "./sidebar-nav-icons";
 import {
   APP_NAV_BUTTON_CLASS,
   NAV_LABEL_CLASS,
@@ -458,7 +457,7 @@ function BottomNavSettings({
         </DialogHeader>
         <ul className="space-y-1">
           {options.map((item) => {
-            const Icon = NAV_ICONS[item.href] ?? CircleIcon;
+            const Icon = navIconFor(item.href, item.iconKey);
             const picked = draft.includes(item.href);
             const blocked = !picked && full;
             return (
@@ -720,7 +719,7 @@ function MobileDashboardHeader({
  * that slot was a second door to the same room — and it cost the bar a fifth of
  * its width for a control nobody was looking for down there.
  */
-function MobileBottomNavigation({
+export function MobileBottomNavigation({
   navItems,
   pathname,
   hrefs,
@@ -753,7 +752,7 @@ function MobileBottomNavigation({
       aria-label="ناوبری اصلی"
     >
       {primaryItems.map((item) => {
-        const Icon = NAV_ICONS[item.href] ?? CircleIcon;
+        const Icon = navIconFor(item.href, item.iconKey);
         const active = item.href === activeHref;
         return (
           <Link

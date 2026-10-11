@@ -22,19 +22,17 @@
  */
 
 import Link from "next/link";
-import { CircleIcon } from "lucide-react";
 import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { NAV_ICONS } from "./sidebar-nav-icons";
+import { navIconFor } from "./sidebar-nav-icons";
 import { APP_NAV_BUTTON_CLASS, NAV_LABEL_CLASS } from "./sidebar-nav-styles";
 import type {
   WorkspaceNavEntry,
   WorkspaceNavGroup,
 } from "@/app/(app)/accounting/accounting-workspace";
-import { ACCOUNTING_SECTION_ICONS } from "@/app/(app)/accounting/accounting-icons";
 
 /** The metadata type a group heading is written in — stated once. */
 export const NAV_GROUP_LABEL_CLASS =
@@ -51,15 +49,10 @@ export const NAV_GROUP_RULE_CLASS =
 export type EntryActiveTest = (entry: WorkspaceNavEntry) => boolean;
 
 function EntryIcon({ entry }: { entry: WorkspaceNavEntry }) {
-  // An explicit `iconKey` wins — it is the one place a row names the *mapping*
-  // (the «حسابداری» calculator, `LEDGER_WORKSPACE_ICON_KEY`) rather than its
-  // section's glyph. An entry has never carried both a business icon and a
-  // section before, so this changes nothing for the existing rows.
-  const Icon = entry.iconKey
-    ? (NAV_ICONS[entry.iconKey] ?? CircleIcon)
-    : entry.section
-      ? ACCOUNTING_SECTION_ICONS[entry.section]
-      : (NAV_ICONS[entry.href.split("?")[0]] ?? CircleIcon);
+  // One resolver for every surface: an explicit `iconKey` names another
+  // entry's mapping (a group with no href of its own); otherwise the entry's
+  // href is the key, and the Accounting sections are in that map too.
+  const Icon = navIconFor(entry.href, entry.iconKey);
   return <Icon aria-hidden="true" className="size-5 shrink-0" />;
 }
 

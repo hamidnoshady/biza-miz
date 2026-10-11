@@ -69,8 +69,9 @@ so the sidebar has one spelling of a row instead of one per menu.
 
 - «فضای کار حسابداری» is **one ordinary menu link** — the same
   `SidebarMenuButton`/`Link` row as «فروش و فاکتور» (`APP_NAV_BUTTON_CLASS`,
-  `NAV_LABEL_CLASS`, a 20px glyph from the calculator mapping
-  `LEDGER_WORKSPACE_ICON_KEY`, hover/focus/selected states, `aria-current` and
+  `NAV_LABEL_CLASS`, a 20px glyph from the shared nav icon map
+  (`navIconFor` in `sidebar-nav-icons.ts`, which reads the section's glyph in
+  `ACCOUNTING_SECTION_ICONS`), hover/focus/selected states, `aria-current` and
   the collapsed-rail tooltip). It has **no disclosure, no chevron, no `aria-expanded`
   and no nested panel** — the words live on the row, not on a heading above it.
   Clicking it opens `/accounting/ledger` immediately.
@@ -175,7 +176,9 @@ table for all three roles (migration 0137).
 ## 5. Adding to the menu
 
 - **A new accounting section** — add the key to `ACCOUNTING_SECTION_KEYS`, a
-  label to `ACCOUNTING_SECTIONS`, a glyph to `ACCOUNTING_SECTION_ICONS`, and
+  label to `ACCOUNTING_SECTIONS`, a glyph to `ACCOUNTING_SECTION_ICONS` (it is
+  the one place a section's glyph lives: the sidebar, the bottom bar and its
+  pin picker all read it through `navIconFor`), and
   (if it is a ledger tool) one division of `LEDGER_WORKSPACE_SUBGROUPS` — the
   tool set `LEDGER_WORKSPACE_SECTION_KEYS` is derived from those divisions. The
   workspace page then lists it automatically, filtered by the same permission

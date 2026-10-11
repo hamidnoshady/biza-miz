@@ -25,11 +25,14 @@ import {
 import type { AccountingSectionKey } from "./accounting-routes";
 
 export const ACCOUNTING_SECTION_ICONS: Record<AccountingSectionKey, LucideIcon> = {
+  // «داشبورد حسابداری» (`/accounting/overview`) keeps the layout glyph its
+  // sidebar row has always worn — the approved reference frame shows it. The
+  // bottom bar and its picker now read this same entry, so the page has one
+  // face everywhere. The app door (`/accounting`) is a separate identity and
+  // keeps the calculator.
   dashboard: LayoutDashboardIcon,
-  // The workspace row wears the app's own calculator — the same glyph the
-  // workspace rail and the bottom nav carry for «حسابداری» (the exact mapping
-  // is `LEDGER_WORKSPACE_ICON_KEY` in `accounting-workspace.ts`; this entry
-  // keeps the section-keyed map total for every other surface that reads it).
+  // «فضای کار حسابداری» wears the same calculator, so the ledger row is
+  // recognisable at the 4rem rail where its label is hidden.
   ledger: CalculatorIcon,
   "trial-balance": CalculatorIcon,
   entries: ClipboardListIcon,

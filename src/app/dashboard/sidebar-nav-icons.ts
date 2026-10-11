@@ -18,6 +18,7 @@ import {
   CalculatorIcon,
   CalendarDaysIcon,
   ChefHatIcon,
+  CircleIcon,
   ClipboardListIcon,
   ContactIcon,
   GemIcon,
@@ -37,8 +38,24 @@ import {
   WatchIcon,
   type LucideIcon,
 } from "lucide-react";
+import {
+  ACCOUNTING_SECTION_KEYS,
+  accountingSectionHref,
+} from "@/app/(app)/accounting/accounting-routes";
+import { ACCOUNTING_SECTION_ICONS } from "@/app/(app)/accounting/accounting-icons";
 
-export const NAV_ICONS: Record<string, LucideIcon> = {
+/**
+ * Every Accounting section, by its canonical href, wears the glyph its section
+ * is drawn with (`ACCOUNTING_SECTION_ICONS`). Derived rather than listed, so a
+ * section cannot exist in the menu and be missing its face here — which is how
+ * the bottom bar and its pin picker drew «فضای کار حسابداری» and every ledger
+ * tool as the generic circle while the sidebar drew them correctly.
+ */
+const ACCOUNTING_SECTION_NAV_ICONS: Record<string, LucideIcon> = Object.fromEntries(
+  ACCOUNTING_SECTION_KEYS.map((key) => [accountingSectionHref(key), ACCOUNTING_SECTION_ICONS[key]]),
+);
+
+const BUSINESS_NAV_ICONS: Record<string, LucideIcon> = {
   "/dashboard": LayoutDashboardIcon,
   "/accounting/orders": ClipboardListIcon,
   // Business work areas now sit under the primary Accounting workspace. The
@@ -61,10 +78,6 @@ export const NAV_ICONS: Record<string, LucideIcon> = {
   // `/dashboard/ledger` address still forwards into it in middleware, so
   // nothing keys on the retired URL any more.
   "/accounting": CalculatorIcon,
-  // Each app's *home* is its overview, and the nav entry carries that exact
-  // href — so the glyph has to be keyed on it too, or the app's own door falls
-  // back to the generic circle.
-  "/accounting/overview": CalculatorIcon,
   "/settings/connections": PlugIcon,
   // Migration 0149 — the media library.
   "/media": ImageIcon,
@@ -89,3 +102,22 @@ export const NAV_ICONS: Record<string, LucideIcon> = {
   // Migration 0131 — the in-product knowledge base («مرکز آموزش»).
   "/knowledge": BookOpenIcon,
 };
+
+/**
+ * The one href → glyph map every navigation surface reads. Accounting's own
+ * pages come from their section definition; everything else is listed above.
+ */
+export const NAV_ICONS: Record<string, LucideIcon> = {
+  ...ACCOUNTING_SECTION_NAV_ICONS,
+  ...BUSINESS_NAV_ICONS,
+};
+
+/**
+ * The glyph for one menu entry. An explicit `iconKey` names another entry's
+ * mapping (the products group has no href of its own and borrows one); otherwise
+ * the entry's own href, query string dropped, is the key. An unmapped entry gets
+ * the generic circle rather than nothing.
+ */
+export function navIconFor(href: string, iconKey?: string): LucideIcon {
+  return NAV_ICONS[iconKey ?? href.split("?")[0]] ?? CircleIcon;
+}

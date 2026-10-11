@@ -32,9 +32,6 @@
 import { PLATFORM_SETTINGS_HOME } from "./app-routes";
 import { SETTINGS_TAB_KEYS, type SettingsTabKey } from "./settings-tabs";
 
-/** A settings section's URL slug — the segment after `/settings/`. */
-export type SettingsSlug = string;
-
 /**
  * Slug → tab key, for the sections the settings manager renders.
  *

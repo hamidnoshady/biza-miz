@@ -1,3 +1,4 @@
+import type { WorkspaceNavGroup } from "./accounting-workspace";
 import { describe, expect, it } from "vitest";
 import {
   ACCOUNTING_SECTIONS,
@@ -13,11 +14,9 @@ import {
 } from "./accounting-routes";
 import {
   accountingWorkspaceGroups,
-  accountingWorkspaceHrefs,
   isLedgerWorkspacePathname,
   ledgerWorkspaceToolGroups,
   LEDGER_WORKSPACE_GROUP_KEY,
-  LEDGER_WORKSPACE_ICON_KEY,
   LEDGER_WORKSPACE_SECTION_KEYS,
   LEDGER_WORKSPACE_SUBGROUPS,
   workspaceEntryIsActive,
@@ -28,6 +27,12 @@ import {
   ACCOUNTING_WORKSPACE_HREFS,
   accountingProductsHref,
 } from "@/lib/app-routes";
+
+/** Every href the composed menu offers, in menu order. */
+function accountingWorkspaceHrefs(groups: readonly WorkspaceNavGroup[]): string[] {
+  return groups.flatMap((group) => group.entries.map((entry) => entry.href));
+}
+
 
 /**
  * Accounting is the business's primary workspace.
@@ -113,7 +118,6 @@ describe("the Accounting workspace menu", () => {
         label: LEDGER_WORKSPACE_LABEL,
         href: "/accounting/ledger",
         section: "ledger",
-        iconKey: LEDGER_WORKSPACE_ICON_KEY,
       },
     ]);
     // An ordinary row: it carries no disclosure furniture at all — no
@@ -389,7 +393,6 @@ describe("which menu entry is the page you are on", () => {
   it("lights the workspace row on its landing page and its owned tool routes", () => {
     const workspace = entry(accountingSectionHref("ledger"), {
       section: "ledger",
-      iconKey: LEDGER_WORKSPACE_ICON_KEY,
     });
     expect(workspaceEntryIsActive(workspace, "/accounting/ledger", "")).toBe(true);
     for (const key of LEDGER_WORKSPACE_SECTION_KEYS) {
