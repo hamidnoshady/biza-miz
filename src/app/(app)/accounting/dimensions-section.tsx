@@ -56,6 +56,10 @@ interface LocationOption {
 interface CatalogResponse {
   settings: DimensionSettingRecord[];
   values: DimensionValueRecord[];
+  /** Issue #868 surface issue: true when the catalogue hit `DIMENSION_VALUE_LIST_CAP`
+   *  and older rows were left out of the list (the count badge is then a floor). */
+  truncated?: boolean;
+  truncatedAt?: number | null;
 }
 
 interface ValueForm {
@@ -103,6 +107,8 @@ export function DimensionsSection({ canManage }: { canManage: boolean }) {
   const [locations, setLocations] = useState<LocationOption[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [catalogTruncated, setCatalogTruncated] = useState(false);
+  const [catalogCap, setCatalogCap] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [actionError, setActionError] = useState("");
@@ -135,6 +141,8 @@ export function DimensionsSection({ canManage }: { canManage: boolean }) {
       setValues(catalog.data.values ?? []);
       const detail = (catalog.data.settings ?? []).find((s) => s.kind === "detail");
       setDetailLabel(detail?.label ?? "");
+      setCatalogTruncated(Boolean(catalog.data.truncated));
+      setCatalogCap(typeof catalog.data.truncatedAt === "number" ? catalog.data.truncatedAt : null);
     }
     if (places.ok) setLocations(places.data.locations ?? []);
     setLoaded(true);
@@ -285,6 +293,12 @@ export function DimensionsSection({ canManage }: { canManage: boolean }) {
         {tab === "manage" ? (
           <div className="space-y-6">
             <ErrorBox>{loadError}</ErrorBox>
+            {catalogTruncated && (
+              <InfoBox>
+                فهرست ابعاد حسابداری بیش از {catalogCap?.toLocaleString("fa-IR") ?? "۲۰۰۰"} مقدار دارد و تنها بخش اخیر آن بارگذاری شد.
+                برای یافتن مقدارهای قدیمی‌تر از جستجو استفاده کنید یا مقدارهای بلااستفاده را بایگانی کنید.
+              </InfoBox>
+            )}
             <InfoBox>{notice}</InfoBox>
             <ErrorBox>{actionError}</ErrorBox>
 

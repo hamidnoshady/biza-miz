@@ -2412,6 +2412,165 @@ describe("malformed payloads and foreign id shapes — every refusal is a domain
  * Seeded from the real template on purpose — hand-inserting the two accounts,
  * as the fixture above does, is exactly what let the gap go unnoticed.
  */
+
+describe("accounting dimensions on fixed assets (issue #868)", () => {
+  let dims: typeof import("../src/lib/accounting-dimensions-service");
+  let ccId: string;
+  beforeEach(async () => {
+    dims = dims ?? (await import("../src/lib/accounting-dimensions-service"));
+    await dims.saveDimensionSettings(biz.id, owner.id, [
+      { kind: "cost_center", isEnabled: true },
+      { kind: "profit_center", isEnabled: true },
+      { kind: "department", isEnabled: true },
+      { kind: "detail", isEnabled: true },
+    ]);
+    ccId = (await dims.createDimensionValue(biz.id, owner.id, { kind: "cost_center", code: `CC-KIT-${randomUUID().slice(0,6)}`, name: "Kitchen ops" })).id;
+  });
+
+  it("persists default dimensions on the asset and stamps them on the acquisition asset leg only", async () => {
+    const asset = await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "فر پیتزا",
+      acquisitionDate: "2026-08-01",
+      inServiceDate: "2026-08-01",
+      cost: 60_000_000,
+      salvageValue: 0,
+      usefulLifeMonths: 60,
+      createdBy: owner.id,
+      dimensions: { cost_center: ccId },
+      acquisition: { sourceAccountId: acct.cash, entryDate: null },
+    });
+    expect(asset.costCenterId).toBe(ccId);
+    expect(asset.profitCenterId).toBeNull();
+
+    const { rows: lines } = await db.query<{
+      debit: string; credit: string; cost_center_id: string | null; account_code: string;
+    }>(
+      `SELECT jl.debit::text AS debit, jl.credit::text AS credit, jl.cost_center_id, a.code AS account_code
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.source_type = 'fixed_asset_acquisition' AND je.source_id = $1
+        ORDER BY a.code`,
+      [asset.id],
+    );
+    expect(lines).toHaveLength(2);
+    // asset leg (1500 block) carries cost_center; settlement leg (cash) does not
+    const assetLeg = lines.find((l) => l.account_code.startsWith("15"))!;
+    const cashLeg = lines.find((l) => l.account_code === "1100" || l.debit === "0")!;
+    expect(assetLeg.cost_center_id).toBe(ccId);
+    expect(assetLeg.debit).toBe("60000000");
+    expect(cashLeg.cost_center_id).toBeNull();
+    expect(cashLeg.credit).toBe("60000000");
+  });
+
+  it("stamps dimensions on depreciation expense (not accumulated depreciation)", async () => {
+    const period = periodMonthsAgo(1); // a month that has started, one period back
+    const asset = await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "یخچال",
+      acquisitionDate: acquisitionDateFor(period),
+      inServiceDate: acquisitionDateFor(period),
+      cost: 60_000_000,
+      salvageValue: 0,
+      usefulLifeMonths: 60,
+      createdBy: owner.id,
+      dimensions: { cost_center: ccId },
+      acquisition: { sourceAccountId: acct.cash, entryDate: null },
+    });
+    const posted = await fixedAssetsService.postDepreciation({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      periodKey: period,
+      createdBy: owner.id,
+    });
+    const { rows } = await db.query<{ account_code: string; cost_center_id: string | null; debit: string; credit: string }>(
+      `SELECT a.code AS account_code, jl.cost_center_id, jl.debit::text AS debit, jl.credit::text AS credit
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.source_type = 'fixed_asset_depreciation' AND je.business_id = $1
+        ORDER BY a.code`,
+      [biz.id],
+    );
+    // expense debit carries dims; accumulated-depreciation credit does not
+    const exp = rows.find((r) => r.account_code === "5700")!;
+    const acc = rows.find((r) => r.account_code === "1510")!;
+    expect(exp.cost_center_id).toBe(ccId);
+    expect(Number(exp.debit)).toBeGreaterThan(0);
+    expect(acc.cost_center_id).toBeNull();
+    expect(Number(acc.credit)).toBeGreaterThan(0);
+  });
+
+  it("stamps dimensions on disposal cost/gain/loss legs but not the proceeds leg", async () => {
+    const asset = await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "صندوق فروش",
+      acquisitionDate: "2026-06-01",
+      inServiceDate: "2026-06-01",
+      cost: 60_000_000,
+      salvageValue: 0,
+      usefulLifeMonths: 60,
+      createdBy: owner.id,
+      dimensions: { cost_center: ccId },
+      acquisition: { sourceAccountId: acct.cash, entryDate: null },
+    });
+    const sale = await fixedAssetsService.disposeFixedAsset({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      kind: "sale",
+      disposalDate: "2026-09-30",
+      proceeds: 70_000_000,
+      proceedsAccountId: acct.cash,
+      reason: "فروش",
+      createdBy: owner.id,
+    });
+    expect(sale.journalEntryId).not.toBeNull();
+    const { rows } = await db.query<{ account_code: string; cost_center_id: string | null; debit: string; credit: string }>(
+      `SELECT a.code AS account_code, jl.cost_center_id, jl.debit::text AS debit, jl.credit::text AS credit
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.source_type = 'fixed_asset_disposal' AND je.source_id = $1
+        ORDER BY a.code`,
+      [asset.id],
+    );
+    // cash/proceeds (1100) no dims; asset credit (15xx) dims; gain credit (4920) dims
+    const byCode = Object.fromEntries(rows.map((r) => [r.account_code, r]));
+    // find the fixed-asset leg (code starting with 15, excluding 1510)
+    const assetLeg = rows.find((r) => r.account_code.startsWith("15") && r.account_code !== "1510")!;
+    expect(assetLeg.cost_center_id).toBe(ccId);
+    expect(assetLeg.credit).toBe("60000000");
+    const cashLeg = rows.find((r) => r.account_code === "1100");
+    if (cashLeg) expect(cashLeg.cost_center_id).toBeNull();
+    const accLeg = byCode["1510"];
+    if (accLeg) expect(accLeg.cost_center_id).toBeNull(); // accumulated dep'n is contra
+    const gainLeg = byCode["4920"];
+    if (gainLeg) expect(gainLeg.cost_center_id).toBe(ccId);
+  });
+
+  it("refuses a dimension value that does not exist or belongs to another business", async () => {
+    await expect(
+      fixedAssetsService.createFixedAsset({
+        businessId: biz.id,
+        locationId: biz.locationA,
+        name: "برج خنک‌کننده",
+        acquisitionDate: "2026-08-01",
+        cost: 10_000_000,
+        salvageValue: 0,
+        usefulLifeMonths: 60,
+        createdBy: owner.id,
+        dimensions: { cost_center: "00000000-0000-0000-0000-000000000000" },
+        acquisition: { sourceAccountId: acct.cash, entryDate: null },
+      }),
+    ).rejects.toBeInstanceOf(dims.AccountingDimensionError);
+  });
+});
+
+
 describe("depreciation for a business that is not a café", () => {
   it.each(["jewelry", "watch", "accessories", "cosmetics"] as const)(
     "posts against the %s template's own chart",

@@ -485,7 +485,8 @@ export async function updateDimensionValue(
   });
 }
 
-/** How many postings already name this value, across lines, draft lines and expenses. */
+/** How many postings already name this value, across lines, draft lines, expenses
+ *  and fixed-asset defaults (issue #868). */
 export async function dimensionValueUsage(businessId: string, id: string): Promise<number> {
   const { rows } = await query<{ n: string }>(
     `SELECT (
@@ -495,6 +496,8 @@ export async function dimensionValueUsage(businessId: string, id: string): Promi
           WHERE d.business_id = $1 AND $2::uuid IN (dl.cost_center_id, dl.profit_center_id, dl.department_id, dl.detail_dimension_id))
       + (SELECT count(*) FROM expenses e
           WHERE e.business_id = $1 AND $2::uuid IN (e.cost_center_id, e.profit_center_id, e.department_id, e.detail_dimension_id))
+      + (SELECT count(*) FROM fixed_assets fa
+          WHERE fa.business_id = $1 AND $2::uuid IN (fa.cost_center_id, fa.profit_center_id, fa.department_id, fa.detail_dimension_id))
       )::text AS n`,
     [businessId, id],
   );
