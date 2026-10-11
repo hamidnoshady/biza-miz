@@ -20,6 +20,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { generate as generateTotp } from "otplib";
+import { NextRequest } from "next/server";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -36,6 +37,19 @@ if (!rootDatabaseUrl) {
  * token) mean something.
  */
 const sms = vi.hoisted(() => ({ sent: [] as { phone: string; code: string }[] }));
+
+/**
+ * A cookie jar standing in for `next/headers` — the route tests below drive
+ * real session-gated handlers, and outside a Next request there is no cookie
+ * store to read (same seam `support-session-end.integration.test.ts` uses).
+ */
+const cookieJar = vi.hoisted(() => new Map<string, string>());
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) => (cookieJar.has(name) ? { name, value: cookieJar.get(name)! } : undefined),
+  }),
+  headers: async () => new Headers(),
+}));
 
 vi.mock("@/lib/sms-config", () => ({
   getPublicSmsConfig: async () => ({
@@ -66,6 +80,11 @@ let mfaPolicy: typeof import("../src/lib/mfa-policy");
 let mfaEnrol: typeof import("../src/lib/mfa-enrol");
 let mfaVerify: typeof import("../src/lib/mfa-verify");
 let otpChallenge: typeof import("../src/lib/otp-challenge");
+let pinLoginRoute: typeof import("../src/app/api/auth/pin-login/route");
+let authEdge: typeof import("../src/lib/auth-edge");
+let phoneSelfRoute: typeof import("../src/app/api/auth/phone/self/route");
+let phoneOtpRequestRoute: typeof import("../src/app/api/auth/phone-otp/request/route");
+let phoneOtpVerifyRoute: typeof import("../src/app/api/auth/phone-otp/verify/route");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -101,6 +120,11 @@ beforeAll(async () => {
   mfaEnrol = await import("../src/lib/mfa-enrol");
   mfaVerify = await import("../src/lib/mfa-verify");
   otpChallenge = await import("../src/lib/otp-challenge");
+  pinLoginRoute = await import("../src/app/api/auth/pin-login/route");
+  authEdge = await import("../src/lib/auth-edge");
+  phoneSelfRoute = await import("../src/app/api/auth/phone/self/route");
+  phoneOtpRequestRoute = await import("../src/app/api/auth/phone-otp/request/route");
+  phoneOtpVerifyRoute = await import("../src/app/api/auth/phone-otp/verify/route");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -121,7 +145,9 @@ afterAll(async () => {
 
 beforeEach(async () => {
   sms.sent.length = 0;
+  cookieJar.clear();
   await db.query("DELETE FROM auth_password_resets");
+  await db.query("DELETE FROM auth_login_attempts");
   // Challenges are minted pre-auth and carry no tenant column, so they are
   // cleared per test rather than per business.
   await db.query("DELETE FROM mfa_challenges");
@@ -920,5 +946,277 @@ describe("Issue #854 — P1.1 the console MFA roster reads the real policy", () 
      */
     expect(accountant!.requirement).not.toBe("not_required");
     expect(accountant!.methods).toEqual([]);
+  });
+});
+
+describe("Issue #854 — P0.6 the staff door never lets a privileged account skip MFA", () => {
+  /**
+   * Off-cloud, the PIN pad admits the privileged roles too (an owner working a
+   * shift at their own till). That convenience must not double as a bypass:
+   * the door has to run the same MFA decision the account door runs, and
+   * refuse with `mfa_required` instead of minting a session.
+   */
+
+  async function makeLocal(seeded: Seed): Promise<void> {
+    await dbLib.withTenant(seeded.businessId, () =>
+      dbLib.query(
+        `INSERT INTO settings (business_id, location_id, key, value)
+         VALUES ($1, NULL, $2, $3)
+         ON CONFLICT (business_id, location_id, key)
+         DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [
+          seeded.businessId,
+          settings.SETTING_KEYS.deploymentProfile,
+          JSON.stringify({ profile: "local", pairedAt: new Date().toISOString() }),
+        ],
+      ),
+    );
+    expect((await deployment.readDeploymentProfile(seeded.businessId)).profile).toBe("local");
+  }
+
+  function pinLogin(businessId: string, pin: string) {
+    return pinLoginRoute.POST(
+      new NextRequest("http://localhost/api/auth/pin-login", {
+        method: "POST",
+        body: JSON.stringify({ pin, businessId }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  }
+
+  it("refuses an owner whose policy requires MFA, and names the account door", async () => {
+    const seeded = await seedBusiness("PinDoorPolicy");
+    await makeLocal(seeded);
+    await dbLib.withTenant(seeded.businessId, () =>
+      mfaPolicy.setMfaPolicy(seeded.businessId, { requireForManagers: true, requireForAccountants: true }),
+    );
+    await dbLib.withTenant(seeded.businessId, () =>
+      team.setPin(seeded.businessId, seeded.ownerId, "4821", seeded.ownerId),
+    );
+
+    const response = await pinLogin(seeded.businessId, "4821");
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: "mfa_required" });
+
+    // No session was minted by the refused attempt.
+    const { rows } = await db.query(
+      `SELECT 1 FROM employee_sessions WHERE employee_id = $1`,
+      [seeded.ownerId],
+    );
+    expect(rows.length).toBe(0);
+  });
+
+  it("refuses a privileged account that holds a confirmed factor even under a permissive policy", async () => {
+    const seeded = await seedBusiness("PinDoorFactor");
+    await makeLocal(seeded);
+    await dbLib.withTenant(seeded.businessId, () =>
+      mfaPolicy.setMfaPolicy(seeded.businessId, { requireForManagers: false, requireForAccountants: false }),
+    );
+
+    // A manager membership linked to the owner identity: the factor hangs off
+    // the identity, so the PIN door must see it through the membership.
+    const managerIdentity = await db.query<{ id: string }>(
+      `INSERT INTO platform_users (email, password_hash, full_name)
+       VALUES ($1, $2, 'Manager') RETURNING id`,
+      [`manager-${randomUUID().slice(0, 8)}@example.com`, await bcrypt.hash("manager-password", 10)],
+    );
+    const manager = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, platform_user_id, role, full_name, email)
+       VALUES ($1, $2, 'manager', 'Manager', $3) RETURNING id`,
+      [seeded.businessId, managerIdentity.rows[0].id, `manager-${randomUUID().slice(0, 8)}@example.com`],
+    );
+
+    const enrolled = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: managerIdentity.rows[0].id,
+      email: "manager@example.com",
+      method: "totp",
+    });
+    expect(enrolled.ok).toBe(true);
+    if (!enrolled.ok || !enrolled.totpSecret) throw new Error("totp enrolment failed");
+    const confirm = await mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: managerIdentity.rows[0].id,
+      method: "totp",
+      code: await generateTotp({ secret: enrolled.totpSecret }),
+    });
+    expect(confirm.outcome).toBe("totp");
+
+    await dbLib.withTenant(seeded.businessId, () =>
+      team.setPin(seeded.businessId, manager.rows[0].id, "9153", seeded.ownerId),
+    );
+
+    const response = await pinLogin(seeded.businessId, "9153");
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: "mfa_required" });
+  });
+
+  it("keeps the staff door open for a PIN-role member with no factor", async () => {
+    const seeded = await seedBusiness("PinDoorStaff");
+    await makeLocal(seeded);
+    const cashier = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name)
+       VALUES ($1, 'cashier', 'Cashier') RETURNING id`,
+      [seeded.businessId],
+    );
+    await dbLib.withTenant(seeded.businessId, () =>
+      team.setPin(seeded.businessId, cashier.rows[0].id, "7734", seeded.ownerId),
+    );
+
+    const response = await pinLogin(seeded.businessId, "7734");
+    // The gate is not a blanket refusal: a member the policy does not cover
+    // and who holds no factor signs in at the till as before.
+    expect(response.status).toBe(200);
+  });
+});
+
+describe("Issue #854 — P1.16 a self phone change pre-checks duplicates before spending the SMS", () => {
+  /**
+   * The route that lets a member prove their own number runs the uniqueness
+   * check *before* the send — a taken number answers 409 without an SMS going
+   * out — and re-checks on the verify side, because another membership can
+   * take the number in the window between send and redeem. Both halves are
+   * asserted here against the real route with a real signed session.
+   */
+
+  async function signIn(seeded: Seed): Promise<void> {
+    const token = await authEdge.signSession({
+      sub: seeded.ownerId,
+      role: "owner",
+      businessId: seeded.businessId,
+      locationId: null,
+      fullName: "Owner",
+      recentAuthAt: Math.floor(Date.now() / 1000),
+    });
+    cookieJar.set(authEdge.SESSION_COOKIE, token);
+  }
+
+  function post(body: Record<string, unknown>) {
+    return phoneSelfRoute.POST(
+      new NextRequest("http://localhost/api/auth/phone/self", {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  }
+
+  it("refuses a taken number before the SMS, and re-checks at verify time", async () => {
+    const seeded = await seedBusiness("PhoneSelf");
+    const takenPhone = "+989121110801";
+    await db.query(
+      `INSERT INTO users (business_id, role, full_name, phone_e164)
+       VALUES ($1, 'cashier', 'Taken', $2)`,
+      [seeded.businessId, takenPhone],
+    );
+    await signIn(seeded);
+
+    // The pre-check: 409, and no SMS spent on the refusal.
+    const refused = await post({ action: "send", phone: takenPhone });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: "phone_taken" });
+    expect(sms.sent.length).toBe(0);
+
+    // A free number proceeds to the send.
+    const freshPhone = "+989121110802";
+    const sent = await post({ action: "send", phone: freshPhone });
+    expect(sent.status).toBe(200);
+    expect(sms.sent.length).toBe(1);
+    expect(sms.sent[0].phone).toBe(freshPhone);
+    const code = sms.sent[0].code;
+
+    // The verify-side re-check: while the challenge is live, the number
+    // becomes taken — the redemption must refuse rather than write a
+    // duplicate, and the code is not silently accepted.
+    await db.query(
+      `UPDATE users SET phone_e164 = $1 WHERE business_id = $2 AND full_name = 'Taken'`,
+      [freshPhone, seeded.businessId],
+    );
+    const verify = await post({ action: "verify", code });
+    expect(verify.status).toBe(409);
+    expect(await verify.json()).toMatchObject({ error: "phone_taken" });
+
+    // Nothing was stamped on the refusing verify.
+    const { rows } = await db.query<{ phone_verified_at: Date | null }>(
+      `SELECT phone_verified_at FROM users WHERE id = $1`,
+      [seeded.ownerId],
+    );
+    expect(rows[0].phone_verified_at).toBeNull();
+  });
+});
+
+describe("Issue #854 — P1.18 the multi-business door reveals nothing before the code is proven", () => {
+  /**
+   * A number that matches members in several businesses gets one challenge
+   * keyed on the number; the request answers exactly like any other send, and
+   * only a *proven* code unlocks the business list. A wrong code must look
+   * like any wrong code — no list, no hint of how many businesses matched.
+   */
+
+  it("lists the businesses only after the code is proven", async () => {
+    const phone = "+989121110810";
+    const first = await seedBusiness("MultiA");
+    const second = await seedBusiness("MultiB");
+    for (const seeded of [first, second]) {
+      await db.query(
+        `INSERT INTO users (business_id, role, full_name, phone_e164, phone_verified_at)
+         VALUES ($1, 'cashier', 'Shared', $2, now())`,
+        [seeded.businessId, phone],
+      );
+    }
+
+    const requested = await phoneOtpRequestRoute.POST(
+      new NextRequest("http://localhost/api/auth/phone-otp/request", {
+        method: "POST",
+        body: JSON.stringify({ phone }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(requested.status).toBe(200);
+    const requestJson = (await requested.json()) as { token?: string; status?: string };
+    expect(requestJson.status).toBe("sent");
+    // The send itself names no business.
+    expect(requestJson).not.toHaveProperty("businesses");
+    expect(requestJson).not.toHaveProperty("needsBusinessSelection");
+    const pendingToken = requestJson.token!;
+    expect(pendingToken).toBeTruthy();
+    const code = sms.sent[sms.sent.length - 1].code;
+
+    // Wrong code: the same refusal a single-business member gets — no list.
+    const wrong = await phoneOtpVerifyRoute.POST(
+      new NextRequest("http://localhost/api/auth/phone-otp/verify", {
+        method: "POST",
+        body: JSON.stringify({ code: "000000" }),
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${pendingToken}`,
+        },
+      }),
+    );
+    expect(wrong.status).toBe(401);
+    const wrongJson = (await wrong.json()) as Record<string, unknown>;
+    expect(wrongJson).toMatchObject({ error: "invalid_code" });
+    expect(wrongJson).not.toHaveProperty("businesses");
+
+    // The right code, and only then, unlocks the selection.
+    const right = await phoneOtpVerifyRoute.POST(
+      new NextRequest("http://localhost/api/auth/phone-otp/verify", {
+        method: "POST",
+        body: JSON.stringify({ code }),
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${pendingToken}`,
+        },
+      }),
+    );
+    expect(right.status).toBe(200);
+    const rightJson = (await right.json()) as {
+      needsBusinessSelection?: boolean;
+      businesses?: { id: string; name: string }[];
+      selectionToken?: string;
+    };
+    expect(rightJson.needsBusinessSelection).toBe(true);
+    expect(rightJson.businesses?.map((b) => b.name).sort()).toEqual(["MultiA", "MultiB"]);
+    expect(rightJson.selectionToken).toBeTruthy();
   });
 });

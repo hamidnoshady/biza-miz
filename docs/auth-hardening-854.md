@@ -41,7 +41,7 @@ nothing in this pass merges the two trust boundaries.
 | P0.3 tenant admin receives a usable reset credential | `requestMemberPasswordReset` delivers by SMS to the holder's verified number and returns `{deliveredTo, channel, expiresAt, email}`; the token exists only in the sent message; `no_verified_channel` when there is none | `auth-hardening-854.integration.test.ts` (P0.3) |
 | P0.4 invitation acceptance bypasses authentication for an existing identity | the offered password must verify against the identity's **existing** hash (`authentication_required` / `invalid_credentials`), and the acceptance itself is now two phases: `beginInvitationAcceptance` (validate the invitation, authenticate, create the identity a first-time invitee's second factor hangs off) and `completeInvitationAcceptance` (write the membership). Nothing the ceremony promises is written until every factor is proven — the pending MFA token carries `invitationId`, and `/api/auth/mfa/verify` completes the acceptance on its success path, immediately before the session. Phase 2 re-locks the invitation, so one revoked mid-ceremony cannot land, and is idempotent for the identity it accepted. The invitation screen renders the shared `MfaStep` instead of navigating away on `res.ok` (it used to bounce the invitee to the login screen) | `auth-hardening-854.integration.test.ts` (P0.4 ordering), `team.integration.test.ts`, `auth-account-security.integration.test.ts` |
 | P0.5 invitation `locationIds` not tenant-validated | validated at creation **and** re-validated under the acceptance transaction | `auth-hardening-854.integration.test.ts` (P0.5) |
-| P0.6 privileged PIN login bypasses MFA and sets `platformUserId: null` | a privileged role is refused the staff door when MFA applies or a factor exists (403 `mfa_required`); biometric now runs the same gate; PIN/biometric sessions carry the real `platformUserId` + `tokenVersion` | `pin-login/route.ts`, `webauthn/login/verify/route.ts` |
+| P0.6 privileged PIN login bypasses MFA and sets `platformUserId: null` | a privileged role is refused the staff door when MFA applies or a factor exists (403 `mfa_required`); biometric now runs the same gate; PIN/biometric sessions carry the real `platformUserId` + `tokenVersion` | `pin-login/route.ts`, `webauthn/login/verify/route.ts`; pinned by the P0.6 cases in `auth-hardening-854.integration.test.ts` — refusal under a requiring policy, refusal for a confirmed factor under a permissive policy, no session minted, and the staff door still open for an uncovered PIN role |
 | P0.7 phone OTP stamps `otp_login_at` before MFA | the stamp is deferred into the terminal step of `completePhoneLogin`, after the MFA decision | `phone-otp.integration.test.ts` |
 | P0.8 self OTP accepts a fresh phone at verify | purpose and destination are read from the challenge row; the body's `phone` is never used at verify | `phone-otp.integration.test.ts`, `auth-hardening-854.integration.test.ts` |
 | P0.9 the last factor is removable from the wrong business | `mayRemoveGlobalMfaFactor` + `globalMfaRequirementForPlatformUser` (strictest active membership wins) | `auth-hardening-854.integration.test.ts` (P0.9) |
@@ -65,7 +65,7 @@ nothing in this pass merges the two trust boundaries.
 | P1.13 Hybrid invitations not blocked | `createInvitation` refuses on a Hybrid profile (`cloud_confirmation_required`), like direct creation |
 | P1.14 Hybrid writes to cloud-owned PIN/phone | `describeCredentialSurface` guards in `/api/auth/phone/self`, `/api/auth/mfa/self` and `setPin`; the table decides, not the route |
 | P1.15 Profile shows editable controls Hybrid rejects | the page passes the surfaces; the cards render read-only with «این مورد در نسخهٔ ابری مدیریت می‌شود.» |
-| P1.16 self phone change lacks a duplicate pre-check | `isPhoneTaken` before the SMS **and** again on the verify path |
+| P1.16 self phone change lacks a duplicate pre-check | `isPhoneTaken` before the SMS **and** again on the verify path. Pinned by the P1.16 case in `auth-hardening-854.integration.test.ts`: a taken number answers 409 with no SMS spent, a free number sends, a number taken mid-window is refused at verify, and nothing is stamped on a refusal — all driven through the real route with a real signed session |
 | P1.17 challenge consumption not concurrency-safe | row lock + `consumed_at` (§1–2 of `0211`) |
 | P1.18 phone login anti-enumeration incomplete | the business list is only returned after a valid code; before that the multi-business path answers exactly like any other send |
 | P1.19 multi-business phone/password selection UI | one shared step, `components/auth/business-picker.tsx` (`useBusinessSelection` + `BusinessPicker`). Both doors render it: the phone-OTP step replays its `selectionToken`, and the password door re-posts `{email,password,businessId}` — it has no token, because `/api/auth/login` re-verifies the credentials on every call. The password door previously read `res.ok` as a successful login and navigated, so a member of two businesses looped back to the login screen with no explanation |
@@ -237,6 +237,33 @@ No security invariant is deferred. P2.20's two phone numbers — the membership'
 login phone and the identity's MFA SMS factor — remain deliberately separate
 and labelled; the rationale is in its row above (the issue's own fix for P2.20
 is labelling, not collapsing).
+
+## Verification pass (round 5)
+
+Every finding above was re-opened against the code — not the doc — on the
+round-4 head: for each of P0.1–P0.9, P1.1–P1.20 and P2.1–P2.28 the enforcing
+file was read and the test claimed for it located. The audit confirmed every
+fix exists and the Tenant (`platform_user`) and Platform console
+(`platform_admin`) realms remain separate throughout. Two rows were carrying
+fixes without a regression test and were completed during the pass:
+
+- **P0.6** — the PIN door's `mfa_required` refusal now has three integration
+  cases (policy-required owner refused; a privileged account holding a
+  confirmed factor refused even under a permissive policy; an uncovered
+  PIN-role member still signs in), asserting the status, the error code and
+  that no `employee_sessions` row is minted by a refusal.
+- **P1.16** — the self phone change's duplicate pre-check is now driven
+  through the real `/api/auth/phone/self` route with a signed session: the
+  taken number is refused with no SMS spent, and the verify-side re-check
+  refuses a number taken mid-window without stamping anything.
+- **P1.18** — the multi-business phone door now has a case proving the list
+  of businesses appears only after the code redeems: the send and a wrong
+  code both answer without any `businesses` field, and the proven code alone
+  unlocks the selection with its token.
+
+The full finding-by-finding table with file:line evidence and test names is
+kept in the pull request description so review can check it against this
+document.
 
 ## Gate results in this workspace
 
