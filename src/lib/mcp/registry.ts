@@ -219,6 +219,8 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // Batch T — site-level infra reads (agnostic, like every website read).
   { name: "get_website_dns", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "get_website_cdn", kind: "read", app: "website", branchPolicy: "agnostic" },
+  // Batch U — the help catalogue is whole-app shared content (agnostic).
+  { name: "list_kb_catalogue", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_sales_invoice", kind: "read", app: "pos", branchPolicy: "pinned" },
 
   // ---- Workspace / AEC (project desk is business-scoped, never branch-scoped) ----

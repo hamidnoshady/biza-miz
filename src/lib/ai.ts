@@ -2739,6 +2739,14 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     {
       type: "function",
       function: {
+        name: "list_kb_catalogue",
+        description: "فهرست راهنمای محصول: دسته‌ها و نوشته‌ها با slug — برای اشارهٔ دقیق به یک راهنما (پس از این می‌توانی با search_kb_articles متن را بیابی).",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "get_website_dns",
         description: "وضعیت DNS دامنهٔ سایت — رکوردها، nameserverها و تأیید (برای «چرا دامنه‌ام وصل نشد؟»).",
         parameters: { type: "object", properties: {}, additionalProperties: false },

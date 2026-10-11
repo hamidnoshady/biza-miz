@@ -220,6 +220,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   get_wp_overview: "The WooCommerce manager dashboard counts.",
   get_website_dns: "DNS status of the site's domain (records, nameservers, verification).",
   get_website_cdn: "CDN status of the site (cache mode, purge state).",
+  list_kb_catalogue: "The product help catalogue — categories and articles with slugs for citation.",
   // Phase C — the messaging reads that feed the campaign-create action.
   list_message_templates: "Saved message templates by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",
   list_message_campaigns: "The business's message campaigns (draft, sending, done) with id, name, channel, status and recipient / sent / delivered / failed counts.",

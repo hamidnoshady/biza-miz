@@ -724,7 +724,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Knowledge base",
     entity: "Knowledge articles & search",
     routes: ["knowledge"],
-    test: "integration/knowledge.integration.test.ts",
+    ops: { listDetail: ["search_kb_articles", "list_kb_catalogue"] },
+    note: "authoring (articles/categories/tags) lives under the platform console by design — the tenant exposes the help it reads, not the help it writes",
+    test: "src/lib/knowledge.test.ts",
   },
   {
     id: "reports.reports",

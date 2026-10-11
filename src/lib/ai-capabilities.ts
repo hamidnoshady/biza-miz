@@ -135,6 +135,7 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // the same gate that lets the assistant itself read the centre. Media
   // library mirrors the library screen (media.view).
   search_kb_articles: PERMISSIONS.aiUse,
+  list_kb_catalogue: PERMISSIONS.aiUse,
   list_media_assets: PERMISSIONS.mediaView,
   get_media_asset: PERMISSIONS.mediaView,
   list_formulas: PERMISSIONS.inventoryView,

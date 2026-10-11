@@ -60,7 +60,7 @@ import { listMembers } from "./team-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
-import { searchKbArticles } from "./knowledge-service";
+import { searchKbArticles, listKbCatalogue } from "./knowledge-service";
 import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/website-service";
 import { listRetailInvoices } from "./retail-invoice/list-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
@@ -1831,6 +1831,9 @@ export async function runReadTool(
       const result = await listCmsMedia(businessId, { limit, page });
       if (!result.ok) return { ok: false, data: { error: result.error } };
       return { ok: true, data: { media: result.data.media, totalDocs: result.data.totalDocs, page } };
+    }
+    case "list_kb_catalogue": {
+      return { ok: true, data: await listKbCatalogue() };
     }
     case "search_kb_articles": {
       const q = String(args.q ?? "").trim();

@@ -4,7 +4,7 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **118 read verbs** (**25** business-wide aggregates —
+Current surface: **119 read verbs** (**25** business-wide aggregates —
 visible only to connections consented for every branch) and **110 write verbs**
 (**32** high-risk, forced through the approval queue even on `apply`-mode connections).
 
@@ -113,6 +113,7 @@ visible only to connections consented for every branch) and **110 write verbs**
 | `get_wp_overview` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_website_dns` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_website_cdn` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_kb_catalogue` | workspace | agnostic | `ai.use` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_sales_invoice` | pos | pinned | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_workspace_project_status` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_workspace_tasks` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
