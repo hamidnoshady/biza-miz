@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { NATIVE_BRIDGE_VERSION } from "./bridge-contract";
 import { NATIVE_STORAGE_KEY } from "./native-environment";
 import {
   createNativeRuntimeStore,
@@ -97,7 +98,7 @@ function fakeHost(overrides: Partial<NativeRuntimeHost> & { referrer?: string } 
 }
 
 function readyFrame(payload: unknown = APP_INFO) {
-  return JSON.stringify({ v: 1, kind: "event", name: "bridge.ready", payload });
+  return JSON.stringify({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload });
 }
 
 describe("createNativeRuntimeStore", () => {
@@ -148,9 +149,9 @@ describe("createNativeRuntimeStore", () => {
     emit({ data: "", ports: [port.asPort()] });
     expect(port.posted).toHaveLength(1);
     const request = JSON.parse(port.posted[0]);
-    expect(request).toMatchObject({ v: 1, kind: "request", command: "app.info" });
+    expect(request).toMatchObject({ v: NATIVE_BRIDGE_VERSION, kind: "request", command: "app.info" });
 
-    port.emit(JSON.stringify({ v: 1, kind: "response", id: request.id, ok: true, result: APP_INFO }));
+    port.emit(JSON.stringify({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: request.id, ok: true, result: APP_INFO }));
     await vi.waitFor(() => expect(store.getSnapshot().connection).toBe("connected"));
     expect(store.getSnapshot().app).toEqual(APP_INFO);
   });
@@ -229,6 +230,39 @@ describe("createNativeRuntimeStore", () => {
     expect(port.closed).toBe(true);
     expect(store.getSnapshot()).toEqual(INITIAL_NATIVE_SNAPSHOT);
   });
+
+  it("rejects request() with bridge_unavailable before any channel has connected", async () => {
+    const store = createNativeRuntimeStore();
+    await expect(store.request("app.info")).rejects.toMatchObject({ code: "bridge_unavailable" });
+  });
+
+  it("sends request() through the connected channel and resolves with the parsed result", async () => {
+    const store = createNativeRuntimeStore();
+    const { host, emit } = fakeHost({ referrer: TWA_REFERRER });
+    store.attach(host);
+    const port = fakePort();
+    emit({ data: readyFrame(), ports: [port.asPort()] });
+
+    const pending = store.request("notifications.status");
+    expect(port.posted).toHaveLength(1);
+    const sent = JSON.parse(port.posted[0]);
+    expect(sent).toMatchObject({ command: "notifications.status" });
+    port.emit(
+      JSON.stringify({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: sent.id, ok: true, result: { permission: "granted" } }),
+    );
+
+    await expect(pending).resolves.toEqual({ permission: "granted" });
+  });
+
+  it("rejects request() with bridge_unavailable again once the channel has been torn down", () => {
+    const store = createNativeRuntimeStore();
+    const { host, emit } = fakeHost({ referrer: TWA_REFERRER });
+    const detach = store.attach(host);
+    emit({ data: readyFrame(), ports: [fakePort().asPort()] });
+    detach();
+
+    return expect(store.request("app.info")).rejects.toMatchObject({ code: "bridge_unavailable" });
+  });
 });
 
 describe("portTransport", () => {
@@ -236,8 +270,8 @@ describe("portTransport", () => {
     const port = fakePort();
     const transport = portTransport(port.asPort());
     transport.onMessage(() => {});
-    transport.send({ v: 1, kind: "request", id: "req-1", command: "app.info", payload: {} });
-    expect(port.posted).toEqual(['{"v":1,"kind":"request","id":"req-1","command":"app.info","payload":{}}']);
+    transport.send({ v: NATIVE_BRIDGE_VERSION, kind: "request", id: "req-1", command: "app.info", payload: {} });
+    expect(port.posted).toEqual([`{"v":${NATIVE_BRIDGE_VERSION},"kind":"request","id":"req-1","command":"app.info","payload":{}}`]);
   });
 
   it("decodes incoming JSON strings and drops anything that is not valid JSON", () => {
@@ -246,11 +280,11 @@ describe("portTransport", () => {
     const received: unknown[] = [];
     transport.onMessage((value) => received.push(value));
 
-    port.emit('{"v":1,"kind":"event"}');
+    port.emit(`{"v":${NATIVE_BRIDGE_VERSION},"kind":"event"}`);
     port.emit("not json");
     port.emit({ already: "an object" });
 
-    expect(received).toEqual([{ v: 1, kind: "event" }]);
+    expect(received).toEqual([{ v: NATIVE_BRIDGE_VERSION, kind: "event" }]);
   });
 
   it("starts the port and closes it", () => {

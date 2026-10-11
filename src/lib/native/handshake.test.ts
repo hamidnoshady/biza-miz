@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { NATIVE_BRIDGE_VERSION } from "./bridge-contract";
 import { acceptNativeChannel } from "./handshake";
 
 const PAGE = "https://app.example.test";
@@ -9,7 +10,7 @@ const APP_INFO = {
   bridgeVersion: 1,
   capabilities: [],
 };
-const READY = JSON.stringify({ v: 1, kind: "event", name: "bridge.ready", payload: APP_INFO });
+const READY = JSON.stringify({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload: APP_INFO });
 const PORT = { name: "port-a" };
 
 describe("acceptNativeChannel", () => {
@@ -38,12 +39,12 @@ describe("acceptNativeChannel", () => {
   });
 
   it("does not treat a malformed bridge.ready as a valid announcement", () => {
-    const bad = JSON.stringify({ v: 1, kind: "event", name: "bridge.ready", payload: { appVersionName: "" } });
+    const bad = JSON.stringify({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload: { appVersionName: "" } });
     expect(acceptNativeChannel({ origin: PAGE, data: bad, ports: [PORT] }, PAGE)?.ready).toBeNull();
   });
 
   it("reads an announcement that arrives as an object rather than a string", () => {
-    const data = { v: 1, kind: "event", name: "bridge.ready", payload: APP_INFO };
+    const data = { v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload: APP_INFO };
     expect(acceptNativeChannel({ origin: PAGE, data, ports: [PORT] }, PAGE)?.ready).toEqual(APP_INFO);
   });
 });

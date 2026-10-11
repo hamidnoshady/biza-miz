@@ -11,7 +11,14 @@
  * `<NativeCapabilityGate>`, never on the Android user agent or the referrer.
  */
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
-import type { NativeAppInfo, NativeCapability, NativeEnvironment } from "@/lib/native/bridge-contract";
+import { NativeBridgeError } from "@/lib/native/bridge";
+import type {
+  NativeAppInfo,
+  NativeCapability,
+  NativeCommand,
+  NativeCommandResults,
+  NativeEnvironment,
+} from "@/lib/native/bridge-contract";
 import {
   NO_BROWSER_FEATURES,
   resolveAllCapabilities,
@@ -27,6 +34,12 @@ import {
   type NativeRuntimeSnapshot,
 } from "@/lib/native/native-runtime";
 
+/** Rejects with a `NativeBridgeError` (bridge.ts) when there is no connected channel to send on. */
+export type NativeRequest = <C extends NativeCommand>(
+  command: C,
+  payload?: Record<string, unknown>,
+) => Promise<NativeCommandResults[C]>;
+
 export interface NativeContextValue {
   kind: NativeRuntimeKind;
   connection: NativeConnection;
@@ -34,9 +47,22 @@ export interface NativeContextValue {
   environment: NativeEnvironment | null;
   app: NativeAppInfo | null;
   capabilities: Readonly<Record<NativeCapability, CapabilityResolution>>;
+  /**
+   * Sends a typed bridge command — e.g. issue #884's device registry calling
+   * `device.identity` once `connection === "connected"`. UI code should still
+   * prefer `capabilities`/`<NativeCapabilityGate>` for feature gating; this is
+   * for one-off commands that are not a standing capability.
+   */
+  request: NativeRequest;
 }
 
-export function buildNativeContextValue(snapshot: NativeRuntimeSnapshot, browser: BrowserFeatures): NativeContextValue {
+const UNAVAILABLE_REQUEST: NativeRequest = () => Promise.reject(new NativeBridgeError("bridge_unavailable"));
+
+export function buildNativeContextValue(
+  snapshot: NativeRuntimeSnapshot,
+  browser: BrowserFeatures,
+  request: NativeRequest = UNAVAILABLE_REQUEST,
+): NativeContextValue {
   return {
     kind: snapshot.kind,
     connection: snapshot.connection,
@@ -44,6 +70,7 @@ export function buildNativeContextValue(snapshot: NativeRuntimeSnapshot, browser
     environment: snapshot.environment,
     app: snapshot.app,
     capabilities: resolveAllCapabilities(browser, snapshot.app),
+    request,
   };
 }
 
@@ -95,7 +122,10 @@ export function NativeProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const value = useMemo(() => buildNativeContextValue(snapshot, browser), [snapshot, browser]);
+  const value = useMemo(
+    () => buildNativeContextValue(snapshot, browser, runtimeStore.request),
+    [snapshot, browser],
+  );
   return <NativeContext.Provider value={value}>{children}</NativeContext.Provider>;
 }
 

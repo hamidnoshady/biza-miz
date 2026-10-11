@@ -120,6 +120,18 @@ export interface SessionPayload {
    * pin-login) and on any token minted before this field existed.
    */
   employeeSessionId?: string | null;
+  /**
+   * Issue #884 — native_app_devices.id, set only when this token belongs to a
+   * browser running inside the Android app's Trusted Web Activity and that
+   * installation has registered itself (`POST /api/native-devices`). The JWT
+   * stays the bearer credential; this just names the device row that makes
+   * the session revocable per-installation, re-checked live on the server by
+   * `checkNativeDevice` in auth.ts — never trusted alone, the same shape
+   * `employeeSessionId` above already has. Absent on every session that did
+   * not come through a registered native installation (every browser tab,
+   * and a TWA session before registration completes).
+   */
+  nativeDeviceId?: string | null;
   /** True when this session completed MFA verification at login. */
   mfaVerified?: boolean;
   /** Epoch seconds of the most recent primary/MFA/step-up authentication. */

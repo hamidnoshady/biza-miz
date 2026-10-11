@@ -15,6 +15,7 @@ import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsServiceConnection
 import androidx.browser.trusted.TrustedWebActivityIntentBuilder
 import com.bizamiz.android.bridge.BridgeCommandRouter
+import com.bizamiz.android.bridge.InstallationId
 import com.bizamiz.android.bridge.TwaChannelCallback
 import com.bizamiz.android.bridge.TwaSessionHolder
 import com.bizamiz.android.navigation.AppLinkRouter
@@ -97,6 +98,7 @@ class TwaLauncherActivity : Activity() {
                 notificationsEnabled = {
                     appContext.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() ?: false
                 },
+                installationId = { InstallationId.read(appContext) },
             ),
             origin = Uri.parse(BuildConfig.WEB_ORIGIN),
         )

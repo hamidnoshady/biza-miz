@@ -11,11 +11,17 @@
  * `idle`, and no native call is made.
  */
 import {
+  NativeBridgeError,
   createNativeBridgeClient,
   type BridgeTransport,
   type NativeBridgeClient,
 } from "./bridge";
-import { type NativeAppInfo, type NativeEnvironment } from "./bridge-contract";
+import {
+  type NativeAppInfo,
+  type NativeCommand,
+  type NativeCommandResults,
+  type NativeEnvironment,
+} from "./bridge-contract";
 import { acceptNativeChannel, type IncomingChannelMessage } from "./handshake";
 import {
   detectNativeRuntime,
@@ -54,6 +60,13 @@ export interface NativeRuntimeStore {
   subscribe(listener: () => void): () => void;
   /** Starts detection and the handshake listener. Returns a function that tears both down. */
   attach(host: NativeRuntimeHost): () => void;
+  /**
+   * Sends a bridge command through the connected channel. Rejects with
+   * `bridge_unavailable` (see `NativeBridgeError`) when there is no connected
+   * channel to send it on — the caller (issue #884's device registration flow,
+   * for example) should only call this once `connection === "connected"`.
+   */
+  request<C extends NativeCommand>(command: C, payload?: Record<string, unknown>): Promise<NativeCommandResults[C]>;
 }
 
 /** Adapts a real MessagePort to the bridge's transport. The app expects JSON strings, so every envelope is encoded here. */
@@ -137,6 +150,11 @@ export function createNativeRuntimeStore(): NativeRuntimeStore {
 
   return {
     getSnapshot: () => snapshot,
+
+    request(command, payload) {
+      if (!client) return Promise.reject(new NativeBridgeError("bridge_unavailable"));
+      return client.request(command, payload);
+    },
 
     subscribe(listener) {
       subscribers.add(listener);

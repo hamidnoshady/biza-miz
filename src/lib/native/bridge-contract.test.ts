@@ -5,6 +5,7 @@ import {
   buildRequestEnvelope,
   parseAppInfo,
   parseCommandResult,
+  parseDeviceIdentity,
   parseEventPayload,
   parseNativeEnvelope,
   parseNotificationStatus,
@@ -62,10 +63,34 @@ describe("parseNotificationStatus", () => {
   });
 });
 
+describe("parseDeviceIdentity", () => {
+  it("accepts a well-formed installation id", () => {
+    expect(parseDeviceIdentity({ installationId: "a1b2c3d4-e5f6-4a3b-9c8d-1234567890ab" })).toEqual({
+      installationId: "a1b2c3d4-e5f6-4a3b-9c8d-1234567890ab",
+    });
+  });
+
+  it.each([
+    ["too short", "short"],
+    ["too long", "x".repeat(129)],
+    ["containing characters outside the allowlist", "not/valid"],
+  ])("rejects an installation id that is %s", (_label, installationId) => {
+    expect(parseDeviceIdentity({ installationId })).toBeNull();
+  });
+
+  it("rejects non-objects and a missing field", () => {
+    expect(parseDeviceIdentity(null)).toBeNull();
+    expect(parseDeviceIdentity({})).toBeNull();
+  });
+});
+
 describe("parseCommandResult and parseEventPayload", () => {
   it("checks a result against the shape of the command that produced it", () => {
     expect(parseCommandResult("app.info", APP_INFO)).toEqual(APP_INFO);
     expect(parseCommandResult("notifications.status", APP_INFO)).toBeNull();
+    expect(parseCommandResult("device.identity", { installationId: "a1b2c3d4e5f647" })).toEqual({
+      installationId: "a1b2c3d4e5f647",
+    });
   });
 
   it("checks an event payload against its declared shape", () => {
@@ -78,12 +103,12 @@ describe("parseNativeEnvelope", () => {
   it("accepts a response with a result", () => {
     expect(
       parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "abc-123", ok: true, result: APP_INFO }),
-    ).toEqual({ v: 1, kind: "response", id: "abc-123", ok: true, result: APP_INFO });
+    ).toEqual({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "abc-123", ok: true, result: APP_INFO });
   });
 
   it("maps an unrecognised error code to native_failure rather than trusting the app's wording", () => {
     const parsed = parseNativeEnvelope({
-      v: 1,
+      v: NATIVE_BRIDGE_VERSION,
       kind: "response",
       id: "abc",
       ok: false,
@@ -94,7 +119,7 @@ describe("parseNativeEnvelope", () => {
 
   it("keeps a known error code and truncates an overlong message", () => {
     const parsed = parseNativeEnvelope({
-      v: 1,
+      v: NATIVE_BRIDGE_VERSION,
       kind: "response",
       id: "abc",
       ok: false,
@@ -112,7 +137,7 @@ describe("parseNativeEnvelope", () => {
   });
 
   it("refuses a success response without a result", () => {
-    expect(parseNativeEnvelope({ v: 1, kind: "response", id: "abc", ok: true })).toBeNull();
+    expect(parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "abc", ok: true })).toBeNull();
   });
 
   it.each([
@@ -121,27 +146,27 @@ describe("parseNativeEnvelope", () => {
     ["an id over 64 characters", "a".repeat(65)],
     ["a non-string id", 7],
   ])("refuses a response with %s", (_label, id) => {
-    expect(parseNativeEnvelope({ v: 1, kind: "response", id, ok: true, result: APP_INFO })).toBeNull();
+    expect(parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "response", id, ok: true, result: APP_INFO })).toBeNull();
   });
 
   it("refuses a request for a command outside the allowlist", () => {
     expect(
-      parseNativeEnvelope({ v: 1, kind: "request", id: "abc", command: "shell.exec", payload: {} }),
+      parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "request", id: "abc", command: "shell.exec", payload: {} }),
     ).toBeNull();
   });
 
   it("refuses a request whose payload is not an object", () => {
     expect(
-      parseNativeEnvelope({ v: 1, kind: "request", id: "abc", command: "app.info", payload: "x" }),
+      parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "request", id: "abc", command: "app.info", payload: "x" }),
     ).toBeNull();
   });
 
   it("refuses an event name outside the allowlist", () => {
-    expect(parseNativeEnvelope({ v: 1, kind: "event", name: "device.wiped", payload: {} })).toBeNull();
+    expect(parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "device.wiped", payload: {} })).toBeNull();
   });
 
   it("refuses an unknown kind and non-object frames", () => {
-    expect(parseNativeEnvelope({ v: 1, kind: "push", id: "abc" })).toBeNull();
+    expect(parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "push", id: "abc" })).toBeNull();
     expect(parseNativeEnvelope("hello")).toBeNull();
     expect(parseNativeEnvelope(undefined)).toBeNull();
   });
@@ -150,7 +175,7 @@ describe("parseNativeEnvelope", () => {
 describe("buildRequestEnvelope", () => {
   it("builds the request shape the app expects", () => {
     expect(buildRequestEnvelope("req-1", "app.info")).toEqual({
-      v: 1,
+      v: NATIVE_BRIDGE_VERSION,
       kind: "request",
       id: "req-1",
       command: "app.info",

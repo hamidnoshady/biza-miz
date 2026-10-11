@@ -6,13 +6,13 @@ import {
   type BridgeTransport,
   type NativeBridgeClient,
 } from "./bridge";
-import { parseNativeEnvelope } from "./bridge-contract";
+import { NATIVE_BRIDGE_VERSION, parseNativeEnvelope } from "./bridge-contract";
 
 describe("createRequestId", () => {
   it("produces 32 hex characters that the app's id rule accepts", () => {
     const id = createRequestId();
     expect(id).toMatch(/^[0-9a-f]{32}$/);
-    expect(parseNativeEnvelope({ v: 1, kind: "request", id, command: "app.info", payload: {} })).not.toBeNull();
+    expect(parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "request", id, command: "app.info", payload: {} })).not.toBeNull();
   });
 
   it("produces a different id on each call", () => {
@@ -76,23 +76,23 @@ describe("createNativeBridgeClient", () => {
   it("sends an allowlisted request and resolves with the parsed result when the id matches", async () => {
     const { client, sent, deliver } = setup();
     const pending = client.request("app.info");
-    expect(sent).toEqual([{ v: 1, kind: "request", id: "req-1", command: "app.info", payload: {} }]);
+    expect(sent).toEqual([{ v: NATIVE_BRIDGE_VERSION, kind: "request", id: "req-1", command: "app.info", payload: {} }]);
 
-    deliver({ v: 1, kind: "response", id: "req-1", ok: true, result: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-1", ok: true, result: APP_INFO });
     await expect(pending).resolves.toEqual(APP_INFO);
   });
 
   it("rejects with the native error code when the app answers with an error", async () => {
     const { client, deliver } = setup();
     const pending = client.request("notifications.status");
-    deliver({ v: 1, kind: "response", id: "req-1", ok: false, error: { code: "permission_denied", message: "no" } });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-1", ok: false, error: { code: "permission_denied", message: "no" } });
     await expect(pending).rejects.toMatchObject({ code: "permission_denied" });
   });
 
   it("rejects with invalid_payload when the app sends a result that does not match the command", async () => {
     const { client, deliver } = setup();
     const pending = client.request("notifications.status");
-    deliver({ v: 1, kind: "response", id: "req-1", ok: true, result: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-1", ok: true, result: APP_INFO });
     await expect(pending).rejects.toMatchObject({ code: "invalid_payload" });
   });
 
@@ -107,23 +107,23 @@ describe("createNativeBridgeClient", () => {
   it("ignores a response whose id matches no pending request", async () => {
     const { client, deliver } = setup();
     const pending = client.request("app.info");
-    deliver({ v: 1, kind: "response", id: "req-999", ok: true, result: APP_INFO });
-    deliver({ v: 1, kind: "response", id: "req-1", ok: true, result: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-999", ok: true, result: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-1", ok: true, result: APP_INFO });
     await expect(pending).resolves.toEqual(APP_INFO);
   });
 
   it("ignores a second response for the same request", async () => {
     const { client, deliver } = setup();
     const pending = client.request("app.info");
-    deliver({ v: 1, kind: "response", id: "req-1", ok: true, result: APP_INFO });
-    deliver({ v: 1, kind: "response", id: "req-1", ok: false, error: { code: "native_failure" } });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-1", ok: true, result: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-1", ok: false, error: { code: "native_failure" } });
     await expect(pending).resolves.toEqual(APP_INFO);
   });
 
   it("drops frames from a different protocol version and leaves the request pending", async () => {
     const { client, deliver } = setup();
     const pending = client.request("app.info");
-    deliver({ v: 2, kind: "response", id: "req-1", ok: true, result: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION + 1, kind: "response", id: "req-1", ok: true, result: APP_INFO });
     const assertion = expect(pending).rejects.toMatchObject({ code: "timeout" });
     await vi.advanceTimersByTimeAsync(1000);
     await assertion;
@@ -160,7 +160,7 @@ describe("createNativeBridgeClient", () => {
     const { client, deliver } = setup();
     const seen: unknown[] = [];
     client.onEvent("bridge.ready", (info) => seen.push(info));
-    deliver({ v: 1, kind: "event", name: "bridge.ready", payload: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload: APP_INFO });
     expect(seen).toEqual([APP_INFO]);
   });
 
@@ -168,7 +168,7 @@ describe("createNativeBridgeClient", () => {
     const { client, deliver } = setup();
     const seen: unknown[] = [];
     client.onEvent("bridge.ready", (info) => seen.push(info));
-    deliver({ v: 1, kind: "event", name: "bridge.ready", payload: { permission: "granted" } });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload: { permission: "granted" } });
     expect(seen).toEqual([]);
   });
 
@@ -177,7 +177,7 @@ describe("createNativeBridgeClient", () => {
     const seen: unknown[] = [];
     const unsubscribe = client.onEvent("bridge.ready", (info) => seen.push(info));
     unsubscribe();
-    deliver({ v: 1, kind: "event", name: "bridge.ready", payload: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload: APP_INFO });
     expect(seen).toEqual([]);
   });
 
@@ -202,14 +202,14 @@ describe("createNativeBridgeClient", () => {
     const seen: unknown[] = [];
     client.onEvent("bridge.ready", (info) => seen.push(info));
     client.close();
-    deliver({ v: 1, kind: "event", name: "bridge.ready", payload: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "event", name: "bridge.ready", payload: APP_INFO });
     expect(seen).toEqual([]);
   });
 
   it("does not let a timer fire after the request has already settled", async () => {
     const { client, deliver } = setup();
     const pending = client.request("app.info");
-    deliver({ v: 1, kind: "response", id: "req-1", ok: true, result: APP_INFO });
+    deliver({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "req-1", ok: true, result: APP_INFO });
     await expect(pending).resolves.toEqual(APP_INFO);
     await vi.advanceTimersByTimeAsync(5000);
     expect(vi.getTimerCount()).toBe(0);

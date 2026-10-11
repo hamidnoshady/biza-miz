@@ -23,7 +23,7 @@ export const NATIVE_BRIDGE_PROTOCOL: string = contract.protocol;
 /** The protocol version both sides speak. A frame carrying any other `v` is ignored. */
 export const NATIVE_BRIDGE_VERSION: number = contract.bridgeVersion;
 
-export const NATIVE_COMMANDS = ["app.info", "notifications.status"] as const;
+export const NATIVE_COMMANDS = ["app.info", "notifications.status", "device.identity"] as const;
 export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
 
 /**
@@ -93,10 +93,21 @@ export interface NativeNotificationStatus {
   permission: NativePermissionState;
 }
 
+/**
+ * Issue #884 device registry — the app's own persistent installation
+ * identity, generated once on first launch and kept in app-private storage.
+ * Not a login credential by itself: `POST /api/native-devices` only accepts
+ * it from an already-authenticated session.
+ */
+export interface NativeDeviceIdentity {
+  installationId: string;
+}
+
 /** Result type per command. Adding a command means adding it to every map below. */
 export interface NativeCommandResults {
   "app.info": NativeAppInfo;
   "notifications.status": NativeNotificationStatus;
+  "device.identity": NativeDeviceIdentity;
 }
 
 export interface NativeEventPayloads {
@@ -183,6 +194,25 @@ export function parseNotificationStatus(value: unknown): NativeNotificationStatu
   return { permission: value.permission as NativePermissionState };
 }
 
+const MIN_INSTALLATION_ID_LENGTH = 8;
+const MAX_INSTALLATION_ID_LENGTH = 128;
+const INSTALLATION_ID_PATTERN = /^[A-Za-z0-9-]+$/;
+
+/** Parses the `device.identity` shape. Returns `null` for anything malformed rather than guessing. */
+export function parseDeviceIdentity(value: unknown): NativeDeviceIdentity | null {
+  if (!isRecord(value)) return null;
+  const { installationId } = value;
+  if (
+    typeof installationId !== "string" ||
+    installationId.length < MIN_INSTALLATION_ID_LENGTH ||
+    installationId.length > MAX_INSTALLATION_ID_LENGTH ||
+    !INSTALLATION_ID_PATTERN.test(installationId)
+  ) {
+    return null;
+  }
+  return { installationId };
+}
+
 /** Checks a command's `result` against its declared shape. `null` means the app sent a bad result. */
 export function parseCommandResult<C extends NativeCommand>(command: C, value: unknown): NativeCommandResults[C] | null {
   switch (command) {
@@ -190,6 +220,8 @@ export function parseCommandResult<C extends NativeCommand>(command: C, value: u
       return parseAppInfo(value) as NativeCommandResults[C] | null;
     case "notifications.status":
       return parseNotificationStatus(value) as NativeCommandResults[C] | null;
+    case "device.identity":
+      return parseDeviceIdentity(value) as NativeCommandResults[C] | null;
     default:
       return null;
   }

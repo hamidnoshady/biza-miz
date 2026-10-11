@@ -15,7 +15,7 @@ object BridgeProtocol {
 
     val BRIDGE_VERSION: Int = BuildConfig.NATIVE_BRIDGE_VERSION
 
-    val COMMANDS: Set<String> = setOf("app.info", "notifications.status")
+    val COMMANDS: Set<String> = setOf("app.info", "notifications.status", "device.identity")
 
     val ERROR_CODES: Set<String> = setOf(
         "unknown_command",

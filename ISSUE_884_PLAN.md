@@ -18,11 +18,15 @@ In scope (done or in progress on this branch):
 - the Digital Asset Links file and the Android Trusted Web Activity shell, with App Links and an offline fallback
 - the Android CI, a manual signed staging candidate, and a manual production release
 - the runtime documentation (`docs/android-runtime.md`)
+- **the device registry (Phase 6 below)**: a tenant-scoped table and RLS policy, self- and
+  admin-service API routes, live revocation enforcement in `getSession()`, the `device.identity`
+  bridge command (bridge version 2), and the registration client mounted in `WorkspaceShell`
 
-Deferred (listed as follow-up work below): the device registry, the mobile shell redesign, the
-list/card representations, biometric re-authentication, push, background sync, the scanner,
-camera, share and file flows, printers, CRM Caller ID and post-call CRM, feature flags, and
-store promotion from a candidate.
+Deferred (listed as follow-up work below): the device-registry admin/self-service UI (the API and
+enforcement are done; there is no Settings screen yet), the mobile shell redesign, the list/card
+representations, biometric re-authentication, push, background sync, the scanner, camera, share
+and file flows, printers, CRM Caller ID and post-call CRM, feature flags, and store promotion
+from a candidate.
 
 ## Baseline and what could be verified here
 
@@ -102,6 +106,60 @@ so the app needs one library rather than two.
 - [x] `docs/android-runtime.md`: layout, environments, local development, testing, bridge contract, security model, permissions, offline behaviour, CI and release, secrets, Play Store steps, Digital Asset Links, and rollout
 - [x] This plan
 
+## Phase 6 — Device registry
+
+Owner decisions that unblocked this phase (session after the owner chose "device registry" as
+the next slice):
+
+1. Owners and a member holding `native_devices.manage` may see/revoke every device in the
+   business; everyone else sees/revokes only their own, server-enforced, tenant-isolated, with
+   an audit record of every revocation.
+2. Registration is an authenticated web API call, using an installation identity the Android app
+   creates on first launch and hands over through a typed bridge command, after login and
+   business selection. Idempotent, and it never silently reactivates a revoked device.
+3. A revoked device loses the authenticated access tied to that installation (sessions, business
+   API requests, sync, push, privileged native operations) — enforced server-side on every
+   request, not only the next bridge round trip, because it cannot reach an offline device.
+   Reactivation needs an explicit owner/admin action and a fresh login.
+
+What is here:
+
+- [x] `migrations/0216_native_app_devices.sql`: a new tenant-scoped table, its own RLS policy in
+      the same migration (never `pos_devices`, which is the unauthenticated login-picker's
+      terminal registry — a different security relationship, see the migration's own comment)
+- [x] `src/lib/permissions.ts` / `src/lib/permission-registry.ts`: `native_devices.manage`, not
+      owner-only, not in any role preset but `admin` (which holds every non-owner-only
+      permission) — a business grants it per member the same way every other delegable key works
+- [x] `src/lib/native-device-service.ts`: register (idempotent upsert, never revives a revoked
+      row, never silently reassigns a shared installation's ownership), list (self/business),
+      revoke (self/admin), reactivate (admin), each audited
+- [x] `src/lib/auth.ts`: `SessionPayload.nativeDeviceId` (auth-edge.ts) and `checkNativeDevice`,
+      wired into `resolveSessionFromToken` next to `checkEmployeeSession` — re-checks
+      `revoked_at` on every request, the enforcement half of owner decision 3
+- [x] `src/app/api/native-devices/**`: `POST /api/native-devices` (register, `requireMember`,
+      rebinds the session cookie), `GET`/`DELETE /api/native-devices/self*` (self-service),
+      `GET`/`DELETE /api/native-devices/[id]`, `POST /api/native-devices/[id]/reactivate`
+      (`requirePermission(native_devices.manage)`)
+- [x] Bridge contract bumped to version 2 for the new `device.identity` command (`minBridgeVersion`
+      2): `config/native-bridge-contract.json`, `src/lib/native/bridge-contract.ts`,
+      `BridgeProtocol.kt`, `BridgeCommandRouter.kt`, `InstallationId.kt` (the persistent
+      installation UUID, kept in app-private `SharedPreferences`)
+- [x] `src/lib/native/native-runtime.ts` / `src/components/native/native-provider.tsx`: exposes
+      `request()` so a component can send a one-off bridge command, not only read capabilities
+- [x] `src/components/native/native-device-registrar.tsx`, mounted in `WorkspaceShell` (not the
+      root layout, which also wraps public pages with no session to register against): calls
+      `device.identity` once connected and registers it, best-effort, never blocking the page
+- [x] `docs/android-runtime.md#device-registry`
+- [x] Tests: `integration/native-device-registry.integration.test.ts` (the DB-touching service,
+      against the real schema and RLS, the same pattern as `device-binding.integration.test.ts`);
+      unit tests for the bridge contract, the runtime store's `request()`, the registrar
+      component, the Kotlin router and `BridgeContractTest`'s drift check
+- [ ] A Settings UI to see/revoke devices (self and admin) — the API and enforcement exist;
+      the screen does not. Follow-up.
+- [ ] Revoking a push-notification token (`notifications_devices`, a separate web-push table) when
+      a native device is revoked — out of scope until the FCM slice exists.
+- [ ] Device-on-a-list verification on a real signed build — the sandbox cannot run Gradle.
+
 ## Acceptance criteria — issue #884
 
 The 28 items in the issue's "Acceptance criteria" section. "Done" means implemented here and
@@ -120,7 +178,7 @@ this slice and is listed under follow-up work.
 | 8 | Mobile/TWA UI uses a real app shell | Deferred | The shell redesign (top bar, `Home \| Sales \| + \| CRM \| More`) is a separate slice. The existing bottom bar is unchanged. |
 | 9 | All major platform modules remain accessible on Android | Partial | The TWA opens the full web platform, so nothing is hidden. Verify on a device. |
 | 10 | Major lists/tables have mobile-native card/row representations | Deferred | Existing design-system rules are unchanged and remain authoritative. |
-| 11 | Device registration and revocation work | Deferred | Device registry is the next slice. |
+| 11 | Device registration and revocation work | Partial | `native_app_devices`, registration/list/revoke/reactivate APIs, live enforcement in `checkNativeDevice`, and the `device.identity` bridge command are all in (Phase 6). No Settings UI to see/revoke a device yet, and not verified on a signed device build. |
 | 12 | Biometric re-authentication works | Deferred | Capability key `biometric` is reserved; no implementation. |
 | 13 | Push notifications deep-link correctly | Deferred | No FCM in this slice. |
 | 14 | Background native sync without a second business datastore | Deferred | No native storage was added. |
@@ -135,7 +193,7 @@ this slice and is listed under follow-up work.
 | 23 | Android release and signing secrets are protected | Done | Secrets are referenced only by the two release workflows, which run in environments and only on `main`. The keystore is decoded to the runner temp and removed. The Gradle check fails before compilation. Environment setup is an owner action. |
 | 24 | Android has a separate build/release workflow from web and Windows | Done | Three `android-*.yml` files. Nothing in `test.yml` or the Windows workflows changed. |
 | 25 | Web deploys do not unnecessarily require an Android release | Done | Web and Android versions are independent. `src/lib/native/**` changes run the Android build but not a release. |
-| 26 | Bridge compatibility prevents old installed apps from breaking | Partial | `minBridgeVersion` and `nativeMinBridgeVersion`, unknown keys ignored, `updateRequired`, tested on the web side. Two real app versions not tested. |
+| 26 | Bridge compatibility prevents old installed apps from breaking | Partial | `minBridgeVersion` and `nativeMinBridgeVersion`, unknown keys ignored, `updateRequired`, tested on the web side. The contract has already been versioned once in practice (1→2, for `device.identity`) without changing any existing command's shape. Two real app versions not tested on a device. |
 | 27 | Existing mobile emulator/real-device acceptance remains in place | Done | Those workflows are untouched. |
 | 28 | Documentation is added | Done | `docs/android-runtime.md`. Store and rollout steps need the owner's Play account. |
 
@@ -154,6 +212,12 @@ this slice and is listed under follow-up work.
 | `CLAUDE.md` | CI table row, manual-only list, and runner note |
 | `.gitignore` | Anchored Android build and signing patterns |
 | `docs/android-runtime.md` | Documentation for developers and the release owner |
+| `migrations/0216_native_app_devices.sql` | The device registry's table and RLS policy |
+| `src/lib/native-device-service.ts` | Register/list/revoke/reactivate a device, each audited |
+| `src/app/api/native-devices/**` | Self- and admin-service device-registry API routes |
+| `src/lib/auth.ts`, `src/lib/auth-edge.ts` | `nativeDeviceId` on the session and `checkNativeDevice`, the live revocation check |
+| `src/components/native/native-device-registrar.tsx` | Registers the installation once the bridge connects |
+| `android/**/bridge/InstallationId.kt` | The persistent installation UUID, in app-private storage |
 
 ## Decisions worth reading before review
 
@@ -177,16 +241,20 @@ this slice and is listed under follow-up work.
 
 ## Follow-up work (next slices)
 
-1. Device registry: a server table for each Android installation, with its own name (not
-   `devices`, which is POS terminals), RLS in the same migration, a Security/Devices UI, and
-   revocation that takes effect on the next bridge request. The issue's "forced re-authentication"
-   needs the biometric slice first.
+1. Device-registry UI: a Settings screen (self list/revoke; an admin business-wide list/revoke/
+   reactivate behind `native_devices.manage`), composed from the existing `data-table.tsx` /
+   `page-chrome.tsx` / `ui.tsx` primitives, the same way the `pos_devices` "دستگاه‌های ثبت‌شده"
+   tab is. The API and server-side enforcement (Phase 6) are already in; this is the screen.
 2. Mobile shell: the top app bar, `Home | Sales | + | CRM | More` through the existing
    `MobileBottomNavigation` (which already has a customisable bar), and the quick-create sheet.
 3. Mobile lists: card and compact-row representations in the design system's `DataTable` and
    `mobile-record-list` pattern. This needs a design review.
-4. Biometric re-authentication and passkeys through Credential Manager.
-5. Push: FCM with deep links, and a server-side device token that the registry owns.
+4. Biometric re-authentication and passkeys through Credential Manager. The issue's "forced
+   re-authentication" on device revocation (beyond the session invalidation Phase 6 already
+   does) depends on this slice existing first.
+5. Push: FCM with deep links, and a server-side device token — likely a column on
+   `native_app_devices` rather than a second table, so a revoked device is also unreachable by
+   push without an extra join.
 6. Native capabilities, one at a time, each behind its own `nativeMinBridgeVersion` and a
    feature flag: barcode, camera and document capture, share and file, network and Bluetooth
    printers, the caller module.
@@ -200,7 +268,31 @@ Answered by the owner during the session. Recorded here so the decisions travel 
 
 1. **Web hosts.** Production is `https://app.eshobe.com`, which is also the App Link host. Staging is `https://staging.eshobe.com`. Still owner setup: set the GitHub variables `ANDROID_WEB_ORIGIN_PRODUCTION=https://app.eshobe.com` and `ANDROID_WEB_ORIGIN_STAGING=https://staging.eshobe.com` on the matching environments. Until they are set, the staging and production builds refuse to compile.
 2. **Play account.** There is no Play Console app yet. Next: create the app with the application ID `com.bizamiz.app`, and confirm in Play Console that Play App Signing is enrolled. Once it is, the Digital Asset Links fingerprint is the app signing key's SHA-256 from Play Console, not the upload key's. That value then goes into `public/.well-known/assetlinks.json`. Uploads to Play stay off until a service account exists.
-3. **Next slice: the device registry.** It gets its own tenant-scoped table, not `devices`, with RLS in the same migration. Still open before it starts: who may see and revoke a device, how a device registers (a bridge command at first launch, or a web call), and what a revoked device can still do.
+3. **The device registry.** It gets its own tenant-scoped table, `native_app_devices`, not
+   `pos_devices` (the unauthenticated login-picker's terminal list — a different security
+   relationship), with RLS in the same migration. The owner answered the three open questions
+   from item 3 above, in this later session:
+   - **Who may see/revoke a device.** Owners and a member holding `native_devices.manage` may
+     see and revoke every device in the business. Every other user may see and revoke only their
+     own device. Enforced server-side, tenant-isolated, every revocation audited.
+   - **How a device registers.** An authenticated web API call. The Android app creates a
+     persistent installation identity on first launch (`InstallationId.kt`). After login and
+     business selection, the web app reads that identity through the new `device.identity`
+     bridge command and calls `POST /api/native-devices`. The server derives the user and tenant
+     from the session, never from the request body. Registration is idempotent and never
+     silently reactivates a revoked device.
+   - **What a revoked device can still do.** It loses the authenticated access tied to that
+     installation: sessions and credentials for it are invalidated, and business API requests,
+     sync, push, and privileged native operations are denied. Only public/login screens, app
+     updates, and basic diagnostics stay reachable, behind a "device revoked" screen.
+     Reactivation needs an explicit owner/admin action plus a fresh sign-in. Other devices are
+     unaffected. Revocation cannot reach a disconnected device instantly or erase what it already
+     cached; the server enforces it on every protected request once the device is back online,
+     and the client is expected to stop protected local operations and clear sensitive caches
+     once it detects the revocation, not only on the next bridge call.
+   - **A fourth point in the owner's instructions was cut off before any content followed "4."**
+     It was never recovered in this session. If it covered a requirement this slice's design
+     does not already satisfy, it still needs to be asked and applied as a follow-up.
 
 ## Gates
 
@@ -231,7 +323,43 @@ Not yet exercised: the two release workflows (`android-signed-candidate.yml`, `a
 - Pull request run `37944325145`: passed.
 - Push run `37944320200`: the `desktop shell` job failed at the `npm ci` install step. This branch does not change `package.json`, the lockfile, `electron/`, or the workflow. The same job passed on the pull request run for this commit, and recent `main` push runs pass. No cause was found, and the job logs are not readable from the sandbox, so it is recorded as probably transient. GitHub refused a re-run and a manual dispatch from the sandbox. Re-run that job from the Actions tab to confirm.
 
+## Gates — device registry slice (Phase 6)
+
+Local, on the pre-commit tree built on top of `f64c5fd`/`main` (sandbox: Node 22, 2 CPUs, 3.9 GB
+RAM, `DATABASE_URL` pointed at the `embedded-postgres` devDependency's local server). Run after a
+fresh `npm ci`:
+
+- `npx tsc --noEmit` with `NODE_OPTIONS=--max-old-space-size=3072`: exit 0, once the new
+  `native-device-registrar.test.tsx` file's two `vi.fn()` call-site types were corrected (an
+  argument-less mock inferred a zero-length `calls[]` tuple; typed the mocked `fetch` signature
+  explicitly instead).
+- `npm test`: 707 files, 9,320 tests passed. One pre-existing drift test needed a one-line fix for
+  this slice: `src/lib/billing/catalog/audit.test.ts` enumerates every `/api/<segment>` and fails
+  until it is classified; `native-devices` is now in `routes.ts`, classified the same way
+  `devices` (`pos_devices`) is — an operations/security surface, not a billed capability.
+- `npm run db:migrate` (303 migrations applied, `0216_native_app_devices.sql` included and a
+  no-op on rerun — also exercised by `integration/migrations.integration.test.ts`'s clean-database
+  and upgrade-from-0011 paths), then `npm run test:db`: 198 files, 2,702 tests passed, 1 skipped,
+  zero failures. Includes the new `integration/native-device-registry.integration.test.ts` (6
+  tests: idempotent re-registration as a heartbeat with exactly one audit row, a revoked
+  installation refusing to reactivate itself on a repeat register from any user, refusing a silent
+  ownership transfer to a different member, cross-tenant isolation on revoke/reactivate/list, a
+  plain member's self list/revoke scoped away from an admin's business-wide view, and an
+  owner/admin's revoke → reactivate cycle with its own audit trail) and
+  `integration/device-binding.integration.test.ts` (the pre-existing `pos_devices` suite, unaffected).
+- `npm run build`: **not completed here**, same sandbox memory limit as the foundation slice —
+  the process was OOM-killed partway through `Creating an optimized production build`. The
+  `production build` job in `test.yml` is the gate for this step; it will be read from CI once
+  this slice's commit runs there.
+- Not run locally: the Kotlin changes (`InstallationId.kt`, `BridgeCommandRouter.kt`'s new
+  constructor param and `device.identity` case, `BridgeCommandRouterTest.kt`'s new test) — no
+  JDK/Gradle/Android SDK in this sandbox, same as the foundation slice. `BridgeContractTest.kt`
+  needed no change: it compares `BridgeProtocol.COMMANDS` and `BRIDGE_VERSION` against
+  `config/native-bridge-contract.json` generically, so it already covers the new command and the
+  version bump to 2 without being told about either by name. `android-build.yml` is the verifier.
+
 ## Files
+
 
 Added: `ISSUE_884_PLAN.md`, `docs/android-runtime.md`, `config/native-bridge-contract.json`,
 `config/android-environments.json`, `public/.well-known/assetlinks.json`, `src/lib/native/`
@@ -244,3 +372,18 @@ Changed: `src/app/layout.tsx` (one provider), `CLAUDE.md` (CI table, manual list
 
 Not changed: `src/` (other than the layout), `electron/`, `test.yml`, `mobile-emulator-acceptance.yml`,
 `mobile-real-device-acceptance.yml`, `migrations/`, `src/middleware.ts`, `next.config.ts`.
+
+Device registry slice (Phase 6), added on top of the above: `migrations/0216_native_app_devices.sql`,
+`src/lib/native-device-service.ts`, `src/app/api/native-devices/` (5 route files),
+`src/components/native/native-device-registrar.tsx` and its test,
+`integration/native-device-registry.integration.test.ts`,
+`android/app/src/main/java/com/bizamiz/android/bridge/InstallationId.kt`. Changed:
+`src/lib/permissions.ts` / `src/lib/permission-registry.ts` (`native_devices.manage`),
+`src/lib/auth.ts` / `src/lib/auth-edge.ts` (`nativeDeviceId`, `checkNativeDevice`),
+`src/lib/db.ts` (`native-device-auth` bypass reason), `src/lib/billing/catalog/routes.ts`
+(classifies the new API segment), `src/app/dashboard/workspace-shell.tsx` (mounts the registrar),
+`config/native-bridge-contract.json` / `src/lib/native/bridge-contract.ts` (bridge version 2,
+`device.identity`), `android/.../bridge/BridgeProtocol.kt`, `BridgeCommandRouter.kt`,
+`TwaLauncherActivity.kt`, `BridgeCommandRouterTest.kt`, `src/lib/native/native-runtime.ts` /
+`native-provider.tsx` (exposes `request()`), `docs/android-runtime.md` (the new
+"Device registry" section).

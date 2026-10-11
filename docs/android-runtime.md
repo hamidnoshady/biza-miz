@@ -110,13 +110,14 @@ event:    { v, kind: "event",    name, payload }
 `id` is 1 to 64 characters from `[A-Za-z0-9-]`. `v` is the protocol version (`bridgeVersion`).
 A frame with a different `v` is ignored, so the request that is waiting for it times out.
 
-### Commands and events (version 1)
+### Commands and events (version 2)
 
-| Name | Kind | Result |
-|---|---|---|
-| `app.info` | command | `appVersionName`, `appVersionCode`, `environment`, `bridgeVersion`, `capabilities` |
-| `notifications.status` | command | `permission`: `granted` or `denied` today. `not_determined` is in the contract for a later app that asks for the permission. |
-| `bridge.ready` | event | same shape as `app.info` |
+| Name | Kind | Min bridge | Result |
+|---|---|---|---|
+| `app.info` | command | 1 | `appVersionName`, `appVersionCode`, `environment`, `bridgeVersion`, `capabilities` |
+| `notifications.status` | command | 1 | `permission`: `granted` or `denied` today. `not_determined` is in the contract for a later app that asks for the permission. |
+| `device.identity` | command | 2 | `installationId` — the app's own persistent installation UUID (`InstallationId.kt`), used by the [device registry](#device-registry) |
+| `bridge.ready` | event | 1 | same shape as `app.info` |
 
 There is no generic executor. A command that is not in the allowlist gets `unknown_command`,
 and nothing runs. The allowlists are the `commands` and `events` keys in the contract file.
@@ -159,6 +160,43 @@ features that need them. `notifications.status` reports the system setting and d
 anything.
 
 The `<queries>` entries let the app find the Custom Tabs provider on Android 11 and later.
+
+## Device registry
+
+Every Android installation that signs in registers itself, so an owner can see and revoke a
+lost or stolen phone. Owner decisions (ISSUE_884_PLAN.md):
+
+1. **Who may see/revoke a device.** A plain member sees and revokes only their own installation
+   (`GET`/`DELETE /api/native-devices/self*`, `requireMember`, scoped to `session.sub`). An
+   owner, or a member explicitly granted `native_devices.manage`, sees and revokes every
+   installation in the business (`/api/native-devices*`). Every revocation is audited
+   (`audit_log`, entity `native_device`).
+2. **How registration happens.** `TwaLauncherActivity`'s `InstallationId` generates a UUID once,
+   on first launch, and keeps it in app-private storage. Once the bridge connects inside an
+   authenticated page, `NativeDeviceRegistrar` (mounted in `WorkspaceShell`, so a session and a
+   business are already known) asks for it with the `device.identity` command and calls
+   `POST /api/native-devices`. The server derives the user and tenant from the session, never
+   from the request body. Registration is an idempotent upsert keyed on
+   `(business_id, install_id)` — repeat logins and reconnects never create a second row — but it
+   never revives a revoked row: that fails with `device_revoked` until an owner/admin calls
+   `POST /api/native-devices/[id]/reactivate`.
+3. **What revocation does.** `native_app_devices.revoked_at` is checked live, on every request,
+   by `checkNativeDevice` in `src/lib/auth.ts` — the same shape `checkEmployeeSession` already
+   has for PIN logins. A session bound to a revoked device (`SessionPayload.nativeDeviceId`,
+   set when registration succeeds) stops resolving immediately: the next request is treated as
+   unauthenticated, which denies business API calls, sync and any privileged native operation
+   from that installation without needing per-route code. **This cannot reach an installation
+   that is offline at the moment of revocation** — enforcement is "the next request this
+   installation makes is refused", not a push to the device — and it does not erase whatever the
+   installation already has cached locally; the existing PWA offline layer governs that, the
+   same as for the web app. Reactivation requires the explicit owner/admin action above, and
+   restores nothing by itself: the member must sign in again and the app must register again,
+   because the session the installation was using was already invalidated when it was revoked.
+
+`native_app_devices` is its own table, not `pos_devices` (the till/biometric-terminal registry):
+a POS device token narrows an unauthenticated login picker, where this is a record of an
+already-authenticated member's own installation. See migration `0216_native_app_devices.sql`
+for the full rationale.
 
 ## Offline and failure
 

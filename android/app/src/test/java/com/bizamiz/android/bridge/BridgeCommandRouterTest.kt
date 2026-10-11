@@ -8,11 +8,12 @@ import org.junit.Test
 
 class BridgeCommandRouterTest {
 
-    private fun router(notificationsOn: Boolean = true) = BridgeCommandRouter(
+    private fun router(notificationsOn: Boolean = true, installationId: String = "install-1234") = BridgeCommandRouter(
         environment = "staging",
         appVersionName = "0.1.0",
         appVersionCode = 4,
         notificationsEnabled = { notificationsOn },
+        installationId = { installationId },
     )
 
     private fun request(command: String, id: String = "req-1") =
@@ -40,6 +41,13 @@ class BridgeCommandRouterTest {
 
         val denied = JSONObject(router(notificationsOn = false).handleFrame(request("notifications.status"))!!)
         assertEquals("denied", denied.getJSONObject("result").getString("permission"))
+    }
+
+    @Test
+    fun deviceIdentityReportsThePersistentInstallationId() {
+        val reply = JSONObject(router(installationId = "a1b2c3d4-e5f6").handleFrame(request("device.identity"))!!)
+        assertEquals(true, reply.getBoolean("ok"))
+        assertEquals("a1b2c3d4-e5f6", reply.getJSONObject("result").getString("installationId"))
     }
 
     @Test

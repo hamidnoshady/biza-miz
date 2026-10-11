@@ -81,6 +81,45 @@ async function checkEmployeeSession(session: SessionPayload | null): Promise<Ses
 }
 
 /**
+ * Issue #884 — the counterpart of `checkEmployeeSession` for
+ * `nativeDeviceId`: a JWT alone must not keep an Android installation's
+ * session usable once an owner/admin has revoked `native_app_devices`, so
+ * that row is re-checked live on every request rather than trusted for the
+ * token's full life. This is the enforcement half of the owner decision that
+ * revoking a device "loses authenticated access associated with that
+ * installation" — denying the next request this cheaply (no per-route code,
+ * no header, nothing the installation has to be online to receive) is
+ * exactly what makes it work even against a device that is offline at the
+ * moment it is revoked.
+ *
+ * Runs under `withoutTenantScope` for the same timing reason
+ * `checkEmployeeSession` does — see the "native-device-auth" entry in
+ * db.ts's `withoutTenantScope` doc comment.
+ */
+async function checkNativeDevice(session: SessionPayload | null): Promise<SessionPayload | null> {
+  if (!session?.nativeDeviceId) return session;
+  const deviceId = session.nativeDeviceId;
+
+  const revoked = await withoutTenantScope("native-device-auth", async () => {
+    const { rows } = await query<{ revoked_at: Date | null }>(
+      `SELECT revoked_at FROM native_app_devices WHERE id = $1 AND business_id = $2`,
+      [deviceId, session.businessId],
+    );
+    // A row that no longer exists behaves exactly like a revoked one: there is
+    // nothing left for this session to be bound to.
+    return !rows[0] || rows[0].revoked_at !== null;
+  });
+  if (revoked) return null;
+
+  // Best-effort activity marker for the device list — never blocks the request.
+  void withoutTenantScope("native-device-auth", () =>
+    query(`UPDATE native_app_devices SET last_seen_at = now() WHERE id = $1`, [deviceId]),
+  ).catch(() => {});
+
+  return session;
+}
+
+/**
  * Re-check `platform_users.token_version` and `is_active` on every token
  * resolution so a password change/reset or global sign-out invalidates
  * existing sessions even on routes that call `getSession()` directly without
@@ -157,7 +196,8 @@ export async function resolveSessionFromToken(token: string | null | undefined):
   const verified = await verifySession(token);
   const afterImpersonation = await checkImpersonation(verified);
   const afterEmployeeSession = await checkEmployeeSession(afterImpersonation);
-  return checkPlatformIdentity(afterEmployeeSession);
+  const afterPlatformIdentity = await checkPlatformIdentity(afterEmployeeSession);
+  return checkNativeDevice(afterPlatformIdentity);
 }
 
 export async function getSession(): Promise<SessionPayload | null> {

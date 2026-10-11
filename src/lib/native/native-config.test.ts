@@ -76,7 +76,7 @@ describe("bridge contract matches its TypeScript mirror", () => {
   });
 
   it("keeps the command set small: no generic executor, only named commands", () => {
-    expect(NATIVE_COMMANDS).toEqual(["app.info", "notifications.status"]);
+    expect(NATIVE_COMMANDS).toEqual(["app.info", "notifications.status", "device.identity"]);
   });
 });
 

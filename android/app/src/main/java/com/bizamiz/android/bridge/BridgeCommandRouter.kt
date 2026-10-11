@@ -16,6 +16,8 @@ class BridgeCommandRouter(
     private val appVersionCode: Int,
     private val notificationsEnabled: () -> Boolean,
     private val capabilities: List<String> = listOf("notifications"),
+    /** Issue #884 device registry — the app's persistent installation identity. */
+    private val installationId: () -> String = { "" },
 ) {
     fun appInfo(): JSONObject = JSONObject()
         .put("appVersionName", appVersionName)
@@ -34,6 +36,8 @@ class BridgeCommandRouter(
             "app.info" -> BridgeProtocol.success(request.id, appInfo())
             "notifications.status" ->
                 BridgeProtocol.success(request.id, JSONObject().put("permission", permissionState()))
+            "device.identity" ->
+                BridgeProtocol.success(request.id, JSONObject().put("installationId", installationId()))
             else -> BridgeProtocol.failure(request.id, "unknown_command")
         }
     }

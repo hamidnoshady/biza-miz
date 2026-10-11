@@ -1,7 +1,7 @@
 {
   "$comment": "Single source of truth for the Web <-> Android Trusted Web Activity bridge contract (issue #884). Read by src/lib/native/bridge-contract.ts (web), android/app/src/test/.../BridgeContractTest.kt (Android unit tests) and android/app/build.gradle.kts (BuildConfig.NATIVE_BRIDGE_VERSION). A change here is a contract change: bump bridgeVersion only with a new command or a changed shape, never to rename, and see docs/android-runtime.md#bridge-contract before editing.",
   "protocol": "biza-native-bridge",
-  "bridgeVersion": 1,
+  "bridgeVersion": 2,
   "transport": "CustomTabsSession.requestPostMessageChannel inside a Trusted Web Activity (Chrome 115+). The page receives a MessagePort from the app; every frame is a JSON envelope. Requires delegate_permission/common.use_as_origin in public/.well-known/assetlinks.json.",
   "envelope": {
     "request": ["v", "kind", "id", "command", "payload"],
@@ -18,6 +18,12 @@
       "minBridgeVersion": 1,
       "payload": [],
       "result": ["permission"]
+    },
+    "device.identity": {
+      "minBridgeVersion": 2,
+      "payload": [],
+      "result": ["installationId"],
+      "$comment": "Issue #884 device registry. The persistent UUID TwaLauncherActivity's InstallationId keeps in app-private storage, for POST /api/native-devices. Not a login credential — the caller must already hold an authenticated session."
     }
   },
   "events": {
