@@ -363,6 +363,7 @@ surviving code.
 | `NavCollapsibleGroup`, `NAV_COLLAPSIBLE_GROUP_TOGGLE_CLASS`, `NAV_SUBGROUP_LABEL_CLASS`, `WorkspaceNavSubGroup` | `dashboard/sidebar-nav-group.tsx`, `(app)/accounting/accounting-app-nav.tsx` | Only the disclosure used them. `sidebar-nav-group.tsx` is now entries-only. |
 | Duplicate `LEDGER_WORKSPACE_LABEL` | `(app)/accounting/accounting-workspace.ts` | One definition remains, in `accounting-nav.ts`. |
 | Per-surface icon tables | sidebar, bottom bar, pin picker | Replaced by the single `navIconFor` map. A test fails if a section's glyph is missing. |
+| `isKnownSettingsSlug` | `src/lib/settings-routes.ts` | No production caller. It only combined `settingsTabForSlug` and `isPlatformSettingsPage`, and the settings page calls those two directly. Its three assertions were removed with it; the two functions it combined keep their own assertions. |
 
 **Kept on purpose** (inspected, not removed):
 
@@ -371,9 +372,12 @@ surviving code.
   Deleting them would delete that invariant, not dead code.
 - `isCanonicalAppPathname` (`src/lib/app-routes.ts`): test-only, and the
   documented reason that no redirect loop can exist (see §2 above).
-- `isKnownSettingsSlug` (`src/lib/settings-routes.ts`): test-only. It is kept
-  pending a decision on whether the settings page should reject unknown slugs
-  explicitly. That is a behaviour change, not cleanup.
+- `APP_SHELL_NAV` (`src/app/dashboard/app-shell-nav.ts`): live. Read by
+  `appShellNavFor`, which the dashboard sidebar calls.
+- `LEDGER_WORKSPACE_LABEL` (`accounting-nav.ts`): live. Read by the sidebar and
+  by the workspace tests.
 - `ACCOUNTING_SECTIONS` `ledger` and `settings` entries, the `ar`/`ap` legacy
   keys, and the `/dashboard/ledger?tab=` compatibility redirects: all are live
   routes or compatibility URLs.
+
+The `export` keyword was also dropped from three symbols that only their own file used: `SectionGroup` (`dashboard/section-nav.tsx`), `NavEntries` (`dashboard/sidebar-nav-group.tsx`) and `RoleGuard` (`lib/trade-goods-routes.ts`). The code is kept. A repository-wide grep found no importer of any of the three, and `tsc --noEmit` must still pass without them exported.

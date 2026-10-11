@@ -56,7 +56,7 @@ function EntryIcon({ entry }: { entry: WorkspaceNavEntry }) {
   return <Icon aria-hidden="true" className="size-5 shrink-0" />;
 }
 
-export function NavEntries({
+function NavEntries({
   entries,
   isActive,
   onNavigate,

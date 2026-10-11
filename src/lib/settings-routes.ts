@@ -82,11 +82,6 @@ export function isPlatformSettingsPage(slug: string): slug is PlatformSettingsPa
   return (PLATFORM_SETTINGS_PAGES as readonly string[]).includes(slug);
 }
 
-/** Whether a slug is any known platform settings section (tab or page). */
-export function isKnownSettingsSlug(slug: string): boolean {
-  return settingsTabForSlug(slug) !== null || isPlatformSettingsPage(slug);
-}
-
 /**
  * The old `?tab=` deep links, resolved to the canonical URL.
  *
