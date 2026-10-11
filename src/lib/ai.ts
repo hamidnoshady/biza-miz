@@ -260,6 +260,12 @@ export type ActionType =
   // record and its flip is logged with actor + timestamp by the service;
   // the same service decides who can change it (parties.manage on the
   // route) — the permission map mirrors that.
+  // Batch E — branches: structural configuration of the business itself.
+  // Membership creation/role changes stay screen-owned for now (access /
+  // identity changes carry step-up policy beyond the approval queue).
+  | "branch.create"
+  | "branch.update"
+  | "branch.lifecycle"
   | "crm.note.delete"
   | "crm.note.pin"
   | "crm.consent.set"
@@ -321,6 +327,9 @@ export type AutopilotExecutorKey =
   | "barcodeAssign"
   | "partyCustomerCreate"
   | "partySupplierCreate"
+  | "branchCreate"
+  | "branchUpdate"
+  | "branchLifecycle"
   | "crmNoteDelete"
   | "crmNotePin"
   | "crmConsentSet"
@@ -954,6 +963,31 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ inventoryItemId: string /* از find_items در مد inventory */, code?: string /* خالی یعنی سیستم خودش بارکد قابل‌اسکن می‌سازد */, symbology?: "EAN13"|"UPC"|"internal", note?: string }',
     executor: "barcodeAssign",
+  },
+  "branch.create": {
+    type: "branch.create",
+    endpoint: "/api/branches",
+    method: "POST",
+    label: "ایجاد شعبهٔ تازه",
+    payloadHint:
+      "{ name: string, address?: string, phone?: string, timezone?: string /* IANA name, خالی یعنی تهران */, color?: string, copyMenuFromLocationId?: string /* منوی آن شعبه را می‌گیرد */ }",
+    executor: "branchCreate",
+  },
+  "branch.update": {
+    type: "branch.update",
+    endpoint: "/api/branches/[id]",
+    method: "PATCH",
+    label: "ویرایش نام/نشانی/تلفن/منطقهٔ زمانی شعبه",
+    payloadHint: "{ branchId: string /* از list_branches */, name?: string, address?: string, phone?: string, timezone?: string, color?: string }",
+    executor: "branchUpdate",
+  },
+  "branch.lifecycle": {
+    type: "branch.lifecycle",
+    endpoint: "/api/branches/[id]",
+    method: "PATCH",
+    label: "فعال/غیرفعال‌کردن شعبه",
+    payloadHint: '{ branchId: string, action: "deactivate"|"reactivate" } — غیرفعال‌کردن شعبه، گزارش‌های روزانهٔش را متوقف می‌کند؛ برمی‌گرداندنش برعکس',
+    executor: "branchLifecycle",
   },
   "crm.note.delete": {
     type: "crm.note.delete",
@@ -2574,6 +2608,24 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           name: "list_crm_automations",
           description:
             "ربات‌های اتوماسیون CRM — ماشه (trigger)، اقدام و وضعیت فعالی. اجراهایشان (runs) از این ابزار جداست.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_branches",
+          description:
+            "شعبه‌های فعال کسب‌وکار — شناسه، نام، رنگ و منطقهٔ زمانی؛ مبنای شعبه‌ها برای هر ابزار دیگر.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_team_members",
+          description:
+            "اعضای تیم کسب‌وکار — نام، نقش، وضعیت فعالی و دسترسی شعبه؛ قبل از هر «تغییر فرد» از این ابزار شناسهٔ درست بگیر.",
           parameters: { type: "object", properties: {}, additionalProperties: false },
         },
       },

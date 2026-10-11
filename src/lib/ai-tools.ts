@@ -56,6 +56,7 @@ import { getMenuTree } from "./menu-service";
 import { listFormulas, listRuns } from "./production-service";
 import { listBarcodes, listItemsWithoutBarcode } from "./inventory-item-barcodes-service";
 import { listCustomerNotes, listActivities } from "./crm-service";
+import { listMembers } from "./team-service";
 import { listAutomations } from "./crm-automation-service";
 
 /** Case-insensitive contains over a whitelist of row fields — tool-side `q`. */
@@ -1612,6 +1613,15 @@ export async function runReadTool(
     case "list_crm_automations": {
       const automations = await listAutomations(businessId);
       return { ok: true, data: { count: automations.length, automations } };
+    }
+    // Issue #883 package 2, batch E — business shape: branches + staff.
+    case "list_branches": {
+      const branches = await listBranches(businessId);
+      return { ok: true, data: { count: branches.length, branches } };
+    }
+    case "list_team_members": {
+      const members = await listMembers(businessId);
+      return { ok: true, data: { count: members.length, members } };
     }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);

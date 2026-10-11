@@ -64,6 +64,7 @@ import { assignBarcode } from "./inventory-item-barcodes-service";
 import { createCustomer, createParty } from "./parties-service";
 import { getSetting, SETTING_KEYS } from "./settings";
 import { toggleNotePin, setConsent } from "./crm-service";
+import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
 import { createSegment, updateSegment, archiveSegment } from "./crm-segments-service";
 import { setAutomationActive } from "./crm-automation-service";
 import type { SegmentDefinition } from "./segments";
@@ -1730,6 +1731,74 @@ const crmAutomationToggle: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { automationId, isActive } };
 };
 
+
+// ── Issue #883 package 2, batch E — branch structure (locations.manage) ─────
+// Branch create/lifecycle reshape the business itself; mirror the routes'
+// etiquette — always_approve in the registry — and reuse the service's own
+// validation + ceiling/override checks so the screens and the connectors see
+// the same errors.
+
+const branchCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("invalid_payload");
+  try {
+    const created = await createBranch({
+      businessId: ctx.businessId,
+      name,
+      address: str(ctx.payload.address),
+      phone: str(ctx.payload.phone),
+      timezone: str(ctx.payload.timezone) ?? undefined,
+      color: str(ctx.payload.color),
+      copyMenuFromLocationId: str(ctx.payload.copyMenuFromLocationId),
+      actorId: ctx.authorizedByUserId,
+    });
+    return { ok: true, result: { locationId: created.locationId } };
+  } catch (err) {
+    if (err instanceof BranchError) return fail(err.message);
+    throw err;
+  }
+};
+
+const branchUpdate: AutopilotExecutor = async (ctx) => {
+  const locationId = str(ctx.payload.branchId);
+  if (!locationId) return fail("invalid_payload");
+  try {
+    await updateBranch({
+      businessId: ctx.businessId,
+      locationId,
+      actorId: ctx.authorizedByUserId,
+      name: str(ctx.payload.name) ?? undefined,
+      address: ctx.payload.address === undefined ? undefined : str(ctx.payload.address),
+      phone: ctx.payload.phone === undefined ? undefined : str(ctx.payload.phone),
+      timezone: str(ctx.payload.timezone) ?? undefined,
+      color: str(ctx.payload.color) ?? undefined,
+    });
+    return { ok: true, result: { branchId: locationId, updated: true } };
+  } catch (err) {
+    if (err instanceof BranchError) return fail(err.message);
+    throw err;
+  }
+};
+
+const branchLifecycle: AutopilotExecutor = async (ctx) => {
+  const locationId = str(ctx.payload.branchId);
+  const action = str(ctx.payload.action);
+  if (!locationId || (action !== "deactivate" && action !== "reactivate")) {
+    return fail("invalid_payload");
+  }
+  try {
+    if (action === "deactivate") {
+      await deactivateBranch(ctx.businessId, locationId, ctx.authorizedByUserId);
+    } else {
+      await reactivateBranch(ctx.businessId, locationId, ctx.authorizedByUserId);
+    }
+    return { ok: true, result: { branchId: locationId, action } };
+  } catch (err) {
+    if (err instanceof BranchError) return fail(err.message);
+    throw err;
+  }
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -1781,6 +1850,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   barcodeAssign,
   partyCustomerCreate,
   partySupplierCreate,
+  branchCreate,
+  branchUpdate,
+  branchLifecycle,
   crmNoteDelete,
   crmNotePin,
   crmConsentSet,

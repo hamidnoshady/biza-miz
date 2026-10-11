@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **77 read verbs** (**23** business-wide aggregates —
-visible only to connections consented for every branch) and **55 write verbs**
-(**21** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **79 read verbs** (**23** business-wide aggregates —
+visible only to connections consented for every branch) and **58 write verbs**
+(**23** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -45,6 +45,8 @@ visible only to connections consented for every branch) and **55 write verbs**
 | `list_customer_notes` | crm | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_activities` | crm | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_automations` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_branches` | workspace | agnostic | `locations.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_team_members` | workspace | agnostic | `team.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_vat_liability` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `run_accounting_review` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_accounts` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -136,6 +138,9 @@ visible only to connections consented for every branch) and **55 write verbs**
 | `write_barcode_assign` | `barcode.assign` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_party_customer_create` | `party.customer.create` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_party_supplier_create` | `party.supplier.create` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_branch_create` | `branch.create` | workspace | high | always approval queue (step-up) | `locations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_branch_update` | `branch.update` | workspace | low | connection write_mode | `locations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_branch_lifecycle` | `branch.lifecycle` | workspace | high | always approval queue (step-up) | `locations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_note_delete` | `crm.note.delete` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_note_pin` | `crm.note.pin` | crm | low | connection write_mode | `parties.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_consent_set` | `crm.consent.set` | crm | high | always approval queue (step-up) | `crm.consent_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

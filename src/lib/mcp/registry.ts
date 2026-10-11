@@ -114,6 +114,10 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_crm_activities", kind: "read", app: "crm", branchPolicy: "agnostic" },
   // (list_customer_segments exists from before — do not re-add)
   { name: "list_crm_automations", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  // Batch E — the business's own shape: branches and staff are business-wide
+  // configuration views, not per-branch facts.
+  { name: "list_branches", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_team_members", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
@@ -241,6 +245,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch D — CRM: notes bookkeeping is low; consent is a legal record and
   // automation toggles re-shape behaviour for every customer at once, so
   // both ask for explicit approval.
+  { actionType: "branch.create", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  { actionType: "branch.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "branch.lifecycle", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "crm.note.delete", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.note.pin", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.consent.set", kind: "write", app: "crm", risk: "high", approval: "always_approve" },

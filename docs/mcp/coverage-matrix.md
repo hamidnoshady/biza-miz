@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (61)
+### Tenant (59)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -33,7 +33,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **inventory.production** (Inventory · Production formulas & runs, modifier recipes) — partial
 - **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
-- **crm.customers** (CRM · Customers (profile, notes, tags, relationships, merge, duplicates, consent)) — partial
 - **crm.deals-leads** (CRM · Deals & leads (handoff, convert)) — MCP gap
 - **crm.cases-activities** (CRM · Cases & activities) — MCP gap
 - **crm.pipelines** (CRM · Pipelines & stages) — MCP gap
@@ -55,8 +54,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **workspace.approvals** (Workspace · Approvals) — partial
 - **workspace.aec** (Workspace · AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement)) — partial
 - **config.settings** (Business config · Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms)) — partial
-- **config.team** (Business config · Staff, roles & permissions, invitations, credentials, site access) — MCP gap
-- **config.branches** (Business config · Branches & locations) — partial
+- **config.team** (Business config · Staff, roles & permissions, invitations, credentials, site access) — partial
 - **config.integrations** (Business config · Integration connections & syncs (Holoo etc.)) — partial
 - **config.ai** (Business config · AI config, automations, coworker jobs/templates/review, widgets, memory, conversations, research) — partial
 - **config.data** (Business config · Data transfer: entities, exports, imports, schedules, templates, Holoo provider) — MCP gap
@@ -101,7 +99,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 11 · partial: 32 · MCP gap: 29 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 13 · partial: 31 · MCP gap: 28 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -132,7 +130,7 @@ Counts — covered: 11 · partial: 32 · MCP gap: 29 · backend gap: 0 · n/a (i
 | Inventory | Barcodes (lookup, bulk) | list_item_barcodes, list_items_without_barcode | barcode.assign | — | — | (route only) | inventory.adjust, inventory.view | connection mode | list_item_barcodes, list_items_without_barcode, barcode.assign | integration/stock.integration.test.ts | partial |
 | Inventory | Waste & write-downs | get_waste_history | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | get_waste_history | integration/stock.integration.test.ts | partial |
 | Inventory | stock/* routes<br>_legacy alias of the inventory/* surface_ | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, purchases.manage | — | — | — | duplicate surface |
-| CRM | Customers (profile, notes, tags, relationships, merge, duplicates, consent) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes | crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create | crm.customer.tag, crm.note.pin | (route only) | — | crm.consent_manage, crm.manage, crm.merge, crm.view, ledger.view, parties.manage, parties.view | connection mode; step-up (always approve) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes, crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create, crm.customer.tag, crm.note.pin | integration/parties.integration.test.ts | partial |
+| CRM | Customers (profile, notes, tags, relationships, merge, duplicates, consent) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes | crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create | crm.customer.tag, crm.note.pin | crm.note.delete | — | crm.consent_manage, crm.manage, crm.merge, crm.view, ledger.view, parties.manage, parties.view | connection mode; step-up (always approve) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes, crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create, crm.customer.tag, crm.note.pin, crm.note.delete | integration/parties.integration.test.ts | covered |
 | CRM | Deals & leads (handoff, convert) | (route only) | (route only) | (route only) | (route only) | — | crm.manage, crm.view | — | — | integration/crm.integration.test.ts | MCP gap |
 | CRM | Cases & activities | (route only) | (route only) | (route only) | (route only) | — | crm.delete, parties.manage, parties.view | — | — | integration/crm.integration.test.ts | MCP gap |
 | CRM | Pipelines & stages | (route only) | (route only) | (route only) | — | — | crm.configure | — | — | integration/crm.integration.test.ts | MCP gap |
@@ -157,8 +155,8 @@ Counts — covered: 11 · partial: 32 · MCP gap: 29 · backend gap: 0 · n/a (i
 | Workspace | Approvals | list_workspace_approvals | (route only) | — | (route only) | — | workspace.approve, workspace.manage, workspace.view | — | list_workspace_approvals | integration/workspace.integration.test.ts | partial |
 | Workspace | AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement) | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | (route only) | (route only) | (route only) | — | settings.manage, workspace.approve, workspace.documents_issue, workspace.manage, workspace.view | — | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | — | partial |
 | Business config | Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms) | get_setup_state | (route only) | (route only) | (route only) | — | accounts.edit, settings.manage | — | get_setup_state | integration/business-settings.integration.test.ts | partial |
-| Business config | Staff, roles & permissions, invitations, credentials, site access | (route only) | (route only) | (route only) | (route only) | — | team.manage, team.permissions_manage, team.view | — | — | integration/team.integration.test.ts | MCP gap |
-| Business config | Branches & locations | get_branch_comparison | (route only) | (route only) | — | — | locations.manage | — | get_branch_comparison | integration/branch-management.integration.test.ts | partial |
+| Business config | Staff, roles & permissions, invitations, credentials, site access | list_team_members | (route only) | (route only) | (route only) | — | team.manage, team.permissions_manage, team.view | — | list_team_members | integration/team.integration.test.ts | partial |
+| Business config | Branches & locations | get_branch_comparison, list_branches | branch.create | branch.update | branch.lifecycle | — | locations.manage | connection mode; step-up (always approve) | get_branch_comparison, list_branches, branch.create, branch.update, branch.lifecycle | integration/branch-management.integration.test.ts | covered |
 | Business config | Integration connections & syncs (Holoo etc.) | describe_app | (route only) | (route only) | (route only) | — | integrations.manage, integrations.view | — | describe_app | integration/connections.integration.test.ts | partial |
 | Business config | WooCommerce webhooks / WordPress event bridges / connections management planes (API keys, desktop, MCP, website)<br>_inbound webhooks and the token-management planes of the API connector families (the panel hosts the UI); the MCP management plane itself is expressly out of scope_ | (route only) | (route only) | (route only) | (route only) | — | integrations.manage, integrations.view, mcp.manage | — | — | — | n/a (infra) |
 | Business config | AI config, automations, coworker jobs/templates/review, widgets, memory, conversations, research | get_setup_state, list_coworker_jobs | (route only) | (route only) | (route only) | — | ai.automations.manage, ai.manage, ai.usage.view, ai.use, finance.expenses_manage, settings.manage | — | get_setup_state, list_coworker_jobs | integration/ai-autopilot.integration.test.ts | partial |

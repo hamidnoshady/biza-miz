@@ -67,6 +67,10 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_crm_activities: PERMISSIONS.partiesView,
   // list_customer_segments was already mapped; automations is the new read.
   list_crm_automations: PERMISSIONS.crmView,
+  // Batch E reads — the routes use locations.manage on branches and
+  // team.view on the member list.
+  list_branches: PERMISSIONS.locationsManage,
+  list_team_members: PERMISSIONS.teamView,
   list_formulas: PERMISSIONS.inventoryView,
   list_production_runs: PERMISSIONS.inventoryView,
   list_item_barcodes: PERMISSIONS.inventoryView,
@@ -158,6 +162,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   // Batch D — notes activities follow the notes screen (parties manage),
   // consent the consent drawer (crm.consent_manage), segments/automechanics
   // the configure gate the routes themselves use.
+  "branch.create": PERMISSIONS.locationsManage,
+  "branch.update": PERMISSIONS.locationsManage,
+  "branch.lifecycle": PERMISSIONS.locationsManage,
   "crm.note.delete": PERMISSIONS.partiesManage,
   "crm.note.pin": PERMISSIONS.partiesManage,
   "crm.consent.set": PERMISSIONS.crmConsentManage,

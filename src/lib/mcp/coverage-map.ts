@@ -303,7 +303,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       listDetail: ["get_customer_profile", "find_customers", "get_customer_timeline", "get_at_risk_customers", "list_customer_notes", "list_crm_activities"],
       create: ["party.customer.create", "party.supplier.create", "customer.note.add", "crm.customer.note", "crm.consent.set"],
       update: ["crm.customer.tag", "crm.note.pin"],
-      delete: ["crm.note.delete"],
+      lifecycle: ["crm.note.delete"],
     },
     test: "integration/parties.integration.test.ts",
   },
@@ -522,6 +522,10 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Staff, roles & permissions, invitations, credentials, site access",
     routes: ["team", "staff"],
+    // Reads landed with batch E (#883); membership create/role/permission
+    // writes stay screen-owned for now — access/identity writes carry a
+    // step-up policy beyond the approval queue (see the batch's commit note).
+    ops: { listDetail: ["list_team_members"] },
     test: "integration/team.integration.test.ts",
   },
   {
@@ -529,7 +533,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Branches & locations",
     routes: ["branches", "locations"],
-    ops: { listDetail: ["get_branch_comparison"] },
+    ops: {
+      // Batch E (#883) — the full branch CRUD of the locations screen,
+      // reusing createBranch/updateBranch/deactivateBranch/reactivateBranch.
+      listDetail: ["list_branches", "get_branch_comparison"],
+      create: ["branch.create"],
+      update: ["branch.update"],
+      lifecycle: ["branch.lifecycle"],
+    },
     test: "integration/branch-management.integration.test.ts",
   },
   {
