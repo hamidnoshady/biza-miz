@@ -98,6 +98,28 @@ export function availableActions(direction: ChequeDirection, status: ChequeStatu
   return CHEQUE_ACTIONS.filter((action) => from[action] !== undefined);
 }
 
+/**
+ * The statuses no action can leave, in either direction: the instrument's life
+ * is over. Derived from the table above rather than listed twice, so the
+ * register's «پایان‌یافته» filter and `isTerminal` cannot disagree.
+ */
+export const CHEQUE_TERMINAL_STATUSES: readonly ChequeStatus[] = CHEQUE_STATUSES.filter((status) =>
+  CHEQUE_DIRECTIONS.every((direction) => isTerminal(direction, status)),
+);
+
+/** The register's `locationId` value for legacy cheques with no branch recorded. */
+export const LEGACY_UNASSIGNED_LOCATION = "unassigned";
+
+/**
+ * Escape a user's text for a SQL `LIKE` pattern, so «%» and «_» typed into the
+ * search box match themselves rather than acting as wildcards (which would
+ * make «_» match every cheque). Postgres's default escape character is the
+ * backslash, and the backslash itself is escaped first.
+ */
+export function escapeLikePattern(raw: string): string {
+  return raw.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
 /** Whether the cheque's life is over — nothing more can happen to it. */
 export function isTerminal(direction: ChequeDirection, status: ChequeStatus): boolean {
   return availableActions(direction, status).length === 0;

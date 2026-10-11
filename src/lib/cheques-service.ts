@@ -48,7 +48,10 @@ import {
   CHEQUE_ACTIONS,
   CHEQUE_DIRECTIONS,
   CHEQUE_STATUSES,
+  CHEQUE_TERMINAL_STATUSES,
+  escapeLikePattern,
   initialStatus,
+  LEGACY_UNASSIGNED_LOCATION,
   nextStatus,
   normalizeSayadId,
   type ChequeAction,
@@ -271,6 +274,10 @@ export const CHEQUE_STATUS_GROUPS: Record<string, ChequeStatus[]> = {
   contingent: ["endorsed"],
   returned_unresolved: ["bounced"],
   settled: ["cleared", "cancelled", "resolved"],
+  // The life-cycle view: «open» is anything an action can still move (a
+  // returned cheque included), «terminal» is what no action can leave.
+  open: CHEQUE_STATUSES.filter((status) => !CHEQUE_TERMINAL_STATUSES.includes(status)),
+  terminal: [...CHEQUE_TERMINAL_STATUSES],
 };
 
 /**
@@ -410,14 +417,21 @@ export async function listCheques(
     params.push(direction);
     where += ` AND c.direction = $${params.length}`;
   }
-  if (filters.locationId) {
+  if (filters.locationId === LEGACY_UNASSIGNED_LOCATION) {
+    // Cheques written before a branch was recorded on them. Filtering on the
+    // sentinel is how the register reaches them; they are never silently
+    // folded into «all branches».
+    where += " AND c.location_id IS NULL";
+  } else if (filters.locationId) {
     if (!isUuid(filters.locationId)) throw new ChequeError("invalid_location");
     params.push(filters.locationId);
     where += ` AND c.location_id = $${params.length}`;
   }
   const status = filters.status?.trim();
   if (status && status !== "all") {
-    const group = CHEQUE_STATUS_GROUPS[status];
+    // An own property only: `status=constructor` must be refused, not read off
+    // Object.prototype and passed to SQL as a list of statuses.
+    const group = Object.hasOwn(CHEQUE_STATUS_GROUPS, status) ? CHEQUE_STATUS_GROUPS[status] : undefined;
     const statuses = group ?? (CHEQUE_STATUSES.includes(status as ChequeStatus) ? [status] : null);
     if (!statuses) throw new ChequeError("invalid_status");
     params.push(statuses);
@@ -441,15 +455,24 @@ export async function listCheques(
   }
   const q = filters.q?.trim();
   if (q) {
-    params.push(`%${q.toLowerCase()}%`);
+    // The text is data, not a pattern: «%» and «_» typed by a clerk match
+    // themselves. The canonical form of a serial can be empty («_», «.»),
+    // and an empty pattern would match every cheque, so the serial and صیاد
+    // clauses only apply when something is left to compare.
+    params.push(`%${escapeLikePattern(q.toLowerCase())}%`);
     const like = `$${params.length}`;
-    params.push(`%${canonicalSerialNumber(q)}%`);
-    const canonical = `$${params.length}`;
-    where += ` AND (lower(c.counterparty_name) LIKE ${like}
-                 OR lower(c.bank_name) LIKE ${like}
-                 OR lower(COALESCE(c.memo, '')) LIKE ${like}
-                 OR c.serial_number_canonical LIKE ${canonical}
-                 OR COALESCE(c.sayad_id, '') LIKE ${canonical})`;
+    const clauses = [
+      `lower(c.counterparty_name) LIKE ${like}`,
+      `lower(c.bank_name) LIKE ${like}`,
+      `lower(COALESCE(c.memo, '')) LIKE ${like}`,
+    ];
+    const canonicalQuery = canonicalSerialNumber(q);
+    if (canonicalQuery) {
+      params.push(`%${escapeLikePattern(canonicalQuery)}%`);
+      const canonical = `$${params.length}`;
+      clauses.push(`c.serial_number_canonical LIKE ${canonical}`, `COALESCE(c.sayad_id, '') LIKE ${canonical}`);
+    }
+    where += ` AND (${clauses.join(" OR ")})`;
   }
 
   const limit = Math.min(Math.max(Math.trunc(filters.limit ?? 50), 1), MAX_PAGE);

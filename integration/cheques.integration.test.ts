@@ -2326,3 +2326,113 @@ describe("concurrency under a forced lock barrier (issue #828)", () => {
     return original;
   }
 });
+
+describe("issue #828 follow-up: payable replacement, open/terminal state, legacy branch, search text", () => {
+  it("nets a returned payable against its replacement: 2122 empties and the supplier is owed the new cheque once", async () => {
+    const issued = await payable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: issued.id,
+      action: "bounce",
+      occurredOn: "2026-02-21",
+      createdBy: null,
+    });
+    // A returned payable is a credit balance in 2122, the mirror of 2121.
+    expect(await balanceOf("2122")).toBe(-3_000_000);
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: issued.id,
+      action: "restore",
+      occurredOn: "2026-02-22",
+      createdBy: null,
+    });
+    expect(await balanceOf("2122")).toBe(0);
+    const owedBeforeReplacement = await balanceOf("2100");
+
+    const replacement = await payable({
+      replacesChequeId: issued.id,
+      issueDate: "2026-02-23",
+      dueDate: "2026-04-10",
+    });
+    expect(replacement.replacesChequeId).toBe(issued.id);
+    expect(replacement.status).toBe("issued");
+    // The replacement's own entry debits 2100 once, exactly as the original
+    // issue did: the supplier is paid by the new cheque, not twice.
+    expect(await balanceOf("2100")).toBe(owedBeforeReplacement + 3_000_000);
+    expect(await balanceOf("2122")).toBe(0);
+
+    // The original bounce stays in the history, untouched.
+    const history = await cheques.getChequeHistory(biz.id, issued.id);
+    expect(history.map((event) => event.event)).toContain("bounced");
+  });
+
+  it("filters the register by open and terminal state, and names the two groups", async () => {
+    const onHand = await receivable();
+    const returned = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: returned.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+    const done = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: done.id,
+      action: "deposit",
+      occurredOn: "2026-03-10",
+      createdBy: null,
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: done.id,
+      action: "clear",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+
+    const open = await cheques.listCheques(biz.id, { direction: "receivable", status: "open" });
+    expect(open.cheques.map((c) => c.id).sort()).toEqual([onHand.id, returned.id].sort());
+    expect(open.total).toBe(2);
+
+    const terminal = await cheques.listCheques(biz.id, { direction: "receivable", status: "terminal" });
+    expect(terminal.cheques.map((c) => c.id)).toEqual([done.id]);
+    expect(terminal.total).toBe(1);
+
+    // A name that is only inherited from Object.prototype is not a status.
+    await expect(
+      cheques.listCheques(biz.id, { direction: "receivable", status: "constructor" }),
+    ).rejects.toThrow("invalid_status");
+  });
+
+  it("filters cheques that have no branch recorded, and labels them as such", async () => {
+    const legacy = await receivable();
+    const branched = await receivable();
+    await db.query("UPDATE cheques SET location_id = NULL WHERE id = $1", [legacy.id]);
+
+    const page = await cheques.listCheques(biz.id, { direction: "receivable", locationId: "unassigned" });
+    expect(page.cheques.map((c) => c.id)).toEqual([legacy.id]);
+    expect(page.cheques[0]).toMatchObject({ locationId: null, locationName: null });
+
+    const byBranch = await cheques.listCheques(biz.id, {
+      direction: "receivable",
+      locationId: biz.locationId,
+    });
+    expect(byBranch.cheques.map((c) => c.id)).toEqual([branched.id]);
+  });
+
+  it("matches LIKE wildcards typed in the search box as plain text, never as «anything»", async () => {
+    await receivable({ counterpartyName: "علی" });
+    await receivable({ counterpartyName: "رضا" });
+
+    // «_» and «%» are wildcards to SQL, and «_» canonicalises to nothing at
+    // all. Neither may match every cheque.
+    for (const q of ["_", "%", "__", "%%"]) {
+      const page = await cheques.listCheques(biz.id, { direction: "receivable", q });
+      expect(page.total, `search for ${q}`).toBe(0);
+    }
+    const literal = await cheques.listCheques(biz.id, { direction: "receivable", q: "علی" });
+    expect(literal.total).toBe(1);
+  });
+});

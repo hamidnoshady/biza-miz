@@ -121,6 +121,7 @@ import { useMoney } from "@/components/money/money-context";
 import {
   availableActions,
   isTerminal,
+  LEGACY_UNASSIGNED_LOCATION,
   type ChequeAction,
   type ChequeDirection,
   type ChequeStatus,
@@ -1077,6 +1078,9 @@ export function ChequesSection({
                       {b.name}
                     </SelectItem>
                   ))}
+                  {/* Legacy cheques were written before a branch was recorded on
+                      them; they are listed on their own, never inside «همه شعب». */}
+                  <SelectItem value={LEGACY_UNASSIGNED_LOCATION}>ثبت قدیمی (بدون شعبه)</SelectItem>
                 </SelectContent>
               </Select>
             ) : null}
@@ -1880,6 +1884,9 @@ const STATUS_GROUP_OPTIONS: { value: string; label: string }[] = [
   { value: "returned_unresolved", label: "برگشتی تعیین‌تکلیف‌نشده" },
   { value: "contingent", label: "واگذارشده (تعهد احتمالی)" },
   { value: "settled", label: "تعیین‌تکلیف‌شده" },
+  // The life-cycle split: anything an action can still move, and the rest.
+  { value: "open", label: "باز (هنوز کاری مانده)" },
+  { value: "terminal", label: "پایان‌یافته" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -2115,7 +2122,7 @@ function ChequeDetailDialog({
                   currently switched into. */}
               <DetailItem
                 label="شعبه ثبت چک"
-                value={cheque.locationName ?? "کل کسب‌وکار"}
+                value={cheque.locationName ?? "ثبت قدیمی — بدون شعبه (کل کسب‌وکار)"}
               />
               {(cheque.replacedByAmount ?? 0) > 0 ? (
                 <DetailItem

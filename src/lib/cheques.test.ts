@@ -6,6 +6,9 @@ import {
   bucketChequesByDueDate,
   CHEQUE_ACTIONS,
   CHEQUE_DIRECTIONS,
+  CHEQUE_STATUSES,
+  CHEQUE_TERMINAL_STATUSES,
+  escapeLikePattern,
   initialStatus,
   isTerminal,
   nextStatus,
@@ -249,5 +252,35 @@ describe("bucketChequesByDueDate", () => {
 
   it("returns nothing for nothing", () => {
     expect(bucketChequesByDueDate([], "2026-08-18")).toEqual([]);
+  });
+});
+
+describe("CHEQUE_TERMINAL_STATUSES", () => {
+  it("is exactly the statuses no action can leave, in either direction", () => {
+    expect([...CHEQUE_TERMINAL_STATUSES]).toEqual(["cleared", "cancelled", "resolved"]);
+  });
+
+  it("matches isTerminal in the direction that holds each status", () => {
+    expect(isTerminal("receivable", "cleared")).toBe(true);
+    expect(isTerminal("receivable", "resolved")).toBe(true);
+    expect(isTerminal("payable", "cancelled")).toBe(true);
+    expect(isTerminal("payable", "resolved")).toBe(true);
+    // Live or returned balances are still open: they have an action to take.
+    expect(isTerminal("receivable", "bounced")).toBe(false);
+    expect(isTerminal("payable", "bounced")).toBe(false);
+    expect(isTerminal("receivable", "endorsed")).toBe(false);
+    expect(isTerminal("payable", "issued")).toBe(false);
+    expect(isTerminal("receivable", "on_hand")).toBe(false);
+  });
+});
+
+describe("escapeLikePattern", () => {
+  it("escapes the LIKE wildcards and the escape character itself", () => {
+    expect(escapeLikePattern("50%_off")).toBe("50\\%\\_off");
+    expect(escapeLikePattern("a\\b")).toBe("a\\\\b");
+  });
+
+  it("leaves ordinary text, Persian text and digits untouched", () => {
+    expect(escapeLikePattern("ملت ۱۲۳")).toBe("ملت ۱۲۳");
   });
 });

@@ -16,7 +16,7 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toPersianDigits } from "@/lib/digits";
 import { MoneyProvider } from "@/components/money/money-context";
 import { ChequesSection } from "./cheques-section";
@@ -527,6 +527,42 @@ describe("the idempotency key a confirmation carries", () => {
 
 
 
+/**
+ * Fills the minimum a registration needs and submits it. The exception
+ * checkbox («ثبت بدون اتصال به طرف حساب») is ticked by default, because no
+ * party is picked here; pass `unattributed: false` to leave it alone.
+ */
+async function fillAndSubmit(
+  user: ReturnType<typeof userEvent.setup>,
+  serial: string,
+  { unattributed = true }: { unattributed?: boolean } = {},
+) {
+  const serialInput = screen.getByLabelText(/^شماره چک/);
+  await user.clear(serialInput);
+  await user.type(serialInput, serial);
+  const bank = screen.getByLabelText(/^بانک/);
+  await user.clear(bank);
+  await user.type(bank, "ملت");
+  const amount = screen.getByLabelText(/^مبلغ \(/);
+  await user.clear(amount);
+  await user.type(amount, "5000000");
+  const name = screen.getByLabelText(/^نام صادرکننده روی چک/);
+  await user.clear(name);
+  await user.type(name, "مشتری");
+  if (unattributed && !(screen.getByRole("checkbox") as HTMLInputElement).checked) {
+    await user.click(screen.getByRole("checkbox"));
+  }
+  // Shamsi only: the due date is picked from the Jalali calendar, never
+  // typed into a Gregorian `<input type="date">`.
+  if (!screen.queryByRole("button", { name: "ماه بعد" })) {
+    await user.click(screen.getByLabelText("سررسید چک"));
+  }
+  await user.click(await screen.findByRole("button", { name: "ماه بعد" }));
+  const days = await screen.findAllByRole("button", { name: /^۱۵ / });
+  await user.click(days[0]);
+  await user.click(screen.getByRole("button", { name: "ثبت چک" }));
+}
+
 describe("the idempotency key a new registration carries", () => {
   /** Every POST to the create route, with the key its body carried. */
   let creates: Record<string, unknown>[];
@@ -576,33 +612,6 @@ describe("the idempotency key a new registration carries", () => {
     }
   };
 
-  /** Fills the minimum a registration needs and submits it. */
-  async function fillAndSubmit(user: ReturnType<typeof userEvent.setup>, serial: string) {
-    const serialInput = screen.getByLabelText(/^شماره چک/);
-    await user.clear(serialInput);
-    await user.type(serialInput, serial);
-    const bank = screen.getByLabelText(/^بانک/);
-    await user.clear(bank);
-    await user.type(bank, "ملت");
-    const amount = screen.getByLabelText(/^مبلغ \(/);
-    await user.clear(amount);
-    await user.type(amount, "5000000");
-    const name = screen.getByLabelText(/^نام صادرکننده روی چک/);
-    await user.clear(name);
-    await user.type(name, "مشتری");
-    if (!(screen.getByRole("checkbox") as HTMLInputElement).checked) {
-      await user.click(screen.getByRole("checkbox"));
-    }
-    // Shamsi only: the due date is picked from the Jalali calendar, never
-    // typed into a Gregorian `<input type="date">`.
-    if (!screen.queryByRole("button", { name: "ماه بعد" })) {
-      await user.click(screen.getByLabelText("سررسید چک"));
-    }
-    await user.click(await screen.findByRole("button", { name: "ماه بعد" }));
-    const days = await screen.findAllByRole("button", { name: /^۱۵ / });
-    await user.click(days[0]);
-    await user.click(screen.getByRole("button", { name: "ثبت چک" }));
-  }
 
   it("retries a registration whose response was lost under the same key, even after the dialog was closed", async () => {
     stubCreate(async (attempt) => {
@@ -1152,5 +1161,137 @@ describe("the cheque register's accounting categories", () => {
     expect(screen.getAllByText("ظهرنویسی‌شده (تعهد احتمالی)").length).toBe(1);
     expect(screen.getAllByText("برگشتی تعیین‌تکلیف‌نشده").length).toBe(1);
     expect(screen.getAllByText(/۱۲۴۴/).length).toBeGreaterThan(0);
+  });
+});
+
+// The journal peek loads an entry over the network; the drill-down test only
+// needs to know which entry the history row asked for.
+vi.mock("./journal-peek-dialog", async () => {
+  const React = await import("react");
+  return {
+    JournalPeekDialog: ({ entryId }: { entryId: string }) =>
+      React.createElement("div", { role: "dialog", "aria-label": "سند حسابداری" }, `entry:${entryId}`),
+  };
+});
+
+describe("the audit trail, the state and branch filters, and the party rule (issue #828)", () => {
+  // jsdom has no pointer-capture or scrollIntoView, which Radix's Select calls
+  // when it opens. These stubs only let the listbox open; they change nothing
+  // the test asserts.
+  beforeAll(() => {
+    const proto = Element.prototype as unknown as Record<string, unknown>;
+    proto.hasPointerCapture ??= () => false;
+    proto.releasePointerCapture ??= () => undefined;
+    proto.scrollIntoView ??= () => undefined;
+  });
+
+  it("opens the journal entry a history step posted, by its entryId, and offers none for a step that posted nothing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+        if (url.startsWith("/api/ledger/cheques?")) {
+          return answer({ cheques: [cheque(1, { id: "cheque-1" })], total: 1, hasMore: false, banks: [], summary: summary() });
+        }
+        if (url === "/api/ledger/cheques/cheque-1/history") {
+          return answer({
+            events: [
+              { id: "ev-1", event: "received", occurredOn: "2026-01-10", entryId: "entry-1", endorsedToSupplierId: null, memo: null, createdAt: "2026-01-10T08:00:00.000Z" },
+              { id: "ev-2", event: "deposited", occurredOn: "2026-02-10", entryId: "entry-42", endorsedToSupplierId: null, memo: null, createdAt: "2026-02-10T08:00:00.000Z" },
+              { id: "ev-3", event: "cleared", occurredOn: "2026-02-12", entryId: null, endorsedToSupplierId: null, memo: null, createdAt: "2026-02-12T08:00:00.000Z" },
+            ],
+          });
+        }
+        return answer({ locations: [], customers: [], suppliers: [] });
+      }),
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-001"));
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+
+    // Two steps posted an entry, so two drill-downs; the third posted none.
+    const drills = await screen.findAllByRole("button", { name: "مشاهده سند حسابداری" });
+    expect(drills).toHaveLength(2);
+    await user.click(drills[1]);
+    const peek = await screen.findByRole("dialog", { name: "سند حسابداری" });
+    expect(peek.textContent).toBe("entry:entry-42");
+  });
+
+  it("asks the server for the open or the terminal state, and names the group it chose", async () => {
+    stubFetch(() => ({ cheques: [], total: 0, hasMore: false, banks: [], summary: summary() }));
+    const user = userEvent.setup();
+    renderSection();
+    await waitFor(() => expect(registerCalls.length).toBeGreaterThan(0));
+
+    await user.click(screen.getByRole("combobox", { name: "فیلتر وضعیت چک" }));
+    await user.click(await screen.findByRole("option", { name: "پایان‌یافته" }));
+    await waitFor(() => expect(registerCalls.at(-1)).toContain("status=terminal"));
+
+    await user.click(screen.getByRole("combobox", { name: "فیلتر وضعیت چک" }));
+    await user.click(await screen.findByRole("option", { name: /باز \(هنوز کاری مانده\)/ }));
+    await waitFor(() => expect(registerCalls.at(-1)).toContain("status=open"));
+  });
+
+  it("lets a reader isolate the cheques that have no branch recorded", async () => {
+    stubFetch(() => ({ cheques: [], total: 0, hasMore: false, banks: [], summary: summary() }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+        if (url.startsWith("/api/ledger/cheques?")) {
+          registerCalls.push(url);
+          return answer({ cheques: [], total: 0, hasMore: false, banks: [], summary: summary() });
+        }
+        if (url.startsWith("/api/locations/active")) {
+          return answer({ locations: [{ id: "loc-1", name: "مرکزی" }, { id: "loc-2", name: "شعبهٔ دو" }] });
+        }
+        return answer({ locations: [], customers: [], suppliers: [] });
+      }),
+    );
+    registerCalls = [];
+    const user = userEvent.setup();
+    renderSection();
+    await waitFor(() => expect(registerCalls.length).toBeGreaterThan(0));
+
+    await user.click(await screen.findByRole("combobox", { name: "فیلتر شعبه" }));
+    await user.click(await screen.findByRole("option", { name: "ثبت قدیمی (بدون شعبه)" }));
+    await waitFor(() => expect(registerCalls.at(-1)).toContain("locationId=unassigned"));
+  });
+
+  it("refuses an ordinary registration with no party, and sends the exception only when it is ticked", async () => {
+    const creates: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+        if (url === "/api/ledger/cheques" && init?.method === "POST") {
+          creates.push(JSON.parse(String(init?.body ?? "{}")));
+          return answer({ cheque: cheque(9) });
+        }
+        if (url.startsWith("/api/ledger/cheques?")) {
+          return answer({ cheques: [cheque(1)], total: 1, hasMore: false, banks: ["ملت"], summary: summary() });
+        }
+        return answer({ locations: [], customers: [{ customerId: "customer-1", customerName: "مشتری" }], suppliers: [] });
+      }),
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(screen.getByRole("button", { name: /ثبت چک جدید/ }));
+    await fillAndSubmit(user, "S-900", { unattributed: false });
+    // The form's own alert says why nothing was sent; nothing reached the API.
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("alert").some((node) => node.textContent?.includes("انتخاب مشتری الزامی است")),
+      ).toBe(true),
+    );
+    expect(creates).toHaveLength(0);
+
+    await fillAndSubmit(user, "S-901");
+    await waitFor(() => expect(creates).toHaveLength(1));
+    expect(creates[0].allowUnattributed).toBe(true);
+    expect(creates[0].customerId).toBeUndefined();
   });
 });
