@@ -24,6 +24,8 @@ import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError 
 import { MIN_REASON_LENGTH, MAX_REASON_LENGTH } from "./order-amendments";
 import { voidRetailInvoice, RetailInvoiceVoidError } from "./retail-invoice-void-service";
 import { updateCmsOrderStatus } from "./cms/website-service";
+import { listConnections, getConnection } from "./integrations/connections-service";
+import { retryWpQueueRow, retryAllFailedWpQueue, flushWpOutbox } from "./integrations/wp-manager-service";
 import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
@@ -2644,6 +2646,51 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { moved } };
 };
 
+/** The one connected woo shop a write names (explicit id, or the single one). */
+async function resolveWpOwnerConnection(
+  businessId: string,
+  explicitId: string | null,
+): Promise<{ id: string } | { error: string }> {
+  if (explicitId) {
+    const conn = await getConnection(businessId, explicitId);
+    if (!conn || conn.provider !== "woocommerce") return { error: "not_found" };
+    return { id: conn.id };
+  }
+  const connections = (await listConnections(businessId)).filter((c) => c.provider === "woocommerce");
+  if (connections.length === 0) return { error: "not_connected" };
+  if (connections.length > 1) return { error: "connection_required" };
+  return { id: connections[0].id };
+}
+
+// ── Issue #883 package 2, batch S — WooCommerce queue re-pends ─────────────
+// A retry only resets an event that was already approved when it first moved
+// to the shop; flush just wakes the drainer ahead of its timer. Neither can
+// create data on the site the owner has not produced themselves.
+const wpQueueRetry: AutopilotExecutor = async (ctx) => {
+  const queueRowId = str(ctx.payload.queueRowId) ?? str(ctx.payload.rowId) ?? str(ctx.payload.id);
+  if (!queueRowId) return fail("invalid_payload");
+  const conn = await resolveWpOwnerConnection(ctx.businessId, str(ctx.payload.connectionId));
+  if ("error" in conn) return fail(conn.error);
+  const direction = str(ctx.payload.direction);
+  const result = await retryWpQueueRow(ctx.businessId, conn.id, queueRowId, direction === "in" ? "in" : direction === "out" ? "out" : undefined);
+  if (!result.ok) return fail(result.error ?? "retry_failed");
+  return { ok: true, result: { status: result.status ?? "pending", connectionId: conn.id } };
+};
+const wpQueueRetryAllFailed: AutopilotExecutor = async (ctx) => {
+  const conn = await resolveWpOwnerConnection(ctx.businessId, str(ctx.payload.connectionId));
+  if ("error" in conn) return fail(conn.error);
+  const result = await retryAllFailedWpQueue(ctx.businessId, conn.id);
+  if (!result.ok) return fail("retry_failed");
+  return { ok: true, result: { outboxRetried: result.outboxRetried, inboxRetried: result.inboxRetried, connectionId: conn.id } };
+};
+const wpQueueFlush: AutopilotExecutor = async (ctx) => {
+  const conn = await resolveWpOwnerConnection(ctx.businessId, str(ctx.payload.connectionId));
+  if ("error" in conn) return fail(conn.error);
+  const result = await flushWpOutbox(ctx.businessId, conn.id);
+  if (!result.ok) return fail("flush_failed");
+  return { ok: true, result: { ...result, connectionId: conn.id } };
+};
+
 // ── Issue #883 package 2, batch R — website order status ───────────────────
 // The route is three lines of guard around this service; the service already
 // normalises every refusal to WebsiteResult codes, so the executor is a
@@ -3012,6 +3059,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   priceListQuickUpdate,
   retailInvoiceVoid,
   websiteOrderStatus,
+  wpQueueRetry,
+  wpQueueRetryAllFailed,
+  wpQueueFlush,
   transferCreate,
   transferShip,
   transferReceive,

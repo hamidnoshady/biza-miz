@@ -512,8 +512,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Website / CMS",
     entity: "WooCommerce manager (posts, queue, syncs)",
     routes: ["integrations/wp-manager"],
+    ops: {
+      listDetail: ["list_wp_queue", "get_wp_queue_summary", "get_wp_overview"],
+      bulk: ["wp.queue.retry", "wp.queue.retry_all_failed", "wp.queue.flush"],
+    },
     status: undefined,
-    note: "wp-manager content/queue are covered by list_website_*; sync verbs are WP-dashboard operations, not business records",
+    note: "content/queue reads ride list_website_* plus these manager views; retry/flush only re-pend events the shop already approved or wake the drainer early — connection resolution follows the screens (single active shop implicit, several need connectionId)",
   },
 
   // ============================ Projects (My Workspace) ============================

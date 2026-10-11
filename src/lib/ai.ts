@@ -322,6 +322,11 @@ export type ActionType =
   | "sales.invoice.void"
   // Batch R — the site's order-status mutation (customer-facing money state).
   | "website.order.status"
+  // Batch S — the queue's re-pends; an event re-queued was already approved
+  // the first time its payload moved to the shop.
+  | "wp.queue.retry"
+  | "wp.queue.retry_all_failed"
+  | "wp.queue.flush"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -360,6 +365,9 @@ export type ActionType =
 export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
   | "websiteOrderStatus"
+  | "wpQueueRetry"
+  | "wpQueueRetryAllFailed"
+  | "wpQueueFlush"
   | "menuItemPatch"
   | "stockCount"
   | "draftPurchase"
@@ -1289,6 +1297,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ updates: [{ priceListId, itemId /* از list_menu_items */, price: number|null /* null = حذف قیمت */, expectedVersion?: string /* version از list_price_list_entries برای تشخیص تداخل */ }] }',
     executor: "priceListEntriesSave",
+  },
+  "wp.queue.retry": {
+    type: "wp.queue.retry",
+    endpoint: "/api/integrations/wp-manager/queue/[id]",
+    method: "POST",
+    label: "تلاش دوبارهٔ یک رویداد صف ووکامرس (خروجی یا ورودی) — ارسالِ دوبارهٔ همان داده‌ای که پیش‌تر تأیید شده",
+    payloadHint: '{ queueRowId: string, connectionId?: string, direction?: "out"|"in" }',
+    executor: "wpQueueRetry",
+  },
+  "wp.queue.retry_all_failed": {
+    type: "wp.queue.retry_all_failed",
+    endpoint: "/api/integrations/wp-manager/queue",
+    method: "POST",
+    label: "تلاش دوبارهٔ همهٔ رویدادهای ناموفق/مردهٔ صف — بدون دادهٔ تازه‌ای به فروشگاه",
+    payloadHint: '{ connectionId?: string }',
+    executor: "wpQueueRetryAllFailed",
+  },
+  "wp.queue.flush": {
+    type: "wp.queue.flush",
+    endpoint: "/api/integrations/wp-manager/queue",
+    method: "POST",
+    label: "ارسال فوری صف خروجی به فروشگاه (RPC برای اتصال پلاگین، تخلیه برای REST)",
+    payloadHint: '{ connectionId?: string }',
+    executor: "wpQueueFlush",
   },
   "website.order.status": {
     type: "website.order.status",
@@ -2689,6 +2721,49 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             locationId: { type: "string" },
           },
           required: ["invoiceId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_wp_queue",
+        description:
+          "صف همگام‌سازی ووکامرس — رویدادهای خروجی (موجودی/قیمت/محصول/سفارش) در حالت pending/failed/dead و ورودی‌های شکست‌خورده؛ فایل یک اتصال مشخص یا اتصال واحد فعال.",
+        parameters: {
+          type: "object",
+          properties: {
+            connectionId: { type: "string", description: "اگر بیش از یک فروشگاه وصل است، الزامی" },
+            status: { type: "string", description: "پیش‌فرض open" },
+            direction: { type: "string", enum: ["out", "in", "all"] },
+            search: { type: "string" },
+            limit: { type: "number", description: "پیش‌فرض ۲۵، سقف ۵۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_wp_queue_summary",
+        description: "شمارش‌های خلاصهٔ صف ووکامرس برای همان اتصال.",
+        parameters: {
+          type: "object",
+          properties: { connectionId: { type: "string" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_wp_overview",
+        description: "داشبورد مدیر ووکامرس: شمارش اتصال‌ها، سطح صف و آخرین رویدادها.",
+        parameters: {
+          type: "object",
+          properties: { connectionId: { type: "string" } },
           additionalProperties: false,
         },
       },

@@ -123,6 +123,10 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch Q — the sales-invoice screens' read gate.
   list_sales_invoices: PERMISSIONS.ordersView,
   get_sales_invoice: PERMISSIONS.ordersView,
+  // Batch S — the WooCommerce manager screens' read gates.
+  list_wp_queue: PERMISSIONS.woocommerceView,
+  get_wp_queue_summary: PERMISSIONS.woocommerceView,
+  get_wp_overview: PERMISSIONS.woocommerceView,
   // Batch I — the KB centre is member-wide (requireMember): the ai.use key
   // is the connection's own "may read assistant-side material" baseline, and
   // the same gate that lets the assistant itself read the centre. Media
@@ -248,6 +252,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "priceList.entries.save": PERMISSIONS.menuEdit,
   "sales.invoice.void": PERMISSIONS.ordersAmendClosed,
   "website.order.status": PERMISSIONS.cmsContentManage,
+  "wp.queue.retry": PERMISSIONS.woocommerceSync,
+  "wp.queue.retry_all_failed": PERMISSIONS.woocommerceSync,
+  "wp.queue.flush": PERMISSIONS.woocommerceSync,
   "priceList.quick_update": PERMISSIONS.menuEdit,
   "transfer.create": PERMISSIONS.inventoryAdjust,
   "transfer.ship": PERMISSIONS.inventoryAdjust,

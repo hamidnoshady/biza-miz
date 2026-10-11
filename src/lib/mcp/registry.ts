@@ -211,6 +211,11 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_cms_media", kind: "read", app: "website", branchPolicy: "agnostic" },
   // Batch Q — sales invoices are branch-scoped like every other POS order read.
   { name: "list_sales_invoices", kind: "read", app: "pos", branchPolicy: "pinned" },
+  // Batch S — the WooCommerce manager is a site-level catalogue (agnostic),
+  // exactly like the other website reads.
+  { name: "list_wp_queue", kind: "read", app: "website", branchPolicy: "agnostic" },
+  { name: "get_wp_queue_summary", kind: "read", app: "website", branchPolicy: "agnostic" },
+  { name: "get_wp_overview", kind: "read", app: "website", branchPolicy: "agnostic" },
   { name: "get_sales_invoice", kind: "read", app: "pos", branchPolicy: "pinned" },
 
   // ---- Workspace / AEC (project desk is business-scoped, never branch-scoped) ----
@@ -382,6 +387,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch R — paid/refunded/cancelled is customer-facing money state on the
   // connected site (the CMS's hooks settle stock); explicit approval every time.
   { actionType: "website.order.status", kind: "write", app: "website", risk: "high", approval: "always_approve" },
+  // Batch S — queue re-pends events already approved once (no new data
+  // moves to the site); flush only nudges the drainer early.
+  { actionType: "wp.queue.retry", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "wp.queue.retry_all_failed", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "wp.queue.flush", kind: "write", app: "website", risk: "low", approval: "mode" },
 ];
 
 // ---------------------------------------------------------------------------

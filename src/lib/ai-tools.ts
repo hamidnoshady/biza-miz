@@ -63,6 +63,8 @@ import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listCmsPages, listCmsMedia } from "./cms/website-service";
 import { listRetailInvoices } from "./retail-invoice/list-service";
+import { listConnections, getConnection } from "./integrations/connections-service";
+import { wpOverviewStats, wpQueue, wpQueueSummary } from "./integrations/wp-manager-service";
 import { getRetailInvoiceDetail } from "./retail-invoice/read-service";
 import { toLatinDigits } from "./digits";
 import { listMediaAssets, getMediaAsset } from "./media-service";
@@ -171,6 +173,21 @@ export interface McpReadScope {
 type PinnedLocation =
   | { ok: true; locationId: string | null }
   | { ok: false; error: string };
+
+/** The one connected WooCommerce shop this read or write names. */
+type WpConnection = { id: string } | { error: string };
+async function resolveWpConnection(businessId: string, args: Record<string, unknown>): Promise<WpConnection> {
+  const explicit = typeof args.connectionId === "string" ? args.connectionId.trim() : "";
+  if (explicit) {
+    const conn = await getConnection(businessId, explicit);
+    if (!conn || conn.provider !== "woocommerce") return { error: "not_found" };
+    return { id: conn.id };
+  }
+  const connections = (await listConnections(businessId)).filter((c) => c.provider === "woocommerce");
+  if (connections.length === 0) return { error: "not_connected" };
+  if (connections.length > 1) return { error: "connection_required" };
+  return { id: connections[0].id };
+}
 
 async function pinnedLocation(
   businessId: string,
@@ -2070,6 +2087,33 @@ export async function runReadTool(
     // The route's filters are mirrored one-for-one (Latin digits, ISO date
     // bounds, enum guards) so the read answers with exactly what the screen
     // would list at the same office index.
+    // Issue #883 package 2, batch S — the WooCommerce manager's reads.
+    // Connection resolution mirrors the screens: an explicit connectionId is
+    // honoured; otherwise the single active woocommerce connection answers,
+    // and zero or many ask the model to name one.
+    case "list_wp_queue": {
+      const conn = await resolveWpConnection(businessId, args);
+      if ("error" in conn) return { ok: false, data: { error: conn.error } };
+      const rows = await wpQueue(businessId, conn.id, {
+        status: typeof args.status === "string"
+          ? (args.status as import("./integrations/wp-manager-service").WpQueueFilterOptions["status"])
+          : undefined,
+        direction: typeof args.direction === "string" ? (args.direction as "out" | "in" | "all") : undefined,
+        search: typeof args.search === "string" ? args.search : undefined,
+        limit: typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.min(500, Math.max(1, Math.floor(args.limit))) : undefined,
+      });
+      return { ok: true, data: { rows, connectionId: conn.id } };
+    }
+    case "get_wp_queue_summary": {
+      const conn = await resolveWpConnection(businessId, args);
+      if ("error" in conn) return { ok: false, data: { error: conn.error } };
+      return { ok: true, data: { summary: await wpQueueSummary(businessId, conn.id), connectionId: conn.id } };
+    }
+    case "get_wp_overview": {
+      const conn = await resolveWpConnection(businessId, args);
+      if ("error" in conn) return { ok: false, data: { error: conn.error } };
+      return { ok: true, data: { overview: await wpOverviewStats(businessId, conn.id), connectionId: conn.id } };
+    }
     case "list_sales_invoices": {
       const pinned = await pinnedLocation(businessId, args, mcpScope);
       if (!pinned.ok) return { ok: false, data: { error: pinned.error } };

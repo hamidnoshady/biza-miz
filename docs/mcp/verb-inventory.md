@@ -4,8 +4,8 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **113 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **106 write verbs**
+Current surface: **116 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **109 write verbs**
 (**32** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -108,6 +108,9 @@ visible only to connections consented for every branch) and **106 write verbs**
 | `list_cms_pages` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cms_media` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_sales_invoices` | pos | pinned | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_wp_queue` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_wp_queue_summary` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_wp_overview` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_sales_invoice` | pos | pinned | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_workspace_project_status` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_workspace_tasks` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -236,6 +239,9 @@ visible only to connections consented for every branch) and **106 write verbs**
 | `write_website_product` | `website.product.upsert` | website | low | connection write_mode | `website.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_sales_invoice_void` | `sales.invoice.void` | pos | high | always approval queue (step-up) | `orders.amend_closed` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_website_order_status` | `website.order.status` | website | high | always approval queue (step-up) | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wp_queue_retry` | `wp.queue.retry` | website | low | connection write_mode | `woocommerce.sync` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wp_queue_retry_all_failed` | `wp.queue.retry_all_failed` | website | low | connection write_mode | `woocommerce.sync` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wp_queue_flush` | `wp.queue.flush` | website | low | connection write_mode | `woocommerce.sync` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 
 ## Deliberate exclusions (not MCP verbs here by design)
 
