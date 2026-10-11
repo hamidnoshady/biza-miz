@@ -33,7 +33,7 @@ import {
 } from "./coa-template";
 import { ENABLED_INDUSTRIES, INDUSTRIES, type Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
-import { lockChartOfAccounts } from "./accounts-service";
+import { lockChartOfAccounts, recordAccountAudit } from "./accounts-service";
 import { attachmentLevel, type AttachableParent } from "./account-hierarchy";
 import { wizardStepsForIndustry } from "./wizard-steps";
 import { seedPaymentMethods } from "./payment-methods-service";
@@ -800,6 +800,16 @@ export async function seedChartOfAccounts(
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
         [businessId, parent?.id ?? null, a.code, a.name, a.type, level, a.isContra ?? false],
       );
+      // Audited like every other account creation: a seed on a live business
+      // (an industry change) is a real change to its chart.
+      await recordAccountAudit(client, businessId, null, "account.created", rows[0].id, {
+        code: a.code,
+        name: a.name,
+        type: a.type,
+        level,
+        isContra: a.isContra ?? false,
+        source: "industry_seed",
+      });
       parentFacts.set(a.code, { id: rows[0].id, code: a.code, type: a.type, level, isActive: true });
       inserted.push(a.code);
       pending.splice(pending.indexOf(a), 1);

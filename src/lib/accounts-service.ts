@@ -42,7 +42,12 @@ import { query, getPool } from "./db";
 import { isUuid } from "./uuid";
 import { toLatinDigits } from "./digits";
 import { AccountsError } from "./accounts-error";
-import { attachmentLevel, loadAttachableParent, resolveAttachableParent } from "./account-hierarchy";
+import {
+  attachmentLevel,
+  loadAttachableParent,
+  orderAccountTree,
+  resolveAttachableParent,
+} from "./account-hierarchy";
 import {
   ACCOUNT_TYPES,
   WELL_KNOWN_CODES,
@@ -200,7 +205,7 @@ async function findAccount(
  * identifying fields so the row remains understandable after the account row
  * is gone.
  */
-async function recordAccountAudit(
+export async function recordAccountAudit(
   client: PoolClient,
   businessId: string,
   actorId: string | null,
@@ -749,6 +754,110 @@ export async function updateAccount(params: {
       }
     }
   });
+}
+
+/** One account of a wholesale chart replacement, as the setup wizard sends it. */
+export interface ReplacementAccount {
+  code: string;
+  name: string;
+  type: AccountType;
+  parentCode: string | null;
+  isContra: boolean;
+}
+
+/**
+ * The setup wizard's wholesale chart replacement, run on the caller's
+ * transaction under the chart lock. It is the one place that deletes a whole
+ * chart, so it follows the same rules as the single-row writers:
+ *
+ *  - the list is placed first (`orderAccountTree`), so a list that cannot be
+ *    placed reads nothing and writes nothing (`AccountTreeError`);
+ *  - a chart that any draft line or posting references is refused with a typed
+ *    409 `accounts_in_use`, before any delete. A draft is an in-flight posting:
+ *    the wizard used to check only `journal_lines`, so a draft reached the
+ *    `ON DELETE RESTRICT` foreign key and surfaced as a raw 500;
+ *  - every deleted account gets an `account.deleted` row and every created one
+ *    an `account.created` row, in this transaction, so the audit trail matches
+ *    what the chart went through (issue #824 §5).
+ *
+ * Returns the number of accounts created.
+ */
+export async function replaceChartOfAccounts(
+  client: PoolClient,
+  businessId: string,
+  accounts: readonly ReplacementAccount[],
+  actorId: string | null,
+): Promise<number> {
+  const placed = orderAccountTree<ReplacementAccount>(
+    accounts.map((a) => ({ ...a, parentCode: a.parentCode ?? null })),
+  );
+
+  await lockChartOfAccounts(client, businessId);
+
+  const { rows: inUse } = await client.query(
+    `SELECT 1 FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
+      WHERE a.business_id = $1
+     UNION ALL
+     SELECT 1 FROM journal_entry_draft_lines dl JOIN accounts a ON a.id = dl.account_id
+      WHERE a.business_id = $1
+     LIMIT 1`,
+    [businessId],
+  );
+  if (inUse.length > 0) throw new AccountsError("accounts_in_use", 409);
+
+  const { rows: previous } = await client.query<{
+    id: string;
+    code: string;
+    name: string;
+    type: string;
+    level: string;
+    is_contra: boolean;
+  }>(
+    `SELECT id, code, name, type::text AS type, level::text AS level, is_contra
+       FROM accounts WHERE business_id = $1 ORDER BY code`,
+    [businessId],
+  );
+  try {
+    for (const old of previous) {
+      await client.query(`DELETE FROM accounts WHERE business_id = $1 AND id = $2`, [businessId, old.id]);
+      await recordAccountAudit(client, businessId, actorId, "account.deleted", old.id, {
+        code: old.code,
+        name: old.name,
+        type: old.type,
+        level: old.level,
+        isContra: old.is_contra,
+        source: "setup_wizard",
+      });
+    }
+  } catch (err) {
+    // A restrict reference the query above does not name (an expense or a
+    // reconciliation line, say) is still a refusal, not a server error.
+    if (sqlState(err) === FOREIGN_KEY_VIOLATION) throw new AccountsError("accounts_in_use", 409);
+    throw err;
+  }
+
+  // Parents first, as placed; each level is the one derived from its parent,
+  // never a value the client sent.
+  const idByCode = new Map<string, string>();
+  for (const a of placed.ordered) {
+    const level = placed.levelByCode.get(a.code)!;
+    const parentId = a.parentCode ? (idByCode.get(a.parentCode) ?? null) : null;
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [businessId, parentId, a.code, a.name, a.type, level, a.isContra],
+    );
+    idByCode.set(a.code, rows[0].id);
+    await recordAccountAudit(client, businessId, actorId, "account.created", rows[0].id, {
+      code: a.code,
+      name: a.name,
+      type: a.type,
+      level,
+      isContra: a.isContra,
+      source: "setup_wizard",
+    });
+  }
+  return placed.ordered.length;
 }
 
 /**

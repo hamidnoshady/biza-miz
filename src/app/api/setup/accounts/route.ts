@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPool, query } from "@/lib/db";
-import { lockChartOfAccounts } from "@/lib/accounts-service";
+import { AccountsError, replaceChartOfAccounts } from "@/lib/accounts-service";
 import { markStepDone } from "@/lib/settings";
 import { requireManager } from "@/lib/setup-state";
 import { coaTemplateForIndustry, validateAccounts, type TemplateAccount } from "@/lib/coa-template";
-import { AccountTreeError, orderAccountTree } from "@/lib/account-hierarchy";
+import { AccountTreeError } from "@/lib/account-hierarchy";
 import { withTenantScope } from "@/lib/auth";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 
@@ -28,7 +28,7 @@ export const GET = withTenantScope(async () => {
 
 /**
  * Creates the chart of accounts from the (possibly customized) template.
- * Replaces an existing chart only while no journal lines reference it.
+ * Replaces an existing chart only while no journal line or draft line references it.
  */
 /** The Persian message for each way a wizard chart can fail to place. */
 const TREE_MESSAGES: Record<AccountTreeError["reason"], string> = {
@@ -62,68 +62,35 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (errors.length > 0) {
     return NextResponse.json({ error: "invalid_accounts", messages: errors }, { status: 400 });
   }
-  // Placement is decided before the transaction opens: the same parents-first
-  // ordering and level derivation the editor and the restore use. A list that
-  // cannot be placed is refused here, with nothing read or deleted.
-  let placed;
-  try {
-    placed = orderAccountTree(accounts.map((a) => ({ ...a, parentCode: a.parentCode ?? null })));
-  } catch (err) {
-    if (!(err instanceof AccountTreeError)) throw err;
-    // One message per reason. Before this, every refusal other than depth read
-    // as a cycle, so a child under a parent of another type was reported as a loop.
-    const message = TREE_MESSAGES[err.reason];
-    return NextResponse.json({ error: "invalid_accounts", messages: [message] }, { status: 400 });
-  }
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    // Same wholesale-replacement shape as the settings route, so the same
-    // canonical chart-of-accounts lock applies (issue #824 review item 6).
-    await lockChartOfAccounts(client, session.businessId);
-
-    const { rows: used } = await client.query(
-      `SELECT 1 FROM journal_lines jl
-        JOIN accounts a ON a.id = jl.account_id
-       WHERE a.business_id = $1 LIMIT 1`,
-      [session.businessId],
+    // The replacement places the list, takes the canonical chart lock, refuses
+    // a chart that is in use and audits every row it removes or creates, all on
+    // this transaction (see replaceChartOfAccounts).
+    const created = await replaceChartOfAccounts(
+      client,
+      session.businessId,
+      accounts.map((a) => ({ ...a, parentCode: a.parentCode ?? null })),
+      session.sub,
     );
-    if (used.length > 0) {
-      await client.query("ROLLBACK");
-      return NextResponse.json({ error: "accounts_in_use" }, { status: 409 });
-    }
-
-    await client.query("DELETE FROM accounts WHERE business_id = $1", [session.businessId]);
-
-    // Parents first, as placed above; each row's level is the one derived from
-    // its parent, never a value the client sent.
-    const idByCode = new Map<string, string>();
-    for (const a of placed.ordered) {
-      const res = await client.query(
-        `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [
-          session.businessId,
-          a.parentCode ? idByCode.get(a.parentCode) : null,
-          a.code,
-          a.name,
-          a.type,
-          placed.levelByCode.get(a.code),
-          a.isContra,
-        ],
-      );
-      idByCode.set(a.code, res.rows[0].id);
-    }
-
     // The step marker commits with the chart it describes (issue #808 §6), so
     // a failed progress write can no longer leave accounts that exist while
     // the wizard believes the step was never done.
     const progress = await markStepDone(session.businessId, "accounts", client);
     await client.query("COMMIT");
-    return NextResponse.json({ ok: true, created: accounts.length, progress });
+    return NextResponse.json({ ok: true, created, progress });
   } catch (err) {
     await client.query("ROLLBACK");
+    // A typed refusal is an answer, not a failure: the same 400/409 the editor
+    // gives for the same rule, with nothing written.
+    if (err instanceof AccountTreeError) {
+      return NextResponse.json({ error: "invalid_accounts", messages: [TREE_MESSAGES[err.reason]] }, { status: 400 });
+    }
+    if (err instanceof AccountsError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
     throw err;
   } finally {
     client.release();

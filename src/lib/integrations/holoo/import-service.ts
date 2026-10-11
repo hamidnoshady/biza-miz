@@ -22,7 +22,7 @@ import { getSetting, SETTING_KEYS } from "../../settings";
 import { planAccountImport, planGoods, planPersons, holooAccountType } from "./import-plan";
 import type { MappedAccount, MappedGoods, MappedOpeningInventory, MappedPerson } from "./mappers";
 import { createParty } from "../../parties-service";
-import { lockChartOfAccounts } from "../../accounts-service";
+import { lockChartOfAccounts, recordAccountAudit } from "../../accounts-service";
 import { resolveAttachableParent } from "../../account-hierarchy";
 import type { PoolClient } from "pg";
 
@@ -483,6 +483,15 @@ export async function applyBaseImport(
            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
           [businessId, parentId, account.code, account.name, childType, level],
         );
+        // Audited in this transaction like every other account creation. The
+        // import has no signed-in actor; the payload says where the row came from.
+        await recordAccountAudit(client, businessId, null, "account.created", rows[0].id, {
+          code: account.code,
+          name: account.name,
+          type: childType,
+          level,
+          source: "holoo_import",
+        });
         await upsertMappingOnClient(
           client,
           businessId,

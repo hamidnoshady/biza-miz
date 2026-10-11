@@ -20,7 +20,7 @@
  */
 
 import { query } from "../../db";
-import { AccountsError, createAccount, setAccountActive } from "../../accounts-service";
+import { AccountsError, createAccount, renameAccount, setAccountActive } from "../../accounts-service";
 import { MissingLedgerAccountError, recordExpense } from "../../expense-service";
 import { expenseErrorMessage } from "../../expense-errors";
 import { parseExpenseAmount, parseExpenseVatAmount } from "../../expense-input";
@@ -199,12 +199,12 @@ const accountsAdapter: EntityAdapter = {
       // Name and active flag only. Re-typing a code or re-parenting an account
       // reshapes every historical report built on it, and the chart screen
       // gates both behind their own confirmations for exactly that reason.
-      await query(
-        `UPDATE accounts SET name = $3 WHERE business_id = $1 AND id = $2`,
-        [context.businessId, existing.id, name],
-      );
+      // The rename goes through the canonical service, not a bare UPDATE: it is
+      // audited (`account.renamed`) in the same transaction and carries the
+      // actor. A bare UPDATE here left an import-driven rename with no trail.
+      await renameAccount(context.businessId, existing.id, name, context.actorUserId);
       if (values.isActive !== undefined) {
-        await setAccountActive(context.businessId, existing.id, values.isActive !== false);
+        await setAccountActive(context.businessId, existing.id, values.isActive !== false, context.actorUserId);
       }
       return { status: "updated", id: existing.id, warnings };
     }
@@ -216,9 +216,10 @@ const accountsAdapter: EntityAdapter = {
         name,
         type: String(values.type ?? "expense"),
         parentId,
+        actorId: context.actorUserId,
       });
       if (values.isActive === false) {
-        await setAccountActive(context.businessId, created.id, false);
+        await setAccountActive(context.businessId, created.id, false, context.actorUserId);
       }
       return { status: "created", id: created.id, warnings };
     } catch (error) {
