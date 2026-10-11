@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { toPersianDigits } from "@/lib/digits";
+import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
 
 export type MfaMethod = "totp" | "sms_otp";
 
@@ -509,7 +509,12 @@ export function MfaStep({
         maxLength={recoveryMode ? 20 : 6}
         required
         value={code}
-        onChange={(e) => setCode(e.target.value)}
+        onChange={(e) =>
+          // Issue #854 (pass 4): digits are normalized, not stripped, so a
+          // Persian keyboard still types a valid code; recovery codes stay
+          // free text — the server folds them (see normalizeRecoveryCode).
+          setCode(recoveryMode ? e.target.value : normalizeSecurityDigits(e.target.value, 6))
+        }
         placeholder={recoveryMode ? "ABCDE-FGHJK" : "------"}
         className={theme.input}
       />
