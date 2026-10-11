@@ -131,3 +131,24 @@ reads its runs, payslips and ledger values from one `REPEATABLE READ READ ONLY` 
 Official SSO, insurance-submission and tax-authority export files are **not explicitly required** by
 issue #865. Payroll figures and statutory summaries are implemented; the external submission
 artifacts are separate work and are not represented as complete here.
+
+## Visual regression investigation
+
+The pre-existing red check was `accounting-expenses.png` in Actions run `37976797464`
+(`push`, head `05f4b2114fffb67decd0023adf3c22c17bf8bf11`): 4.06% changed pixels, bounds
+`54,18 1370×830`. This was stale baseline drift, not an expense-code change in #865:
+`src/app/(app)/accounting/expense-section.tsx` has the same SHA-256 at base `7b1b11c` and
+current main (`174b11be7500aaf9ef20f42aa28b5950bff0657687f54c12d79dec696fb9efa4`), while the
+committed expense baseline changes from `069e3e56963911abbb2cbeb3d4e2658a83e3290e341965b020a4bf94765a8a57`
+(108,570 bytes) to `38f985e84edda3d0dda40891be328e64757fb0536f8ab5ced3f699a37abf7537` (110,705 bytes)
+in upstream main commit `55a9b7e` (#889). The inspected PNGs show the old image missing the VAT
+control and the current status/payment filters and columns that are already present in the unchanged
+expense source.
+
+The failed run's uploaded `visual-diffs` archive (artifact `11638488913`) could not be fetched:
+`gh run download` returned `EOF` from GitHub's artifact blob host. I therefore make no claim about
+that inaccessible diff image; the two committed baselines themselves were inspected. Unchanged-main
+reproduction is available in Actions run `38127262250`, head `55a9b7e`: its `visual regression` job,
+production build and overall workflow all passed. Resolution was to merge current main (`9bf72f7`,
+which contains that reviewed upstream baseline and harness update) into this branch. No screenshot
+was re-recorded here, no baseline assertion/tolerance was weakened, and no visual test was skipped.
