@@ -209,14 +209,15 @@ passed end to end:
 | Unpacked installed payload | 504.9 MiB | 600 MiB |
 | Positively staged runtime (local Linux build) | 153.9 MiB | 200 MiB |
 
-**Current budgets (2026-10-03).** The installer gate is 175 MiB and the unpacked
-payload's runaway detector is **620 MiB**, raised from 600 MiB when the AEC
-document-control wave took the traced runtime to 600.6 MiB against 0.2 MiB of
-headroom. The detector's job is to catch a payload that accidentally ships
-`node_modules`, a build cache or source maps rather than to freeze the app's
-growth, and the component report now shows the dominant term: roughly 103 MiB of
-*unminified* `.next/server` chunks. Minifying the compile pass is the real size
-work available here and is tracked separately.
+**Current budgets (2026-10-11).** The installer gate is 175 MiB and the unpacked
+payload's runaway detector is **640 MiB**. The issue #834 Windows package measured
+620.2 MiB ([run 38165434904](https://github.com/hamidnoshady/biza-miz/actions/runs/38165434904)),
+just over the former 620 MiB detector; 640 MiB restores about 20 MiB of headroom.
+The detector's job is to catch a payload that accidentally ships `node_modules`,
+a build cache or source maps rather than to freeze the app's growth. The component
+report shows the dominant term: roughly 103 MiB of *unminified* `.next/server`
+chunks. Minifying the compile pass is the real size work available here and is
+tracked separately.
 
 The uploaded installer artifact is 136,405,815 bytes as a GitHub artifact and
 has digest
