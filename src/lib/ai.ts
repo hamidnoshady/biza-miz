@@ -293,6 +293,16 @@ export type ActionType =
   | "production.formula.deactivate"
   | "production.formulaInput.set"
   | "production.formulaInput.delete"
+  // Batch L — inventory transfers & warehouse documents. Contract copied from
+  // the routes: transfers ride the four client-tx services in
+  // transfer-service (idempotency-key required, exactly like the screen); the
+  // warehouse document posts stock immediately through
+  // createWarehouseDocument's own transaction.
+  | "transfer.create"
+  | "transfer.ship"
+  | "transfer.receive"
+  | "transfer.cancel"
+  | "warehouseDocument.create"
   // Batch K3 — CRM service desk: cases + activities. The routes gate on
   // partiesView/partiesManage (the CRM screens share that), not crmManage.
   | "crm.case.save"
@@ -379,6 +389,11 @@ export type AutopilotExecutorKey =
   | "productionFormulaDeactivate"
   | "productionFormulaInputSet"
   | "productionFormulaInputDelete"
+  | "transferCreate"
+  | "transferShip"
+  | "transferReceive"
+  | "transferCancel"
+  | "warehouseDocumentCreate"
   | "crmCaseSave"
   | "crmCaseSetStatus"
   | "crmActivityCreate"
@@ -1118,6 +1133,48 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف یک مادهٔ اولیه از فرمول",
     payloadHint: "{ formulaId: string, inventoryItemId: string }",
     executor: "productionFormulaInputDelete",
+  },
+  "transfer.create": {
+    type: "transfer.create",
+    endpoint: "/api/inventory/transfers",
+    method: "POST",
+    label: "ساخت پیش‌نویس انتقال بین شعب — ارسال/دریافت/لغو بعداً با transfer.ship/receive/cancel",
+    payloadHint:
+      '{ destinationLocationId: string /* شعبهٔ مقصد — مبدأ از locationId یا شعبهٔ فعال */, lines: [{ sourceInventoryItemId, destinationInventoryItemId, quantity: string }], note?: string, idempotencyKey: string /* لازم — کلید تکرارناپذیری */, locationId?: string /* شعبهٔ مبدأ اگر پین متفاوت است */ }',
+    executor: "transferCreate",
+  },
+  "transfer.ship": {
+    type: "transfer.ship",
+    endpoint: "/api/inventory/transfers/[id]/ship",
+    method: "POST",
+    label: "ارسال انتقال — خروج موجودی از مبدأ با قیمت‌گذاری دقیق",
+    payloadHint: "{ transferId: string /* از list_inventory_transfers — وضعیت باید draft باشد */ }",
+    executor: "transferShip",
+  },
+  "transfer.receive": {
+    type: "transfer.receive",
+    endpoint: "/api/inventory/transfers/[id]/receive",
+    method: "POST",
+    label: "دریافت انتقال — ورود موجودی به مقصد با هزینهٔ حملت‌همسلسله",
+    payloadHint: "{ transferId: string /* وضعیت باید shipped باشد */ }",
+    executor: "transferReceive",
+  },
+  "transfer.cancel": {
+    type: "transfer.cancel",
+    endpoint: "/api/inventory/transfers/[id]/cancel",
+    method: "POST",
+    label: "لغو انتقال — دریافت‌شده فقط با انتقال برگشتی، مثل هشدار صفحه",
+    payloadHint: "{ transferId: string /* draft یا shipped — received لغو نمی‌شود */ }",
+    executor: "transferCancel",
+  },
+  "warehouseDocument.create": {
+    type: "warehouseDocument.create",
+    endpoint: "/api/inventory/warehouse-documents",
+    method: "POST",
+    label: "ثبت حوالهٔ انبار (رسید/صدور) — بلافاصله پست می‌شود مثل دکمهٔ صفحه",
+    payloadHint:
+      '{ kind: "receipt"|"issue", locationId?: string /* شعبهٔ پین‌شده اگر نیاد */, supplierId?: string, recipient?: string, documentNumber?: string, note?: string, lines: [{ inventoryItemId, quantity: string, unitCost?: string /* فقط رسید — ریال به‌صورت متن */ }] }',
+    executor: "warehouseDocumentCreate",
   },
   "crm.case.save": {
     type: "crm.case.save",
@@ -3208,6 +3265,38 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               assigneeUserId: { type: "string" },
               unowned: { type: "boolean", description: "فقط پرونده‌های بدون مسئول" },
               limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۲۰۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_inventory_transfers",
+          description:
+            "انتقال‌های بین‌شعبه‌ای با مبدأ/مقصد و وضعیت (draft/shipped/received/cancelled) — تازه‌ترین اول؛ شناسه برای transfer.ship/receive/cancel لازم است.",
+          parameters: {
+            type: "object",
+            properties: {
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۱۰۰ — همان سقف صفحه" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_warehouse_documents",
+          description:
+            "حواله‌های انبار (رسید/صدور) با فیلتر نوع و شعبه — تازه‌ترین اول؛ شناسهٔ سند و شمارهٔ سند برای استناد.",
+          parameters: {
+            type: "object",
+            properties: {
+              kind: { type: "string", description: "receipt|issue" },
+              locationId: { type: "string" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۵۰۰ — همان سقف صفحه" },
             },
             additionalProperties: false,
           },

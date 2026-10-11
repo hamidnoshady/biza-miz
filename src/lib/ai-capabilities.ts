@@ -86,6 +86,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch K1 — the routes' own gates: deals/leads read on crmView, writes on
   // crmManage, pipeline configuration on crmConfigure.
   // Batch K3 — the cases route checks partiesView, its writes partiesManage.
+  // Batch L — both routes read on inventoryView, write on inventoryAdjust.
+  list_inventory_transfers: PERMISSIONS.inventoryView,
+  list_warehouse_documents: PERMISSIONS.inventoryView,
   list_crm_cases: PERMISSIONS.partiesView,
   list_crm_deals: PERMISSIONS.crmView,
   list_crm_leads: PERMISSIONS.crmView,
@@ -209,6 +212,11 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "production.formula.deactivate": PERMISSIONS.inventoryAdjust,
   "production.formulaInput.set": PERMISSIONS.inventoryAdjust,
   "production.formulaInput.delete": PERMISSIONS.inventoryAdjust,
+  "transfer.create": PERMISSIONS.inventoryAdjust,
+  "transfer.ship": PERMISSIONS.inventoryAdjust,
+  "transfer.receive": PERMISSIONS.inventoryAdjust,
+  "transfer.cancel": PERMISSIONS.inventoryAdjust,
+  "warehouseDocument.create": PERMISSIONS.inventoryAdjust,
   "crm.case.save": PERMISSIONS.partiesManage,
   "crm.case.set_status": PERMISSIONS.partiesManage,
   "crm.activity.create": PERMISSIONS.partiesManage,

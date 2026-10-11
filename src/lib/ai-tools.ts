@@ -64,6 +64,8 @@ import { searchKbArticles } from "./knowledge-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
 import { listDeals, listCases } from "./crm-service";
+import { listInventoryTransfers } from "./transfer-service";
+import { listWarehouseDocuments, isWarehouseDocumentKind } from "./warehouse-document-service";
 import { listLeads } from "./crm-lead-service";
 import { listPipelines } from "./crm-pipeline-service";
 import { crmOverview } from "./crm-overview";
@@ -1753,6 +1755,21 @@ export async function runReadTool(
         limit,
       });
       return { ok: true, data: { count: deals.length, deals } };
+    }
+    // Issue #883 package 2, batch L — the two warehouse lanes' lists, via the
+    // services the routes moved to since batch L (single SQL source of truth).
+    case "list_inventory_transfers": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 100;
+      const transfers = await listInventoryTransfers(businessId, { limit });
+      return { ok: true, data: { count: transfers.length, transfers } };
+    }
+    case "list_warehouse_documents": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 500) : 100;
+      const kind = typeof args.kind === "string" && isWarehouseDocumentKind(args.kind) ? args.kind : undefined;
+      const locationId =
+        typeof args.locationId === "string" && args.locationId.trim() ? args.locationId.trim() : undefined;
+      const documents = await listWarehouseDocuments(businessId, { kind, locationId, limit });
+      return { ok: true, data: { count: documents.length, documents } };
     }
     case "list_crm_cases": {
       const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;

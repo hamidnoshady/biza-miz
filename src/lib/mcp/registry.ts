@@ -137,7 +137,11 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // Batch K3 — the service-desk lane. Cases read rides listCases the screen
   // calls, agnostic like the other CRM reads.
   { name: "list_crm_cases", kind: "read", app: "crm", branchPolicy: "agnostic" },
-  { name: "list_crm_deals", kind: "read", app: "crm", branchPolicy: "agnostic" },
+
+  // Batch L — transfers span two branches by definition and documents carry
+  // their location on the row; business-wide listing, so agnostic like orders.
+  { name: "list_inventory_transfers", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  { name: "list_warehouse_documents", kind: "read", app: "pos", branchPolicy: "agnostic" },  { name: "list_crm_deals", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_leads", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_pipelines", kind: "read", app: "crm", branchPolicy: "agnostic" },
   // K2 addendum — CRM dashboard/quality/roster surfaces are business-wide by
@@ -287,6 +291,14 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "production.formula.deactivate", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "production.formulaInput.set", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "production.formulaInput.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch L — stock-moving between branches / immediate posting: every verb
+  // that prices layers sits as a step-up write, exactly like waste count-line
+  // commits and inventory.production.run.
+  { actionType: "transfer.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "transfer.ship", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "transfer.receive", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "transfer.cancel", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "warehouseDocument.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "crm.case.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
   // A status move drives the SLA clock (first response, waits, close-out) —
   // still a normal inbox action on the screen, so mode not always_approve.

@@ -239,7 +239,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Warehouses, transfers, warehouse documents",
     routes: ["inventory/warehouses", "inventory/transfers", "inventory/warehouse-documents"],
-    test: "integration/stock.integration.test.ts",
+    ops: {
+      listDetail: ["list_inventory_transfers", "list_warehouse_documents"],
+      create: ["transfer.create", "warehouseDocument.create"],
+      lifecycle: ["transfer.ship", "transfer.receive", "transfer.cancel"],
+    },
+    note: "the warehouses screen itself is the branch/location directory — covered by list_branches and the branch.* writes; transfer ship/receive/cancel and the posting document are always_approve (priced layers move), transfer.create is a draft",
+    test: "integration/warehouse-document.integration.test.ts + retail-warehouse-document",
   },
   {
     id: "inventory.counts",

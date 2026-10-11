@@ -81,6 +81,13 @@ import { listPipelines, createPipeline, updatePipeline, moveDealToStage, type St
 import { saveLead, convertLead } from "./crm-lead-service";
 import { upsertDeal, upsertCase, createActivity, updateActivity } from "./crm-service";
 import { setCaseStatus } from "./crm-case-service";
+import {
+  createInventoryTransfer,
+  shipInventoryTransfer,
+  receiveInventoryTransfer,
+  cancelInventoryTransfer,
+} from "./transfer-service";
+import { createWarehouseDocument, parseWarehouseDocumentLines, isWarehouseDocumentKind } from "./warehouse-document-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
 import { createWorkspaceProject, updateWorkspaceProject, createWorkspaceTask, updateWorkspaceTask, WorkspaceError } from "./workspace";
 import { workspaceAccessFlags } from "./workspace-shared";
@@ -2368,6 +2375,122 @@ const crmPipelineUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { pipelineId, updated: true } };
 };
 
+// ── Issue #883 package 2, batch L — transfers & warehouse documents ─────────
+// The four transfer states ride the same client-transaction services as the
+// routes' BEGIN/COMMIT blocks; the document posts through the service's own
+// transaction wrapper, exactly like the route.
+const transferCreate: AutopilotExecutor = async (ctx) => {
+  const destinationLocationId = str(ctx.payload.destinationLocationId);
+  const idempotencyKey = str(ctx.payload.idempotencyKey);
+  const rawLines = ctx.payload.lines;
+  if (!destinationLocationId || !idempotencyKey || !Array.isArray(rawLines) || rawLines.length === 0) {
+    return fail("invalid_payload");
+  }
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  if (!ctx.authorizedByUserId) return fail("no_authorizing_user");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const lines = rawLines.map((raw) => {
+      const line = raw as Record<string, unknown>;
+      return {
+        sourceInventoryItemId: str(line.sourceInventoryItemId) ?? "",
+        destinationInventoryItemId: str(line.destinationInventoryItemId) ?? "",
+        quantity: positiveQuantityText(String(line.quantity ?? "")),
+      };
+    });
+    const result = await createInventoryTransfer(client, {
+      businessId: ctx.businessId,
+      sourceLocationId: branch.locationId,
+      destinationLocationId,
+      note: str(ctx.payload.note),
+      idempotencyKey,
+      createdBy: ctx.authorizedByUserId,
+      lines,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { id: result.id, duplicate: result.duplicate } };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    const code = err instanceof Error ? err.message : "transfer_failed";
+    return fail(code);
+  } finally {
+    client.release();
+  }
+};
+
+type TransferLifecycle = (client: import("pg").PoolClient, params: {
+  businessId: string;
+  transferId: string;
+  actorId: string;
+}) => Promise<{ eventId: string | null; value: unknown }>;
+
+function transferLifecycle(fn: TransferLifecycle): AutopilotExecutor {
+  return async (ctx) => {
+    const transferId = str(ctx.payload.transferId);
+    if (!transferId) return fail("invalid_payload");
+    if (!ctx.authorizedByUserId) return fail("no_authorizing_user");
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await fn(client, {
+        businessId: ctx.businessId,
+        transferId,
+        actorId: ctx.authorizedByUserId,
+      });
+      await client.query("COMMIT");
+      return { ok: true, result: { transferId, eventId: result.eventId, value: result.value } };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      const code = err instanceof Error ? err.message : "transfer_failed";
+      return fail(code);
+    } finally {
+      client.release();
+    }
+  };
+}
+
+const transferShip: AutopilotExecutor = transferLifecycle((client, params) => shipInventoryTransfer(client, params));
+const transferReceive: AutopilotExecutor = transferLifecycle((client, params) => receiveInventoryTransfer(client, params));
+const transferCancel: AutopilotExecutor = transferLifecycle((client, params) => cancelInventoryTransfer(client, params));
+
+const warehouseDocumentCreate: AutopilotExecutor = async (ctx) => {
+  const kind = str(ctx.payload.kind);
+  if (!kind || !isWarehouseDocumentKind(kind)) return fail("invalid_kind");
+  const rawLines = ctx.payload.lines;
+  if (!Array.isArray(rawLines) || rawLines.length === 0) return fail("no_items");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  let parsed;
+  try {
+    parsed = parseWarehouseDocumentLines(
+      kind,
+      rawLines as Array<{ inventoryItemId?: string; quantity?: string; unitCost?: string | number }>,
+    );
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "bad_request");
+  }
+  try {
+    const created = await createWarehouseDocument({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      kind: parsed.kind,
+      supplierId: str(ctx.payload.supplierId),
+      recipient: str(ctx.payload.recipient),
+      documentNumber: str(ctx.payload.documentNumber),
+      note: str(ctx.payload.note),
+      createdBy: ctx.authorizedByUserId,
+      lines: parsed.lines,
+    });
+    return { ok: true, result: { id: created.id, totalValue: created.totalValue, kind } };
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "warehouse_document_failed");
+  }
+};
+
 // ── Issue #883 package 2, batch K3 — CRM service desk (cases & activities) ──
 const crmCaseSave: AutopilotExecutor = async (ctx) => {
   const subject = str(ctx.payload.subject);
@@ -2547,6 +2670,11 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   productionFormulaDeactivate,
   productionFormulaInputSet,
   productionFormulaInputDelete,
+  transferCreate,
+  transferShip,
+  transferReceive,
+  transferCancel,
+  warehouseDocumentCreate,
   crmCaseSave,
   crmCaseSetStatus,
   crmActivityCreate,
