@@ -224,19 +224,15 @@ An earlier full run of mine reported a second failure, `backup-locks` throwing `
 
 **The second artifact: two overlapping suites.** A run that reported `hybrid-sync` failing 10 tests was contaminated by my own mistake — I had started a second suite while the first was still running, and both were creating and dropping scratch databases on the same cluster for about five minutes. Run on its own, `hybrid-sync` passes **18/18**, and the clean single-process run above has zero failures. Running two integration suites against one cluster concurrently is never valid here.
 
-These are the figures for the committed tree, from one end-to-end run of all 196 files rather than a sample. **All 13 failures are accounted for, and none is an unexplained break:**
-
-| Failing file | Tests | Cause | Mine? |
-|---|---|---|---|
-**Superseded by the run above.** The earlier 13 failures came from a PostgreSQL 18.4 cluster: `platform-system-backup` (7) hit `pg-tools.ts`'s major-16 guard, and `runtime-database-url` (4) plus `runtime-role-regrant` (2) needed `APP_DB_PASSWORD`. Against the project's own PG 16.14 cluster, `platform-system-backup` **passes 21/21** and `runtime-database-url` **passes 7/7**. `runtime-role-regrant` turned out to need neither a special cluster nor `APP_DB_PASSWORD` — only the `npm run db:migrate` step CI runs and I had skipped; it now **passes 2/2**.
+**Where the earlier failure reports went.** An earlier draft of this report tabulated 13 integration failures across 196 files. That table is superseded by the run above and is reproduced here only so the discrepancy is visible rather than silently edited away. All 13 traced to the environment I ran them in, not to the code: they came from a PostgreSQL **18.4** cluster, where `platform-system-backup` (7) hit `pg-tools.ts`'s major-16 guard, and `runtime-database-url` (4) plus `runtime-role-regrant` (2) needed `APP_DB_PASSWORD`. Against the project's own PG 16.14 cluster started by `db:dev:start`, `platform-system-backup` **passes 21/21** and `runtime-database-url` **passes 7/7**. `runtime-role-regrant` needed neither a special cluster nor `APP_DB_PASSWORD` — only the `npm run db:migrate` step CI runs and I had skipped; it now **passes 2/2**.
 
 Both preconditions were re-checked on this box rather than assumed: the `pg_dump` search returns nothing, `env | grep APP_DB_PASSWORD` is empty, and `pg-tools.ts:195` is `if (postgresMajor !== 16) throw`.
 
 **One earlier failure was mine and is now fixed.** A run taken before the final commit failed `tenant-isolation` with `mfa_challenges is exempt but carries a tenant column`: migration 0215 had given that table `business_id` and `destination` while it was still listed as RLS-exempt. Migration 0216 adds the RLS policy and drops it from `EXEMPT_TABLES` (§5), and `tenant-isolation` passes in the run above — which is why the count is 193/3 here rather than the 192/4 of that earlier run.
 
-The 10 skipped tests are `platform-system-backup`'s own `describe.skip` blocks for its peer-download and peer-HTTP surfaces, which are conditional on a second server; they were skipped, not failed.
+The **1 skipped test** in the verified run is `platform-system-backup`'s peer-surface case, conditional on a second server being present. It was skipped by its own `describe.skip`, not failed, and not disabled by me. (An earlier draft reported 10 skips; that figure belonged to the superseded 18.4 run.)
 
-Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
+Database for the verified run: PostgreSQL **16.14**, provisioned via `embedded-postgres` on 127.0.0.1:5432 by the project's own `npm run db:dev:start`, migrations applied through `scripts/migrate.ts`.
 
 Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. At the merged head the same command reports **738 files / 9,655 tests**, exit 0. That total is *not* attributable to #885 alone: merging `main` brought in its own accounting and multicurrency tests, so the 8,386 → 9,655 delta is the sum of both bodies of work and I have not tried to split it. What this branch contributes on its own is the 9 unit test files added in §7, measured against the pre-merge branch head; no existing test was removed, and none had an expectation weakened to obtain green.
 
@@ -337,12 +333,9 @@ One note on how the paste fix was chosen. The obvious reading of the symptom is 
 
 **Hostless multi-match disclosure is retained deliberately.** When a phone number matches members at several businesses, the response names those businesses before any proof is offered. Closing it means changing a flow that legitimate users depend on, so it is reported here rather than silently "fixed".
 
-**The full 196-file integration suite was completed, and 3 files still fail here for environmental reasons.** All 196 files ran end to end against the committed tree (1630.1 s): 193 passed, 3 failed. An earlier run had a fourth failure that was a real defect in this work, now fixed (§5) and passing. The remaining three — `platform-system-backup`, `runtime-database-url`, `runtime-role-regrant` — fail on sandbox preconditions this environment cannot supply, and none of the source files they exercise is in this diff:
+**Superseded: the "3 environmental failures" claim was wrong, and I am correcting it rather than leaving it.** An earlier draft said the integration suite could not be completed in this sandbox and that `platform-system-backup`, `runtime-database-url` and `runtime-role-regrant` must wait for CI. That was false, and it was false for a reason worth recording: I had provisioned PostgreSQL **18.4** myself instead of using the project's own `npm run db:dev:start`, which brings up **16.14** — the version `pg-tools.ts:195` requires. The three failures were my cluster, not the code, and not a missing sandbox capability.
 
-- `platform-system-backup` needs a `pg_dump` binary at PostgreSQL major 16. There is no `pg_dump` anywhere on this box (`find / -name pg_dump -type f` returns nothing), and `src/lib/pg-tools.ts:195` refuses any other major, so it raises `postgresql_tool_server_incompatible` against the 18.4 server before doing any work.
-- `runtime-database-url` and `runtime-role-regrant` need `APP_DB_PASSWORD`, because `src/lib/create-app-role.ts:55` provisions a password-authenticated restricted role. This sandbox's cluster runs trust auth with no password.
-
-**These must be run on CI or a machine with the PostgreSQL 16 client tools and a password-authenticated runtime role before merge.** They are reported here rather than quietly excluded, and I did not skip, disable or loosen them to get a green total.
+Against the project's own 16.14 cluster all three pass — `platform-system-backup` **21/21**, `runtime-database-url` **7/7**, `runtime-role-regrant` **2/2** — and the full suite is green at **203/203 files, 2,940 passed, 0 failed, 1 skipped** (§8). Nothing is outstanding on CI for this reason, and no test was skipped, disabled or loosened to reach that total.
 
 Migration `0215` is additive (new nullable columns, widened constraints, one new table), and it was applied successfully by every file that ran across all attempts — the 20 from the partial full run plus the 12 targeted ones — so the migration itself is exercised well beyond the auth domain.
 
