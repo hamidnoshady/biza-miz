@@ -224,6 +224,7 @@ export interface CommissionStatement {
     entryId: string | null;
   }[];
   runs: { runId: string; runNumber: number; status: string; owed: string; paid: string; outstanding: string }[];
+  /** True when `accruals` or `payouts` hold only the first 500 rows. The totals are never truncated. */
   truncated: boolean;
 }
 
@@ -965,7 +966,7 @@ export async function getCommissionStatement(businessId: string, employeeId: str
   if (!people[0]) throw new CommissionSettlementError("employee_not_found", 404);
 
   const LIMIT = 500;
-  const [accrualRows, accrualTotals, payrollPaid, payoutRows, runRows] = await Promise.all([
+  const [accrualRows, accrualTotals, payrollPaid, runPaidTotals, payoutRows, runRows] = await Promise.all([
     query<{
       id: string;
       sale_date: string | null;
@@ -998,6 +999,15 @@ export async function getCommissionStatement(businessId: string, employeeId: str
       `SELECT COALESCE(SUM(l.commission_amount), 0)::text AS paid
          FROM payroll_run_lines l JOIN payroll_runs pr ON pr.id = l.run_id
         WHERE pr.business_id = $1 AND l.user_id = $2 AND pr.status = 'paid'`,
+      [businessId, employeeId],
+    ),
+    // Lifetime standalone money out, net of reversals. Summed in the database
+    // over every allocation, never over the bounded detail list below: a
+    // member with more than LIMIT allocations must still get the true total.
+    query<{ paid: string }>(
+      `SELECT COALESCE(SUM(al.amount), 0)::text AS paid
+         FROM commission_settlement_allocations al
+        WHERE al.business_id = $1 AND al.employee_id = $2`,
       [businessId, employeeId],
     ),
     query<{
@@ -1035,7 +1045,7 @@ export async function getCommissionStatement(businessId: string, employeeId: str
 
   const accrued = BigInt(accrualTotals.rows[0].accrued);
   const paidThroughPayroll = BigInt(payrollPaid.rows[0].paid);
-  const paidThroughRuns = payoutRows.rows.reduce((sum, row) => sum + BigInt(row.amount), 0n);
+  const paidThroughRuns = BigInt(runPaidTotals.rows[0].paid);
   const person = people[0];
   return {
     employee: {

@@ -838,3 +838,105 @@ describe("reads and isolation", () => {
     await expectRefusal(settlement.calculateCommissionRun(t.id, t.calculator, randomUUID()), "run_not_found", 404);
   });
 });
+
+describe("the statement totals are sums over the whole history, not over the rows it shows", () => {
+  it("counts every allocation past the 500-row detail window, reversals on both sides of it, payroll and standalone, exactly", async () => {
+    const t = await newTenant();
+    const other = await newTenant();
+
+    // A real sale (+5,000) and a real return (-3,000, the commission it reverses), through the engine's return path.
+    await accrue(t, t.sellerA, 100_000);
+    await giveBack(t, t.sellerA, 3_000);
+    // A standalone run that holds the member's 2,000 owed, and one real payout of 1,000 through the service,
+    // which moves the run to partially_paid (the only state a payout reversal may be written against).
+    const run = await approvedRun(t);
+    await settlement.recordCommissionPayout(
+      t.id,
+      t.paymaster,
+      run.id,
+      { allocations: [{ employeeId: t.sellerA, amount: 1000n }], paymentAccountId: null, method: "cash", paidDate: null, memo: null },
+      "payout-stmt-real-0001",
+    );
+
+    // Payroll paid 4,000 of commission to the same member.
+    const { rows: [payroll] } = await db.query<{ id: string }>(
+      `INSERT INTO payroll_runs (business_id, period_label, total_amount, commission_total, status)
+       VALUES ($1, 'پورسانت تست', 0, 4000, 'paid') RETURNING id`,
+      [t.id],
+    );
+    await db.query(
+      "INSERT INTO payroll_run_lines (run_id, user_id, amount, commission_amount) VALUES ($1, $2, 0, 4000)",
+      [payroll.id, t.sellerA],
+    );
+
+    // 520 more sales, written directly: the aggregate, not the engine, is under test.
+    await db.query(
+      `INSERT INTO commission_accruals (business_id, employee_id, source_type, source_id, amount, basis_amount)
+       SELECT $1, $2, 'order_item', NULL, 1000, 20000 FROM generate_series(1, 520)`,
+      [t.id, t.sellerA],
+    );
+
+    // 600 standalone payouts of 10 each, with a reversal of the very first one
+    // (created before the last 500 payouts, so it falls outside the 500-row window)
+    // and a reversal of the last one (inside the window).
+    const payoutIds: string[] = [];
+    const addPayout = async () => {
+      const { rows: [p] } = await db.query<{ id: string }>(
+        `INSERT INTO commission_settlement_payouts (business_id, run_id, kind, amount, payment_account_id, payment_method, paid_date)
+         VALUES ($1, $2, 'payout', 10, $3, 'cash', CURRENT_DATE) RETURNING id`,
+        [t.id, run.id, t.accounts.cash],
+      );
+      await db.query(
+        `INSERT INTO commission_settlement_allocations (business_id, payout_id, run_id, employee_id, employee_name, amount)
+         VALUES ($1, $2, $3, $4, 'فروشنده الف', 10)`,
+        [t.id, p.id, run.id, t.sellerA],
+      );
+      payoutIds.push(p.id);
+    };
+    const reverse = async (payoutId: string) => {
+      const { rows: [r] } = await db.query<{ id: string }>(
+        `INSERT INTO commission_settlement_payouts (business_id, run_id, kind, reverses_payout_id, amount, payment_account_id, payment_method, paid_date)
+         VALUES ($1, $2, 'reversal', $3, 10, $4, 'cash', CURRENT_DATE) RETURNING id`,
+        [t.id, run.id, payoutId, t.accounts.cash],
+      );
+      await db.query(
+        `INSERT INTO commission_settlement_allocations (business_id, payout_id, run_id, employee_id, employee_name, amount)
+         VALUES ($1, $2, $3, $4, 'فروشنده الف', -10)`,
+        [t.id, r.id, run.id, t.sellerA],
+      );
+    };
+
+    for (let i = 0; i < 100; i += 1) await addPayout();
+    await reverse(payoutIds[0]);
+    for (let i = 0; i < 500; i += 1) await addPayout();
+    await reverse(payoutIds[599]);
+
+    const statement = await settlement.getCommissionStatement(t.id, t.sellerA);
+    // Accrued: +5,000 - 3,000 + 520 x 1,000.
+    expect(statement.totals.accrued).toBe("522000");
+    expect(statement.totals.paidThroughPayroll).toBe("4000");
+    // 1,000 through the service, plus 600 x 10 out, less two reversals of 10: 6,980.
+    // The old code summed only the 501 fetched rows, which gives 5,980 here.
+    expect(statement.totals.paidThroughRuns).toBe("6980");
+    expect(statement.totals.unpaid).toBe("511020");
+    // The detail list is bounded and says so; the totals above are not.
+    expect(statement.payouts).toHaveLength(500);
+    expect(statement.truncated).toBe(true);
+
+    // Another business's money never leaks in, and its member id is not found here.
+    await accrue(other, other.sellerA, 100_000);
+    const otherRun = await approvedRun(other);
+    await settlement.recordCommissionPayout(
+      other.id,
+      other.paymaster,
+      otherRun.id,
+      { allocations: [{ employeeId: other.sellerA, amount: 2000n }], paymentAccountId: null, method: "cash", paidDate: null, memo: null },
+      "payout-stmt-other-0001",
+    );
+    const otherStatement = await settlement.getCommissionStatement(other.id, other.sellerA);
+    expect(otherStatement.totals.paidThroughRuns).toBe("2000");
+    const again = await settlement.getCommissionStatement(t.id, t.sellerA);
+    expect(again.totals.paidThroughRuns).toBe("6980");
+    await expectRefusal(settlement.getCommissionStatement(t.id, other.sellerA), "employee_not_found", 404);
+  }, 120_000);
+});

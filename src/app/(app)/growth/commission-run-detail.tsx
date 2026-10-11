@@ -34,6 +34,7 @@ import { formatPersianNumber } from "@/lib/digits";
 import type { CommissionRunAction, CommissionRunStatus } from "@/lib/commission-settlement-lifecycle";
 import type { PlanWarning } from "@/lib/commission-settlement-plan";
 import { commissionSettlementErrorMessage, commissionWarningText } from "./commission-settlement-messages";
+import { useKeyedRequest, type KeyedRequestStatus } from "./use-keyed-request";
 import {
   actionLabel,
   actionNeedsConfirmation,
@@ -212,7 +213,6 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
 
   const [run, setRun] = useState<RunDetailData | null>(null);
   const [loadError, setLoadError] = useState("");
-  const [accounts, setAccounts] = useState<PaymentAccount[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [actionError, setActionError] = useState("");
@@ -223,8 +223,16 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
   const [showPayout, setShowPayout] = useState(false);
   const [payoutError, setPayoutError] = useState("");
   const [statementFor, setStatementFor] = useState<string | null>(null);
-  const [statement, setStatement] = useState<StatementData | null>(null);
-  const [statementError, setStatementError] = useState("");
+  // Each request is keyed by what is on screen: a superseded answer is dropped, never shown.
+  const accountsRequest = useKeyedRequest<{ accounts?: PaymentAccount[] }>(
+    can.has("commission.payout") ? "/api/commission/payment-accounts" : null,
+    commissionSettlementErrorMessage,
+  );
+  const accounts = accountsRequest.data?.accounts ?? [];
+  const statementRequest = useKeyedRequest<StatementData>(
+    statementFor ? `/api/commission/statement?employeeId=${encodeURIComponent(statementFor)}` : null,
+    commissionSettlementErrorMessage,
+  );
 
   const loadRun = useCallback(async () => {
     setLoadError("");
@@ -236,26 +244,6 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
   useEffect(() => {
     void loadRun();
   }, [loadRun]);
-
-  useEffect(() => {
-    if (!can.has("commission.payout")) return;
-    void api<{ accounts?: PaymentAccount[] }>("/api/commission/payment-accounts").then(({ ok, data }) => {
-      if (ok && data.accounts) setAccounts(data.accounts);
-    });
-  }, [can]);
-
-  useEffect(() => {
-    if (!statementFor) {
-      setStatement(null);
-      return;
-    }
-    setStatementError("");
-    setStatement(null);
-    void api<StatementData & { error?: string }>(`/api/commission/statement?employeeId=${statementFor}`).then(({ ok, data }) => {
-      if (ok) setStatement(data);
-      else setStatementError(commissionSettlementErrorMessage(data.error));
-    });
-  }, [statementFor]);
 
   const names = useMemo(() => new Map((run?.employees ?? []).map((e) => [e.employeeId, e.employeeName])), [run]);
   const formatMoney = (rial: string) => money.formatText(rial);
@@ -450,6 +438,9 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
           <PayoutFormCard
             run={run}
             accounts={accounts}
+            accountsStatus={accountsRequest.status}
+            accountsError={accountsRequest.error}
+            onRetryAccounts={accountsRequest.retry}
             busy={busy === "pay"}
             onDone={(next, message) => {
               setRun(next);
@@ -486,8 +477,10 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
 
         {statementFor ? (
           <StatementCard
-            statement={statement}
-            error={statementError}
+            status={statementRequest.status}
+            statement={statementRequest.data}
+            error={statementRequest.error}
+            onRetry={statementRequest.retry}
             money={money}
             onClose={() => setStatementFor(null)}
           />
@@ -559,6 +552,9 @@ function MembersCard({
 function PayoutFormCard({
   run,
   accounts,
+  accountsStatus,
+  accountsError,
+  onRetryAccounts,
   busy,
   onDone,
   onError,
@@ -568,6 +564,9 @@ function PayoutFormCard({
 }: {
   run: RunDetailData;
   accounts: PaymentAccount[];
+  accountsStatus: KeyedRequestStatus;
+  accountsError: string;
+  onRetryAccounts: () => void;
   busy: boolean;
   onDone: (run: RunDetailData, message: string) => void;
   onError: (message: string) => void;
@@ -580,7 +579,10 @@ function PayoutFormCard({
   const [rows, setRows] = useState<Record<string, PayoutFormRow>>(() =>
     Object.fromEntries(payable.map((e) => [e.employeeId, { all: true, text: money.toInputText(e.outstanding) }])),
   );
-  const [choice, setChoice] = useState(() => (accounts[0] ? `account:${accounts[0].id}` : "method:bank"));
+  // The default is the first account once the accounts have loaded; a late load
+  // must not leave the form on a method the user never chose.
+  const [pickedChoice, setChoice] = useState<string | null>(null);
+  const choice = pickedChoice ?? (accounts[0] ? `account:${accounts[0].id}` : "method:bank");
   const [paidDate, setPaidDate] = useState(run.today);
   const [memo, setMemo] = useState("");
   // One key for this form, reused by a retry after a dropped connection, so the same payout is never made twice.
@@ -686,6 +688,11 @@ function PayoutFormCard({
           </DataTable>
           <div className="grid gap-3 sm:grid-cols-3">
             <Field label="پرداخت از">
+              {accountsStatus === "error" ? (
+                <RetryNotice message={accountsError} onRetry={onRetryAccounts} />
+              ) : accountsStatus === "loading" ? (
+                <p className="text-sm text-muted-foreground">در حال بارگذاری حساب‌های پرداخت…</p>
+              ) : null}
               <select className={inputClass} value={choice} onChange={(e) => setChoice(e.target.value)}>
                 {accounts.map((account) => (
                   <option key={account.id} value={`account:${account.id}`}>
@@ -806,14 +813,32 @@ function PayoutsCard({
   );
 }
 
+/** A failed read with a way to try again: the same request, never a silent gap. */
+function RetryNotice({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <ErrorBox>{message}</ErrorBox>
+      </div>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        تلاش دوباره
+      </Button>
+    </div>
+  );
+}
+
 function StatementCard({
+  status,
   statement,
   error,
+  onRetry,
   money,
   onClose,
 }: {
+  status: KeyedRequestStatus;
   statement: StatementData | null;
   error: string;
+  onRetry: () => void;
   money: MoneyApi;
   onClose: () => void;
 }) {
@@ -826,9 +851,11 @@ function StatementCard({
         </Button>
       }
     >
-      {error ? (
-        <ErrorBox>{error}</ErrorBox>
-      ) : !statement ? (
+      {status === "error" ? (
+        <div className="p-4">
+          <RetryNotice message={error} onRetry={onRetry} />
+        </div>
+      ) : status !== "ready" || !statement ? (
         <LoadingSkeleton rows={3} compact />
       ) : (
         <div className="space-y-4">
@@ -870,28 +897,15 @@ function StatementCard({
 function LinesCard({ runId, employees, money }: { runId: string; employees: Employee[]; money: MoneyApi }) {
   const [employeeId, setEmployeeId] = useState("");
   const [offset, setOffset] = useState(0);
-  const [lines, setLines] = useState<LineRow[] | null>(null);
-  const [total, setTotal] = useState(0);
-  const [error, setError] = useState("");
-
-  const load = useCallback(async () => {
-    setError("");
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-    if (employeeId) params.set("employeeId", employeeId);
-    const { ok, data } = await api<{ lines?: LineRow[]; total?: number; error?: string }>(
-      `/api/commission/runs/${runId}/lines?${params}`,
-    );
-    if (ok && data.lines) {
-      setLines(data.lines);
-      setTotal(data.total ?? data.lines.length);
-    } else {
-      setError(commissionSettlementErrorMessage(data.error));
-    }
-  }, [runId, employeeId, offset]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+  if (employeeId) params.set("employeeId", employeeId);
+  const request = useKeyedRequest<{ lines?: LineRow[]; total?: number }>(
+    `/api/commission/runs/${runId}/lines?${params}`,
+    commissionSettlementErrorMessage,
+  );
+  const lines = request.status === "ready" ? (request.data?.lines ?? []) : null;
+  const total = request.data?.total ?? request.data?.lines?.length ?? 0;
+  const error = request.status === "error" ? request.error : "";
 
   const csvHref = `/api/commission/runs/${runId}/lines?format=csv${employeeId ? `&employeeId=${employeeId}` : ""}`;
   return (
@@ -923,7 +937,7 @@ function LinesCard({ runId, employees, money }: { runId: string; employees: Empl
     >
       {error ? (
         <div className="p-4">
-          <ErrorBox>{error}</ErrorBox>
+          <RetryNotice message={error} onRetry={request.retry} />
         </div>
       ) : lines === null ? (
         <div className="p-4">

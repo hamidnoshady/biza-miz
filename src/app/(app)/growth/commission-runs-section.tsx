@@ -34,6 +34,7 @@ import { formatPersianNumber } from "@/lib/digits";
 import { todayIsoDate } from "@/lib/jalali";
 import { COMMISSION_RUN_STATUSES, type CommissionRunStatus } from "@/lib/commission-settlement-lifecycle";
 import { commissionSettlementErrorMessage } from "./commission-settlement-messages";
+import { useKeyedRequest } from "./use-keyed-request";
 import { runStatusLabel, runStatusTone, shamsiDate } from "./commission-run-view";
 
 interface RunRow {
@@ -262,24 +263,18 @@ export function CommissionRunsSection({ permissions }: { permissions: readonly s
 
   const [status, setStatus] = useState<"" | CommissionRunStatus>("");
   const [offset, setOffset] = useState(0);
-  const [runs, setRuns] = useState<RunRow[] | null>(null);
-  const [total, setTotal] = useState(0);
-  const [loadError, setLoadError] = useState("");
+  const runsParams = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+  if (status) runsParams.set("status", status);
+  // Keyed by the filter and page on screen: an answer to an older filter or page is dropped.
+  const runsRequest = useKeyedRequest<{ runs?: RunRow[]; total?: number }>(
+    `/api/commission/runs?${runsParams}`,
+    commissionSettlementErrorMessage,
+  );
+  const runs = runsRequest.status === "ready" ? (runsRequest.data?.runs ?? []) : null;
+  const total = runsRequest.data?.total ?? runsRequest.data?.runs?.length ?? 0;
+  const loadError = runsRequest.status === "error" ? runsRequest.error : "";
   const [tieOut, setTieOut] = useState<TieOut | null>(null);
   const [tieOutError, setTieOutError] = useState("");
-
-  const loadRuns = useCallback(async () => {
-    setLoadError("");
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-    if (status) params.set("status", status);
-    const { ok, data } = await api<{ runs?: RunRow[]; total?: number; error?: string }>(`/api/commission/runs?${params}`);
-    if (ok && data.runs) {
-      setRuns(data.runs);
-      setTotal(data.total ?? data.runs.length);
-    } else {
-      setLoadError(commissionSettlementErrorMessage(data.error));
-    }
-  }, [status, offset]);
 
   const loadTieOut = useCallback(async () => {
     setTieOutError("");
@@ -288,9 +283,6 @@ export function CommissionRunsSection({ permissions }: { permissions: readonly s
     else setTieOutError(commissionSettlementErrorMessage(data.error));
   }, []);
 
-  useEffect(() => {
-    void loadRuns();
-  }, [loadRuns]);
   useEffect(() => {
     void loadTieOut();
   }, [loadTieOut]);
@@ -353,7 +345,7 @@ export function CommissionRunsSection({ permissions }: { permissions: readonly s
           {loadError ? (
             <div className="space-y-3 p-4">
               <ErrorBox>{loadError}</ErrorBox>
-              <Button variant="outline" onClick={() => void loadRuns()}>
+              <Button variant="outline" onClick={runsRequest.retry}>
                 تلاش دوباره
               </Button>
             </div>
