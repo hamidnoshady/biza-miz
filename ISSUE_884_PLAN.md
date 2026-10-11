@@ -392,12 +392,15 @@ release-ready on desktop, even though they do not block the `required` gate:**
 
 Both budgets are commented in their workflows as **deliberately tight, reviewed gates** ("leaves
 nothing to hide" / "a runaway detector"), not auto-tuned numbers — bumping either is a product/ops
-call, not a code fix, and this plan does not change them without the owner's sign-off. The options
-once the owner is asked: (a) raise the two budgets to restore a working margin (a small bump, e.g.
-+10–20 MiB each, given the overage itself is only ~3 MiB), (b) accept that this slice's desktop
-build stays red until a separate size-reduction pass runs, or (c) something else the owner
-prefers. Nothing about this affects the web or Android deliverable: no desktop-specific code was
-touched, and the overage is pure Next.js bundle growth from genuine new routes/services.
+call, not a code fix, so this was raised to the owner rather than changed unilaterally. **Owner
+decision: bump both budgets.** Applied in a follow-up commit, the same way the prior 600→620 MiB
+precedent was handled — `build-desktop-installer.yml`'s unpacked-payload budget moves 620→640 MiB,
+`verify-shippables.yml`'s staged-runtime budget moves 200→220 MiB, both with an explanatory comment
+in the workflow and a dated note in `docs/standalone-desktop-app.md` (the prior 2026-10-03 note is
+kept as history, not overwritten). A fresh CI run against the bump commit is in flight; see the
+Gates section for its outcome once it completes. Nothing about this affects the web or Android
+deliverable: no desktop-specific code was touched, and the overage is pure Next.js bundle growth
+from genuine new routes/services.
 
 ## Files
 
