@@ -4,8 +4,8 @@ import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { isoDateToJalali, jalaliMonthLength, jalaliToIsoDate } from "./jalali";
 import { isUuid } from "./uuid";
+import { SEARCH_FOLD, foldForSearch, searchPattern } from "./sql-search";
 import { businessToday } from "./business-day-service";
-import { normalizePosSearchText } from "./pos-selection";
 
 /**
  * Installment schedules (اقساط) — see migrations/0140_installments.sql for the
@@ -702,26 +702,6 @@ export async function payInstallmentItem(params: {
   }
 }
 
-/**
- * Folds a column into the alphabet `normalizePosSearchText` folds the typed
- * needle into — Arabic ي/ك to Persian ی/ک and both digit sets to ASCII — so a
- * search behaves like the pickers everywhere else in the app («علي» is found
- * by typing «علی», «۱۲» finds «12»). Kept as inline `translate` rather than a
- * stored function: one expression, no migration needed.
- */
-const SEARCH_FOLD = "translate(%s, 'يك٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', 'یک01234567890123456789')";
-
-/**
- * The `q` argument as a LIKE pattern, or null when there is nothing to search
- * for. The needle is normalized exactly the way the client-side pickers
- * normalize it (same `normalizePosSearchText`), then the LIKE wildcards it may
- * contain are escaped — «%» must find a literal «%», not swallow the table.
- */
-function searchPattern(q: string | undefined): string | null {
-  const needle = normalizePosSearchText(q ?? "");
-  if (!needle) return null;
-  return `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
-}
 
 /** Audit F11 — an explicitly selected cash/bank account and optional bank reference. */
 function voucherAccountFields(r: {
@@ -759,9 +739,9 @@ export async function listReceipts(businessId: string, q?: string) {
        LEFT JOIN accounts ca ON ca.id = r.cash_account_id
       WHERE r.business_id = $1
         AND ($2::text IS NULL
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
+             OR ${foldForSearch("COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE $2 ESCAPE '\\'
+             OR ${foldForSearch("COALESCE(r.memo, '')")} ILIKE $2 ESCAPE '\\'
+             OR ${foldForSearch("COALESCE(r.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
       ORDER BY r.receipt_date DESC, r.created_at DESC, r.id DESC`,
     [businessId, pattern],
   );
@@ -820,10 +800,10 @@ export async function listPayments(businessId: string, q?: string) {
        LEFT JOIN journal_entries reversal ON reversal.reverses_entry_id = original.id
       WHERE p.business_id = $1
         AND ($2::text IS NULL
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
+            OR ${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE $2 ESCAPE '\\'
+            OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE $2 ESCAPE '\\'
+            OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE $2 ESCAPE '\\'
+            OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
       ORDER BY p.payment_date DESC, p.created_at DESC, p.id DESC`,
     [businessId, pattern],
   );
