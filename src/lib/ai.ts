@@ -293,6 +293,15 @@ export type ActionType =
   | "production.formula.deactivate"
   | "production.formulaInput.set"
   | "production.formulaInput.delete"
+  // Batch N2b — workspace documents and project templates. Documents validate
+  // every link target against the calling owner (validateDocumentLinks) and
+  // revisions inherit version numbers server-side; template apply itself
+  // stays inside workspace.project.create's templateKey, not standalone.
+  | "workspace.document.create"
+  | "workspace.document.update"
+  | "workspace.document.delete"
+  | "workspace.template.save"
+  | "workspace.template.archive"
   // Batch N2a — workspace calendar + comments. The services throw
   // WorkspaceError with the same codes the guard maps to 4xx, and calendar/
   // comment subjects resolve access from the subject itself, never the body.
@@ -404,6 +413,11 @@ export type AutopilotExecutorKey =
   | "productionFormulaDeactivate"
   | "productionFormulaInputSet"
   | "productionFormulaInputDelete"
+  | "workspaceDocumentCreate"
+  | "workspaceDocumentUpdate"
+  | "workspaceDocumentDelete"
+  | "workspaceTemplateSave"
+  | "workspaceTemplateArchive"
   | "workspaceEventCreate"
   | "workspaceEventUpdate"
   | "workspaceEventDelete"
@@ -1157,6 +1171,49 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف یک مادهٔ اولیه از فرمول",
     payloadHint: "{ formulaId: string, inventoryItemId: string }",
     executor: "productionFormulaInputDelete",
+  },
+  "workspace.document.create": {
+    type: "workspace.document.create",
+    endpoint: "/api/workspace/documents",
+    method: "POST",
+    label: "ثبت سند فضای کاری — با supersedesId نسخهٔ بعدیِ آن سند می‌شود",
+    payloadHint:
+      '{ title: string /* لازم */, description?: string, status?: "draft"|"in_review"|"approved"|"rejected"|"archived", projectId?: string|null, taskId?: string|null, contractId?: string|null, partyId?: string|null, journalEntryId?: string|null, mediaAssetId?: string|null, tags?: string[], supersedesId?: string|null /* نسخهٔ قبلی — از list_workspace_documents */ }',
+    executor: "workspaceDocumentCreate",
+  },
+  "workspace.document.update": {
+    type: "workspace.document.update",
+    endpoint: "/api/workspace/documents/[id]",
+    method: "PATCH",
+    label: "ویرایش سند فضای کاری",
+    payloadHint:
+      '{ documentId: string /* از list_workspace_documents */, title?, description?, status?, projectId?: string|null, taskId?: string|null, contractId?: string|null, partyId?: string|null, journalEntryId?: string|null, mediaAssetId?: string|null, tags?: string[] }',
+    executor: "workspaceDocumentUpdate",
+  },
+  "workspace.document.delete": {
+    type: "workspace.document.delete",
+    endpoint: "/api/workspace/documents/[id]",
+    method: "DELETE",
+    label: "حذف سند فضای کاری",
+    payloadHint: "{ documentId: string }",
+    executor: "workspaceDocumentDelete",
+  },
+  "workspace.template.save": {
+    type: "workspace.template.save",
+    endpoint: "/api/workspace/templates",
+    method: "POST",
+    label: "ثبت یا ویرایش قالب پروژه — با key موجود بازنویسی می‌شود، مثل ویرایشگر قالب",
+    payloadHint:
+      '{ name: string /* لازم */, key?: string /* صراحت برای بازنویسی قالب موجود */, description?: string, projectType?: string|null, phases?: [{ name }], defaultTasks?: [{ title, priority? }] }',
+    executor: "workspaceTemplateSave",
+  },
+  "workspace.template.archive": {
+    type: "workspace.template.archive",
+    endpoint: "/api/workspace/templates/[key]",
+    method: "DELETE",
+    label: "بایگانی قالب پروژه",
+    payloadHint: "{ templateKey: string /* از list_workspace_templates */ }",
+    executor: "workspaceTemplateArchive",
   },
   "workspace.event.create": {
     type: "workspace.event.create",
@@ -3512,6 +3569,46 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               subjectId: { type: "string" },
             },
             required: ["subjectType", "subjectId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_documents",
+          description:
+            "اسناد فضای کاری — با فیلتر پروژه/وظیفه/قرارداد/طرف‌حساب/وضعیت و جستجو؛ currentOnly نسخه‌های جایگزین‌شده را پنهان می‌کند (پیش‌فرض فهرست صفحه).",
+          parameters: {
+            type: "object",
+            properties: {
+              projectId: { type: "string" },
+              taskId: { type: "string" },
+              contractId: { type: "string" },
+              partyId: { type: "string" },
+              status: { type: "string", description: "draft|in_review|approved|rejected|archived|all" },
+              currentOnly: { type: "boolean", description: "پیش‌فرض true — فقط آخرین نسخهٔ هر زنجیره" },
+              search: { type: "string" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۳۰۰" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_document",
+          description:
+            "جزئیات کامل یک سند — با includeVersions کل زنجیرهٔ نسخه‌ها از قدیم به جدید برمی‌گردد.",
+          parameters: {
+            type: "object",
+            properties: {
+              documentId: { type: "string" },
+              includeVersions: { type: "boolean" },
+            },
+            required: ["documentId"],
             additionalProperties: false,
           },
         },

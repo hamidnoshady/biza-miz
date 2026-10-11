@@ -88,7 +88,7 @@ import {
   cancelInventoryTransfer,
 } from "./transfer-service";
 import { createWarehouseDocument, parseWarehouseDocumentLines, isWarehouseDocumentKind } from "./warehouse-document-service";
-import { listCalendar, createEvent, updateEvent, deleteEvent, addComment } from "./workspace";
+import { listCalendar, createEvent, updateEvent, deleteEvent, addComment, createDocument, updateDocument, deleteDocument, saveTemplate, archiveTemplate } from "./workspace";
 import {
   createPriceList,
   renamePriceList,
@@ -2384,6 +2384,84 @@ const crmPipelineUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { pipelineId, updated: true } };
 };
 
+// ── Issue #883 package 2, batch N2b — workspace documents & templates ───────
+const workspaceDocumentInput = (ctx: AutopilotExecutorContext) => ({
+  title: str(ctx.payload.title) ?? undefined,
+  description: str(ctx.payload.description) ?? undefined,
+  mediaAssetId: (ctx.payload.mediaAssetId as string | null | undefined) ?? undefined,
+  projectId: (ctx.payload.projectId as string | null | undefined) ?? undefined,
+  taskId: (ctx.payload.taskId as string | null | undefined) ?? undefined,
+  contractId: (ctx.payload.contractId as string | null | undefined) ?? undefined,
+  partyId: (ctx.payload.partyId as string | null | undefined) ?? undefined,
+  journalEntryId: (ctx.payload.journalEntryId as string | null | undefined) ?? undefined,
+  status: (str(ctx.payload.status) ?? undefined) as string | undefined,
+  tags: Array.isArray(ctx.payload.tags) ? ctx.payload.tags : undefined,
+});
+
+const workspaceDocumentCreate: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const doc = await createDocument(owner, {
+      ...workspaceDocumentInput(ctx),
+      supersedesId: (ctx.payload.supersedesId as string | null | undefined) ?? undefined,
+    });
+    return { ok: true, result: { id: doc.id, title: doc.title, version: doc.version } };
+  } catch (err) {
+    return failWorkspace(err);
+  }
+};
+
+const workspaceDocumentUpdate: AutopilotExecutor = async (ctx) => {
+  const documentId = str(ctx.payload.documentId);
+  if (!documentId) return fail("invalid_payload");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const doc = await updateDocument(owner, documentId, workspaceDocumentInput(ctx));
+    if (!doc) return fail("document_not_found");
+    return { ok: true, result: { id: doc.id, title: doc.title, version: doc.version } };
+  } catch (err) {
+    return failWorkspace(err);
+  }
+};
+
+const workspaceDocumentDelete: AutopilotExecutor = async (ctx) => {
+  const documentId = str(ctx.payload.documentId);
+  if (!documentId) return fail("invalid_payload");
+  const deleted = await deleteDocument(ctx.businessId, documentId);
+  if (!deleted) return fail("document_not_found");
+  return { ok: true, result: { documentId, deleted: true } };
+};
+
+const workspaceTemplateSave: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("invalid_payload");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const templates = await saveTemplate(owner, {
+      key: str(ctx.payload.key) ?? undefined,
+      name,
+      description: str(ctx.payload.description) ?? undefined,
+      projectType: (ctx.payload.projectType as string | null | undefined) ?? undefined,
+      phases: ctx.payload.phases,
+      defaultTasks: ctx.payload.defaultTasks,
+    });
+    const saved = templates.find((t) => t.key === (str(ctx.payload.key) ?? undefined)) ?? templates[templates.length - 1];
+    return { ok: true, result: { key: saved?.key, name: saved?.name, count: templates.length } };
+  } catch (err) {
+    return failWorkspace(err);
+  }
+};
+
+const workspaceTemplateArchive: AutopilotExecutor = async (ctx) => {
+  const templateKey = str(ctx.payload.templateKey);
+  if (!templateKey) return fail("invalid_payload");
+  await archiveTemplate(ctx.businessId, templateKey);
+  return { ok: true, result: { templateKey, archived: true } };
+};
+
 // ── Issue #883 package 2, batch N2a — workspace calendar & comments ─────────
 // These services throw WorkspaceError (code, like the guard's map), beside
 // boolean returns. The owner is the batch-H member row: the routes build the
@@ -2857,6 +2935,11 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   productionFormulaDeactivate,
   productionFormulaInputSet,
   productionFormulaInputDelete,
+  workspaceDocumentCreate,
+  workspaceDocumentUpdate,
+  workspaceDocumentDelete,
+  workspaceTemplateSave,
+  workspaceTemplateArchive,
   workspaceEventCreate,
   workspaceEventUpdate,
   workspaceEventDelete,

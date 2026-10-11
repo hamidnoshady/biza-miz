@@ -543,12 +543,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Calendar, comments, documents, templates",
     routes: ["workspace/calendar", "workspace/comments", "workspace/documents", "workspace/templates"],
     ops: {
-      listDetail: ["list_workspace_calendar", "list_workspace_comments", "list_workspace_templates"],
-      create: ["workspace.event.create", "workspace.comment.add"],
-      update: ["workspace.event.update"],
-      lifecycle: ["workspace.event.delete"],
+      listDetail: ["list_workspace_calendar", "list_workspace_comments", "list_workspace_templates", "list_workspace_documents", "get_workspace_document"],
+      create: ["workspace.event.create", "workspace.comment.add", "workspace.document.create"],
+      update: ["workspace.event.update", "workspace.document.update", "workspace.template.save"],
+      lifecycle: ["workspace.event.delete", "workspace.document.delete", "workspace.template.archive"],
     },
-    note: "documents & template mutations are the remaining lane of this row (workspace N2b); subject access always resolves from the subject itself (resolveWorkspaceSubject), never the payload",
+    note: "document links are validated against the calling owner (validateDocumentLinks); revisions inherit version numbers server-side via supersedesId; template apply is workspace.project.create's templateKey, not a standalone verb",
     test: "integration/workspace.integration.test.ts",
   },
   {

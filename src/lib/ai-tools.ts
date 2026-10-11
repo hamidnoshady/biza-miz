@@ -63,7 +63,7 @@ import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
-import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject } from "./workspace";
+import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject, listDocuments, getDocument, listDocumentVersions } from "./workspace";
 import { listDeals, listCases } from "./crm-service";
 import { listInventoryTransfers } from "./transfer-service";
 import { listPriceLists, listPriceEntries } from "./price-lists-service";
@@ -1733,6 +1733,33 @@ export async function runReadTool(
     // Issue #883 package 2, batch N2a — calendar & comment threads. Subject
     // access is proven from the subject itself before listing, verbatim from
     // the route (never trusting an id in the payload).
+    // Issue #883 package 2, batch N2b — document lane. listDocuments derives
+    // visibility from the owner (the route's documentWhere), never a filter.
+    case "list_workspace_documents": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 300) : 100;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const documents = await listDocuments(owner, {
+        projectId: typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : undefined,
+        taskId: typeof args.taskId === "string" && args.taskId.trim() ? args.taskId.trim() : undefined,
+        contractId: typeof args.contractId === "string" && args.contractId.trim() ? args.contractId.trim() : undefined,
+        partyId: typeof args.partyId === "string" && args.partyId.trim() ? args.partyId.trim() : undefined,
+        status: typeof args.status === "string" && args.status.trim() ? (args.status.trim() as never) : undefined,
+        currentOnly: args.currentOnly !== false,
+        search: typeof args.search === "string" && args.search.trim() ? args.search.trim() : undefined,
+        limit,
+        offset,
+      });
+      return { ok: true, data: { count: documents.length, offset, documents } };
+    }
+    case "get_workspace_document": {
+      const documentId = typeof args.documentId === "string" ? args.documentId.trim() : "";
+      if (!documentId) return { ok: false, data: { error: "invalid_arguments" } };
+      const doc = await getDocument(businessId, documentId);
+      if (!doc) return { ok: false, data: { error: "document_not_found" } };
+      const versions = args.includeVersions === true ? await listDocumentVersions(businessId, documentId) : undefined;
+      return { ok: true, data: { document: doc, ...(versions ? { versions } : {}) } };
+    }
     case "list_workspace_calendar": {
       const from = typeof args.from === "string" ? args.from.trim() : "";
       const to = typeof args.to === "string" ? args.to.trim() : "";

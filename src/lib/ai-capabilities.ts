@@ -95,6 +95,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_workspace_templates: PERMISSIONS.workspaceView,
   // Batch N2a — routes: calendar/comments read on workspaceView, write on
   // workspaceManage.
+  // Batch N2b
+  list_workspace_documents: PERMISSIONS.workspaceView,
+  get_workspace_document: PERMISSIONS.workspaceView,
   list_workspace_calendar: PERMISSIONS.workspaceView,
   list_workspace_comments: PERMISSIONS.workspaceView,
   list_price_lists: PERMISSIONS.menuView,
@@ -224,6 +227,11 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "production.formula.deactivate": PERMISSIONS.inventoryAdjust,
   "production.formulaInput.set": PERMISSIONS.inventoryAdjust,
   "production.formulaInput.delete": PERMISSIONS.inventoryAdjust,
+  "workspace.document.create": PERMISSIONS.workspaceManage,
+  "workspace.document.update": PERMISSIONS.workspaceManage,
+  "workspace.document.delete": PERMISSIONS.workspaceManage,
+  "workspace.template.save": PERMISSIONS.workspaceManage,
+  "workspace.template.archive": PERMISSIONS.workspaceManage,
   "workspace.event.create": PERMISSIONS.workspaceManage,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
