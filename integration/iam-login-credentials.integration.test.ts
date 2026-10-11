@@ -13,7 +13,7 @@ import { query, withTenant, withoutTenantScope } from "../src/lib/db";
 import { provisionBusiness } from "../src/lib/business-provisioning";
 import { provisionMfaEnrolment } from "../src/lib/mfa-service";
 import { issueRecoveryCodes } from "../src/lib/mfa-recovery";
-import { verifyMfaCode } from "../src/lib/mfa-verify";
+import { verifyExistingConfirmedMfaFactor } from "../src/lib/mfa-verify";
 import {
   applyLoginCredentials,
   applyReplicatedPins,
@@ -103,15 +103,16 @@ describe("global login replication", () => {
     expect(await bcrypt.compare("cloud-password", identity.rows[0].password_hash)).toBe(true);
 
     const code = await new TOTP({ crypto: new NobleCryptoPlugin(), base32: new ScureBase32Plugin() }).generate({ secret });
-    await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: localId, method: "totp", code })).resolves.toBe("totp");
-    await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: localId, method: "totp", code: recovery[0], useRecoveryCode: true }))
-      .resolves.toBe("recovery_code");
+    await expect(verifyExistingConfirmedMfaFactor({ subjectRealm: "platform_user", subjectId: localId, method: "totp", code }))
+      .resolves.toMatchObject({ outcome: "totp" });
+    await expect(verifyExistingConfirmedMfaFactor({ subjectRealm: "platform_user", subjectId: localId, method: "totp", code: recovery[0], useRecoveryCode: true }))
+      .resolves.toMatchObject({ outcome: "recovery_code" });
 
     // A code spent on the site stays spent when the cloud re-sends it unspent.
     const changed = credentials.map((c) => (c.membershipId === cloud.userId ? { ...c, fullName: "حمید نوشادی" } : c));
     await withTenant(site.businessId, () => applyLoginCredentials(site.businessId, changed));
-    await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: localId, method: "totp", code: recovery[0], useRecoveryCode: true }))
-      .resolves.toBe("rejected");
+    await expect(verifyExistingConfirmedMfaFactor({ subjectRealm: "platform_user", subjectId: localId, method: "totp", code: recovery[0], useRecoveryCode: true }))
+      .resolves.toMatchObject({ outcome: "rejected" });
 
     // A password changed on the site alone is noticed and put back to the cloud's.
     await withoutTenantScope("identity", () =>
@@ -126,10 +127,10 @@ describe("global login replication", () => {
     expect(spent).toHaveLength(1);
     await useDatabase(cloudDb);
     await recordSpentRecoveryCodes(cloud.businessId, spent);
-    await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code: recovery[0], useRecoveryCode: true }))
-      .resolves.toBe("rejected");
-    await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code: recovery[1], useRecoveryCode: true }))
-      .resolves.toBe("recovery_code");
+    await expect(verifyExistingConfirmedMfaFactor({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code: recovery[0], useRecoveryCode: true }))
+      .resolves.toMatchObject({ outcome: "rejected" });
+    await expect(verifyExistingConfirmedMfaFactor({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code: recovery[1], useRecoveryCode: true }))
+      .resolves.toMatchObject({ outcome: "recovery_code" });
   }, 180_000);
 
   it("brings a cashier's cloud PIN to the desktop so they appear on its quick login", async () => {

@@ -195,3 +195,74 @@ describe("the deduplicated definitions stay deduplicated", () => {
     expect(PARTIES_SECTION).not.toMatch(/MANAGING_ROLES|LEDGER_ROLES/);
   });
 });
+
+describe("the personnel directory is gated on parties.view (issue #854 pass 4)", () => {
+  it("renders the team-scoped directory only behind canViewParties", () => {
+    // `/api/parties` enforces `parties.view`, which a team manager's grant
+    // need not include. The Team screen hides the personnel file for such a
+    // member instead of mounting a section that only ever answers 403 — and
+    // the permission itself is not widened to avoid the error.
+    expect(TEAM_MANAGER).toContain("canViewParties");
+    const gated =
+      /canViewParties\(role, permissions\)\s*\?\s*\([\s\S]*?پروندهٔ کارکنان[\s\S]*?<PartiesSection scope=\{partyScopeFor\("team"\)\}/.test(
+        TEAM_MANAGER,
+      );
+    expect(gated).toBe(true);
+    // The gate must not be bypassed by an unconditional second mount.
+    const mounts = TEAM_MANAGER.match(/<PartiesSection/g) ?? [];
+    expect(mounts.length).toBe(1);
+  });
+
+  it("keeps the view gate in the shared scope module, not re-derived inline", () => {
+    expect(TEAM_MANAGER).toContain('from "@/lib/parties-scopes"');
+    expect(TEAM_MANAGER).not.toMatch(/includes\(\s*(PERMISSIONS\.)?(partiesView|"parties\.view")\s*\)/);
+  });
+});
+
+describe("lifecycle-derived member actions (issue #854 pass 4, gap 4)", () => {
+  it("offers suspend/reactivate only to non-offboarded members and rehire only to offboarded ones", () => {
+    // Offboarding removed the identity linkage; a bare «فعال‌سازی» would
+    // restore a doorless membership. The buttons are therefore derived from
+    // the lifecycle state instead of offered side by side.
+    const suspendOrReactivate = /member\.status !== "offboarded"\)\s*\?\s*<SecondaryButton[\s\S]*?\{(member\.isActive \? "تعلیق" : "فعال‌سازی")\}/.test(
+      TEAM_MANAGER,
+    );
+    expect(suspendOrReactivate).toBe(true);
+
+    const rehire = /member\.status === "offboarded"\)\s*\?\s*<SecondaryButton[\s\S]*?بازگشت به کار/.test(
+      TEAM_MANAGER,
+    );
+    expect(rehire).toBe(true);
+
+    // Offboarding itself stays a distinct, non-offboarded action.
+    expect(TEAM_MANAGER).toContain('member.status !== "offboarded") ? <SecondaryButton');
+  });
+
+  it("rehire goes through its own ceremony endpoint with a mandatory reason, not the membership PATCH", () => {
+    expect(TEAM_MANAGER).toContain("/api/team/${member.id}/rehire");
+    // The dialog is the only path to that endpoint — no fire-and-forget fetch.
+    expect(TEAM_MANAGER).toMatch(/RehireDialog/);
+    // Client-side minimum before submission mirrors the route's requirement.
+    expect(TEAM_MANAGER).toContain("دلیل این تغییر را بنویسید (حداقل ۸ نویسه)");
+  });
+
+  it("the rehire route enforces the ceremony server-side", () => {
+    const REHIRE_API = here("../../api/team/[id]/rehire/route.ts");
+    // Both gates: the general team-write permission and the permissions-
+    // management one, because a rehire re-grants a stored role + grant.
+    expect(REHIRE_API).toContain("requirePermission(PERMISSIONS.teamManage)");
+    expect(REHIRE_API).toContain("PERMISSIONS.teamPermissionsManage");
+    // It delegates to the service ceremony — not an unlocked state flip.
+    expect(REHIRE_API).toContain("rehireMembership");
+    // The ceremony itself holds the membership row lock and takes a reason.
+    const TEAM_SERVICE = here("../../../lib/team-service.ts");
+    expect(TEAM_SERVICE).toContain("FOR UPDATE");
+    expect(TEAM_SERVICE).toContain("validateAccessChangeReason");
+    const AUTHORITY = here("../../../lib/membership-authority.ts");
+    expect(AUTHORITY).toContain("reason_required");
+  });
+
+  it("the offboard confirmation names rehire as the way back", () => {
+    expect(TEAM_MANAGER).toContain("بازگشت دوبارهٔ همین شخص با «بازگشت به کار»");
+  });
+});
