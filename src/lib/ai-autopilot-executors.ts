@@ -67,6 +67,9 @@ import { toggleNotePin, setConsent } from "./crm-service";
 import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
 import { upsertPromotion, setPromotionActive, issueGiftCard } from "./promotions-service";
 import { createSupplierReturn } from "./supplier-return-service";
+import { createWorkspaceProject, updateWorkspaceProject, createWorkspaceTask, updateWorkspaceTask, WorkspaceError } from "./workspace";
+import { workspaceAccessFlags } from "./workspace-shared";
+import { effectivePermissions, parseOverrides } from "./permissions";
 import type { Role } from "./auth-edge";
 import { getGrowthSettings } from "./growth-settings-service";
 import { createSegment, updateSegment, archiveSegment } from "./crm-segments-service";
@@ -393,7 +396,7 @@ const expense: AutopilotExecutor = async (ctx) => {
       amount,
       expenseDate: str(ctx.payload.expenseDate),
       vendor: str(ctx.payload.vendor),
-      partyId: str(ctx.payload.partyId),
+      partyId: str(ctx.payload.partyId) ?? undefined,
       vatAmount: parseExpenseVatAmount(ctx.payload.vatAmount ?? 0),
       memo: `${AUTOPILOT_NOTE_PREFIX}${memo}`,
       createdBy: ctx.authorizedByUserId,
@@ -1936,6 +1939,149 @@ const supplierReturnCreate: AutopilotExecutor = async (ctx) => {
   }
 };
 
+
+// ── Issue #883 package 2, batch H — workspace projects/tasks ────────────────
+// The services key every authorization decision on `owner.access` — the same
+// flags `workspaceOwner(PERMISSIONS.x)` builds from the session's effective
+// permissions; the executors rebuild exactly those flags for the authorizing
+// user, so a connection whose authorizer lacks workspace.manage cannot do
+// anything the screens would refuse them either.
+
+async function workspaceOwnerFor(ctx: AutopilotExecutorContext) {
+  const { rows } = await query<{
+    full_name: string | null;
+    role: Role;
+    permissions: unknown;
+    is_active: boolean;
+    custom_role_permissions: string[] | null;
+  }>(
+    `SELECT u.full_name, u.role, u.permissions, u.is_active, u.custom_role_id,
+            (SELECT CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END
+               FROM tenant_roles tr WHERE tr.id = u.custom_role_id) AS custom_role_permissions
+       FROM users u WHERE u.id = $1 AND u.business_id = $2`,
+    [ctx.authorizedByUserId, ctx.businessId],
+  );
+  const member = rows[0];
+  // No row, or an account that's off: the screens answer "not a member of
+  // this business" either way, and so do we.
+  if (!member || !member.is_active) return null;
+  const access = workspaceAccessFlags(
+    effectivePermissions(member.role, parseOverrides(member.permissions), member.custom_role_permissions),
+  );
+  return {
+    businessId: ctx.businessId,
+    actorUserId: ctx.authorizedByUserId as string,
+    actorName: member.full_name ?? "",
+    access,
+  };
+}
+const projectCreate: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const created = await createWorkspaceProject(owner, {
+      name: str(ctx.payload.name) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      status: str(ctx.payload.status) ?? undefined,
+      priority: str(ctx.payload.priority) ?? undefined,
+      startDate: str(ctx.payload.startDate),
+      endDate: str(ctx.payload.endDate),
+      tags: Array.isArray(ctx.payload.tags) ? ctx.payload.tags : undefined,
+      ownerUserId: str(ctx.payload.ownerUserId) ?? undefined,
+      partyId: str(ctx.payload.partyId) ?? undefined,
+      budgetRial: ctx.payload.budgetRial,
+      templateKey: str(ctx.payload.templateKey) ?? undefined,
+    });
+    return { ok: true, result: { id: created.id, name: created.name } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+
+const projectUpdate: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId);
+  if (!projectId) return fail("invalid_payload");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const updated = await updateWorkspaceProject(owner, projectId, {
+      name: str(ctx.payload.name) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      status: str(ctx.payload.status) ?? undefined,
+      priority: str(ctx.payload.priority) ?? undefined,
+      startDate: str(ctx.payload.startDate),
+      endDate: str(ctx.payload.endDate),
+      tags: Array.isArray(ctx.payload.tags) ? ctx.payload.tags : undefined,
+    });
+    if (!updated) return fail("project_not_found");
+    return { ok: true, result: { id: updated.id, name: updated.name } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+
+const taskCreate: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  const projectId = str(ctx.payload.projectId);
+  if (!projectId || !str(ctx.payload.title)) return fail("invalid_payload");
+  try {
+    const created = await createWorkspaceTask(owner, projectId, {
+      title: str(ctx.payload.title) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      assigneeUserId: str(ctx.payload.assigneeUserId) ?? undefined,
+      priority: str(ctx.payload.priority) ?? undefined,
+      dueDate: str(ctx.payload.dueDate) ?? undefined,
+      phaseId: str(ctx.payload.phaseId) ?? undefined,
+    });
+    return { ok: true, result: { id: created.id, projectId, title: created.title } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+
+const taskUpdate: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  const taskId = str(ctx.payload.taskId);
+  if (!taskId) return fail("invalid_payload");
+  try {
+    const updated = await updateWorkspaceTask(owner, taskId, {
+      title: str(ctx.payload.title) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      assigneeUserId:
+        ctx.payload.assigneeUserId === undefined ? undefined : str(ctx.payload.assigneeUserId),
+      dueDate: ctx.payload.dueDate === undefined ? undefined : str(ctx.payload.dueDate),
+      phaseId: ctx.payload.phaseId === undefined ? undefined : str(ctx.payload.phaseId),
+      priority: str(ctx.payload.priority) ?? undefined,
+    });
+    if (!updated) return fail("task_not_found");
+    return { ok: true, result: { id: updated.id } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+
+const taskStatus: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  const taskId = str(ctx.payload.taskId);
+  const status = str(ctx.payload.status);
+  if (!taskId || !status) return fail("invalid_payload");
+  try {
+    const updated = await updateWorkspaceTask(owner, taskId, { status });
+    if (!updated) return fail("task_not_found");
+    return { ok: true, result: { id: updated.id, status } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -1991,6 +2137,11 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   promotionToggle,
   giftCardIssue,
   supplierReturnCreate,
+  projectCreate,
+  projectUpdate,
+  taskCreate,
+  taskUpdate,
+  taskStatus,
   branchCreate,
   branchUpdate,
   branchLifecycle,

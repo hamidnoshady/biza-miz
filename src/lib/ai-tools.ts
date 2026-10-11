@@ -59,6 +59,7 @@ import { listCustomerNotes, listActivities } from "./crm-service";
 import { listMembers } from "./team-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
+import { listWorkspaceProjects } from "./workspace";
 import { getPool } from "./db";
 import { listParties } from "./parties-service";
 import { listAutomations } from "./crm-automation-service";
@@ -1687,6 +1688,19 @@ export async function runReadTool(
         pageSize,
       });
       return { ok: true, data: { total: result.total, page, pageSize, count: result.parties.length, suppliers: result.parties } };
+    }
+    // Issue #883 package 2, batch H — workspace projects list. The subject is
+    // the actor only insofar as their workspace flags admit: a reader without
+    // workspace.manage sees only their own projects, the screens filter the
+    // same way (workspaceOwner flags).
+    case "list_workspace_projects": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const projects = await listWorkspaceProjects(
+        { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) },
+        { includeArchived: args.includeArchived === true, limit, offset },
+      );
+      return { ok: true, data: { count: projects.length, projects } };
     }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);

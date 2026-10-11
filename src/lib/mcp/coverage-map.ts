@@ -477,7 +477,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Workspace",
     entity: "Projects, members, phases",
     routes: ["workspace/projects"],
-    ops: { listDetail: ["get_workspace_project_status"] },
+    ops: {
+      // Batch H (#883): project CRUD through the workspace service with the
+      // owner's access flags rebuilt for the authorizing user.
+      listDetail: ["get_workspace_project_status", "list_workspace_projects"],
+      create: ["project.create"],
+      update: ["project.update"],
+    },
     test: "integration/workspace.integration.test.ts",
   },
   {
@@ -485,7 +491,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Workspace",
     entity: "Tasks, checklist, dependencies",
     routes: ["workspace/tasks"],
-    ops: { listDetail: ["list_workspace_tasks"] },
+    ops: {
+      // Batch H (#883): task create/update/status — the kanban screen's verbs,
+      // with open/done transitions staying service-signed.
+      listDetail: ["list_workspace_tasks"],
+      create: ["task.create"],
+      update: ["task.update"],
+      lifecycle: ["task.status"],
+    },
     test: "integration/workspace.integration.test.ts",
   },
   {

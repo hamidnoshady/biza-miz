@@ -81,6 +81,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_stock_counts: PERMISSIONS.inventoryView,
   get_stock_count: PERMISSIONS.inventoryView,
   list_suppliers: PERMISSIONS.partiesView,
+  // Batch H — workspace.view on the project list (the screen's GET gate).
+  list_workspace_projects: PERMISSIONS.workspaceView,
   list_formulas: PERMISSIONS.inventoryView,
   list_production_runs: PERMISSIONS.inventoryView,
   list_item_barcodes: PERMISSIONS.inventoryView,
@@ -172,6 +174,12 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   // Batch D — notes activities follow the notes screen (parties manage),
   // consent the consent drawer (crm.consent_manage), segments/automechanics
   // the configure gate the routes themselves use.
+  // Batch H — workspace.manage, the gate the project/task screens share.
+  "project.create": PERMISSIONS.workspaceManage,
+  "project.update": PERMISSIONS.workspaceManage,
+  "task.create": PERMISSIONS.workspaceManage,
+  "task.update": PERMISSIONS.workspaceManage,
+  "task.status": PERMISSIONS.workspaceManage,
   "supplier.return.create": PERMISSIONS.purchasesManage,
   "promotion.upsert": PERMISSIONS.campaignsManage,
   "promotion.toggle": PERMISSIONS.campaignsManage,

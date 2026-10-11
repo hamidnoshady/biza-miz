@@ -269,6 +269,14 @@ export type ActionType =
   // Batch G — supplier returns: stock out + settlement posting in one tx
   // (purchases.manage; cash/bank/AP settlement touches money ⇒ always_approve).
   | "supplier.return.create"
+  // Batch H — workspace projects/tasks. The services key every write on the
+  // owner's workspaceAccessFlags — the same flags requirePermission resolves
+  // for the screen; the executors rebuild them for the authorizing user.
+  | "project.create"
+  | "project.update"
+  | "task.create"
+  | "task.update"
+  | "task.status"
   // Batch E — branches: structural configuration of the business itself.
   // Membership creation/role changes stay screen-owned for now (access /
   // identity changes carry step-up policy beyond the approval queue).
@@ -340,6 +348,11 @@ export type AutopilotExecutorKey =
   | "promotionToggle"
   | "giftCardIssue"
   | "supplierReturnCreate"
+  | "projectCreate"
+  | "projectUpdate"
+  | "taskCreate"
+  | "taskUpdate"
+  | "taskStatus"
   | "branchCreate"
   | "branchUpdate"
   | "branchLifecycle"
@@ -976,6 +989,48 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint:
       '{ inventoryItemId: string /* از find_items در مد inventory */, code?: string /* خالی یعنی سیستم خودش بارکد قابل‌اسکن می‌سازد */, symbology?: "EAN13"|"UPC"|"internal", note?: string }',
     executor: "barcodeAssign",
+  },
+  "project.create": {
+    type: "project.create",
+    endpoint: "/api/workspace/projects",
+    method: "POST",
+    label: "ایجاد پروژهٔ کار — با قالب اختیاری شکل فازها می‌آید",
+    payloadHint:
+      '{ name: string, description?: string, status?: "planning"|"active"|"paused"|"completed"|"cancelled", priority?: "low"|"normal"|"high"|"urgent", startDate?: string, endDate?: string, tags?: string[], ownerUserId?: string /* از list_team_members */, partyId?: string, budgetRial?: number, templateKey?: string }',
+    executor: "projectCreate",
+  },
+  "project.update": {
+    type: "project.update",
+    endpoint: "/api/workspace/projects/[id]",
+    method: "PATCH",
+    label: "ویرایش پروژه (نام/وضعیت/اولویت/تاریخ/تگ)",
+    payloadHint: "{ projectId: string /* از list_workspace_projects */, name?: string, status?: ..., priority?: ..., startDate?: string, endDate?: string, tags?: string[] }",
+    executor: "projectUpdate",
+  },
+  "task.create": {
+    type: "task.create",
+    endpoint: "/api/workspace/tasks",
+    method: "POST",
+    label: "ساخت تَسک در یک پروژه",
+    payloadHint:
+      '{ projectId: string, title: string, description?: string, assigneeUserId?: string, priority?: "low"|"normal"|"high"|"urgent", dueDate?: string, phaseId?: string }',
+    executor: "taskCreate",
+  },
+  "task.update": {
+    type: "task.update",
+    endpoint: "/api/workspace/tasks/[id]",
+    method: "PATCH",
+    label: "ویرایش تَسک (عنوان/توضیح/مسئول/سررسید/فاز)",
+    payloadHint: "{ taskId: string, title?: string, description?: string, assigneeUserId?: string|null, dueDate?: string|null, phaseId?: string|null, priority?: ... }",
+    executor: "taskUpdate",
+  },
+  "task.status": {
+    type: "task.status",
+    endpoint: "/api/workspace/tasks/[id]",
+    method: "PATCH",
+    label: "تغییر وضعیت تَسک — بازکردن، پیش‌بردن یا بستن",
+    payloadHint: '{ taskId: string, status: "open"|"in_progress"|"blocked"|"done" }',
+    executor: "taskStatus",
   },
   "supplier.return.create": {
     type: "supplier.return.create",
@@ -2750,6 +2805,23 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               includeInactive: { type: "boolean" },
               page: { type: "number", description: "۱-بر، پیش‌فرض ۱" },
               pageSize: { type: "number", description: "۱ تا ۵۰، پیش‌فرض ۲۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_projects",
+          description:
+            "پروژه‌های فضای کاری کسب‌وکار — وضعیت، اولویت، مالک و تگ‌ها؛ به همان ترتیب ادم‌های فضای کاری می‌بینند.",
+          parameters: {
+            type: "object",
+            properties: {
+              includeArchived: { type: "boolean", description: "true یعنی بایگانی‌شده‌ها هم بیایند" },
+              limit: { type: "number", description: "۱ تا ۲۰۰، پیش‌فرض ۱۰۰" },
+              offset: { type: "number" },
             },
             additionalProperties: false,
           },

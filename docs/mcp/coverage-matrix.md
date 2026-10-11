@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (59)
+### Tenant (58)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -48,7 +48,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **cms.orders** (Website / CMS · Website orders) — MCP gap
 - **cms.woocommerce** (Website / CMS · WooCommerce manager (posts, queue, syncs)) — MCP gap
 - **workspace.projects** (Workspace · Projects, members, phases) — partial
-- **workspace.tasks** (Workspace · Tasks, checklist, dependencies) — partial
 - **workspace.calendar-comments** (Workspace · Calendar, comments, documents, templates) — MCP gap
 - **workspace.contracts** (Workspace · Contracts & lifecycle) — partial
 - **workspace.approvals** (Workspace · Approvals) — partial
@@ -99,7 +98,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 13 · partial: 33 · MCP gap: 26 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 14 · partial: 32 · MCP gap: 26 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -148,8 +147,8 @@ Counts — covered: 13 · partial: 33 · MCP gap: 26 · backend gap: 0 · n/a (i
 | Website / CMS | Connection, setup/build, design, domain/DNS, CDN | (route only) | (route only) | (route only) | (route only) | — | cms.configure, cms.view | — | — | integration/website.integration.test.ts | MCP gap |
 | Website / CMS | Website orders | — | — | (route only) | — | — | cms.content_manage | — | — | integration/website.integration.test.ts | MCP gap |
 | Website / CMS | WooCommerce manager (posts, queue, syncs)<br>_wp-manager content/queue are covered by list_website_*; sync verbs are WP-dashboard operations, not business records_ | (route only) | (route only) | — | (route only) | — | woocommerce.manage, woocommerce.sync, woocommerce.view | — | — | — | MCP gap |
-| Workspace | Projects, members, phases | get_workspace_project_status | (route only) | (route only) | (route only) | — | workspace.manage, workspace.view | — | get_workspace_project_status | integration/workspace.integration.test.ts | partial |
-| Workspace | Tasks, checklist, dependencies | list_workspace_tasks | (route only) | (route only) | (route only) | — | workspace.manage, workspace.view | — | list_workspace_tasks | integration/workspace.integration.test.ts | partial |
+| Workspace | Projects, members, phases | get_workspace_project_status, list_workspace_projects | project.create | project.update | (route only) | — | workspace.manage, workspace.view | connection mode | get_workspace_project_status, list_workspace_projects, project.create, project.update | integration/workspace.integration.test.ts | partial |
+| Workspace | Tasks, checklist, dependencies | list_workspace_tasks | task.create | task.update | task.status | — | workspace.manage, workspace.view | connection mode | list_workspace_tasks, task.create, task.update, task.status | integration/workspace.integration.test.ts | covered |
 | Workspace | Calendar, comments, documents, templates | (route only) | (route only) | (route only) | (route only) | — | workspace.manage, workspace.view | — | — | integration/workspace.integration.test.ts | MCP gap |
 | Workspace | Contracts & lifecycle | list_expiring_contracts | (route only) | (route only) | (route only) | — | workspace.contracts_manage, workspace.view | — | list_expiring_contracts | integration/workspace.integration.test.ts | partial |
 | Workspace | Approvals | list_workspace_approvals | (route only) | — | (route only) | — | workspace.approve, workspace.manage, workspace.view | — | list_workspace_approvals | integration/workspace.integration.test.ts | partial |

@@ -125,6 +125,8 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "list_suppliers", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  // Batch H — workspace projects are business-scoped records.
+  { name: "list_workspace_projects", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   { name: "run_accounting_review", kind: "read", app: "accounting", branchPolicy: "business_wide" },
   // ── Accounting module lists/details (issue #883 package 2, batch A) ───────
@@ -252,6 +254,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch D — CRM: notes bookkeeping is low; consent is a legal record and
   // automation toggles re-shape behaviour for every customer at once, so
   // both ask for explicit approval.
+  { actionType: "project.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "project.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "supplier.return.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "promotion.upsert", kind: "write", app: "growth", risk: "low", approval: "mode" },
   { actionType: "promotion.toggle", kind: "write", app: "growth", risk: "low", approval: "mode" },
