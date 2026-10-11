@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (55)
+### Tenant (54)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -34,7 +34,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
 - **crm.cases-activities** (CRM · Cases & activities) — MCP gap
 - **crm.config** (CRM · CRM automations, custom fields, audit) — partial
-- **crm.overview** (CRM · CRM overview, members, consent state, data quality) — MCP gap
 - **crm.loyalty** (CRM · Loyalty programs, store credit, redemptions) — partial
 - **growth.settings-campaigns** (Growth · Growth overview, settings, campaign audience, accounting) — partial
 - **growth.messaging** (Growth · Messaging rules & templates) — partial
@@ -95,7 +94,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 17 · partial: 32 · MCP gap: 23 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 18 · partial: 32 · MCP gap: 22 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -132,7 +131,7 @@ Counts — covered: 17 · partial: 32 · MCP gap: 23 · backend gap: 0 · n/a (i
 | CRM | Pipelines & stages<br>_stage set edits (savePipelineStages) stay route-only: structural rework belongs to the settings screen, not a chat turn_ | list_crm_pipelines | crm.pipeline.create | crm.pipeline.update | — | — | crm.configure | connection mode | list_crm_pipelines, crm.pipeline.create, crm.pipeline.update | integration/crm.integration.test.ts | covered |
 | CRM | Segments, saved views, queues, RFM | get_repurchase_candidates, list_customer_segments, preview_customer_segment | crm.segment.create | crm.segment.update | crm.segment.archive | — | crm.configure, crm.manage, crm.view | connection mode | get_repurchase_candidates, list_customer_segments, preview_customer_segment, crm.segment.create, crm.segment.update, crm.segment.archive | integration/crm.integration.test.ts | covered |
 | CRM | CRM automations, custom fields, audit | list_crm_automations | (route only) | crm.automation.toggle | (route only) | — | crm.configure | step-up (always approve) | list_crm_automations, crm.automation.toggle | integration/crm.integration.test.ts | partial |
-| CRM | CRM overview, members, consent state, data quality | (route only) | — | — | — | — | crm.merge, crm.view | — | — | integration/crm.integration.test.ts | MCP gap |
+| CRM | CRM overview, members, consent state, data quality<br>_consent state changes ride the customer row's crm.consent.set (logged legal event, always_approve); quality/merge POST stays route-only (mass mutation identity merge)_ | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members | — | crm.consent.set, crm.customer.tag | — | — | crm.merge, crm.view | connection mode; step-up (always approve) | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members, crm.consent.set, crm.customer.tag | integration/crm.integration.test.ts | covered |
 | CRM | Loyalty programs, store credit, redemptions | get_repurchase_candidates | (route only) | — | (route only) | — | loyalty.manage, loyalty.redeem, loyalty.view, store_credit.issue, store_credit.payout | — | get_repurchase_candidates | integration/loyalty.integration.test.ts | partial |
 | Growth | Growth overview, settings, campaign audience, accounting | list_message_campaigns, list_message_templates | (route only) | (route only) | — | — | campaigns.manage, growth.view, marketing.configure | — | list_message_campaigns, list_message_templates | integration/crm.integration.test.ts | partial |
 | Growth | Messaging rules & templates | list_message_templates | (route only) | — | crm.customer.note | — | campaigns.manage, campaigns.view | connection mode | list_message_templates, crm.customer.note | integration/crm.integration.test.ts | partial |

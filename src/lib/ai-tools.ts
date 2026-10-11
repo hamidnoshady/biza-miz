@@ -66,6 +66,10 @@ import { listSavedReports } from "./reports-service";
 import { listDeals } from "./crm-service";
 import { listLeads } from "./crm-lead-service";
 import { listPipelines } from "./crm-pipeline-service";
+import { crmOverview } from "./crm-overview";
+import { crmDataQuality } from "./crm-data-quality";
+import { listAssignableMembers } from "./crm-ownership";
+import { crmQueueView, crmQueueViewFilters } from "./crm-queue-views";
 import { getPool } from "./db";
 import { listParties } from "./parties-service";
 import { listAutomations } from "./crm-automation-service";
@@ -1764,6 +1768,26 @@ export async function runReadTool(
         offset,
       });
       return { ok: true, data: { total, count: leads.length, offset, leads } };
+    }
+    // Issue #883 package 2, K2 addendum — the four CRM screens' read surfaces.
+    case "get_crm_overview": {
+      const overview = await crmOverview(businessId);
+      return { ok: true, data: overview };
+    }
+    case "get_crm_data_quality": {
+      const groups = await crmDataQuality(businessId);
+      return { ok: true, data: { count: groups.length, groups } };
+    }
+    case "list_crm_members": {
+      const members = await listAssignableMembers(businessId);
+      return { ok: true, data: { count: members.length, members } };
+    }
+    case "get_crm_queue": {
+      const queueKey = typeof args.queueKey === "string" ? args.queueKey.trim() : "";
+      if (!queueKey) return { ok: false, data: { error: "invalid_arguments" } };
+      const view = crmQueueView(queueKey as never);
+      if (!view) return { ok: false, data: { error: "not_found" } };
+      return { ok: true, data: { view, filters: crmQueueViewFilters(queueKey as never) } };
     }
     case "list_crm_pipelines": {
       const includeArchived = args.includeArchived === true;

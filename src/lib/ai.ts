@@ -3101,6 +3101,49 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           },
         },
       },
+      {
+        type: "function",
+        function: {
+          name: "get_crm_overview",
+          description:
+            "داده‌کاوی CRM — شمارش مشتری‌ها، رضایت، قیف، پرونده‌ها و روند ۳۰روزهٔ اخیر در برابر دورهٔ قبل؛ همان داشبورد صفحهٔ CRM.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_crm_data_quality",
+          description:
+            "گروه‌های کیفیت دادهٔ CRM — موارد ناقص (تلفن/ایمیل غایب، تکراری‌های مشکوک) با تعداد و نمونه؛ همان صفحهٔ سلامت داده.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_members",
+          description:
+            "اعضای قابل‌انتساب CRM برای مالکیت سرنخ/معامله/فعالت/پرونده — شناسهٔ عضو برای ownerUserId و assigneeUserId.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_crm_queue",
+          description:
+            "تعریف و فیلترهای یک صفِ کاری CRM — کلیدهای صف را از کمینهٔ صفحهٔ CRM می‌شود یافت؛ خروجی کاربردی برای ساخت فیلتر list_crm_deals/list_crm_leads.",
+          parameters: {
+            type: "object",
+            properties: {
+              queueKey: { type: "string", description: "کلید صف — مثل unassigned_leads یا unowned_work" },
+            },
+            required: ["queueKey"],
+            additionalProperties: false,
+          },
+        },
+      },
 
   ];
 

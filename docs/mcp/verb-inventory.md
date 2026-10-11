@@ -4,7 +4,7 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **92 read verbs** (**23** business-wide aggregates —
+Current surface: **96 read verbs** (**25** business-wide aggregates —
 visible only to connections consented for every branch) and **81 write verbs**
 (**25** high-risk, forced through the approval queue even on `apply`-mode connections).
 
@@ -59,6 +59,10 @@ visible only to connections consented for every branch) and **81 write verbs**
 | `list_crm_deals` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_leads` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_crm_pipelines` | crm | agnostic | `crm.configure` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_crm_overview` | crm | business_wide | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_crm_data_quality` | crm | business_wide | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_crm_members` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_crm_queue` | crm | agnostic | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_saved_reports` | pos | agnostic | `reports.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_vat_liability` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `run_accounting_review` | accounting | business_wide | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |

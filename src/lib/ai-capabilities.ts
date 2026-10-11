@@ -88,6 +88,13 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_crm_deals: PERMISSIONS.crmView,
   list_crm_leads: PERMISSIONS.crmView,
   list_crm_pipelines: PERMISSIONS.crmConfigure,
+  // K2 addendum — every one of these routes checks crmView itself.
+  get_crm_overview: PERMISSIONS.crmView,
+  // GET /api/crm/quality checks crmView (merge-level power is only for
+  // POST /quality/merge, which is not exposed).
+  get_crm_data_quality: PERMISSIONS.crmView,
+  list_crm_members: PERMISSIONS.crmView,
+  get_crm_queue: PERMISSIONS.crmView,
   // Batch J — reports.view, the gate POST /api/reports/saved itself enforces.
   list_saved_reports: PERMISSIONS.reportsView,
   // Batch I — the KB centre is member-wide (requireMember): the ai.use key

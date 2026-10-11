@@ -137,6 +137,12 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_crm_deals", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_leads", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_crm_pipelines", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  // K2 addendum — CRM dashboard/quality/roster surfaces are business-wide by
+  // nature (no location column anywhere in them), so business_wide policy.
+  { name: "get_crm_overview", kind: "read", app: "crm", branchPolicy: "business_wide" },
+  { name: "get_crm_data_quality", kind: "read", app: "crm", branchPolicy: "business_wide" },
+  { name: "list_crm_members", kind: "read", app: "crm", branchPolicy: "agnostic" },
+  { name: "get_crm_queue", kind: "read", app: "crm", branchPolicy: "agnostic" },
   // Batch J — saved reports are business-wide configuration rows.
   { name: "list_saved_reports", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_vat_liability", kind: "read", app: "accounting", branchPolicy: "business_wide" },

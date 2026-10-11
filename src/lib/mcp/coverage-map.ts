@@ -388,6 +388,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "CRM",
     entity: "CRM overview, members, consent state, data quality",
     routes: ["crm/overview", "crm/members", "crm/consent", "crm/quality"],
+    ops: {
+      listDetail: ["get_crm_overview", "get_crm_data_quality", "list_crm_members", "get_crm_queue"],
+      update: ["crm.customer.tag", "crm.consent.set"],
+    },
+    note: "consent state changes ride the customer row's crm.consent.set (logged legal event, always_approve); quality/merge POST stays route-only (mass mutation identity merge)",
     test: "integration/crm.integration.test.ts",
   },
   {
