@@ -45,6 +45,7 @@ export function errorMessage(code: string | undefined): string {
     // not a real calendar date) — the A/R and A/P routes reject rather than
     // guessing what was meant.
     invalid_date: "تاریخ واردشده معتبر نیست.",
+    invalid_memo: "شرح واردشده معتبر نیست.",
     // Phase 16 — AP subledger
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",

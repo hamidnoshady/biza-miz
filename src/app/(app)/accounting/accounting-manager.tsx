@@ -171,6 +171,23 @@ export function AccountingManager({
    * API is going to refuse.
    */
   const canProposeLedger = permissions.includes(PERMISSIONS.ledgerPropose);
+  /**
+   * Whether this member may record receipts / payments in «دریافت و پرداخت».
+   * The workspace used to draw ثبت for everyone who could view the ledger, so
+   * a viewer got a 403 from a control that looked live. Plain booleans like
+   * `canApproveLedger`/`canProposeLedger` — `permissions` is required, so
+   * there is no unread-member case to represent (the section still accepts
+   * `undefined` and treats it as allowed, keeping the API as the gate for any
+   * future optional caller).
+   *
+   * The same pair feeds the subledger screens' settle actions: those screens
+   * are readable on `ledger.view`, but settling a balance is exactly these
+   * permissions, the ones the receipts and payments endpoints enforce —
+   * handing each side its own boolean is what keeps a live «دریافت وجه»
+   * button off an auditor's screen.
+   */
+  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
 
   /**
    * Whether this member may *write* in the expense register (issue #832 §3).
@@ -260,19 +277,6 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
-  /*
-   * The two subledger screens are readable on `ledger.view` — a read-only
-   * viewer or an auditor reaches /accounting/receivables legitimately — but
-   * settling a balance is `finance.receivables_manage` / `finance.payables_manage`,
-   * the permissions the receipts and payments endpoints enforce. Handing the
-   * sections their own capability (rather than letting them guess) is what
-   * keeps a live «دریافت وجه» button off an auditor's screen: the shared
-   * subledger component takes one boolean per side, exactly as
-   * `ChartOfAccountsSection` takes `canEdit`.
-   */
-  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
-  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
-
   /*
    * Whether this member may run a reconciliation at all.
    *
@@ -408,6 +412,7 @@ export function AccountingManager({
             canManageReceivables={canManageReceivables}
             canManagePayables={canManagePayables}
             canReversePayments={canApproveLedger}
+            canReverseReceipts={canApproveLedger}
           /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}

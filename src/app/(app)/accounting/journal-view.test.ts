@@ -25,6 +25,7 @@ import {
   journalFiltersFromParams,
   journalReversalBadge,
   journalRowId,
+  amountToRialText,
   rialTextToAmountInput,
   type JournalFilterState,
 } from "./journal-view";
@@ -185,6 +186,23 @@ describe("rialTextToAmountInput", () => {
     expect(rialTextToAmountInput("", "toman")).toBe("");
     expect(rialTextToAmountInput("abc", "toman")).toBe("");
     expect(rialTextToAmountInput("-5", "rial")).toBe("");
+  });
+});
+
+describe("amountToRialText", () => {
+  const parseText = (input: string) => {
+    if (!/^\d+$/.test(input)) throw new Error("bad");
+    return input;
+  };
+  it("parses a typed display-unit amount to exact Rial text", () => {
+    expect(amountToRialText("180000", parseText)).toBe("180000");
+    expect(amountToRialText("  180000  ", parseText)).toBe("180000");
+  });
+
+  it("clears to empty rather than erroring on empty or unparseable input", () => {
+    expect(amountToRialText("", parseText)).toBe("");
+    expect(amountToRialText("   ", parseText)).toBe("");
+    expect(amountToRialText("abc", parseText)).toBe("");
   });
 });
 
