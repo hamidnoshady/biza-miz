@@ -63,7 +63,7 @@ import { listWorkspaceProjects } from "./workspace";
 import { searchKbArticles } from "./knowledge-service";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
-import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates } from "./workspace";
+import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject } from "./workspace";
 import { listDeals, listCases } from "./crm-service";
 import { listInventoryTransfers } from "./transfer-service";
 import { listPriceLists, listPriceEntries } from "./price-lists-service";
@@ -1729,6 +1729,27 @@ export async function runReadTool(
         projectId: typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : undefined,
       });
       return { ok: true, data: { count: report.length, report } };
+    }
+    // Issue #883 package 2, batch N2a — calendar & comment threads. Subject
+    // access is proven from the subject itself before listing, verbatim from
+    // the route (never trusting an id in the payload).
+    case "list_workspace_calendar": {
+      const from = typeof args.from === "string" ? args.from.trim() : "";
+      const to = typeof args.to === "string" ? args.to.trim() : "";
+      if (!from || !to) return { ok: false, data: { error: "invalid_arguments" } };
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const projectId = typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : undefined;
+      const entries = await listCalendar(owner, { from, to, projectId });
+      return { ok: true, data: { count: entries.length, entries } };
+    }
+    case "list_workspace_comments": {
+      const subjectType = typeof args.subjectType === "string" ? args.subjectType.trim() : "";
+      const subjectId = typeof args.subjectId === "string" ? args.subjectId.trim() : "";
+      if (!subjectType || !subjectId) return { ok: false, data: { error: "invalid_arguments" } };
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      await resolveWorkspaceSubject(owner, subjectType as never, subjectId, "view");
+      const comments = await listComments(businessId, subjectType as never, subjectId);
+      return { ok: true, data: { count: comments.length, comments } };
     }
     case "list_workspace_templates": {
       // Template keys come from the industry catalogue — the read the

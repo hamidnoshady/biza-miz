@@ -293,6 +293,13 @@ export type ActionType =
   | "production.formula.deactivate"
   | "production.formulaInput.set"
   | "production.formulaInput.delete"
+  // Batch N2a — workspace calendar + comments. The services throw
+  // WorkspaceError with the same codes the guard maps to 4xx, and calendar/
+  // comment subjects resolve access from the subject itself, never the body.
+  | "workspace.event.create"
+  | "workspace.event.update"
+  | "workspace.event.delete"
+  | "workspace.comment.add"
   // Batch M — price lists & entries. Service contract copied 1:1 from the
   // routes (menuView reads, menuEdit writes); quick-update is mass-price
   // mutation so it lands as always_approve in the registry.
@@ -397,6 +404,10 @@ export type AutopilotExecutorKey =
   | "productionFormulaDeactivate"
   | "productionFormulaInputSet"
   | "productionFormulaInputDelete"
+  | "workspaceEventCreate"
+  | "workspaceEventUpdate"
+  | "workspaceEventDelete"
+  | "workspaceCommentAdd"
   | "priceListCreate"
   | "priceListRename"
   | "priceListDelete"
@@ -1146,6 +1157,41 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف یک مادهٔ اولیه از فرمول",
     payloadHint: "{ formulaId: string, inventoryItemId: string }",
     executor: "productionFormulaInputDelete",
+  },
+  "workspace.event.create": {
+    type: "workspace.event.create",
+    endpoint: "/api/workspace/calendar",
+    method: "POST",
+    label: "ثبت رویداد روی تقویم فضای کاری — مثل فرم صفحهٔ تقویم",
+    payloadHint:
+      '{ title: string /* لازم */, kind?: "meeting"|"milestone"|"reminder"|"site_visit"|"other", eventDate: string /* ISO */, startTime?: string|null, endTime?: string|null, location?: string, description?: string, projectId?: string|null, taskId?: string|null }',
+    executor: "workspaceEventCreate",
+  },
+  "workspace.event.update": {
+    type: "workspace.event.update",
+    endpoint: "/api/workspace/calendar/[id]",
+    method: "PATCH",
+    label: "ویرایش رویداد تقویم",
+    payloadHint:
+      '{ eventId: string /* از list_workspace_calendar */, title?, kind?, eventDate?, startTime?: string|null, endTime?: string|null, location?, description?, projectId?: string|null }',
+    executor: "workspaceEventUpdate",
+  },
+  "workspace.event.delete": {
+    type: "workspace.event.delete",
+    endpoint: "/api/workspace/calendar/[id]",
+    method: "DELETE",
+    label: "حذف رویداد تقویم",
+    payloadHint: "{ eventId: string }",
+    executor: "workspaceEventDelete",
+  },
+  "workspace.comment.add": {
+    type: "workspace.comment.add",
+    endpoint: "/api/workspace/comments",
+    method: "POST",
+    label: "افزودن نظر به سوژهٔ فضای کاری — پروژه، وظیفه، سند، قرارداد، نسخهٔ برآورد یا نسخهٔ تعهدنامه",
+    payloadHint:
+      '{ subjectType: "project"|"task"|"document"|"contract"|"estimate_version"|"submittal_revision", subjectId: string /* از فهرست همان سوژه */, body: string /* لازم */ }',
+    executor: "workspaceCommentAdd",
   },
   "priceList.create": {
     type: "priceList.create",
@@ -3433,6 +3479,41 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           description:
             "قالب‌های پروژهٔ فضای کاری — کلید برای workspace.project.create با templateKey؛ فهرستِ همان انتخابگر قالبِ صفحه.",
           parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_calendar",
+          description:
+            "رویدادهای تقویم فضای کاری میان دو تاریخ — همراه با موعدهای وظایف و قراردادها در همان ردیف؛ projectId برای محدودکردن.",
+          parameters: {
+            type: "object",
+            properties: {
+              from: { type: "string", description: "ISO date — لازم" },
+              to: { type: "string", description: "ISO date — لازم" },
+              projectId: { type: "string" },
+            },
+            required: ["from", "to"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_comments",
+          description:
+            "نخ نظرهای یک سوژهٔ فضای کاری — پروژه/وظیفه/سند/قرارداد/نسخهٔ برآورد/نسخهٔ تعهدنامه؛ دسترسی از خود سوژه می‌آید نه از ورودی.",
+          parameters: {
+            type: "object",
+            properties: {
+              subjectType: { type: "string", description: "project|task|document|contract|estimate_version|submittal_revision" },
+              subjectId: { type: "string" },
+            },
+            required: ["subjectType", "subjectId"],
+            additionalProperties: false,
+          },
         },
       },
 

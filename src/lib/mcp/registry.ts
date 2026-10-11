@@ -133,6 +133,8 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "get_workspace_insights", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_workspace_project_report", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_workspace_templates", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_workspace_calendar", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_workspace_comments", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   // Batch I — knowledge centre (platform catalogue, member-wide) and the
   // media library (business-scoped files).
   { name: "search_kb_articles", kind: "read", app: "workspace", branchPolicy: "agnostic" },
@@ -304,6 +306,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch L — stock-moving between branches / immediate posting: every verb
   // that prices layers sits as a step-up write, exactly like waste count-line
   // commits and inventory.production.run.
+  { actionType: "workspace.event.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "workspace.event.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "workspace.event.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "workspace.comment.add", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "priceList.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "priceList.rename", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "priceList.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },

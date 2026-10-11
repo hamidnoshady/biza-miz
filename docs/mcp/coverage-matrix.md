@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (51)
+### Tenant (50)
 - **accounting.accounts** (Accounting · Chart of accounts) — partial
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
@@ -43,7 +43,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **cms.orders** (Website / CMS · Website orders) — MCP gap
 - **cms.woocommerce** (Website / CMS · WooCommerce manager (posts, queue, syncs)) — MCP gap
 - **workspace.projects** (Workspace · Projects, members, phases) — partial
-- **workspace.calendar-comments** (Workspace · Calendar, comments, documents, templates) — MCP gap
 - **workspace.contracts** (Workspace · Contracts & lifecycle) — partial
 - **workspace.approvals** (Workspace · Approvals) — partial
 - **workspace.aec** (Workspace · AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement)) — partial
@@ -91,7 +90,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 21 · partial: 33 · MCP gap: 18 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 22 · partial: 33 · MCP gap: 17 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -142,7 +141,7 @@ Counts — covered: 21 · partial: 33 · MCP gap: 18 · backend gap: 0 · n/a (i
 | Website / CMS | WooCommerce manager (posts, queue, syncs)<br>_wp-manager content/queue are covered by list_website_*; sync verbs are WP-dashboard operations, not business records_ | (route only) | (route only) | — | (route only) | — | woocommerce.manage, woocommerce.sync, woocommerce.view | — | — | — | MCP gap |
 | Workspace | Projects, members, phases | get_workspace_project_status, list_workspace_projects | project.create | project.update | (route only) | — | workspace.manage, workspace.view | connection mode | get_workspace_project_status, list_workspace_projects, project.create, project.update | integration/workspace.integration.test.ts | partial |
 | Workspace | Tasks, checklist, dependencies | list_workspace_tasks | task.create | task.update | task.status | — | workspace.manage, workspace.view | connection mode | list_workspace_tasks, task.create, task.update, task.status | integration/workspace.integration.test.ts | covered |
-| Workspace | Calendar, comments, documents, templates | (route only) | (route only) | (route only) | (route only) | — | workspace.manage, workspace.view | — | — | integration/workspace.integration.test.ts | MCP gap |
+| Workspace | Calendar, comments, documents, templates<br>_documents & template mutations are the remaining lane of this row (workspace N2b); subject access always resolves from the subject itself (resolveWorkspaceSubject), never the payload_ | list_workspace_calendar, list_workspace_comments, list_workspace_templates | workspace.comment.add, workspace.event.create | workspace.event.update | workspace.event.delete | — | workspace.manage, workspace.view | connection mode | list_workspace_calendar, list_workspace_comments, list_workspace_templates, workspace.comment.add, workspace.event.create, workspace.event.update, workspace.event.delete | integration/workspace.integration.test.ts | covered |
 | Workspace | Contracts & lifecycle | list_expiring_contracts | (route only) | (route only) | (route only) | — | workspace.contracts_manage, workspace.view | — | list_expiring_contracts | integration/workspace.integration.test.ts | partial |
 | Workspace | Approvals | list_workspace_approvals | (route only) | — | (route only) | — | workspace.approve, workspace.manage, workspace.view | — | list_workspace_approvals | integration/workspace.integration.test.ts | partial |
 | Workspace | AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement) | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | (route only) | (route only) | (route only) | — | settings.manage, workspace.approve, workspace.documents_issue, workspace.manage, workspace.view | — | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | — | partial |

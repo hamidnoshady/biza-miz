@@ -4,8 +4,8 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **105 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **95 write verbs**
+Current surface: **107 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **99 write verbs**
 (**30** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -57,6 +57,8 @@ visible only to connections consented for every branch) and **95 write verbs**
 | `get_workspace_insights` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_workspace_project_report` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_workspace_templates` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_workspace_calendar` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_workspace_comments` | workspace | agnostic | `workspace.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `search_kb_articles` | workspace | agnostic | `ai.use` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_media_assets` | workspace | agnostic | `media.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_media_asset` | workspace | agnostic | `media.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -174,6 +176,10 @@ visible only to connections consented for every branch) and **95 write verbs**
 | `write_production_formula_deactivate` | `production.formula.deactivate` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_formulainput_set` | `production.formulaInput.set` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_formulainput_delete` | `production.formulaInput.delete` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_workspace_event_create` | `workspace.event.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_workspace_event_update` | `workspace.event.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_workspace_event_delete` | `workspace.event.delete` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_workspace_comment_add` | `workspace.comment.add` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_pricelist_create` | `priceList.create` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_pricelist_rename` | `priceList.rename` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_pricelist_delete` | `priceList.delete` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

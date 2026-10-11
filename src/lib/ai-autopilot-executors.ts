@@ -88,6 +88,7 @@ import {
   cancelInventoryTransfer,
 } from "./transfer-service";
 import { createWarehouseDocument, parseWarehouseDocumentLines, isWarehouseDocumentKind } from "./warehouse-document-service";
+import { listCalendar, createEvent, updateEvent, deleteEvent, addComment } from "./workspace";
 import {
   createPriceList,
   renamePriceList,
@@ -2383,6 +2384,95 @@ const crmPipelineUpdate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { pipelineId, updated: true } };
 };
 
+// ── Issue #883 package 2, batch N2a — workspace calendar & comments ─────────
+// These services throw WorkspaceError (code, like the guard's map), beside
+// boolean returns. The owner is the batch-H member row: the routes build the
+// very same shape from the session.
+function failWorkspace(err: unknown): AutopilotExecutionResult {
+  if (err instanceof WorkspaceError) return fail(err.code);
+  throw err;
+}
+
+const workspaceEventCreate: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const entries = await createEvent(owner, {
+      title: str(ctx.payload.title) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      kind: (str(ctx.payload.kind) ?? undefined) as Parameters<typeof createEvent>[1]["kind"],
+      eventDate: ctx.payload.eventDate as string,
+      startTime: (ctx.payload.startTime as string | null | undefined) ?? undefined,
+      endTime: (ctx.payload.endTime as string | null | undefined) ?? undefined,
+      location: str(ctx.payload.location) ?? undefined,
+      projectId: (ctx.payload.projectId as string | null | undefined) ?? undefined,
+      taskId: (ctx.payload.taskId as string | null | undefined) ?? undefined,
+    });
+    const created = entries[entries.length - 1];
+    return { ok: true, result: { id: created?.id, title: created?.title } };
+  } catch (err) {
+    return failWorkspace(err);
+  }
+};
+
+const workspaceEventUpdate: AutopilotExecutor = async (ctx) => {
+  const eventId = str(ctx.payload.eventId);
+  if (!eventId) return fail("invalid_payload");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const updated = await updateEvent(owner, eventId, {
+      title: str(ctx.payload.title) ?? undefined,
+      description: str(ctx.payload.description) ?? undefined,
+      kind: (str(ctx.payload.kind) ?? undefined) as Parameters<typeof updateEvent>[2]["kind"],
+      eventDate: typeof ctx.payload.eventDate === "string" ? ctx.payload.eventDate : undefined,
+      startTime: (ctx.payload.startTime as string | null | undefined) ?? undefined,
+      endTime: (ctx.payload.endTime as string | null | undefined) ?? undefined,
+      location: str(ctx.payload.location) ?? undefined,
+      projectId: (ctx.payload.projectId as string | null | undefined) ?? undefined,
+    });
+    if (!updated) return fail("event_not_found");
+    return { ok: true, result: { eventId, updated: true } };
+  } catch (err) {
+    return failWorkspace(err);
+  }
+};
+
+const workspaceEventDelete: AutopilotExecutor = async (ctx) => {
+  const eventId = str(ctx.payload.eventId);
+  if (!eventId) return fail("invalid_payload");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const deleted = await deleteEvent(owner, eventId);
+    if (!deleted) return fail("event_not_found");
+    return { ok: true, result: { eventId, deleted: true } };
+  } catch (err) {
+    return failWorkspace(err);
+  }
+};
+
+const workspaceCommentAdd: AutopilotExecutor = async (ctx) => {
+  const subjectType = str(ctx.payload.subjectType);
+  const subjectId = str(ctx.payload.subjectId);
+  const body = str(ctx.payload.body);
+  if (!subjectType || !subjectId || !body) return fail("invalid_payload");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const comments = await addComment(
+      owner,
+      subjectType as Parameters<typeof addComment>[1],
+      subjectId,
+      body,
+    );
+    const last = comments[comments.length - 1];
+    return { ok: true, result: { id: (last as { id?: string } | undefined)?.id, subjectType, subjectId } };
+  } catch (err) {
+    return failWorkspace(err);
+  }
+};
+
 // ── Issue #883 package 2, batch M — price lists & entries ───────────────────
 // Services answer {list?, error?}/boolean/number — the routes' own branching,
 // so executors fail() with the identical code rather than translating.
@@ -2767,6 +2857,10 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   productionFormulaDeactivate,
   productionFormulaInputSet,
   productionFormulaInputDelete,
+  workspaceEventCreate,
+  workspaceEventUpdate,
+  workspaceEventDelete,
+  workspaceCommentAdd,
   priceListCreate,
   priceListRename,
   priceListDelete,

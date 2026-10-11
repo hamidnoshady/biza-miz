@@ -542,6 +542,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Workspace",
     entity: "Calendar, comments, documents, templates",
     routes: ["workspace/calendar", "workspace/comments", "workspace/documents", "workspace/templates"],
+    ops: {
+      listDetail: ["list_workspace_calendar", "list_workspace_comments", "list_workspace_templates"],
+      create: ["workspace.event.create", "workspace.comment.add"],
+      update: ["workspace.event.update"],
+      lifecycle: ["workspace.event.delete"],
+    },
+    note: "documents & template mutations are the remaining lane of this row (workspace N2b); subject access always resolves from the subject itself (resolveWorkspaceSubject), never the payload",
     test: "integration/workspace.integration.test.ts",
   },
   {
