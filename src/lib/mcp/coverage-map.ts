@@ -140,10 +140,10 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Accounting",
     entity: "Fiscal years & periods (open/close), readiness",
     routes: ["ledger/fiscal-years", "ledger/fiscal-periods", "ledger/fiscal-readiness"],
-    ops: { listDetail: ["list_fiscal_years"] },
+    ops: { listDetail: ["list_fiscal_years", "get_fiscal_readiness"], create: ["fiscal.year.create"], update: ["fiscal.period.set_status"], lifecycle: ["fiscal.year.close"] },
+    note: "all three calendar verbs are always_approve: a reopened period takes postings again, a locked one freezes them, a closed year builds its closing entries under the year lock (unwind is console-only, no MCP verb)",
     test: "integration/fiscal-readiness.integration.test.ts",
-  },
-  {
+  },  {
     id: "accounting.vat",
     module: "Accounting",
     entity: "VAT & trial balance",

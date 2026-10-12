@@ -224,6 +224,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_product_attributes: "The branch's product attribute definitions (e.g. colour → red, blue).",
   list_audit_log: "The business audit trail (who changed what, filtered by entity/action/actor; cursor with before).",
   get_account_statement: "One ledger account's statement (running balance over an optional ISO range).",
+  get_fiscal_readiness: "Fiscal-year close readiness (open temporary balances, unlocked periods, remaining steps).",
   list_media_collections: "The media library's collections with file counts.",
   list_media_folders: "The media library's folders with file counts.",
   list_barcode_templates: "The branch's weight-barcode templates (prefix + weight unit).",
@@ -1643,6 +1644,47 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         itemIds: { type: "array", items: { type: "string" }, description: "خالی = همهٔ اقلام شعبه" },
       },
       required: ["target", "mode", "value", "round"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_fiscal_year_create",
+    actionType: "fiscal.year.create",
+    english: "Create a fiscal year with its twelve monthly periods — calendar, no postings. Explicit approval each time.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: { jy: { type: "number", description: "سال جلالی — مثل ۱۴۰۴" } },
+      required: ["jy"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_fiscal_period_set_status",
+    actionType: "fiscal.period.set_status",
+    english:
+      "Set a fiscal period's status — open / soft_closed / locked. Reopening lets postings back into a closed period; explicit approval each time.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        periodId: id("شناسهٔ دوره — از list_fiscal_years/دوره‌های سال"),
+        status: { type: "string", enum: ["open", "soft_closed", "locked"] },
+      },
+      required: ["periodId", "status"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_fiscal_year_close",
+    actionType: "fiscal.year.close",
+    english:
+      "Lock a fiscal year for good — closing entries are built under the year lock; unwind only from the admin console. Explicit approval each time.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { fiscalYearId: id("شناسهٔ سال مالی — از list_fiscal_years") },
+      required: ["fiscalYearId"],
       additionalProperties: false,
     },
   },

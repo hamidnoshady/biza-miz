@@ -348,6 +348,10 @@ export type ActionType =
   | "payroll.staff.terms"
   // Batch Z3 — reconciliation line clearance (tick/untick against a session).
   | "reconciliation.line.clear"
+  // Batch Z4 — the fiscal calendar (year create, period status, year close).
+  | "fiscal.year.create"
+  | "fiscal.period.set_status"
+  | "fiscal.year.close"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -388,6 +392,9 @@ export type AutopilotExecutorKey =
   | "websiteOrderStatus"
   | "websiteDomainSet"
   | "payrollSettingsUpdate"
+  | "fiscalYearCreate"
+  | "fiscalPeriodSetStatus"
+  | "fiscalYearClose"
   | "reconciliationLineClear"
   | "payrollStaffTerms"
   | "fixedAssetSetAcquisition"
@@ -1364,6 +1371,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "fiscal.year.create": {
+    type: "fiscal.year.create",
+    endpoint: "/api/ledger/fiscal-years",
+    method: "POST",
+    label: "ساخت سال مالی با ۱۲ دورهٔ ماه‌بندی‌شده — تقویم حسابداری، نه ثبت دفتری",
+    payloadHint: '{ jy: number /* سال جلالی — مثل ۱۴۰۴ */ }',
+    executor: "fiscalYearCreate",
+  },
+  "fiscal.period.set_status": {
+    type: "fiscal.period.set_status",
+    endpoint: "/api/ledger/fiscal-periods/[id]",
+    method: "PATCH",
+    label: "تنظیم وضعیت دورهٔ مالی — open/soft_closed/locked؛ بازکردن دورهٔ بسته، ثبت را دوباره در آن دوره آزاد می‌کند",
+    payloadHint: '{ periodId: string, status: "open"|"soft_closed"|"locked" }',
+    executor: "fiscalPeriodSetStatus",
+  },
+  "fiscal.year.close": {
+    type: "fiscal.year.close",
+    endpoint: "/api/ledger/fiscal-years/[id]/close",
+    method: "POST",
+    label: "قفل‌کردن نهایی یک سال مالی — سندهای اختتامیه را زیر قفل سال می‌سازد و برگشت آن فقط از کنسول مدیریت است",
+    payloadHint: '{ fiscalYearId: string }',
+    executor: "fiscalYearClose",
   },
   "reconciliation.line.clear": {
     type: "reconciliation.line.clear",
@@ -2887,6 +2918,15 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       function: {
         name: "list_media_folders",
         description: "پوشه‌های کتابخانهٔ رسانه با شمارش فایل.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_fiscal_readiness",
+        description:
+          "آمادگی بستن سال مالی — مانده‌های باز حساب‌های موقت، دوره‌های قفل‌نشده و گام‌های لازم پیش از fiscal.year.close.",
         parameters: { type: "object", properties: {}, additionalProperties: false },
       },
     },

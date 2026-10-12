@@ -67,6 +67,7 @@ import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/web
 import { listRetailInvoices } from "./retail-invoice/list-service";
 import { listAuditLog } from "./audit-service";
 import { getAccountStatement } from "./reports-service";
+import { getFiscalReadiness } from "./fiscal-periods-service";
 import { listMediaCollections, listMediaFolders } from "./media-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
 import { wpOverviewStats, wpQueue, wpQueueSummary } from "./integrations/wp-manager-service";
@@ -2115,6 +2116,10 @@ export async function runReadTool(
     // Issue #883 package 2, batch Y — the account statement screen's read.
     // Same fail-soft shape as the routes: date format is rejected up front,
     // a missing account answers account_not_found rather than throwing.
+    // Issue #883 package 2, batch Z4 — the close-readiness screen's read.
+    case "get_fiscal_readiness": {
+      return { ok: true, data: { readiness: await getFiscalReadiness(businessId) } };
+    }
     case "get_account_statement": {
       const accountId = typeof args.accountId === "string" ? args.accountId : "";
       if (!accountId) return { ok: false, data: { error: "account_required" } };

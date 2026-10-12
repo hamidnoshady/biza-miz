@@ -15,9 +15,8 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (44)
+### Tenant (43)
 - **accounting.entries** (Accounting · Journal entries) — partial
-- **accounting.fiscal** (Accounting · Fiscal years & periods (open/close), readiness) — partial
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -84,7 +83,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 28 · partial: 34 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 29 · partial: 33 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -97,7 +96,7 @@ Counts — covered: 28 · partial: 34 · MCP gap: 10 · backend gap: 0 · n/a (i
 | Accounting | Fixed assets (register, depreciate, dispose, transfer) | list_fixed_assets | fixed-asset.create | fixed-asset.set_acquisition | fixed-asset.depreciate, fixed-asset.dispose | — | finance.assets_manage, ledger.view | connection mode; step-up (always approve) | list_fixed_assets, fixed-asset.create, fixed-asset.set_acquisition, fixed-asset.depreciate, fixed-asset.dispose | integration/fixed-assets.integration.test.ts | covered |
 | Accounting | Payroll (settings, staff, runs, advances)<br>_settings and pay terms are always_approve by parity with the rest of the money-shaping payroll verbs (settings govern every future run; terms change somebody's pay)_ | get_payroll_summary, list_payroll_advances, list_payroll_runs | payroll.advance.record, payroll.run.accrue | payroll.settings.update, payroll.staff.terms | payroll.advance.void, payroll.run.pay, payroll.run.void | — | payroll.manage, payroll.view | step-up (always approve) | get_payroll_summary, list_payroll_advances, list_payroll_runs, payroll.advance.record, payroll.run.accrue, payroll.settings.update, payroll.staff.terms, payroll.advance.void, payroll.run.pay, payroll.run.void | integration/payroll.integration.test.ts | covered |
 | Accounting | Bank reconciliation<br>_line clearance rides the shared parseLineClearanceRequest parser — boolean required, batch wins, a malformed batch is refused whole, never partly applied_ | get_unreconciled_bank_lines, list_reconciliations | reconciliation.create | reconciliation.line.clear | reconciliation.complete | — | finance.reconciliation_manage, ledger.view | connection mode; step-up (always approve) | get_unreconciled_bank_lines, list_reconciliations, reconciliation.create, reconciliation.line.clear, reconciliation.complete | integration/reconciliation.integration.test.ts | covered |
-| Accounting | Fiscal years & periods (open/close), readiness | list_fiscal_years | (route only) | (route only) | (route only) | — | ledger.close_period, ledger.view | — | list_fiscal_years | integration/fiscal-readiness.integration.test.ts | partial |
+| Accounting | Fiscal years & periods (open/close), readiness<br>_all three calendar verbs are always_approve: a reopened period takes postings again, a locked one freezes them, a closed year builds its closing entries under the year lock (unwind is console-only, no MCP verb)_ | get_fiscal_readiness, list_fiscal_years | fiscal.year.create | fiscal.period.set_status | fiscal.year.close | — | ledger.close_period, ledger.view | step-up (always approve) | get_fiscal_readiness, list_fiscal_years, fiscal.year.create, fiscal.period.set_status, fiscal.year.close | integration/fiscal-readiness.integration.test.ts | covered |
 | Accounting | VAT & trial balance | get_vat_liability, run_report | — | — | — | — | ledger.view | — | get_vat_liability, run_report | integration/ledger.integration.test.ts | covered |
 | Accounting | Installment contracts | list_installment_plans | installment.plan.create | — | installment.item.pay | — | finance.installments_manage, ledger.view | connection mode; step-up (always approve) | list_installment_plans, installment.plan.create, installment.item.pay | integration/installments.integration.test.ts | covered |
 | Accounting | Ledger overview / settings / shift sales | run_accounting_review | — | — | — | — | ledger.view | — | run_accounting_review | — | covered |

@@ -219,6 +219,8 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_audit_log", kind: "read", app: "pos", branchPolicy: "agnostic" },
   // Batch Y — the ledger is business-wide for reads (agnostic like ledgerView).
   { name: "get_account_statement", kind: "read", app: "accounting", branchPolicy: "agnostic" },
+  // Batch Z4 — the close readiness screen's read (agnostic ledger-wide).
+  { name: "get_fiscal_readiness", kind: "read", app: "accounting", branchPolicy: "agnostic" },
   { name: "list_barcode_templates", kind: "read", app: "pos", branchPolicy: "pinned" },
   // Batch Q — sales invoices are branch-scoped like every other POS order read.
   { name: "list_sales_invoices", kind: "read", app: "pos", branchPolicy: "pinned" },
@@ -432,6 +434,12 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch Z3 — ticking lines on an in-progress reconciliation posts nothing;
   // like the screen, a refused batch is refused whole.
   { actionType: "reconciliation.line.clear", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  // Batch Z4 — the financial calendar itself: a reopened period takes
+  // postings again, a locked one freezes them, a closed year builds its
+  // closing entries under the year lock. Explicit human approval every time.
+  { actionType: "fiscal.year.create", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "fiscal.period.set_status", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "fiscal.year.close", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

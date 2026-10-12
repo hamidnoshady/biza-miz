@@ -89,6 +89,8 @@ import {
 } from "./payroll-service";
 import { PayrollError } from "./payroll-errors";
 import { parseLineClearanceRequest } from "./bank-reconciliation";
+import { createFiscalYear, setPeriodStatus, FiscalPeriodError } from "./fiscal-periods-service";
+import { closeFiscalYear } from "./closing-service";
 import { recordAdvance, voidAdvance } from "./payroll-advances-service";
 import { createOrder } from "./order-mutations";
 import type { CartItemInput } from "./order-cart";
@@ -2684,6 +2686,57 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch Z4 — the fiscal calendar ───────────────────
+// FiscalPeriodError carries status AND optional details the screen reads
+// (which period blocks a close; overlap window); surface both, exactly the
+// response payrollErrorResponse keeps for payroll.
+function failFiscal(err: unknown): AutopilotExecutionResult {
+  if (err instanceof FiscalPeriodError) {
+    return {
+      ok: false,
+      result: { error: err.message, ...(err.details ?? {}) },
+      errorCode: err.message,
+    };
+  }
+  if (err instanceof MissingLedgerAccountError) return fail("ledger_account_missing");
+  throw err;
+}
+const fiscalYearCreate: AutopilotExecutor = async (ctx) => {
+  const jy = typeof ctx.payload.jy === "number" && Number.isInteger(ctx.payload.jy) ? ctx.payload.jy : null;
+  if (jy === null) return fail("invalid_jalali_year");
+  try {
+    const year = await createFiscalYear(ctx.businessId, jy);
+    return { ok: true, result: { year: { ...(year as object) } } };
+  } catch (err) {
+    return failFiscal(err);
+  }
+};
+const fiscalPeriodSetStatus: AutopilotExecutor = async (ctx) => {
+  const periodId = str(ctx.payload.periodId) ?? str(ctx.payload.id);
+  const status = str(ctx.payload.status);
+  if (!periodId || (status !== "open" && status !== "soft_closed" && status !== "locked")) {
+    return fail("invalid_status");
+  }
+  if (!ctx.authorizedByUserId) return fail("no_authorizing_user");
+  try {
+    const period = await setPeriodStatus(ctx.businessId, periodId, status, ctx.authorizedByUserId);
+    return { ok: true, result: { period: { ...(period as object) } } };
+  } catch (err) {
+    return failFiscal(err);
+  }
+};
+const fiscalYearClose: AutopilotExecutor = async (ctx) => {
+  const fiscalYearId = str(ctx.payload.fiscalYearId) ?? str(ctx.payload.id);
+  if (!fiscalYearId) return fail("missing_fields");
+  if (!ctx.authorizedByUserId) return fail("no_authorizing_user");
+  try {
+    const result = await closeFiscalYear(ctx.businessId, fiscalYearId, ctx.authorizedByUserId);
+    return { ok: true, result: { ...(result as object) } };
+  } catch (err) {
+    return failFiscal(err);
+  }
+};
+
 // ── Issue #883 package 2, batch Z3 — reconciliation line clearance ─────────
 // The payload flows through the shared parseLineClearanceRequest parser, so
 // its disciplines (boolean required, batch wins, empty/over-size batches
@@ -3312,6 +3365,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   payrollSettingsUpdate,
   payrollStaffTerms,
   reconciliationLineClear,
+  fiscalYearCreate,
+  fiscalPeriodSetStatus,
+  fiscalYearClose,
   mediaCollectionCreate,
   mediaCollectionRename,
   mediaCollectionDelete,

@@ -129,6 +129,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_audit_log: PERMISSIONS.teamManage,
   // Batch Y — the chart-of-accounts statement screen's gate.
   get_account_statement: PERMISSIONS.ledgerView,
+  // Batch Z4 — what the close-readiness screen needs to answer first.
+  get_fiscal_readiness: PERMISSIONS.ledgerView,
   list_barcode_templates: PERMISSIONS.menuView,
   // Batch Q — the sales-invoice screens' read gate.
   list_sales_invoices: PERMISSIONS.ordersView,
@@ -275,6 +277,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "payroll.settings.update": PERMISSIONS.payrollManage,
   "payroll.staff.terms": PERMISSIONS.payrollManage,
   "reconciliation.line.clear": PERMISSIONS.financeReconciliationManage,
+  "fiscal.year.create": PERMISSIONS.ledgerClosePeriod,
+  "fiscal.period.set_status": PERMISSIONS.ledgerClosePeriod,
+  "fiscal.year.close": PERMISSIONS.ledgerClosePeriod,
   "media.collection.rename": PERMISSIONS.mediaManage,
   "media.collection.delete": PERMISSIONS.mediaManage,
   "media.asset.set_collection": PERMISSIONS.mediaManage,

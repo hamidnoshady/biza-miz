@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **125 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **123 write verbs**
-(**34** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **126 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **126 write verbs**
+(**37** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -112,6 +112,7 @@ visible only to connections consented for every branch) and **123 write verbs**
 | `list_media_folders` | workspace | agnostic | `media.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_audit_log` | pos | agnostic | `team.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_account_statement` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_fiscal_readiness` | accounting | agnostic | `ledger.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_barcode_templates` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_sales_invoices` | pos | pinned | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_wp_queue` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -260,6 +261,9 @@ visible only to connections consented for every branch) and **123 write verbs**
 | `write_payroll_settings_update` | `payroll.settings.update` | accounting | high | always approval queue (step-up) | `payroll.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_payroll_staff_terms` | `payroll.staff.terms` | accounting | high | always approval queue (step-up) | `payroll.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_reconciliation_line_clear` | `reconciliation.line.clear` | accounting | low | connection write_mode | `finance.reconciliation_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fiscal_year_create` | `fiscal.year.create` | accounting | high | always approval queue (step-up) | `ledger.close_period` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fiscal_period_set_status` | `fiscal.period.set_status` | accounting | high | always approval queue (step-up) | `ledger.close_period` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fiscal_year_close` | `fiscal.year.close` | accounting | high | always approval queue (step-up) | `ledger.close_period` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_delete` | `media.collection.delete` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_asset_set_collection` | `media.asset.set_collection` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
