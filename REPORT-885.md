@@ -287,6 +287,14 @@ At `c05e9429` two jobs outside `test.yml` failed:
 
 **Measured, locally:** staged runtime **215.6 → 207.1 MiB**, `npm run desktop:runtime` exit 0, **0** manifests remaining. **Measured, on CI at `c459914f`:** `desktop shell` ✓ and `packaged Windows end-to-end` ✓ — both gates that had been failing by 0.2 MiB and 0.6 MiB respectively now clear with ~11 MiB of margin.
 
+**One flake, identified rather than waved away.** At the docs-only head `edaaf1c2` the `visual regression` job failed with "4.08% of pixels changed". It is not a regression and the evidence is exact rather than assumed:
+
+- `git diff --stat c459914f edaaf1c2` is **`REPORT-885.md` alone** — 1 file, +32/−24, and `git diff --name-only … | grep -v '\.md$'` returns nothing, so no application file differs between the two heads.
+- `REPORT-885.md` is referenced by no application code (`grep` across `*.ts`, `*.tsx`, `*.mjs`, `*.js`, `*.json`, `*.yml`, excluding `node_modules`), so it cannot reach a rendered page.
+- The same job **passed** at `c459914f` (`verify-shippables`/`test.yml` run `38218031047`, conclusion `success`), which carries byte-identical application code.
+
+A markdown-only diff cannot move pixels, so the code-bearing result at `c459914f` is the authoritative one. I could not re-run the job to demonstrate the flake directly: both `gh run rerun` and `POST /actions/runs/38223196818/rerun-failed-jobs` are refused from this token (`cannot be rerun`, then `403 Resource not accessible by integration`). No visual baseline was re-recorded and no threshold was loosened.
+
 **Neither budget was touched.** `verify-shippables.yml` still reads `200MB` and `build-desktop-installer.yml` still reads `620MB`; raising either to make a check pass is manufacturing green. No test was disabled, no assertion loosened, no visual baseline re-recorded.
 
 The only annotations are `ubuntu-latest`→Ubuntu 26 migration notices.
