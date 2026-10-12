@@ -13,7 +13,7 @@
  * `platform-admin.ts` and are tested there, and the guard/isolation behaviour
  * is exercised by the platform integration test.
  */
-import { getPool, query, withoutTenantScope, withTenant } from "./db";
+import { getPool, query, withoutTenantScope, withoutTenantScopeTransaction, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
 import type { MigrationStatus } from "./migration-status-service";
 import type { PoolClient } from "pg";
@@ -40,6 +40,12 @@ import {
 } from "./impersonation-handoff";
 import { validSupportReason } from "./support-session";
 import { isUuid } from "./uuid";
+import {
+  resolveBusinessSort,
+  type BusinessSortKey,
+  type BusinessSortValue,
+  type SortDirection,
+} from "./business-sort";
 
 // ---------------------------------------------------------------------------
 // Business lifecycle
@@ -144,7 +150,10 @@ export interface BusinessQuery {
   createdTo?: string;
   /** "active" = has any orders; "idle" = none. */
   activity?: "active" | "idle";
-  sort?: "newest" | "oldest" | "name" | "orders" | "members" | "activity";
+  /** Sort key (legacy `newest`/`oldest` included); see `business-sort.ts`. */
+  sort?: BusinessSortValue;
+  /** Explicit direction; omitted = the key's natural default. */
+  sortDir?: SortDirection;
   page?: number;
   pageSize?: number;
 }
@@ -170,14 +179,22 @@ export interface BusinessStatusCounts {
   archived: number;
 }
 
-const BUSINESS_SORT_SQL: Record<NonNullable<BusinessQuery["sort"]>, string> = {
-  newest: "b.created_at DESC",
-  oldest: "b.created_at ASC",
-  name: "b.name ASC",
-  orders: "order_count DESC",
-  members: "member_count DESC",
-  activity: "last_activity_at DESC NULLS LAST",
+/** The ORDER BY column for each sort key; the direction is applied from the resolved sort. */
+const BUSINESS_SORT_COLUMN: Record<BusinessSortKey, string> = {
+  created: "b.created_at",
+  name: "b.name",
+  orders: "order_count",
+  members: "member_count",
+  activity: "last_activity_at",
 };
+
+/** Build `ORDER BY` for a sort. Nulls always sort last; `b.id` breaks ties. */
+function businessOrderBy(sort: BusinessQuery["sort"], dir: BusinessQuery["sortDir"]): string {
+  const resolved = resolveBusinessSort(sort ?? "newest", dir ?? null);
+  const column = BUSINESS_SORT_COLUMN[resolved.key];
+  const direction = resolved.dir === "asc" ? "ASC" : "DESC";
+  return `${column} ${direction} NULLS LAST, b.id ASC`;
+}
 
 /**
  * The console's business directory — filtered, sorted and paginated in the
@@ -191,7 +208,7 @@ export async function queryBusinesses(q: BusinessQuery = {}): Promise<BusinessLi
   const page = Math.max(1, Math.floor(q.page ?? 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(q.pageSize ?? 20)));
   const offset = (page - 1) * pageSize;
-  const sort = BUSINESS_SORT_SQL[q.sort ?? "newest"] ?? BUSINESS_SORT_SQL.newest;
+  const orderBy = businessOrderBy(q.sort, q.sortDir);
 
   return withoutTenantScope("platform", async () => {
     /** Bound values plus the WHERE clauses that reference them. */
@@ -280,7 +297,7 @@ export async function queryBusinesses(q: BusinessQuery = {}): Promise<BusinessLi
                 WHERE l.business_id = b.id) AS last_activity_at
          FROM businesses b
         ${whereSql}
-        ORDER BY ${sort}
+        ORDER BY ${orderBy}
         LIMIT ${pageSize} OFFSET ${offset}`,
       all.params,
     );
@@ -2767,6 +2784,13 @@ export interface SupportTicketQuery {
   /** Restrict to tickets assigned to `adminId`. */
   assignedToMe?: boolean;
   adminId?: string;
+  /**
+   * The desk's "open" queue: open, in-progress and waiting-customer tickets —
+   * the same set the KPI tiles count (audit F19).
+   */
+  openOnly?: boolean;
+  /** Only tickets with no assigned responder (the "بدون مسئول" KPI). */
+  unassigned?: boolean;
   page?: number;
   pageSize?: number;
 }
@@ -2801,6 +2825,8 @@ export async function querySupportTickets(q: SupportTicketQuery = {}): Promise<S
     if (q.category && q.category.trim()) where.push(`t.category = ${bind(q.category.trim().slice(0, 20))}`);
     if (q.businessId && q.businessId.trim()) where.push(`t.business_id = ${bind(q.businessId.trim())}::uuid`);
     if (q.assignedToMe && q.adminId) where.push(`t.assigned_admin_id = ${bind(q.adminId)}::uuid`);
+    if (q.openOnly) where.push(`t.status IN ('open', 'in_progress', 'waiting_customer')`);
+    if (q.unassigned) where.push(`t.assigned_admin_id IS NULL`);
     if (q.search && q.search.trim()) {
       const p = bind(`%${q.search.trim().slice(0, 200)}%`);
       where.push(
@@ -3509,7 +3535,10 @@ export async function updatePlatformAdmin(params: {
     return { ok: false, error: "missing_fields" };
   }
 
-  return withoutTenantScope("platform", async () => {
+  // One transaction with a row lock on every platform admin: the last-owner
+  // check and the write cannot interleave with a concurrent demotion or
+  // suspension, and the audit row commits or rolls back with the change.
+  return withoutTenantScopeTransaction("platform", async () => {
     const { rows: allAdmins } = await query<{
       id: string;
       email: string;
@@ -3518,7 +3547,9 @@ export async function updatePlatformAdmin(params: {
       is_active: boolean;
     }>(
       `SELECT id, email::text AS email, full_name, role::text AS role, is_active
-         FROM platform_admins`,
+         FROM platform_admins
+        ORDER BY id
+          FOR UPDATE`,
     );
     const target = allAdmins.find((a) => a.id === params.targetAdminId);
     if (!target) return { ok: false, error: "not_found" };

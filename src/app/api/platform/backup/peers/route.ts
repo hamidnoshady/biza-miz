@@ -7,6 +7,7 @@ import {
   listPlatformBackupPeers,
   upsertPlatformBackupPeer,
 } from "@/lib/platform-backup-service";
+import { requireRecentAuth } from "@/lib/recent-auth";
 
 /**
  * The servers this install may restore FROM (migration 0132) — the "address"
@@ -31,6 +32,8 @@ export const GET = withPlatformScope(async () => {
 export const POST = withPlatformScope(async (request: NextRequest) => {
   const { session, error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
+  const recentError = requireRecentAuth(session);
+  if (recentError) return recentError;
 
   let body: Record<string, unknown>;
   try {

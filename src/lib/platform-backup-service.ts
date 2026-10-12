@@ -283,6 +283,9 @@ function s3ConfigOf(config: PlatformBackupConfig): S3Config {
 // Run bookkeeping
 // ---------------------------------------------------------------------------
 
+/** Error recorded when encryption is required but no passphrase is configured. */
+export const PASSPHRASE_REQUIRED = "passphrase_required";
+
 type RunKind = "local" | "cloud";
 type RunTrigger = "scheduled" | "manual" | "peer";
 
@@ -501,7 +504,15 @@ async function runPlatformLocalBackupLocked(
   try {
     const config = await getPlatformBackupConfig();
     const passphrase = platformBackupPassphrase(config);
-    const encrypt = passphrase.length > 0 && config.encryptLocal;
+    // Fail closed (audit F03). A run that asks for encryption without an
+    // effective passphrase is refused and recorded as failed — it never
+    // silently becomes a plaintext dump that could then be shared.
+    if (config.encryptLocal && passphrase.length === 0) {
+      const runId = await startRun("local", trigger, null, null, platformAdminId);
+      await finishRun(runId, { status: "failed", error: PASSPHRASE_REQUIRED });
+      return { status: "failed", error: PASSPHRASE_REQUIRED };
+    }
+    const encrypt = config.encryptLocal;
     const dir = platformBackupDir(config.directory);
     await fs.mkdir(dir, { recursive: true });
 
@@ -1061,6 +1072,10 @@ export async function resolveServeableArtifact(
   if (!isServeableArtifactName(artifact)) return { ok: false, status: 404, error: "not_found" };
   const config = await getPlatformBackupConfig();
   if (!config.servingEnabled) return { ok: false, status: 404, error: "not_found" };
+  // Peers only ever receive ciphertext (audit F03). A plaintext artifact —
+  // including a legacy one written before encryption was enforced — is kept
+  // on disk for an operator to deal with, but is never handed to a peer.
+  if (!artifact.endsWith(".enc")) return { ok: false, status: 403, error: "plaintext_artifact_not_served" };
   const filePath = path.join(platformBackupDir(config.directory), artifact);
   try {
     const stat = await fs.stat(filePath);

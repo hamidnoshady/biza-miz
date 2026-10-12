@@ -444,6 +444,40 @@ export async function withoutTenantScope<T>(reason: string, fn: () => Promise<T>
 }
 
 /**
+ * `withoutTenantScope` for multi-statement platform writes that must commit or
+ * roll back together, or that lock rows (`FOR UPDATE`, advisory locks).
+ *
+ * Same contract as `withTenantTransaction`: ambient `query()` is pinned to one
+ * client inside `BEGIN`/`COMMIT`, a throw rolls everything back, and the
+ * bypass reason is recorded exactly as `withoutTenantScope` records it. Use it
+ * only where the platform scope is already justified; it is not a way around
+ * tenant isolation.
+ */
+export async function withoutTenantScopeTransaction<T>(
+  reason: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withoutTenantScope(reason, async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await runPinned(client, fn);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Intentionally ignored: the original error explains the failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+}
+
+/**
  * Whether RLS is actually capable of protecting anything on this connection.
  *
  * Superusers — and any role with BYPASSRLS — ignore row-level security

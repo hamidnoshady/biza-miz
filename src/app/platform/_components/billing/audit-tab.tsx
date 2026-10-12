@@ -12,7 +12,7 @@ import { RefreshCwIcon } from "lucide-react";
 import { api, Card, ErrorBox, inputClass, selectClass, SkeletonRows } from "../../ui";
 import { PLATFORM_ROLE_LABELS } from "@/lib/platform-admin";
 import { formatJalali } from "@/lib/jalali";
-import { tomanLabel } from "@/lib/platform-money";
+import { summarizePayload } from "./audit-payload-format";
 
 interface AuditEntry {
   id: string;
@@ -57,42 +57,7 @@ const ACTION_LABELS: Record<string, string> = {
   "manual_payment.rejected": "رد پرداخت دستی",
   "wallet.adjusted": "تنظیم دستی کیف پول",
   "refund.created": "ثبت بازپرداخت",
-};
-
-/** Human summary of a payload — before/after diffs above all. */
-function summarizePayload(payload: Record<string, unknown> | null): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const parts: string[] = [];
-  const fmt = (v: unknown): string => {
-    if (v == null) return "—";
-    if (typeof v === "number") return Number.isInteger(v) && Math.abs(v) >= 1000 ? tomanLabel(v) : String(v);
-    if (typeof v === "boolean") return v ? "بله" : "خیر";
-    if (typeof v === "object") return JSON.stringify(v);
-    return String(v);
-  };
-  for (const key of ["from", "to", "before", "after", "kind", "group", "removed"]) {
-    if (key in payload) parts.push(`${PATTERN_LABELS[key] ?? key}: ${fmt(payload[key])}`);
-  }
-  for (const key of ["featureKey", "planKey", "packageName", "amountRial", "creditRial", "name"]) {
-    if (key in payload) parts.push(`${PATTERN_LABELS[key] ?? key}: ${fmt(payload[key])}`);
-  }
-  return parts.length ? parts.join(" • ") : null;
-}
-
-const PATTERN_LABELS: Record<string, string> = {
-  from: "از",
-  to: "به",
-  before: "پیش",
-  after: "پس",
-  kind: "نوع",
-  group: "گروه",
-  removed: "حذف",
-  featureKey: "قابلیت",
-  planKey: "پلن",
-  packageName: "بسته",
-  amountRial: "مبلغ",
-  creditRial: "اعتبار",
-  name: "نام",
+  "billing.spend_policy.updated": "تغییر سیاست سقف هزینه",
 };
 
 export function BillingAuditTab() {
