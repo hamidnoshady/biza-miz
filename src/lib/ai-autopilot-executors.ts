@@ -25,6 +25,7 @@ import { openSession, releaseSessionWithoutOrders, mergeTableIntoSession, setSes
 import { broadcast } from "./realtime";
 import { getBackupConfig, setBackupConfig, runBackupNow, restoreAvailable, restoreFromArtifact } from "./backup-service";
 import { chargeForFeature } from "./billing-guard";
+import { DeviceError, renameDevice, revokeDevice, listDevices, findActiveDeviceId } from "./device-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2698,6 +2699,35 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AI — device rename / revoke ───────────────
+// renameDevice / revokeDevice take the actor id and throw typed DeviceError
+// whose {message, status} the route surfaces verbatim — same mapping here.
+const deviceFail = (err: unknown): AutopilotExecutionResult => {
+  if (err instanceof DeviceError) return fail(err.message);
+  throw err;
+};
+const deviceRename: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.deviceId);
+  const label = str(ctx.payload.label);
+  if (!id || !label) return fail("invalid_label");
+  try {
+    const device = await renameDevice(id, ctx.businessId, ctx.authorizedByUserId, label);
+    return { ok: true, result: { device: { ...(device as object) } } };
+  } catch (err) {
+    return deviceFail(err);
+  }
+};
+const deviceRevoke: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.deviceId);
+  if (!id) return fail("missing_fields");
+  try {
+    await revokeDevice(id, ctx.businessId, ctx.authorizedByUserId);
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    return deviceFail(err);
+  }
+};
+
 // ── Issue #883 package 2, batch AH — backup config, manual run, restore ───
 // run-now rides the route's own billing gate (chargeForFeature) so a priced
 // run charges the wallet exactly once, same as the button. Restore is the
@@ -3910,6 +3940,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  deviceRename,
+  deviceRevoke,
   backupConfigSet,
   backupRunNow,
   backupRestoreApply,

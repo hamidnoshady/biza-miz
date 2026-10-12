@@ -73,6 +73,7 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_team_members: PERMISSIONS.teamView,
   // Batch F reads — campaigns.view on promotions, giftCards.view on cards.
   list_promotions: PERMISSIONS.campaignsView,
+  list_devices: PERMISSIONS.settingsManage,
   get_backup_status: PERMISSIONS.backupManage,
   get_gift_card_status: PERMISSIONS.giftCardsView,
   // Batch G reads — inventory.view on counts (the screen's GET gate), the
@@ -302,6 +303,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "backup.config.set": PERMISSIONS.backupConfigure,
   "backup.run_now": PERMISSIONS.backupManage,
   "backup.restore.apply": PERMISSIONS.backupRestore,
+  "device.rename": PERMISSIONS.settingsManage,
+  "device.revoke": PERMISSIONS.settingsManage,
   "table.session.open": PERMISSIONS.tablesManage,
   "table.session.update": PERMISSIONS.tablesManage,
   "media.collection.rename": PERMISSIONS.mediaManage,

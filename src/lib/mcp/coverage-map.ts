@@ -716,6 +716,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Tenant billing (plans/packages, wallet, payments)",
     routes: ["billing"],
+    note: "tenant billing lanes (initiate payment → gateway redirect → verify) are browser-bound: the gateway returns a redirect the user's browser must follow, and verifyPayment expects the PSP callback params — no chat-side verb can complete the dance; wallet top-up/purchase design note stands (route-owned), see billing-service fulfilPurchasedPayment",
     test: "integration/billing.integration.test.ts",
   },
   {
@@ -723,6 +724,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Devices & printing config, pairing",
     routes: ["devices", "printing", "payment-methods"],
+    ops: {
+      listDetail: ["list_devices"],
+      update: ["device.rename"],
+      lifecycle: ["device.revoke"],
+    },
+    note: "device PAIRING stays route-only by design: the POST returns a plaintext device token exactly once, meant for the calling browser's local storage — a chat-initiated pair would mint an orphaned credential; printing jobs/test lanes drive physical printers on a branch's own runtime (route-owned); payment-method edits are Owner-side POS settings rides",
     test: "integration/printing.integration.test.ts",
   },
   {

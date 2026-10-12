@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **127 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **146 write verbs**
-(**50** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **128 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **148 write verbs**
+(**51** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -50,6 +50,7 @@ visible only to connections consented for every branch) and **146 write verbs**
 | `list_promotions` | growth | agnostic | `campaigns.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_gift_card_status` | growth | agnostic | `gift_cards.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_backup_status` | workspace | agnostic | `backup.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_devices` | workspace | agnostic | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_stock_counts` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_stock_count` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_suppliers` | pos | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -283,6 +284,8 @@ visible only to connections consented for every branch) and **146 write verbs**
 | `write_backup_config_set` | `backup.config.set` | workspace | low | connection write_mode | `backup.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_backup_run_now` | `backup.run_now` | workspace | high | always approval queue (step-up) | `backup.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_backup_restore_apply` | `backup.restore.apply` | workspace | high | always approval queue (step-up) | `backup.restore` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_device_rename` | `device.rename` | workspace | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_device_revoke` | `device.revoke` | workspace | high | always approval queue (step-up) | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_open` | `table.session.open` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_update` | `table.session.update` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

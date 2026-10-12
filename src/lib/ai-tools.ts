@@ -58,6 +58,7 @@ import { listBarcodes, listItemsWithoutBarcode } from "./inventory-item-barcodes
 import { listCustomerNotes, listActivities } from "./crm-service";
 import { listMembers } from "./team-service";
 import { getBackupHealth, listBackupRuns } from "./backup-service";
+import { listDevices, findActiveDeviceId } from "./device-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
@@ -1687,6 +1688,16 @@ export async function runReadTool(
       return { ok: true, data: { code: card.code, balance, isActive: card.isActive, expiresAt: card.expiresAt, history } };
     }
     // Issue #883 package 2, batch G — stock counts + suppliers directory.
+    // Issue #883 package 2, batch AI — paired devices.
+    case "list_devices": {
+      // No device token exists in the chat channel — currentDeviceId is
+      // deliberately null there, as the route reports for an unpaired caller.
+      const [devices, currentDeviceId] = await Promise.all([
+        listDevices(businessId),
+        findActiveDeviceId(null, businessId),
+      ]);
+      return { ok: true, data: { devices, currentDeviceId } };
+    }
     // Issue #883 package 2, batch AH — backup health + run history.
     case "get_backup_status": {
       const [health, runs] = await Promise.all([getBackupHealth(businessId), listBackupRuns(businessId)]);

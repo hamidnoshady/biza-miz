@@ -122,6 +122,7 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_promotions", kind: "read", app: "growth", branchPolicy: "agnostic" },
   { name: "get_gift_card_status", kind: "read", app: "growth", branchPolicy: "agnostic" },
   { name: "get_backup_status", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_devices", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   // Batch G — inventory readings and the suppliers directory.
   { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
@@ -473,6 +474,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "backup.config.set", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "backup.run_now", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "backup.restore.apply", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  // Batch AI — revoke kills the device's biometric credential along with it
+  // (device-service.revokeDevice), so it steps up like any credential kill.
+  { actionType: "device.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "device.revoke", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

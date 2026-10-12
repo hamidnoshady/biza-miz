@@ -382,6 +382,9 @@ export type ActionType =
   | "backup.config.set"
   | "backup.run_now"
   | "backup.restore.apply"
+  // Batch AI — devices: rename + revoke (pairing stays browser-bound).
+  | "device.rename"
+  | "device.revoke"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -432,6 +435,8 @@ export type AutopilotExecutorKey =
   | "backupConfigSet"
   | "backupRunNow"
   | "backupRestoreApply"
+  | "deviceRename"
+  | "deviceRevoke"
   | "tableSessionOpen"
   | "tableSessionUpdate"
   | "loyaltyPointsRedeem"
@@ -1421,6 +1426,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "device.rename": {
+    type: "device.rename",
+    endpoint: "/api/devices/{id}",
+    method: "PATCH",
+    label: "تغییر نام دستگاه POS",
+    payloadHint: '{ id: string, label: string }',
+    executor: "deviceRename",
+  },
+  "device.revoke": {
+    type: "device.revoke",
+    endpoint: "/api/devices/{id}",
+    method: "DELETE",
+    label: "لغو دستگاه — اعتبارنامهٔ بیومتریک آن هم از کار می‌افتد؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "deviceRevoke",
   },
   "backup.config.set": {
     type: "backup.config.set",
@@ -3840,6 +3861,19 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           name: "get_backup_status",
           description:
             "وضعیت سلامت بکاپ و تاریخچهٔ آخرین اجراها — health + recent runs، همان کارتِ صفحهٔ تنظیمات بکاپ.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_devices",
+          description:
+            "دستگاه‌های جفت‌شدهٔ تنانت — لیست دستگاه‌ها + شناسهٔ دستگاه جاریِ قابل‌استفاده برای rename/revoke.",
           parameters: {
             type: "object",
             properties: {},
