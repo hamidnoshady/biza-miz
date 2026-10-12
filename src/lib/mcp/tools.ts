@@ -1647,6 +1647,46 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_payroll_settings_update",
+    actionType: "payroll.settings.update",
+    english: "Update payroll settings — the calculator's basis for every future run. Always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        settings: { type: "object", description: "همان JSON تنظیمات حقوق که فرم صفحه می‌فرستد" },
+      },
+      required: ["settings"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_payroll_staff_terms",
+    actionType: "payroll.staff.terms",
+    english:
+      "Change one staff member's pay terms (monthly wage / allowances / fixed deduction, integer Rial). Always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        userId: id("شناسهٔ پرسنل"),
+        terms: {
+          type: "object",
+          description: "حداقل یکی: monthlyWage، taxableAllowance، nonTaxableAllowance، fixedDeduction — ریال صحیح؛ monthlyWage=null پاک می‌کند",
+          properties: {
+            monthlyWage: { type: "number" },
+            taxableAllowance: { type: "number" },
+            nonTaxableAllowance: { type: "number" },
+            fixedDeduction: { type: "number" },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ["userId", "terms"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_fixed_asset_set_acquisition",
     actionType: "fixed-asset.set_acquisition",
     english: "Set a fixed asset's acquisition source and (optionally) its source purchase entry.",

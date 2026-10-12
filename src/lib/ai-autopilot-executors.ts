@@ -62,6 +62,10 @@ import { queueTriggeredMessageCampaign } from "./message-campaigns-service";
 import type { PurchaseItemInput } from "./purchase-lines";
 // Issue #883 package 2, batch A — accounting services (batch verbs).
 import { AccountsError, createAccount, updateAccount, deleteAccount } from "./accounts-service";
+import { savePayrollSettings, setStaffPayTerms, type StaffPayTermsPatch } from "./payroll-service";
+import { PAY_TERMS } from "./payroll-types";
+import { fiscalPeriodLockErrorCode } from "./fiscal-periods";
+
 
 import { approveDraft, rejectDraft } from "./manual-journal-service";
 import { ArError, receivePayment } from "./ar-service";
@@ -2677,6 +2681,58 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch Z2 — payroll settings & staff pay terms ────
+// Both mirror the payroll-http error contract (PayrollError keeps its status
+// AND the extra `details` a screen uses to name what field/member blew up;
+// MissingLedgerAccountError and fiscal locks keep their distinct codes).
+// Pay terms are filtered key-by-key EXACTLY like the route: a non-number
+// value can never silently «clear» somebody's wage.
+function failPayroll(err: unknown): AutopilotExecutionResult {
+  if (err instanceof PayrollError) {
+    return { ok: false, result: { error: err.message, ...(err.details ?? {}) }, errorCode: err.message };
+  }
+  if (err instanceof MissingLedgerAccountError) return fail("ledger_account_missing");
+  const lockCode = fiscalPeriodLockErrorCode(err);
+  if (lockCode) return fail(lockCode);
+  throw err;
+}
+const payrollSettingsUpdate: AutopilotExecutor = async (ctx) => {
+  if (ctx.payload.settings == null || typeof ctx.payload.settings !== "object" || Array.isArray(ctx.payload.settings)) {
+    return fail("bad_request");
+  }
+  try {
+    const settings = await savePayrollSettings(ctx.businessId, ctx.payload.settings);
+    return { ok: true, result: { settings: { ...(settings as object) } } };
+  } catch (err) {
+    return failPayroll(err);
+  }
+};
+const payrollStaffTerms: AutopilotExecutor = async (ctx) => {
+  const userId = str(ctx.payload.userId);
+  const terms = ctx.payload.terms;
+  if (!userId || terms == null || typeof terms !== "object" || Array.isArray(terms)) return fail("bad_request");
+  const patch: StaffPayTermsPatch = {};
+  for (const term of PAY_TERMS) {
+    if (!(term in terms)) continue;
+    const raw = (terms as Record<string, unknown>)[term];
+    if (raw === null && term === "monthlyWage") patch[term] = null;
+    else if (typeof raw === "number" && Number.isFinite(raw)) patch[term] = raw;
+    else return fail("invalid_amount");
+  }
+  if (Object.keys(patch).length === 0) return fail("bad_request");
+  try {
+    await setStaffPayTerms({
+      businessId: ctx.businessId,
+      userId,
+      patch,
+      actorId: ctx.authorizedByUserId ?? null,
+    });
+    return { ok: true, result: { ok: true, userId } };
+  } catch (err) {
+    return failPayroll(err);
+  }
+};
+
 // ── Issue #883 package 2, batch Z — fixed-asset acquisition link ───────────
 // Byte-for-byte the PATCH route: enum/source validation and not-found are
 // the service's, surfacing as FixedAssetError codes.
@@ -3214,6 +3270,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   websiteDomainSet,
   accountDelete,
   fixedAssetSetAcquisition,
+  payrollSettingsUpdate,
+  payrollStaffTerms,
   mediaCollectionCreate,
   mediaCollectionRename,
   mediaCollectionDelete,

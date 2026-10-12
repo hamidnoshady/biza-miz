@@ -343,6 +343,9 @@ export type ActionType =
   | "account.delete"
   // Batch Z — fixed-asset acquisition link (the register's only PATCH).
   | "fixed-asset.set_acquisition"
+  // Batch Z2 — payroll settings + staff pay terms (pay maths for future months).
+  | "payroll.settings.update"
+  | "payroll.staff.terms"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -382,6 +385,8 @@ export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
   | "websiteOrderStatus"
   | "websiteDomainSet"
+  | "payrollSettingsUpdate"
+  | "payrollStaffTerms"
   | "fixedAssetSetAcquisition"
   | "accountDelete"
   | "mediaCollectionCreate"
@@ -1356,6 +1361,23 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "payroll.settings.update": {
+    type: "payroll.settings.update",
+    endpoint: "/api/ledger/payroll/settings",
+    method: "PUT",
+    label: "به‌روزرسانی تنظیمات حقوق — مبنای محاسبهٔ ماه‌های آینده است",
+    payloadHint: '{ settings: { ...same payroll settings JSON the screen sends... } }',
+    executor: "payrollSettingsUpdate",
+  },
+  "payroll.staff.terms": {
+    type: "payroll.staff.terms",
+    endpoint: "/api/ledger/payroll/staff/[id]",
+    method: "PATCH",
+    label: "تغییر شرایط پرداخت یک پرسنل — حقوق ماهانه/کمک‌هزینه/کسور ثابت (ریال صحیح)",
+    payloadHint:
+      '{ userId: string, terms: { monthlyWage?: number|null, taxableAllowance?: number, nonTaxableAllowance?: number, fixedDeduction?: number } /* حداقل یک ترم */ }',
+    executor: "payrollStaffTerms",
   },
   "fixed-asset.set_acquisition": {
     type: "fixed-asset.set_acquisition",

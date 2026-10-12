@@ -122,7 +122,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Accounting",
     entity: "Payroll (settings, staff, runs, advances)",
     routes: ["ledger/payroll"],
-    ops: { listDetail: ["get_payroll_summary", "list_payroll_runs", "list_payroll_advances"], create: ["payroll.run.accrue", "payroll.advance.record"], lifecycle: ["payroll.run.pay", "payroll.run.void", "payroll.advance.void"] },
+    ops: { listDetail: ["get_payroll_summary", "list_payroll_runs", "list_payroll_advances"], create: ["payroll.run.accrue", "payroll.advance.record"], update: ["payroll.settings.update", "payroll.staff.terms"], lifecycle: ["payroll.run.pay", "payroll.run.void", "payroll.advance.void"] },
+    note: "settings and pay terms are always_approve by parity with the rest of the money-shaping payroll verbs (settings govern every future run; terms change somebody's pay)",
     test: "integration/payroll.integration.test.ts",
   },
   {

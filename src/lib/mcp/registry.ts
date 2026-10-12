@@ -425,6 +425,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch Z — a register field (source link), not a posting; the asset's
   // depreciate/dispose siblings already carry the gate tier.
   { actionType: "fixed-asset.set_acquisition", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  // Batch Z2 — same tier as the other payroll money-shaping verbs on the
+  // row: settings govern every future run, wage terms change somebody's pay.
+  { actionType: "payroll.settings.update", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  { actionType: "payroll.staff.terms", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },
