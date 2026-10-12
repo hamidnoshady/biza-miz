@@ -11,7 +11,7 @@
  * callers: an Owner's second factor and a cashier's door login differ in
  * ceremony, not in what a live challenge row means.
  */
-import { SignJWT } from "jose";
+import { EncryptJWT, jwtDecrypt } from "jose";
 import { query, withoutTenantScope } from "./db";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
 import {
@@ -119,36 +119,66 @@ export interface PhonePendingPayload {
   realm: "phone";
 }
 
+/**
+ * The claim shape carried by a pending token, whichever of the two encodings
+ * it arrived in. `uid` rather than `sub` because `jose` reserves `sub` for its
+ * own validated claim and we do not want a caller-supplied one to shadow it.
+ */
+interface PhonePendingClaims {
+  realm?: string;
+  uid?: string | null;
+  businessId?: string;
+  mayAttachPhone?: boolean;
+  phone?: string | null;
+  candidatePhone?: string | null;
+  multiBusiness?: boolean;
+  otpProven?: boolean;
+}
+
 const PHONE_PENDING_TTL = "10m";
 
+/**
+ * Issue #885, gap 2 — the pending token is **encrypted**, not merely signed.
+ *
+ * A signed HS256 JWT is readable: its middle segment base64-decodes to the
+ * whole payload. That made the anti-enumeration guarantee on the phone door
+ * cosmetic — the synthetic "no such member" response and the real one were
+ * distinguishable by simply looking at the token, because one carried `uid`,
+ * `businessId` and `cid` and the other carried nulls and zeros. Encryption
+ * removes the readable payload entirely, so the two tokens differ only in
+ * length and the route can keep its byte-identical body.
+ *
+ * `dir` + `A256GCM` uses the realm secret directly as the content-encryption
+ * key, which keeps the existing key material and rotation working unchanged.
+ */
 export async function signPhonePendingToken(
   payload: Omit<PhonePendingPayload, "realm">,
 ): Promise<string> {
   const secret = await getRealmSecret("phone");
-  return new SignJWT({
+  return new EncryptJWT({
     ...payload,
     sub: undefined,
     uid: payload.sub,
     realm: "phone",
   })
-    .setProtectedHeader({ alg: "HS256" })
+    .setProtectedHeader({ alg: "dir", enc: "A256GCM" })
     .setIssuedAt()
     .setExpirationTime(PHONE_PENDING_TTL)
-    .sign(secret);
+    .encrypt(secret);
 }
 
 export async function verifyPhonePendingToken(token: string): Promise<PhonePendingPayload | null> {
   try {
-    const payload = await verifyWithRealmSecret<{
-      realm?: string;
-      uid?: string | null;
-      businessId?: string;
-      mayAttachPhone?: boolean;
-      phone?: string | null;
-      candidatePhone?: string | null;
-      multiBusiness?: boolean;
-      otpProven?: boolean;
-    }>(token, "phone");
+    // The encrypted read is the normal path. Both secret reads sit *inside*
+    // this try on purpose: `getRealmSecret` throws when a realm has no
+    // previous secret configured, which is the common case, and a throw from
+    // outside the try would reject the whole expression so the fallback below
+    // silently never ran.
+    const secret = await getRealmSecret("phone");
+    const decrypted = await jwtDecrypt<PhonePendingClaims>(token, secret).catch(() => null);
+    const payload =
+      decrypted?.payload ??
+      (await verifyWithRealmSecret<PhonePendingClaims>(token, "phone").catch(() => null));
     if (!payload || payload.realm !== "phone") return null;
     return {
       sub: payload.uid ?? null,
