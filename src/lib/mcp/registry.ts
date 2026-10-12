@@ -498,6 +498,16 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "jewelry.stone.add", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "jewelry.stone.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "jewelry.item.consign", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AL2 — every lane below either posts money (sale/buy-back/installment
+  // /payout/layaway deposit+settle) or re-prices the whole stock of a purity
+  // (mass price rule). All of them step up on every single call.
+  { actionType: "jewelry.item.sell", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "jewelry.buyback.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "jewelry.layaway.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "jewelry.layaway.pay", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "jewelry.layaway.complete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "jewelry.consignor.payout", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "jewelry.price.record", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

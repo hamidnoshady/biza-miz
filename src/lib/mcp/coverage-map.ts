@@ -878,11 +878,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)",
     routes: ["jewelry"],
     ops: {
-      create: ["jewelry.item.create", "jewelry.stone.add"],
-      update: ["jewelry.item.update", "jewelry.item.consign"],
-      lifecycle: ["jewelry.stone.delete"],
+      create: ["jewelry.item.create", "jewelry.stone.add", "jewelry.buyback.create", "jewelry.layaway.create", "jewelry.price.record"],
+      update: ["jewelry.item.update", "jewelry.item.consign", "jewelry.layaway.pay"],
+      lifecycle: ["jewelry.stone.delete", "jewelry.item.sell", "jewelry.layaway.complete", "jewelry.consignor.payout"],
     },
-    note: "money lanes (sell / buy-back / consignor payout / layaway settle) and the bulk gold-price update ship in AL2; AL1 covers the catalog + consignment lanes with item-audit events identical to the routes",
+    note: "AL1 catalog + AL2 money lanes: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory CRUD itself ships in a follow-up (payouts are the wallets-relevant half)",
     test: "integration/jewelry.integration.test.ts",
   },
   {

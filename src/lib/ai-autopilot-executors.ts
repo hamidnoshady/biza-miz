@@ -37,6 +37,11 @@ import { createItem, getItem, setWeightAttributes, getWeightAttributes, addStone
 import { validateWeightAttributes } from "./gold";
 import { markAsConsigned } from "./consignment-service";
 import { recordItemEvent } from "./item-audit-service";
+import { sellWeightedItem } from "./gold-sales-service";
+import { buyBackGold, openLayaway, payLayaway, completeLayaway } from "./jewelry-flagship-service";
+import { payConsignor } from "./consignment-service";
+import { isPurity } from "./gold";
+import { recordGoldPrice, getGoldPrice } from "./gold-prices-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2686,6 +2691,204 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AL2 — jewelry money lanes ────────────────
+// Every verb mirrors its route 1:1: same client transaction, same ledger
+// error convention (MissingLedgerAccountError → ledger_account_missing),
+// same failure envelope the gold screens show ({*_failed, message}).
+const jewelryFailEnv = (err: unknown, code: "pay_failed" | "complete_failed" | "validation_failed"): AutopilotExecutionResult => {
+  if (err instanceof MissingLedgerAccountError) {
+    return { ok: false, result: { error: "ledger_account_missing", code: err.code }, errorCode: "ledger_account_missing" };
+  }
+  return { ok: false, result: { error: code, message: (err as Error).message }, errorCode: code };
+};
+const jewelryItemSell: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const makingChargeType = str(ctx.payload.makingChargeType);
+  if (makingChargeType !== "percent" && makingChargeType !== "fixed") return fail("invalid_making_charge");
+  const makingChargeValue = Number(ctx.payload.makingChargeValue);
+  const profitPercent = Number(ctx.payload.profitPercent);
+  const vatPercent = Number(ctx.payload.vatPercent);
+  if (![makingChargeValue, profitPercent, vatPercent].every(Number.isFinite)) return fail("bad_request");
+  const paymentMethod = str(ctx.payload.paymentMethod);
+  if (paymentMethod !== "cash" && paymentMethod !== "bank" && paymentMethod !== "credit") return fail("invalid_payment_method");
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await sellWeightedItem(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      itemId: id,
+      makingCharge: { type: makingChargeType, value: makingChargeValue },
+      profitPercent,
+      vatPercent,
+      paymentMethod,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return jewelryFailEnv(err, "validation_failed");
+  } finally {
+    client.release();
+  }
+};
+const jewelryBuybackCreate: AutopilotExecutor = async (ctx) => {
+  const purity = str(ctx.payload.purity);
+  const grossWeight = str(ctx.payload.grossWeight) ?? "";
+  if (!purity || !grossWeight) return fail("missing_fields");
+  if (!isPurity(purity)) return fail("invalid_purity");
+  const price = await getGoldPrice(ctx.businessId, purity);
+  if (!price || price.buyPricePerGram == null) {
+    return { ok: false, result: { error: "no_buy_rate", message: "نرخ خرید امروز برای این عیار ثبت نشده است." }, errorCode: "no_buy_rate" };
+  }
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await buyBackGold(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      customerId: str(ctx.payload.customerId) ?? null,
+      purity: purity as never,
+      grossWeight,
+      karsorPercent: Number(ctx.payload.karsorPercent ?? 0),
+      buyPricePerGram: price.buyPricePerGram,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return jewelryFailEnv(err, "validation_failed");
+  } finally {
+    client.release();
+  }
+};
+const jewelryLayawayCreate: AutopilotExecutor = async (ctx) => {
+  const customerId = str(ctx.payload.customerId);
+  const grams = str(ctx.payload.grams) ?? str(ctx.payload.grams?.toString());
+  if (!customerId || !grams) return fail("missing_fields");
+  const pricePerGram = Number(ctx.payload.pricePerGram ?? 0);
+  const depositRial = Number(ctx.payload.depositRial ?? 0);
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const plan = await openLayaway(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      customerId,
+      itemId: str(ctx.payload.itemId) ?? null,
+      grams,
+      pricePerGram,
+      depositRial,
+      promisedDate: (ctx.payload.promisedDate as string | null | undefined) ?? null,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { plan: { ...(plan as object) } } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return jewelryFailEnv(err, "validation_failed");
+  } finally {
+    client.release();
+  }
+};
+const jewelryLayawayPay: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.planId);
+  const amount = Number(ctx.payload.amount ?? 0);
+  if (!id) return fail("missing_fields");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const plan = await payLayaway(client, {
+      businessId: ctx.businessId,
+      planId: id,
+      amount,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, plan: { ...(plan as object) } } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return jewelryFailEnv(err, "pay_failed");
+  } finally {
+    client.release();
+  }
+};
+const jewelryLayawayComplete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.planId);
+  if (!id) return fail("missing_fields");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const plan = await completeLayaway(client, {
+      businessId: ctx.businessId,
+      planId: id,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, plan: { ...(plan as object) } } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return jewelryFailEnv(err, "complete_failed");
+  } finally {
+    client.release();
+  }
+};
+const jewelryConsignorPayout: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.consignorId);
+  const amount = Number(ctx.payload.amount);
+  const paymentMethod = str(ctx.payload.paymentMethod) === "bank" ? "bank" : "cash";
+  if (!id) return fail("missing_fields");
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await payConsignor(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      consignorId: id,
+      amount,
+      paymentMethod,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return jewelryFailEnv(err, "validation_failed");
+  } finally {
+    client.release();
+  }
+};
+const jewelryPriceRecord: AutopilotExecutor = async (ctx) => {
+  const purity = str(ctx.payload.purity) ?? "";
+  const pricePerGram = Number(ctx.payload.pricePerGram);
+  if (!Number.isFinite(pricePerGram)) return fail("bad_request");
+  try {
+    const price = await recordGoldPrice({
+      businessId: ctx.businessId,
+      purity,
+      pricePerGram,
+      createdBy: ctx.authorizedByUserId,
+    });
+    return { ok: true, result: { ok: true, price: { ...(price as object) } } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+
 // ── Issue #883 package 2, batch AL1 — jewelry catalog ────────────────────
 // The routes validate weight inputs BEFORE any write and mirror every write
 // with an item-audit event; both land here verbatim so the timeline on the
@@ -4201,6 +4404,13 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  jewelryItemSell,
+  jewelryBuybackCreate,
+  jewelryLayawayCreate,
+  jewelryLayawayPay,
+  jewelryLayawayComplete,
+  jewelryConsignorPayout,
+  jewelryPriceRecord,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

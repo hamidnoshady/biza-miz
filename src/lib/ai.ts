@@ -399,6 +399,15 @@ export type ActionType =
   | "jewelry.stone.add"
   | "jewelry.stone.delete"
   | "jewelry.item.consign"
+  // Batch AL2 — jewelry money lanes: every one moves gold or cash → all
+  // seven step up on every call, no exceptions.
+  | "jewelry.item.sell"
+  | "jewelry.buyback.create"
+  | "jewelry.layaway.create"
+  | "jewelry.layaway.pay"
+  | "jewelry.layaway.complete"
+  | "jewelry.consignor.payout"
+  | "jewelry.price.record"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -449,6 +458,13 @@ export type AutopilotExecutorKey =
   | "backupConfigSet"
   | "backupRunNow"
   | "backupRestoreApply"
+  | "jewelryItemSell"
+  | "jewelryBuybackCreate"
+  | "jewelryLayawayCreate"
+  | "jewelryLayawayPay"
+  | "jewelryLayawayComplete"
+  | "jewelryConsignorPayout"
+  | "jewelryPriceRecord"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1450,6 +1466,62 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "jewelry.item.sell": {
+    type: "jewelry.item.sell",
+    endpoint: "/api/jewelry/items/{id}/sell",
+    method: "POST",
+    label: "فروش قلم طلای وزنی — سند فروش واقعی با اجرت/سود/مالیات و تسویه؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, makingChargeType: "percent"|"fixed", makingChargeValue: number, profitPercent: number, vatPercent: number, paymentMethod: "cash"|"bank"|"credit", locationId?: string }',
+    executor: "jewelryItemSell",
+  },
+  "jewelry.buyback.create": {
+    type: "jewelry.buyback.create",
+    endpoint: "/api/jewelry/buy-back",
+    method: "POST",
+    label: "خرید طلای دست‌دوم از مشتری با نرخ امروز — پول می‌رود بیرون، موجودی می‌آید داخل؛ هر بار تأیید انسان",
+    payloadHint: '{ purity: string, grossWeight: string, karsorPercent?: number, customerId?: string, locationId?: string }',
+    executor: "jewelryBuybackCreate",
+  },
+  "jewelry.layaway.create": {
+    type: "jewelry.layaway.create",
+    endpoint: "/api/jewelry/layaway",
+    method: "POST",
+    label: "باز کردن امانت-خرید (layaway) برای مشتری — درصدی بیعانه الزامی است؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, grams: string, pricePerGram: number, depositRial?: number, promisedDate?: string|null, itemId?: string, locationId?: string }',
+    executor: "jewelryLayawayCreate",
+  },
+  "jewelry.layaway.pay": {
+    type: "jewelry.layaway.pay",
+    endpoint: "/api/jewelry/layaway/{id}/pay",
+    method: "POST",
+    label: "دریافت قسط امانت-خرید — دریافت واقعی پول؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, amount: number }',
+    executor: "jewelryLayawayPay",
+  },
+  "jewelry.layaway.complete": {
+    type: "jewelry.layaway.complete",
+    endpoint: "/api/jewelry/layaway/{id}/complete",
+    method: "POST",
+    label: "تسویهٔ نهایی امانت-خرید — فروش قطعی ثبت می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "jewelryLayawayComplete",
+  },
+  "jewelry.consignor.payout": {
+    type: "jewelry.consignor.payout",
+    endpoint: "/api/jewelry/consignors/{id}/payout",
+    method: "POST",
+    label: "تسویه با امانت‌دار — پرداخت واقعی نقد/بانک؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, amount: number, paymentMethod: "cash"|"bank", locationId?: string }',
+    executor: "jewelryConsignorPayout",
+  },
+  "jewelry.price.record": {
+    type: "jewelry.price.record",
+    endpoint: "/api/jewelry/prices",
+    method: "POST",
+    label: "ثبت نرخ روز طلا برای یک عیار — قیمت‌گذاری انبوه همهٔ اقلام همین عیار را تغییر می‌دهد؛ هر بار تأیید انسان",
+    payloadHint: '{ purity: string, pricePerGram: number }',
+    executor: "jewelryPriceRecord",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
