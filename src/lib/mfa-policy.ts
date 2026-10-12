@@ -83,10 +83,28 @@ export async function setMfaPolicy(businessId: string, policy: MfaPolicy): Promi
   //
   // Only on an actual change, so re-saving the same policy does not log
   // everyone out of their trusted devices for nothing.
-  if (previous.requireForManagers !== next.requireForManagers) {
+  /*
+   * Every field the policy can tighten is compared, not just the first one.
+   *
+   * `requireForAccountants` is a separate switch (#854) and it exempts exactly
+   * the same routine challenge, so an accountant's seven-day device trust is
+   * just as stale after it flips as a manager's is after theirs. Comparing only
+   * `requireForManagers` left a real hole: an owner could switch MFA on for
+   * every accountant in the business and not one of them would be asked, until
+   * their device trust happened to expire on its own.
+   *
+   * One revocation covers whichever field moved — the exemption is per device,
+   * not per role, so there is nothing to split.
+   */
+  const managersChanged = previous.requireForManagers !== next.requireForManagers;
+  const accountantsChanged = previous.requireForAccountants !== next.requireForAccountants;
+  if (managersChanged || accountantsChanged) {
+    const tightened =
+      (managersChanged && next.requireForManagers) ||
+      (accountantsChanged && next.requireForAccountants);
     await revokeTrustedDevicesForBusiness({
       businessId,
-      reason: next.requireForManagers ? "mfa_policy_tightened" : "mfa_policy_changed",
+      reason: tightened ? "mfa_policy_tightened" : "mfa_policy_changed",
     });
   }
 

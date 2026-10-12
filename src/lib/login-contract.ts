@@ -252,7 +252,16 @@ export function loginErrorMessage(options: {
     case "unknown_business":
     case "business_required":
       return "کسب‌وکار در دسترس نیست. با مدیر خود تماس بگیرید.";
+    /*
+     * `/api/auth/login` spells this `no_business_membership`; `no_membership` is
+     * the shorter form the other doors use. Both name the same condition — the
+     * account exists and authenticated, but holds no active membership — and
+     * without the alias the route's spelling fell through to the generic 403
+     * "not permitted from this path", which tells a member their *route* is
+     * wrong when what is actually wrong is their access.
+     */
     case "no_membership":
+    case "no_business_membership":
       return "برای این حساب دسترسی فعالی ثبت نشده است.";
     case "needsBusinessSelection":
       return "برای ادامه، کسب‌وکار خود را انتخاب کنید.";

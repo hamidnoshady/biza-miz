@@ -338,6 +338,54 @@ describe("security events invalidate trust", () => {
     expect(rows[0].revoked_reason).toBe("mfa_policy_tightened");
   });
 
+  it("switching the requirement on for accountants revokes trust too", async () => {
+    const mfaPolicy = await import("../src/lib/mfa-policy");
+
+    // Baseline: managers already required, accountants not. The tests above
+    // leave this business in a known state, but set it explicitly so this case
+    // cannot silently inherit a different starting policy.
+    await dbLib.withTenant(biz.id, () =>
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false, requireForAccountants: false }),
+    );
+
+    const issued = await dbLib.withTenant(biz.id, () =>
+      trustedDevice.issueTrustedDevice({ businessId: biz.id, userId: member.a }),
+    );
+    expect(
+      await trustedDevice.verifyTrustedDevice({
+        businessId: biz.id,
+        userId: member.a,
+        token: issued.token,
+      }),
+    ).toEqual({ trusted: true, expiresAt: issued.expiresAt });
+
+    /*
+     * Only `requireForAccountants` moves. This is the case the change-detection
+     * used to miss: it compared `requireForManagers` alone, so an owner could
+     * turn the second factor on for every accountant in the business and not
+     * one existing device exemption would be re-earned. Both switches exempt
+     * the same routine challenge, so both must invalidate.
+     */
+    await dbLib.withTenant(biz.id, () =>
+      mfaPolicy.setMfaPolicy(biz.id, { requireForManagers: false, requireForAccountants: true }),
+    );
+
+    expect(
+      await trustedDevice.verifyTrustedDevice({
+        businessId: biz.id,
+        userId: member.a,
+        token: issued.token,
+      }),
+    ).toEqual({ trusted: false, reason: "revoked" });
+
+    const { rows } = await db.query<{ revoked_reason: string }>(
+      `SELECT revoked_reason FROM trusted_devices WHERE business_id = $1 AND user_id = $2
+        ORDER BY trusted_at DESC LIMIT 1`,
+      [biz.id, member.a],
+    );
+    expect(rows[0].revoked_reason).toBe("mfa_policy_tightened");
+  });
+
   it("re-saving an unchanged MFA policy does not take anyone's trust", async () => {
     const mfaPolicy = await import("../src/lib/mfa-policy");
 
