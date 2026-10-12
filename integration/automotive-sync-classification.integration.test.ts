@@ -317,6 +317,7 @@ describe("§22's classification against the schema", () => {
       "127.0.0.1",
       "Windows Business Suite",
       installationId,
+      { maxSnapshotVersion: pairingSnapshot.PAIRING_SNAPSHOT_VERSION },
     );
     expect(redeemed.ok).toBe(true);
     if (!redeemed.ok) return;
