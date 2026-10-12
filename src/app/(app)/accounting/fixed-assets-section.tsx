@@ -39,6 +39,13 @@ import {
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 import {
+  DimensionCatalogError,
+  DimensionFields,
+  DimensionFieldsSkeleton,
+  useDimensionCatalog,
+} from "./dimension-fields";
+import { dimensionPayload, type DimensionDraft } from "./dimension-catalog";
+import {
   ASSET_ACQUISITION_SOURCE_ROLES,
   ASSET_SALE_PROCEEDS_ROLES,
   classifyAccounts,
@@ -1017,6 +1024,9 @@ function AssetForm({
   const [vendorPartyId, setVendorPartyId] = useState("");
   const [custodianPartyId, setCustodianPartyId] = useState("");
   const [assetAccountId, setAssetAccountId] = useState("");
+  // Default dimensions stamped on acquisition, depreciation and disposal.
+  const [assetDimensions, setAssetDimensions] = useState<DimensionDraft>({});
+  const dimCatalog = useDimensionCatalog();
   const [suppliers, setSuppliers] = useState<PartyOption[] | null>(null);
   const acquisitionSettlementAccounts = useMemo(
     () => settlementAccountOptions(accounts ?? [], ASSET_ACQUISITION_SOURCE_ROLES),
@@ -1133,6 +1143,7 @@ function AssetForm({
         purchaseReference: purchaseReference.trim() || null,
         notes: notes.trim() || null,
         assetAccountId: assetAccountId || null,
+        dimensions: dimensionPayload(assetDimensions) ?? null,
       }),
     });
     setIsSubmitting(false);
@@ -1158,6 +1169,7 @@ function AssetForm({
     setVendorPartyId("");
     setCustodianPartyId("");
     setAssetAccountId("");
+    setAssetDimensions({});
     setShowDetails(false);
     onNotice("دارایی ثابت جدید با موفقیت در دفتر ثبت شد.");
     onCreated();
@@ -1451,6 +1463,32 @@ function AssetForm({
                 disabled={busy || isSubmitting}
               />
             </Field>
+
+            <div className="sm:col-span-2">
+              <p className="mb-1.5 block text-sm font-medium text-foreground">ابعاد حسابداری پیش‌فرض</p>
+              <p className="mb-2 text-xs text-muted-foreground">
+                ثبت خرید، استهلاک‌های آتی و واگذاری این دارایی به‌طور خودکار با این ابعاد زده می‌شوند؛ پای حساب تسویه (صندوق/بانک) بی‌بُعد می‌ماند.
+              </p>
+              {dimCatalog.error ? (
+                <DimensionCatalogError error={dimCatalog.error} onRetry={dimCatalog.retry} />
+              ) : !dimCatalog.loaded ? (
+                <DimensionFieldsSkeleton />
+              ) : (
+                <DimensionFields
+                  idPrefix="asset-dimensions"
+                  catalog={dimCatalog.catalog}
+                  locationId={null}
+                  value={assetDimensions}
+                  onChange={setAssetDimensions}
+                  disabled={busy || isSubmitting}
+                />
+              )}
+              {dimCatalog.catalog?.truncated ? (
+                <p className="mt-2 text-xs text-amber-700">
+                  فهرست ابعاد بیش از {dimCatalog.catalog.truncatedAt?.toLocaleString("fa-IR") ?? "۲۰۰۰"} مقدار دارد؛ برای یافتن مقدارهای قدیمی‌تر از جستجوی درون هر انتخاب‌گر استفاده کنید.
+                </p>
+              ) : null}
+            </div>
           </div>
         ) : null}
 

@@ -6,8 +6,10 @@ import {
   AccountingDimensionError,
   createDimensionValue,
   DIMENSION_VALUE_LIST_CAP,
+  getDimensionValuesByIds,
   listDimensionSettings,
   listDimensionValues,
+  searchDimensionValues,
   type DimensionValueInput,
 } from "@/lib/accounting-dimensions-service";
 
@@ -29,20 +31,44 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (kindParam && !isDimensionKind(kindParam)) {
     return NextResponse.json({ error: "unknown_dimension_kind" }, { status: 400 });
   }
+  const kind = kindParam ? (kindParam as DimensionKind) : undefined;
   const includeArchived = ["1", "true", "yes"].includes((params.get("includeArchived") ?? "").toLowerCase());
-  const [settings, valueList] = await Promise.all([
+  const q = (params.get("q") ?? "").trim();
+  const idsParam = params.get("ids");
+  const postable = params.get("postable") !== "0" && params.get("postable") !== "false";
+  const limitParam = Number(params.get("limit"));
+  const limit = Number.isInteger(limitParam) && limitParam > 0 ? limitParam : 20;
+
+  // Selected-ID resolution: a picker holding a value outside the initial capped
+  // list must still be able to display the saved label. The response merges
+  // these with search results so a single round trip is enough.
+  const selectedIds = idsParam
+    ? idsParam.split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+
+  const [settings, hits, selected] = await Promise.all([
     listDimensionSettings(session.businessId),
-    listDimensionValues(session.businessId, {
-      kind: kindParam ? (kindParam as DimensionKind) : undefined,
-      includeArchived,
-    }),
+    q
+      ? searchDimensionValues(session.businessId, { q, kind, postable, limit })
+      : listDimensionValues(session.businessId, { kind, includeArchived }).then((r) => r.values),
+    selectedIds.length > 0 ? getDimensionValuesByIds(session.businessId, selectedIds) : Promise.resolve([]),
   ]);
+
+  // Merge selected + hits deduped by id, preserving server order for hits.
+  const merged = new Map<string, (typeof selected)[number]>();
+  for (const v of selected) merged.set(v.id, v);
+  for (const v of hits) merged.set(v.id, v);
+  const values = [...merged.values()];
+
+  // Truncation flag: a search response is never truncated (it has its own
+  // small LIMIT). The full-catalogue response reports truncation as before.
+  const fullList = !q;
   return NextResponse.json({
     settings,
-    values: valueList.values,
-    truncated: valueList.truncated,
-    truncatedAt: valueList.truncated ? DIMENSION_VALUE_LIST_CAP : null,
-    totalLoaded: valueList.values.length,
+    values,
+    truncated: fullList ? hits.length >= DIMENSION_VALUE_LIST_CAP : false,
+    truncatedAt: fullList && hits.length >= DIMENSION_VALUE_LIST_CAP ? DIMENSION_VALUE_LIST_CAP : null,
+    totalLoaded: values.length,
   });
 });
 

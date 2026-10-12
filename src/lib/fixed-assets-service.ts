@@ -820,15 +820,15 @@ export async function createFixedAsset(params: {
     throw new FixedAssetError("idempotency_key_too_long");
   }
 
-  const client = await getPool().connect();
-  let id: string;
-  // Issue #868: validate the default dimensions before opening the transaction
-  // so malformed input is refused without leaving a rolled-back txn. The same
-  // rule set the journal writer applies (enabled/active/leaf/branch/date).
+  // Issue #868: validate the default dimensions before acquiring a client, so
+  // malformed input refuses without leaking a pooled connection.
   const parsedDimensions = parseLineDimensions(params.dimensions);
   if (!parsedDimensions.ok) throw new AccountingDimensionError("invalid_dimension");
   const assetDimensions: LineDimensions = parsedDimensions.value;
   const dimCols = dimensionColumnValues(assetDimensions);
+
+  const client = await getPool().connect();
+  let id: string;
   try {
     await client.query("BEGIN");
     // Verify the default dimensions are postable on the in-service date at the
@@ -1112,12 +1112,14 @@ export async function setFixedAssetAcquisition(params: {
   fixedAssetId: string;
   acquisitionSource: string;
   acquisitionEntryId?: string | null;
+  client?: PoolClient;
 }): Promise<FixedAsset> {
   const link = normaliseAcquisitionLink(params.acquisitionSource, params.acquisitionEntryId);
   if (!isUuid(params.fixedAssetId)) throw new FixedAssetError("fixed_asset_not_found", 404);
-  const client = await getPool().connect();
+  const ownClient = !params.client;
+  const client = params.client ?? (await getPool().connect());
   try {
-    await client.query("BEGIN");
+    if (ownClient) await client.query("BEGIN");
     const { rows } = await client.query<{ cost: string; status: FixedAssetStatus; archived_at: string | null }>(
       `SELECT cost::text AS cost, status, archived_at::text FROM fixed_assets WHERE business_id = $1 AND id = $2 FOR UPDATE`,
       [params.businessId, params.fixedAssetId],
@@ -1132,6 +1134,96 @@ export async function setFixedAssetAcquisition(params: {
       `UPDATE fixed_assets SET acquisition_source = $3, acquisition_entry_id = $4 WHERE business_id = $1 AND id = $2`,
       [params.businessId, params.fixedAssetId, link.source, link.entryId],
     );
+    if (ownClient) await client.query("COMMIT");
+  } catch (err) {
+    if (ownClient) await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    if (ownClient) client.release();
+  }
+  if (ownClient) {
+    return (await getFixedAssetWithDepreciation(params.businessId, params.fixedAssetId)).fixedAsset;
+  }
+  // Caller owns the transaction and will read back at commit time.
+  return null as unknown as FixedAsset;
+}
+
+/**
+ * Atomic metadata update (issue #868): default dimensions AND/OR acquisition
+ * link, under one lock and one transaction. Both are metadata; neither posts
+ * anything. Dimensions are validated against today/branch. Default-dimension
+ * changes apply prospectively (already-posted history is not rewritten).
+ */
+export async function updateFixedAsset(params: {
+  businessId: string;
+  fixedAssetId: string;
+  acquisitionSource?: string;
+  acquisitionEntryId?: string | null;
+  setAcquisition?: boolean;
+  dimensions?: LineDimensions | null;
+  setDimensions?: boolean;
+}): Promise<FixedAsset> {
+  if (!isUuid(params.fixedAssetId)) throw new FixedAssetError("fixed_asset_not_found", 404);
+  let parsedDims: LineDimensions = {};
+  if (params.setDimensions) {
+    const parsed = parseLineDimensions(params.dimensions);
+    if (!parsed.ok) throw new AccountingDimensionError("invalid_dimension");
+    parsedDims = parsed.value;
+  }
+  const dimCols = dimensionColumnValues(parsedDims);
+  const link = params.setAcquisition
+    ? normaliseAcquisitionLink(String(params.acquisitionSource ?? ""), params.acquisitionEntryId ?? null)
+    : null;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const asset = await lockAsset(client, params.businessId, params.fixedAssetId);
+    if (asset.status === "disposed") throw new FixedAssetError("asset_disposed", 409);
+    if (asset.archivedAt) throw new FixedAssetError("asset_archived", 409);
+    if (params.setDimensions && Object.keys(parsedDims).length > 0) {
+      const today = await businessToday(params.businessId);
+      await assertDimensionsPostable(client, {
+        businessId: params.businessId,
+        locationId: asset.locationId,
+        entryDate: today,
+        lines: [{ dimensions: parsedDims }],
+      });
+    }
+    const sets: string[] = [];
+    const args: unknown[] = [params.businessId, params.fixedAssetId];
+    if (params.setDimensions) {
+      sets.push(
+        "cost_center_id = $3",
+        "profit_center_id = $4",
+        "department_id = $5",
+        "detail_dimension_id = $6",
+      );
+      args.push(dimCols.cost_center_id, dimCols.profit_center_id, dimCols.department_id, dimCols.detail_dimension_id);
+    }
+    if (params.setAcquisition && link) {
+      const offset = args.length + 1;
+      if (link.entryId) {
+        const { rows: costRows } = await client.query<{ cost: string }>(
+          `SELECT cost::text AS cost FROM fixed_assets WHERE business_id = $1 AND id = $2`,
+          [params.businessId, params.fixedAssetId],
+        );
+        await assertAcquisitionEntryCovers(
+          client,
+          params.businessId,
+          link.entryId,
+          Number(costRows[0].cost),
+          params.fixedAssetId,
+        );
+      }
+      sets.push(`acquisition_source = $${offset}`, `acquisition_entry_id = $${offset + 1}`);
+      args.push(link.source, link.entryId);
+    }
+    if (sets.length > 0) {
+      await client.query(
+        `UPDATE fixed_assets SET ${sets.join(", ")} WHERE business_id = $1 AND id = $2`,
+        args,
+      );
+    }
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -1152,55 +1244,19 @@ export async function setFixedAssetAcquisition(params: {
  * attribute; a historical posting already carries what it carried).
  *
  * Permissions: `financeAssetsManage`, same as every other asset mutation.
+ * @deprecated Use `updateFixedAsset` (atomic with acquisition link) when both fields may change in one request.
  */
 export async function updateFixedAssetDimensions(params: {
   businessId: string;
   fixedAssetId: string;
   dimensions: LineDimensions | null | undefined;
 }): Promise<FixedAsset> {
-  if (!isUuid(params.fixedAssetId)) throw new FixedAssetError("fixed_asset_not_found", 404);
-  const parsed = parseLineDimensions(params.dimensions);
-  if (!parsed.ok) throw new AccountingDimensionError("invalid_dimension");
-  const next = parsed.value;
-  const dimCols = dimensionColumnValues(next);
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
-    const asset = await lockAsset(client, params.businessId, params.fixedAssetId);
-    if (asset.status === "disposed") throw new FixedAssetError("asset_disposed", 409);
-    if (asset.archivedAt) throw new FixedAssetError("asset_archived", 409);
-    if (Object.keys(next).length > 0) {
-      // Validate that the new defaults are postable at the asset's branch
-      // today. The trigger will also enforce the structural business/kind match.
-      const today = await businessToday(params.businessId);
-      await assertDimensionsPostable(client, {
-        businessId: params.businessId,
-        locationId: asset.locationId,
-        entryDate: today,
-        lines: [{ dimensions: next }],
-      });
-    }
-    await client.query(
-      `UPDATE fixed_assets
-          SET cost_center_id = $3, profit_center_id = $4, department_id = $5, detail_dimension_id = $6
-        WHERE business_id = $1 AND id = $2`,
-      [
-        params.businessId,
-        params.fixedAssetId,
-        dimCols.cost_center_id,
-        dimCols.profit_center_id,
-        dimCols.department_id,
-        dimCols.detail_dimension_id,
-      ],
-    );
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-  return (await getFixedAssetWithDepreciation(params.businessId, params.fixedAssetId)).fixedAsset;
+  return updateFixedAsset({
+    businessId: params.businessId,
+    fixedAssetId: params.fixedAssetId,
+    dimensions: params.dimensions,
+    setDimensions: true,
+  });
 }
 export interface AcquisitionCandidate {
   entryId: string;

@@ -268,6 +268,74 @@ export async function getDimensionValue(businessId: string, id: string): Promise
 }
 
 /**
+ * Bounded tenant-scoped search for pickers when the catalogue exceeds
+ * `DIMENSION_VALUE_LIST_CAP`. The query is a simple substring over code and
+ * name (ILIKE with a trailing wildcard only — no regex, no leading wildcard
+ * to keep the btree usable), bounded by kind and archived flag. The limit is
+ * deliberately small (50) so a mis-typed letter cannot stream the whole table.
+ *
+ * Posting pickers (forms) should set `postable: true` so archived values and
+ * parents are excluded; filter pickers use `postable: false` so historical
+ * values are still reachable.
+ */
+export async function searchDimensionValues(businessId: string, options: {
+  q: string;
+  kind?: DimensionKind;
+  postable?: boolean;
+  limit?: number;
+}): Promise<DimensionValueRecord[]> {
+  const needle = options.q?.trim();
+  if (!needle) return [];
+  const safeLimit = Math.max(1, Math.min(50, options.limit ?? 20));
+  // Build a simple prefix+infix token against code and name, with a leading
+  // anchor on the code btree where possible. `lower(btrim(code))` matches the
+  // unique index expression so exact prefixes are indexable; name uses an ILIKE
+  // infix that is acceptable for small result sets under the hard LIMIT.
+  const params: unknown[] = [businessId];
+  const conditions: string[] = ["v.business_id = $1"];
+  if (options.kind) {
+    params.push(options.kind);
+    conditions.push(`v.kind = $${params.length}::text`);
+  }
+  if (options.postable) {
+    conditions.push("v.is_active");
+    conditions.push("NOT EXISTS (SELECT 1 FROM accounting_dimension_values c WHERE c.parent_id = v.id)");
+  }
+  params.push(`${needle}%`);
+  params.push(`%${needle}%`);
+  const codeIdx = params.length - 1;
+  const nameIdx = params.length;
+  conditions.push(
+    `(lower(btrim(v.code)) LIKE lower(btrim($${codeIdx})) OR lower(v.name) ILIKE $${nameIdx})`,
+  );
+  const { rows } = await query<ValueRow>(
+    `${VALUE_SELECT}
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY v.kind, lower(btrim(v.code)), v.code
+      LIMIT ${safeLimit}`,
+    params,
+  );
+  return rows.map(toValue);
+}
+
+/**
+ * Look up a batch of values by id. Used by pickers to resolve an already-
+ * selected id that may fall outside the initial capped list, so a form that
+ * loads after the cap still displays the chosen value correctly. Every id
+ * must belong to this business; ids from other businesses are silently
+ * dropped (callers treat missing ids as unassigned).
+ */
+export async function getDimensionValuesByIds(businessId: string, ids: readonly string[]): Promise<DimensionValueRecord[]> {
+  const uuids = ids.filter((id) => isDimensionUuid(id));
+  if (uuids.length === 0) return [];
+  const { rows } = await query<ValueRow>(
+    `${VALUE_SELECT} WHERE v.business_id = $1 AND v.id = ANY($2::uuid[])`,
+    [businessId, uuids],
+  );
+  return rows.map(toValue);
+}
+
+/**
  * The one value of a kind that a code names, archived values included, so an
  * import can say «archived» rather than «unknown». The match is the same
  * expression the unique index uses (`lower(btrim(code))`), so the lookup and
