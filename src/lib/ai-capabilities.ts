@@ -280,6 +280,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "fiscal.year.create": PERMISSIONS.ledgerClosePeriod,
   "fiscal.period.set_status": PERMISSIONS.ledgerClosePeriod,
   "fiscal.year.close": PERMISSIONS.ledgerClosePeriod,
+  // Same trust as approving a draft — the route's own comment; the screen
+  // gates its button on ledger.approve too.
+  "journal.entry.reverse": PERMISSIONS.ledgerApprove,
   "media.collection.rename": PERMISSIONS.mediaManage,
   "media.collection.delete": PERMISSIONS.mediaManage,
   "media.asset.set_collection": PERMISSIONS.mediaManage,

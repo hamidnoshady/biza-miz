@@ -74,8 +74,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Accounting",
     entity: "Journal entries",
     routes: ["ledger/entries"],
-    note: "list, detail, reverse (manual drafts covered by journal.manual.propose)",
-    ops: { listDetail: ["list_journal_entries", "list_manual_journal_drafts"], lifecycle: ["journal.manual.propose", "journal.draft.approve", "journal.draft.reject"] },
+    note: "manual drafts are intentionally one lane — humans and the assistant both draft through the same parseManualDraftPayload pipeline (journal.manual.propose); reversal makes a new mirrored entry, never an edit",
+    ops: { listDetail: ["list_journal_entries", "list_manual_journal_drafts"], create: ["journal.manual.propose"], lifecycle: ["journal.draft.approve", "journal.draft.reject", "journal.entry.reverse"] },
     test: "integration/ledger-reports.integration.test.ts",
   },
   {

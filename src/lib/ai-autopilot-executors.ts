@@ -42,7 +42,7 @@ import { createWeightBarcodeTemplate } from "./weight-barcode-templates-service"
 import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
-import { createDraft, deleteDraft, ManualJournalError } from "./manual-journal-service";
+import { createDraft, deleteDraft, ManualJournalError, reverseEntry, MANUAL_MEMO_MAX } from "./manual-journal-service";
 import { updateCustomer } from "./parties-service";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
 import { isWasteReason, recordWaste } from "./waste-service";
@@ -91,6 +91,8 @@ import { PayrollError } from "./payroll-errors";
 import { parseLineClearanceRequest } from "./bank-reconciliation";
 import { createFiscalYear, setPeriodStatus, FiscalPeriodError } from "./fiscal-periods-service";
 import { closeFiscalYear } from "./closing-service";
+
+import { isUuid } from "./uuid";
 import { recordAdvance, voidAdvance } from "./payroll-advances-service";
 import { createOrder } from "./order-mutations";
 import type { CartItemInput } from "./order-cart";
@@ -2686,6 +2688,45 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch Z5 — manual-entry reversal ─────────────────
+// Mirrors the reverse route one-for-one: isUuid guard first (a normal 404,
+// never a Postgres cast error), memo bound, the approver's branch passed as
+// the fallback only — the reversal documents travel on the ORIGINAL entry's
+// own branch, by the service's explicit design, even in hybrid deployments.
+const journalEntryReverse: AutopilotExecutor = async (ctx) => {
+  const entryId = str(ctx.payload.entryId) ?? str(ctx.payload.id);
+  if (!entryId) return fail("missing_fields");
+  if (!isUuid(entryId)) return fail("entry_not_found");
+  const memo = ctx.payload.memo === undefined || ctx.payload.memo === null ? undefined : str(ctx.payload.memo) ?? undefined;
+  if (typeof memo === "string" && memo.length > MANUAL_MEMO_MAX) return fail("memo_too_long");
+  const entryDate = typeof ctx.payload.entryDate === "string" ? ctx.payload.entryDate : undefined;
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  // The route passes `session.role` as the sync actor; the connection's
+  // authorizing user plays that part here (same shape as supplier returns).
+  const { rows: roleRows } = await query<{ role: string }>(`SELECT role FROM users WHERE id = $1`, [
+    ctx.authorizedByUserId,
+  ]);
+  try {
+    const result = await reverseEntry({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      entryId,
+      actorId: ctx.authorizedByUserId,
+      memo,
+      entryDate,
+      sync: { actorRole: (roleRows[0]?.role ?? "Owner") as Role },
+    });
+    return { ok: true, result: { ...result } };
+  } catch (err) {
+    if (err instanceof ManualJournalError) return fail(err.message);
+    const lockCode = fiscalPeriodLockErrorCode(err);
+    if (lockCode) return fail(lockCode);
+    throw err;
+  }
+};
+
 // ── Issue #883 package 2, batch Z4 — the fiscal calendar ───────────────────
 // FiscalPeriodError carries status AND optional details the screen reads
 // (which period blocks a close; overlap window); surface both, exactly the
@@ -3365,6 +3406,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   payrollSettingsUpdate,
   payrollStaffTerms,
   reconciliationLineClear,
+  journalEntryReverse,
   fiscalYearCreate,
   fiscalPeriodSetStatus,
   fiscalYearClose,

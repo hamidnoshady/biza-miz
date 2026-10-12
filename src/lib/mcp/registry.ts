@@ -440,6 +440,8 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "fiscal.year.create", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "fiscal.period.set_status", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "fiscal.year.close", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  // Batch Z5 — a posting reversal: new mirrored entry into the ledger.
+  { actionType: "journal.entry.reverse", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

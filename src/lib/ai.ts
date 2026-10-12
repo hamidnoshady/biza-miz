@@ -352,6 +352,8 @@ export type ActionType =
   | "fiscal.year.create"
   | "fiscal.period.set_status"
   | "fiscal.year.close"
+  // Batch Z5 — reversing a posted manual entry (a new mirror entry, never an edit).
+  | "journal.entry.reverse"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -394,6 +396,7 @@ export type AutopilotExecutorKey =
   | "payrollSettingsUpdate"
   | "fiscalYearCreate"
   | "fiscalPeriodSetStatus"
+  | "journalEntryReverse"
   | "fiscalYearClose"
   | "reconciliationLineClear"
   | "payrollStaffTerms"
@@ -1371,6 +1374,14 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "journal.entry.reverse": {
+    type: "journal.entry.reverse",
+    endpoint: "/api/ledger/entries/[id]/reverse",
+    method: "POST",
+    label: "برگشت یک سند دستی ثبت‌شده — سند جدید با خطوط معکوس، امروز؛ اصل‌سند دست‌نخورده می‌ماند (تاریخ اختیاری)",
+    payloadHint: '{ entryId: string, memo?: string /* سقف MANUAL_MEMO_MAX */, entryDate?: "YYYY-MM-DD", locationId?: string /* fallback شعبه */ }',
+    executor: "journalEntryReverse",
   },
   "fiscal.year.create": {
     type: "fiscal.year.create",

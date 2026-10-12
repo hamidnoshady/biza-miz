@@ -1648,6 +1648,24 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_journal_entry_reverse",
+    actionType: "journal.entry.reverse",
+    english:
+      "Reverse a posted manual entry — a new mirrored entry dated today (original untouched). Explicit approval each time.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entryId: id("شناسهٔ سند دستی — از list_journal_entries"),
+        memo: { type: "string", description: "یادداشت سند برگشتی — کوتاه" },
+        entryDate: { type: "string", description: "YYYY-MM-DD — پیش‌فرض امروز شعبه" },
+        locationId: id("شعبهٔ اختصاری — فقط وقتی سند اصلی شعبه ندارد"),
+      },
+      required: ["entryId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_fiscal_year_create",
     actionType: "fiscal.year.create",
     english: "Create a fiscal year with its twelve monthly periods — calendar, no postings. Explicit approval each time.",
