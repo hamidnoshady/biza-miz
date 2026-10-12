@@ -49,9 +49,11 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "dashboard", label: "داشبورد حسابداری" },
   { key: "trial-balance", label: "تراز آزمایشی" },
   { key: "entries", label: "دفتر روزنامه" },
+  { key: "vouchers", label: "اسناد و شماره‌گذاری" },
   { key: "manual", label: "ثبت سند دستی" },
   { key: "expenses", label: "هزینه‌ها" },
   { key: "fiscal-periods", label: "دوره‌های مالی" },
+  { key: "opening-balances", label: "ترازات افتتاحیه" },
   // The platform's one people directory. «مشتریان»، «تأمین‌کنندگان» and
   // «فروشندگان» were three more sections here; they are `?view=` filters of
   // this one now (`src/lib/party-directory.ts`), so there is one screen, one
@@ -109,6 +111,7 @@ export const ACCOUNTING_NAV_GROUPS: readonly {
       "dashboard",
       "trial-balance",
       "entries",
+      "vouchers",
       "manual",
       "chart-of-accounts",
     ],
@@ -124,7 +127,7 @@ export const ACCOUNTING_NAV_GROUPS: readonly {
   },
   {
     label: "دوره و گزارش",
-    keys: ["fiscal-periods", "vat", "payroll", "financial-reports", "growth"],
+    keys: ["fiscal-periods", "opening-balances", "vat", "payroll", "financial-reports", "growth"],
   },
   // The app's settings entry, last — the shape every app's menu ends with.
   { label: "پیکربندی", keys: ["settings"] },

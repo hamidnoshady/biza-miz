@@ -38,8 +38,18 @@ function scriptedClient(accounts: Record<string, string> = ACCOUNTS) {
         const requested = params[1] as string[];
         return { rows: requested.filter((code) => accounts[code]).map((code) => ({ code, id: accounts[code] })) };
       }
-      if (flat.includes("INSERT INTO journal_entries")) return { rows: [{ id: "entry-1" }] };
+      // The entry's own date is what its voucher number is derived from, so
+      // the RETURNING carries it the way the real column does.
+      if (flat.includes("INSERT INTO journal_entries")) {
+        return { rows: [{ id: "entry-1", entry_date: "2026-01-31" }] };
+      }
       if (flat.includes("INSERT INTO journal_lines")) return { rows: [] };
+      // Issue #867 — every posting numbers its entry in-transaction.
+      if (flat.includes("SELECT id FROM fiscal_years")) return { rows: [] };
+      if (flat.includes("INSERT INTO voucher_sequences")) return { rows: [] };
+      if (flat.includes("FROM voucher_sequences")) return { rows: [{ last_number: "0" }] };
+      if (flat.includes("UPDATE voucher_sequences")) return { rows: [] };
+      if (flat.includes("UPDATE journal_entries")) return { rows: [] };
       throw new Error(`unexpected query: ${flat}`);
     },
   } as unknown as PoolClient;

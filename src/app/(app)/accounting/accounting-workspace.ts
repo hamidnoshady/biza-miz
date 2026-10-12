@@ -166,6 +166,7 @@ const REPORTS_SLOTS: readonly WorkspaceSlot[] = [
 export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
   "trial-balance",
   "entries",
+  "vouchers",
   "manual",
   "chart-of-accounts",
   "receivables",
@@ -177,6 +178,7 @@ export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
   "reconciliation",
   "fixed-assets",
   "fiscal-periods",
+  "opening-balances",
   "vat",
   "payroll",
 ];
@@ -201,14 +203,14 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   label: string;
   keys: readonly AccountingSectionKey[];
 }[] = [
-  { key: "ledger-books", label: "دفتر و اسناد", keys: ["trial-balance", "entries", "manual", "chart-of-accounts"] },
+  { key: "ledger-books", label: "دفتر و اسناد", keys: ["trial-balance", "entries", "vouchers", "manual", "chart-of-accounts"] },
   {
     key: "ledger-receivables",
     label: "دریافتنی و پرداختنی",
     keys: ["receivables", "payables", "installments", "cheques"],
   },
   { key: "ledger-funds", label: "وجوه و هزینه", keys: ["receipts", "expenses", "reconciliation", "fixed-assets"] },
-  { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "vat", "payroll"] },
+  { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "opening-balances", "vat", "payroll"] },
 ];
 
 /** The label «فضای کار حسابداری» wears wherever it is drawn — menu and page alike. */

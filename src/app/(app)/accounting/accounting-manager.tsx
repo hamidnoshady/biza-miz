@@ -24,8 +24,10 @@ import { accountingSectionNeedsAccountList } from "./accounting-manager-policy";
 import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
 import { TrialBalanceSection } from "./trial-balance-section";
 import { EntriesSection } from "./entries-section";
+import { VouchersSection } from "./vouchers-section";
 import { ManualEntrySection } from "./manual-entry-section";
 import { FiscalPeriodsSection } from "./fiscal-periods-section";
+import { OpeningBalancesSection } from "./opening-balances-section";
 import { ArSection } from "./ar-section";
 import { ApSection } from "./ap-section";
 import { ReceiptsPaymentsSection } from "./receipts-payments-section";
@@ -369,6 +371,20 @@ export function AccountingManager({
               onRefresh={() => setRefreshKey((key) => key + 1)}
             />
           ) : null}
+          {section === "vouchers" ? (
+            /*
+             * The register itself opens on the app's door; renumbering a
+             * voucher is `ledger.approve`, the same decision permission that
+             * approves a manual journal — so the «شماره‌گذاری دوباره» control
+             * follows `canApproveLedger` exactly like «برگشت سند» does on the
+             * journal screen.
+             */
+            <VouchersSection
+              busy={busy}
+              refreshKey={refreshKey}
+              canApprove={canApproveLedger}
+            />
+          ) : null}
           {section === "manual" ? (
             <ManualEntrySection
               accounts={accounts ?? []}
@@ -391,6 +407,21 @@ export function AccountingManager({
             />
           ) : null}
           {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
+          {section === "opening-balances" ? (
+            /*
+             * The set's line editor picks accounts from the chart this
+             * workspace already loaded (the same list «ثبت سند دستی» gets).
+             * draft/review/submit is `ledger.post`; approve/post/reverse is
+             * `ledger.approve` — the same split the manual journal uses.
+             */
+            <OpeningBalancesSection
+              accounts={accounts ?? []}
+              busy={busy}
+              run={run}
+              refreshKey={refreshKey}
+              canApprove={canApproveLedger}
+            />
+          ) : null}
           {section === "directory" ? (
             <PartiesSection
               scope={partyScopeFor("accounting")}
