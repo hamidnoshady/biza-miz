@@ -603,7 +603,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Workspace",
     entity: "Approvals",
     routes: ["workspace/approvals"],
-    ops: { listDetail: ["list_workspace_approvals"] },
+    ops: {
+      listDetail: ["list_workspace_approvals"],
+      create: ["workspace.approval.request"],
+      lifecycle: ["workspace.approval.decide"],
+    },
     test: "integration/workspace.integration.test.ts",
   },
   {

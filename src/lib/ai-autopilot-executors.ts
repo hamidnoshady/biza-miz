@@ -28,6 +28,11 @@ import { chargeForFeature } from "./billing-guard";
 import { DeviceError, renameDevice, revokeDevice, listDevices, findActiveDeviceId } from "./device-service";
 import { updateAttributeDefinition, deleteAttributeDefinition } from "./product-attributes-service";
 import { deleteWeightBarcodeTemplate } from "./weight-barcode-templates-service";
+import { requestApproval, decideApproval, approvalSubjectType } from "./workspace";
+import { decideEstimateApproval } from "./aec-boq-service";
+import { decideCertificateApproval, decideVariationApproval } from "./aec-commercial-service";
+import { decideCommitmentApproval, decideMaterialRequestApproval } from "./aec-procurement-service";
+import { decideSubmittalApproval } from "./aec-rfi-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2677,6 +2682,73 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AK — workspace approvals ─────────────────
+// The decide executor mirrors the route's subject-type dispatch exactly:
+// every commercial subject runs through ITS register's decide service so the
+// queue and the register screen record one identical decision.
+const WORKSPACE_DECISIONS = new Set(["approved", "rejected", "changes_requested", "cancelled"]);
+const workspaceApprovalRequest: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("not_business_member");
+  const subjectType = str(ctx.payload.subjectType);
+  const subjectId = str(ctx.payload.subjectId);
+  if (!subjectType || !subjectId) return fail("missing_fields");
+  const approval = await requestApproval(owner, {
+    subjectType,
+    subjectId,
+    projectId: ctx.payload.projectId === undefined ? undefined : (str(ctx.payload.projectId) ?? null),
+    title: str(ctx.payload.title) ?? undefined,
+    approverUserId: ctx.payload.approverUserId === undefined ? undefined : (str(ctx.payload.approverUserId) ?? null),
+    dueDate: ctx.payload.dueDate,
+    note: str(ctx.payload.note) ?? undefined,
+  });
+  return { ok: true, result: { approval: { ...(approval as object) } } };
+};
+const workspaceApprovalDecide: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("not_business_member");
+  const id = str(ctx.payload.id) ?? str(ctx.payload.approvalId);
+  const decision = str(ctx.payload.decision);
+  if (!id) return fail("missing_fields");
+  if (!decision || !WORKSPACE_DECISIONS.has(decision)) return fail("invalid_decision");
+  const note = str(ctx.payload.note) ?? "";
+  const d = decision as "approved" | "rejected" | "changes_requested" | "cancelled";
+  const subjectType = await approvalSubjectType(owner.businessId, id);
+  if (subjectType === "estimate_version") {
+    const result = await decideEstimateApproval(owner, id, d, note);
+    if (!result.applied) return fail("approval_not_pending");
+    return { ok: true, result: { approval: null, estimateVersionId: result.versionId } };
+  }
+  if (subjectType === "submittal_revision") {
+    const result = await decideSubmittalApproval(owner, id, d, note);
+    if (!result.applied) return fail("approval_not_pending");
+    return { ok: true, result: { approval: null, submittalRevisionId: result.revisionId } };
+  }
+  if (subjectType === "variation") {
+    const result = await decideVariationApproval(owner, id, d, note);
+    if (!result.applied) return fail("approval_not_pending");
+    return { ok: true, result: { approval: null, variationId: (result as unknown as Record<string, unknown>).variationId ?? id } };
+  }
+  if (subjectType === "material_request") {
+    const result = await decideMaterialRequestApproval(owner, id, d, note);
+    if (!result.applied) return fail("approval_not_pending");
+    return { ok: true, result: { approval: null, materialRequestId: result.requestId } };
+  }
+  if (subjectType === "commitment") {
+    const result = await decideCommitmentApproval(owner, id, d, note);
+    if (!result.applied) return fail("approval_not_pending");
+    return { ok: true, result: { approval: null, commitmentId: result.commitmentId } };
+  }
+  if (subjectType === "payment_certificate") {
+    const result = await decideCertificateApproval(owner, id, d, note);
+    if (!result.applied) return fail("approval_not_pending");
+    return { ok: true, result: { approval: null, certificateId: result.certificateId } };
+  }
+  const approval = await decideApproval(owner, id, d, note);
+  if (!approval) return fail("approval_not_pending");
+  return { ok: true, result: { approval: { ...(approval as object) } } };
+};
+
 // ── Issue #883 package 2, batch AJ — product attributes & price entries ───
 // savePriceEntries applies per-cell optimistic concurrency (expectedVersion)
 // and returns survived-cell count + the exact conflicting cells, so the
@@ -3981,6 +4053,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  workspaceApprovalRequest,
+  workspaceApprovalDecide,
   productAttributeUpdate,
   productAttributeDelete,
   barcodeTemplateDelete,

@@ -1650,6 +1650,43 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_workspace_approval_request",
+    actionType: "workspace.approval.request",
+    english: "File an approval request over a workspace subject/document.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        subjectType: { type: "string" },
+        subjectId: { type: "string" },
+        projectId: { type: ["string", "null"] },
+        title: { type: "string" },
+        approverUserId: { type: ["string", "null"] },
+        dueDate: { type: "string" },
+        note: { type: "string" },
+      },
+      required: ["subjectType", "subjectId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_workspace_approval_decide",
+    actionType: "workspace.approval.decide",
+    english:
+      "Decide a pending approval (approved/rejected/changes_requested/cancelled) — commercial documents finalise figures on approve; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: id("درخواست تأیید — از list_workspace_approvals"),
+        decision: { type: "string", enum: ["approved", "rejected", "changes_requested", "cancelled"] },
+        note: { type: "string" },
+      },
+      required: ["id", "decision"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_product_attribute_update",
     actionType: "product.attribute.update",
     english: "Edit a product attribute definition (name/options/active).",

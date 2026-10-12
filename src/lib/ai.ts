@@ -389,6 +389,10 @@ export type ActionType =
   | "product.attribute.update"
   | "product.attribute.delete"
   | "barcode.template.delete"
+  // Batch AK — workspace approvals: request + decide (decisions activate
+  // contracts and fix certified figures → every one steps up).
+  | "workspace.approval.request"
+  | "workspace.approval.decide"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -439,6 +443,8 @@ export type AutopilotExecutorKey =
   | "backupConfigSet"
   | "backupRunNow"
   | "backupRestoreApply"
+  | "workspaceApprovalRequest"
+  | "workspaceApprovalDecide"
   | "productAttributeUpdate"
   | "productAttributeDelete"
   | "barcodeTemplateDelete"
@@ -1433,6 +1439,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "workspace.approval.request": {
+    type: "workspace.approval.request",
+    endpoint: "/api/workspace/approvals",
+    method: "POST",
+    label: "ثبت درخواست تأیید روی یک سند/موضوع فضای کاری",
+    payloadHint: '{ subjectType: string, subjectId: string, projectId?: string|null, title?: string, approverUserId?: string|null, dueDate?: string, note?: string }',
+    executor: "workspaceApprovalRequest",
+  },
+  "workspace.approval.decide": {
+    type: "workspace.approval.decide",
+    endpoint: "/api/workspace/approvals/{id}",
+    method: "POST",
+    label: "تصمیم روی درخواست تأیید — تأیید/رد/درخواست اصلاح/لغو؛ تصمیم روی سندهای تجاری ارقام را نهایی می‌کند؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, decision: "approved"|"rejected"|"changes_requested"|"cancelled", note?: string }',
+    executor: "workspaceApprovalDecide",
   },
   "product.attribute.update": {
     type: "product.attribute.update",

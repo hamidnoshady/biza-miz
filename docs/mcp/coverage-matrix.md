@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (35)
+### Tenant (34)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -33,7 +33,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **cms.woocommerce** (Website / CMS · WooCommerce manager (posts, queue, syncs)) — partial
 - **workspace.projects** (Workspace · Projects, members, phases) — partial
 - **workspace.contracts** (Workspace · Contracts & lifecycle) — partial
-- **workspace.approvals** (Workspace · Approvals) — partial
 - **workspace.aec** (Workspace · AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement)) — partial
 - **config.settings** (Business config · Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms)) — partial
 - **config.team** (Business config · Staff, roles & permissions, invitations, credentials, site access) — partial
@@ -75,7 +74,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 37 · partial: 28 · MCP gap: 7 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 38 · partial: 27 · MCP gap: 7 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -128,7 +127,7 @@ Counts — covered: 37 · partial: 28 · MCP gap: 7 · backend gap: 0 · n/a (in
 | Workspace | Tasks, checklist, dependencies | list_workspace_tasks | task.create | task.update | task.status | — | workspace.manage, workspace.view | connection mode | list_workspace_tasks, task.create, task.update, task.status | integration/workspace.integration.test.ts | covered |
 | Workspace | Calendar, comments, documents, templates<br>_document links are validated against the calling owner (validateDocumentLinks); revisions inherit version numbers server-side via supersedesId; template apply is workspace.project.create's templateKey, not a standalone verb_ | get_workspace_document, list_workspace_calendar, list_workspace_comments, list_workspace_documents, list_workspace_templates | workspace.comment.add, workspace.document.create, workspace.event.create | workspace.document.update, workspace.event.update, workspace.template.save | workspace.document.delete, workspace.event.delete, workspace.template.archive | — | workspace.manage, workspace.view | connection mode | get_workspace_document, list_workspace_calendar, list_workspace_comments, list_workspace_documents, list_workspace_templates, workspace.comment.add, workspace.document.create, workspace.event.create, workspace.document.update, workspace.event.update, workspace.template.save, workspace.document.delete, workspace.event.delete, workspace.template.archive | integration/workspace.integration.test.ts | covered |
 | Workspace | Contracts & lifecycle | list_expiring_contracts | (route only) | (route only) | (route only) | — | workspace.contracts_manage, workspace.view | — | list_expiring_contracts | integration/workspace.integration.test.ts | partial |
-| Workspace | Approvals | list_workspace_approvals | (route only) | — | (route only) | — | workspace.approve, workspace.manage, workspace.view | — | list_workspace_approvals | integration/workspace.integration.test.ts | partial |
+| Workspace | Approvals | list_workspace_approvals | workspace.approval.request | — | workspace.approval.decide | — | workspace.approve, workspace.manage, workspace.view | connection mode; step-up (always approve) | list_workspace_approvals, workspace.approval.request, workspace.approval.decide | integration/workspace.integration.test.ts | covered |
 | Workspace | AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement) | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | (route only) | (route only) | (route only) | — | settings.manage, workspace.approve, workspace.documents_issue, workspace.manage, workspace.view | — | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | — | partial |
 | Business config | Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms) | get_setup_state | (route only) | (route only) | (route only) | — | accounts.edit, settings.manage | — | get_setup_state | integration/business-settings.integration.test.ts | partial |
 | Business config | Staff, roles & permissions, invitations, credentials, site access | list_team_members | (route only) | (route only) | (route only) | — | team.manage, team.permissions_manage, team.view | — | list_team_members | integration/team.integration.test.ts | partial |

@@ -483,6 +483,13 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "product.attribute.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "product.attribute.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "barcode.template.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AK — the decide lane is the one that ACTIVATES contracts and fixes
+  // certified figures through the subject's own service, so every decision
+  // steps up forever. Cancels narrow through workspaceApprove here (the
+  // route allows workspaceManage for cancel only — capability maps can't
+  // key on payload values, documented).
+  { actionType: "workspace.approval.request", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "workspace.approval.decide", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

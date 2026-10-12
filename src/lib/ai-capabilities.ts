@@ -261,6 +261,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "workspace.template.save": PERMISSIONS.workspaceManage,
   "workspace.template.archive": PERMISSIONS.workspaceManage,
   "workspace.event.create": PERMISSIONS.workspaceManage,
+  "workspace.approval.request": PERMISSIONS.workspaceManage,
+  "workspace.approval.decide": PERMISSIONS.workspaceApprove,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,
