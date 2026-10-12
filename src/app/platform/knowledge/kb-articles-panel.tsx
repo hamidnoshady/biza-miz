@@ -6,7 +6,7 @@
  * Filters (search, category, status, section, tag) drive GET
  * /api/platform/knowledge/articles; the editor modal carries every field of
  * an article — title, slug (auto-suggested), category, tags, the dashboard
- * sections it teaches, video and cover URLs, ordering, status — plus the
+ * pages it teaches, video and cover URLs, ordering, status — plus the
  * markdown body with a tiny insertion toolbar and a live preview rendered by
  * the exact KbMarkdown members read (theme-aware `auto` tone), so what the
  * operator writes is what «مرکز آموزش» shows in either selected theme.
@@ -21,7 +21,7 @@ import {
   SearchIcon,
   Trash2Icon,
 } from "lucide-react";
-import { KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
+import { KNOWLEDGE_PAGES, KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
 import { suggestKbSlug } from "@/lib/knowledge";
 import { KbMarkdown } from "@/components/knowledge/kb-markdown";
 import {
@@ -55,6 +55,14 @@ const EMPTY_FILTERS: Filters = {
   section: "",
   tagId: "",
 };
+
+const PAGE_GROUPS = [...new Set(KNOWLEDGE_PAGES.map((page) => page.group))];
+
+function assignmentLabel(key: string): string {
+  return KNOWLEDGE_PAGES.find((page) => page.key === key)?.label ??
+    KNOWLEDGE_SECTIONS.find((section) => section.key === key)?.label ??
+    key;
+}
 
 export function ArticlesPanel({
   categories,
@@ -209,14 +217,21 @@ export function ArticlesPanel({
           value={filters.section}
           onChange={(e) => setFilter({ section: e.target.value })}
           className={`${selectClass} w-auto`}
-          aria-label="بخش برنامه"
+          aria-label="صفحهٔ راهنما"
         >
-          <option value="">همهٔ بخش‌ها</option>
-          {KNOWLEDGE_SECTIONS.map((s) => (
-            <option key={s.key} value={s.key}>
-              {s.label}
-            </option>
+          <option value="">همهٔ صفحه‌ها</option>
+          {PAGE_GROUPS.map((group) => (
+            <optgroup key={group} label={group}>
+              {KNOWLEDGE_PAGES.filter((page) => page.group === group).map((page) => (
+                <option key={page.key} value={page.key}>{page.label}</option>
+              ))}
+            </optgroup>
           ))}
+          <optgroup label="اتصال‌های قدیمی">
+            {KNOWLEDGE_SECTIONS.map((section) => (
+              <option key={section.key} value={section.key}>{section.label}</option>
+            ))}
+          </optgroup>
         </select>
         <select
           value={filters.tagId}
@@ -258,7 +273,7 @@ export function ArticlesPanel({
               <tr>
                 <th className="px-4 py-3 text-start font-medium">راهنما</th>
                 <th className="px-4 py-3 text-start font-medium">دسته</th>
-                <th className="px-4 py-3 text-start font-medium">بخش‌ها</th>
+                <th className="px-4 py-3 text-start font-medium">صفحه‌ها</th>
                 <th className="px-4 py-3 text-start font-medium">وضعیت</th>
                 <th className="px-4 py-3 text-start font-medium">
                   به‌روزرسانی
@@ -285,7 +300,7 @@ export function ArticlesPanel({
                       className="mt-0.5 truncate text-[11px] text-muted-foreground"
                       dir="rtl"
                     >
-                      /dashboard/knowledge/a/{row.slug}
+                      /knowledge/a/{row.slug}
                     </p>
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">
@@ -293,13 +308,7 @@ export function ArticlesPanel({
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">
                     {row.sectionKeys.length
-                      ? row.sectionKeys
-                          .map(
-                            (k) =>
-                              KNOWLEDGE_SECTIONS.find((s) => s.key === k)
-                                ?.label ?? k,
-                          )
-                          .join("، ")
+                      ? row.sectionKeys.map(assignmentLabel).join("، ")
                       : "—"}
                   </td>
                   <td className="px-4 py-3">
@@ -568,7 +577,7 @@ function ArticleEditor({
             {article ? `ویرایش «${article.title}»` : "راهنمای جدید"}
           </h3>
           <span className="me-auto text-[11px] text-muted-foreground" dir="ltr">
-            /dashboard/knowledge/a/{effectiveSlug}
+            /knowledge/a/{effectiveSlug}
           </span>
           <Button
             variant="ghost"
