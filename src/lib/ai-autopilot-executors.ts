@@ -28,6 +28,15 @@ import { listConnections, getConnection } from "./integrations/connections-servi
 import { retryWpQueueRow, retryAllFailedWpQueue, flushWpOutbox } from "./integrations/wp-manager-service";
 import { updateCmsSiteDomain } from "./cms/website-service";
 import { createAttributeDefinition } from "./product-attributes-service";
+import {
+  createMediaCollection,
+  renameMediaCollection,
+  deleteMediaCollection,
+  addAssetToCollection,
+  removeAssetFromCollection,
+  softDeleteMediaAsset,
+  restoreMediaAsset,
+} from "./media-service";
 import { createWeightBarcodeTemplate } from "./weight-barcode-templates-service";
 import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
@@ -2665,6 +2674,62 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch X — media library organisation ─────────────
+// Collections are a grouping layer: create/rename/delete never touch stored
+// bytes. The trash is soft (recoverable by media.asset.restore); the HARD
+// delete — which removes the storage object for good — deliberately stays
+// screen-only (coverage-matrix note).
+const mediaCollectionCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("missing_fields");
+  const description = ctx.payload.description === undefined || ctx.payload.description === null ? null : str(ctx.payload.description);
+  const record = await createMediaCollection(ctx.businessId, ctx.authorizedByUserId ?? null, name, description);
+  return { ok: true, result: { collection: { ...record } } };
+};
+const mediaCollectionRename: AutopilotExecutor = async (ctx) => {
+  const collectionId = str(ctx.payload.collectionId) ?? str(ctx.payload.id);
+  const name = str(ctx.payload.name);
+  if (!collectionId || !name) return fail("missing_fields");
+  const description =
+    ctx.payload.description === undefined ? undefined : ctx.payload.description === null ? null : str(ctx.payload.description);
+  const ok = await renameMediaCollection(ctx.businessId, collectionId, name, description);
+  if (!ok) return fail("collection_not_found");
+  return { ok: true, result: { ok: true, collectionId } };
+};
+const mediaCollectionDelete: AutopilotExecutor = async (ctx) => {
+  const collectionId = str(ctx.payload.collectionId) ?? str(ctx.payload.id);
+  if (!collectionId) return fail("missing_fields");
+  const ok = await deleteMediaCollection(ctx.businessId, collectionId);
+  if (!ok) return fail("collection_not_found");
+  return { ok: true, result: { ok: true, collectionId } };
+};
+const mediaAssetSetCollection: AutopilotExecutor = async (ctx) => {
+  const assetId = str(ctx.payload.assetId);
+  const collectionId = str(ctx.payload.collectionId);
+  const action = str(ctx.payload.action);
+  if (!assetId || !collectionId || (action !== "add" && action !== "remove")) return fail("invalid_payload");
+  const ok =
+    action === "add"
+      ? await addAssetToCollection(ctx.businessId, collectionId, assetId, ctx.authorizedByUserId ?? null)
+      : await removeAssetFromCollection(ctx.businessId, collectionId, assetId);
+  if (!ok) return fail("membership_not_found");
+  return { ok: true, result: { ok: true, assetId, collectionId, action } };
+};
+const mediaAssetTrash: AutopilotExecutor = async (ctx) => {
+  const assetId = str(ctx.payload.assetId) ?? str(ctx.payload.id);
+  if (!assetId) return fail("missing_fields");
+  const ok = await softDeleteMediaAsset(ctx.businessId, assetId);
+  if (!ok) return fail("asset_not_found");
+  return { ok: true, result: { ok: true, assetId, trashed: true } };
+};
+const mediaAssetRestore: AutopilotExecutor = async (ctx) => {
+  const assetId = str(ctx.payload.assetId) ?? str(ctx.payload.id);
+  if (!assetId) return fail("missing_fields");
+  const ok = await restoreMediaAsset(ctx.businessId, assetId);
+  if (!ok) return fail("asset_not_found");
+  return { ok: true, result: { ok: true, assetId, restored: true } };
+};
+
 // ── Issue #883 package 2, batch V — product masters ────────────────────────
 // Thin mirrors of the attribute/barcode-template routes: service returns
 // {definition?,error?} / {template?,error?} pairs with the route's own codes.
@@ -3107,6 +3172,12 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   retailInvoiceVoid,
   websiteOrderStatus,
   websiteDomainSet,
+  mediaCollectionCreate,
+  mediaCollectionRename,
+  mediaCollectionDelete,
+  mediaAssetSetCollection,
+  mediaAssetTrash,
+  mediaAssetRestore,
   productAttributeCreate,
   barcodeTemplateCreate,
   wpQueueRetry,

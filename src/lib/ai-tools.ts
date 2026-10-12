@@ -66,6 +66,7 @@ import { listWeightBarcodeTemplates } from "./weight-barcode-templates-service";
 import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/website-service";
 import { listRetailInvoices } from "./retail-invoice/list-service";
 import { listAuditLog } from "./audit-service";
+import { listMediaCollections, listMediaFolders } from "./media-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
 import { wpOverviewStats, wpQueue, wpQueueSummary } from "./integrations/wp-manager-service";
 import { getRetailInvoiceDetail } from "./retail-invoice/read-service";
@@ -2103,6 +2104,13 @@ export async function runReadTool(
     // The route rejects invalid cursors/filters rather than silently paging
     // wrong or reaching PostgreSQL casts; this case mirrors that contract
     // byte-for-byte so the gate answers the same way as the screen.
+    // Issue #883 package 2, batch X — media library organisation reads.
+    case "list_media_collections": {
+      return { ok: true, data: { collections: await listMediaCollections(businessId) } };
+    }
+    case "list_media_folders": {
+      return { ok: true, data: { folders: await listMediaFolders(businessId) } };
+    }
     case "list_audit_log": {
       const AUDIT_MAX_LIMIT = 200;
       const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

@@ -4,8 +4,8 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **122 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **112 write verbs**
+Current surface: **124 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **118 write verbs**
 (**32** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -108,6 +108,8 @@ visible only to connections consented for every branch) and **112 write verbs**
 | `list_cms_pages` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cms_media` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_product_attributes` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_media_collections` | workspace | agnostic | `media.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_media_folders` | workspace | agnostic | `media.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_audit_log` | pos | agnostic | `team.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_barcode_templates` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_sales_invoices` | pos | pinned | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -251,6 +253,12 @@ visible only to connections consented for every branch) and **112 write verbs**
 | `write_website_domain_set` | `website.domain.set` | website | low | connection write_mode | `cms.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_product_attribute_create` | `product.attribute.create` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_barcode_template_create` | `barcode.template.create` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_media_collection_create` | `media.collection.create` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_media_collection_delete` | `media.collection.delete` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_media_asset_set_collection` | `media.asset.set_collection` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_media_asset_trash` | `media.asset.trash` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_media_asset_restore` | `media.asset.restore` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 
 ## Deliberate exclusions (not MCP verbs here by design)
 

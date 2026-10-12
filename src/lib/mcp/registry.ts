@@ -211,6 +211,9 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_cms_media", kind: "read", app: "website", branchPolicy: "agnostic" },
   // Batch V — product masters are branch-scoped (pinned) like price lists.
   { name: "list_product_attributes", kind: "read", app: "pos", branchPolicy: "pinned" },
+  // Batch X — media library reads, agnostic like the existing media reads.
+  { name: "list_media_collections", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_media_folders", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   // Batch W — the audit trail has no branch dimension (agnostic, like the
   // other business-wide reads).
   { name: "list_audit_log", kind: "read", app: "pos", branchPolicy: "agnostic" },
@@ -410,6 +413,15 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch V — catalogue masters behind menuEdit, same tier as price lists.
   { actionType: "product.attribute.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "barcode.template.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch X — library organisation only: collections never touch bytes, and
+  // the soft trash is recoverable. The hard delete (storage object gone for
+  // good) stays screen-only, recorded on the matrix row.
+  { actionType: "media.collection.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "media.asset.trash", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "media.asset.restore", kind: "write", app: "workspace", risk: "low", approval: "mode" },
 ];
 
 // ---------------------------------------------------------------------------

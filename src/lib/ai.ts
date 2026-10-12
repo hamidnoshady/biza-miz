@@ -332,6 +332,13 @@ export type ActionType =
   // Batch V — product masters (attributes + weight-barcode templates).
   | "product.attribute.create"
   | "barcode.template.create"
+  // Batch X — media library organisation (collections + soft trash).
+  | "media.collection.create"
+  | "media.collection.rename"
+  | "media.collection.delete"
+  | "media.asset.set_collection"
+  | "media.asset.trash"
+  | "media.asset.restore"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -371,6 +378,12 @@ export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
   | "websiteOrderStatus"
   | "websiteDomainSet"
+  | "mediaCollectionCreate"
+  | "mediaCollectionRename"
+  | "mediaCollectionDelete"
+  | "mediaAssetSetCollection"
+  | "mediaAssetTrash"
+  | "mediaAssetRestore"
   | "productAttributeCreate"
   | "barcodeTemplateCreate"
   | "wpQueueRetry"
@@ -1337,6 +1350,54 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "media.collection.create": {
+    type: "media.collection.create",
+    endpoint: "/api/media/collections",
+    method: "POST",
+    label: "ساخت مجموعهٔ رسانه — فقط یک گروه‌بندی، هیچ فایلی جا‌به‌جا نمی‌شود",
+    payloadHint: '{ name: string, description?: string }',
+    executor: "mediaCollectionCreate",
+  },
+  "media.collection.rename": {
+    type: "media.collection.rename",
+    endpoint: "/api/media/collections/[id]",
+    method: "PATCH",
+    label: "تغییر نام/توضیح یک مجموعهٔ رسانه",
+    payloadHint: '{ collectionId: string, name: string, description?: string }',
+    executor: "mediaCollectionRename",
+  },
+  "media.collection.delete": {
+    type: "media.collection.delete",
+    endpoint: "/api/media/collections/[id]",
+    method: "DELETE",
+    label: "حذف مجموعه — خود فایل‌ها دست‌نخورده می‌مانند",
+    payloadHint: '{ collectionId: string }',
+    executor: "mediaCollectionDelete",
+  },
+  "media.asset.set_collection": {
+    type: "media.asset.set_collection",
+    endpoint: "/api/media/collections/[id]/items",
+    method: "POST",
+    label: "افزودن/حذف یک فایل به/از یک مجموعهٔ رسانه",
+    payloadHint: '{ assetId: string, collectionId: string, action: "add"|"remove" }',
+    executor: "mediaAssetSetCollection",
+  },
+  "media.asset.trash": {
+    type: "media.asset.trash",
+    endpoint: "/api/media/[id]",
+    method: "DELETE",
+    label: "فرستادن فایل به سطل‌زبالهٔ رسانه — بازیابی‌پذیر است؛ روی منو/سایت از نمایش می‌افتد",
+    payloadHint: '{ assetId: string }',
+    executor: "mediaAssetTrash",
+  },
+  "media.asset.restore": {
+    type: "media.asset.restore",
+    endpoint: "/api/media/[id]/restore",
+    method: "POST",
+    label: "بازیابی فایل از سطل‌زبالهٔ رسانه",
+    payloadHint: '{ assetId: string }',
+    executor: "mediaAssetRestore",
   },
   "product.attribute.create": {
     type: "product.attribute.create",
@@ -2755,6 +2816,22 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           required: ["invoiceId"],
           additionalProperties: false,
         },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_media_collections",
+        description: "مجموعه‌های رسانه با شمارش فایل — برای دسته‌بندی کتابخانهٔ رسانه.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_media_folders",
+        description: "پوشه‌های کتابخانهٔ رسانه با شمارش فایل.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
       },
     },
     {

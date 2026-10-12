@@ -122,6 +122,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_cms_media: PERMISSIONS.cmsView,
   // Batch V — product masters ride the menu/price-list branch pins.
   list_product_attributes: PERMISSIONS.menuView,
+  // Batch X — mirrors the media library screens' gates.
+  list_media_collections: PERMISSIONS.mediaView,
+  list_media_folders: PERMISSIONS.mediaView,
   // Batch W — the audit-trail screen's own gate (who did what, business-wide).
   list_audit_log: PERMISSIONS.teamManage,
   list_barcode_templates: PERMISSIONS.menuView,
@@ -264,6 +267,12 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "website.domain.set": PERMISSIONS.cmsConfigure,
   "product.attribute.create": PERMISSIONS.menuEdit,
   "barcode.template.create": PERMISSIONS.menuEdit,
+  "media.collection.create": PERMISSIONS.mediaManage,
+  "media.collection.rename": PERMISSIONS.mediaManage,
+  "media.collection.delete": PERMISSIONS.mediaManage,
+  "media.asset.set_collection": PERMISSIONS.mediaManage,
+  "media.asset.trash": PERMISSIONS.mediaManage,
+  "media.asset.restore": PERMISSIONS.mediaManage,
   "wp.queue.retry": PERMISSIONS.woocommerceSync,
   "wp.queue.retry_all_failed": PERMISSIONS.woocommerceSync,
   "wp.queue.flush": PERMISSIONS.woocommerceSync,

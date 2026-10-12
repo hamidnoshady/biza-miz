@@ -712,12 +712,19 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Media",
     entity: "Media assets, folders, collections, AI transforms",
     routes: ["media"],
-    // Batch I (#883): library read + single-asset detail. Upload/delete/
-    // transforms stay screen-side for now: the upload is a presign/PUT
-    // byte flow rather than a JSON verb, and AI transforms cost metered
-    // credits (see the ai-media endpoints).
-    ops: { listDetail: ["list_media_assets", "get_media_asset"] },
-    test: "integration/media.integration.test.ts",
+    // Batch I (#883): library read + single-asset detail; batch X added the
+    // organisation lanes (folders/collections reads + collection CRUD,
+    // membership, and the recoverable soft trash). Upload stays screen-side:
+    // the upload is a presign/PUT byte flow rather than a JSON verb, the HARD
+    // delete removes the storage object for good, and AI transforms cost
+    // metered credits (see the ai-media endpoints).
+    ops: {
+      listDetail: ["list_media_assets", "get_media_asset", "list_media_collections", "list_media_folders"],
+      create: ["media.collection.create"],
+      update: ["media.collection.rename", "media.asset.set_collection"],
+      lifecycle: ["media.collection.delete", "media.asset.trash", "media.asset.restore"],
+    },
+    test: "integration/media-library.integration.test.ts",
   },
   {
     id: "knowledge.articles",
