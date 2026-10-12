@@ -2760,6 +2760,26 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     {
       type: "function",
       function: {
+        name: "list_audit_log",
+        description:
+          "دفتر رویداد کسب‌وکار — چه کسی چه کرد (forcement log)؛ فیلتر موجودیت، عمل، عامل، یا موجودیت id؛ صفحه‌بندی مکان‌نما با before.",
+        parameters: {
+          type: "object",
+          properties: {
+            entity: { type: "string", description: "نام موجودیت — مثل order یا party" },
+            entityId: { type: "string" },
+            actorId: { type: "string", description: "شناسهٔ کاربر عامل" },
+            action: { type: "string", description: "نام عمل — مثل create یا update" },
+            before: { type: "number", description: "مکان‌نمای صفحه — کوچکتر از این id" },
+            limit: { type: "number", description: "پیش‌فرض ۵۰، سقف ۲۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "list_product_attributes",
         description: "ویژگی‌های کالا (رنگ/برند/…) با گزینه‌هایشان در شعبهٔ فعال.",
         parameters: {

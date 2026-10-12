@@ -4,7 +4,7 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **121 read verbs** (**25** business-wide aggregates —
+Current surface: **122 read verbs** (**25** business-wide aggregates —
 visible only to connections consented for every branch) and **112 write verbs**
 (**32** high-risk, forced through the approval queue even on `apply`-mode connections).
 
@@ -108,6 +108,7 @@ visible only to connections consented for every branch) and **112 write verbs**
 | `list_cms_pages` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cms_media` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_product_attributes` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_audit_log` | pos | agnostic | `team.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_barcode_templates` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_sales_invoices` | pos | pinned | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_wp_queue` | website | agnostic | `woocommerce.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |

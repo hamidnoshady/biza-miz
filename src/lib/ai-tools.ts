@@ -65,6 +65,7 @@ import { listAttributeDefinitions } from "./product-attributes-service";
 import { listWeightBarcodeTemplates } from "./weight-barcode-templates-service";
 import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/website-service";
 import { listRetailInvoices } from "./retail-invoice/list-service";
+import { listAuditLog } from "./audit-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
 import { wpOverviewStats, wpQueue, wpQueueSummary } from "./integrations/wp-manager-service";
 import { getRetailInvoiceDetail } from "./retail-invoice/read-service";
@@ -2098,6 +2099,31 @@ export async function runReadTool(
     // and zero or many ask the model to name one.
     // Issue #883 package 2, batch T — website infra reads (DNS/CDN status).
     // Issue #883 package 2, batch V — product masters (branch-pinned reads).
+    // Issue #883 package 2, batch W — the audit-trail screen's read.
+    // The route rejects invalid cursors/filters rather than silently paging
+    // wrong or reaching PostgreSQL casts; this case mirrors that contract
+    // byte-for-byte so the gate answers the same way as the screen.
+    case "list_audit_log": {
+      const AUDIT_MAX_LIMIT = 200;
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const SAFE_FILTER = /^[a-z][a-z0-9_.-]{0,79}$/i;
+      const entity = typeof args.entity === "string" && args.entity !== "" ? args.entity : undefined;
+      const action = typeof args.action === "string" && args.action !== "" ? args.action : undefined;
+      const actorId = typeof args.actorId === "string" && args.actorId !== "" ? args.actorId : undefined;
+      const entityId = typeof args.entityId === "string" && args.entityId !== "" ? args.entityId : undefined;
+      const before = typeof args.before === "number" && Number.isSafeInteger(args.before) ? args.before : undefined;
+      const limit = typeof args.limit === "number" && Number.isSafeInteger(args.limit) ? args.limit : undefined;
+      if (before !== undefined && before < 1) return { ok: false, data: { error: "invalid_before" } };
+      if (limit !== undefined && (limit < 1 || limit > AUDIT_MAX_LIMIT)) return { ok: false, data: { error: "invalid_limit" } };
+      if ((entity && !SAFE_FILTER.test(entity)) || (action && !SAFE_FILTER.test(action))) {
+        return { ok: false, data: { error: "invalid_filter" } };
+      }
+      if ((actorId && !UUID_RE.test(actorId)) || (entityId && entity === "account" && !UUID_RE.test(entityId))) {
+        return { ok: false, data: { error: "invalid_identifier" } };
+      }
+      const entries = await listAuditLog(businessId, { entity, entityId, actorId, action, before, limit });
+      return { ok: true, data: { entries } };
+    }
     case "list_product_attributes": {
       const pinned = await pinnedLocation(businessId, args, mcpScope);
       if (!pinned.ok) return { ok: false, data: { error: pinned.error } };

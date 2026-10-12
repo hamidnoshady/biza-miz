@@ -122,6 +122,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_cms_media: PERMISSIONS.cmsView,
   // Batch V — product masters ride the menu/price-list branch pins.
   list_product_attributes: PERMISSIONS.menuView,
+  // Batch W — the audit-trail screen's own gate (who did what, business-wide).
+  list_audit_log: PERMISSIONS.teamManage,
   list_barcode_templates: PERMISSIONS.menuView,
   // Batch Q — the sales-invoice screens' read gate.
   list_sales_invoices: PERMISSIONS.ordersView,

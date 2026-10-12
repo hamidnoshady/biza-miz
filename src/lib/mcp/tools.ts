@@ -222,6 +222,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   get_website_cdn: "CDN status of the site (cache mode, purge state).",
   list_kb_catalogue: "The product help catalogue — categories and articles with slugs for citation.",
   list_product_attributes: "The branch's product attribute definitions (e.g. colour → red, blue).",
+  list_audit_log: "The business audit trail (who changed what, filtered by entity/action/actor; cursor with before).",
   list_barcode_templates: "The branch's weight-barcode templates (prefix + weight unit).",
   // Phase C — the messaging reads that feed the campaign-create action.
   list_message_templates: "Saved message templates by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",

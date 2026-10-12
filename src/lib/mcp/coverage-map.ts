@@ -747,9 +747,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Cross-cutting",
     entity: "Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup",
     routes: ["audit-log", "dashboard", "commission", "deliveries", "couriers", "business-day", "business-info", "bug-report", "industry", "security", "watch", "sessions", "rollup"],
-    ops: { listDetail: ["get_setup_state", "describe_app"] },
-    note: "small surfaces; audit-log read is the audit trail",
-    test: "integration/security.integration.test.ts",
+    ops: { listDetail: ["get_setup_state", "describe_app", "list_audit_log"] },
+    note: "small surfaces; the audit-log read mirrors the screen's validation contract (invalid cursors and filters are refused, never silently paged)",
+    test: "integration/auth-account-security.integration.test.ts",
   },
   {
     id: "misc.support",
