@@ -1072,14 +1072,15 @@ export async function resolveServeableArtifact(
   if (!isServeableArtifactName(artifact)) return { ok: false, status: 404, error: "not_found" };
   const config = await getPlatformBackupConfig();
   if (!config.servingEnabled) return { ok: false, status: 404, error: "not_found" };
-  // Peers only ever receive ciphertext (audit F03). A plaintext artifact —
-  // including a legacy one written before encryption was enforced — is kept
-  // on disk for an operator to deal with, but is never handed to a peer.
-  if (!artifact.endsWith(".enc")) return { ok: false, status: 403, error: "plaintext_artifact_not_served" };
   const filePath = path.join(platformBackupDir(config.directory), artifact);
   try {
     const stat = await fs.stat(filePath);
     if (!stat.isFile()) return { ok: false, status: 404, error: "not_found" };
+    // Peers only ever receive ciphertext (audit F03). A plaintext artifact that
+    // exists — including a legacy one written before encryption was enforced —
+    // stays on disk for an operator, but is never handed to a peer. A name that
+    // does not exist is simply not found, plaintext or not.
+    if (!artifact.endsWith(".enc")) return { ok: false, status: 403, error: "plaintext_artifact_not_served" };
     const maxBytes = resolveMaxDownloadBytes();
     if (stat.size > maxBytes) {
       return { ok: false, status: 413, error: "artifact_too_large" };
