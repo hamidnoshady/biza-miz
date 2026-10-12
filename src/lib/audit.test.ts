@@ -25,6 +25,14 @@ describe("auditActionLabel", () => {
     expect(auditActionLabel("settings.business.update")).toBe("تغییر اطلاعات کسب‌وکار");
     expect(auditActionLabel("settings.mfa_policy.update")).toBe("تغییر سیاست ورود دومرحله‌ای");
   });
+
+  it("labels fiscal-year and fiscal-period lifecycle events", () => {
+    expect(auditActionLabel("fiscal_year.created")).toBe("تعریف سال مالی");
+    expect(auditActionLabel("fiscal_period.soft_closed")).toBe("بستن موقت دورهٔ مالی");
+    expect(auditActionLabel("fiscal_period.locked")).toBe("قفل‌کردن دورهٔ مالی");
+    expect(auditActionLabel("fiscal_period.reopened")).toBe("بازگشایی دورهٔ مالی");
+    expect(auditActionLabel("fiscal_year.closed")).toBe("بستن نهایی سال مالی");
+  });
 });
 
 describe("auditEntityLabel", () => {
@@ -42,6 +50,11 @@ describe("auditEntityLabel", () => {
 
   it("labels the account entity (issue #160 §7.5)", () => {
     expect(auditEntityLabel("account")).toBe("حساب");
+  });
+
+  it("labels fiscal-year and fiscal-period entities", () => {
+    expect(auditEntityLabel("fiscal_year")).toBe("سال مالی");
+    expect(auditEntityLabel("fiscal_period")).toBe("دورهٔ مالی");
   });
 });
 

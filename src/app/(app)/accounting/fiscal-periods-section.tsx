@@ -82,7 +82,7 @@ function errorMessage(code: string | undefined): string {
     invalid_year: `سال شمسی باید عددی بین ${toPersianDigits(FISCAL_YEAR_MIN)} تا ${toPersianDigits(FISCAL_YEAR_MAX)} باشد.`,
     fiscal_year_exists: "این سال مالی قبلاً تعریف شده است.",
     fiscal_period_overlap: "بازهٔ این سال با یک دورهٔ مالی موجود هم‌پوشانی دارد؛ اطلاعات دوره‌ها را بررسی کنید.",
-    fiscal_period_not_defined: "برای این تاریخ سال مالی تعریف نشده است. سال شمسی مربوط را تعریف کنید تا ثبت سند در بازهٔ آن ممکن شود.",
+    fiscal_period_not_defined: "این تاریخ در هیچ دورهٔ مالیِ تعریف‌شده‌ای قرار نمی‌گیرد. در حسابداری، بخش «سال‌ها و دوره‌های مالی»، سال شمسیِ مربوط را تعریف کنید؛ تا آن زمان ثبت سند پذیرفته نمی‌شود.",
     fiscal_year_not_found: "سال مالی یافت نشد؛ فهرست را دوباره بارگذاری کنید.",
     period_not_found: "دوره یافت نشد؛ فهرست را دوباره بارگذاری کنید.",
     invalid_transition: "وضعیت این دوره هم‌زمان تغییر کرده است؛ فهرست را بررسی و دوباره تلاش کنید.",
@@ -494,8 +494,46 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
         title="سال‌های مالی"
         description="هر سال مالی از فروردین تا اسفند و شامل دوازده دورهٔ ماهانه است. تعریف سال، هیچ سندی ثبت یا قفل نمی‌کند."
       >
+        {canManage || years.length === 0 ? (
+          <InfoBox>
+            {years.length === 0 ? (
+              <>
+                <p className="font-semibold">کنترل دوره‌های مالی با تعریف نخستین سال فعال می‌شود.</p>
+                <p className="mt-1 text-xs leading-5">
+                  پس از آن، ثبت هر سند جدید—حتی اگر تاریخش به گذشته برگردد—باید در یک دورهٔ تعریف‌شده قرار بگیرد؛ ثبت با تاریخِ بدون پوشش پذیرفته نمی‌شود.
+                </p>
+                <p className="mt-1 text-xs leading-5">
+                  این فعال‌سازی سندهای پیشین را بازنویسی نمی‌کند؛ اما سند تازه با همان تاریخِ بدون پوشش هم پذیرفته نخواهد شد.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-semibold">هر ثبت تازه باید در یک دورهٔ مالی تعریف‌شده قرار بگیرد.</p>
+                <p className="mt-1 text-xs leading-5">
+                  این شرط برای سندهای با تاریخ گذشته هم برقرار است؛ تاریخِ بدون پوشش پذیرفته نمی‌شود.
+                </p>
+              </>
+            )}
+            {canManage ? (
+              <>
+                <p className="mt-1 text-xs leading-5">
+                  اگر تاریخی هنوز پوشش ندارد، سال شمسی مربوط را در همین فرم تعریف کنید؛ دوازده دورهٔ ماهانهٔ آن خودکار ساخته می‌شود.
+                </p>
+                <Button asChild variant="link" size="sm">
+                  <a href="#fiscal-year-definition">رفتن به فرم تعریف سال مالی</a>
+                </Button>
+              </>
+            ) : (
+              <p className="mt-1 text-xs leading-5">
+                برای تعریف سال مربوط، از دارندهٔ مجوز «بستن دورهٔ مالی» بخواهید در همین بخش سال شمسی را تعریف کند.
+              </p>
+            )}
+          </InfoBox>
+        ) : null}
+
         {canManage ? (
         <form
+          id="fiscal-year-definition"
           className="grid gap-3 sm:grid-cols-[minmax(0,13rem)_auto] sm:items-end"
           onSubmit={(event) => {
             event.preventDefault();

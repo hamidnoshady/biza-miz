@@ -90,12 +90,28 @@ async function renderSection(canManage: boolean, options: Parameters<typeof stub
     view = render(<FiscalPeriodsSection canManage={canManage} />);
   });
   await waitFor(() => {
-    expect(screen.queryByText("سال انتخاب‌شده") || screen.queryByText(/بارگذاری سال‌های مالی ناموفق بود/)).toBeTruthy();
+    expect(
+      screen.queryByText("سال انتخاب‌شده") ||
+        screen.queryByText(/هنوز سال مالی‌ای تعریف نشده است/) ||
+        screen.queryByText(/بارگذاری سال‌های مالی ناموفق بود/),
+    ).toBeTruthy();
   });
   return { ...network, view };
 }
 
 describe("FiscalPeriodsSection capability-aware controls", () => {
+  it("explains first-year adoption, back-dated coverage, and where to define missing years", async () => {
+    await renderSection(true, { years: { fiscalYears: [] } });
+
+    expect(await screen.findByText("کنترل دوره‌های مالی با تعریف نخستین سال فعال می‌شود.")).toBeTruthy();
+    expect(screen.getByText(/حتی اگر تاریخش به گذشته برگردد/)).toBeTruthy();
+    expect(screen.getByText(/ثبت با تاریخِ بدون پوشش پذیرفته نمی‌شود/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "رفتن به فرم تعریف سال مالی" }).getAttribute("href")).toBe(
+      "#fiscal-year-definition",
+    );
+    expect(document.getElementById("fiscal-year-definition")).toBeTruthy();
+  });
+
   it("shows status read-only and hides every mutation for a ledger viewer", async () => {
     await renderSection(false, { periods: { periods: [period("soft_closed"), period("locked", 2)] } });
 

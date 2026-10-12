@@ -2216,7 +2216,9 @@ function ReverseDialog({
         );
       }
       if (code === "fiscal_period_not_defined") {
-        return setLocalError("برای تاریخ برگشت سال مالی تعریف نشده است؛ ابتدا سال شمسی مربوط را تعریف کنید.");
+        return setLocalError(
+          "این تاریخ در هیچ دورهٔ مالیِ تعریف‌شده‌ای قرار نمی‌گیرد. در حسابداری، بخش «سال‌ها و دوره‌های مالی»، سال شمسیِ مربوط را تعریف کنید؛ تا آن زمان ثبت سند پذیرفته نمی‌شود.",
+        );
       }
       return setLocalError(resolveErrorMessage(code));
     }

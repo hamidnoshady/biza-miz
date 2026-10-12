@@ -56,6 +56,11 @@ const ACTION_LABELS: Record<string, string> = {
   "account.reparented": "جابه‌جایی حساب در ساختار",
   "account.archived": "بایگانی حساب",
   "account.reactivated": "بازگردانی حساب از بایگانی",
+  "fiscal_year.created": "تعریف سال مالی",
+  "fiscal_period.soft_closed": "بستن موقت دورهٔ مالی",
+  "fiscal_period.locked": "قفل‌کردن دورهٔ مالی",
+  "fiscal_period.reopened": "بازگشایی دورهٔ مالی",
+  "fiscal_year.closed": "بستن نهایی سال مالی",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -66,6 +71,8 @@ const ENTITY_LABELS: Record<string, string> = {
   order: "سفارش",
   location: "شعبه",
   account: "حساب",
+  fiscal_year: "سال مالی",
+  fiscal_period: "دورهٔ مالی",
   settings: "تنظیمات",
   menu_item: "آیتم منو",
 };
