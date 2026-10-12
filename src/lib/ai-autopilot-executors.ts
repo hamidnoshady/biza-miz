@@ -18,6 +18,7 @@
 import { getPool, query } from "./db";
 import type { AutopilotExecutorKey } from "./ai";
 import { createStockCount, editStockCount, reverseStockCount } from "./stock-count-service";
+import { saveMessageTemplate, pauseMessageCampaign, resumeMessageCampaign, launchMessageCampaign } from "./message-campaigns-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
@@ -2689,6 +2690,80 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch AB — messaging templates & send-lane ───────
+// The route's known-code list (startsWith matches included) is the executor's
+// code map: every service refusal reaches the model as the campaign screen's
+// own error text, never a wrapped 500.
+const MESSAGING_CODES = [
+  "invalid_template", "invalid_campaign", "not_found", "campaign_needs_segment",
+  "campaign_already_launched", "campaign_audience_limit_exceeded", "campaign_has_no_recipients",
+  "no_reachable_customer", "messaging_not_configured", "template_not_found", "invalid_amount",
+  "invalid_template_body", "invalid_template_name",
+];
+function failMessaging(err: unknown): AutopilotExecutionResult {
+  const message = err instanceof Error ? err.message : "";
+  if (
+    MESSAGING_CODES.some((code) => message.startsWith(code)) ||
+    message.startsWith("message_variable_missing") ||
+    message.startsWith("unknown_template_variable")
+  ) {
+    return fail(message);
+  }
+  throw err;
+}
+const messagingTemplateSave: AutopilotExecutor = async (ctx) => {
+  const channel = str(ctx.payload.channel);
+  const name = str(ctx.payload.name);
+  const body = typeof ctx.payload.body === "string" ? ctx.payload.body : null;
+  if ((channel !== "sms" && channel !== "email") || !name || body === null) return fail("invalid_payload");
+  try {
+    const template = await saveMessageTemplate(ctx.businessId, {
+      channel,
+      name,
+      subject: channel === "email" ? str(ctx.payload.subject) ?? undefined : undefined,
+      body,
+    });
+    return { ok: true, result: { template: { ...template } } };
+  } catch (err) {
+    return failMessaging(err);
+  }
+};
+const messagingCampaignPause: AutopilotExecutor = async (ctx) => {
+  const campaignId = str(ctx.payload.campaignId) ?? str(ctx.payload.id);
+  if (!campaignId) return fail("campaign_required");
+  try {
+    await pauseMessageCampaign(ctx.businessId, campaignId);
+    return { ok: true, result: { ok: true, campaignId, status: "paused" } };
+  } catch (err) {
+    return failMessaging(err);
+  }
+};
+const messagingCampaignResume: AutopilotExecutor = async (ctx) => {
+  const campaignId = str(ctx.payload.campaignId) ?? str(ctx.payload.id);
+  if (!campaignId) return fail("campaign_required");
+  try {
+    await resumeMessageCampaign(ctx.businessId, campaignId);
+    return { ok: true, result: { ok: true, campaignId } };
+  } catch (err) {
+    return failMessaging(err);
+  }
+};
+const messagingCampaignLaunch: AutopilotExecutor = async (ctx) => {
+  const campaignId = str(ctx.payload.campaignId) ?? str(ctx.payload.id);
+  if (!campaignId) return fail("campaign_required");
+  const creditRial =
+    typeof ctx.payload.creditRial === "number" && Number.isSafeInteger(ctx.payload.creditRial)
+      ? ctx.payload.creditRial
+      : undefined;
+  const discountCode = str(ctx.payload.discountCode) ?? undefined;
+  try {
+    const launch = await launchMessageCampaign(ctx.businessId, campaignId, { creditRial, discountCode });
+    return { ok: true, result: { launch: { ...(launch as object) } } };
+  } catch (err) {
+    return failMessaging(err);
+  }
+};
+
 // ── Issue #883 package 2, batch AA — stock-count edit & reverse ────────────
 // Both ride the client-transaction services the routes call, with the own
 // count's stored branch (never a guessed one) and the caller's exact code
@@ -3499,6 +3574,10 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  messagingTemplateSave,
+  messagingCampaignPause,
+  messagingCampaignResume,
+  messagingCampaignLaunch,
   fiscalYearCreate,
   fiscalPeriodSetStatus,
   fiscalYearClose,

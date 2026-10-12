@@ -447,6 +447,13 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // AND its ledger entries — a posting reversal, hence always_approve.
   { actionType: "inventory.count.edit", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "inventory.count.reverse", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  // Batch AB — templates are boilerplate (mode). Pause is protective (mode).
+  // Resume and launch both enter the mass-outbound lane (launch can also
+  // attach wallet credit / discount codes to customers) — always_approve.
+  { actionType: "messaging.template.save", kind: "write", app: "growth", risk: "low", approval: "mode" },
+  { actionType: "messaging.campaign.pause", kind: "write", app: "growth", risk: "low", approval: "mode" },
+  { actionType: "messaging.campaign.resume", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
+  { actionType: "messaging.campaign.launch", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

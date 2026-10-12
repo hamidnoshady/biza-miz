@@ -430,7 +430,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Growth",
     entity: "Growth overview, settings, campaign audience, accounting",
     routes: ["growth"],
-    ops: { listDetail: ["list_message_templates", "list_message_campaigns"] },
+    ops: { listDetail: ["list_message_templates", "list_message_campaigns"], lifecycle: ["messaging.campaign.pause", "messaging.campaign.resume", "messaging.campaign.launch"] },
+    note: "growth settings screen (channels, tariffs, attribution windows) stays route-only — Twilio/SMS sender configuration is credential-shaped and never crosses the chat channel; campaign draft creation is proposal-only by design (see growth.messaging)",
     test: "integration/crm.integration.test.ts",
   },
   {
@@ -438,7 +439,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Growth",
     entity: "Messaging rules & templates",
     routes: ["messaging", "notifications/rules"],
-    ops: { listDetail: ["list_message_templates"], lifecycle: ["crm.customer.note"] },
+    ops: { listDetail: ["list_message_templates"], create: ["messaging.template.save"], lifecycle: ["crm.customer.note", "messaging.campaign.pause", "messaging.campaign.resume", "messaging.campaign.launch"] },
+    note: "campaign DRAFT creation stays proposal-only (the assistant writes the campaign card, the browser sends it) — same design class as website.post.publish; notification rules live on their own screen with their own route",
     test: "integration/crm.integration.test.ts",
   },
   {

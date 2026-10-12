@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **126 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **129 write verbs**
-(**39** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **133 write verbs**
+(**41** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -267,6 +267,10 @@ visible only to connections consented for every branch) and **129 write verbs**
 | `write_journal_entry_reverse` | `journal.entry.reverse` | accounting | high | always approval queue (step-up) | `ledger.approve` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_inventory_count_edit` | `inventory.count.edit` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_inventory_count_reverse` | `inventory.count.reverse` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_messaging_template_save` | `messaging.template.save` | growth | low | connection write_mode | `campaigns.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_messaging_campaign_pause` | `messaging.campaign.pause` | growth | low | connection write_mode | `campaigns.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_messaging_campaign_resume` | `messaging.campaign.resume` | growth | high | always approval queue (step-up) | `campaigns.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_messaging_campaign_launch` | `messaging.campaign.launch` | growth | high | always approval queue (step-up) | `campaigns.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_delete` | `media.collection.delete` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_asset_set_collection` | `media.asset.set_collection` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

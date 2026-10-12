@@ -357,6 +357,11 @@ export type ActionType =
   // Batch AA — correcting/removing a posted stock count (adjustment re-do or full reversal).
   | "inventory.count.edit"
   | "inventory.count.reverse"
+  // Batch AB — messaging: template save + campaign send-lane controls.
+  | "messaging.template.save"
+  | "messaging.campaign.pause"
+  | "messaging.campaign.resume"
+  | "messaging.campaign.launch"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -400,6 +405,10 @@ export type AutopilotExecutorKey =
   | "fiscalYearCreate"
   | "fiscalPeriodSetStatus"
   | "inventoryCountEdit"
+  | "messagingTemplateSave"
+  | "messagingCampaignPause"
+  | "messagingCampaignResume"
+  | "messagingCampaignLaunch"
   | "inventoryCountReverse"
   | "journalEntryReverse"
   | "fiscalYearClose"
@@ -1379,6 +1388,38 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "messaging.template.save": {
+    type: "messaging.template.save",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "ذخیرهٔ قالب پیام (sms|email) — متغیرهای ناشناخته رد می‌شوند؛ هیچ پیامی ارسال نمی‌شود",
+    payloadHint: '{ channel: "sms"|"email", name: string, body: string, subject?: string }',
+    executor: "messagingTemplateSave",
+  },
+  "messaging.campaign.pause": {
+    type: "messaging.campaign.pause",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "مکث کمپینِ در حال ارسال — عملیات محافظه‌کارانه",
+    payloadHint: '{ campaignId: string }',
+    executor: "messagingCampaignPause",
+  },
+  "messaging.campaign.resume": {
+    type: "messaging.campaign.resume",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "از سر گرفتن کمپین — برگشت به مسیر ارسال انبوه به مشتریان؛ هر بار تأیید انسان",
+    payloadHint: '{ campaignId: string }',
+    executor: "messagingCampaignResume",
+  },
+  "messaging.campaign.launch": {
+    type: "messaging.campaign.launch",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "پرتاب کمپین پیام به همهٔ گیرندگان سگمنت — خروجی انبوه با اعتبار/کد تخفیف اختیاری؛ هر بار تأیید انسان",
+    payloadHint: '{ campaignId: string, creditRial?: number /* ریال صحیح */, discountCode?: string }',
+    executor: "messagingCampaignLaunch",
   },
   "inventory.count.edit": {
     type: "inventory.count.edit",

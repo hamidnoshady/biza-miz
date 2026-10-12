@@ -1648,6 +1648,64 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_messaging_template_save",
+    actionType: "messaging.template.save",
+    english: "Save a message template (sms|email) — unknown variables are refused; nothing is sent.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel: { type: "string", enum: ["sms", "email"] },
+        name: { type: "string", description: "نام قالب" },
+        body: { type: "string", description: "متن با متغیرهای شناخته‌شده — مثل {{customer_name}}" },
+        subject: { type: "string", description: "فقط برای email" },
+      },
+      required: ["channel", "name", "body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_messaging_campaign_pause",
+    actionType: "messaging.campaign.pause",
+    english: "Pause a sending campaign (protective — sends stop).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: { campaignId: id("شناسهٔ کمپین — از list_message_campaigns") },
+      required: ["campaignId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_messaging_campaign_resume",
+    actionType: "messaging.campaign.resume",
+    english: "Resume a paused campaign — back onto mass delivery; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { campaignId: id("شناسهٔ کمپین — از list_message_campaigns") },
+      required: ["campaignId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_messaging_campaign_launch",
+    actionType: "messaging.campaign.launch",
+    english:
+      "Launch a campaign to every recipient in its segment — mass outbound, with optional wallet credit/discount code attached; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        campaignId: id("شناسهٔ کمپین — از list_message_campaigns"),
+        creditRial: { type: "number", description: "اعتبار کیف پول برای هر گیرنده — ریال صحیح" },
+        discountCode: { type: "string" },
+      },
+      required: ["campaignId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_inventory_count_edit",
     actionType: "inventory.count.edit",
     english:
