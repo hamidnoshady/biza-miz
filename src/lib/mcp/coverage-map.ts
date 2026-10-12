@@ -451,12 +451,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     ops: {
       // Batch F (#883): promotion create/toggle, gift-card issue (liability
       // posting rides the route's transaction), card balance+history by code.
-      // Redeem stays till-side (it happens inside a payment, not alone).
+      // Batch AC: standalone redeem + the deliberate expiry tick — the
+      // spend side outside a sale, always_approve both.
       listDetail: ["list_promotions", "get_gift_card_status"],
       create: ["promotion.upsert", "gift_card.issue"],
       update: ["promotion.toggle"],
+      lifecycle: ["gift_card.redeem", "gift_card.expire_run"],
     },
-    test: "integration/giftcards.integration.test.ts",
+    test: "integration/promotions.integration.test.ts",
   },
 
   // ============================ Website / CMS / WooCommerce ============================

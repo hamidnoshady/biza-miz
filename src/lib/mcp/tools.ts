@@ -1648,6 +1648,35 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_gift_card_redeem",
+    actionType: "gift_card.redeem",
+    english:
+      "Redeem a gift card at the branch — money leaves the customer's card balance; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "کد کارت هدیه" },
+        amount: { type: "number", description: "مبلغ خرج — ریال صحیح" },
+        locationId: id("شعبه — اگر پین شعبه دیگری است؛ پیش‌فرض پین"),
+      },
+      required: ["code", "amount"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_gift_card_expire_run",
+    actionType: "gift_card.expire_run",
+    english:
+      "Run expiry for the branch's due gift cards — posts an expiry event per card; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { locationId: id("شعبه — اگر پین شعبه دیگری است؛ پیش‌فرض پین") },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_messaging_template_save",
     actionType: "messaging.template.save",
     english: "Save a message template (sms|email) — unknown variables are refused; nothing is sent.",

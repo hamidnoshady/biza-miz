@@ -19,6 +19,7 @@ import { getPool, query } from "./db";
 import type { AutopilotExecutorKey } from "./ai";
 import { createStockCount, editStockCount, reverseStockCount } from "./stock-count-service";
 import { saveMessageTemplate, pauseMessageCampaign, resumeMessageCampaign, launchMessageCampaign } from "./message-campaigns-service";
+import { redeemGiftCard, expireGiftCards } from "./promotions-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
@@ -2690,6 +2691,59 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch AC — gift-card money movements ─────────────
+// Both mirror the routes' client transactions. Redeem preserves the route's
+// simple failure shape ({redeem_failed} with the reason); the expiry run is
+// a deliberate bulk tick, one expiry event per due card inside one transaction.
+const giftCardRedeem: AutopilotExecutor = async (ctx) => {
+  const code = str(ctx.payload.code);
+  const amount = typeof ctx.payload.amount === "number" && Number.isFinite(ctx.payload.amount) ? ctx.payload.amount : null;
+  if (!code || amount === null || amount <= 0) return fail("missing_fields");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await redeemGiftCard(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      code,
+      amount,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, balance: result.balance } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return { ok: false, result: { error: "redeem_failed", message: (err as Error).message }, errorCode: "redeem_failed" };
+  } finally {
+    client.release();
+  }
+};
+const giftCardExpireRun: AutopilotExecutor = async (ctx) => {
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await expireGiftCards(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      createdBy: ctx.authorizedByUserId ?? null,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { cards: result.cards, totalRial: result.totalRial } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
 // ── Issue #883 package 2, batch AB — messaging templates & send-lane ───────
 // The route's known-code list (startsWith matches included) is the executor's
 // code map: every service refusal reaches the model as the campaign screen's
@@ -3574,6 +3628,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  giftCardRedeem,
+  giftCardExpireRun,
   messagingTemplateSave,
   messagingCampaignPause,
   messagingCampaignResume,

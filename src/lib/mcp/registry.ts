@@ -454,6 +454,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "messaging.campaign.pause", kind: "write", app: "growth", risk: "low", approval: "mode" },
   { actionType: "messaging.campaign.resume", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
   { actionType: "messaging.campaign.launch", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
+  // Batch AC — redeem spends a customer's stored balance; expire_run posts
+  // expiry events for every due card in the branch. Both money-shaped.
+  { actionType: "gift_card.redeem", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
+  { actionType: "gift_card.expire_run", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

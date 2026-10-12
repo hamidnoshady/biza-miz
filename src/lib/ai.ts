@@ -362,6 +362,9 @@ export type ActionType =
   | "messaging.campaign.pause"
   | "messaging.campaign.resume"
   | "messaging.campaign.launch"
+  // Batch AC — gift-card money movements (redeem / bulk expiry run).
+  | "gift_card.redeem"
+  | "gift_card.expire_run"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -408,6 +411,8 @@ export type AutopilotExecutorKey =
   | "messagingTemplateSave"
   | "messagingCampaignPause"
   | "messagingCampaignResume"
+  | "giftCardRedeem"
+  | "giftCardExpireRun"
   | "messagingCampaignLaunch"
   | "inventoryCountReverse"
   | "journalEntryReverse"
@@ -1388,6 +1393,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "gift_card.redeem": {
+    type: "gift_card.redeem",
+    endpoint: "/api/promotions/gift-cards/redeem",
+    method: "POST",
+    label: "خرج کارت هدیه در شعبه — پول از موجودی کارت مشتری کم می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ code: string, amount: number /* ریال صحیح */, locationId?: string }',
+    executor: "giftCardRedeem",
+  },
+  "gift_card.expire_run": {
+    type: "gift_card.expire_run",
+    endpoint: "/api/promotions/gift-cards/expire",
+    method: "POST",
+    label: "اجرای انقضای کارت‌های سررسیدگذشتهٔ شعبه — صدور رویداد به هر کارت؛ هر بار تأیید انسان",
+    payloadHint: '{ locationId?: string }',
+    executor: "giftCardExpireRun",
   },
   "messaging.template.save": {
     type: "messaging.template.save",

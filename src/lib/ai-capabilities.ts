@@ -289,6 +289,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "messaging.campaign.pause": PERMISSIONS.campaignsManage,
   "messaging.campaign.resume": PERMISSIONS.campaignsManage,
   "messaging.campaign.launch": PERMISSIONS.campaignsManage,
+  "gift_card.redeem": PERMISSIONS.giftCardsRedeem,
+  "gift_card.expire_run": PERMISSIONS.giftCardsIssue,
   "media.collection.rename": PERMISSIONS.mediaManage,
   "media.collection.delete": PERMISSIONS.mediaManage,
   "media.asset.set_collection": PERMISSIONS.mediaManage,
