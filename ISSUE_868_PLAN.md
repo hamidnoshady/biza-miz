@@ -209,9 +209,9 @@ Runs: the packaged job `37979722293` (push) and `37979728260` (pull request) pas
 
 Delivered as draft PR #898 from `arena/10b8596c-biza-miz`. Rebased cleanly onto `origin/main` at `b8b66b2` (PR #875, multicurrency), resolving all five conflicts. The PR refs #868 and does **not** close it: several items in §7 are genuine remaining work, documented below.
 
-Head after rebase + fixed-asset defaults PATCH: `9df206f8`. CI run 38169234122 is pending on push.
+Head at end of this push: `fb160a89`. CI run 38227670607 is in flight; unit tests and design lint pass locally after fixing the stale route-test mock and adding a dark-mode amber pair.
 
-Delivered (§6 plus this pass):
+Delivered (§6 plus subsequent passes):
 
 - The line-level model, migration `0216`, pure rules, services, posting guard on manual journals, drafts, expenses; reversals mirror. Expense & journal-voucher import with four optional code columns; concurrency hardening (`0217`/`0218`); journal CSV export with 8 dimension columns; reads/filters/reports (matrix, profit by centre, cost-centre card, trial-balance filter); screens at `/accounting/dimensions` with management, searchable pickers and Project/Cost-centre distinction. Size diagnostics and budget preservation (198.17 / 618.6 / 161 MiB on Windows).
 - **Fixed-asset attribution** (migration `0219`): four nullable columns on `fixed_assets`, structural BEFORE trigger reusing `accounting_dimension_check_all`, partial indexes; create/depreciation/disposal stamp dimensions on asset/P&L legs; settlement/contra/proceeds legs stay unattributed; reversals mirror through `postExactMirrorEntry(dimensionMirror: true)`; `dimensionValueUsage` counts `fixed_assets` so defaults archive.
