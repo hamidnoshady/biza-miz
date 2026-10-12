@@ -298,6 +298,9 @@ export const PERMISSIONS = {
    *                         spending one.
    *   commission.*          compensation data. Its own boundary, server-side;
    *                         hiding the menu entry was never the protection.
+   *                         `calculate` builds a settlement run, `approve`
+   *                         reviews and approves it, `payout` pays it out and
+   *                         closes it, `reverse` undoes a payout (#869).
    *   marketing.configure   Growth-wide configuration.
    *
    * `src/lib/growth-access.ts` maps every Growth page and API to exactly one of
@@ -316,6 +319,12 @@ export const PERMISSIONS = {
   giftCardsRedeem: "gift_cards.redeem",
   commissionView: "commission.view",
   commissionManage: "commission.manage",
+  // Issue #869: the settlement lifecycle is split so that no single key can
+  // both decide what is owed and pay it out.
+  commissionCalculate: "commission.calculate",
+  commissionApprove: "commission.approve",
+  commissionPayout: "commission.payout",
+  commissionReverse: "commission.reverse",
   marketingConfigure: "marketing.configure",
   integrationsView: "integrations.view",
   integrationsManage: "integrations.manage",
@@ -368,6 +377,10 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.storeCreditPayout,
   PERMISSIONS.giftCardsIssue,
   PERMISSIONS.commissionManage,
+  PERMISSIONS.commissionCalculate,
+  PERMISSIONS.commissionApprove,
+  PERMISSIONS.commissionPayout,
+  PERMISSIONS.commissionReverse,
 ]);
 const REASON_REQUIRED = new Set<Permission>([
   PERMISSIONS.ordersAmendClosed,
@@ -447,7 +460,8 @@ const {
   woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
   growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
   storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
-  commissionView, commissionManage, marketingConfigure,
+  commissionView, commissionManage, commissionCalculate, commissionApprove, commissionPayout, commissionReverse,
+  marketingConfigure,
   integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
 } = PERMISSIONS;
 
@@ -508,7 +522,11 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // before is lost.
     growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
     storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
-    commissionView, commissionManage, marketingConfigure,
+    commissionView, commissionManage,
+    // #869: a manager may build a settlement run, but approving and paying it
+    // is the books' work, and stays with the accountant.
+    commissionCalculate,
+    marketingConfigure,
     integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
   ],
   // Phase 16's role: the books, and only the books. No till, no floor. Manages
@@ -544,8 +562,10 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     workspaceView,
     // Growth accounting and customer reads were open to the accountant, and
     // commission is compensation — the same data class as payroll, which this
-    // role already reads. Read only: writing a commission rule is not books work.
+    // role already reads. Writing a commission rule is not books work; the
+    // settlement lifecycle is (#869): build, approve, pay and reverse a run.
     growthView, commissionView,
+    commissionCalculate, commissionApprove, commissionPayout, commissionReverse,
   ],
   cashier: [
     aiUse,
@@ -667,6 +687,10 @@ const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>
   [PERMISSIONS.giftCardsIssue]: [PERMISSIONS.giftCardsView],
   [PERMISSIONS.giftCardsRedeem]: [PERMISSIONS.giftCardsView],
   [PERMISSIONS.commissionManage]: [PERMISSIONS.commissionView],
+  [PERMISSIONS.commissionCalculate]: [PERMISSIONS.commissionView],
+  [PERMISSIONS.commissionApprove]: [PERMISSIONS.commissionView],
+  [PERMISSIONS.commissionPayout]: [PERMISSIONS.commissionView],
+  [PERMISSIONS.commissionReverse]: [PERMISSIONS.commissionView],
   [PERMISSIONS.integrationsManage]: [PERMISSIONS.integrationsView],
   [PERMISSIONS.mediaManage]: [PERMISSIONS.mediaView],
   [PERMISSIONS.billingManage]: [PERMISSIONS.billingView],
