@@ -468,8 +468,22 @@ follows it.
 Local verification of this hardening pass (same sandbox as Phase 6's gates, after a fresh
 `npm ci`): `npx tsc --noEmit` (heap raised to 6 GB — 3 GB was not enough this time) exit 0; `npm
 run db:migrate` applied 304 migrations including `0217_native_app_devices_generation.sql`
-cleanly; `npm test` — **707 files, 9,320 tests passed**; `npm run test:db` — full results recorded
-in the Gates section below once this run completes.
+cleanly; `npm test` — **707 files, 9,320 tests passed, 0 failures** (510.24s); `npm run test:db` —
+**199 files, 2,707 tests passed, 1 skipped, 0 failures** (2691.39s), including both native-device
+integration test files. `npm run build` did not complete locally — this sandbox has 3.8 GB of RAM
+total, and the production build's webpack phase pegs Node's RSS at ~3.6 GB and thrashes rather than
+producing a clear OOM error; this is a sandbox resource limit, not a code defect.
+
+This commit (`c7a9039`, pushed to PR #890) was then confirmed green on GitHub's actual CI, which
+is the authoritative check for the build in particular: `production build` passed in 5m22s,
+`integration tests (real database)` passed in 24m21s (199/2707, matching the local run), `unit
+tests` passed in 4m43s, `type check`, `ESLint`, `desktop shell`, `production container`,
+`packaged Windows end-to-end`, `android development debug`, `web native bridge tests`, `media E2E
+tests`, `design checks`, `API guard and permission tests`, `data transfer engine (real database)`,
+`Windows print connector` and `WordPress plugin` all passed. Only `visual regression` failed, and
+its annotation reports the exact same `docs/design/visual/accounting-expenses.png` diff (4.06% of
+pixels changed) already on record as failing on `main` itself before this branch existed — not a
+regression from this commit. Per the repo rules, the baseline is not re-recorded to paper over it.
 
 Two other points the review raised were checked and are **not** bugs in this slice:
 
