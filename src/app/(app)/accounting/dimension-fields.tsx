@@ -19,8 +19,6 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ErrorBox, SecondaryButton as ErrorRetryButton, api } from "@/app/dashboard/ui";
 import type { DimensionKind } from "@/lib/accounting-dimensions";
 import {
-  dimensionOptionsFor,
-  dimensionFilterOptionsFor,
   enabledDimensionKinds,
   enabledKindLabel,
   historicalKinds,
@@ -29,6 +27,7 @@ import {
   type DimensionCatalogLoadResult,
   type DimensionDraft,
 } from "./dimension-catalog";
+import { useDimensionSearch } from "./dimension-search";
 
 type CatalogState =
   | { status: "loading" }
@@ -98,6 +97,73 @@ export function DimensionCatalogError({ error: _error, onRetry }: { error: strin
   );
 }
 
+/**
+ * One kind's selector. Factored out so each selector can own its own
+ * `useDimensionSearch` remote-search state (per-kind debounce, selected-id
+ * label resolution, stale-response cancellation and retry).
+ */
+function DimensionSelect({
+  name,
+  kind,
+  label,
+  catalog,
+  locationId,
+  value,
+  onChange,
+  disabled,
+  mode,
+}: {
+  name: string;
+  kind: DimensionKind;
+  label: string;
+  catalog: DimensionCatalog;
+  locationId: string | null;
+  value: string | undefined;
+  onChange: (next: string | undefined) => void;
+  disabled: boolean;
+  mode: "postable" | "historical";
+}) {
+  const noneOption = { value: "", label: `بدون ${label}` };
+  const search = useDimensionSearch(catalog, {
+    kind,
+    locationId,
+    selectedId: value ?? null,
+    mode,
+    noneOption,
+  });
+  const localEmptyText = mode === "historical" ? "موردی یافت نشد." : "موردی برای این شعبه نیست.";
+  const emptyText = search.error ? "جستجو انجام نشد؛ دوباره تلاش کنید." : localEmptyText;
+  return (
+    <div className="min-w-0">
+      <SearchableSelect
+        value={value ?? ""}
+        onChange={(next) => onChange(next || undefined)}
+        options={search.options}
+        ariaLabel={name}
+        searchPlaceholder="کد یا نام…"
+        emptyText={emptyText}
+        disabled={disabled}
+        loading={search.loading}
+        onQueryChange={search.onQueryChange}
+      />
+      {search.truncated ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          نتایج بیشتری وجود دارد؛ برای محدود کردن جستجو، بخش بیشتری از کد یا نام را تایپ کنید.
+        </p>
+      ) : null}
+      {search.error ? (
+        <button
+          type="button"
+          onClick={search.retry}
+          className="mt-1 text-xs font-medium text-sky-700 hover:underline dark:text-sky-300"
+        >
+          تلاش دوباره
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function DimensionFields({
   idPrefix,
   catalog,
@@ -129,27 +195,24 @@ export function DimensionFields({
     kinds ??
     (mode === "historical" ? historicalKinds(catalog.settings, catalog.allValues) : enabledDimensionKinds(catalog.settings));
   if (enabled.length === 0) return null;
-  const valuesList = mode === "historical" ? catalog.allValues : catalog.postableValues;
   return (
     <div className="grid gap-3 sm:grid-cols-2" id={idPrefix}>
       {enabled.map((kind) => {
         const label = enabledKindLabel(catalog.settings, kind);
         const name = rowLabel ? `${label} ${rowLabel}` : label;
-        const options =
-          mode === "historical"
-            ? dimensionFilterOptionsFor(valuesList, kind)
-            : dimensionOptionsFor(valuesList, kind, locationId);
         return (
           <label key={kind} className="block min-w-0">
             <span className="mb-1.5 block text-sm font-medium text-foreground">{name}</span>
-            <SearchableSelect
-              value={value[kind] ?? ""}
-              onChange={(next) => onChange({ ...value, [kind]: next || undefined })}
-              options={[{ value: "", label: `بدون ${label}` }, ...options]}
-              ariaLabel={name}
-              searchPlaceholder="کد یا نام…"
-              emptyText={mode === "historical" ? "موردی یافت نشد." : "موردی برای این شعبه نیست."}
+            <DimensionSelect
+              name={name}
+              kind={kind}
+              label={label}
+              catalog={catalog}
+              locationId={locationId}
+              value={value[kind]}
+              onChange={(next) => onChange({ ...value, [kind]: next })}
               disabled={disabled}
+              mode={mode}
             />
           </label>
         );
