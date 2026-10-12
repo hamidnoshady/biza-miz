@@ -78,6 +78,8 @@ import {
   createReconciliation,
   ReconciliationError,
   RECONCILABLE_ACCOUNTS,
+  setLineCleared,
+  setLinesCleared,
   type ReconcilableAccount,
 } from "./reconciliation-service";
 import {
@@ -86,6 +88,7 @@ import {
   voidPayrollRun,
 } from "./payroll-service";
 import { PayrollError } from "./payroll-errors";
+import { parseLineClearanceRequest } from "./bank-reconciliation";
 import { recordAdvance, voidAdvance } from "./payroll-advances-service";
 import { createOrder } from "./order-mutations";
 import type { CartItemInput } from "./order-cart";
@@ -2681,6 +2684,42 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch Z3 — reconciliation line clearance ─────────
+// The payload flows through the shared parseLineClearanceRequest parser, so
+// its disciplines (boolean required, batch wins, empty/over-size batches
+// refused, never partly applied) are guaranteed identical to the route.
+const reconciliationLineClear: AutopilotExecutor = async (ctx) => {
+  const reconciliationId = str(ctx.payload.reconciliationId) ?? str(ctx.payload.id);
+  if (!reconciliationId) return fail("missing_fields");
+  const parsed = parseLineClearanceRequest({
+    cleared: ctx.payload.cleared,
+    journalLineId: ctx.payload.journalLineId,
+    journalLineIds: ctx.payload.journalLineIds,
+  });
+  if (!parsed.ok) return fail(parsed.error);
+  try {
+    if (parsed.value.kind === "batch") {
+      const { changed } = await setLinesCleared({
+        businessId: ctx.businessId,
+        reconciliationId,
+        journalLineIds: parsed.value.journalLineIds,
+        cleared: parsed.value.cleared,
+      });
+      return { ok: true, result: { ok: true, changed } };
+    }
+    await setLineCleared({
+      businessId: ctx.businessId,
+      reconciliationId,
+      journalLineId: parsed.value.journalLineId,
+      cleared: parsed.value.cleared,
+    });
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    if (err instanceof ReconciliationError) return fail(err.message);
+    throw err;
+  }
+};
+
 // ── Issue #883 package 2, batch Z2 — payroll settings & staff pay terms ────
 // Both mirror the payroll-http error contract (PayrollError keeps its status
 // AND the extra `details` a screen uses to name what field/member blew up;
@@ -3272,6 +3311,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   fixedAssetSetAcquisition,
   payrollSettingsUpdate,
   payrollStaffTerms,
+  reconciliationLineClear,
   mediaCollectionCreate,
   mediaCollectionRename,
   mediaCollectionDelete,

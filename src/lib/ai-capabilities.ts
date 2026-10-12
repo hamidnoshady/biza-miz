@@ -274,6 +274,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "fixed-asset.set_acquisition": PERMISSIONS.financeAssetsManage,
   "payroll.settings.update": PERMISSIONS.payrollManage,
   "payroll.staff.terms": PERMISSIONS.payrollManage,
+  "reconciliation.line.clear": PERMISSIONS.financeReconciliationManage,
   "media.collection.rename": PERMISSIONS.mediaManage,
   "media.collection.delete": PERMISSIONS.mediaManage,
   "media.asset.set_collection": PERMISSIONS.mediaManage,

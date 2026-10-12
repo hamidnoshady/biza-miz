@@ -131,8 +131,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Accounting",
     entity: "Bank reconciliation",
     routes: ["ledger/reconciliations"],
-    ops: { listDetail: ["get_unreconciled_bank_lines", "list_reconciliations"], create: ["reconciliation.create"], lifecycle: ["reconciliation.complete"] },
-    test: "integration/bank-reconciliation.integration.test.ts",
+    ops: { listDetail: ["get_unreconciled_bank_lines", "list_reconciliations"], create: ["reconciliation.create"], update: ["reconciliation.line.clear"], lifecycle: ["reconciliation.complete"] },
+    note: "line clearance rides the shared parseLineClearanceRequest parser — boolean required, batch wins, a malformed batch is refused whole, never partly applied",
+    test: "integration/reconciliation.integration.test.ts",
   },
   {
     id: "accounting.fiscal",

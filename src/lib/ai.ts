@@ -346,6 +346,8 @@ export type ActionType =
   // Batch Z2 — payroll settings + staff pay terms (pay maths for future months).
   | "payroll.settings.update"
   | "payroll.staff.terms"
+  // Batch Z3 — reconciliation line clearance (tick/untick against a session).
+  | "reconciliation.line.clear"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -386,6 +388,7 @@ export type AutopilotExecutorKey =
   | "websiteOrderStatus"
   | "websiteDomainSet"
   | "payrollSettingsUpdate"
+  | "reconciliationLineClear"
   | "payrollStaffTerms"
   | "fixedAssetSetAcquisition"
   | "accountDelete"
@@ -1361,6 +1364,15 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "reconciliation.line.clear": {
+    type: "reconciliation.line.clear",
+    endpoint: "/api/ledger/reconciliations/[id]/lines",
+    method: "PATCH",
+    label: "علامت‌زدن/برداشتن علامت سطرهای دفتر روی مغایرت‌گیری در جریان — تک‌سطری یا دسته‌ای؛ دستهٔ بدشکل کامل رد می‌شود",
+    payloadHint:
+      '{ reconciliationId: string, cleared: boolean, journalLineId?: string, journalLineIds?: string[] /* دسته‌ای سقف MAX_RECONCILIATION_LINE_BATCH */ }',
+    executor: "reconciliationLineClear",
   },
   "payroll.settings.update": {
     type: "payroll.settings.update",

@@ -429,6 +429,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // row: settings govern every future run, wage terms change somebody's pay.
   { actionType: "payroll.settings.update", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "payroll.staff.terms", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  // Batch Z3 — ticking lines on an in-progress reconciliation posts nothing;
+  // like the screen, a refused batch is refused whole.
+  { actionType: "reconciliation.line.clear", kind: "write", app: "accounting", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

@@ -1647,6 +1647,24 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_reconciliation_line_clear",
+    actionType: "reconciliation.line.clear",
+    english:
+      "Clear or un-clear journal lines against an in-progress reconciliation (single or batch; a malformed batch is refused whole).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        reconciliationId: id("شناسهٔ مغایرت‌گیری در جریان — از list_reconciliations"),
+        cleared: { type: "boolean", description: "true=علامت بزن، false=علامت را بردار" },
+        journalLineId: id("تک‌سطری — یکی از get_unreconciled_bank_lines"),
+        journalLineIds: { type: "array", items: { type: "string" }, description: "حالت دسته‌ای — در تقدم بر journalLineId" },
+      },
+      required: ["reconciliationId", "cleared"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_payroll_settings_update",
     actionType: "payroll.settings.update",
     english: "Update payroll settings — the calculator's basis for every future run. Always asks a human first.",
