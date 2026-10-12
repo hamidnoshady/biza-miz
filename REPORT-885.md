@@ -2,7 +2,7 @@
 
 **Branch:** `arena/d6aa0a4a-biza-miz`
 **Branched from:** `d14f0e3557253591da3b083771745e87ee244b93`, then synchronised with `main` — the current merge-base with `origin/main` is **`b8b66b21`**, i.e. this branch is **0 behind / 28 ahead**.
-**Diff (`b8b66b21` → branch HEAD), code and tests only:** **57 files changed, +7,076 / −271** — 27 added, 30 modified. (This report is excluded from the count, so the figure does not move as the report is edited.)
+**Diff (`b8b66b21` → branch HEAD), code and tests only:** **61 files changed, +7,448 / −287** — 28 added, 33 modified. (This report is excluded from the count, so the figure does not move as the report is edited.)
 
 An earlier draft of this header reported 53 files / +6,262 measured against `d14f0e3`. That base is stale: it predates the merge of `main`'s accounting and multicurrency work, so it counted main's own changes as this branch's. The figures above are measured against the true merge-base and describe only what this branch contributes.
 
@@ -75,6 +75,15 @@ Redemption already existed — an admin could mint a link from the team screen a
 **L17 — the OTP step's async could outlive a cancelled step.** `phone-otp-step.tsx` was still on a bare `await fetch` behind a local `busy` flag, so nothing moved on when the member backed out mid-verify. A response landing afterwards ran its handlers regardless: `onVerified()` completed a login the member had already abandoned. It now goes through `useLoginRequest`, gaining the generation guard and the bounded timeout the two sign-in forms already had.
 
 That wiring exposed a second defect, in the hook itself rather than the step. `cancel()` moved the generation on, which is enough to protect the caller's state, but never aborted the request — so an abandoned verify still reached the server, still consumed an OTP attempt, and still counted against the send ceiling. A member who backed out and retried could burn the attempt their next code needed. `cancel()` now aborts the in-flight controller.
+
+**Four more confirmed this pass, each fixed at its root cause.**
+
+- **The manager door could wedge itself permanently.** `admin-login-form.tsx` did `setBusy(true)`, awaited a bare `fetch`, and released `busy` on the line *after* the await. A network rejection threw straight past the release, so the submit button stayed disabled for the rest of the visit with no message explaining why — the only recovery was a reload. It now goes through the shared `useLoginRequest` hook, which releases in a `finally`, bounds the wait, and reports timeout/unreachable as its own case.
+- **The same door accepted a malformed HTTP 200 as a login.** Any `res.ok` was treated as authenticated, including a 200 whose body failed to parse and fell back to `{}`; it then navigated with no session cookie and bounced straight back, looking like a broken form. Success now requires the session shape the route actually sends (`user` **and** `business`).
+- **Manager error mappings were still collapsed.** Every non-lockout failure produced one "wrong email or password" string, so a member with no active membership was told to re-check a password that was never the problem. They are now mapped by the shared `loginErrorMessage`.
+- **A code the mapper did not know.** `/api/auth/login` answers `no_business_membership`; the helper only matched `no_membership`, so the route's spelling fell through to the generic 403 "not permitted from this path" — telling the member their *route* was wrong when what was wrong was their access. Both spellings now map to the real condition.
+
+**Trust invalidation missed the accountant switch.** `setMfaPolicy` decided whether a policy change revokes device trust by comparing `requireForManagers` alone. `requireForAccountants` (#854) exempts exactly the same routine challenge, so an owner could turn the second factor on for every accountant in the business and not one existing exemption would be re-earned — it would simply run out on its own seven-day expiry. Both fields are compared now.
 
 **A pre-existing bug the audit did not list.** `auth_login_attempts` (migration 0070) constrained `realm` to `('tenant_password','platform_admin','directory')`; 0078 widened only the realm list. `sendEmployeePhoneOtp` has inserted `realm='phone_otp'` since Phase 42, so **every** OTP send violated the check constraint — *after* the SMS had already been dispatched, outside any `try/catch`. Two consequences: the route's catch answered `502 sms_dispatch_failed` for a message that had been delivered (inviting a retry), and no attempt row was recorded, so `checkPhoneOtpRateLimit` always read an empty budget and the 1/min, 5/hr, 20/day ceiling never applied. Verified by direct insert against PostgreSQL 18.4. Fixed by re-adding both constraints to include `'phone_otp'` and `'reserved'`.
 
@@ -167,6 +176,9 @@ The legacy PIN-only scan was reviewed but **not retired** — it is still the on
 | `src/app/api/auth/password-reset/request/route.test.ts` | 8 | new — all six outcomes answer identically, no 429, no outcome echo |
 | `integration/password-reset-request.integration.test.ts` | 7 | new — minting, single-live-link, cap at the exact boundary, against real PostgreSQL |
 | `integration/trusted-device.integration.test.ts` | 7 | new — against real PostgreSQL |
+| `src/app/admin/admin-login-form.test.tsx` | 6 | new — busy released on a network rejection, unparseable 200 and empty-object 200 are not logins, a real session navigates, missing-membership wording, lockout wording |
+| `integration/trusted-device.integration.test.ts` | 11 | +1 — switching `requireForAccountants` alone revokes trust; verified by reverting the fix |
+| `src/lib/admin-screen-contracts.test.ts` | 17 | updated — the selection guard is asserted by *position* relative to the success gate rather than by the literal `res.ok` spelling the refactor renamed |
 | `src/app/api/api-guards.test.ts` | — | +2 registrations for the new routes |
 
 Two of these are regression guards for bugs found during this work, not just coverage for new code: the verify-route equivalence test, and the `auth_login_attempts` constraint is exercised by the integration harness that now records real attempt rows.
@@ -183,8 +195,8 @@ All commands run in this sandbox on the work commit.
 |---|---|
 | `NODE_OPTIONS=--max-old-space-size=3072 ./node_modules/.bin/tsc --noEmit` | **exit 0**, no output |
 | `./node_modules/.bin/eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run` (full unit suite) | **738 files / 9,655 tests passed**, exit 0, 410.7 s |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (full integration suite, 203 files) | **203 files passed / 0 failed · 2,940 tests passed / 0 failed / 1 skipped**, 2351.5 s |
+| `npx vitest run` (full unit suite) | **739 files / 9,661 tests passed**, exit 0 |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (full integration suite, 203 files) | **203 files passed / 0 failed · 2,941 tests passed / 0 failed / 1 skipped**, exit 0 |
 
 All figures above are measured at the merged head **`6e5f099b`** — `origin/main` merged into this branch, 0 behind / 26 ahead, with the originally published #885 head `4ad73b9` still an ancestor.
 
@@ -234,11 +246,11 @@ The **1 skipped test** in the verified run is `platform-system-backup`'s peer-su
 
 Database for the verified run: PostgreSQL **16.14**, provisioned via `embedded-postgres` on 127.0.0.1:5432 by the project's own `npm run db:dev:start`, migrations applied through `scripts/migrate.ts`.
 
-Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. At the merged head the same command reports **738 files / 9,655 tests**, exit 0. That total is *not* attributable to #885 alone: merging `main` brought in its own accounting and multicurrency tests, so the 8,386 → 9,655 delta is the sum of both bodies of work and I have not tried to split it. What this branch contributes on its own is the 9 unit test files added in §7, measured against the pre-merge branch head; no existing test was removed, and none had an expectation weakened to obtain green.
+Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. At the current head the same command reports **739 files / 9,661 tests**, exit 0. That total is *not* attributable to #885 alone: merging `main` brought in its own accounting and multicurrency tests, so the 8,386 → 9,661 delta is the sum of both bodies of work and I have not tried to split it. What this branch contributes on its own is the 10 unit test files added in §7, measured against the pre-merge branch head; no existing test was removed, and none had an expectation weakened to obtain green.
 
 GitHub CI: **this repository does have CI** — 14 workflows under `.github/workflows/`, and `test.yml` alone runs 10 jobs. An earlier draft of this report claimed no CI existed; that was wrong and is corrected here.
 
-The `test.yml` run at the published head **`c05e9429`** is **fully green — all 10 jobs `success`**, reported across the two runs GitHub split it into ([`38170129564`](https://github.com/hamidnoshady/biza-miz/actions/runs/38170129564) and [`38170125462`](https://github.com/hamidnoshady/biza-miz/actions/runs/38170125462)), with the `all checks passed` roll-up job itself `success`:
+At the published head **`c459914f`** every check GitHub reports is **green** — all 10 `test.yml` jobs, the `all checks passed` roll-up, and the three `verify-shippables` / `build-desktop-installer` jobs that had previously been red ([`test.yml` run `38218031047`](https://github.com/hamidnoshady/biza-miz/actions/runs/38218031047)):
 
 | Job | Result |
 |---|---|
@@ -253,31 +265,29 @@ The `test.yml` run at the published head **`c05e9429`** is **fully green — all
 | media E2E tests | ✓ 3m57s |
 | API guard and permission tests | ✓ 33s |
 
-This supersedes the earlier figures in this report, which were measured at `4ad73b9` — the head *before* `main` was merged in. The numbers above are the ones that describe the code a reviewer would actually be merging. Two jobs outside `test.yml` are red; both are analysed in §8 below and §9.
+| **desktop shell** (`verify-shippables`) | **✓** |
+| **packaged Windows end-to-end** (`build-desktop-installer`) | **✓** |
+| production container | ✓ |
 
-**Two jobs outside `test.yml` are red. They have different causes, and only one of them is pre-existing.**
+Those last two rows are the change since the previous revision of this report. Both were red at `c05e9429` and are green at `c459914f`; what fixed them is §6 below, not a change to either budget.
 
-**(a) `desktop shell` (`verify-shippables.yml`, job `114561339250`) — a genuine regression on the merged head, caused by the merge.**
+**Both desktop size gates were red here, and both are now green — fixed by removing dead weight, not by moving a limit.**
 
-This one *is* attributable to this branch, and the earlier draft of this report did not mention it. The per-step conclusions from the Jobs API locate it exactly: steps 1–12 all `success` — including step 8, *Build production app and staged desktop runtime*, so the production build itself is fine — and step 13, **`Staged runtime stays below pre-package budget`**, is `failure`. That step has exactly one failure mode: `.desktop-runtime` exceeding 200 MiB.
+At `c05e9429` two jobs outside `test.yml` failed:
 
-I reproduced it rather than inferring it. Adding swap to get past this sandbox's memory ceiling and running `npm run build && npm run desktop:runtime` at the merged head stages **215.6 MiB** (the script's own figure; `du -sb` = 227,355,383 bytes = 216.8 MiB) against a **200 MiB** budget. Composition: `.next` 138 MiB (`server/app` 108 MiB, `static` 18, `chunks` 12), `node_modules` 80 MiB (`@img` 37, `next` 28, `playwright-core` 7), `migrations` 3 MiB, `public` 1 MiB.
+- `desktop shell` (`verify-shippables`, job `114561339250`) failed at **step 13, `Staged runtime stays below pre-package budget`**. The Jobs API per-step conclusions place it exactly: steps 1–12 all `success` — including step 8, *Build production app and staged desktop runtime*, so the production build itself was fine — and step 13 `failure`. That step has one failure mode: `.desktop-runtime` exceeding 200 MiB. Windows reported **200.2 MiB against 200 MiB**.
+- `packaged Windows end-to-end` (`build-desktop-installer`) failed on the same cause from the other side: **installed payload 620.6 MiB against a 620 MiB budget**.
 
-Attribution is a *combination*, and I want to state it precisely rather than assign it to either side:
+**Root cause.** `*.nft.json` — 1,070 files, ~11 MiB — was being copied into the staged runtime. Those are `@vercel/nft`'s *build-time* trace manifests: the record of which files each entrypoint reached, which is what produced the traced `node_modules` tree in the first place. Once that tree is staged, nothing reads them. Verified rather than assumed:
 
-- `desktop shell` **passed** at this branch's pre-merge head `51189607` (✓ 6m10s).
-- `desktop shell` **passed** on `main` at `b8b66b21` (`verify-shippables` run `38135440182`, job `success`).
-- `desktop shell` **fails** at the merged head `c05e9429`.
+- Next's runtime server never mentions them — `start-server.js`, `next-server.js` and `next.js` contain no reference; only `next/dist/build/*` does, and a staged runtime never runs a build.
+- No consumer in this repository (`grep` across `*.ts`, `*.tsx`, `*.mjs`, `*.js`, `*.json`, `*.yml`, excluding `node_modules`) and none in the Electron shell.
 
-So neither parent alone crossed the budget; the merged tree does. The merge brought in 21 new API routes and 77 changed source files from `main`'s accounting/multicurrency work, which grows the traced `.next/server/app`; combined with this branch's 58 changed files the total passes 200 MiB.
+`scripts/build-desktop-runtime.mjs` now walks the staged tree and removes them. The walk is recursive on purpose — the manifests sit next to every traced entrypoint, deep inside `.next/server` — unlike the dev-package strip next to it, which stays top-level because a recursive package glob could reach a nested production file. The `.nft.json` suffix is only ever emitted by the tracer, so a recursive match cannot.
 
-Two caveats, stated plainly. The 215.6 MiB figure is a **Linux** measurement; CI runs this job on Windows, where the staged `@img` sharp binaries are `win32-x64` rather than the `linux-x64` + `linuxmusl-x64` pair (37 MiB) present locally, so CI's exact number differs and is unreadable here — the log host is unreachable (§ below). What is not in doubt is the direction: CI ran the same check and failed it.
+**Measured, locally:** staged runtime **215.6 → 207.1 MiB**, `npm run desktop:runtime` exit 0, **0** manifests remaining. **Measured, on CI at `c459914f`:** `desktop shell` ✓ and `packaged Windows end-to-end` ✓ — both gates that had been failing by 0.2 MiB and 0.6 MiB respectively now clear with ~11 MiB of margin.
 
-**I did not raise the 200 MiB budget.** Doing so would be weakening an assertion to obtain green. The two honest resolutions are a deliberate maintainer decision to re-set the budget for the now-larger app, or a genuine reduction of the traced runtime — and the growth is `main`'s routes, not this branch's, so neither is this PR's call to make unilaterally. It is recorded as an open issue in §9.
-
-**(b) `packaged Windows end-to-end` (`build-desktop-installer.yml`) — pre-existing on `main`, not this branch's doing.** It fails on this PR — and it also fails on **`main`'s own head `b8b66b21`**, which contains the main commit this branch merged but *none* of the #885 work (`git merge-base --is-ancestor 4ad73b9 b8b66b21` → false). It fails identically on three unrelated `arena/**` branches, and it was still green at `55a9b7ee`. Its cause is unrelated to (a): it reports a built installer, so it is not the size budget.
-
-What the annotations show is that the package itself builds — "Installer 161.2 MiB; unpacked installed payload 620.2 MiB; PostgreSQL tools 1.1 MiB", version bumped 1.0.42 → 1.0.43 — and the job then exits 1. The exact failing step could not be read: GitHub's log-archive host (`productionresultssa12.blob.core.windows.net`) is not reachable from this sandbox, and every retrieval attempt returned `EOF`. So the *attribution* is established by the ancestry check above and the *cause* is not; it is recorded as an open, pre-existing failure on `main` rather than explained away.
+**Neither budget was touched.** `verify-shippables.yml` still reads `200MB` and `build-desktop-installer.yml` still reads `620MB`; raising either to make a check pass is manufacturing green. No test was disabled, no assertion loosened, no visual baseline re-recorded.
 
 The only annotations are `ubuntu-latest`→Ubuntu 26 migration notices.
 
@@ -294,8 +304,6 @@ So there is no Arm64 build failure in this repository's CI for me to fix or to l
 
 ## 9. Genuine remaining issues
 
-**The merged head exceeds the desktop runtime's 200 MiB budget, and `desktop shell` is red because of it.** This is the one item here that is a *regression introduced by this branch's merge*, and it is the first thing a reviewer should look at. Full diagnosis and attribution are in §8; the short form is that the staged runtime measures **215.6 MiB** against a **200 MiB** limit, that neither parent head crossed the limit on its own (`desktop shell` ✓ at pre-merge `51189607`, and ✓ on `main` at `b8b66b21`), and that the merge is what pushed it over. I did **not** raise the budget, because raising a limit to make a check pass is exactly the kind of green I was told not to manufacture. The two honest fixes are a maintainer decision to re-set the budget for the now-larger application, or a real reduction in the traced runtime — and since the growth is `main`'s 21 new API routes rather than this branch's auth work, choosing between them is not this PR's call to make alone.
-
 
 **The production build is verified on CI, and only unverifiable *in this sandbox*.** `npm run build` here is OOM-killed (exit 137) on a machine with 3.9 GB RAM and no swap; building the untouched base commit is killed identically at the same point, so it is a memory ceiling, not a regression. The authoritative result is CI job `113936440462`, `production build` ✓ 4m24s (§8). An earlier draft called the build "unverified" outright; that understated it — it is unverified *locally* and green on CI.
 
@@ -303,7 +311,7 @@ So there is no Arm64 build failure in this repository's CI for me to fix or to l
 
 *(Correction to an earlier draft of this report: it claimed no email transport existed for platform identities. That was wrong. `resolveMessageConfig()` reads `platform_message_config WHERE id = true` under `withoutTenantScope("platform")` — a deployment-wide singleton, not a tenant setting — and `data-transfer/schedule-service.ts` already sends non-campaign mail through the same `SmtpMessageProvider`. L10 is implemented.)*
 
-**L13 is partially addressed — the policy is now explicit, but the underlying divergence is untouched.**
+**L13 is partially addressed — the policy is now explicit, but the underlying divergence is untouched.** *(The accountant trust-invalidation half of this finding is closed; see §2. What remains is the WebAuthn and PIN-session assurance gap described below.)*
 
 What *is* done: the issue's "one explicit deployment-aware eligibility policy" now exists. `src/lib/login-eligibility.ts` is the single place that says which role set each door applies, and all eight hand-copied role lists are gone (§6). The doors' differing behaviour is now recorded as a decision with its reason attached, rather than being an accident of which file you opened.
 
