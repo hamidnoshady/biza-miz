@@ -20,7 +20,7 @@ import type { AutopilotExecutorKey } from "./ai";
 import { createStockCount, editStockCount, reverseStockCount } from "./stock-count-service";
 import { saveMessageTemplate, pauseMessageCampaign, resumeMessageCampaign, launchMessageCampaign } from "./message-campaigns-service";
 import { redeemGiftCard, expireGiftCards } from "./promotions-service";
-import { redeemPoints, issueStoreCredit, useStoreCredit, storeCreditBalance, upsertProgram } from "./loyalty-service";
+import { redeemPoints, issueStoreCredit, useStoreCredit as payOutStoreCredit, storeCreditBalance, upsertProgram } from "./loyalty-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2780,7 +2780,7 @@ const loyaltyStoreCreditUse: AutopilotExecutor = async (ctx) => {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    const result = await useStoreCredit(client, {
+    const result = await payOutStoreCredit(client, {
       businessId: ctx.businessId,
       locationId: branch.locationId,
       customerId,
