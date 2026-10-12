@@ -478,6 +478,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // (device-service.revokeDevice), so it steps up like any credential kill.
   { actionType: "device.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "device.revoke", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  // Batch AJ — an attribute delete drops the values on every item that
+  // carries it; a bulk price save is the standing mass-price rule (step up).
+  { actionType: "product.attribute.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "product.attribute.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "barcode.template.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

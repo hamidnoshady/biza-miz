@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (36)
+### Tenant (35)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -44,7 +44,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **config.devices** (Business config · Devices & printing config, pairing) — partial
 - **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
-- **misc.products** (Products (retail) · Product items, attributes, barcode templates) — partial
 - **misc.invoices** (Sales · Sales invoices & voids) — partial
 - **vertical_jewelry** (Verticals · Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)) — MCP gap
 - **vertical_cosmetics** (Verticals · Cosmetics (rot management, suppliers, reports)) — partial
@@ -76,7 +75,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 36 · partial: 29 · MCP gap: 7 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 37 · partial: 28 · MCP gap: 7 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -147,7 +146,7 @@ Counts — covered: 36 · partial: 29 · MCP gap: 7 · backend gap: 0 · n/a (in
 | Reports | Reports (standard, saved, export, query, drill-down, views)<br>_XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes); dashboard-widget layout save stays UI-only_ | list_reports, list_saved_reports, run_report | report.saved.create | report.saved.update | report.saved.delete | (route only) | ledger.view, reports.export, reports.view | connection mode | list_reports, list_saved_reports, run_report, report.saved.create, report.saved.update, report.saved.delete | integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report | partial |
 | Cross-cutting | Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup<br>_small surfaces; the audit-log read mirrors the screen's validation contract (invalid cursors and filters are refused, never silently paged)_ | describe_app, get_setup_state, list_audit_log | (route only) | (route only) | (route only) | — | commission.manage, commission.view, delivery.configure, delivery.manage, inventory.adjust, inventory.view, ledger.close_period, ledger.view | — | describe_app, get_setup_state, list_audit_log | integration/auth-account-security.integration.test.ts | partial |
 | Cross-cutting | Support tickets (tenant side) | (route only) | (route only) | (route only) | (route only) | — | — | — | — | — | n/a (infra) |
-| Products (retail) | Product items, attributes, barcode templates<br>_products/items create waits for the checkout-input normaliser (tax, barcode-conflict shape) to move out of the route body — same extraction gate as pos.orders; item reads ride list_inventory_items_ | list_barcode_templates, list_product_attributes | barcode.template.create, product.attribute.create | (route only) | (route only) | — | menu.edit, menu.view | connection mode | list_barcode_templates, list_product_attributes, barcode.template.create, product.attribute.create | integration/generic-items.integration.test.ts | partial |
+| Products (retail) | Product items, attributes, barcode templates<br>_products/items create waits for the checkout-input normaliser (tax, barcode-conflict shape) to move out of the route body — same extraction gate as pos.orders; item reads ride list_inventory_items_ | list_barcode_templates, list_product_attributes | barcode.template.create, product.attribute.create | product.attribute.update | barcode.template.delete, product.attribute.delete | — | menu.edit, menu.view | connection mode; step-up (always approve) | list_barcode_templates, list_product_attributes, barcode.template.create, product.attribute.create, product.attribute.update, barcode.template.delete, product.attribute.delete | integration/generic-items.integration.test.ts | covered |
 | Products (retail) | Price lists & entries (bulk quick-update)<br>_entries save carries expectedVersion optimistic-lock conflicts back to the caller exactly like the screen; quick_update is always_approve (mass price mutation), everything else mode_ | list_price_list_entries, list_price_lists | priceList.create | priceList.entries.save, priceList.quick_update, priceList.rename | priceList.delete | — | menu.edit, menu.view | connection mode; step-up (always approve) | list_price_list_entries, list_price_lists, priceList.create, priceList.entries.save, priceList.quick_update, priceList.rename, priceList.delete | integration/products.integration.test.ts | covered |
 | Sales | Sales invoices & voids<br>_creating an invoice stays register-only: the checkout path coordinates tender queue, loyalty, COGS and outbox in the route — same registered design note as the pos.orders lane; void (the reversal mirror) is service-backed and runs under explicit approval with the service's obstacle codes (batches, dismissed sessions, fiscal locks) verbatim_ | get_sales_invoice, list_sales_invoices | (route only) | — | sales.invoice.void | — | orders.amend_closed, orders.view, payments.take | step-up (always approve) | get_sales_invoice, list_sales_invoices, sales.invoice.void | integration/retail-invoice.integration.test.ts | partial |
 | Workspace | Workspace dashboard, insights, lookups, reports, search<br>_each service derives visibility from the real member row (exactly the screens' owner shape); lookup/search picker endpoints stay route-only (they exist to feed the screens' keyboards, not a conversation)_ | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | — | — | — | — | workspace.view | — | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | integration/workspace.integration.test.ts | covered |

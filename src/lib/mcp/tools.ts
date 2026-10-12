@@ -1650,6 +1650,47 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_product_attribute_update",
+    actionType: "product.attribute.update",
+    english: "Edit a product attribute definition (name/options/active).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: id("ویژگی — از list_product_attributes"),
+        name: { type: "string" },
+        options: { type: "array", items: { type: "string" } },
+        isActive: { type: "boolean" },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_product_attribute_delete",
+    actionType: "product.attribute.delete",
+    english: "Delete an attribute definition — its values on every item vanish too; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { id: id("ویژگی — از list_product_attributes") },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_barcode_template_delete",
+    actionType: "barcode.template.delete",
+    english: "Delete a weight-barcode template (print config).",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { id: id("قالب بارکد — از list_barcode_templates") },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_device_rename",
     actionType: "device.rename",
     english: "Rename a POS device.",

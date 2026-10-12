@@ -26,6 +26,8 @@ import { broadcast } from "./realtime";
 import { getBackupConfig, setBackupConfig, runBackupNow, restoreAvailable, restoreFromArtifact } from "./backup-service";
 import { chargeForFeature } from "./billing-guard";
 import { DeviceError, renameDevice, revokeDevice, listDevices, findActiveDeviceId } from "./device-service";
+import { updateAttributeDefinition, deleteAttributeDefinition } from "./product-attributes-service";
+import { deleteWeightBarcodeTemplate } from "./weight-barcode-templates-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2634,30 +2636,6 @@ const priceListDelete: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { priceListId, deleted: true } };
 };
 
-const priceListEntriesSave: AutopilotExecutor = async (ctx) => {
-  const raw = ctx.payload.updates;
-  if (!Array.isArray(raw) || raw.length === 0) return fail("invalid_payload");
-  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
-  if ("error" in branch) return fail(branch.error);
-  if (!branch.locationId) return fail("invalid_location");
-  const updates = raw.map((cell) => {
-    const c = cell as Record<string, unknown>;
-    return {
-      priceListId: str(c.priceListId) ?? "",
-      itemId: str(c.itemId) ?? "",
-      price: c.price === null ? null : typeof c.price === "number" && Number.isFinite(c.price) ? c.price : NaN,
-      expectedVersion: typeof c.expectedVersion === "string" ? c.expectedVersion : undefined,
-    };
-  });
-  if (updates.some((u) => u.price !== null && Number.isNaN(u.price))) return fail("invalid_payload");
-  const result = await savePriceEntries(updates, {
-    locationId: branch.locationId,
-    businessId: ctx.businessId,
-    userId: ctx.authorizedByUserId,
-  });
-  return { ok: true, result: { touched: result.touched, conflicts: result.conflicts } };
-};
-
 const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   const target = ctx.payload.target as QuickUpdateTarget | undefined;
   const mode = str(ctx.payload.mode);
@@ -2698,6 +2676,69 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+
+// ── Issue #883 package 2, batch AJ — product attributes & price entries ───
+// savePriceEntries applies per-cell optimistic concurrency (expectedVersion)
+// and returns survived-cell count + the exact conflicting cells, so the
+// model answers "done except these two, someone edited them first".
+const productAttributeUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.attributeId);
+  if (!id) return fail("missing_fields");
+  const patch: { name?: string; options?: string[]; isActive?: boolean } = {};
+  if (ctx.payload.name !== undefined) {
+    const name = str(ctx.payload.name);
+    if (!name) return fail("missing_fields");
+    patch.name = name;
+  }
+  if (ctx.payload.options !== undefined) {
+    if (!Array.isArray(ctx.payload.options)) return fail("bad_request");
+    patch.options = (ctx.payload.options as unknown[]).map((o) => String(o ?? "").trim()).filter((o) => o.length > 0);
+  }
+  if (ctx.payload.isActive !== undefined) {
+    if (typeof ctx.payload.isActive !== "boolean") return fail("bad_request");
+    patch.isActive = ctx.payload.isActive as boolean;
+  }
+  if (Object.keys(patch).length === 0) return fail("bad_request");
+  const { definition, error: updateError } = await updateAttributeDefinition(id, patch);
+  if (updateError || !definition) return fail(updateError ?? "attribute_not_found");
+  return { ok: true, result: { definition: { ...(definition as object) } } };
+};
+const productAttributeDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.attributeId);
+  if (!id) return fail("missing_fields");
+  const deleted = await deleteAttributeDefinition(id);
+  if (!deleted) return fail("attribute_not_found");
+  return { ok: true, result: { ok: true } };
+};
+const barcodeTemplateDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.templateId);
+  if (!id) return fail("missing_fields");
+  const deleted = await deleteWeightBarcodeTemplate(id);
+  if (!deleted) return fail("template_not_found");
+  return { ok: true, result: { ok: true } };
+};
+const priceListEntriesSave: AutopilotExecutor = async (ctx) => {
+  const raw = Array.isArray(ctx.payload.updates) ? (ctx.payload.updates as Record<string, unknown>[]) : [];
+  if (raw.length === 0) return fail("missing_fields");
+  if (raw.length > 200) return fail("updates_too_large");
+  const updates = raw.map((u) => ({
+    priceListId: String(u.priceListId ?? ""),
+    itemId: String(u.itemId ?? ""),
+    priceRial:
+      u.priceRial === null || u.priceRial === undefined ? (u.priceRial as number | null | undefined) : Number(u.priceRial),
+    expectedVersion: u.expectedVersion === undefined ? undefined : String(u.expectedVersion),
+  }));
+  if (updates.some((u) => !isUuid(u.priceListId) || !isUuid(u.itemId))) return fail("invalid_update");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const { touched, conflicts } = await savePriceEntries(updates as never, {
+    locationId: branch.locationId,
+    businessId: ctx.businessId,
+    userId: ctx.authorizedByUserId,
+  });
+  return { ok: true, result: { ok: true, touched, conflicts } };
+};
 
 // ── Issue #883 package 2, batch AI — device rename / revoke ───────────────
 // renameDevice / revokeDevice take the actor id and throw typed DeviceError
@@ -3940,6 +3981,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  productAttributeUpdate,
+  productAttributeDelete,
+  barcodeTemplateDelete,
   deviceRename,
   deviceRevoke,
   backupConfigSet,

@@ -385,6 +385,10 @@ export type ActionType =
   // Batch AI — devices: rename + revoke (pairing stays browser-bound).
   | "device.rename"
   | "device.revoke"
+  // Batch AJ — product catalogue attributes + price-list entries.
+  | "product.attribute.update"
+  | "product.attribute.delete"
+  | "barcode.template.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -435,6 +439,9 @@ export type AutopilotExecutorKey =
   | "backupConfigSet"
   | "backupRunNow"
   | "backupRestoreApply"
+  | "productAttributeUpdate"
+  | "productAttributeDelete"
+  | "barcodeTemplateDelete"
   | "deviceRename"
   | "deviceRevoke"
   | "tableSessionOpen"
@@ -1426,6 +1433,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "product.attribute.update": {
+    type: "product.attribute.update",
+    endpoint: "/api/products/attributes/{id}",
+    method: "PATCH",
+    label: "ویرایش تعریف ویژگی محصول — نام/گزینه‌ها/فعالی",
+    payloadHint: '{ id: string, name?: string, options?: string[], isActive?: boolean }',
+    executor: "productAttributeUpdate",
+  },
+  "product.attribute.delete": {
+    type: "product.attribute.delete",
+    endpoint: "/api/products/attributes/{id}",
+    method: "DELETE",
+    label: "حذف تعریف ویژگی — مقادیرش روی همهٔ اقلام پاک می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "productAttributeDelete",
+  },
+  "barcode.template.delete": {
+    type: "barcode.template.delete",
+    endpoint: "/api/products/barcode-templates/{id}",
+    method: "DELETE",
+    label: "حذف قالب بارکد وزنی",
+    payloadHint: '{ id: string }',
+    executor: "barcodeTemplateDelete",
   },
   "device.rename": {
     type: "device.rename",

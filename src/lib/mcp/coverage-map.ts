@@ -808,6 +808,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     ops: {
       listDetail: ["list_product_attributes", "list_barcode_templates"],
       create: ["product.attribute.create", "barcode.template.create"],
+      update: ["product.attribute.update"],
+      lifecycle: ["product.attribute.delete", "barcode.template.delete"],
     },
     note: "products/items create waits for the checkout-input normaliser (tax, barcode-conflict shape) to move out of the route body — same extraction gate as pos.orders; item reads ride list_inventory_items",
     test: "integration/generic-items.integration.test.ts",
