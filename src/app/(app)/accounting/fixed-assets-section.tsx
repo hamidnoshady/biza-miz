@@ -1484,7 +1484,7 @@ function AssetForm({
                 />
               )}
               {dimCatalog.catalog?.truncated ? (
-                <p className="mt-2 text-xs text-amber-700">
+                <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
                   فهرست ابعاد بیش از {dimCatalog.catalog.truncatedAt?.toLocaleString("fa-IR") ?? "۲۰۰۰"} مقدار دارد؛ برای یافتن مقدارهای قدیمی‌تر از جستجوی درون هر انتخاب‌گر استفاده کنید.
                 </p>
               ) : null}

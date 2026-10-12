@@ -29,7 +29,9 @@ vi.mock("@/lib/accounting-dimensions-service", async (importOriginal) => {
   return {
     ...actual,
     listDimensionSettings: vi.fn(async () => []),
-    listDimensionValues: vi.fn(async () => []),
+    listDimensionValues: vi.fn(async () => ({ values: [], truncated: false, total: 0 })),
+    searchDimensionValues: vi.fn(async () => []),
+    getDimensionValuesByIds: vi.fn(async () => []),
     createDimensionValue: vi.fn(async () => ({ id: "new" })),
   };
 });
