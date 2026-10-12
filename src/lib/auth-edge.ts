@@ -132,6 +132,22 @@ export interface SessionPayload {
    * and a TWA session before registration completes).
    */
   nativeDeviceId?: string | null;
+  /**
+   * Issue #884 — `native_app_devices.session_generation` as it stood the
+   * moment this token was signed (registration, or a `device_revoked`
+   * re-registration attempt — see `registerNativeDevice` and
+   * `POST /api/native-devices`). Revoking a device bumps the column by one;
+   * reactivating it bumps it again. `checkNativeDevice` denies any session
+   * whose stamped generation no longer matches the row's current one, which
+   * is what makes a revoke→reactivate cycle require a *fresh* registration
+   * rather than quietly reviving a browser tab's token that predates the
+   * revocation: without this, clearing `revoked_at` alone would make such a
+   * token valid again, which is exactly the "followed by fresh
+   * authentication" half of the owner decision that a bare `revoked_at`
+   * check cannot enforce by itself. Always set together with
+   * `nativeDeviceId`; never meaningful without it.
+   */
+  nativeDeviceGeneration?: number | null;
   /** True when this session completed MFA verification at login. */
   mfaVerified?: boolean;
   /** Epoch seconds of the most recent primary/MFA/step-up authentication. */

@@ -21,6 +21,7 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let nativeDevices: typeof import("../src/lib/native-device-service");
+let authLib: typeof import("../src/lib/auth");
 
 const alpha = { businessId: "", ownerId: "", managerId: "" };
 const beta = { businessId: "", ownerId: "" };
@@ -71,6 +72,24 @@ function registration(overrides: Partial<Parameters<typeof nativeDevices.registe
   };
 }
 
+/** A tenant session bound to a device, signed the way `POST /api/native-devices` signs one. */
+async function signDeviceSession(
+  businessId: string,
+  userId: string,
+  deviceId: string,
+  nativeDeviceGeneration: number,
+): Promise<string> {
+  return authLib.signSession({
+    sub: userId,
+    role: "owner",
+    businessId,
+    locationId: null,
+    fullName: "test",
+    nativeDeviceId: deviceId,
+    nativeDeviceGeneration,
+  });
+}
+
 beforeAll(async () => {
   databaseName = `native_device_registry_${randomUUID().replaceAll("-", "")}`;
   const maintenance = new Client({ connectionString: maintenanceUrl() });
@@ -85,6 +104,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   nativeDevices = await import("../src/lib/native-device-service");
+  authLib = await import("../src/lib/auth");
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
 }, 120_000);
@@ -287,5 +307,104 @@ describe("native device registry lifecycle", () => {
       "native_device.revoked_admin",
       "native_device.reactivated",
     ]);
+  });
+
+  it("denies a session minted before revocation even after the device is reactivated (fresh authentication required)", async () => {
+    const { device: registered } = await asBusiness(alpha.businessId, () =>
+      nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, registration()),
+    );
+    const staleToken = await signDeviceSession(
+      alpha.businessId,
+      alpha.ownerId,
+      registered.id,
+      registered.sessionGeneration,
+    );
+
+    // Before revocation, the token this registration minted resolves normally.
+    const beforeRevoke = await asBusiness(alpha.businessId, () => authLib.resolveSessionFromToken(staleToken));
+    expect(beforeRevoke?.sub).toBe(alpha.ownerId);
+
+    await asBusiness(alpha.businessId, () =>
+      nativeDevices.revokeNativeDeviceAsAdmin(registered.id, alpha.businessId, alpha.ownerId),
+    );
+    expect(await asBusiness(alpha.businessId, () => authLib.resolveSessionFromToken(staleToken))).toBeNull();
+
+    await asBusiness(alpha.businessId, () =>
+      nativeDevices.reactivateNativeDevice(registered.id, alpha.businessId, alpha.ownerId),
+    );
+    // The bug this guards against: checking only `revoked_at` would let this
+    // exact pre-revocation token resolve again the moment it goes back to
+    // NULL, with no login in between. `session_generation` was bumped by
+    // both the revoke and the reactivate, so the stale token's stamped
+    // generation no longer matches and it must still be denied.
+    expect(await asBusiness(alpha.businessId, () => authLib.resolveSessionFromToken(staleToken))).toBeNull();
+
+    // Only a *new* registration call — which only a freshly authenticated
+    // member can make — mints a token that resolves again.
+    const { device: reregistered } = await asBusiness(alpha.businessId, () =>
+      nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, registration()),
+    );
+    const freshToken = await signDeviceSession(
+      alpha.businessId,
+      alpha.ownerId,
+      reregistered.id,
+      reregistered.sessionGeneration,
+    );
+    const afterFreshRegistration = await asBusiness(alpha.businessId, () =>
+      authLib.resolveSessionFromToken(freshToken),
+    );
+    expect(afterFreshRegistration?.sub).toBe(alpha.ownerId);
+  });
+
+  it("a device_revoked registration attempt carries the device identity needed to bind and deny the caller's current session", async () => {
+    const input = registration();
+    const { device: revokable } = await asBusiness(alpha.businessId, () =>
+      nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, input),
+    );
+    await asBusiness(alpha.businessId, () =>
+      nativeDevices.revokeOwnNativeDevice(revokable.id, alpha.businessId, alpha.ownerId),
+    );
+
+    let caught: unknown;
+    try {
+      await asBusiness(alpha.businessId, () =>
+        nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, input),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({
+      message: "device_revoked",
+      status: 409,
+      deviceId: revokable.id,
+    });
+    const generation = (caught as { sessionGeneration: number }).sessionGeneration;
+    expect(typeof generation).toBe("number");
+
+    // Binding a session to exactly what the error carried denies it — proving
+    // the fields `POST /api/native-devices` uses to bind a failed caller's
+    // session are the right ones, not just present.
+    const boundToken = await signDeviceSession(alpha.businessId, alpha.ownerId, revokable.id, generation);
+    expect(await asBusiness(alpha.businessId, () => authLib.resolveSessionFromToken(boundToken))).toBeNull();
+  });
+
+  it("resolves two concurrent first-registrations of the same brand-new installation into exactly one device row", async () => {
+    const input = registration();
+    const results = await Promise.all([
+      asBusiness(alpha.businessId, () => nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, input)),
+      asBusiness(alpha.businessId, () => nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, input)),
+    ]);
+
+    // Neither concurrent call throws a raw unique-constraint violation —
+    // both resolve to the same row, one as the creator and one as a
+    // heartbeat re-registration.
+    expect(results[0].device.id).toBe(results[1].device.id);
+    expect(results.filter((r) => r.created).length).toBe(1);
+
+    const rows = await db.query("SELECT id FROM native_app_devices WHERE business_id = $1 AND install_id = $2", [
+      alpha.businessId,
+      input.installId,
+    ]);
+    expect(rows.rows).toHaveLength(1);
   });
 });

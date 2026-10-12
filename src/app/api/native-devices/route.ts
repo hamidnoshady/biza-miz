@@ -50,9 +50,23 @@ interface RegisterBody {
  * registers only their own installation; `registerNativeDevice` is what
  * scopes the write to `session.sub`.
  *
- * On success, re-signs the session cookie with `nativeDeviceId` so this
- * browser's session is now bound to the row — the enforcement half lives in
- * `checkNativeDevice` (auth.ts), re-checked on every later request.
+ * On success, re-signs the session cookie with `nativeDeviceId` and
+ * `nativeDeviceGeneration` so this browser's session is now bound to the
+ * row — the enforcement half lives in `checkNativeDevice` (auth.ts),
+ * re-checked on every later request.
+ *
+ * On `device_revoked`, the registration itself still fails (409), but the
+ * session cookie is *also* re-signed, bound to that same (revoked) row. This
+ * is what actually closes the gap a silent client failure would otherwise
+ * leave open: the bridge-driven registrar never reads this response body
+ * (ISSUE_884_PLAN.md's offline-limitation decision — it cannot show the
+ * member anything useful anyway), so without this the browser's session
+ * would stay completely unbound — and therefore fully authenticated, with
+ * no revocation enforcement ever applying to it — for its entire remaining
+ * lifetime, exactly for a device revoked before it ever finished
+ * registering. Binding it here means `checkNativeDevice` denies this
+ * session on the very next protected request regardless of what the client
+ * does with a 409.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireMember();
@@ -102,13 +116,30 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       appVersionCode,
       bridgeVersion,
     });
-    const nextToken = await signSession({ ...session, nativeDeviceId: device.id });
+    const nextToken = await signSession({
+      ...session,
+      nativeDeviceId: device.id,
+      nativeDeviceGeneration: device.sessionGeneration,
+    });
     const res = NextResponse.json({ device }, { status: created ? 201 : 200 });
     res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions());
     return res;
   } catch (err) {
     if (err instanceof NativeDeviceError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      const res = NextResponse.json({ error: err.message }, { status: err.status });
+      // See this handler's doc comment: a `device_revoked` failure still
+      // binds the session, so revocation is enforced from the very next
+      // request even though this one failed and the client may never look
+      // at why.
+      if (err.message === "device_revoked" && err.deviceId && err.sessionGeneration !== undefined) {
+        const nextToken = await signSession({
+          ...session,
+          nativeDeviceId: err.deviceId,
+          nativeDeviceGeneration: err.sessionGeneration,
+        });
+        res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions());
+      }
+      return res;
     }
     throw err;
   }

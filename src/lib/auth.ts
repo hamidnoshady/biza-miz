@@ -92,6 +92,19 @@ async function checkEmployeeSession(session: SessionPayload | null): Promise<Ses
  * exactly what makes it work even against a device that is offline at the
  * moment it is revoked.
  *
+ * Checking `revoked_at` alone is not enough to cover a revoke -> reactivate
+ * cycle: reactivating clears `revoked_at`, and a session JWT minted *before*
+ * the revocation (one that was never otherwise invalidated — a backgrounded
+ * tab whose token has not expired) would start resolving again the instant
+ * that happens, with no login in between. `session_generation` (migration
+ * 0217) is what actually makes "reactivation requires fresh authentication"
+ * hold: every session is stamped with the generation that was current when
+ * it was minted (`nativeDeviceGeneration`), both revoking and reactivating
+ * bump the column, and a session whose stamped generation no longer matches
+ * is denied regardless of what `revoked_at` currently says — the same shape
+ * `checkPlatformIdentity`'s `token_version` comparison already has for a
+ * password change.
+ *
  * Runs under `withoutTenantScope` for the same timing reason
  * `checkEmployeeSession` does — see the "native-device-auth" entry in
  * db.ts's `withoutTenantScope` doc comment.
@@ -100,16 +113,18 @@ async function checkNativeDevice(session: SessionPayload | null): Promise<Sessio
   if (!session?.nativeDeviceId) return session;
   const deviceId = session.nativeDeviceId;
 
-  const revoked = await withoutTenantScope("native-device-auth", async () => {
-    const { rows } = await query<{ revoked_at: Date | null }>(
-      `SELECT revoked_at FROM native_app_devices WHERE id = $1 AND business_id = $2`,
+  const valid = await withoutTenantScope("native-device-auth", async () => {
+    const { rows } = await query<{ revoked_at: Date | null; session_generation: number }>(
+      `SELECT revoked_at, session_generation FROM native_app_devices WHERE id = $1 AND business_id = $2`,
       [deviceId, session.businessId],
     );
+    const row = rows[0];
     // A row that no longer exists behaves exactly like a revoked one: there is
     // nothing left for this session to be bound to.
-    return !rows[0] || rows[0].revoked_at !== null;
+    if (!row || row.revoked_at !== null) return false;
+    return row.session_generation === session.nativeDeviceGeneration;
   });
-  if (revoked) return null;
+  if (!valid) return null;
 
   // Best-effort activity marker for the device list — never blocks the request.
   void withoutTenantScope("native-device-auth", () =>

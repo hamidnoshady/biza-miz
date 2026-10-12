@@ -413,6 +413,80 @@ GitHub surfaces the push-triggered run's duplicate failure alongside the passing
 the required gate failed. Do not re-record the `accounting-expenses` baseline to "fix" this — it is
 the same push-vs-pull_request-context flake already on record, not something this slice caused.
 
+## Phase 6 hardening pass — three correctness/security bugs found on review, fixed
+
+An independent review of the merged device-registry slice (PR #890, commit `915bd89`) found three
+real gaps between the shipped code and the owner decisions in this plan. All three are fixed, with
+new regression coverage, in migration `0217_native_app_devices_generation.sql` and the commit that
+follows it.
+
+1. **Reactivation could silently restore a session minted before revocation.** `checkNativeDevice`
+   (auth.ts) checked only `revoked_at IS NULL`. Revoking sets it, reactivating clears it back to
+   `NULL` — but a session JWT minted *before* the revocation (one that was never otherwise
+   invalidated, e.g. a backgrounded tab whose token had not expired) would start resolving again
+   the instant `revoked_at` went back to `NULL`, with no login in between. That contradicts owner
+   decision #3's "reactivation requires an authorized owner/admin action followed by fresh
+   authentication" — the fresh-authentication half never actually happened for that token.
+   **Fix:** `native_app_devices.session_generation` (migration 0217), the same shape
+   `platform_users.token_version` already has for a password change. Every session is stamped with
+   the generation current when it was minted (`SessionPayload.nativeDeviceGeneration`); revoking
+   *and* reactivating both bump the column; `checkNativeDevice` now denies any session whose
+   stamped generation no longer matches, regardless of what `revoked_at` says. Proven by
+   `integration/native-device-registry.integration.test.ts`'s "denies a session minted before
+   revocation even after the device is reactivated" test, which signs a token, revokes, reactivates,
+   and asserts that exact token is still denied — then shows a token from a *new* registration call
+   resolves normally.
+2. **A revoked installation's failed re-registration left its browser session fully authenticated
+   and completely unbound.** `POST /api/native-devices` only re-signed the session cookie (binding
+   `nativeDeviceId`) on success. On `device_revoked`, it returned 409 and touched nothing else — and
+   `native-device-registrar.tsx` never reads the response body (by design: there is nothing useful
+   to show the member, see its doc comment). The result: a session that logged in, failed to
+   register because its installation was already revoked, kept working as an ordinary, fully
+   authenticated session for the rest of the token's life, because `checkNativeDevice` only ever
+   runs for a session that carries `nativeDeviceId` — and this one never got the chance to.
+   **Fix:** `NativeDeviceError` now carries the conflicting row's `deviceId` and `sessionGeneration`
+   for the `device_revoked` case specifically (not `device_registered_to_another_user`, which is a
+   different user's own device, not this session's). The route handler re-signs and sets the
+   session cookie, binding it to that (revoked) device, *before* returning the 409 — closing the gap
+   purely through the `Set-Cookie` header, which the browser stores regardless of whether the
+   client reads the response body or even the status code. Proven by the new
+   `integration/native-device-registration-route.integration.test.ts`, which calls the real route
+   handler, confirms the 409 response carries a bound session cookie, and confirms
+   `resolveSessionFromToken` on that exact cookie value is denied.
+3. **Two concurrent first-registrations of the same brand-new installation could throw a raw
+   unique-constraint error instead of converging on one row.** `registerNativeDevice`'s
+   `SELECT ... FOR UPDATE` only locks a row that already exists; for a genuinely new `installId`,
+   two concurrent transactions both find nothing to lock and both attempt the `INSERT` branch — the
+   loser's `INSERT` fails `native_app_devices_business_install_unique`, which propagated as an
+   unhandled `NativeDeviceError`-less exception. **Fix:** the `INSERT` is now wrapped so a
+   unique-violation (Postgres code `23505`) triggers a bounded retry (up to 3 attempts) of the whole
+   transaction, which re-runs the `SELECT` and this time finds the winner's committed row, falling
+   into the ordinary re-registration (`UPDATE`) branch instead. Proven by
+   "resolves two concurrent first-registrations of the same brand-new installation into exactly one
+   device row" (`Promise.all` of two calls), asserting one row, one `created: true`, no thrown error.
+
+Local verification of this hardening pass (same sandbox as Phase 6's gates, after a fresh
+`npm ci`): `npx tsc --noEmit` (heap raised to 6 GB — 3 GB was not enough this time) exit 0; `npm
+run db:migrate` applied 304 migrations including `0217_native_app_devices_generation.sql`
+cleanly; `npm test` — **707 files, 9,320 tests passed**; `npm run test:db` — full results recorded
+in the Gates section below once this run completes.
+
+Two other points the review raised were checked and are **not** bugs in this slice:
+
+- **Empty `assetlinks.json` fingerprint arrays and no device/App-Links acceptance.** This is the
+  documented, intentional state from the foundation slice (no signing key, no Play Console app
+  yet — owner decisions recorded above) — the TWA fails closed until those exist, which is the
+  correct behaviour, not a gap introduced here.
+- **`android-build.yml`'s debug APK is labelled NON-PRODUCTION.** Also intentional and documented
+  (PR #890's description) — it is a debug build with no secrets, never the signed artifact; the
+  signed-candidate/production-release workflows are separate and manual.
+
+Genuinely still missing, unchanged from before this pass and far larger than a hardening fix:
+the Security/Devices settings UI (API and enforcement exist; no screen yet), biometric
+re-authentication, push notifications, background sync, barcode/camera/file/share/media
+integration, native printing, Caller ID and post-call CRM activity, and the full mobile-shell
+navigation audit issue #884 asks for. None of those are started.
+
 ## Files
 
 
@@ -442,3 +516,14 @@ Device registry slice (Phase 6), added on top of the above: `migrations/0216_nat
 `TwaLauncherActivity.kt`, `BridgeCommandRouterTest.kt`, `src/lib/native/native-runtime.ts` /
 `native-provider.tsx` (exposes `request()`), `docs/android-runtime.md` (the new
 "Device registry" section).
+
+Phase 6 hardening pass, added on top of the above:
+`migrations/0217_native_app_devices_generation.sql` (`session_generation` column),
+`integration/native-device-registration-route.integration.test.ts` (new file — the route-level
+`device_revoked` binding test). Changed: `src/lib/auth-edge.ts` (`nativeDeviceGeneration` on
+`SessionPayload`), `src/lib/auth.ts` (`checkNativeDevice` compares generations, not just
+`revoked_at`), `src/lib/native-device-service.ts` (`NativeDeviceError` carries `deviceId`/
+`sessionGeneration` for `device_revoked`; `registerNativeDevice` retries a unique-violation race;
+revoke/reactivate bump `session_generation`), `src/app/api/native-devices/route.ts` (binds the
+session on a `device_revoked` failure, not only on success),
+`integration/native-device-registry.integration.test.ts` (3 new tests).
