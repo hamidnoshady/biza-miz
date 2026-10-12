@@ -90,6 +90,7 @@ export default function PlatformAiPromptsPage() {
   return (
     <div className="space-y-4">
       <AiConsoleNav />
+      <h1 className="text-xl font-bold">لایه‌های پرامپت</h1>
       <InfoBox>
         یک حل‌کنندهٔ پرامپت، لایه‌به‌لایه. انتشار یک نسخه فقط «متن» همان لایه را عوض می‌کند، نه وجودش را؛ و حوزه‌ای
         که نسخهٔ منتشرشده ندارد به پیش‌فرض کد برمی‌گردد — هرگز به پرامپت خالی.

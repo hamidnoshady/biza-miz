@@ -45,6 +45,9 @@ type PendingMutation =
   | { kind: "create"; body: PlatformAdminCreateRequest }
   | { kind: "change"; body: PlatformAdminUpdateRequest };
 
+const LAST_OWNER_HINT =
+  "این تنها مالک فعال سکو است؛ برای تعلیق یا تغییر نقش، ابتدا مالک فعال دیگری تعیین کنید.";
+
 function successNotice(mutation: PendingMutation): string {
   if (mutation.kind === "create") return "مدیر جدید سکو با موفقیت ایجاد شد.";
   switch (mutation.body.action) {
@@ -318,7 +321,14 @@ export default function AdminsPage() {
               </tr>
             </thead>
             <tbody>
-              {admins.map((a) => (
+              {admins.map((a) => {
+                // Mirrors the server rule (audit F27): the only active owner cannot be
+                // suspended or demoted. Shown before submission, not as a 409 afterwards.
+                const lastActiveOwner =
+                  a.role === "owner" &&
+                  a.isActive &&
+                  admins.filter((o) => o.role === "owner" && o.isActive).length <= 1;
+                return (
                 <tr key={a.id} className="border-t border-border">
                   <td className="px-4 py-3 font-medium text-foreground">{a.fullName}</td>
                   <td className="px-4 py-3 font-mono text-xs text-muted-foreground" dir="ltr">
@@ -327,7 +337,9 @@ export default function AdminsPage() {
                   <td className="px-4 py-3">
                     <select
                       value={a.role}
-                      disabled={busy}
+                      disabled={busy || lastActiveOwner}
+                      title={lastActiveOwner ? LAST_OWNER_HINT : undefined}
+                      aria-describedby={lastActiveOwner ? `last-owner-${a.id}` : undefined}
                       aria-label={`نقش ${a.fullName}`}
                       onChange={(e) =>
                         changeAdmin({
@@ -344,6 +356,11 @@ export default function AdminsPage() {
                         </option>
                       ))}
                     </select>
+                    {lastActiveOwner ? (
+                      <p id={`last-owner-${a.id}`} className="mt-1 max-w-[16rem] text-xs text-amber-700 dark:text-amber-300">
+                        {LAST_OWNER_HINT}
+                      </p>
+                    ) : null}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -373,7 +390,8 @@ export default function AdminsPage() {
                     <div className="flex flex-wrap gap-1.5">
                       <Button
                         variant="ghost"
-                        disabled={busy}
+                        disabled={busy || (a.isActive && lastActiveOwner)}
+                        title={a.isActive && lastActiveOwner ? LAST_OWNER_HINT : undefined}
                         onClick={() =>
                           changeAdmin({
                             action: "update",
@@ -411,7 +429,8 @@ export default function AdminsPage() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
