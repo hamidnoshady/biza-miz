@@ -293,7 +293,18 @@ At `c05e9429` two jobs outside `test.yml` failed:
 - `REPORT-885.md` is referenced by no application code (`grep` across `*.ts`, `*.tsx`, `*.mjs`, `*.js`, `*.json`, `*.yml`, excluding `node_modules`), so it cannot reach a rendered page.
 - The same job **passed** at `c459914f` (`verify-shippables`/`test.yml` run `38218031047`, conclusion `success`), which carries byte-identical application code.
 
-A markdown-only diff cannot move pixels, so the code-bearing result at `c459914f` is the authoritative one. I could not re-run the job to demonstrate the flake directly: both `gh run rerun` and `POST /actions/runs/38223196818/rerun-failed-jobs` are refused from this token (`cannot be rerun`, then `403 Resource not accessible by integration`). No visual baseline was re-recorded and no threshold was loosened.
+A markdown-only diff cannot move pixels, so the code-bearing result at `c459914f` is the authoritative one.
+
+**The flake is now proven rather than inferred.** Two `test.yml` runs executed against the *same* head SHA `4757434c`, and they disagree:
+
+| Check run | Job | Conclusion | Started |
+|---|---|---|---|
+| `114740868746` | visual regression | **failure** | 09:17:17Z |
+| `114742042497` | visual regression | **success** | 09:19:11Z |
+
+Identical code, two runs, different outcomes — which is the definition of a flake, and needs no argument about what the diff contains. The `all checks passed` roll-up has the same pair (`114757467028` success, `114760301738` failure): the roll-up is a *consequence* of the visual job, not an independent signal, and it failed only in the run whose visual job failed. Its annotation reads `One or more required checks failed, were cancelled, or did not run: failure`.
+
+This matters for how the PR reads: `gh pr checks` reports the later, passing run for each name, while branch protection sees the failing roll-up too, so the PR shows `UNSTABLE` with every individual job green. I could not re-run the failed job to clear the stale roll-up — both `gh run rerun` and `POST /actions/runs/38228209488/rerun-failed-jobs` are refused from this token (`cannot be rerun`, then `403 Resource not accessible by integration`). A maintainer re-running it, or merging on the green run, resolves it. No visual baseline was re-recorded and no threshold was loosened.
 
 **Neither budget was touched.** `verify-shippables.yml` still reads `200MB` and `build-desktop-installer.yml` still reads `620MB`; raising either to make a check pass is manufacturing green. No test was disabled, no assertion loosened, no visual baseline re-recorded.
 
