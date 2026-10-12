@@ -1,4 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { ACCOUNTING_SECTIONS } from "@/app/(app)/accounting/accounting-nav";
+import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
+import { CRM_NAV_ITEMS } from "@/app/(app)/crm/crm-nav";
+import { crmSectionHref } from "@/app/(app)/crm/crm-routes";
+import { GROWTH_NAV_ITEMS } from "@/app/(app)/growth/growth-nav";
+import { growthSectionHref } from "@/app/(app)/growth/growth-routes";
+import { CMS_NAV_ITEMS, WP_NAV_ITEMS } from "@/app/(app)/websites/website-nav";
+import { cmsSectionHref, wpSectionHref } from "@/app/(app)/websites/website-routes";
 import {
   KNOWLEDGE_SECTIONS,
   KNOWLEDGE_PAGES,
@@ -124,6 +132,25 @@ describe("knowledge page assignments", () => {
       expect(page.label.trim()).not.toBe("");
       expect(page.group.trim()).not.toBe("");
       expect(knowledgePage(page.key)).toEqual(page);
+    }
+  });
+
+  it("covers each page in the shared Accounting, CRM, Growth and Website help headers", () => {
+    const routes = new Set(KNOWLEDGE_PAGES.map((page) => page.route));
+    for (const section of ACCOUNTING_SECTIONS) {
+      expect(routes.has(accountingSectionHref(section.key))).toBe(true);
+    }
+    for (const section of CRM_NAV_ITEMS) {
+      expect(routes.has(crmSectionHref(section.key))).toBe(true);
+    }
+    for (const section of GROWTH_NAV_ITEMS) {
+      expect(routes.has(growthSectionHref(section.key))).toBe(true);
+    }
+    for (const section of CMS_NAV_ITEMS) {
+      expect(routes.has(cmsSectionHref(section.key))).toBe(true);
+    }
+    for (const section of WP_NAV_ITEMS) {
+      expect(routes.has(wpSectionHref(section.key))).toBe(true);
     }
   });
 
