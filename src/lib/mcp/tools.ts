@@ -1648,6 +1648,30 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_crm_deal_delete",
+    actionType: "crm.deal.delete",
+    english: "Delete a CRM deal — irreversible; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { id: id("معامله") },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_crm_case_delete",
+    actionType: "crm.case.delete",
+    english: "Delete a support case — irreversible; always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { id: id("پرونده") },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_gift_card_redeem",
     actionType: "gift_card.redeem",
     english:

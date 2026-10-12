@@ -105,7 +105,7 @@ import { createCategory, updateCategory, createMenuItem, updateMenuItem } from "
 import { assignBarcode } from "./inventory-item-barcodes-service";
 import { createCustomer, createParty } from "./parties-service";
 import { getSetting, SETTING_KEYS } from "./settings";
-import { toggleNotePin, setConsent } from "./crm-service";
+import { toggleNotePin, setConsent, deleteDeal, deleteCase } from "./crm-service";
 import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
 import { upsertPromotion, setPromotionActive, issueGiftCard } from "./promotions-service";
 import { createSupplierReturn } from "./supplier-return-service";
@@ -2691,6 +2691,25 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+
+// ── Issue #883 package 2, batch AD — CRM deal & case deletes ──────────────
+// Save / move-stage / set-status verbs + executors already exist from the
+// earlier CRM package; only the irreversible deletes were missing.
+const crmDealDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.dealId);
+  if (!id) return fail("missing_fields");
+  const deleted = await deleteDeal(ctx.businessId, id);
+  if (!deleted) return fail("deal_not_found");
+  return { ok: true, result: { result: "deleted" } };
+};
+const crmCaseDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.caseId);
+  if (!id) return fail("missing_fields");
+  const deleted = await deleteCase(ctx.businessId, id);
+  if (!deleted) return fail("case_not_found");
+  return { ok: true, result: { result: "deleted" } };
+};
+
 // ── Issue #883 package 2, batch AC — gift-card money movements ─────────────
 // Both mirror the routes' client transactions. Redeem preserves the route's
 // simple failure shape ({redeem_failed} with the reason); the expiry run is
@@ -3628,6 +3647,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  crmDealDelete,
+  crmCaseDelete,
   giftCardRedeem,
   giftCardExpireRun,
   messagingTemplateSave,

@@ -365,6 +365,10 @@ export type ActionType =
   // Batch AC — gift-card money movements (redeem / bulk expiry run).
   | "gift_card.redeem"
   | "gift_card.expire_run"
+  // Batch AD — CRM deal/case delete lanes (the save/move/status verbs
+  // already ship from the earlier CRM package).
+  | "crm.deal.delete"
+  | "crm.case.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -412,6 +416,8 @@ export type AutopilotExecutorKey =
   | "messagingCampaignPause"
   | "messagingCampaignResume"
   | "giftCardRedeem"
+  | "crmDealDelete"
+  | "crmCaseDelete"
   | "giftCardExpireRun"
   | "messagingCampaignLaunch"
   | "inventoryCountReverse"
@@ -1393,6 +1399,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "crm.deal.delete": {
+    type: "crm.deal.delete",
+    endpoint: "/api/crm/deals/{id}",
+    method: "DELETE",
+    label: "حذف معاملهٔ CRM — برگشت‌ناپذیر؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "crmDealDelete",
+  },
+  "crm.case.delete": {
+    type: "crm.case.delete",
+    endpoint: "/api/crm/cases/{id}",
+    method: "DELETE",
+    label: "حذف پروندهٔ پشتیبانی — برگشت‌ناپذیر؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "crmCaseDelete",
   },
   "gift_card.redeem": {
     type: "gift_card.redeem",

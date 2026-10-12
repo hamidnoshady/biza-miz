@@ -458,6 +458,8 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // expiry events for every due card in the branch. Both money-shaped.
   { actionType: "gift_card.redeem", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
   { actionType: "gift_card.expire_run", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
+  { actionType: "crm.deal.delete", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
+  { actionType: "crm.case.delete", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

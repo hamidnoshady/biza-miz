@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **126 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **135 write verbs**
-(**43** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **137 write verbs**
+(**45** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -273,6 +273,8 @@ visible only to connections consented for every branch) and **135 write verbs**
 | `write_messaging_campaign_launch` | `messaging.campaign.launch` | growth | high | always approval queue (step-up) | `campaigns.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_gift_card_redeem` | `gift_card.redeem` | growth | high | always approval queue (step-up) | `gift_cards.redeem` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_gift_card_expire_run` | `gift_card.expire_run` | growth | high | always approval queue (step-up) | `gift_cards.issue` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_crm_deal_delete` | `crm.deal.delete` | crm | high | always approval queue (step-up) | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_crm_case_delete` | `crm.case.delete` | crm | high | always approval queue (step-up) | `crm.delete` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_delete` | `media.collection.delete` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_asset_set_collection` | `media.asset.set_collection` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
