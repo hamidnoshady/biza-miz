@@ -378,6 +378,10 @@ export type ActionType =
   // Batch AF — table sessions (floor-plan table CRUD stays designer-side).
   | "table.session.open"
   | "table.session.update"
+  // Batch AH — backup config/run/restore (restore replaces the tenant DB).
+  | "backup.config.set"
+  | "backup.run_now"
+  | "backup.restore.apply"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -425,6 +429,9 @@ export type AutopilotExecutorKey =
   | "messagingCampaignPause"
   | "messagingCampaignResume"
   | "giftCardRedeem"
+  | "backupConfigSet"
+  | "backupRunNow"
+  | "backupRestoreApply"
   | "tableSessionOpen"
   | "tableSessionUpdate"
   | "loyaltyPointsRedeem"
@@ -1414,6 +1421,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "backup.config.set": {
+    type: "backup.config.set",
+    endpoint: "/api/backup/config",
+    method: "PUT",
+    label: "تنظیم زمان‌بندی/مقصد بکاپ — فقط Owner؛ رمز نسخه اگر خالی بماند تغییر نمی‌کند",
+    payloadHint: '{ enabled: boolean, intervalHours?: number, retentionDays?: number, localDir?: string, cloud?: object, passphrase?: string }',
+    executor: "backupConfigSet",
+  },
+  "backup.run_now": {
+    type: "backup.run_now",
+    endpoint: "/api/backup/run",
+    method: "POST",
+    label: "اجرای فوری بکاپ — وقتی پلن قیمت‌گذاری کرده باشد از کیف پول کسر می‌کند؛ هر بار تأیید انسان",
+    payloadHint: "{}",
+    executor: "backupRunNow",
+  },
+  "backup.restore.apply": {
+    type: "backup.restore.apply",
+    endpoint: "/api/backup/restore",
+    method: "POST",
+    label: "خطرناک — جایگزینی کامل پایگاه‌دادۀ تنانت با یک نسخهٔ از پیش صحت‌سنجی‌شده؛ هر بار تأیید انسان",
+    payloadHint: '{ artifactId: string /* از لیست restore */, passphrase?: string, verifyOnly?: boolean }',
+    executor: "backupRestoreApply",
   },
   "table.session.open": {
     type: "table.session.open",
@@ -3799,6 +3830,19 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             properties: {
               includeInactive: { type: "boolean", description: "true یعنی غیرفعال‌ها هم بیایند" },
             },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_backup_status",
+          description:
+            "وضعیت سلامت بکاپ و تاریخچهٔ آخرین اجراها — health + recent runs، همان کارتِ صفحهٔ تنظیمات بکاپ.",
+          parameters: {
+            type: "object",
+            properties: {},
             additionalProperties: false,
           },
         },

@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (37)
+### Tenant (36)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -40,7 +40,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **config.integrations** (Business config · Integration connections & syncs (Holoo etc.)) — partial
 - **config.ai** (Business config · AI config, automations, coworker jobs/templates/review, widgets, memory, conversations, research) — partial
 - **config.data** (Business config · Data transfer: entities, exports, imports, schedules, templates, Holoo provider) — MCP gap
-- **config.backup** (Business config · Backup & restore (tenant scope)) — MCP gap
 - **config.billing** (Business config · Tenant billing (plans/packages, wallet, payments)) — MCP gap
 - **config.devices** (Business config · Devices & printing config, pairing) — MCP gap
 - **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
@@ -77,7 +76,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 35 · partial: 28 · MCP gap: 9 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 36 · partial: 28 · MCP gap: 8 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -139,7 +138,7 @@ Counts — covered: 35 · partial: 28 · MCP gap: 9 · backend gap: 0 · n/a (in
 | Business config | WooCommerce webhooks / WordPress event bridges / connections management planes (API keys, desktop, MCP, website)<br>_inbound webhooks and the token-management planes of the API connector families (the panel hosts the UI); the MCP management plane itself is expressly out of scope_ | (route only) | (route only) | (route only) | (route only) | — | integrations.manage, integrations.view, mcp.manage | — | — | — | n/a (infra) |
 | Business config | AI config, automations, coworker jobs/templates/review, widgets, memory, conversations, research | get_setup_state, list_coworker_jobs | (route only) | (route only) | (route only) | — | ai.automations.manage, ai.manage, ai.usage.view, ai.use, finance.expenses_manage, settings.manage | — | get_setup_state, list_coworker_jobs | integration/ai-autopilot.integration.test.ts | partial |
 | Business config | Data transfer: entities, exports, imports, schedules, templates, Holoo provider | (route only) | (route only) | (route only) | (route only) | (route only) | data.export, data.import, integrations.view | — | — | integration/data-transfer.integration.test.ts | MCP gap |
-| Business config | Backup & restore (tenant scope) | (route only) | (route only) | (route only) | (route only) | — | backup.configure, backup.export, backup.manage, backup.restore | — | — | integration/backup.integration.test.ts | MCP gap |
+| Business config | Backup & restore (tenant scope)<br>_run-now charges the wallet when the plan prices the feature (the route's own billing gate, reclaimed by the verb); restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lane stays route-only_ | get_backup_status | backup.run_now | backup.config.set | backup.restore.apply | — | backup.configure, backup.export, backup.manage, backup.restore | connection mode; step-up (always approve) | get_backup_status, backup.run_now, backup.config.set, backup.restore.apply | integration/backup.integration.test.ts | covered |
 | Business config | Tenant billing (plans/packages, wallet, payments) | (route only) | (route only) | — | (route only) | — | billing.manage, billing.view | — | — | integration/billing.integration.test.ts | MCP gap |
 | Business config | Devices & printing config, pairing | (route only) | (route only) | (route only) | (route only) | — | orders.amend_closed, payments.refund, payments.take, printing.execute, settings.manage | — | — | integration/printing.integration.test.ts | MCP gap |
 | Business config | Onboarding wizard routes<br>_first-run wizard flow — UI-only; nothing to operate once a business exists_ | (route only) | (route only) | — | (route only) | (route only) | settings.manage | — | — | — | n/a (infra) |

@@ -23,6 +23,8 @@ import { redeemGiftCard, expireGiftCards } from "./promotions-service";
 import { redeemPoints, issueStoreCredit, useStoreCredit as payOutStoreCredit, storeCreditBalance, upsertProgram } from "./loyalty-service";
 import { openSession, releaseSessionWithoutOrders, mergeTableIntoSession, setSessionGuests } from "./table-session-service";
 import { broadcast } from "./realtime";
+import { getBackupConfig, setBackupConfig, runBackupNow, restoreAvailable, restoreFromArtifact } from "./backup-service";
+import { chargeForFeature } from "./billing-guard";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2696,6 +2698,51 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AH — backup config, manual run, restore ───
+// run-now rides the route's own billing gate (chargeForFeature) so a priced
+// run charges the wallet exactly once, same as the button. Restore is the
+// whole-database replacement the Owner-only route performs; verifyOnly maps
+// to the route's apply:false (validate into scratch, touch nothing).
+const backupConfigSet: AutopilotExecutor = async (ctx) => {
+  const payload = { ...(ctx.payload as Record<string, unknown>) };
+  if (payload.passphrase === "" || payload.passphrase === undefined) {
+    const current = await getBackupConfig(ctx.businessId);
+    if (current) payload.passphrase = (current as { passphrase?: string }).passphrase;
+  }
+  try {
+    await setBackupConfig(ctx.businessId, payload as never);
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    if (message.startsWith("invalid_") || message.includes("required")) return fail("bad_request");
+    throw err;
+  }
+};
+const backupRunNow: AutopilotExecutor = async (ctx) => {
+  const gate = await chargeForFeature(ctx.businessId, "backup", {
+    note: "پشتیبان‌گیری دستی",
+    userId: ctx.authorizedByUserId ?? null,
+  });
+  if (!gate.ok) {
+    return { ok: false, result: { error: "backup_not_chargeable", detail: gate.response }, errorCode: "backup_not_chargeable" };
+  }
+  const result = await runBackupNow(ctx.businessId);
+  return { ok: true, result: { result: { ...(result as object) }, charged: gate.charged ?? null, balanceRial: gate.balanceRial ?? null } };
+};
+const backupRestoreApply: AutopilotExecutor = async (ctx) => {
+  const artifactId = str(ctx.payload.artifactId) ?? str(ctx.payload.id);
+  if (!artifactId) return fail("missing_artifact");
+  if (!(await restoreAvailable())) return fail("restore_not_available");
+  const apply = !(ctx.payload.verifyOnly === true);
+  const outcome = await restoreFromArtifact(ctx.businessId, {
+    source: "artifact",
+    artifactId,
+    passphrase: str(ctx.payload.passphrase) ?? undefined,
+    apply,
+  } as never);
+  return { ok: true, result: { applied: apply, outcome: { ...(outcome as object) } } };
+};
+
 // ── Issue #883 package 2, batch AF — table sessions ───────────────────────
 // The two session handlers the floormaps use. Errors arrive from the client-
 // transaction services as thrown {code, status} errors, exactly as the routes
@@ -3863,6 +3910,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  backupConfigSet,
+  backupRunNow,
+  backupRestoreApply,
   tableSessionOpen,
   tableSessionUpdate,
   loyaltyPointsRedeem,

@@ -121,6 +121,7 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // Batch F — growth reads.
   { name: "list_promotions", kind: "read", app: "growth", branchPolicy: "agnostic" },
   { name: "get_gift_card_status", kind: "read", app: "growth", branchPolicy: "agnostic" },
+  { name: "get_backup_status", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   // Batch G — inventory readings and the suppliers directory.
   { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
@@ -466,6 +467,12 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "loyalty.store_credit.issue", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
   { actionType: "loyalty.store_credit.use", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
   { actionType: "loyalty.program.upsert", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  // Batch AH — backup: config is Owner-only owner-grade settings (mode);
+  // run-now can CHARGE the wallet when the plan prices the feature (step
+  // up); restore replaces the tenant's whole database in place (step up).
+  { actionType: "backup.config.set", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "backup.run_now", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  { actionType: "backup.restore.apply", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

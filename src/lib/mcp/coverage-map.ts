@@ -702,6 +702,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Backup & restore (tenant scope)",
     routes: ["backup"],
+    ops: {
+      listDetail: ["get_backup_status"],
+      create: ["backup.run_now"],
+      update: ["backup.config.set"],
+      lifecycle: ["backup.restore.apply"],
+    },
+    note: "run-now charges the wallet when the plan prices the feature (the route's own billing gate, reclaimed by the verb); restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lane stays route-only",
     test: "integration/backup.integration.test.ts",
   },
   {
