@@ -369,6 +369,12 @@ export type ActionType =
   // already ship from the earlier CRM package).
   | "crm.deal.delete"
   | "crm.case.delete"
+  // Batch AE — loyalty: every one of these moves wallet value for a
+  // customer, so all three always step up.
+  | "loyalty.points.redeem"
+  | "loyalty.store_credit.issue"
+  | "loyalty.store_credit.use"
+  | "loyalty.program.upsert"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -416,6 +422,10 @@ export type AutopilotExecutorKey =
   | "messagingCampaignPause"
   | "messagingCampaignResume"
   | "giftCardRedeem"
+  | "loyaltyPointsRedeem"
+  | "loyaltyStoreCreditIssue"
+  | "loyaltyStoreCreditUse"
+  | "loyaltyProgramUpsert"
   | "crmDealDelete"
   | "crmCaseDelete"
   | "giftCardExpireRun"
@@ -1399,6 +1409,38 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "loyalty.points.redeem": {
+    type: "loyalty.points.redeem",
+    endpoint: "/api/loyalty/customers/{id}/redeem",
+    method: "POST",
+    label: "بخش امتیازات وفاداری مشتری را می‌خرج — پولِ مشتری؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, points: number /* صحیح مثبت */, locationId?: string }',
+    executor: "loyaltyPointsRedeem",
+  },
+  "loyalty.store_credit.issue": {
+    type: "loyalty.store_credit.issue",
+    endpoint: "/api/loyalty/customers/{id}/store-credit",
+    method: "POST",
+    label: "صدور اعتبار فروشگاه برای مشتری — ایجاد ارزش پولی روی حساب مشتری؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, amount: number /* ریال */, reason?: string, locationId?: string }',
+    executor: "loyaltyStoreCreditIssue",
+  },
+  "loyalty.store_credit.use": {
+    type: "loyalty.store_credit.use",
+    endpoint: "/api/loyalty/customers/{id}/store-credit",
+    method: "POST",
+    label: "بازپرداخت اعتبار فروشگاه به مشتری به‌صورت نقد یا بانک — پرداخت واقعی پول؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, amount: number /* ریال */, paymentMethod: "cash"|"bank", locationId?: string }',
+    executor: "loyaltyStoreCreditUse",
+  },
+  "loyalty.program.upsert": {
+    type: "loyalty.program.upsert",
+    endpoint: "/api/loyalty/programs",
+    method: "POST",
+    label: "ایجاد/به‌روزرسانی برنامهٔ وفاداری — نرخ کسب و ارزش امتیاز",
+    payloadHint: '{ name: string, earnPointsPer100000?: number, pointValueRial?: number, pointsExpiryDays?: number|null, isActive?: boolean, isDefault?: boolean }',
+    executor: "loyaltyProgramUpsert",
   },
   "crm.deal.delete": {
     type: "crm.deal.delete",

@@ -460,6 +460,12 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "gift_card.expire_run", kind: "write", app: "growth", risk: "high", approval: "always_approve" },
   { actionType: "crm.deal.delete", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
   { actionType: "crm.case.delete", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
+  // Batch AE — loyalty lanes all denominate in wallet value: redeem spends
+  // the customer's points, issue mints credit, use pays it out in cash/bank.
+  { actionType: "loyalty.points.redeem", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
+  { actionType: "loyalty.store_credit.issue", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
+  { actionType: "loyalty.store_credit.use", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
+  { actionType: "loyalty.program.upsert", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

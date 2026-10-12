@@ -20,6 +20,8 @@ import type { AutopilotExecutorKey } from "./ai";
 import { createStockCount, editStockCount, reverseStockCount } from "./stock-count-service";
 import { saveMessageTemplate, pauseMessageCampaign, resumeMessageCampaign, launchMessageCampaign } from "./message-campaigns-service";
 import { redeemGiftCard, expireGiftCards } from "./promotions-service";
+import { redeemPoints, issueStoreCredit, useStoreCredit, storeCreditBalance, upsertProgram } from "./loyalty-service";
+import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
@@ -103,7 +105,7 @@ import { ShiftError, openShift, closeOwnShift, closeShiftById } from "./shift-se
 import { randomUUID } from "crypto";
 import { createCategory, updateCategory, createMenuItem, updateMenuItem } from "./menu-service";
 import { assignBarcode } from "./inventory-item-barcodes-service";
-import { createCustomer, createParty } from "./parties-service";
+import { createCustomer, createParty, getCustomer } from "./parties-service";
 import { getSetting, SETTING_KEYS } from "./settings";
 import { toggleNotePin, setConsent, deleteDeal, deleteCase } from "./crm-service";
 import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
@@ -2692,6 +2694,129 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AE — loyalty wallet lanes ─────────────────
+// Same pattern the routes use: one client transaction per movement, and the
+// route's composite failure shape ({error, message}) preserved verbatim —
+// the wallet screens surface that message to the operator.
+const loyaltyFail = (err: unknown, code: "redeem_failed" | "store_credit_failed"): AutopilotExecutionResult => ({
+  ok: false,
+  result: { error: code, message: (err as Error).message },
+  errorCode: code,
+});
+const loyaltyPointsRedeem: AutopilotExecutor = async (ctx) => {
+  const customerId = str(ctx.payload.customerId) ?? str(ctx.payload.id);
+  const points = typeof ctx.payload.points === "number" && Number.isFinite(ctx.payload.points) ? Math.round(ctx.payload.points) : null;
+  if (!customerId || points === null || points <= 0) return fail("missing_fields");
+  const customer = await getCustomer(ctx.businessId, customerId);
+  if (!customer) return fail("customer_not_found");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const businessDay = await getBusinessDayStatus(branch.locationId);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await redeemPoints(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      customerId,
+      points,
+      businessDate: businessDay?.businessDate,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...result } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return loyaltyFail(err, "redeem_failed");
+  } finally {
+    client.release();
+  }
+};
+const loyaltyStoreCreditIssue: AutopilotExecutor = async (ctx) => {
+  const customerId = str(ctx.payload.customerId) ?? str(ctx.payload.id);
+  const amount = typeof ctx.payload.amount === "number" && Number.isFinite(ctx.payload.amount) ? ctx.payload.amount : null;
+  if (!customerId || amount === null || amount <= 0) return fail("bad_request");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const customer = await getCustomer(ctx.businessId, customerId);
+  if (!customer) return fail("customer_not_found");
+  const businessDay = await getBusinessDayStatus(branch.locationId);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await issueStoreCredit(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      customerId,
+      amount,
+      reason: str(ctx.payload.reason) ?? null,
+      businessDate: businessDay?.businessDate,
+      createdBy: ctx.authorizedByUserId,
+    });
+    const balance = await storeCreditBalance(ctx.businessId, customerId, client);
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, balance } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return loyaltyFail(err, "store_credit_failed");
+  } finally {
+    client.release();
+  }
+};
+const loyaltyStoreCreditUse: AutopilotExecutor = async (ctx) => {
+  const customerId = str(ctx.payload.customerId) ?? str(ctx.payload.id);
+  const amount = typeof ctx.payload.amount === "number" && Number.isFinite(ctx.payload.amount) ? ctx.payload.amount : null;
+  const paymentMethod = str(ctx.payload.paymentMethod);
+  if (!customerId || amount === null || amount <= 0) return fail("bad_request");
+  if (paymentMethod !== "cash" && paymentMethod !== "bank") return fail("bad_request");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const customer = await getCustomer(ctx.businessId, customerId);
+  if (!customer) return fail("customer_not_found");
+  const businessDay = await getBusinessDayStatus(branch.locationId);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await useStoreCredit(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      customerId,
+      amount,
+      paymentMethod,
+      businessDate: businessDay?.businessDate,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, balance: result.balance } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return loyaltyFail(err, "store_credit_failed");
+  } finally {
+    client.release();
+  }
+};
+const loyaltyProgramUpsert: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("missing_fields");
+  const program = await upsertProgram(ctx.businessId, {
+    name,
+    earnPointsPer100000: typeof ctx.payload.earnPointsPer100000 === "number" ? ctx.payload.earnPointsPer100000 : undefined,
+    pointValueRial: typeof ctx.payload.pointValueRial === "number" ? ctx.payload.pointValueRial : undefined,
+    pointsExpiryDays:
+      ctx.payload.pointsExpiryDays === null
+        ? null
+        : typeof ctx.payload.pointsExpiryDays === "number"
+          ? ctx.payload.pointsExpiryDays
+          : undefined,
+    isActive: typeof ctx.payload.isActive === "boolean" ? ctx.payload.isActive : undefined,
+    isDefault: typeof ctx.payload.isDefault === "boolean" ? ctx.payload.isDefault : undefined,
+  });
+  return { ok: true, result: { program: { ...(program as object) } } };
+};
+
 // ── Issue #883 package 2, batch AD — CRM deal & case deletes ──────────────
 // Save / move-stage / set-status verbs + executors already exist from the
 // earlier CRM package; only the irreversible deletes were missing.
@@ -3647,6 +3772,10 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  loyaltyPointsRedeem,
+  loyaltyStoreCreditIssue,
+  loyaltyStoreCreditUse,
+  loyaltyProgramUpsert,
   crmDealDelete,
   crmCaseDelete,
   giftCardRedeem,

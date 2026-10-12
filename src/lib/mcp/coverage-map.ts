@@ -421,7 +421,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "CRM",
     entity: "Loyalty programs, store credit, redemptions",
     routes: ["loyalty"],
-    ops: { listDetail: ["get_repurchase_candidates"] },
+    ops: {
+      listDetail: ["get_repurchase_candidates"],
+      create: ["loyalty.program.upsert"],
+      lifecycle: ["loyalty.points.redeem", "loyalty.store_credit.issue", "loyalty.store_credit.use"],
+    },
+    note: "every wallet lane (redeem / issue / payout) steps up forever — points and store credit are the customer's money; loyalty reports and the repurchase feed stay read lanes",
     test: "integration/loyalty.integration.test.ts",
   },
 

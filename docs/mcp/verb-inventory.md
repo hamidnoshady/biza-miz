@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **126 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **137 write verbs**
-(**45** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **141 write verbs**
+(**48** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -275,6 +275,10 @@ visible only to connections consented for every branch) and **137 write verbs**
 | `write_gift_card_expire_run` | `gift_card.expire_run` | growth | high | always approval queue (step-up) | `gift_cards.issue` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_deal_delete` | `crm.deal.delete` | crm | high | always approval queue (step-up) | `crm.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_case_delete` | `crm.case.delete` | crm | high | always approval queue (step-up) | `crm.delete` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_loyalty_points_redeem` | `loyalty.points.redeem` | crm | high | always approval queue (step-up) | `loyalty.redeem` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_loyalty_store_credit_issue` | `loyalty.store_credit.issue` | crm | high | always approval queue (step-up) | `store_credit.issue` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_loyalty_store_credit_use` | `loyalty.store_credit.use` | crm | high | always approval queue (step-up) | `store_credit.payout` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_loyalty_program_upsert` | `loyalty.program.upsert` | crm | low | connection write_mode | `loyalty.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_delete` | `media.collection.delete` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_asset_set_collection` | `media.asset.set_collection` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

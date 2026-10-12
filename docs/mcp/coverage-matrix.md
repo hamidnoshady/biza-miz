@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (38)
+### Tenant (37)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -25,7 +25,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
 - **crm.config** (CRM · CRM automations, custom fields, audit) — partial
-- **crm.loyalty** (CRM · Loyalty programs, store credit, redemptions) — partial
 - **growth.settings-campaigns** (Growth · Growth overview, settings, campaign audience, accounting) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
 - **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — partial
@@ -78,7 +77,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 34 · partial: 28 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 35 · partial: 27 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -116,7 +115,7 @@ Counts — covered: 34 · partial: 28 · MCP gap: 10 · backend gap: 0 · n/a (i
 | CRM | Segments, saved views, queues, RFM | get_repurchase_candidates, list_customer_segments, preview_customer_segment | crm.segment.create | crm.segment.update | crm.segment.archive | — | crm.configure, crm.manage, crm.view | connection mode | get_repurchase_candidates, list_customer_segments, preview_customer_segment, crm.segment.create, crm.segment.update, crm.segment.archive | integration/crm.integration.test.ts | covered |
 | CRM | CRM automations, custom fields, audit | list_crm_automations | (route only) | crm.automation.toggle | (route only) | — | crm.configure | step-up (always approve) | list_crm_automations, crm.automation.toggle | integration/crm.integration.test.ts | partial |
 | CRM | CRM overview, members, consent state, data quality<br>_consent state changes ride the customer row's crm.consent.set (logged legal event, always_approve); quality/merge POST stays route-only (mass mutation identity merge)_ | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members | — | crm.consent.set, crm.customer.tag | — | — | crm.merge, crm.view | connection mode; step-up (always approve) | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members, crm.consent.set, crm.customer.tag | integration/crm.integration.test.ts | covered |
-| CRM | Loyalty programs, store credit, redemptions | get_repurchase_candidates | (route only) | — | (route only) | — | loyalty.manage, loyalty.redeem, loyalty.view, store_credit.issue, store_credit.payout | — | get_repurchase_candidates | integration/loyalty.integration.test.ts | partial |
+| CRM | Loyalty programs, store credit, redemptions<br>_every wallet lane (redeem / issue / payout) steps up forever — points and store credit are the customer's money; loyalty reports and the repurchase feed stay read lanes_ | get_repurchase_candidates | loyalty.program.upsert | — | loyalty.points.redeem, loyalty.store_credit.issue, loyalty.store_credit.use | — | loyalty.manage, loyalty.redeem, loyalty.view, store_credit.issue, store_credit.payout | connection mode; step-up (always approve) | get_repurchase_candidates, loyalty.program.upsert, loyalty.points.redeem, loyalty.store_credit.issue, loyalty.store_credit.use | integration/loyalty.integration.test.ts | covered |
 | Growth | Growth overview, settings, campaign audience, accounting<br>_growth settings screen (channels, tariffs, attribution windows) stays route-only — Twilio/SMS sender configuration is credential-shaped and never crosses the chat channel; campaign draft creation is proposal-only by design (see growth.messaging)_ | list_message_campaigns, list_message_templates | (route only) | (route only) | messaging.campaign.launch, messaging.campaign.pause, messaging.campaign.resume | — | campaigns.manage, growth.view, marketing.configure | connection mode; step-up (always approve) | list_message_campaigns, list_message_templates, messaging.campaign.launch, messaging.campaign.pause, messaging.campaign.resume | integration/crm.integration.test.ts | partial |
 | Growth | Messaging rules & templates<br>_campaign DRAFT creation stays proposal-only (the assistant writes the campaign card, the browser sends it) — same design class as website.post.publish; notification rules live on their own screen with their own route_ | list_message_templates | messaging.template.save | — | crm.customer.note, messaging.campaign.launch, messaging.campaign.pause, messaging.campaign.resume | — | campaigns.manage, campaigns.view | connection mode; step-up (always approve) | list_message_templates, messaging.template.save, crm.customer.note, messaging.campaign.launch, messaging.campaign.pause, messaging.campaign.resume | integration/crm.integration.test.ts | covered |
 | Growth | Promotions & gift cards (issue, expire, redeem) | get_gift_card_status, list_promotions | gift_card.issue, promotion.upsert | promotion.toggle | gift_card.expire_run, gift_card.redeem | — | campaigns.manage, campaigns.view, gift_cards.issue, gift_cards.redeem, gift_cards.view | connection mode; step-up (always approve) | get_gift_card_status, list_promotions, gift_card.issue, promotion.upsert, promotion.toggle, gift_card.expire_run, gift_card.redeem | integration/promotions.integration.test.ts | covered |
