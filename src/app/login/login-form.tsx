@@ -281,7 +281,12 @@ function PinLogin() {
   /** The direct «ورود با شمارهٔ موبایل» tab — offered once the policy turns the feature on. */
   const [phoneTab, setPhoneTab] = useState(false);
   const [tabPhone, setTabPhone] = useState("");
-  const [tabBusinesses, setTabBusinesses] = useState<{ id: string; name: string }[] | null>(null);
+  /**
+   * Issue #854 (P1.18): the *send* step never names a business, so there is no
+   * business list to hold here any more. A multi-business number gets the same
+   * `sent` answer as any other, and the list — with a selection token — is what
+   * a *verified* code produces inside `PhoneOtpStep`.
+   */
 
   useEffect(() => {
     // Checked client-side only (guarded, not called during the server render)
@@ -462,17 +467,8 @@ function PinLogin() {
         error?: string;
         message?: string;
         retryAfterMs?: number;
-        needsBusinessSelection?: boolean;
-        businesses?: { id: string; name: string }[];
       };
 
-      if (data.needsBusinessSelection) {
-        // The typed number belongs to members of more than one business and
-        // this origin does not name one — ask which, then re-send addressed
-        // to it. (Only the direct tab can land here.)
-        setTabBusinesses(data.businesses ?? []);
-        return;
-      }
       if (res.status === 429) {
         const ms = typeof data.retryAfterMs === "number" ? data.retryAfterMs : 0;
         const seconds = Math.max(1, Math.ceil(ms / 1000));
@@ -490,7 +486,6 @@ function PinLogin() {
         return;
       }
 
-      setTabBusinesses(null);
       setOtpSent({ token: data.token, maskedPhone: data.maskedPhone ?? null });
       if (employeeId) rememberRecent(employeeId);
     } catch {
@@ -608,7 +603,6 @@ function PinLogin() {
             type="button"
             onClick={() => {
               setPhoneTab(false);
-              setTabBusinesses(null);
               setError(null);
               setOtpSpec(null);
               setOtpSent(null);
@@ -633,23 +627,6 @@ function PinLogin() {
               setError(null);
             }}
           />
-        ) : tabBusinesses ? (
-          <div className="space-y-2">
-            <p className="text-sm text-muted-foreground">
-              این شماره در چند کسب‌وکار ثبت شده است؛ وارد کدام می‌شوید؟
-            </p>
-            {tabBusinesses.map((b) => (
-              <button
-                key={b.id}
-                type="button"
-                disabled={busy}
-                onClick={() => void startOtp({ kind: "phone", phone: tabPhone, businessId: b.id })}
-                className="w-full rounded-lg border border-input px-3 py-2.5 text-sm font-semibold transition hover:bg-primary/10 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
-              >
-                {b.name}
-              </button>
-            ))}
-          </div>
         ) : (
           <form
             className="space-y-4"

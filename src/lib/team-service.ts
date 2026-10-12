@@ -10,6 +10,7 @@
  * through `createMembership` is what keeps that from happening again.
  */
 import bcrypt from "bcryptjs";
+import { randomUUID } from "crypto";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
 import { getPool, query, withoutTenantScope } from "./db";
@@ -32,16 +33,29 @@ import {
   invitationStatus,
   isPasswordRole,
   isPinRole,
+  isValidPin,
   resolveMemberLocationAssignment,
   type InvitationStatus,
   type MemberSummary,
 } from "./team";
 import {
-  issuePasswordResetToken,
+  issueDeliveredPasswordReset,
   revokeMembershipSessions,
   revokePlatformUserSessions,
   validatePasswordStrength,
 } from "./password-reset";
+import { pinBlindIndex } from "./otp-challenge";
+import { loginCredentialModelForRole } from "./roles";
+import {
+  isSensitiveAccessChange,
+  loadCustomRole,
+  membershipGrantRefusal,
+  projectGrantedPermissions,
+  resolveMembershipAuthority,
+  validateAccessChangeReason,
+} from "./membership-authority";
+import { lockMembership, lockPlatformIdentity } from "./membership-lock";
+import { maySelfServiceWrite } from "./credential-authority";
 
 export class TeamError extends Error {
   status: number;
@@ -191,6 +205,17 @@ async function auditMembership(
     targetUserId: string;
     before?: unknown;
     after?: unknown;
+    /**
+     * Issue #854 (P2.4) — the operator's justification, for changes that grant
+     * or revoke access. Null for the administrative edits that carry none.
+     */
+    reason?: string | null;
+    /** What changed about access, in the audit row's own words. */
+    accessChange?: {
+      role: { from: string; to: string | undefined } | null;
+      customRoleId: { from: string | null; to: string | null } | null;
+      permissionsChanged: boolean;
+    } | null;
   },
 ): Promise<void> {
   await client.query(
@@ -204,9 +229,28 @@ async function auditMembership(
       JSON.stringify({
         before: params.before ?? null,
         after: params.after ?? null,
+        ...(params.reason ? { reason: params.reason } : {}),
+        ...(params.accessChange ? { accessChange: params.accessChange } : {}),
       }),
     ],
   );
+}
+
+/**
+ * A stable string form of an override set, for "did this request actually change
+ * anything" comparisons (issue #854 P2.4).
+ *
+ * Sorted, because the same grants in a different order are the same grants and
+ * must not look like a change.
+ */
+function sortOverrides(overrides: PermissionOverrides): {
+  granted: string[];
+  revoked: string[];
+} {
+  return {
+    granted: [...(overrides.granted ?? [])].sort(),
+    revoked: [...(overrides.revoked ?? [])].sort(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +277,10 @@ export interface CreateMembershipInput {
   defaultLocationId?: string | null;
   locationScope?: "all" | "selected" | "home" | "none";
   overrides?: PermissionOverrides;
+  /** Issue #854 (P0.1) — the custom role the creation assigns, if any. */
+  customRoleId?: string | null;
+  /** Issue #854 (P2.4) — why this membership is being created with this access. */
+  reason?: string;
   actorId: string | null;
 }
 
@@ -270,9 +318,32 @@ export async function createMembership(
     throw new TeamError("member_limit_exceeded", 403);
   }
 
+  /**
+   * Issue #854 (P2.4) — creating a member *is* granting access, and the reason
+   * rule applies with the same logic the update path uses: a plain hire at a
+   * preset role needs no prose, while handing the new account a custom role or
+   * capability overrides is exactly the "who gave whom what, and why" the
+   * requirement exists to answer.
+   */
+  const createGrantsExtraAccess =
+    (input.customRoleId ?? null) !== null ||
+    (input.overrides !== undefined && sortOverrides(input.overrides).granted.length > 0);
+  let accessChangeReason: string | null = null;
+  if (createGrantsExtraAccess) {
+    const validated = validateAccessChangeReason(input.reason);
+    if (!validated.ok) throw new TeamError(validated.error, 400);
+    accessChangeReason = validated.reason;
+  }
+
+  // Issue #854 (GAP 7): the membership id is chosen up front so the shared
+  // advisory lock can be taken before any door state is read or written —
+  // creation participates in the same protocol as every other door change.
+  const newMembershipId = randomUUID();
+
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    await lockMembership(client, input.businessId, newMembershipId);
 
     let platformUserId: string | null = null;
     if (isPasswordRole(input.role) && email) {
@@ -312,9 +383,75 @@ export async function createMembership(
         await client.query("ROLLBACK");
         throw new TeamError("already_a_member", 409);
       }
+      /*
+       * Issue #854 (pass 4) — an offboarded membership keeps its email on the
+       * retained row (history is never deleted), so the per-business unique
+       * index would refuse the same address for a new hire with a raw
+       * Postgres error. Surface that as a sentence instead: the person who
+       * wore this address comes back through the rehire ceremony
+       * (`rehireMembership`), not through a second membership.
+       */
+      const { rows: emailTaken } = await client.query(
+        "SELECT 1 FROM users WHERE business_id = $1 AND email = $2",
+        [input.businessId, email],
+      );
+      if (emailTaken.length > 0) {
+        await client.query("ROLLBACK");
+        throw new TeamError("email_taken", 409);
+      }
+    }
+
+    /**
+     * Issue #854 (GAP 10) — the custom role's `default_location_scope` finally
+     * means something. Until now the column was stored, replicated and shown,
+     * but nothing read it at assignment time: a member created without an
+     * explicit branch policy got the legacy fallback regardless of the role
+     * they were wearing. The rule: when a creation names a custom role and no
+     * branch policy, the role's default governs — except when it cannot be
+     * honoured ("selected" with no branches, "home" with no home), which is a
+     * refusal rather than a silent widening to "all".
+     */
+    let customRoleDefaultScope: "all" | "selected" | "home" | "none" | null = null;
+    if (input.customRoleId) {
+      const { rows: roleRows } = await client.query<{
+        default_location_scope: "all" | "selected" | "home" | "none";
+      }>(
+        `SELECT default_location_scope
+           FROM tenant_roles
+          WHERE business_id = $1 AND id = $2 AND is_active`,
+        [input.businessId, input.customRoleId],
+      );
+      if (!roleRows[0]) {
+        await client.query("ROLLBACK");
+        throw new TeamError("custom_role_not_found", 404);
+      }
+      customRoleDefaultScope = roleRows[0].default_location_scope;
+    }
+    const namesBranchPolicy =
+      input.locationScope !== undefined ||
+      (input.locationIds?.length ?? 0) > 0 ||
+      Boolean(input.defaultLocationId);
+    let effectiveLocationScope = input.locationScope ?? null;
+    if (!namesBranchPolicy && customRoleDefaultScope && input.role !== "owner") {
+      if (customRoleDefaultScope === "selected") {
+        await client.query("ROLLBACK");
+        throw new TeamError("selected_locations_required", 400);
+      }
+      if (customRoleDefaultScope === "home") {
+        await client.query("ROLLBACK");
+        throw new TeamError("home_location_required", 400);
+      }
+      effectiveLocationScope = customRoleDefaultScope;
     }
 
     const pinHash = input.pin ? await bcrypt.hash(input.pin, BCRYPT_COST) : null;
+    /**
+     * Issue #854 (P2.13): the keyed blind index that backs the unique PIN
+     * constraint, written on the same statement as the credential itself.
+     * Without it a concurrent `isPinTaken` check and insert can both pass;
+     * with it the database refuses the second writer.
+     */
+    const pinIndex = input.pin ? await pinBlindIndex(input.businessId, input.pin) : null;
 
     // Branch ids come from a request body; nothing downstream re-checks they
     // belong to this business, so this is where a foreign id stops.
@@ -327,26 +464,31 @@ export async function createMembership(
 
     const { rows: created } = await client.query<{ id: string }>(
       `INSERT INTO users
-         (business_id, platform_user_id, role, full_name, email, pin_hash,
-          phone_e164, location_id, permissions, location_scope)
-       VALUES ($1, $2, $3, $4, $5, NULLIF($6::text, $6::text), $7, $8, $9,
+         (id, business_id, platform_user_id, role, full_name, email, pin_hash,
+          phone_e164, location_id, permissions, location_scope, custom_role_id)
+       VALUES ($13, $1, $2, $3, $4, $5, $6, $7, $8, $9,
                CASE WHEN $3::user_role = 'owner'::user_role THEN 'all'::location_scope
                     WHEN $11::text IS NOT NULL THEN $11::location_scope
                     WHEN cardinality($10::uuid[]) > 0 THEN 'selected'::location_scope
                     WHEN $8::uuid IS NOT NULL THEN 'home'::location_scope
-                    ELSE 'all'::location_scope END) RETURNING id`,
+                    ELSE 'all'::location_scope END,
+               $12) RETURNING id`,
       [
         input.businessId,
         platformUserId,
         input.role,
         fullName,
         email,
-        pinHash,
+        // The PIN hash is written to `employee_credentials` below; the legacy
+        // `users.pin_hash` column stays NULL so there is one source of truth.
+        null,
         input.phoneE164 ?? null,
         locations.defaultLocationId,
         JSON.stringify(input.overrides ?? {}),
         locations.locationIds,
-        input.locationScope ?? null,
+        effectiveLocationScope,
+        input.customRoleId ?? null,
+        newMembershipId,
       ],
     );
     const userId = created[0].id;
@@ -360,12 +502,28 @@ export async function createMembership(
          ON CONFLICT (id) DO NOTHING`,
         [userId, input.businessId],
       );
-      await client.query(
-        `INSERT INTO employee_credentials
-           (employee_id, business_id, credential_type, secret_hash)
-         VALUES ($1, $2, 'pin', $3)`,
-        [userId, input.businessId, pinHash],
-      );
+      /**
+       * Issue #854 (P2.13): the unique index on
+       * `(business_id, pin_blind_index)` is the real guarantee — `isPinTaken`
+       * above answers the friendly case, and this answers the racing one. The
+       * conflict must surface as the same `pin_taken` refusal every other PIN
+       * surface produces, or the caller sees a raw Postgres error name instead
+       * of a sentence about the PIN they just chose.
+       */
+      try {
+        await client.query(
+          `INSERT INTO employee_credentials
+             (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
+           VALUES ($1, $2, 'pin', $3, $4)`,
+          [userId, input.businessId, pinHash, pinIndex],
+        );
+      } catch (err) {
+        if ((err as { code?: string }).code === "23505") {
+          await client.query("ROLLBACK");
+          throw new TeamError("pin_taken", 409);
+        }
+        throw err;
+      }
     }
 
     if (locations.locationIds.length > 0) {
@@ -376,10 +534,26 @@ export async function createMembership(
     }
 
     await appendIamEvent(client, { businessId: input.businessId, type: "membership.created", entityId: userId,
+      /**
+       * Issue #854 — the payload must describe the row that was just written.
+       *
+       * `customRoleId` was hard-coded `null` here while the INSERT three dozen
+       * lines above stored `input.customRoleId ?? null`. The event is not
+       * decorative: `src/lib/iam/sync.ts` applies `membership.created` by
+       * inserting `users` with `member.customRoleId` as `custom_role_id`, so
+       * every membership replicated from the cloud to a Hybrid/Local site
+       * arrived wearing the plain role preset — the custom role decided on the
+       * cloud was silently narrowed on the site, and the two installs then
+       * disagreed about what that member could do. A replica that grants less
+       * than the cloud is a bug report; the reverse would be an incident.
+       */
       payload: { membership: { id: userId, businessId: input.businessId, cloudIdentityRef: platformUserId,
-        role: input.role, customRoleId: null, fullName, email, isActive: true, status: "active",
-        overrides: input.overrides ?? {}, locationScope: input.role === "owner" ? "all" : (input.locationScope ?? (locations.locationIds.length ? "selected" : locations.defaultLocationId ? "home" : "all")),
-        defaultLocationId: locations.defaultLocationId, locationIds: locations.locationIds, revision: 1 }, revision: 1 },
+        role: input.role, customRoleId: input.customRoleId ?? null, fullName, email, isActive: true, status: "active",
+        overrides: input.overrides ?? {}, locationScope: input.role === "owner" ? "all" : (effectiveLocationScope ?? (locations.locationIds.length ? "selected" : locations.defaultLocationId ? "home" : "all")),
+        defaultLocationId: locations.defaultLocationId, locationIds: locations.locationIds, revision: 1 }, revision: 1,
+        // Issue #854 (P2.4) — the reason travels with the event so a Hybrid or
+        // Local site applying this creation holds the same justification.
+        reason: accessChangeReason },
       actorUserId: input.actorId, origin: eventOrigin });
 
     await auditMembership(client, {
@@ -388,6 +562,12 @@ export async function createMembership(
       action: "team.member_created",
       targetUserId: userId,
       after: { role: input.role, fullName, email, isActive: true },
+      reason: accessChangeReason,
+      accessChange: {
+        role: { from: "", to: input.role },
+        customRoleId: { from: null, to: input.customRoleId ?? null },
+        permissionsChanged: input.overrides !== undefined,
+      },
     });
 
     await client.query("COMMIT");
@@ -468,6 +648,16 @@ export interface UpdateMembershipInput {
   locationIds?: string[];
   defaultLocationId?: string | null;
   locationScope?: "all" | "selected" | "home" | "none";
+  /**
+   * Issue #854 (P2.4) — why this access change is being made.
+   *
+   * Required (and validated here, not only in the route) whenever the write
+   * changes the role, the custom role or a permission override. Stored on the
+   * IAM event and the audit row together with the actor and the change, because
+   * the audit trail's job is to answer "who gave whom what, and why" — and
+   * "why" was the part no surface could answer.
+   */
+  reason?: string;
 }
 
 /**
@@ -509,6 +699,86 @@ async function resolveMemberLocations(
 }
 
 
+/**
+ * Issue #854 (P1.12) — a role transition must not strand the membership.
+ *
+ * Roles split into two credential models (`loginCredentialModelForRole`): a
+ * password role signs in with the global identity behind the tenant login
+ * screen, a PIN role signs in at the staff door. Moving a member between the two
+ * *changes which door exists for them*, and until this check the transition
+ * committed regardless — a cashier moved to manager kept `platform_user_id =
+ * null` and had no way in, and a manager moved to cashier had the login screen
+ * and no PIN.
+ *
+ * The rule is a refusal, not a repair: provisioning a password identity or a PIN
+ * on the administrator's behalf is a credential the member never chose, and the
+ * screens already offer both (invite/recover for a password identity, the
+ * credential reset for a PIN). So a transition that would leave an **active**
+ * membership without its door says which door is missing and stops. Suspended
+ * memberships move freely — nobody signs in with them — and reactivation is
+ * checked, because that is the moment the door is needed again.
+ *
+ * It runs on the caller's connection, inside the same transaction as the write:
+ * a credential revoked between the check and the commit cannot slip past, and a
+ * refused transition leaves nothing half-applied.
+ */
+async function assertRoleTransitionKeepsLoginPath(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    userId: string;
+    fromRole: Role;
+    toRole: Role;
+    /** Whether the membership was active *before* this write. */
+    priorActive: boolean;
+    willBeActive: boolean;
+  },
+): Promise<void> {
+  if (!input.willBeActive) return;
+  const from = loginCredentialModelForRole(input.fromRole);
+  const to = loginCredentialModelForRole(input.toRole);
+  /**
+   * Two ways to arrive at "active membership, credential model X, credential
+   * missing": changing into X, and reactivating a membership that is already X.
+   * The second one is why this is not simply `from !== to` — a suspended cashier
+   * whose PIN was stripped must not become an active cashier without one either.
+   */
+  const changesModel = from !== to;
+  const activates = input.priorActive === false;
+  if (!changesModel && !activates) return;
+
+  if (to === "password") {
+    const { rows } = await client.query<{
+      platform_user_id: string | null;
+      is_active: boolean | null;
+      password_hash: string | null;
+    }>(
+      `SELECT u.platform_user_id, p.is_active, p.password_hash
+         FROM users u
+         LEFT JOIN platform_users p ON p.id = u.platform_user_id
+        WHERE u.id = $1 AND u.business_id = $2`,
+      [input.userId, input.businessId],
+    );
+    const row = rows[0];
+    // No linked identity at all: the member has no username to sign in with.
+    if (!row?.platform_user_id) throw new TeamError("identity_required", 409);
+    if (row.is_active === false || row.is_active === null) {
+      throw new TeamError("identity_inactive", 409);
+    }
+    if (!row.password_hash) throw new TeamError("password_not_set", 409);
+    return;
+  }
+
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id FROM employee_credentials
+      WHERE employee_id = $1 AND business_id = $2
+        AND credential_type = 'pin' AND status = 'active'
+      LIMIT 1`,
+    [input.userId, input.businessId],
+  );
+  if (!rows[0]) throw new TeamError("pin_required", 409);
+}
+
 export async function updateMembership(
   input: UpdateMembershipInput,
 ): Promise<void> {
@@ -527,6 +797,8 @@ export async function updateMembership(
   const target = members.find((m) => m.id === input.userId);
   if (!target) throw new TeamError("not_found", 404);
 
+
+
   const lockout = checkLastOwner(members, input.userId, {
     role: input.role,
     isActive: input.isActive,
@@ -536,13 +808,17 @@ export async function updateMembership(
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Issue #854: every door-touching decision for this membership goes through
+    // one advisory lock, so the login-path assertion below and the credential
+    // writes it reads cannot interleave (see src/lib/membership-lock.ts).
+    await lockMembership(client, input.businessId, input.userId);
     if (input.customRoleId) {
       const role = await client.query(`SELECT 1 FROM tenant_roles WHERE business_id=$1 AND id=$2 AND is_active`, [input.businessId,input.customRoleId]);
       if (!role.rowCount) throw new TeamError("custom_role_not_found",404);
     }
 
     const { rows: beforeRows } = await client.query(
-      `SELECT role, full_name, email, is_active, permissions, location_id
+      `SELECT role, full_name, email, is_active, permissions, location_id, custom_role_id
          FROM users WHERE id = $1 AND business_id = $2`,
       [input.userId, input.businessId],
     );
@@ -550,6 +826,58 @@ export async function updateMembership(
     if (!before) {
       await client.query("ROLLBACK");
       throw new TeamError("not_found", 404);
+    }
+
+    /**
+     * Issue #854 (P2.4) — the reason rule, enforced on the write.
+     *
+     * Applied here rather than in the route for the same reason the escalation
+     * rule is: an invariant that only one route checks is an invariant the next
+     * route forgets. The service is the only place a membership changes, so this
+     * is the only place the requirement can be guaranteed.
+     *
+     * "Sensitive" means the write actually *changes* the role, the custom role
+     * or a permission override — not merely that the body mentions one. The
+     * comparison is against the row as the database holds it, read on this
+     * transaction's connection, so a form that re-submits an unchanged role
+     * while renaming somebody is an administrative edit and needs no prose;
+     * demanding a justification for those is how a required reason becomes
+     * ritual filler.
+     */
+    const changesRole = input.role !== undefined && input.role !== before.role;
+    const changesCustomRole =
+      input.customRoleId !== undefined &&
+      (input.customRoleId ?? null) !== ((before.custom_role_id as string | null) ?? null);
+    const changesPermissions =
+      input.overrides !== undefined &&
+      JSON.stringify(sortOverrides(input.overrides)) !==
+        JSON.stringify(sortOverrides(parseOverrides(before.permissions)));
+    let accessChangeReason: string | null = null;
+    if (isSensitiveAccessChange({ changesRole, changesCustomRole, changesPermissions })) {
+      const validated = validateAccessChangeReason(input.reason);
+      if (!validated.ok) {
+        await client.query("ROLLBACK");
+        throw new TeamError(validated.error, 400);
+      }
+      accessChangeReason = validated.reason;
+    }
+
+    /**
+     * Issue #854 (P1.12) — decide the credential lifecycle *before* committing
+     * the role, on this connection and inside this transaction. See the helper's
+     * comment for why this is a refusal rather than an automatic provisioning.
+     */
+    const nextRole = input.role ?? (before.role as Role);
+    const nextActive = input.isActive ?? before.is_active === true;
+    if (input.role !== undefined || input.isActive === true) {
+      await assertRoleTransitionKeepsLoginPath(client, {
+        businessId: input.businessId,
+        userId: input.userId,
+        fromRole: before.role as Role,
+        toRole: nextRole,
+        priorActive: before.is_active === true,
+        willBeActive: nextActive,
+      });
     }
 
     // Branch ids arrive from a request body: validate them here, on the same
@@ -644,7 +972,17 @@ export async function updateMembership(
       : input.isActive === false ? "membership.suspended"
       : input.isActive === true ? "membership.reactivated" : "membership.profile_updated";
     await appendIamEvent(client, { businessId: input.businessId, type: eventType, entityId: input.userId,
-      payload: { revision: Number((afterRows[0] as { membership_revision?: string })?.membership_revision ?? 1), changes: input },
+      payload: {
+        revision: Number((afterRows[0] as { membership_revision?: string })?.membership_revision ?? 1),
+        changes: input,
+        /**
+         * Issue #854 (P2.4) — the reason travels with the event, not only with
+         * the audit row. A Hybrid/Local site applies these events, and the
+         * person reviewing *that* install's access history needs the same
+         * sentence the cloud holds.
+         */
+        reason: accessChangeReason,
+      },
       actorUserId: input.actorId, origin: eventOrigin });
 
     await auditMembership(client, {
@@ -654,6 +992,18 @@ export async function updateMembership(
       targetUserId: input.userId,
       before,
       after: afterRows[0],
+      // Issue #854 (P2.4): actor + change + reason in one row.
+      reason: accessChangeReason,
+      accessChange: {
+        role: changesRole ? { from: before.role as string, to: input.role } : null,
+        customRoleId: changesCustomRole
+          ? {
+              from: (before.custom_role_id as string | null) ?? null,
+              to: input.customRoleId ?? null,
+            }
+          : null,
+        permissionsChanged: changesPermissions,
+      },
     });
 
     await client.query("COMMIT");
@@ -705,6 +1055,7 @@ export async function removeMembership(
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    await lockMembership(client, businessId, userId);
     const { rows: before } = await client.query(
       "SELECT role, full_name, email, is_active FROM users WHERE id = $1 AND business_id = $2",
       [userId, businessId],
@@ -768,6 +1119,431 @@ export async function removeMembership(
   }
 }
 
+export interface RehireMembershipInput {
+  businessId: string;
+  userId: string;
+  actorId: string | null;
+  /**
+   * The branch policy the rehire comes back to. Offboarding wiped the
+   * assignments (`location_scope='none'`, `user_locations` deleted), so the
+   * ceremony must name them again — or rely on the custom role's default
+   * scope, exactly like a creation does.
+   */
+  locationIds?: string[];
+  defaultLocationId?: string | null;
+  locationScope?: "all" | "selected" | "home" | "none";
+  /**
+   * An optional fresh PIN for a PIN-role member. Without one, the PIN that
+   * was active at offboarding is restored; when nothing can be restored the
+   * rehire is refused rather than leaving an active member without a door.
+   */
+  pin?: string;
+  /** Issue #854 (P2.4) — a rehire re-grants access, so it carries a reason. */
+  reason?: string;
+}
+
+/**
+ * Issue #854 (pass 4, gap 4) — the explicit rehire ceremony.
+ *
+ * Offboarding (`removeMembership`) is deliberately destructive: it severs the
+ * global-identity linkage (`platform_user_id = NULL`), revokes the staff
+ * credentials, wipes the branch assignments, and marks the membership
+ * `offboarded` — while keeping the row itself, because history (orders,
+ * payroll, audit) still points at it. The old Team screen then offered a bare
+ * «فعال‌سازی» for such a member, and `updateMembership(isActive: true)` would
+ * flip the row back to `active` with no identity, no credential and no branch
+ * — an active member with no door, or worse, the appearance of restored
+ * access that the login path then refuses.
+ *
+ * Rehire is therefore its own transition, the mirror image of offboarding, in
+ * one advisory-locked transaction:
+ *
+ *  - only an `offboarded` membership can be rehired (suspended and inactive
+ *    members reactivate through the ordinary path, which already asserts the
+ *    login door);
+ *  - the anti-escalation decision runs against the *stored* role, custom role
+ *    and overrides — rehire re-grants the whole set from an empty state, so a
+ *    delegated manager cannot rehire somebody into capabilities the manager
+ *    does not hold, and only an owner brings an owner back. Because the
+ *    relink targets only the identity matching the membership's own retained
+ *    email, the ceremony can never hand an admin somebody else's identity;
+ *  - a password-role member is relinked to the global identity found by that
+ *    retained email (the identity's password and every MFA factor live on
+ *    `platform_users`/its enrolments and were never deleted, so they return
+ *    with the linkage — no MFA bypass is created and none is needed);
+ *  - a PIN-role member gets the PIN restored that was active at offboarding,
+ *    or a fresh one when the request names it; nothing restorable and nothing
+ *    offered is a refusal (`pin_required`), never a doorless activation;
+ *  - the branch policy is resolved exactly like a creation's, including the
+ *    custom role's `default_location_scope`;
+ *  - `assertRoleTransitionKeepsLoginPath` re-checks the finished row, so a
+ *    racing revoker cannot strand the member between check and commit.
+ *
+ * Nothing is deleted anywhere in this path — the membership row, its history
+ * and the audit trail only ever grow.
+ */
+export async function rehireMembership(input: RehireMembershipInput): Promise<void> {
+  const profile = (await readDeploymentProfile(input.businessId)).profile;
+  if (profile === "hybrid") {
+    // Rehire expands access; a Hybrid site may only restrict (the cloud owns
+    // the decision and the replica applies the event, as with every grant).
+    throw new TeamError("cloud_confirmation_required", 409);
+  }
+  const eventOrigin = profile === "local" ? "local" : "cloud";
+
+  const members = await memberSummaries(input.businessId);
+  if (!members.some((m) => m.id === input.userId)) throw new TeamError("not_found", 404);
+
+  // Rehire always re-grants the stored role/overrides, so the reason rule
+  // applies unconditionally — validated here, where the decision is made.
+  const validated = validateAccessChangeReason(input.reason);
+  if (!validated.ok) throw new TeamError(validated.error, 400);
+  const reason = validated.reason;
+
+  // A rehire counts the seat again; the same ceiling a hire respects applies.
+  const ceiling = await resolveLimitCeiling(input.businessId, "member_limit");
+  if (ceiling.limit !== null && (await activeMemberCount(input.businessId)) >= ceiling.limit) {
+    throw new TeamError("member_limit_exceeded", 403);
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await lockMembership(client, input.businessId, input.userId);
+
+    const { rows: beforeRows } = await client.query<{
+      role: Role;
+      custom_role_id: string | null;
+      full_name: string;
+      email: string | null;
+      is_active: boolean;
+      membership_status: string;
+      permissions: unknown;
+      location_id: string | null;
+    }>(
+      `SELECT role, custom_role_id, full_name, email, is_active, membership_status, permissions, location_id
+         FROM users WHERE id = $1 AND business_id = $2`,
+      [input.userId, input.businessId],
+    );
+    const before = beforeRows[0];
+    if (!before) {
+      await client.query("ROLLBACK");
+      throw new TeamError("not_found", 404);
+    }
+    if (before.membership_status !== "offboarded") {
+      // Suspended/inactive memberships reactivate through updateMembership —
+      // that path keeps their credentials and asserts the door on the way in.
+      await client.query("ROLLBACK");
+      throw new TeamError("not_offboarded", 409);
+    }
+
+    /**
+     * The anti-escalation decision. Rehire restores the membership from an
+     * exercisable-empty state, so `currentPermissions` is empty and every
+     * restored capability counts as an addition the actor must hold — the
+     * same shape the creation path is checked with. An offboarded actor can
+     * never reach this: `resolveMembershipAuthority` only answers for active
+     * members, so a self-rehire is a plain refusal.
+     */
+    const actor = input.actorId
+      ? await resolveMembershipAuthority(input.businessId, input.actorId)
+      : null;
+    if (!actor) {
+      await client.query("ROLLBACK");
+      throw new TeamError("forbidden", 403);
+    }
+    const customRole = before.custom_role_id
+      ? await loadCustomRole(input.businessId, before.custom_role_id)
+      : null;
+    if (before.custom_role_id && !customRole) {
+      // The stored custom role was archived while the member was away. Silent
+      // rehire on the bare preset would smuggle a demotion in; refuse instead
+      // so an owner reassigns the role deliberately.
+      await client.query("ROLLBACK");
+      throw new TeamError("custom_role_not_found", 404);
+    }
+    const refusal = membershipGrantRefusal({
+      actor,
+      nextRole: before.role,
+      currentPermissions: new Set(),
+      nextPermissions: projectGrantedPermissions({
+        role: before.role,
+        overrides: parseOverrides(before.permissions),
+        customRolePermissions: customRole?.permissions ?? null,
+      }),
+      customRole,
+      isSelf: input.actorId === input.userId,
+      isCreation: false,
+      roleChanges: false,
+      changesAccess: true,
+    });
+    if (refusal) {
+      await client.query("ROLLBACK");
+      throw new TeamError(refusal, 403);
+    }
+
+    /**
+     * The branch policy, resolved exactly like a creation's: explicit request
+     * first, the custom role's default scope next, and an unhonourable
+     * default is a refusal rather than a silent widening to «all».
+     */
+    const namesBranchPolicy =
+      input.locationScope !== undefined ||
+      (input.locationIds?.length ?? 0) > 0 ||
+      Boolean(input.defaultLocationId);
+    let effectiveLocationScope = input.locationScope ?? null;
+    const defaultScope = customRole?.defaultLocationScope ?? null;
+    if (!namesBranchPolicy && defaultScope && before.role !== "owner") {
+      if (defaultScope === "selected") {
+        await client.query("ROLLBACK");
+        throw new TeamError("selected_locations_required", 400);
+      }
+      if (defaultScope === "home") {
+        await client.query("ROLLBACK");
+        throw new TeamError("home_location_required", 400);
+      }
+      effectiveLocationScope = defaultScope;
+    }
+    const locations = await resolveMemberLocations(
+      client,
+      input.businessId,
+      input.locationIds,
+      input.defaultLocationId,
+    );
+
+    /**
+     * Relink the global identity. The membership's email survived offboarding
+     * (the row is never deleted, and per-business email uniqueness means no
+     * other membership could have taken it), so the identity it points at is
+     * the member's own — an admin cannot aim the relink anywhere else. The
+     * lookup spans tenants by nature, exactly like the creation path's.
+     */
+    let platformUserId: string | null = null;
+    if (loginCredentialModelForRole(before.role) === "password") {
+      if (!before.email) {
+        await client.query("ROLLBACK");
+        throw new TeamError("identity_required", 409);
+      }
+      await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
+      const { rows: identityRows } = await client.query<{ id: string }>(
+        "SELECT id FROM platform_users WHERE email = $1",
+        [before.email],
+      );
+      await client.query("SELECT set_config('app.rls_bypass', '', true)");
+      await client.query("SELECT set_config('app.business_id', $1, true)", [input.businessId]);
+      if (!identityRows[0]) {
+        // The global identity is gone (retired on the platform); a password
+        // role cannot come back without it.
+        await client.query("ROLLBACK");
+        throw new TeamError("identity_not_found", 409);
+      }
+      platformUserId = identityRows[0].id;
+      // Membership lock first, identity lock second — the protocol's only order.
+      await lockPlatformIdentity(client, platformUserId);
+      const { rows: dup } = await client.query(
+        "SELECT 1 FROM users WHERE business_id = $1 AND platform_user_id = $2 AND id <> $3",
+        [input.businessId, platformUserId, input.userId],
+      );
+      if (dup.length > 0) {
+        await client.query("ROLLBACK");
+        throw new TeamError("already_a_member", 409);
+      }
+    }
+
+    /**
+     * The PIN half. With a fresh PIN named, the rehire provisions it the way
+     * a creation does (shape check, uniqueness, blind index). Otherwise the
+     * credential active at offboarding is restored — offboarding revoked it,
+     * it was never deleted, and reviving it is a single row flip under the
+     * same lock. Nothing to restore and nothing offered: refuse, because an
+     * active PIN-role member without a PIN is the state P1.12 forbids.
+     */
+    if (isPinRole(before.role)) {
+      if (input.pin !== undefined && input.pin !== null && String(input.pin).length > 0) {
+        const pin = String(input.pin);
+        if (!isValidPin(pin)) {
+          await client.query("ROLLBACK");
+          throw new TeamError("invalid_pin", 400);
+        }
+        if (await isPinTaken(input.businessId, pin, input.userId)) {
+          await client.query("ROLLBACK");
+          throw new TeamError("pin_taken", 409);
+        }
+        const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
+        const pinIndex = await pinBlindIndex(input.businessId, pin);
+        await client.query(
+          `INSERT INTO employees (id, business_id) VALUES ($1, $2)
+           ON CONFLICT (id) DO NOTHING`,
+          [input.userId, input.businessId],
+        );
+        try {
+          await client.query(
+            `INSERT INTO employee_credentials
+               (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
+             VALUES ($1, $2, 'pin', $3, $4)`,
+            [input.userId, input.businessId, pinHash, pinIndex],
+          );
+        } catch (err) {
+          if ((err as { code?: string }).code === "23505") {
+            await client.query("ROLLBACK");
+            throw new TeamError("pin_taken", 409);
+          }
+          throw err;
+        }
+      } else {
+        const { rows: restorable } = await client.query<{ id: string }>(
+          `SELECT id FROM employee_credentials
+            WHERE employee_id = $1 AND business_id = $2
+              AND credential_type = 'pin' AND status = 'revoked'
+            ORDER BY revoked_at DESC NULLS LAST, created_at DESC
+            LIMIT 1 FOR UPDATE`,
+          [input.userId, input.businessId],
+        );
+        if (!restorable[0]) {
+          await client.query("ROLLBACK");
+          throw new TeamError("pin_required", 409);
+        }
+        try {
+          await client.query(
+            `UPDATE employee_credentials
+                SET status = 'active', revoked_at = NULL
+              WHERE id = $1 AND business_id = $2`,
+            [restorable[0].id, input.businessId],
+          );
+        } catch (err) {
+          // The blind index is unique among *active* PINs business-wide: if
+          // somebody else now holds that PIN, the restore collides — surface
+          // the same refusal a fresh PIN would, so the caller can name one.
+          if ((err as { code?: string }).code === "23505") {
+            await client.query("ROLLBACK");
+            throw new TeamError("pin_taken", 409);
+          }
+          throw err;
+        }
+      }
+    }
+
+    const { rows: after } = await client.query<{ membership_revision: string }>(
+      `UPDATE users
+          SET is_active = true,
+              membership_status = 'active',
+              platform_user_id = CASE WHEN $3::boolean THEN $4::uuid ELSE platform_user_id END,
+              location_scope = CASE
+                WHEN role = 'owner'::user_role THEN 'all'::location_scope
+                WHEN $5::text IS NOT NULL THEN $5::location_scope
+                WHEN cardinality($6::uuid[]) > 0 THEN 'selected'::location_scope
+                WHEN $7::uuid IS NOT NULL THEN 'home'::location_scope
+                ELSE 'all'::location_scope END,
+              location_id = $7,
+              membership_revision = membership_revision + 1,
+              updated_at = now()
+        WHERE id = $1 AND business_id = $2 RETURNING membership_revision`,
+      [
+        input.userId,
+        input.businessId,
+        platformUserId !== null,
+        platformUserId,
+        effectiveLocationScope,
+        locations.locationIds,
+        locations.defaultLocationId,
+      ],
+    );
+    const revision = Number(after[0]?.membership_revision ?? 1);
+
+    await client.query("DELETE FROM user_locations WHERE user_id = $1", [input.userId]);
+    if (locations.locationIds.length > 0) {
+      await client.query(
+        "INSERT INTO user_locations (user_id, location_id) SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+        [input.userId, locations.locationIds],
+      );
+    }
+
+    // The finished row must hold the door the role needs — re-checked last,
+    // on this connection, inside this transaction, under the membership lock.
+    await assertRoleTransitionKeepsLoginPath(client, {
+      businessId: input.businessId,
+      userId: input.userId,
+      fromRole: before.role,
+      toRole: before.role,
+      priorActive: false,
+      willBeActive: true,
+    });
+
+    await appendIamEvent(client, {
+      businessId: input.businessId,
+      type: "membership.rehired",
+      entityId: input.userId,
+      payload: {
+        membership: {
+          id: input.userId,
+          businessId: input.businessId,
+          cloudIdentityRef: platformUserId,
+          role: before.role,
+          customRoleId: before.custom_role_id,
+          fullName: before.full_name,
+          email: before.email,
+          isActive: true,
+          status: "active",
+          overrides: parseOverrides(before.permissions),
+          locationScope:
+            before.role === "owner"
+              ? "all"
+              : effectiveLocationScope ??
+                (locations.locationIds.length
+                  ? "selected"
+                  : locations.defaultLocationId
+                    ? "home"
+                    : "all"),
+          defaultLocationId: locations.defaultLocationId,
+          locationIds: locations.locationIds,
+          revision,
+        },
+        revision,
+        reason,
+      },
+      actorUserId: input.actorId,
+      origin: eventOrigin,
+    });
+
+    await auditMembership(client, {
+      businessId: input.businessId,
+      actorId: input.actorId,
+      action: "team.member_rehired",
+      targetUserId: input.userId,
+      before: {
+        membershipStatus: "offboarded",
+        isActive: false,
+        role: before.role,
+        platformLinked: false,
+      },
+      after: {
+        membershipStatus: "active",
+        isActive: true,
+        role: before.role,
+        platformLinked: platformUserId !== null,
+        locationScope:
+          before.role === "owner"
+            ? "all"
+            : effectiveLocationScope ??
+              (locations.locationIds.length
+                ? "selected"
+                : locations.defaultLocationId
+                  ? "home"
+                  : "all"),
+      },
+      reason,
+      accessChange: { role: null, customRoleId: null, permissionsChanged: false },
+    });
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Credentials
 // ---------------------------------------------------------------------------
@@ -778,21 +1554,48 @@ export async function setPin(
   userId: string,
   pin: string,
   actorId: string | null,
+  /**
+   * Issue #854 (P1.7): the proof the caller offered when rotating a PIN they
+   * already own. An *administrator* reset does not need it (that is the point
+   * of an admin reset — a member who forgot their PIN has no proof to give),
+   * but a self-service rotation must show the current PIN, so holding an
+   * unlocked terminal is not enough to take the credential over. `null` means
+   * "this caller is not rotating their own PIN"; `undefined` means "self-service
+   * without proof", which is refused before any write.
+   */
+  options: { selfService?: boolean; currentPinVerified?: boolean } = {},
 ): Promise<void> {
   const profile = (await readDeploymentProfile(businessId)).profile;
   const eventOrigin = profile === "cloud" ? "cloud" : "local";
-  if (await isPinTaken(businessId, pin, userId))
-    throw new TeamError("pin_taken", 409);
+
+  /**
+   * Issue #854 (P1.14): a Hybrid site may apply and remove *replicated* PIN
+   * state, but a PIN it originates is a credential the cloud never sees. The
+   * shared authority table is the one place that decides this.
+   */
+  if (options.selfService && !maySelfServiceWrite(profile, "staff_pin")) {
+    throw new TeamError("login_managed_by_cloud", 409);
+  }
+  if (options.selfService && options.currentPinVerified !== true) {
+    throw new TeamError("current_pin_required", 403);
+  }
+
+  if (await isPinTaken(businessId, pin, userId)) throw new TeamError("pin_taken", 409);
+
+  const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
+  const blindIndex = await pinBlindIndex(businessId, pin);
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Same protocol as the role-transition check: a PIN write and a door
+    // decision for this membership must not run at the same time.
+    await lockMembership(client, businessId, userId);
     const member = await client.query(
       "SELECT 1 FROM users WHERE id = $1 AND business_id = $2 FOR UPDATE",
       [userId, businessId],
     );
     if (!member.rowCount) throw new TeamError("not_found", 404);
-    const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
     await client.query(
       `INSERT INTO employees (id, business_id) VALUES ($1, $2)
        ON CONFLICT (id) DO NOTHING`,
@@ -800,17 +1603,32 @@ export async function setPin(
     );
     await client.query(
       `UPDATE employee_credentials
-          SET status = 'revoked', revoked_at = now()
+          SET status = 'revoked', revoked_at = now(), pin_blind_index = NULL
         WHERE employee_id = $1 AND business_id = $2
           AND credential_type = 'pin' AND status = 'active'`,
       [userId, businessId],
     );
-    await client.query(
-      `INSERT INTO employee_credentials
-         (employee_id, business_id, credential_type, secret_hash)
-       VALUES ($1, $2, 'pin', $3)`,
-      [userId, businessId, pinHash],
-    );
+    /**
+     * The unique index on `(business_id, pin_blind_index)` is the real
+     * guarantee (issue #854 P2.13): `isPinTaken` above answers the friendly
+     * case, and this answers the racing one. A conflict is translated to the
+     * same `pin_taken` refusal the pre-check produces, so the caller sees one
+     * answer whichever path caught it.
+     */
+    try {
+      await client.query(
+        `INSERT INTO employee_credentials
+           (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
+         VALUES ($1, $2, 'pin', $3, $4)`,
+        [userId, businessId, pinHash, blindIndex],
+      );
+    } catch (err) {
+      if ((err as { code?: string }).code === "23505") {
+        await client.query("ROLLBACK");
+        throw new TeamError("pin_taken", 409);
+      }
+      throw err;
+    }
     // Once a canonical PIN exists, erase any compatibility copy.
     await client.query(
       "UPDATE users SET pin_hash = NULL, updated_at = now() WHERE id = $1 AND business_id = $2",
@@ -823,7 +1641,7 @@ export async function setPin(
     await auditMembership(client, {
       businessId,
       actorId,
-      action: "team.pin_changed",
+      action: options.selfService ? "team.self_pin_changed" : "team.pin_changed",
       targetUserId: userId,
     });
     await client.query("COMMIT");
@@ -884,6 +1702,21 @@ export async function setMemberPhone(
     throw err;
   } finally {
     client.release();
+  }
+
+  /*
+   * Issue #854 (pass 4, gap 5) — the membership is the canonical owner of the
+   * login phone, and the linked personnel file follows it: without this the
+   * team screen's phone edit and the personnel tab would disagree about the
+   * very field they promise to share. Best-effort like every party sync — the
+   * phone change above is already committed and is never the casualty of a
+   * display-file hiccup; the file catches up on the next membership edit.
+   */
+  try {
+    const { ensureEmployeeParty } = await import("./parties-service");
+    await ensureEmployeeParty(businessId, userId, { phone: phoneE164 });
+  } catch {
+    /* no party row yet, or a display-file failure — see the comment above */
   }
 }
 
@@ -962,12 +1795,21 @@ export async function requestMemberPasswordReset(
   businessId: string,
   userId: string,
   actorId: string | null,
-): Promise<{ token: string; expiresAt: string; email: string }> {
+  options: { origin: string },
+): Promise<{
+  /** Where the recovery credential was sent. Masked — never the number itself. */
+  deliveredTo: string;
+  channel: "sms";
+  expiresAt: string;
+  email: string;
+}> {
   const { rows } = await query<{
     platform_user_id: string | null;
     email: string | null;
+    phone_e164: string | null;
+    phone_verified_at: Date | null;
   }>(
-    `SELECT platform_user_id, email::text AS email
+    `SELECT platform_user_id, email::text AS email, phone_e164, phone_verified_at
        FROM users
       WHERE id = $1 AND business_id = $2`,
     [userId, businessId],
@@ -988,12 +1830,52 @@ export async function requestMemberPasswordReset(
   }
   if (!email) throw new TeamError("no_login", 409);
 
-  const issued = await issuePasswordResetToken({
+  /**
+   * Issue #854 (P0.3) — the delivery channel.
+   *
+   * The reset token is a credential that changes the shared
+   * `platform_users` password, so it may only travel to the **account holder**.
+   * There is no mail transport in this system, which leaves the one channel the
+   * holder and nobody else reads: a **verified** phone number. The verified
+   * number may live on any of their memberships (they might be a cashier here
+   * and the accountant there), so the search spans the identity — but a number
+   * that has merely been *typed by an administrator* does not count, because
+   * possession of it was never proven.
+   *
+   * When there is no verified number anywhere, the recovery is refused. The
+   * tempting fallback — return the link to the administrator who asked — is
+   * exactly the takeover this finding describes, so it is not available.
+   */
+  const verifiedPhone =
+    member.phone_e164 && member.phone_verified_at ? member.phone_e164 : null;
+  const phoneFromOtherMembership = verifiedPhone
+    ? null
+    : await withoutTenantScope("identity", async () => {
+        const { rows: phones } = await query<{ phone_e164: string }>(
+          `SELECT u.phone_e164
+             FROM users u
+            WHERE u.platform_user_id = $1
+              AND u.phone_e164 IS NOT NULL
+              AND u.phone_verified_at IS NOT NULL
+              AND u.is_active = true
+            ORDER BY (u.business_id = $2) DESC, u.phone_verified_at DESC
+            LIMIT 1`,
+          [member.platform_user_id, businessId],
+        );
+        return phones[0]?.phone_e164 ?? null;
+      });
+
+  const deliveryPhone = verifiedPhone ?? phoneFromOtherMembership;
+  if (!deliveryPhone) throw new TeamError("no_verified_channel", 409);
+
+  const delivered = await issueDeliveredPasswordReset({
     subjectRealm: "platform_user",
     subjectId: member.platform_user_id,
     email,
     membershipId: userId,
     createdById: actorId,
+    phoneE164: deliveryPhone,
+    origin: options.origin,
   });
 
   await auditMembership(getPool(), {
@@ -1001,12 +1883,19 @@ export async function requestMemberPasswordReset(
     actorId,
     action: "team.password_reset_requested",
     targetUserId: userId,
-    after: { email, expiresAt: issued.expiresAt.toISOString() },
+    // The delivery target is masked and the token is absent, by construction.
+    after: {
+      email,
+      channel: "sms",
+      deliveredTo: delivered.maskedPhone,
+      expiresAt: delivered.expiresAt.toISOString(),
+    },
   });
 
   return {
-    token: issued.token,
-    expiresAt: issued.expiresAt.toISOString(),
+    deliveredTo: delivered.maskedPhone,
+    channel: "sms",
+    expiresAt: delivered.expiresAt.toISOString(),
     email,
   };
 }
@@ -1068,6 +1957,15 @@ export interface InvitationSummary {
   status: InvitationStatus;
   expiresAt: string;
   createdAt: string;
+  /**
+   * Issue #854 (P2.11/P2.12) — what the invitation will actually grant. Null
+   * scope/inactive role means the pre-0211 reading (the membership's own
+   * defaults), which is why the UI renders them only when present.
+   */
+  locationScope?: "all" | "selected" | "home" | "none" | null;
+  defaultLocationId?: string | null;
+  customRoleId?: string | null;
+  customRoleName?: string | null;
 }
 
 export async function listInvitations(
@@ -1082,9 +1980,25 @@ export async function listInvitations(
     accepted_at: Date | null;
     revoked_at: Date | null;
     created_at: Date;
+    location_scope: InvitationSummary["locationScope"];
+    default_location_id: string | null;
+    custom_role_id: string | null;
+    custom_role_name: string | null;
   }>(
-    `SELECT id, email::text AS email, role, full_name, expires_at, accepted_at, revoked_at, created_at
-       FROM invitations WHERE business_id = $1 ORDER BY created_at DESC`,
+    /**
+     * Issue #854 (P2.11/P2.12): the invitation carries a branch policy and a
+     * custom role now, and a list that hides them invites the reader to assume
+     * the invitee will land with the defaults. The join is `LEFT` because both
+     * columns are nullable — a plain invite has neither.
+     */
+    `SELECT i.id, i.email::text AS email, i.role, i.full_name, i.expires_at,
+            i.accepted_at, i.revoked_at, i.created_at,
+            i.location_scope, i.default_location_id, i.custom_role_id,
+            r.name AS custom_role_name
+       FROM invitations i
+       LEFT JOIN tenant_roles r ON r.id = i.custom_role_id
+      WHERE i.business_id = $1
+      ORDER BY i.created_at DESC`,
     [businessId],
   );
 
@@ -1100,6 +2014,10 @@ export async function listInvitations(
     }),
     expiresAt: r.expires_at.toISOString(),
     createdAt: r.created_at.toISOString(),
+    locationScope: r.location_scope,
+    defaultLocationId: r.default_location_id,
+    customRoleId: r.custom_role_id,
+    customRoleName: r.custom_role_name,
   }));
 }
 
@@ -1110,6 +2028,18 @@ export interface CreateInvitationInput {
   fullName: string;
   overrides?: PermissionOverrides;
   locationIds?: string[];
+  /** Explicit branch policy (#854 P2.11) — see `resolveMemberLocations`. */
+  locationScope?: "all" | "selected" | "home" | "none" | null;
+  defaultLocationId?: string | null;
+  /** Issue #854 (P0.2) — the custom role the eventual membership will wear. */
+  customRoleId?: string | null;
+  /**
+   * Issue #854 (P2.4) — why the eventual membership gets this access. Required
+   * when the invitation grants extra access (custom role or granted overrides);
+   * validated here and stored, so the acceptance audit carries the original
+   * justification instead of inventing one at the door.
+   */
+  reason?: string;
   actorId: string | null;
 }
 
@@ -1128,17 +2058,88 @@ export async function createInvitation(
   if (!email || !fullName) throw new TeamError("missing_fields");
   if (!isPasswordRole(input.role)) throw new TeamError("role_not_invitable");
 
+  /**
+   * Issue #854 (P1.13): direct member creation already refused to originate a
+   * membership on a Hybrid site (`cloud_confirmation_required`); invitations
+   * did not, so the same membership could be conjured through the other door.
+   * "This site must not locally create memberships the cloud does not own" is a
+   * property of *creating a membership*, not of one route.
+   */
+  const profile = (await readDeploymentProfile(input.businessId)).profile;
+  if (profile === "hybrid") throw new TeamError("cloud_confirmation_required", 409);
+
   const { rows: existingMember } = await query(
     `SELECT 1 FROM users WHERE business_id = $1 AND email = $2 AND is_active`,
     [input.businessId, email],
   );
   if (existingMember.length > 0) throw new TeamError("already_a_member", 409);
 
-  const { token, tokenHash } = generateInvitationToken();
+  /**
+   * Issue #854 (P2.4) — an invitation that names a custom role or grants
+   * capability overrides is a sensitive access decision made *now*, even though
+   * the membership materialises at acceptance. The same rule direct creation
+   * applies is applied here, and the validated reason is stored on the row so
+   * the acceptance audit answers "who gave them this, and why".
+   */
+  const inviteGrantsExtraAccess =
+    (input.customRoleId ?? null) !== null ||
+    (input.overrides !== undefined && sortOverrides(input.overrides).granted.length > 0);
+  let invitationReason: string | null = null;
+  if (inviteGrantsExtraAccess) {
+    const validated = validateAccessChangeReason(input.reason);
+    if (!validated.ok) throw new TeamError(validated.error, 400);
+    invitationReason = validated.reason;
+  }
 
+  /**
+   * Issue #854 (P0.5): branch ids arrive from a request body and used to be
+   * stored unvalidated, then applied under the privileged acceptance path.
+   * A crafted invitation could therefore carry another tenant's location uuid.
+   * The same rule normal member create/edit already applies is applied here —
+   * on the same connection, before the row exists — and `acceptInvitation`
+   * validates again on the way out (defence in depth).
+   */
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    const locations = await resolveMemberLocations(
+      client,
+      input.businessId,
+      input.locationIds,
+      input.defaultLocationId ?? input.locationIds?.[0] ?? null,
+    );
+
+    // P2.10: a scope that claims "selected" with nothing selected, or "home"
+    // with no branch, is an unusable membership. Refused here rather than
+    // discovered at the invitee's first login.
+    let scope = input.locationScope ?? null;
+    /**
+     * Issue #854 (GAP 10) — the same inheritance direct creation applies: an
+     * invitation that names a custom role but no branch policy stores the
+     * role's `default_location_scope`, so the member arriving through the link
+     * wears the branch policy that was decided with the role. The unusable
+     * combinations refuse here instead of widening to "all" at acceptance.
+     */
+    if (scope === null && input.customRoleId && input.role !== "owner") {
+      const snapshot = await loadCustomRole(input.businessId, input.customRoleId);
+      if (!snapshot) throw new TeamError("custom_role_not_found", 404);
+      if (snapshot.defaultLocationScope === "selected") {
+        throw new TeamError("selected_locations_required", 400);
+      }
+      if (snapshot.defaultLocationScope === "home") {
+        throw new TeamError("home_location_required", 400);
+      }
+      scope = snapshot.defaultLocationScope;
+    }
+    if (scope === "selected" && locations.locationIds.length === 0) {
+      throw new TeamError("selected_locations_required", 400);
+    }
+    if (scope === "home" && !locations.defaultLocationId) {
+      throw new TeamError("home_location_required", 400);
+    }
+
+    const { token, tokenHash } = generateInvitationToken();
+
     await client.query(
       `UPDATE invitations SET revoked_at = now()
         WHERE business_id = $1 AND email = $2 AND accepted_at IS NULL AND revoked_at IS NULL`,
@@ -1148,18 +2149,22 @@ export async function createInvitation(
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO invitations
          (business_id, email, role, full_name, permissions, location_ids, token_hash,
-          expires_at, invited_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+          expires_at, invited_by, location_scope, default_location_id, custom_role_id, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
       [
         input.businessId,
         email,
         input.role,
         fullName,
         JSON.stringify(input.overrides ?? {}),
-        input.locationIds ?? [],
+        locations.locationIds,
         tokenHash,
         invitationExpiry(),
         input.actorId,
+        scope,
+        locations.defaultLocationId,
+        input.customRoleId ?? null,
+        invitationReason,
       ],
     );
 
@@ -1170,7 +2175,15 @@ export async function createInvitation(
         input.businessId,
         input.actorId,
         rows[0].id,
-        JSON.stringify({ email, role: input.role }),
+        // The authority context is recorded with the invitation, so a later
+        // review can answer "who handed this out and with what standing".
+        JSON.stringify({
+          email,
+          role: input.role,
+          locationIds: locations.locationIds,
+          locationScope: scope,
+          overrides: input.overrides ?? {},
+        }),
       ],
     );
 
@@ -1270,20 +2283,74 @@ export interface AcceptInvitationResult {
   role: Role;
   fullName: string;
   locationId: string | null;
+  /** The branch policy the membership was created under (#854 P2.11). */
+  locationScope: "all" | "selected" | "home" | "none";
+}
+
+export interface AcceptInvitationResult {
+  businessId: string;
+  businessSlug: string;
+  businessSubdomain: string;
+  userId: string;
+  platformUserId: string;
+  role: Role;
+  fullName: string;
+  locationId: string | null;
+  /** The branch policy the membership was created under (#854 P2.11). */
+  locationScope: "all" | "selected" | "home" | "none";
 }
 
 /**
- * Accepts an invitation, creating the membership (and the identity if this is
- * the person's first business).
+ * What `beginInvitationAcceptance` proved, before any membership exists.
  *
- * The whole thing is one transaction against a row locked with FOR UPDATE, so
- * two people racing the same link produce one membership and one failure
- * rather than two memberships.
+ * Issue #854 (P0.4) — the ceremony an invitation link has to satisfy is
+ *
+ *     invitation token
+ *       → identify intended account/business
+ *       → primary authentication
+ *       → required MFA
+ *       → accept membership
+ *       → tenant session
+ *
+ * and the middle two steps are why this type exists. The previous shape created
+ * the membership first and evaluated MFA afterwards, which meant a member who
+ * abandoned the second factor kept a membership nobody had finished accepting —
+ * and, on a brand-new address, an account whose only credential was a password
+ * typed into a form that was never completed. So validation and primary
+ * authentication now commit on their own (`beginInvitationAcceptance`) and the
+ * membership is written only once every factor has been proven
+ * (`completeInvitationAcceptance`).
+ *
+ * The invitation row is *re-locked and re-checked* in the second phase rather
+ * than trusted from the first: the MFA ceremony takes as long as it takes, and a
+ * link revoked in the meantime must not still land.
  */
-export async function acceptInvitation(
+export interface StagedInvitationAcceptance {
+  invitationId: string;
+  businessId: string;
+  businessSlug: string;
+  businessSubdomain: string;
+  email: string;
+  role: Role;
+  fullName: string;
+  platformUserId: string;
+  /** False when the identity was created by this call (a first-time invitee). */
+  identityExisted: boolean;
+}
+
+/**
+ * Phase 1 — validate the invitation and prove the primary factor.
+ *
+ * Runs in its own transaction and commits: the invitation stays `pending` (it is
+ * only marked accepted in phase 2), and for a first-time invitee the identity is
+ * created here because it is the *subject* of the second factor — MFA enrolments
+ * hang off `platform_users`, so an account that cannot exist yet cannot be
+ * protected. What must not exist yet is the membership.
+ */
+export async function beginInvitationAcceptance(
   token: string,
   password: string | null,
-): Promise<AcceptInvitationResult> {
+): Promise<StagedInvitationAcceptance> {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -1291,34 +2358,96 @@ export async function acceptInvitation(
     // member of the business that invited them.
     await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
 
-    const { rows } = await client.query<{
-      id: string;
-      business_id: string;
-      business_slug: string;
-      business_subdomain: string;
-      email: string;
-      role: Role;
-      full_name: string;
-      permissions: unknown;
-      location_ids: string[];
-      expires_at: Date;
-      accepted_at: Date | null;
-      revoked_at: Date | null;
-    }>(
-      `SELECT i.id, i.business_id, b.slug::text AS business_slug,
-              b.subdomain::text AS business_subdomain, i.email::text AS email,
-              i.role, i.full_name, i.permissions, i.location_ids, i.expires_at,
-              i.accepted_at, i.revoked_at
-         FROM invitations i
-         JOIN businesses b ON b.id = i.business_id
-        WHERE i.token_hash = $1 FOR UPDATE OF i`,
-      [hashInvitationToken(token)],
+    const invitation = await lockPendingInvitation(client, token);
+    const { platformUserId, identityExisted } = await authenticateInvitee(
+      client,
+      invitation.email,
+      invitation.full_name,
+      password,
     );
 
+    /**
+     * The duplicate check belongs in phase 1: it needs no MFA and its answer
+     * cannot change between the phases (phase 2 re-checks it under the lock
+     * anyway, because nothing that costs an SMS should be spent on a membership
+     * that already exists).
+     */
+    const { rows: dup } = await client.query(
+      "SELECT 1 FROM users WHERE business_id = $1 AND platform_user_id = $2",
+      [invitation.business_id, platformUserId],
+    );
+    if (dup.length > 0) {
+      await client.query("ROLLBACK");
+      throw new TeamError("already_a_member", 409);
+    }
+
+    await client.query("COMMIT");
+    return {
+      invitationId: invitation.id,
+      businessId: invitation.business_id,
+      businessSlug: invitation.business_slug,
+      businessSubdomain: invitation.business_subdomain,
+      email: invitation.email,
+      role: invitation.role,
+      fullName: invitation.full_name,
+      platformUserId,
+      identityExisted,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Phase 2 — write the membership, once every factor has been proven.
+ *
+ * Idempotent for the member it already accepted: a retry, a refresh, or a second
+ * in-flight `/api/auth/mfa/verify` for the same identity finds the accepted row
+ * and gets the membership back rather than a refusal, because by then the
+ * ceremony *has* been completed and re-running it changes nothing.
+ */
+export async function completeInvitationAcceptance(staged: {
+  invitationId: string;
+  platformUserId: string;
+}): Promise<AcceptInvitationResult> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
+
+    const { rows } = await client.query<InvitationRow>(
+      `SELECT i.id, i.business_id, b.slug::text AS business_slug,
+              b.subdomain::text AS business_subdomain, i.email::text AS email,
+              i.role, i.full_name, i.permissions, i.location_ids, i.location_scope,
+              i.default_location_id, i.custom_role_id, i.reason, i.expires_at, i.accepted_at,
+              i.revoked_at, i.accepted_user_id
+         FROM invitations i
+         JOIN businesses b ON b.id = i.business_id
+        WHERE i.id = $1 FOR UPDATE OF i`,
+      [staged.invitationId],
+    );
     const invitation = rows[0];
     if (!invitation) {
       await client.query("ROLLBACK");
       throw new TeamError("invalid_invitation", 404);
+    }
+
+    /**
+     * Already accepted by *this* identity: the ceremony is done, hand back what
+     * exists. Accepted by somebody else — a different link holder won the race —
+     * keeps the original refusal.
+     */
+    if (invitation.accepted_at !== null) {
+      const existing = await invitationResult(client, invitation, staged.platformUserId);
+      if (existing) {
+        await client.query("COMMIT");
+        return existing;
+      }
+      await client.query("ROLLBACK");
+      throw new TeamError("invitation_accepted", 409);
     }
 
     const status = invitationStatus({
@@ -1331,121 +2460,320 @@ export async function acceptInvitation(
       throw new TeamError(`invitation_${status}`, 409);
     }
 
-    const { rows: identityRows } = await client.query<{ id: string }>(
-      "SELECT id FROM platform_users WHERE email = $1",
-      [invitation.email],
-    );
-
-    let platformUserId: string;
-    if (identityRows[0]) {
-      platformUserId = identityRows[0].id;
-    } else {
-      if (!password || password.length < 8) {
-        await client.query("ROLLBACK");
-        throw new TeamError("weak_password");
-      }
-      const { rows: created } = await client.query<{ id: string }>(
-        `INSERT INTO platform_users (email, password_hash, full_name)
-         VALUES ($1, $2, $3) RETURNING id`,
-        [
-          invitation.email,
-          await bcrypt.hash(password, BCRYPT_COST),
-          invitation.full_name,
-        ],
-      );
-      platformUserId = created[0].id;
-    }
-
-    const { rows: dup } = await client.query(
-      "SELECT 1 FROM users WHERE business_id = $1 AND platform_user_id = $2",
-      [invitation.business_id, platformUserId],
-    );
-    if (dup.length > 0) {
-      await client.query("ROLLBACK");
-      throw new TeamError("already_a_member", 409);
-    }
-
-    // This route has no session — `client` has app.rls_bypass/app.business_id
-    // set by hand above, so the check must run on this same connection (see
-    // plan-limits.ts's module comment for why a fresh pool connection would
-    // silently under-count here). The ceiling read rides the same client so
-    // the override layer is visible under the same GUCs.
-    const invitationCeiling = await resolveLimitCeiling(
-      invitation.business_id,
-      "member_limit",
-      client,
-    );
-    if (
-      invitationCeiling.limit !== null &&
-      (await activeMemberCount(invitation.business_id, client)) >=
-        invitationCeiling.limit
-    ) {
-      await client.query("ROLLBACK");
-      throw new TeamError("member_limit_exceeded", 403);
-    }
-
-    const defaultLocationId = invitation.location_ids[0] ?? null;
-    const { rows: member } = await client.query<{ id: string }>(
-      `INSERT INTO users
-         (business_id, platform_user_id, role, full_name, email, location_id, permissions, location_scope)
-       VALUES ($1, $2, $3, $4, $5, $6, $7,
-               CASE WHEN $3::user_role = 'owner'::user_role THEN 'all'::location_scope
-                    WHEN cardinality($8::uuid[]) > 0 THEN 'selected'::location_scope
-                    WHEN $6::uuid IS NOT NULL THEN 'home'::location_scope
-                    ELSE 'all'::location_scope END) RETURNING id`,
-      [
-        invitation.business_id,
-        platformUserId,
-        invitation.role,
-        invitation.full_name,
-        invitation.email,
-        defaultLocationId,
-        JSON.stringify(invitation.permissions ?? {}),
-        invitation.location_ids ?? [],
-      ],
-    );
-    const userId = member[0].id;
-
-    if (invitation.location_ids?.length) {
-      await client.query(
-        "INSERT INTO user_locations (user_id, location_id) SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
-        [userId, invitation.location_ids],
-      );
-    }
-
-    await client.query(
-      "UPDATE invitations SET accepted_at = now(), accepted_user_id = $2 WHERE id = $1",
-      [invitation.id, userId],
-    );
-
-    await client.query(
-      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-       VALUES ($1, $2, 'team.invitation_accepted', 'user', $3, $4)`,
-      [
-        invitation.business_id,
-        userId,
-        // Separate parameter from user_id above: entity_id is text and user_id
-        // is uuid, and Postgres cannot deduce one type for a shared parameter.
-        userId,
-        JSON.stringify({ invitationId: invitation.id }),
-      ],
-    );
+    const result = await writeInvitationMembership(client, invitation, staged.platformUserId);
 
     await client.query("COMMIT");
-    return {
-      businessId: invitation.business_id,
-      businessSlug: invitation.business_slug,
-      businessSubdomain: invitation.business_subdomain,
-      userId,
-      platformUserId,
-      role: invitation.role,
-      fullName: invitation.full_name,
-      locationId: defaultLocationId,
-    };
+    return result;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
     client.release();
   }
+}
+
+/**
+ * Accepts an invitation, creating the membership (and the identity if this is
+ * the person's first business).
+ *
+ * This is the convenience wrapper for callers that face no second factor: it
+ * runs the two phases in sequence — `beginInvitationAcceptance` (validate +
+ * authenticate, committing nothing membership-shaped) and then
+ * `completeInvitationAcceptance` (the membership write). The phases do **not**
+ * share one connection or one transaction: each opens and commits its own.
+ * What keeps the pair safe instead of a single transaction is the shape of the
+ * phases — phase 1 writes no membership at all, and phase 2 re-locks the
+ * invitation row by id, refuses anything no longer pending, and is idempotent
+ * for the identity it already accepted. The routes that meet an MFA step use
+ * the two phases explicitly, with the pending token carrying `invitationId`.
+ */
+export async function acceptInvitation(
+  token: string,
+  password: string | null,
+): Promise<AcceptInvitationResult> {
+  const staged = await beginInvitationAcceptance(token, password);
+  return completeInvitationAcceptance({
+    invitationId: staged.invitationId,
+    platformUserId: staged.platformUserId,
+  });
+}
+
+interface InvitationRow extends Record<string, unknown> {
+  id: string;
+  business_id: string;
+  business_slug: string;
+  business_subdomain: string;
+  email: string;
+  role: Role;
+  full_name: string;
+  permissions: unknown;
+  location_ids: string[] | null;
+  location_scope: "all" | "selected" | "home" | "none" | null;
+  default_location_id: string | null;
+  custom_role_id: string | null;
+  reason: string | null;
+  expires_at: Date;
+  accepted_at: Date | null;
+  revoked_at: Date | null;
+  accepted_user_id: string | null;
+}
+
+/** Lock the invitation row by token hash and refuse anything not still pending. */
+async function lockPendingInvitation(
+  client: PoolClient,
+  token: string,
+): Promise<InvitationRow> {
+  const { rows } = await client.query<InvitationRow>(
+    `SELECT i.id, i.business_id, b.slug::text AS business_slug,
+            b.subdomain::text AS business_subdomain, i.email::text AS email,
+            i.role, i.full_name, i.permissions, i.location_ids, i.location_scope,
+            i.default_location_id, i.custom_role_id, i.reason, i.expires_at, i.accepted_at,
+            i.revoked_at, i.accepted_user_id
+       FROM invitations i
+       JOIN businesses b ON b.id = i.business_id
+      WHERE i.token_hash = $1 FOR UPDATE OF i`,
+    [hashInvitationToken(token)],
+  );
+
+  const invitation = rows[0];
+  if (!invitation) throw new TeamError("invalid_invitation", 404);
+
+  if (
+    invitationStatus({
+      expiresAt: invitation.expires_at,
+      acceptedAt: invitation.accepted_at,
+      revokedAt: invitation.revoked_at,
+    }) !== "pending"
+  ) {
+    const status = invitationStatus({
+      expiresAt: invitation.expires_at,
+      acceptedAt: invitation.accepted_at,
+      revokedAt: invitation.revoked_at,
+    });
+    throw new TeamError(`invitation_${status}`, 409);
+  }
+  return invitation;
+}
+
+/**
+ * Primary authentication for the invitee.
+ *
+ * Issue #854 (P0.4) — invitation possession is not proof of identity.
+ *
+ * An invitation token says "somebody at this business wants this address to
+ * join"; it says nothing about *who is holding the link*. For an address that
+ * already has a global identity the offered `password` must verify against that
+ * identity's **existing** hash, or the accepting caller is refused. Without this
+ * anyone holding a forwarded (or intercepted) invitation for a known address
+ * received that person's membership with no password and no MFA.
+ *
+ * For an address with no identity the invitation *is* the permission to create
+ * one, and the password given here becomes its credential — through the shared
+ * strength validator, so an invitation cannot plant a blank one.
+ */
+async function authenticateInvitee(
+  client: PoolClient,
+  email: string,
+  fullName: string,
+  password: string | null,
+): Promise<{ platformUserId: string; identityExisted: boolean }> {
+  const { rows: identityRows } = await client.query<{
+    id: string;
+    password_hash: string;
+  }>(
+    "SELECT id, password_hash FROM platform_users WHERE email = $1 AND is_active = true",
+    [email],
+  );
+
+  if (identityRows[0]) {
+    if (!password || password.length === 0) {
+      throw new TeamError("authentication_required", 401);
+    }
+    const authentic = await bcrypt.compare(password, identityRows[0].password_hash);
+    if (!authentic) throw new TeamError("invalid_credentials", 401);
+    return { platformUserId: identityRows[0].id, identityExisted: true };
+  }
+
+  const strength = validatePasswordStrength(password ?? "");
+  if (!strength.ok) throw new TeamError(strength.error, 400);
+  const { rows: created } = await client.query<{ id: string }>(
+    `INSERT INTO platform_users (email, password_hash, full_name)
+     VALUES ($1, $2, $3) RETURNING id`,
+    [email, await bcrypt.hash(password!, BCRYPT_COST), fullName],
+  );
+  return { platformUserId: created[0].id, identityExisted: false };
+}
+
+/** The result shape for an invitation this identity already accepted. */
+async function invitationResult(
+  client: PoolClient,
+  invitation: InvitationRow,
+  platformUserId: string,
+): Promise<AcceptInvitationResult | null> {
+  const { rows } = await client.query<{
+    id: string;
+    location_id: string | null;
+    location_scope: "all" | "selected" | "home" | "none";
+  }>(
+    `SELECT id, location_id, location_scope FROM users
+      WHERE business_id = $1 AND platform_user_id = $2`,
+    [invitation.business_id, platformUserId],
+  );
+  const member = rows[0];
+  if (!member) return null;
+  return {
+    businessId: invitation.business_id,
+    businessSlug: invitation.business_slug,
+    businessSubdomain: invitation.business_subdomain,
+    userId: member.id,
+    platformUserId,
+    role: invitation.role,
+    fullName: invitation.full_name,
+    locationId: member.location_id,
+    locationScope: member.location_scope,
+  };
+}
+
+/** The membership write itself: locations, ceiling, row, invitation, audit. */
+async function writeInvitationMembership(
+  client: PoolClient,
+  invitation: InvitationRow,
+  platformUserId: string,
+): Promise<AcceptInvitationResult> {
+  const { rows: dup } = await client.query(
+    "SELECT 1 FROM users WHERE business_id = $1 AND platform_user_id = $2",
+    [invitation.business_id, platformUserId],
+  );
+  if (dup.length > 0) throw new TeamError("already_a_member", 409);
+
+  /**
+   * Issue #854 (P0.5), defence in depth: every location id the invitation
+   * carries is re-checked against the invitation's business **here**, under
+   * the same connection as the write, even though `createInvitation` already
+   * proved them. An invitation row can be written by more than one path over
+   * the life of the schema (a pairing apply, a restore, an older release), and
+   * this is the last moment before a foreign uuid would be attached to a
+   * membership under the privileged acceptance window.
+   */
+  const resolvedLocations = await resolveMemberLocations(
+    client,
+    invitation.business_id,
+    invitation.location_ids ?? [],
+    invitation.default_location_id ?? null,
+  );
+
+  // This route has no session — `client` has app.rls_bypass/app.business_id
+  // set by hand above, so the check must run on this same connection (see
+  // plan-limits.ts's module comment for why a fresh pool connection would
+  // silently under-count here). The ceiling read rides the same client so
+  // the override layer is visible under the same GUCs.
+  const invitationCeiling = await resolveLimitCeiling(
+    invitation.business_id,
+    "member_limit",
+    client,
+  );
+  if (
+    invitationCeiling.limit !== null &&
+    (await activeMemberCount(invitation.business_id, client)) >= invitationCeiling.limit
+  ) {
+    throw new TeamError("member_limit_exceeded", 403);
+  }
+
+  /**
+   * The branch policy (#854 P2.11). A pre-0211 row has `location_scope` NULL
+   * and keeps the legacy reading — an empty `location_ids` meant "all" — so a
+   * link already in somebody's inbox does not silently narrow. New rows state
+   * it explicitly, and "the inviter never saw a branch field" is no longer
+   * interpreted as "give them everything".
+   */
+  const scope =
+    invitation.location_scope ??
+    (resolvedLocations.locationIds.length > 0
+      ? "selected"
+      : resolvedLocations.defaultLocationId
+        ? "home"
+        : "all");
+  const defaultLocationId =
+    scope === "home" || scope === "selected"
+      ? (resolvedLocations.defaultLocationId ?? resolvedLocations.locationIds[0] ?? null)
+      : null;
+  const assignedLocationIds = scope === "selected" ? resolvedLocations.locationIds : [];
+
+  /**
+   * Issue #854 (P2.12): the custom role the invitation named comes across
+   * with it. Without this the invitation looked right on the Team screen and
+   * the member arrived wearing the plain role preset — a silent downgrade of
+   * exactly the access somebody approved. An `owner` never wears one.
+   */
+  const customRoleId = invitation.role === "owner" ? null : invitation.custom_role_id;
+
+  // Issue #854 (GAP 7): same protocol as direct creation — pick the id, take
+  // the membership lock, then write, all inside the acceptance transaction.
+  const newMembershipId = randomUUID();
+  await lockMembership(client, invitation.business_id, newMembershipId);
+
+  const { rows: member } = await client.query<{ id: string }>(
+    `INSERT INTO users
+       (id, business_id, platform_user_id, role, full_name, email, location_id, permissions,
+        location_scope, membership_status, custom_role_id)
+     VALUES ($10, $1, $2, $3, $4, $5, $6, $7, $8, 'active', $9) RETURNING id`,
+    [
+      invitation.business_id,
+      platformUserId,
+      invitation.role,
+      invitation.full_name,
+      invitation.email,
+      defaultLocationId,
+      JSON.stringify(invitation.permissions ?? {}),
+      invitation.role === "owner" ? "all" : scope,
+      customRoleId,
+      newMembershipId,
+    ],
+  );
+  const userId = member[0].id;
+
+  if (assignedLocationIds.length > 0) {
+    await client.query(
+      "INSERT INTO user_locations (user_id, location_id) SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+      [userId, assignedLocationIds],
+    );
+  }
+
+  await client.query(
+    "UPDATE invitations SET accepted_at = now(), accepted_user_id = $2 WHERE id = $1",
+    [invitation.id, userId],
+  );
+
+  await client.query(
+    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, 'team.invitation_accepted', 'user', $3, $4)`,
+    [
+      invitation.business_id,
+      userId,
+      // Separate parameter from user_id above: entity_id is text and user_id
+      // is uuid, and Postgres cannot deduce one type for a shared parameter.
+      userId,
+      JSON.stringify({
+        invitationId: invitation.id,
+        locationScope: scope,
+        locationIds: assignedLocationIds,
+        customRoleId,
+        // Issue #854 (P2.4): the justification recorded when the access was
+        // decided (invite time), not reconstructed after the fact.
+        reason: invitation.reason ?? null,
+      }),
+    ],
+  );
+
+  return {
+    businessId: invitation.business_id,
+    businessSlug: invitation.business_slug,
+    businessSubdomain: invitation.business_subdomain,
+    userId,
+    platformUserId,
+    role: invitation.role,
+    fullName: invitation.full_name,
+    locationId: defaultLocationId,
+    locationScope: scope,
+  };
 }

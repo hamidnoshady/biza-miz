@@ -16,14 +16,31 @@ import { SETTING_KEYS } from "./settings";
 export interface MfaPolicy {
   /** Extend the second-factor requirement to `manager` memberships. */
   requireForManagers: boolean;
+  /**
+   * Extend the second-factor requirement to `accountant` memberships
+   * (issue #854 P1.1: "Accountant: configurable / risk-based, but supported
+   * fully"). Off by default — an external accountant is often a contractor on
+   * a personal phone, but a business that wants the ledger covered can say so.
+   *
+   * `owner` and `admin` are **not** knobs: they are mandatory by construction
+   * (`MANDATORY_MFA_ROLES`), because the role that can administer the business
+   * is precisely the account a stolen password must not be enough for.
+   */
+  requireForAccountants: boolean;
 }
 
-export const DEFAULT_MFA_POLICY: MfaPolicy = { requireForManagers: false };
+export const DEFAULT_MFA_POLICY: MfaPolicy = {
+  requireForManagers: false,
+  requireForAccountants: false,
+};
 
 export function normalizeMfaPolicy(value: unknown): MfaPolicy {
   if (!value || typeof value !== "object") return { ...DEFAULT_MFA_POLICY };
   const raw = value as Record<string, unknown>;
-  return { requireForManagers: raw.requireForManagers === true };
+  return {
+    requireForManagers: raw.requireForManagers === true,
+    requireForAccountants: raw.requireForAccountants === true,
+  };
 }
 
 /**

@@ -69,6 +69,22 @@ export function isPinRole(role: Role): boolean {
  * may pick a given entry is an authorization question answered server-side in
  * `PATCH /api/team/[id]`, never by omitting an option from a dropdown.
  */
+/**
+ * The credential a role's owner is expected to sign in with.
+ *
+ * Issue #854 (P1.12) — a membership must never be left *active* in a role whose
+ * door it cannot open. `password` means the global identity (`platform_users`
+ * password, reached through the tenant login screen); `pin` means the staff door
+ * on a shared terminal. The mapping is total — every role has exactly one
+ * intended model — which is what makes the transition rule below decidable
+ * rather than a judgement call.
+ */
+export type LoginCredentialModel = "password" | "pin";
+
+export function loginCredentialModelForRole(role: Role): LoginCredentialModel {
+  return isPasswordRole(role) ? "password" : "pin";
+}
+
 export const ASSIGNABLE_ROLES: readonly Role[] = ALL_ROLES;
 
 /**

@@ -43,3 +43,16 @@ describe("A/P source attribution contract", () => {
     expect(apAttributionStatus(null, null)).toBe("unclassified");
   });
 });
+
+it("generates broad and indexed named reads from exactly the registered attributed sources", async () => {
+  const { apSupplierAttributionSql, AP_SUPPLIER_ATTRIBUTION_SQL } = await import("./ap-attribution");
+  const named = apSupplierAttributionSql("$3::uuid");
+  expect(AP_SUPPLIER_ATTRIBUTION_SQL).toBe(apSupplierAttributionSql());
+  for (const [type, contract] of Object.entries(AP_SOURCE_ATTRIBUTION_CONTRACT)) {
+    const marker = `'${type}'::text AS source_type`;
+    expect(named.includes(marker), type).toBe(contract.mode !== "intentional_unknown");
+    expect(AP_SUPPLIER_ATTRIBUTION_SQL.includes(marker), type).toBe(contract.mode !== "intentional_unknown");
+  }
+  expect(named.match(/ = \$3::uuid/g)).toHaveLength(9);
+  expect(AP_SUPPLIER_ATTRIBUTION_SQL).not.toContain("$3");
+});

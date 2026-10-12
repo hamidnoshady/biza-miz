@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { toPersianDigits } from "../src/lib/digits";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -21,9 +22,11 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let arService: typeof import("../src/lib/ar-service");
 let customersService: typeof import("../src/lib/parties-service");
+let holooImport: typeof import("../src/lib/integrations/holoo/transaction-import-service");
+let mappingService: typeof import("../src/lib/integrations/mapping-service");
 
 const biz = { id: "", locationId: "" };
-const acct = { cash: "", bankClearing: "", revenue: "", accountsReceivable: "" };
+const acct = { cash: "", bank: "", bankClearing: "", revenue: "", accountsReceivable: "" };
 const user = { id: "" };
 
 function urlFor(database: string): string {
@@ -55,6 +58,8 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   arService = await import("../src/lib/ar-service");
   customersService = await import("../src/lib/parties-service");
+  holooImport = await import("../src/lib/integrations/holoo/transaction-import-service");
+  mappingService = await import("../src/lib/integrations/mapping-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -104,13 +109,15 @@ beforeEach(async () => {
 
   const accounts = await db.query<{ id: string; code: string }>(
     `INSERT INTO accounts (business_id, code, name, type)
-     VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1120', 'Card clearing', 'asset'),
+     VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1110', 'Bank', 'asset'),
+            ($1, '1120', 'Card clearing', 'asset'),
             ($1, '1200', 'Accounts Receivable', 'asset'), ($1, '4300', 'Sales', 'revenue')
      RETURNING id, code`,
     [biz.id],
   );
   for (const r of accounts.rows) {
     if (r.code === "1100") acct.cash = r.id;
+    if (r.code === "1110") acct.bank = r.id;
     if (r.code === "1120") acct.bankClearing = r.id;
     if (r.code === "1200") acct.accountsReceivable = r.id;
     if (r.code === "4300") acct.revenue = r.id;
@@ -140,6 +147,25 @@ async function postCreditOrder(entryDate: string, customerId: string | null, amo
   return orderId;
 }
 
+/**
+ * A party row with an explicit role set — the shapes `createCustomer` cannot
+ * make, and the ones a crafted API request could name: a supplier, an
+ * employee, a person who is both, a deactivated record, a merged duplicate.
+ */
+async function insertParty(
+  businessId: string,
+  name: string,
+  roles: ("customer" | "supplier" | "employee")[],
+  options: { isActive?: boolean; mergedIntoId?: string | null } = {},
+): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, role, roles, is_active, merged_into_id)
+     VALUES ($1, $2, $3, $4::text[], $5, $6) RETURNING id`,
+    [businessId, name, roles[0], roles, options.isActive ?? true, options.mergedIntoId ?? null],
+  );
+  return rows[0].id;
+}
+
 describe("listCustomerBalances", () => {
   it("attributes a credit order's AR debit to its customer", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali", phone: "0912" });
@@ -164,6 +190,7 @@ describe("listCustomerBalances", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Sara" });
     await postCreditOrder("2025-04-01", customer.id, 200_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -177,12 +204,90 @@ describe("listCustomerBalances", () => {
   });
 });
 
+describe("attribution through the document that caused the line", () => {
+  it("attributes a cheque's A/R line to the cheque's customer and names the cheque on the statement", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Cheque payer" });
+    const { rows: chequeRows } = await db.query<{ id: string }>(
+      `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name,
+                            amount, issue_date, due_date, counterparty_name, customer_id)
+       VALUES ($1, $2, 'receivable', 'on_hand', '123456', 'بانک ملت', 400000, '2025-05-01', '2025-06-01', 'Cheque payer', $3)
+       RETURNING id`,
+      [biz.id, biz.locationId, customer.id],
+    );
+    const chequeId = chequeRows[0].id;
+    const { rows: entryRows } = await db.query<{ id: string }>(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id)
+       VALUES ($1, '2025-05-01', 'چک دریافتی', 'cheque', $2) RETURNING id`,
+      [biz.id, chequeId],
+    );
+    await db.query(
+      `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, 400000, 0), ($1, $3, 0, 400000)`,
+      [entryRows[0].id, acct.accountsReceivable, acct.revenue],
+    );
+
+    const balances = await arService.listCustomerBalances(biz.id);
+    expect(balances).toEqual([
+      { customerId: customer.id, customerName: "Cheque payer", customerPhone: null, balance: 400_000 },
+    ]);
+
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    expect(lines).toHaveLength(1);
+    // The cheque's own identifiers, not the memo's words.
+    expect(lines[0].source).toMatchObject({ type: "cheque", id: chequeId, label: "چک 123456 — بانک ملت" });
+    expect(lines[0].source?.orderId).toBeNull();
+  });
+
+  it("keeps a closed-order amendment attributed to the original order and its customer", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Amended" });
+    const orderId = await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const { rows: orderRows } = await db.query<{ order_number: string }>(
+      "SELECT order_number::text AS order_number FROM orders WHERE id = $1",
+      [orderId],
+    );
+
+    // An amendment voids the sale: the correction posts against the amendment,
+    // which points back at the order the customer was billed for.
+    const { rows: amendmentRows } = await db.query<{ id: string }>(
+      `INSERT INTO order_amendments (business_id, location_id, order_id, kind, reason,
+                                     before_snapshot, after_snapshot, previous_total, new_total, entry_date)
+       VALUES ($1, $2, $3, 'void', 'فاکتور اشتباه بود', '{}'::jsonb, '{}'::jsonb, 500000, 0, '2025-04-01')
+       RETURNING id`,
+      [biz.id, biz.locationId, orderId],
+    );
+    const { rows: entryRows } = await db.query<{ id: string }>(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id)
+       VALUES ($1, '2025-04-01', 'ابطال سفارش', 'order_amendment', $2) RETURNING id`,
+      [biz.id, amendmentRows[0].id],
+    );
+    await db.query(
+      `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, 0, 500000), ($1, $3, 500000, 0)`,
+      [entryRows[0].id, acct.accountsReceivable, acct.revenue],
+    );
+
+    // The balance nets to zero, so the list drops the party entirely…
+    expect(await arService.listCustomerBalances(biz.id)).toEqual([]);
+
+    // …and the statement still shows both halves, each on the original order.
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    expect(lines.map((line) => line.type)).toEqual(["invoice", "invoice"]);
+    expect(lines.map((line) => line.balance)).toEqual([500_000, 0]);
+    expect(lines[1].source).toMatchObject({
+      type: "order_amendment",
+      id: amendmentRows[0].id,
+      orderId,
+    });
+    expect(String(lines[1].source?.orderNumber)).toBe(orderRows[0].order_number);
+    expect(lines[0].description).toBe(`سفارش #${toPersianDigits(orderRows[0].order_number)}`);
+  });
+});
+
 describe("receivePayment", () => {
   it("posts Debit Cash / Credit Accounts Receivable and records the receipt", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
 
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -203,15 +308,37 @@ describe("receivePayment", () => {
     expect(balances[0].balance).toBe(300_000);
   });
 
-  it("posts to bank-clearing for a bank receipt", async () => {
+  it("posts to the bank account for a bank receipt (issue #829: bank means 1110, not clearing)", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
 
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
       method: "bank",
+      amount: 100_000,
+      createdBy: user.id,
+    });
+
+    const { rows } = await db.query<{ debit: string }>(
+      `SELECT COALESCE(SUM(debit),0) AS debit FROM journal_lines WHERE account_id = $1`,
+      [acct.bank],
+    );
+    expect(Number(rows[0].debit)).toBe(100_000);
+  });
+
+  it("posts to the clearing account for a clearing receipt", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+
+    await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "clearing",
       amount: 100_000,
       createdBy: user.id,
     });
@@ -223,6 +350,281 @@ describe("receivePayment", () => {
     expect(Number(rows[0].debit)).toBe(100_000);
   });
 
+  it("posts to an explicit cash account when one is given", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const { rows: subRows } = await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type, parent_id)
+       VALUES ($1, '1101', 'Petty cash', 'asset', $2) RETURNING id`,
+      [biz.id, acct.cash],
+    );
+
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      cashAccountId: subRows[0].id,
+      amount: 100_000,
+      createdBy: user.id,
+    });
+    expect(receipt.cashAccountId).toBe(subRows[0].id);
+
+    const { rows } = await db.query<{ debit: string }>(
+      `SELECT COALESCE(SUM(debit),0) AS debit FROM journal_lines WHERE account_id = $1`,
+      [subRows[0].id],
+    );
+    expect(Number(rows[0].debit)).toBe(100_000);
+  });
+
+  it("rejects a cash account that is not a cash/bank/clearing account", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await expect(
+      arService.receivePayment({
+        idempotencyKey: randomUUID(),
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        cashAccountId: acct.accountsReceivable,
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("invalid_cash_account");
+  });
+
+  it("is idempotent on the client key: a retry returns the original voucher, not a second posting", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const key = `ar-${randomUUID()}`;
+
+    const first = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 100_000,
+      idempotencyKey: key,
+      createdBy: user.id,
+    });
+    const second = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 100_000,
+      idempotencyKey: key,
+      createdBy: user.id,
+    });
+    expect(second.id).toBe(first.id);
+    expect(second.duplicate).toBe(true);
+
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM journal_entries WHERE business_id = $1 AND source_type = 'ar_receipt'`,
+      [biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+  it("requires a client idempotency key: without one there is no submission to de-duplicate", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 10_000,
+        idempotencyKey: "",
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("idempotency_key_required");
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 10_000,
+        idempotencyKey: "k".repeat(129),
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("idempotency_key_required");
+  });
+
+  it("serializes a concurrent burst on one key: exactly one voucher, the rest replays", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const key = `ar-${randomUUID()}`;
+    const call = () =>
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 100_000,
+        receiptDate: "2026-10-04",
+        idempotencyKey: key,
+        createdBy: user.id,
+      });
+    // All five race inside the service's transactions; Promise.all rejects if
+    // any of them surfaces the old transaction-aborted failure.
+    const results = await Promise.all([call(), call(), call(), call(), call()]);
+    expect(new Set(results.map((r) => r.id)).size).toBe(1);
+    expect(results.filter((r) => r.duplicate)).toHaveLength(4);
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM ar_receipts WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+  it("rejects a key reused with changed intent instead of replaying the original", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash" as const,
+      receiptDate: "2026-10-04",
+      idempotencyKey: `ar-${randomUUID()}`,
+      createdBy: user.id,
+    };
+    await arService.receivePayment({ ...base, amount: 100_000 });
+    await expect(arService.receivePayment({ ...base, amount: 200_000 })).rejects.toThrow("idempotency_conflict");
+    // The same intent still replays the original.
+    const replay = await arService.receivePayment({ ...base, amount: 100_000 });
+    expect(replay.duplicate).toBe(true);
+  });
+
+  it("Holoo receipt import survives the crash between posting and writing the mapping", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Holoo Buyer" });
+    const { rows: connRows } = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections (business_id, location_id, name, provider, base_url, link_mode, currency_unit, created_by)
+       VALUES ($1, $2, 'Holoo', 'holoo', NULL, 'rest_api', 'rial', $3) RETURNING id`,
+      [biz.id, biz.locationId, user.id],
+    );
+    const connectionId = connRows[0].id;
+    await mappingService.upsertMapping(biz.id, connectionId, "holoo_customer", "person-1", customer.id);
+    const tx: Parameters<typeof holooImport.applyTransactions>[2] = [
+      { remoteId: "doc-1", type: "receipt", occurredAt: "2026-10-04T10:00:00", personId: "person-1", amountRial: 250_000n },
+    ];
+    const first = await holooImport.applyTransactions(biz.id, connectionId, tx, user.id);
+    expect(first.imported).toBe(1);
+    const receiptId = await mappingService.localIdForRemote(biz.id, connectionId, "holoo_receipt", "doc-1");
+    expect(receiptId).toBeTruthy();
+    // The crash: the receipt posted but the mapping write never landed.
+    await db.query(
+      `DELETE FROM integration_mappings WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'holoo_receipt'`,
+      [biz.id, connectionId],
+    );
+    const second = await holooImport.applyTransactions(biz.id, connectionId, tx, user.id);
+    expect(second.imported).toBe(1);
+    expect(await mappingService.localIdForRemote(biz.id, connectionId, "holoo_receipt", "doc-1")).toBe(receiptId);
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM ar_receipts WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+  it("assigns stable sequential voucher numbers per business", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const first = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 10_000,
+      createdBy: user.id,
+    });
+    const second = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 20_000,
+      createdBy: user.id,
+    });
+    expect(first.voucherNumber).toBe(1);
+    expect(second.voucherNumber).toBe(2);
+  });
+
+  it("rejects a supplier-only party as the receipt customer", async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, 'Vendor', 'supplier') RETURNING id`,
+      [biz.id],
+    );
+    await expect(
+      arService.receivePayment({
+        idempotencyKey: randomUUID(),
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: rows[0].id,
+        method: "cash",
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects an inactive or merged customer", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await db.query(`UPDATE parties SET is_active = false WHERE id = $1`, [customer.id]);
+    await expect(
+      arService.receivePayment({
+        idempotencyKey: randomUUID(),
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects an employee-only party as the receipt customer", async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, 'Crew', 'employee') RETURNING id`,
+      [biz.id],
+    );
+    await expect(
+      arService.receivePayment({
+        idempotencyKey: randomUUID(),
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: rows[0].id,
+        method: "cash",
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("customer_not_found");
+  });
+
+  it("accepts a multi-role party when Customer is one of the roles", async () => {
+    // Legacy `role` says supplier on purpose: the service reads the `roles`
+    // array, so a party that is also a customer must still be receivable.
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role, roles)
+       VALUES ($1, 'Both', 'supplier', ARRAY['customer', 'supplier']) RETURNING id`,
+      [biz.id],
+    );
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: rows[0].id,
+      method: "cash",
+      amount: 10_000,
+      createdBy: user.id,
+    });
+    expect(receipt.customerId).toBe(rows[0].id);
+  });
+
   it("rejects a customer from a different business", async () => {
     const other = await db.query<{ id: string }>(
       "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
@@ -232,6 +634,7 @@ describe("receivePayment", () => {
 
     await expect(
       arService.receivePayment({
+        idempotencyKey: randomUUID(),
         businessId: biz.id,
         locationId: biz.locationId,
         customerId: otherCustomer.id,
@@ -246,6 +649,7 @@ describe("receivePayment", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await expect(
       arService.receivePayment({
+        idempotencyKey: randomUUID(),
         businessId: biz.id,
         locationId: biz.locationId,
         customerId: customer.id,
@@ -257,11 +661,113 @@ describe("receivePayment", () => {
   });
 });
 
+describe("reverseReceipt", () => {
+  it("posts the mirror entry, marks the voucher reversed, and restores the balance", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 200_000,
+      receiptDate: "2025-04-10",
+      createdBy: user.id,
+    });
+
+    const result = await arService.reverseReceipt({
+      businessId: biz.id,
+      receiptId: receipt.id,
+      actorId: user.id,
+    });
+    expect(result.reversalEntryId).toBeTruthy();
+
+    const balances = await arService.listCustomerBalances(biz.id);
+    expect(balances[0].balance).toBe(500_000);
+
+    const detail = await arService.getReceiptDetail(biz.id, receipt.id);
+    expect(detail).not.toBeNull();
+    expect(detail!.reversedAt).toBeTruthy();
+    expect(detail!.reversalEntryId).toBe(result.reversalEntryId);
+  });
+
+  it("refuses to reverse the same voucher twice", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 50_000,
+      createdBy: user.id,
+    });
+    await arService.reverseReceipt({ businessId: biz.id, receiptId: receipt.id, actorId: user.id });
+    await expect(
+      arService.reverseReceipt({ businessId: biz.id, receiptId: receipt.id, actorId: user.id }),
+    ).rejects.toThrow("already_reversed");
+  });
+
+  it("shows the reversal in the customer statement", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 200_000,
+      receiptDate: "2025-04-10",
+      createdBy: user.id,
+    });
+    await arService.reverseReceipt({ businessId: biz.id, receiptId: receipt.id, actorId: user.id });
+
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    expect(lines.map((l) => l.type)).toEqual(["invoice", "receipt", "reversal"]);
+    expect(lines[2].balance).toBe(500_000);
+  });
+
+  it("refuses to reverse into a locked fiscal period", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 50_000,
+      receiptDate: "2025-03-10",
+      createdBy: user.id,
+    });
+    const year = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on)
+       VALUES ($1, 'test-2025', '2025-01-01', '2026-01-01') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO fiscal_periods (business_id, fiscal_year_id, label, starts_on, ends_on, status)
+       VALUES ($1, $2, 'locked-april', '2025-04-01', '2025-05-01', 'locked')`,
+      [biz.id, year.rows[0].id],
+    );
+    await expect(
+      arService.reverseReceipt({
+        businessId: biz.id,
+        receiptId: receipt.id,
+        actorId: user.id,
+        reversalDate: "2025-04-15",
+      }),
+    ).rejects.toThrow("fiscal_period_locked");
+  });
+});
+
 describe("getCustomerStatement", () => {
   it("returns invoices and receipts oldest-first with a running balance", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -306,6 +812,7 @@ describe("getArAging", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Mina" });
     await postCreditOrder("2025-04-01", customer.id, 200_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -324,6 +831,7 @@ describe("getArAging", () => {
   it("shows a customer whose only AR activity is an advance", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Payam" });
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -344,6 +852,7 @@ describe("getArAging", () => {
     const creditor = await customersService.createCustomer(biz.id, { name: "Creditor" });
     await postCreditOrder("2025-01-01", debtor.id, 400_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: creditor.id,
@@ -359,6 +868,576 @@ describe("getArAging", () => {
     // The phase-16 exit criterion, checked directly: «جمع کل» IS the control account.
     const { rows } = await db.query<{ balance: string }>(
       `SELECT (COALESCE(SUM(debit),0) - COALESCE(SUM(credit),0))::text AS balance FROM journal_lines WHERE account_id = $1`,
+      [acct.accountsReceivable],
+    );
+    expect(aging.totals.total).toBe(Number(rows[0].balance));
+  });
+});
+
+/**
+ * Forced contention on one idempotency key (#829 completion). The burst test
+ * above *hopes* the calls overlap; these tests *hold* them overlapped: a
+ * barrier transaction pins the business's voucher-counter row, both callers
+ * provably miss the initial lookup (zero rows mid-hold, both parked past the
+ * lookup on the counter lock), and only then is the barrier released — so
+ * the loser's `DO NOTHING` + re-read recovery path runs deterministically,
+ * not when the scheduler feels generous.
+ */
+describe("forced contention on one idempotency key (issue #829 completion)", () => {
+  /** How many backends on this database are lock-parked inside the counter upsert. */
+  async function counterLockWaiters(): Promise<number> {
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM pg_stat_activity
+        WHERE datname = $1 AND wait_event_type = 'Lock' AND query LIKE '%ar_ap_voucher_counters%'`,
+      [databaseName],
+    );
+    return Number(rows[0].n);
+  }
+
+  async function waitForCounterWaiters(count: number): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await counterLockWaiters()) >= count) return;
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${count} counter-lock waiters`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  async function seedCounterRow(): Promise<void> {
+    await db.query(
+      `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
+       VALUES ($1, 0, 0) ON CONFLICT (business_id) DO NOTHING`,
+      [biz.id],
+    );
+  }
+
+  it("both callers miss the first lookup, then recover to one voucher, one posting, no outbox rows", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await seedCounterRow();
+    const key = `barrier:${randomUUID()}`;
+    const call = () =>
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 100_000,
+        receiptDate: "2026-10-04",
+        idempotencyKey: key,
+        createdBy: user.id,
+      });
+
+    const holder = new Client({ connectionString: urlFor(databaseName) });
+    await holder.connect();
+    let released = false;
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT business_id FROM ar_ap_voucher_counters WHERE business_id = $1 FOR UPDATE`, [biz.id]);
+
+      const a = call();
+      const b = call();
+      // Both callers missed the initial lookup (there is nothing to find)
+      // and are parked *past* it, on the counter upsert — the parked query
+      // text proves the position. Nothing has been inserted mid-hold.
+      await waitForCounterWaiters(2);
+      const midHold = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM ar_receipts WHERE business_id = $1`,
+        [biz.id],
+      );
+      expect(Number(midHold.rows[0].n)).toBe(0);
+
+      await holder.query("COMMIT");
+      released = true;
+      const [first, second] = await Promise.all([a, b]);
+      expect(first.id).toBe(second.id);
+      expect([first, second].filter((r) => r.duplicate)).toHaveLength(1);
+      expect([first, second].filter((r) => !r.duplicate)).toHaveLength(1);
+      const winner = first.duplicate ? second : first;
+
+      // One source row, one balanced journal effect.
+      const sources = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM ar_receipts WHERE business_id = $1 AND idempotency_key = $2`,
+        [biz.id, key],
+      );
+      expect(Number(sources.rows[0].n)).toBe(1);
+      const entries = await db.query<{ id: string }>(
+        `SELECT id FROM journal_entries WHERE business_id = $1 AND source_type = 'ar_receipt' AND source_id = $2`,
+        [biz.id, winner.id],
+      );
+      expect(entries.rows).toHaveLength(1);
+      const lines = await db.query<{ code: string; debit: string; credit: string }>(
+        `SELECT a.code, l.debit::text AS debit, l.credit::text AS credit
+           FROM journal_lines l JOIN accounts a ON a.id = l.account_id
+          WHERE l.entry_id = $1 ORDER BY a.code`,
+        [entries.rows[0].id],
+      );
+      expect(lines.rows).toEqual([
+        { code: "1100", debit: "100000", credit: "0" },
+        { code: "1200", debit: "0", credit: "100000" },
+      ]);
+      // No Holoo connection is configured, and the loser's replay path
+      // returns before the enqueue — nothing reaches the outbox.
+      const outbox = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM integration_outbox_events WHERE business_id = $1`,
+        [biz.id],
+      );
+      expect(Number(outbox.rows[0].n)).toBe(0);
+    } finally {
+      if (!released) await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+  }, 60_000);
+
+  it("a concurrent caller with changed intent loses with 409 from the race path and posts nothing", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await seedCounterRow();
+    const key = `barrier-conflict:${randomUUID()}`;
+    const call = (amount: number) =>
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount,
+        receiptDate: "2026-10-04",
+        idempotencyKey: key,
+        createdBy: user.id,
+      });
+
+    const holder = new Client({ connectionString: urlFor(databaseName) });
+    await holder.connect();
+    let released = false;
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT business_id FROM ar_ap_voucher_counters WHERE business_id = $1 FOR UPDATE`, [biz.id]);
+
+      const a = call(100_000);
+      const b = call(200_000);
+      // Keep vitest's unhandled-rejection detector quiet if an assertion
+      // below fails before the settlement: the outcomes are still observed.
+      a.catch(() => {});
+      b.catch(() => {});
+      // Both lookups missed before either could insert, so the loser cannot
+      // take the fast path — its 409 comes from the race-path re-read guard.
+      await waitForCounterWaiters(2);
+      await holder.query("COMMIT");
+      released = true;
+
+      const outcomes = await Promise.allSettled([a, b]);
+      const fulfilled = outcomes.filter((o) => o.status === "fulfilled");
+      const rejected = outcomes.filter((o) => o.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      if (fulfilled[0].status !== "fulfilled" || rejected[0].status !== "rejected") throw new Error("unreachable");
+      expect(fulfilled[0].value.duplicate).toBe(false);
+      expect(String(rejected[0].reason)).toContain("idempotency_conflict");
+
+      // Exactly the winner's transfer exists — one row, one posting, and the
+      // amount is whichever intent won the race.
+      const winnerAmount = fulfilled[0].value.amount;
+      expect([100_000, 200_000]).toContain(winnerAmount);
+      const sources = await db.query<{ n: string; amount: string }>(
+        `SELECT COUNT(*)::text AS n, MIN(amount)::text AS amount FROM ar_receipts WHERE business_id = $1 AND idempotency_key = $2`,
+        [biz.id, key],
+      );
+      expect(Number(sources.rows[0].n)).toBe(1);
+      expect(Number(sources.rows[0].amount)).toBe(winnerAmount);
+      const entries = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM journal_entries WHERE business_id = $1 AND source_type = 'ar_receipt'`,
+        [biz.id],
+      );
+      expect(Number(entries.rows[0].n)).toBe(1);
+    } finally {
+      if (!released) await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+  }, 60_000);
+
+  it("scopes keys to the business: the same key posts once per tenant and replays per tenant", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const otherBiz = await db.query<{ id: string }>("INSERT INTO businesses (name, slug) VALUES ('AR Other', $1) RETURNING id", [
+      `ar-other-${randomUUID().slice(0, 8)}`,
+    ]);
+    const otherBizId = otherBiz.rows[0].id;
+    const otherLoc = await db.query<{ id: string }>("INSERT INTO locations (business_id, name) VALUES ($1, 'Main') RETURNING id", [otherBizId]);
+    await db.query(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1110', 'Bank', 'asset'),
+              ($1, '1120', 'Card clearing', 'asset'),
+              ($1, '1200', 'Accounts Receivable', 'asset'), ($1, '4300', 'Sales', 'revenue')`,
+      [otherBizId],
+    );
+    const otherCustomer = await customersService.createCustomer(otherBizId, { name: "Sara" });
+
+    const key = `tenant:${randomUUID()}`;
+    const intentFor = (businessId: string, locationId: string, customerId: string) => ({
+      businessId,
+      locationId,
+      customerId,
+      method: "cash" as const,
+      amount: 50_000,
+      receiptDate: "2026-10-04",
+      idempotencyKey: key,
+      createdBy: null,
+    });
+    const first = await arService.receivePayment(intentFor(biz.id, biz.locationId, customer.id));
+    const second = await arService.receivePayment(intentFor(otherBizId, otherLoc.rows[0].id, otherCustomer.id));
+    expect(first.duplicate).toBe(false);
+    expect(second.duplicate).toBe(false);
+    expect(second.id).not.toBe(first.id);
+
+    // Each tenant's retry replays its own voucher, never the other's.
+    const replay = await arService.receivePayment(intentFor(biz.id, biz.locationId, customer.id));
+    expect(replay.duplicate).toBe(true);
+    expect(replay.id).toBe(first.id);
+    const counts = await db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ar_receipts WHERE idempotency_key = $1`, [key]);
+    expect(Number(counts.rows[0].n)).toBe(2);
+  });
+
+  it("rolls everything back when the period lock refuses the posting date", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const year = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on)
+       VALUES ($1, 'test-2026', '2026-01-01', '2027-01-01') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO fiscal_periods (business_id, fiscal_year_id, label, starts_on, ends_on, status)
+       VALUES ($1, $2, 'locked-october', '2026-10-01', '2026-11-01', 'locked')`,
+      [biz.id, year.rows[0].id],
+    );
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 100_000,
+        receiptDate: "2026-10-04",
+        idempotencyKey: `locked:${randomUUID()}`,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("fiscal_period_locked");
+
+    // The source row, the journal effect and the consumed voucher number all
+    // rolled back together — a retry after reopening starts clean.
+    const leftovers = await db.query<{ receipts: string; entries: string; counters: string }>(
+      `SELECT (SELECT COUNT(*) FROM ar_receipts WHERE business_id = $1)::text AS receipts,
+              (SELECT COUNT(*) FROM journal_entries WHERE business_id = $1)::text AS entries,
+              (SELECT COUNT(*) FROM ar_ap_voucher_counters WHERE business_id = $1)::text AS counters`,
+      [biz.id],
+    );
+    expect(leftovers.rows[0]).toEqual({ receipts: "0", entries: "0", counters: "0" });
+  });
+});
+
+describe("wrong-typed fields fail closed (issue #829 completion)", () => {
+  it("rejects non-string memo/date/account with 400 codes and posts nothing", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash" as const,
+      amount: 10_000,
+      idempotencyKey: `types:${randomUUID()}`,
+      createdBy: user.id,
+    };
+    // The routes check first; these prove the service backstop answers the
+    // same controlled codes to internal callers instead of throwing TypeError.
+    await expect(arService.receivePayment({ ...base, memo: 123 as unknown as string })).rejects.toThrow("invalid_memo");
+    await expect(arService.receivePayment({ ...base, receiptDate: 20261004 as unknown as string })).rejects.toThrow("invalid_date");
+    await expect(arService.receivePayment({ ...base, cashAccountId: 123 as unknown as string })).rejects.toThrow("invalid_cash_account");
+    const { resolveVoucherCashAccount } = await import("../src/lib/voucher-cash-account");
+    const client = await dbLib.getPool().connect();
+    try {
+      await expect(resolveVoucherCashAccount(client, biz.id, "cash", 123 as unknown as string)).rejects.toThrow("invalid_cash_account");
+    } finally {
+      client.release();
+    }
+    const leftovers = await db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ar_receipts WHERE business_id = $1`, [biz.id]);
+    expect(Number(leftovers.rows[0].n)).toBe(0);
+  });
+});
+describe("receivePayment party integrity", () => {
+  const payment = (customerId: string, amount = 10_000) => ({
+    businessId: biz.id,
+    locationId: biz.locationId,
+    customerId,
+    method: "cash" as const,
+    amount,
+    idempotencyKey: randomUUID(),
+    createdBy: user.id,
+  });
+
+  it("rejects a supplier-only party", async () => {
+    // The FK on ar_receipts.customer_id points at `parties`, which since 0137
+    // holds suppliers and employees too — so the database cannot say what the
+    // id means and the service has to.
+    const supplier = await insertParty(biz.id, "Supplier only", ["supplier"]);
+    await expect(arService.receivePayment(payment(supplier))).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects an employee-only party", async () => {
+    const employee = await insertParty(biz.id, "Employee only", ["employee"]);
+    await expect(arService.receivePayment(payment(employee))).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects an inactive customer", async () => {
+    const retired = await insertParty(biz.id, "Retired customer", ["customer"], { isActive: false });
+    await expect(arService.receivePayment(payment(retired))).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects a customer merged into another party", async () => {
+    const survivor = await customersService.createCustomer(biz.id, { name: "Survivor" });
+    const duplicate = await insertParty(biz.id, "Duplicate", ["customer"], { mergedIntoId: survivor.id });
+    await expect(arService.receivePayment(payment(duplicate))).rejects.toThrow("customer_not_found");
+  });
+
+  it("accepts a party holding the Customer role alongside another, and posts the receipt", async () => {
+    const both = await insertParty(biz.id, "Buyer and supplier", ["customer", "supplier"]);
+    const receipt = await arService.receivePayment(payment(both));
+    expect(receipt.customerId).toBe(both);
+    const balances = await arService.listCustomerBalances(biz.id);
+    expect(balances).toEqual([
+      expect.objectContaining({ customerId: both, balance: -10_000 }),
+    ]);
+  });
+
+  it("writes nothing when it refuses a party", async () => {
+    const supplier = await insertParty(biz.id, "Supplier only", ["supplier"]);
+    await expect(arService.receivePayment(payment(supplier))).rejects.toThrow("customer_not_found");
+    const { rows } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM ar_receipts");
+    expect(rows[0].n).toBe(0);
+    const { rows: entries } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM journal_entries");
+    expect(entries[0].n).toBe(0);
+  });
+});
+
+describe("date integrity", () => {
+  const paymentOn = (customerId: string, receiptDate: string) => ({
+    businessId: biz.id,
+    locationId: biz.locationId,
+    customerId,
+    method: "cash" as const,
+    amount: 10_000,
+    receiptDate,
+    idempotencyKey: randomUUID(),
+    createdBy: user.id,
+  });
+
+  it("rejects impossible calendar dates on the receipt and on the aging report", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    for (const impossible of ["2026-02-29", "2025-02-30", "2026-04-31", "2026-13-01"]) {
+      await expect(arService.receivePayment(paymentOn(customer.id, impossible))).rejects.toThrow("invalid_date");
+      await expect(arService.getArAging(biz.id, impossible)).rejects.toThrow("invalid_date");
+    }
+    const { rows } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM ar_receipts");
+    expect(rows[0].n).toBe(0);
+  });
+
+  it("accepts a real leap day and files the receipt on it", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment(paymentOn(customer.id, "2024-02-29"));
+    expect(receipt.receiptDate).toBe("2024-02-29");
+    const aging = await arService.getArAging(biz.id, "2024-02-29");
+    expect(aging.asOfDate).toBe("2024-02-29");
+    expect(aging.rows[0].current).toBe(-10_000);
+  });
+});
+
+describe("listCustomerBalancePage", () => {
+  it("pages, counts and searches in SQL, and the summary does not move with the window", async () => {
+    const ali = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const sara = await customersService.createCustomer(biz.id, { name: "Sara" });
+    const mina = await customersService.createCustomer(biz.id, { name: "Mina" });
+    await postCreditOrder("2025-04-01", ali.id, 500_000);
+    await postCreditOrder("2025-04-02", sara.id, 300_000);
+    await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: mina.id,
+      method: "cash",
+      amount: 250_000,
+      receiptDate: "2025-04-03",
+      idempotencyKey: randomUUID(),
+      createdBy: user.id,
+    });
+
+    const first = await arService.listCustomerBalancePage(biz.id, { limit: 2, offset: 0 });
+    expect(first.customers).toHaveLength(2);
+    expect(first.total).toBe(3);
+    expect(first.summary.receivableTotal).toBe(800_000);
+    expect(first.summary.advanceTotal).toBe(250_000);
+    expect(first.summary.netTotal).toBe(550_000);
+    // The whole point of showing both numbers: the subledger IS the control
+    // account, and the screen can prove it rather than assume it.
+    expect(first.summary.controlBalance).toBe(550_000);
+    expect(first.summary.reconciles).toBe(true);
+    expect(first.summary.parties).toBe(3);
+
+    const second = await arService.listCustomerBalancePage(biz.id, { limit: 2, offset: 2 });
+    expect(second.customers).toHaveLength(1);
+    // Paginating changed the window, never the totals.
+    expect(second.summary).toEqual(first.summary);
+
+    const searched = await arService.listCustomerBalancePage(biz.id, { q: "Sar", limit: 25, offset: 0 });
+    expect(searched.customers.map((c) => c.customerId)).toEqual([sara.id]);
+    expect(searched.total).toBe(1);
+  });
+
+  it("folds the search the way the app's pickers fold a typed needle", async () => {
+    // Stored with a Persian ی/ک; searched with the Arabic spelling a phone
+    // keyboard produces. The fold has to happen on the column, in SQL.
+    const ali = await insertParty(biz.id, "علی رضایی", ["customer"]);
+    await postCreditOrder("2025-04-01", ali, 100_000);
+    const found = await arService.listCustomerBalancePage(biz.id, { q: "علي", limit: 25, offset: 0 });
+    expect(found.customers.map((c) => c.customerId)).toEqual([ali]);
+    const withDigits = await arService.listCustomerBalancePage(biz.id, { q: "۱۲۳", limit: 25, offset: 0 });
+    expect(withDigits.total).toBe(0);
+  });
+
+  it("searches the customer's phone and accounting code, not only the name", async () => {
+    const ali = await customersService.createCustomer(biz.id, { name: "Ali", phone: "09121234567" });
+    await db.query("UPDATE parties SET accounting_code = '100023' WHERE id = $1", [ali.id]);
+    const sara = await customersService.createCustomer(biz.id, { name: "Sara" });
+    await postCreditOrder("2025-04-01", ali.id, 500_000);
+    await postCreditOrder("2025-04-01", sara.id, 300_000);
+
+    // The phone on the file, and the accounting code the directory prints
+    // beside the name — the two other things a person types into that box.
+    const byPhone = await arService.listCustomerBalancePage(biz.id, { q: "0912", limit: 25, offset: 0 });
+    expect(byPhone.customers.map((row) => row.customerId)).toEqual([ali.id]);
+    expect(byPhone.total).toBe(1);
+
+    const byCode = await arService.listCustomerBalancePage(biz.id, { q: "100023", limit: 25, offset: 0 });
+    expect(byCode.customers.map((row) => row.customerId)).toEqual([ali.id]);
+  });
+
+  it("keeps the unattributed bucket in the page and in the summary", async () => {
+    await postCreditOrder("2025-04-01", null, 300_000);
+    const page = await arService.listCustomerBalancePage(biz.id, { limit: 25, offset: 0 });
+    expect(page.customers).toEqual([
+      expect.objectContaining({ customerId: "unknown", balance: 300_000 }),
+    ]);
+    expect(page.summary.unattributedBalance).toBe(300_000);
+  });
+
+  it("answers an empty page for a business whose chart has no A/R account", async () => {
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
+      [`other-${randomUUID().slice(0, 8)}`],
+    );
+    const page = await arService.listCustomerBalancePage(other.rows[0].id, { limit: 25, offset: 0 });
+    expect(page).toEqual({
+      customers: [],
+      total: 0,
+      nextOffset: null,
+      summary: expect.objectContaining({ netTotal: 0, reconciles: true, parties: 0 }),
+    });
+  });
+});
+
+describe("getCustomerStatement isolation", () => {
+  it("returns only the requested customer's lines, however much the other customer has", async () => {
+    const ali = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const sara = await customersService.createCustomer(biz.id, { name: "Sara" });
+    await postCreditOrder("2025-04-01", ali.id, 500_000);
+    for (let i = 0; i < 5; i += 1) await postCreditOrder("2025-04-02", sara.id, 10_000);
+
+    const aliLines = await arService.getCustomerStatement(biz.id, ali.id);
+    expect(aliLines).toHaveLength(1);
+    expect(aliLines[0].debit).toBe(500_000);
+    // The statement's cost is the statement's own length: B's five rows were
+    // never read to answer a question about A.
+    const saraLines = await arService.getCustomerStatement(biz.id, sara.id);
+    expect(saraLines).toHaveLength(5);
+    expect(saraLines.every((line) => line.credit === 0 && line.debit === 10_000)).toBe(true);
+  });
+
+  it("answers an id that matches nothing with an empty statement, not the whole book", async () => {
+    await postCreditOrder("2025-04-01", null, 300_000);
+    expect(await arService.getCustomerStatement(biz.id, randomUUID())).toEqual([]);
+    // A malformed id is not a uuid — asking Postgres would raise 22P02 — and
+    // it is not the unknown sentinel either, so it is simply empty.
+    expect(await arService.getCustomerStatement(biz.id, "not-a-uuid")).toEqual([]);
+  });
+
+  it("still serves the unattributed bucket under its own key", async () => {
+    await postCreditOrder("2025-04-01", null, 300_000);
+    const lines = await arService.getCustomerStatement(biz.id, "unknown");
+    expect(lines).toHaveLength(1);
+    expect(lines[0].debit).toBe(300_000);
+    expect(lines[0].source.type).toBe("order");
+  });
+
+  it("carries the source record's own identifiers, never a description to reverse-engineer", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "bank",
+      amount: 200_000,
+      receiptDate: "2025-04-10",
+      idempotencyKey: randomUUID(),
+      createdBy: user.id,
+    });
+
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    const receiptLine = lines.find((line) => line.type === "receipt")!;
+    expect(receiptLine.entryId).toBeTruthy();
+    expect(receiptLine.source).toEqual({
+      type: "ar_receipt",
+      id: receipt.id,
+      label: "دریافت بانکی",
+      orderId: null,
+      orderNumber: null,
+    });
+
+    const order = await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const invoiceLine = (await arService.getCustomerStatement(biz.id, customer.id)).find((line) => line.type === "invoice")!;
+    expect(invoiceLine.source.type).toBe("order");
+    expect(invoiceLine.source.id).toBe(order);
+    expect(invoiceLine.source.orderId).toBe(order);
+    const { rows: orderRows } = await db.query<{ order_number: string }>(
+      "SELECT order_number::text AS order_number FROM orders WHERE id = $1",
+      [order],
+    );
+    expect(String(invoiceLine.source.orderNumber)).toBe(orderRows[0].order_number);
+  });
+});
+
+describe("getArAging scope and buckets", () => {
+  it("ignores activity dated after the as-of date", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-05-01", customer.id, 100_000);
+    expect((await arService.getArAging(biz.id, "2025-04-15")).rows).toEqual([]);
+    expect((await arService.getArAging(biz.id, "2025-05-15")).rows).toHaveLength(1);
+  });
+
+  it("places each open invoice in its own bucket, at the 30/60/90 boundaries", async () => {
+    const asOf = "2025-04-15";
+    const current = await customersService.createCustomer(biz.id, { name: "Current" });
+    const thirty = await customersService.createCustomer(biz.id, { name: "Thirty" });
+    const sixty = await customersService.createCustomer(biz.id, { name: "Sixty" });
+    const ninety = await customersService.createCustomer(biz.id, { name: "Ninety" });
+    await postCreditOrder("2025-04-01", current.id, 100_000); // 14 days
+    await postCreditOrder("2025-03-01", thirty.id, 200_000); // 45 days
+    await postCreditOrder("2025-01-30", sixty.id, 300_000); // 75 days
+    await postCreditOrder("2024-12-01", ninety.id, 400_000); // 135 days
+
+    const aging = await arService.getArAging(biz.id, asOf);
+    const byName = new Map(aging.rows.map((row) => [row.customerName, row]));
+    expect(byName.get("Current")?.current).toBe(100_000);
+    expect(byName.get("Thirty")?.d31_60).toBe(200_000);
+    expect(byName.get("Sixty")?.d61_90).toBe(300_000);
+    expect(byName.get("Ninety")?.over90).toBe(400_000);
+    expect(aging.totals.total).toBe(1_000_000);
+
+    const { rows } = await db.query<{ balance: string }>(
+      `SELECT (COALESCE(SUM(debit),0) - COALESCE(SUM(credit),0))::text AS balance
+         FROM journal_lines WHERE account_id = $1`,
       [acct.accountsReceivable],
     );
     expect(aging.totals.total).toBe(Number(rows[0].balance));

@@ -8,6 +8,8 @@ import { countRemainingRecoveryCodes } from "@/lib/mfa-recovery";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
 import { createSession } from "@/lib/employee-service";
+import { completeInvitationAcceptance } from "@/lib/team-service";
+import { stampPhoneVerified } from "@/lib/phone-otp";
 import {
   membershipBlockedReason,
   membershipsForPlatformUser,
@@ -18,7 +20,11 @@ import {
   recordAuthSuccess,
 } from "@/lib/login-lockout-service";
 import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
-import { selectPrimaryMfaEnrolment, type MfaMethod } from "@/lib/mfa";
+import {
+  mayConfirmPendingEnrolmentAtLogin,
+  selectPrimaryMfaEnrolment,
+  type MfaMethod,
+} from "@/lib/mfa";
 
 export async function POST(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
@@ -95,6 +101,21 @@ export async function POST(request: NextRequest) {
 
     const detail = await verifyAndConfirmMfaCode({
       subjectRealm: "platform_user",
+      /**
+       * Issue #854 (P1.11): confirm a pending enrolment here only when the
+       * account has no confirmed factor — the mid-enrolment lockout case. If a
+       * confirmed factor exists, the strict path applies and a half-finished
+       * enrolment cannot stand in as the second factor.
+       */
+      confirmPendingEnrolment: mayConfirmPendingEnrolmentAtLogin(enrolments, method),
+      /*
+       * Issue #854 (invariant 4): signing in spends a login challenge only —
+       * on both branches. The strict branch proves a confirmed factor; the
+       * mid-enrolment branch (no confirmed factor yet) uses the same
+       * `mfa_login` challenge the login screen already sent and activates the
+       * pending row as it succeeds.
+       */
+      smsPurposes: ["mfa_login"],
       subjectId: user.id,
       method,
       code,
@@ -113,6 +134,80 @@ export async function POST(request: NextRequest) {
       user.id,
     );
 
+    /**
+     * Issue #854 (P0.4) — an invitation acceptance that was interrupted by the
+     * second factor finishes here, before any session is minted.
+     *
+     * The acceptance route proves the invitation and the password, then hands
+     * over a pending token that carries `invitationId`; the membership is
+     * deliberately *not* written at that point (an abandoned ceremony must not
+     * leave one behind). Completing it inside the same call that just verified
+     * the factor is what keeps the documented order — accept membership, then
+     * session — and it runs before `membershipsForPlatformUser` below, so the
+     * membership being created is exactly what that lookup finds.
+     */
+    if (payload.invitationId) {
+      await completeInvitationAcceptance({
+        invitationId: payload.invitationId,
+        platformUserId: user.id,
+      });
+    }
+
+    /**
+     * Issue #854 (GAP 8) — commit the phone-OTP ceremony that this pending
+     * token stands for, now that the second factor has passed.
+     *
+     * The phone door redeemed its challenge but deliberately stamped nothing
+     * when a second factor was still owed. Everything committed here comes
+     * from the *signed* token — the membership, the proven number, the number
+     * to attach — never from this request body, so there is no client input a
+     * crafted request could forge into a verification. The membership is
+     * re-read first: if it was suspended, offboarded or detached between the
+     * two halves of the ceremony, the stamps (and the 7-day PIN window they
+     * open) are refused. A number that changed in between is not stamped
+     * either — it was never proven — while the attach flow writes exactly the
+     * number the ceremony verified.
+     */
+    if (payload.primaryAuth === "phone_otp" && payload.phoneCompletion) {
+      const completion = payload.phoneCompletion;
+      const businessId = payload.businessId;
+      if (!businessId) {
+        return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      }
+      const committable = await withTenant(businessId, async () => {
+        const { rows: fresh } = await query<{
+          id: string;
+          phone_e164: string | null;
+          active: boolean;
+          identity_active: boolean | null;
+        }>(
+          `SELECT u.id, u.phone_e164, u.is_active AS active,
+                  p.is_active AS identity_active
+             FROM users u
+             LEFT JOIN platform_users p ON p.id = u.platform_user_id
+            WHERE u.id = $1 AND u.business_id = $2`,
+          [completion.membershipId, businessId],
+        );
+        const member = fresh[0];
+        if (!member || !member.active || member.identity_active === false) return false;
+        const attaching = completion.attachPhone ?? null;
+        const phoneStillProven =
+          attaching !== null ||
+          (completion.provenPhone !== null && member.phone_e164 === completion.provenPhone);
+        if (phoneStillProven) {
+          await stampPhoneVerified({
+            businessId,
+            userId: completion.membershipId,
+            phone: attaching,
+          });
+        }
+        return true;
+      });
+      if (!committable) {
+        return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      }
+    }
+
     const memberships = await membershipsForPlatformUser(user.id);
     const usable = memberships.filter((m) => membershipBlockedReason(m) === null);
     const chosen = payload.businessId
@@ -123,6 +218,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "business_unavailable" }, { status: 403 });
     }
 
+    // The signed completion context names the membership this ceremony signs
+    // into; a different one cannot be substituted by the identity lookup.
+    if (
+      payload.phoneCompletion &&
+      chosen.userId !== payload.phoneCompletion.membershipId
+    ) {
+      return NextResponse.json({ error: "business_unavailable" }, { status: 403 });
+    }
+
     const employeeSessionId =
       payload.employeeSession?.employeeSessionId ??
       (
@@ -130,6 +234,13 @@ export async function POST(request: NextRequest) {
           createSession(chosen.userId, chosen.businessId, {
             locationId: chosen.locationId,
             deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? "Web (MFA)",
+            /**
+             * Issue #854 (GAP 8) — the session keeps the true provenance of a
+             * phone-OTP door finished through MFA. The label above is the only
+             * client-supplied metadata it carries, observed on *this* request
+             * by the server; nothing is replayed from the earlier call.
+             */
+            loginMethod: payload.primaryAuth === "phone_otp" ? "phone_otp" : null,
           }),
         )
       ).session.id;
