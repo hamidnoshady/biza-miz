@@ -162,10 +162,10 @@ export function fetchCmsDeployTargets(
   opts: PlatformExecutionCallOptions = {},
 ): Promise<CmsDeployTargetRow[]> {
   return withCmsLog("deploy_targets.list", opts, async () => {
+    // Platform-key route (audit F05): the collection's REST list is session-only.
     const body = await cmsRequest<{ docs: Record<string, unknown>[] }>(platformConfig(config), {
       fetchImpl: opts.fetchImpl,
-      path: "/api/deploy-targets",
-      query: { depth: 0, limit: 100, pagination: false },
+      path: "/api/deploy-targets/platform-list",
     });
     return (body.docs ?? []).map((row) => sanitizeDeployTarget(row));
   });
@@ -181,7 +181,7 @@ export function createCmsDeployTarget(
       body: data,
       fetchImpl: opts.fetchImpl,
       method: "POST",
-      path: "/api/deploy-targets",
+      path: "/api/deploy-targets/platform-save",
     });
     return sanitizeDeployTarget(body.doc ?? {});
   });
@@ -195,10 +195,10 @@ export function updateCmsDeployTarget(
 ): Promise<CmsDeployTargetRow> {
   return withCmsLog("deploy_targets.update", opts, async () => {
     const body = await cmsRequest<{ doc: Record<string, unknown> }>(platformConfig(config), {
-      body: data,
+      body: { ...data, id },
       fetchImpl: opts.fetchImpl,
-      method: "PATCH",
-      path: `/api/deploy-targets/${encodeURIComponent(id)}`,
+      method: "POST",
+      path: "/api/deploy-targets/platform-save",
     });
     return sanitizeDeployTarget(body.doc ?? {});
   });
