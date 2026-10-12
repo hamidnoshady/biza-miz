@@ -28,6 +28,7 @@ import { listConnections, getConnection } from "./integrations/connections-servi
 import { retryWpQueueRow, retryAllFailedWpQueue, flushWpOutbox } from "./integrations/wp-manager-service";
 import { updateCmsSiteDomain } from "./cms/website-service";
 import { createAttributeDefinition } from "./product-attributes-service";
+
 import {
   createMediaCollection,
   renameMediaCollection,
@@ -60,7 +61,7 @@ import { draftWebsitePost, updateWebsitePost, upsertWebsiteProduct } from "./web
 import { queueTriggeredMessageCampaign } from "./message-campaigns-service";
 import type { PurchaseItemInput } from "./purchase-lines";
 // Issue #883 package 2, batch A — accounting services (batch verbs).
-import { AccountsError, createAccount, updateAccount } from "./accounts-service";
+import { AccountsError, createAccount, updateAccount, deleteAccount } from "./accounts-service";
 import { approveDraft, rejectDraft } from "./manual-journal-service";
 import { ArError, receivePayment } from "./ar-service";
 import { ApError, payBill, reverseApPayment } from "./ap-service";
@@ -2674,6 +2675,21 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch Y2 — chart-of-accounts delete ──────────────
+// The service owns every refusal (well-known codes, postings, draft lines,
+// child accounts, lost races) and names it with the route's own codes.
+const accountDelete: AutopilotExecutor = async (ctx) => {
+  const accountId = str(ctx.payload.accountId) ?? str(ctx.payload.id);
+  if (!accountId) return fail("missing_fields");
+  try {
+    await deleteAccount(ctx.businessId, accountId);
+    return { ok: true, result: { ok: true, accountId } };
+  } catch (err) {
+    if (err instanceof AccountsError) return fail(err.message);
+    throw err;
+  }
+};
+
 // ── Issue #883 package 2, batch X — media library organisation ─────────────
 // Collections are a grouping layer: create/rename/delete never touch stored
 // bytes. The trash is soft (recoverable by media.asset.restore); the HARD
@@ -3172,6 +3188,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   retailInvoiceVoid,
   websiteOrderStatus,
   websiteDomainSet,
+  accountDelete,
   mediaCollectionCreate,
   mediaCollectionRename,
   mediaCollectionDelete,

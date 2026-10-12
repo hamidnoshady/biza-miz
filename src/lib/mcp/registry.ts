@@ -419,6 +419,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // the soft trash is recoverable. The hard delete (storage object gone for
   // good) stays screen-only, recorded on the matrix row.
   { actionType: "media.collection.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  // Batch Y2 — a no-postings account can be re-added; the service refuses
+  // every used shape (postings, drafts, children, well-known codes).
+  { actionType: "account.delete", kind: "write", app: "accounting", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

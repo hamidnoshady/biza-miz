@@ -66,7 +66,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Chart of accounts",
     routes: ["ledger/accounts"],
     note: "account history rides list_audit_log {entity: account} — same service, stricter gate is the audit screen's own teamManage",
-    ops: { listDetail: ["list_accounts", "get_account_statement"], create: ["account.create"], update: ["account.update", "account.disable"] },
+    ops: { listDetail: ["list_accounts", "get_account_statement"], create: ["account.create"], update: ["account.update", "account.disable"], lifecycle: ["account.delete"] },
     test: "integration/chart-of-accounts.integration.test.ts",
   },
   {

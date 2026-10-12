@@ -15,8 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (48)
-- **accounting.accounts** (Accounting · Chart of accounts) — partial
+### Tenant (47)
 - **accounting.entries** (Accounting · Journal entries) — partial
 - **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
 - **accounting.payroll** (Accounting · Payroll (settings, staff, runs, advances)) — partial
@@ -88,11 +87,11 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 24 · partial: 38 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 25 · partial: 37 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Accounting | Chart of accounts<br>_account history rides list_audit_log {entity: account} — same service, stricter gate is the audit screen's own teamManage_ | get_account_statement, list_accounts | account.create | account.disable, account.update | (route only) | — | accounts.edit, ledger.view | connection mode | get_account_statement, list_accounts, account.create, account.disable, account.update | integration/chart-of-accounts.integration.test.ts | partial |
+| Accounting | Chart of accounts<br>_account history rides list_audit_log {entity: account} — same service, stricter gate is the audit screen's own teamManage_ | get_account_statement, list_accounts | account.create | account.disable, account.update | account.delete | — | accounts.edit, ledger.view | connection mode | get_account_statement, list_accounts, account.create, account.disable, account.update, account.delete | integration/chart-of-accounts.integration.test.ts | covered |
 | Accounting | Journal entries<br>_list, detail, reverse (manual drafts covered by journal.manual.propose)_ | list_journal_entries, list_manual_journal_drafts | (route only) | — | journal.draft.approve, journal.draft.reject, journal.manual.propose | — | ledger.approve, ledger.propose, ledger.view | connection mode; step-up (always approve) | list_journal_entries, list_manual_journal_drafts, journal.draft.approve, journal.draft.reject, journal.manual.propose | integration/ledger-reports.integration.test.ts | partial |
 | Accounting | Receivables (receipts, aging, customers) | get_ar_aging, list_receipts | ar.receipt.record | — | — | — | finance.receivables_manage, ledger.view | step-up (always approve) | get_ar_aging, list_receipts, ar.receipt.record | integration/expense.integration.test.ts | covered |
 | Accounting | Payables (payments, aging, suppliers) | get_ap_upcoming, list_payments | ap.payment.record | — | ap.payment.reverse | — | finance.payables_manage, ledger.approve, ledger.view | step-up (always approve) | get_ap_upcoming, list_payments, ap.payment.record, ap.payment.reverse | integration/expense.integration.test.ts | covered |

@@ -1647,6 +1647,19 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_account_delete",
+    actionType: "account.delete",
+    english:
+      "Delete a chart account — refused when posted/drafted/children/well-known; safe to re-add otherwise.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { accountId: id("شناسهٔ حساب — از list_accounts") },
+      required: ["accountId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_media_collection_create",
     actionType: "media.collection.create",
     english: "Create a media collection (a grouping only; no file moves).",

@@ -339,6 +339,8 @@ export type ActionType =
   | "media.asset.set_collection"
   | "media.asset.trash"
   | "media.asset.restore"
+  // Batch Y2 — chart-of-accounts delete (refused by the service when used).
+  | "account.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -378,6 +380,7 @@ export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
   | "websiteOrderStatus"
   | "websiteDomainSet"
+  | "accountDelete"
   | "mediaCollectionCreate"
   | "mediaCollectionRename"
   | "mediaCollectionDelete"
@@ -1350,6 +1353,14 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "account.delete": {
+    type: "account.delete",
+    endpoint: "/api/ledger/accounts/[id]",
+    method: "DELETE",
+    label: "حذف حساب از دفتر — سرویس برای حسابِ به‌کاررفته (سند خورده/پیش‌نویس/فرزند/حساب‌های شناخته‌شده) خودداری می‌کند",
+    payloadHint: '{ accountId: string }',
+    executor: "accountDelete",
   },
   "media.collection.create": {
     type: "media.collection.create",
