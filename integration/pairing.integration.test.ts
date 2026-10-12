@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { getPool, query, withTenant, withoutTenantScope } from "../src/lib/db";
 import { provisionBusiness } from "../src/lib/business-provisioning";
+import { createAccount } from "../src/lib/accounts-service";
 import {
   acknowledgePairingSession,
   issuePairingCode,
@@ -21,7 +22,7 @@ import {
   revokePairingCode,
 } from "../src/lib/pairing-service";
 import { applyPairingSnapshot, repairPairingSnapshot } from "../src/lib/pairing-apply";
-import { validateSnapshot } from "../src/lib/pairing-snapshot";
+import { validateSnapshot, type PairingSnapshot } from "../src/lib/pairing-snapshot";
 import { acknowledgePendingPairing } from "../src/lib/server-sync";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -180,7 +181,7 @@ describe("pairing round trip", () => {
       issued.code,
       "127.0.0.1",
       "Windows Business Suite",
-      installationId,
+      installationId, { maxSnapshotVersion: 7 },
     );
     expect(redeemed.ok).toBe(true);
     if (!redeemed.ok) return;
@@ -197,7 +198,7 @@ describe("pairing round trip", () => {
       issued.code,
       "127.0.0.1",
       "Windows Business Suite",
-      installationId,
+      installationId, { maxSnapshotVersion: 7 },
     );
     expect(second).toMatchObject({
       ok: true,
@@ -211,7 +212,7 @@ describe("pairing round trip", () => {
       issued.code,
       "127.0.0.1",
       "Windows Business Suite",
-      `desktop-installation-${randomUUID()}`,
+      `desktop-installation-${randomUUID()}`, { maxSnapshotVersion: 7 },
     );
     expect(anotherInstall).toEqual({
       ok: false,
@@ -357,8 +358,8 @@ describe("pairing round trip", () => {
         issued.code,
         "127.0.0.1",
         "Windows Business Suite",
-        installationId,
-      ),
+        installationId, { maxSnapshotVersion: 7 },
+    ),
     ).resolves.toEqual({ ok: false, error: "code_already_redeemed" });
   }, 120_000);
 
@@ -380,7 +381,7 @@ describe("pairing round trip", () => {
         issuePairingCode(created.businessId, adminId, created.locationId),
       );
       if (!("code" in issued)) throw new Error("no code");
-      const redeemed = await redeemPairingCode(issued.code, "127.0.0.1", "Windows Business Suite", installationId);
+      const redeemed = await redeemPairingCode(issued.code, "127.0.0.1", "Windows Business Suite", installationId, { maxSnapshotVersion: 7 });
       if (!redeemed.ok) throw new Error(redeemed.error);
       return redeemed;
     };
@@ -471,5 +472,389 @@ describe("pairing code lifecycle", () => {
       issuePairingCode(created.businessId, adminId, created.locationId),
     );
     expect("code" in reissued).toBe(true);
+  }, 120_000);
+});
+
+/**
+ * Issue #824 finding 2: restore the chart as a tree. A four-level chain must
+ * come back with the levels its parents imply; a fifth tier, a missing parent or
+ * a cycle must refuse the whole snapshot and leave nothing behind; an archived
+ * account must keep its flag; and two businesses that share codes must not see
+ * or disturb each other on the same device.
+ */
+describe("issue #824 finding 2: pairing restores the account chart as a tree", () => {
+  type Snapshot = PairingSnapshot;
+
+  function localClient(): Client {
+    return new Client({ connectionString: urlFor(localDb) });
+  }
+
+  /**
+   * Provision a business, shape its chart, and redeem a code for its snapshot.
+   * The caller points the pool at the server database first.
+   */
+  async function snapshotWithChart(
+    name: string,
+    shape: (businessId: string) => Promise<void>,
+  ): Promise<{ businessId: string; snapshot: Snapshot }> {
+    const created = await provisionBusiness({
+      businessName: name,
+      ownerName: "مالک",
+      email: `owner-${randomUUID()}@example.com`,
+      password: "correct-horse",
+      seedChartOfAccounts: false,
+    });
+    await shape(created.businessId);
+    const adminId = await createPlatformAdmin();
+    const issued = await withoutTenantScope("platform", () =>
+      issuePairingCode(created.businessId, adminId, created.locationId),
+    );
+    if (!("code" in issued)) throw new Error("expected a code");
+    const redeemed = await redeemPairingCode(issued.code, "127.0.0.1", "Windows Business Suite", `desktop-${randomUUID()}`, { maxSnapshotVersion: 7 });
+    if (!redeemed.ok) throw new Error(`redeem failed: ${redeemed.error}`);
+    const validation = validateSnapshot(JSON.parse(JSON.stringify(redeemed.snapshot)));
+    if (!validation.ok) throw new Error("snapshot did not validate");
+    return { businessId: created.businessId, snapshot: validation.snapshot };
+  }
+
+  /** Four tiers under one root, built through the editor, so levels are real. */
+  async function fourTierChart(businessId: string): Promise<void> {
+    await withTenant(businessId, async () => {
+      const root = await createAccount({ businessId, code: "9100", name: "دارایی تست", type: "asset" });
+      const kol = await createAccount({ businessId, code: "9110", name: "کل", type: "asset", parentId: root.id });
+      const moein = await createAccount({ businessId, code: "9111", name: "معین", type: "asset", parentId: kol.id });
+      await createAccount({ businessId, code: "9112", name: "تفصیلی", type: "asset", parentId: moein.id });
+    });
+  }
+
+  async function localAccounts(businessId: string): Promise<Array<{ code: string; level: string; is_active: boolean; parent_code: string | null }>> {
+    const c = localClient();
+    await c.connect();
+    try {
+      const { rows } = await c.query(
+        `SELECT a.code, a.level::text AS level, a.is_active, p.code AS parent_code
+           FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
+          WHERE a.business_id = $1 ORDER BY a.code`,
+        [businessId],
+      );
+      return rows;
+    } finally {
+      await c.end();
+    }
+  }
+
+  async function localBusinessCount(businessId: string): Promise<number> {
+    const c = localClient();
+    await c.connect();
+    try {
+      const { rows } = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM businesses WHERE id = $1`, [businessId]);
+      return Number(rows[0].n);
+    } finally {
+      await c.end();
+    }
+  }
+
+  it("restores a four-tier chain with each level derived from its parent, and keeps an archived kol with its active children", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("چهار سطحی", async (id) => {
+      await fourTierChart(id);
+      // The legacy state the editor now forbids: an archived kol whose moein and
+      // tafsili are still active. The restore must mirror it, not flatten it.
+      await withTenant(id, () => query(`UPDATE accounts SET is_active = false WHERE code = '9110'`));
+    });
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(snapshot, "https://pos.example.com", {});
+
+    const restored = await localAccounts(businessId);
+    expect(restored.map((a) => [a.code, a.level, a.is_active, a.parent_code])).toEqual([
+      ["9100", "group", true, null],
+      ["9110", "kol", false, "9100"],
+      ["9111", "moein", true, "9110"],
+      ["9112", "tafsili", true, "9111"],
+    ]);
+  }, 120_000);
+
+  it("restores a snapshot written before archived accounts travelled: every account is active", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("قدیمی", fourTierChart);
+    // The shape the released v6 contract carried: no account-state fields.
+    const legacy = JSON.parse(JSON.stringify(snapshot)) as Snapshot;
+    legacy.version = 6;
+    for (const account of legacy.accounts) {
+      delete (account as { isActive?: boolean }).isActive;
+      delete (account as { isContra?: boolean }).isContra;
+    }
+    expect(validateSnapshot(JSON.parse(JSON.stringify(legacy))).ok).toBe(true);
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(legacy, "https://pos.example.com", {});
+    const restored = await localAccounts(businessId);
+    expect(restored).toHaveLength(4);
+    expect(restored.every((a) => a.is_active)).toBe(true);
+  }, 120_000);
+
+  it("refuses a fifth tier, a missing parent and a cycle, each with nothing written", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("نامعتبر", fourTierChart);
+    const tafsili = snapshot.accounts.find((a) => a.code === "9112")!;
+    const withExtra = (extra: Snapshot["accounts"][number]) => ({ ...snapshot, accounts: [...snapshot.accounts, extra] }) as Snapshot;
+    const base = { id: randomUUID(), name: "نامعتبر", type: "asset" as const };
+
+    await useDatabase(localDb);
+    const cases: Array<{ label: string; bad: Snapshot; reason: string }> = [
+      {
+        label: "fifth tier",
+        bad: withExtra({ ...base, parentCode: tafsili.code, code: "9113" }),
+        reason: "too_deep",
+      },
+      {
+        label: "missing parent",
+        bad: withExtra({ ...base, parentCode: "9999", code: "9120" }),
+        reason: "parent_missing",
+      },
+      {
+        label: "cycle",
+        bad: {
+          ...snapshot,
+          accounts: [
+            ...snapshot.accounts,
+            { ...base, parentCode: "9130", code: "9121" },
+            { ...base, id: randomUUID(), parentCode: "9121", code: "9130" },
+          ],
+        } as Snapshot,
+        reason: "parent_cycle",
+      },
+    ];
+    for (const { label, bad, reason } of cases) {
+      expect(validateSnapshot(JSON.parse(JSON.stringify(bad))).ok, label).toBe(false);
+      await expect(applyPairingSnapshot(bad, "https://pos.example.com", {}), label).rejects.toThrow(
+        `account_tree_${reason}`,
+      );
+      expect(await localBusinessCount(businessId), label).toBe(0);
+      expect(await localAccounts(businessId), label).toEqual([]);
+    }
+  }, 120_000);
+
+  it("keeps two businesses that share codes apart on one device", async () => {
+    await useDatabase(serverDb);
+    const first = await snapshotWithChart("شرکت اول", async (id) => {
+      await withTenant(id, async () => {
+        await createAccount({ businessId: id, code: "9500", name: "اول", type: "asset" });
+      });
+    });
+    await useDatabase(serverDb);
+    const second = await snapshotWithChart("شرکت دوم", async (id) => {
+      await withTenant(id, async () => {
+        await createAccount({ businessId: id, code: "9500", name: "دوم", type: "liability" });
+      });
+    });
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(first.snapshot, "https://pos.example.com", {});
+    await applyPairingSnapshot(second.snapshot, "https://pos.example.com", {});
+
+    expect(await localAccounts(first.businessId)).toEqual([
+      { code: "9500", level: "group", is_active: true, parent_code: null },
+    ]);
+    expect(await localAccounts(second.businessId)).toEqual([
+      { code: "9500", level: "group", is_active: true, parent_code: null },
+    ]);
+    // The same code resolves to each business's own row, by name. (Row-level
+    // isolation for a non-superuser runtime role is asserted separately, in
+    // chart-of-accounts.integration.test.ts; this pool owns the tables.)
+    const c = localClient();
+    await c.connect();
+    try {
+      const { rows } = await c.query<{ business_id: string; name: string; type: string }>(
+        `SELECT business_id, name, type::text AS type FROM accounts WHERE code = '9500' ORDER BY name`,
+      );
+      expect(rows).toEqual([
+        { business_id: first.businessId, name: "اول", type: "asset" },
+        { business_id: second.businessId, name: "دوم", type: "liability" },
+      ]);
+    } finally {
+      await c.end();
+    }
+  }, 180_000);
+
+  /** Provision a business and shape its chart, without the F&B seed. */
+  async function provisionWithChart(
+    name: string,
+    shape: (businessId: string) => Promise<void>,
+  ): Promise<{ businessId: string; locationId: string }> {
+    const created = await provisionBusiness({
+      businessName: name,
+      ownerName: "مالک",
+      email: `owner-${randomUUID()}@example.com`,
+      password: "correct-horse",
+      seedChartOfAccounts: false,
+    });
+    await shape(created.businessId);
+    return { businessId: created.businessId, locationId: created.locationId };
+  }
+
+  /** A fresh one-time code for a business. */
+  async function issueFor(businessId: string, locationId: string): Promise<string> {
+    const adminId = await createPlatformAdmin();
+    const issued = await withoutTenantScope("platform", () => issuePairingCode(businessId, adminId, locationId));
+    if (!("code" in issued)) throw new Error("expected a code");
+    return issued.code;
+  }
+
+  // ---- issue #824 review: type consistency, isContra, and the version boundary ----
+
+  function clone<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+
+  async function localFlags(
+    businessId: string,
+  ): Promise<Array<{ code: string; type: string; is_active: boolean; is_contra: boolean }>> {
+    const c = localClient();
+    await c.connect();
+    try {
+      const { rows } = await c.query(
+        `SELECT code, type::text AS type, is_active, is_contra FROM accounts WHERE business_id = $1 ORDER BY code`,
+        [businessId],
+      );
+      return rows;
+    } finally {
+      await c.end();
+    }
+  }
+
+  /** A chart with a contra account under an active root: the state v6 cannot express. */
+  async function contraChart(businessId: string): Promise<void> {
+    await withTenant(businessId, async () => {
+      const root = await createAccount({ businessId, code: "9200", name: "دارایی", type: "asset" });
+      await createAccount({ businessId, code: "9210", name: "استهلاک انباشته", type: "asset", parentId: root.id, isContra: true });
+    });
+  }
+
+  it("issue #824 finding 1: a child whose type differs from its parent is refused by validation and by restore, with nothing written", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("نوع ناسازگار", fourTierChart);
+    const bad = clone(snapshot);
+    bad.accounts.find((a) => a.code === "9111")!.type = "liability";
+    expect(validateSnapshot(clone(bad)).ok, "validation must refuse the mismatch").toBe(false);
+
+    await useDatabase(localDb);
+    await expect(applyPairingSnapshot(bad, "https://pos.example.com", {})).rejects.toThrow(
+      "account_tree_type_mismatch:9111",
+    );
+    expect(await localBusinessCount(businessId)).toBe(0);
+    expect(await localAccounts(businessId)).toEqual([]);
+  }, 120_000);
+
+  it("issue #824 finding 3: isContra survives a full round trip, server to desktop", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("متضاد", async (id) => {
+      await withTenant(id, async () => {
+        const root = await createAccount({ businessId: id, code: "9300", name: "دارایی", type: "asset" });
+        await createAccount({ businessId: id, code: "9310", name: "استهلاک انباشته", type: "asset", parentId: root.id, isContra: true });
+        await createAccount({ businessId: id, code: "9311", name: "عادی", type: "asset", parentId: root.id });
+      });
+    });
+    expect(snapshot.accounts.find((a) => a.code === "9310")?.isContra, "producer must carry isContra").toBe(true);
+    expect(snapshot.accounts.find((a) => a.code === "9311")?.isContra, "producer must carry false").toBe(false);
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(snapshot, "https://pos.example.com", {});
+    expect(await localFlags(businessId)).toEqual([
+      { code: "9300", type: "asset", is_active: true, is_contra: false },
+      { code: "9310", type: "asset", is_active: true, is_contra: true },
+      { code: "9311", type: "asset", is_active: true, is_contra: false },
+    ]);
+  }, 120_000);
+
+  it("version boundary: a desktop that cannot read archived or contra state is refused before its code is spent", async () => {
+    await useDatabase(serverDb);
+    const { businessId, locationId } = await provisionWithChart("مرز نسخه", contraChart);
+    const code = await issueFor(businessId, locationId);
+    const installation = `desktop-${randomUUID()}`;
+
+    // The legacy desktop sends no capability. A contra account cannot travel in v6.
+    const legacy = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", installation);
+    expect(legacy).toEqual({ ok: false, error: "pairing_requires_newer_client" });
+
+    // The refusal spent nothing: the same code still redeems for a capable desktop.
+    const modern = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", installation, {
+      maxSnapshotVersion: 7,
+    });
+    if (!modern.ok) throw new Error(`modern redeem failed: ${modern.error}`);
+    expect(modern.snapshot.version).toBe(7);
+    expect(modern.snapshot.accounts.find((a) => a.code === "9210")?.isContra).toBe(true);
+  }, 120_000);
+
+  it("version boundary: a lossless chart still pairs an unchanged desktop, as a v6 snapshot it accepts", async () => {
+    await useDatabase(serverDb);
+    const { businessId, locationId } = await provisionWithChart("سازگار", fourTierChart);
+    const code = await issueFor(businessId, locationId);
+    const redeemed = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", `desktop-${randomUUID()}`);
+    if (!redeemed.ok) throw new Error(`legacy redeem failed: ${redeemed.error}`);
+    expect(redeemed.snapshot.version).toBe(6);
+    const legacy = clone(redeemed.snapshot) as unknown as Record<string, unknown>;
+    const validation = validateSnapshot(legacy);
+    expect(validation.ok).toBe(true);
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(redeemed.snapshot, "https://pos.example.com", {});
+    expect((await localAccounts(businessId)).map((a) => a.code)).toEqual(["9100", "9110", "9111", "9112"]);
+  }, 120_000);
+
+  it("version boundary: a v6 snapshot that claims an archived or contra account is refused, never read as active", async () => {
+    await useDatabase(serverDb);
+    const { snapshot } = await snapshotWithChart("ادعای نادرست", fourTierChart);
+    const v6 = clone(snapshot) as unknown as { version: number; accounts: Array<Record<string, unknown>> };
+    v6.version = 6;
+    for (const a of v6.accounts) delete a.isContra;
+    expect(validateSnapshot(clone(v6)).ok, "lossless v6 is accepted").toBe(true);
+
+    const archived = clone(v6);
+    archived.accounts[0].isActive = false;
+    expect(validateSnapshot(archived).ok, "v6 may not claim an archived account").toBe(false);
+
+    const contra = clone(v6);
+    contra.accounts[0].isContra = true;
+    expect(validateSnapshot(contra).ok, "v6 may not claim a contra account").toBe(false);
+  }, 120_000);
+
+  it("version boundary: a session built for a capable desktop is never handed to a legacy one on resume", async () => {
+    await useDatabase(serverDb);
+    const { businessId, locationId } = await provisionWithChart("ادامه", contraChart);
+    const code = await issueFor(businessId, locationId);
+    const installation = `desktop-${randomUUID()}`;
+
+    const built = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", installation, { maxSnapshotVersion: 7 });
+    if (!built.ok) throw new Error(`modern redeem failed: ${built.error}`);
+
+    const legacyResume = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", installation);
+    expect(legacyResume).toEqual({ ok: false, error: "pairing_requires_newer_client" });
+
+    const modernResume = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", installation, {
+      maxSnapshotVersion: 7,
+    });
+    if (!modernResume.ok) throw new Error(`modern resume failed: ${modernResume.error}`);
+    expect(modernResume.resumed).toBe(true);
+    expect(modernResume.snapshot.version).toBe(7);
+  }, 120_000);
+
+  it("version boundary: a session first built as v6 is not upgraded in place for a capable desktop, which is told to pair again", async () => {
+    await useDatabase(serverDb);
+    const { businessId, locationId } = await provisionWithChart("ارتقا", fourTierChart);
+    const code = await issueFor(businessId, locationId);
+    const installation = `desktop-${randomUUID()}`;
+
+    const legacy = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", installation);
+    if (!legacy.ok) throw new Error(`legacy redeem failed: ${legacy.error}`);
+    expect(legacy.snapshot.version).toBe(6);
+
+    // Handing this v6 snapshot to a capable desktop would be refused there as a
+    // pre-#824 cloud, so the session answers unavailable instead.
+    const upgraded = await redeemPairingCode(code, "127.0.0.1", "Windows Business Suite", installation, {
+      maxSnapshotVersion: 7,
+    });
+    expect(upgraded).toEqual({ ok: false, error: "pairing_session_unavailable" });
   }, 120_000);
 });

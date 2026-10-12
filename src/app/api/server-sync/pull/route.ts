@@ -7,6 +7,11 @@ import { recordLegacyTokenUsage, resolveSyncCredential, tokensMatch, legacySyncT
  * The local (café laptop) server GETs events from here that it hasn't seen yet.
  * Returns sync_events rows with origin='local' (never bounces remote-origin events back).
  *
+ * Business-scope events (#869) have no location. A location-bound credential
+ * never receives them (its `location_id` filter excludes them); a business-wide
+ * credential (no `locationId`) receives them, and a desktop acknowledges them
+ * without applying them (siteSkipsPulledEvent).
+ *
  * Phase 17 security review: the query below used to run with no tenant scope
  * and no business filter at all — under enforced RLS that failed closed (an
  * empty result, so nothing leaked), but under a superuser/BYPASSRLS database
@@ -97,7 +102,7 @@ export async function GET(request: NextRequest) {
                 AND se.applied_at IS NOT NULL
                 AND se.error IS NULL
                 AND se.origin = 'local'
-                AND ($3::uuid IS NULL OR se.location_id = $3::uuid)
+                AND ($3::uuid IS NULL OR (se.scope = 'location' AND se.location_id = $3::uuid))
               ORDER BY se.txid, se.id
               LIMIT $2`,
             [after, limit, credential?.locationId ?? null, afterTx],
@@ -111,7 +116,7 @@ export async function GET(request: NextRequest) {
                 AND se.applied_at IS NOT NULL
                 AND se.error IS NULL
                 AND (se.origin IS NULL OR se.origin = 'local')
-                AND ($3::uuid IS NULL OR se.location_id = $3::uuid)
+                AND ($3::uuid IS NULL OR (se.scope = 'location' AND se.location_id = $3::uuid))
               ORDER BY se.id
               LIMIT $2`,
             [after, limit, credential?.locationId ?? null],

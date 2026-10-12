@@ -31,6 +31,7 @@ function routeKey(file: string): string {
 
 /** Routes that are deliberately session-less, and why. Anything else must guard. */
 const PUBLIC_ROUTES: Record<string, string> = {
+  "integrations/tax-invoices/webhook/[businessId]": "TSP server ingress authenticated by tenant-bound, timestamped HMAC-SHA256 over bounded raw bytes; replay writes one append-only event, no session",
   "auth/login": "credential exchange — necessarily runs without a session",
   "auth/pin-login": "credential exchange — necessarily runs without a session",
   "auth/pin-login/roster":

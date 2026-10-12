@@ -15,10 +15,13 @@ describe("auditActionLabel", () => {
   });
 
   it("labels the account change-history actions (issue #160 §7.5)", () => {
+    expect(auditActionLabel("account.created")).toBe("ایجاد حساب");
     expect(auditActionLabel("account.renamed")).toBe("تغییر نام حساب");
     expect(auditActionLabel("account.reparented")).toBe("جابه‌جایی حساب در ساختار");
     expect(auditActionLabel("account.archived")).toBe("بایگانی حساب");
     expect(auditActionLabel("account.reactivated")).toBe("بازگردانی حساب از بایگانی");
+    expect(auditActionLabel("account.contra_changed")).toBe("تغییر وضعیت حساب کاهنده");
+    expect(auditActionLabel("account.deleted")).toBe("حذف حساب");
   });
 
   it("labels the settings writers, whose rows the audit tab renders", () => {
@@ -55,6 +58,11 @@ describe("auditEntityLabel", () => {
   it("labels fiscal-year and fiscal-period entities", () => {
     expect(auditEntityLabel("fiscal_year")).toBe("سال مالی");
     expect(auditEntityLabel("fiscal_period")).toBe("دورهٔ مالی");
+  });
+
+  it("labels commission settlement entities", () => {
+    expect(auditEntityLabel("commission_run")).toBe("دورهٔ تسویه پورسانت");
+    expect(auditEntityLabel("commission_payout")).toBe("پرداخت پورسانت");
   });
 });
 

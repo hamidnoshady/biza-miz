@@ -937,6 +937,47 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   in `platform_push_config` is written once (`ON CONFLICT DO NOTHING` plus a re-read), and that
   table is in `EXEMPT_TABLES`.
 
+## Taxpayer invoicing (سامانه مودیان) — read before touching a tax invoice
+
+Issue #866 lives inside Accounting at `/accounting/tax-invoices`. Read
+`docs/tax-invoicing.md` first. The rules that are easy to break:
+
+- A tax record is append-only, and the database enforces it (migration
+  `0216_tax_invoicing.sql`): identity and payload columns cannot change, the
+  receipt is written once, status moves must be legal, and the event history
+  cannot be edited. Corrections are new linked records (an amendment or a
+  cancellation), and a rejected sale is corrected by a new revision. Never UPDATE
+  a payload to "fix" it.
+- The uid is generated once, before the first send, and every retry reuses it. The
+  authority deduplicates on it. Never resend a record that is `sending` or
+  `awaiting_inquiry` without inquiring it first.
+- A cancellation rebuilds from the stored snapshot, so the withdrawal matches what
+  was sent. An amendment builds from the sale as it now stands. Do not mix the two.
+- Taxpayer status never writes ledger rows. Reconciliation reads `orders` and the
+  records, and writes nothing.
+- The production adapter fails closed with `live_provider_unavailable`. The gated
+  transport has no installed codec; an environment flag alone cannot enable it.
+  Verify current taxid/schema, normalization, signing, encryption and response
+  trust against official vectors/sandbox before installing a codec. Simulator
+  fixtures are not proof of authority compatibility.
+- Never exhaust unknown delivery into a retryable error. Use inquiry indefinitely.
+  Completion writes require the opaque claim token; callbacks invalidate it. Stale
+  responses keep audit evidence rather than overwriting a newer outcome.
+- Signed callbacks use the documented platform/TSP tenant-bound HMAC, not an
+  assumed official Moodian callback protocol. Never bypass tenant scope for ingress.
+- Accepted (including cancelled) records/events/archives are NEVER deleted, even
+  with the purge flag. Pending delivery and immutable disputed-evidence holds also
+  block reset/delete. Archive age is not legal expiry. Retention holds cannot be
+  cleared through normal application writes. Keep source-order hold/claim locking
+  and business-root lifecycle/destruction locking consistent.
+- Credentials are write-only and sealed with `encryptSecret`. Never log them, return
+  them, or put them in an audit payload.
+- A new table that references `tax_invoice_submissions`, or that blocks deletion of
+  a business, must be covered by `purgeTaxInvoiceRecords` in `platform-service.ts`.
+  Reset and hard delete both depend on it.
+- Client code may import only types from `tax-invoice-core.ts`, which imports
+  `node:crypto`.
+
 ## Repository layout
 
 - `src/app/api/**/route.ts` — route handlers. Every handler starts with a guard

@@ -52,6 +52,12 @@ async function compile(entryPoint, outfile, extraDefine = {}) {
     target: "node24",
     sourcemap: false,
     legalComments: "none",
+    // Whitespace and syntax only, never identifier renaming: the bundle is an
+    // unattended server whose error names and stack shapes are read in support,
+    // so it stays readable while losing the formatting bytes (about 3.4 MiB of
+    // the staged runtime, measured 2026-10-10).
+    minifyWhitespace: true,
+    minifySyntax: true,
     // Imported CLI modules contain direct-execution guards. In CJS output an
     // unbound import.meta.url becomes undefined and fileURLToPath throws before
     // our compiled entry can call main(). A stable non-entry URL keeps every

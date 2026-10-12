@@ -59,6 +59,17 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "payroll.manage": ["payroll.view"],
   "reports.export": ["reports.view"],
 
+  // Taxpayer invoicing: viewing the register requires ledger visibility; every
+  // consequential operation also inherits the tax register read capability.
+  "tax.view": ["ledger.view"],
+  "tax.prepare": ["tax.view"],
+  "tax.send": ["tax.view"],
+  "tax.inquiry": ["tax.view"],
+  "tax.amend": ["tax.view"],
+  "tax.cancel": ["tax.view"],
+  "tax.manage_settings": ["tax.view"],
+  "tax.export": ["tax.view"],
+
   // Growth and marketing
   "campaigns.manage": ["campaigns.view"],
   "loyalty.manage": ["loyalty.view"],
@@ -68,6 +79,10 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "gift_cards.issue": ["gift_cards.view"],
   "gift_cards.redeem": ["gift_cards.view"],
   "commission.manage": ["commission.view"],
+  "commission.calculate": ["commission.view"],
+  "commission.approve": ["commission.view"],
+  "commission.payout": ["commission.view"],
+  "commission.reverse": ["commission.view"],
   "marketing.configure": ["growth.view"],
 
   // Website and integrations

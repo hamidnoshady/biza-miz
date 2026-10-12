@@ -111,6 +111,9 @@ describe("dependencies", () => {
     expect(impliedPermissions([PERMISSIONS.ledgerPost])).toContain("ledger.view");
     expect(impliedPermissions([PERMISSIONS.ledgerClosePeriod])).toContain("ledger.view");
     expect(impliedPermissions([PERMISSIONS.reportsExport])).toContain("reports.view");
+    expect(impliedPermissions([PERMISSIONS.taxView])).toContain("ledger.view");
+    expect(impliedPermissions([PERMISSIONS.taxPrepare])).toContain("tax.view");
+    expect(impliedPermissions([PERMISSIONS.commissionCalculate])).toContain("commission.view");
   });
 
   it("resolves a chain transitively", () => {
