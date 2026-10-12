@@ -476,6 +476,16 @@ function ArticleEditor({
   const [sectionKeys, setSectionKeys] = useState<string[]>(
     article?.sectionKeys ?? [],
   );
+  const [pageQuery, setPageQuery] = useState("");
+  const visiblePages = KNOWLEDGE_PAGES.filter((page) =>
+    `${page.label} ${page.route} ${page.group}`
+      .toLocaleLowerCase("fa")
+      .includes(pageQuery.trim().toLocaleLowerCase("fa")),
+  );
+  // Old section assignments still work as a fallback; preserve them when editing.
+  const legacyKeys = sectionKeys.filter((key) =>
+    KNOWLEDGE_SECTIONS.some((section) => section.key === key),
+  );
   const [tagIds, setTagIds] = useState<string[]>(article?.tagIds ?? []);
   const [videoUrl, setVideoUrl] = useState(article?.videoUrl ?? "");
   const [coverImageUrl, setCoverImageUrl] = useState(
@@ -704,32 +714,77 @@ function ArticleEditor({
               </Field>
 
               <Field
-                label="بخش‌هایی که این راهنما آموزش می‌دهد"
-                hint="آیکون «آموزش» همان بخش به این راهنما پیوند می‌خورد."
-              >
-                <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">
-                  {KNOWLEDGE_SECTIONS.map((s) => {
-                    const on = sectionKeys.includes(s.key);
-                    return (
-                      <button
-                        key={s.key}
-                        type="button"
-                        aria-pressed={on}
-                        onClick={() =>
-                          setSectionKeys((prev) => toggleList(prev, s.key))
-                        }
-                        className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
-                          on
-                            ? "border-sky-400/50 bg-sky-500/20 text-sky-800 dark:text-sky-200"
-                            : "border-border bg-muted text-muted-foreground hover:text-foreground"
-                        }`}
-                      >
-                        {s.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </Field>
+                 label="نمایش راهنما در صفحه‌ها"
+                 hint="از صفحه‌هایی که دکمهٔ «آموزش» دارند انتخاب کنید. یک راهنما می‌تواند چند مقصد داشته باشد."
+               >
+                 <input
+                   type="search"
+                   value={pageQuery}
+                   onChange={(e) => setPageQuery(e.target.value)}
+                   className={`${inputClass} mb-2`}
+                   placeholder="جست‌وجوی نام یا مسیر صفحه…"
+                   aria-label="جست‌وجوی صفحه‌های دارای آموزش"
+                 />
+                 <div className="max-h-52 space-y-3 overflow-y-auto rounded-lg border border-border p-2">
+                   {PAGE_GROUPS.map((group) => {
+                     const pages = visiblePages.filter((page) => page.group === group);
+                     if (!pages.length) return null;
+                     return (
+                       <div key={group}>
+                         <p className="mb-1 text-xs font-semibold text-foreground/70">{group}</p>
+                         <div className="flex flex-wrap gap-1.5">
+                           {pages.map((page) => {
+                             const on = sectionKeys.includes(page.key);
+                             return (
+                               <button
+                                 key={page.key}
+                                 type="button"
+                                 aria-pressed={on}
+                                 aria-label={`${page.label} — ${page.route}`}
+                                 title={page.route}
+                                 onClick={() => setSectionKeys((prev) => toggleList(prev, page.key))}
+                                 className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                   on
+                                     ? "border-sky-400/50 bg-sky-500/20 text-sky-800 dark:text-sky-200"
+                                     : "border-border bg-muted text-muted-foreground hover:text-foreground"
+                                 }`}
+                               >
+                                 {page.label}
+                               </button>
+                             );
+                           })}
+                         </div>
+                       </div>
+                     );
+                   })}
+                   {visiblePages.length === 0 ? (
+                     <p className="text-xs text-muted-foreground">صفحه‌ای با این عبارت پیدا نشد.</p>
+                   ) : null}
+                 </div>
+                 <p className="mt-1.5 text-xs text-muted-foreground">
+                   {sectionKeys.filter((key) => KNOWLEDGE_PAGES.some((page) => page.key === key)).length} صفحه انتخاب شده
+                 </p>
+                 {legacyKeys.length > 0 ? (
+                   <div className="mt-2 rounded-lg border border-dashed border-border p-2">
+                     <p className="mb-2 text-xs text-muted-foreground">
+                       اتصال‌های قدیمی حفظ شده‌اند؛ در صورت نیاز برای حذف روی آن‌ها بزنید:
+                     </p>
+                     <div className="flex flex-wrap gap-1.5">
+                       {legacyKeys.map((key) => (
+                         <button
+                           key={key}
+                           type="button"
+                           aria-pressed="true"
+                           onClick={() => setSectionKeys((prev) => prev.filter((value) => value !== key))}
+                           className="rounded-full border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-xs text-foreground"
+                         >
+                           {assignmentLabel(key)} ×
+                         </button>
+                       ))}
+                     </div>
+                   </div>
+                 ) : null}
+               </Field>
 
               <Field label="برچسب‌ها">
                 <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">
