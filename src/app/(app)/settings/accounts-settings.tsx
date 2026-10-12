@@ -1,63 +1,61 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import { ChartOfAccountsSection } from "@/app/(app)/accounting/chart-of-accounts-section";
-import type { Runner } from "@/app/(app)/accounting/accounting-manager";
-import { ErrorBox, InfoBox, errorMessage } from "@/app/dashboard/ui";
-import { SectionCard } from "@/app/dashboard/page-chrome";
-
 /**
- * Accounting settings is the administration surface for the chart of accounts.
+ * Platform Settings → «حسابداری» tab.
  *
- * This used to be a second, destructive "replace the entire chart" editor. It
- * also had an unrelated payment-method heading and hid the account features
- * that already existed in the Accounting workspace (archive, re-parent,
- * statements and audit history). Keeping two editors meant the settings page
- * and the ledger page could disagree about what an account was.
+ * The chart of accounts now lives in its canonical screen —
+ * `/accounting/chart-of-accounts` — which is the dedicated editor inside the
+ * Accounting workspace. Keeping a second, live editor here meant two places
+ * could restructure the same chart, get out of sync, and expose different
+ * validation/guards (issue #824 §8).
  *
- * The chart editor is now shared with Accounting so both entry points expose
- * the same guarded operations and the same RTL-first design language.
+ * This tab is now a *shortcut*: it explains where accounting configuration
+ * lives and links there. The tab itself is still listed in `settings-tabs.ts`
+ * under `accountsEdit` so old bookmarks/deep links (`/settings?tab=accounts`)
+ * land on this friendly redirect rather than 404 — but no chart editing
+ * happens on the platform settings surface any more. Platform settings stay
+ * focused on platform/business settings; accounting configuration belongs in
+ * the Accounting app.
  */
+
+import Link from "next/link";
+import { BookOpenIcon, ArrowLeftIcon } from "lucide-react";
+import { InfoBox } from "@/app/dashboard/ui";
+import { SectionCard } from "@/app/dashboard/page-chrome";
+import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
+
 export function AccountsSettings() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const run = useCallback<Runner>(async (operation) => {
-    setBusy(true);
-    setError("");
-    try {
-      const result = await operation();
-      if (!result.ok) {
-        setError(errorMessage(result.data.error));
-        return false;
-      }
-      return true;
-    } catch {
-      setError("ارتباط با سرور برقرار نشد؛ دوباره تلاش کنید.");
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-
   return (
     <div className="space-y-5">
-      <ErrorBox>{error}</ErrorBox>
       <InfoBox>
-        در این بخش ساختار حساب‌ها را مدیریت می‌کنید. برای حفظ سوابق، حساب‌های دارای سند حذف نمی‌شوند و فقط می‌توان آن‌ها را غیرفعال کرد؛ حساب‌های سیستمی نیز همیشه محافظت می‌شوند.
+        مدیریت سرفصل حساب‌ها به صفحهٔ اختصاصی خود در برنامهٔ حسابداری منتقل شده است تا تنها یک نقطه برای ویرایش ساختار حساب‌ها وجود داشته باشد.
       </InfoBox>
       <SectionCard
-        title="تنظیمات حسابداری"
-        description="افزودن، ویرایش، جابه‌جایی و بایگانی سرفصل‌ها، همراه با گردش حساب و تاریخچهٔ تغییرات."
+        title="سرفصل حساب‌ها"
+        description="ساختار درختی گروه، کل، معین و تفصیلی — افزودن، ویرایش، جابه‌جایی، بایگانی، گردش حساب و تاریخچهٔ تغییرات."
       >
-        <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-          کد و نوع حساب پس از ایجاد ثابت می‌ماند تا ثبت‌های خودکار و گزارش‌های مالی پایدار بمانند. برای شخصی‌سازی، نام یا حساب والد را ویرایش کنید و برای حساب‌های قدیمی از بایگانی استفاده کنید.
-        </p>
+        <div className="space-y-4">
+          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+            سرفصل حساب‌ها بخشی از برنامهٔ حسابداری است و ویرایش آن در همان‌جا انجام می‌شود. حساب‌های سیستمی محافظت می‌شوند؛ حساب‌های دارای سند حذف نمی‌شوند و فقط بایگانی می‌شوند؛ همهٔ تغییرات به‌صورت یکپارچه اعتبارسنجی و در تاریخچه ثبت می‌شوند.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <Link
+              href={accountingSectionHref("chart-of-accounts")}
+              className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90"
+            >
+              <BookOpenIcon className="size-4" aria-hidden="true" />
+              باز کردن مدیریت سرفصل حساب‌ها
+            </Link>
+            <Link
+              href={accountingSectionHref("settings")}
+              className="inline-flex items-center gap-2 rounded-xl border border-border/80 px-4 py-2 text-sm font-medium text-foreground transition hover:bg-muted"
+            >
+              <ArrowLeftIcon className="size-4" aria-hidden="true" />
+              تنظیمات حسابداری
+            </Link>
+          </div>
+        </div>
       </SectionCard>
-      {/* `canEdit` is the default here by construction: this tab is listed in
-          `settings-tabs.ts` with `requiredAnyPermission: [accountsEdit]`, so a
-          member who cannot edit the chart never reaches this screen at all. */}
-      <ChartOfAccountsSection busy={busy} run={run} />
     </div>
   );
 }

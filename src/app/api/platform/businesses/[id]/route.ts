@@ -21,6 +21,7 @@ import {
   type BusinessStatus,
 } from "@/lib/platform-service";
 import { businessDestructivePhrase } from "@/lib/platform-admin";
+import { AccountsError } from "@/lib/accounts-error";
 import {
   businessLifecycleTransition,
   isBusinessLifecycleStatus,
@@ -146,7 +147,17 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
       return NextResponse.json({ business: existing, seededAccountCodes: [] });
     }
 
-    const result = await changeBusinessIndustry(id, industry);
+    let result: Awaited<ReturnType<typeof changeBusinessIndustry>>;
+    try {
+      result = await changeBusinessIndustry(id, industry);
+    } catch (err) {
+      // A live-chart conflict (an archived parent, or a parent of another type)
+      // rolled the whole change back. It is reported as itself, not as a 500.
+      if (err instanceof AccountsError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
     if (!result) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
     await platformAudit({
