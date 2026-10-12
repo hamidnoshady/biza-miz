@@ -217,6 +217,8 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // Batch W — the audit trail has no branch dimension (agnostic, like the
   // other business-wide reads).
   { name: "list_audit_log", kind: "read", app: "pos", branchPolicy: "agnostic" },
+  // Batch Y — the ledger is business-wide for reads (agnostic like ledgerView).
+  { name: "get_account_statement", kind: "read", app: "accounting", branchPolicy: "agnostic" },
   { name: "list_barcode_templates", kind: "read", app: "pos", branchPolicy: "pinned" },
   // Batch Q — sales invoices are branch-scoped like every other POS order read.
   { name: "list_sales_invoices", kind: "read", app: "pos", branchPolicy: "pinned" },

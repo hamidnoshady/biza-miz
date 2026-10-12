@@ -223,6 +223,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_kb_catalogue: "The product help catalogue — categories and articles with slugs for citation.",
   list_product_attributes: "The branch's product attribute definitions (e.g. colour → red, blue).",
   list_audit_log: "The business audit trail (who changed what, filtered by entity/action/actor; cursor with before).",
+  get_account_statement: "One ledger account's statement (running balance over an optional ISO range).",
   list_media_collections: "The media library's collections with file counts.",
   list_media_folders: "The media library's folders with file counts.",
   list_barcode_templates: "The branch's weight-barcode templates (prefix + weight unit).",

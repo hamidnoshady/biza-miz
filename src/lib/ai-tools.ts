@@ -66,6 +66,7 @@ import { listWeightBarcodeTemplates } from "./weight-barcode-templates-service";
 import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/website-service";
 import { listRetailInvoices } from "./retail-invoice/list-service";
 import { listAuditLog } from "./audit-service";
+import { getAccountStatement } from "./reports-service";
 import { listMediaCollections, listMediaFolders } from "./media-service";
 import { listConnections, getConnection } from "./integrations/connections-service";
 import { wpOverviewStats, wpQueue, wpQueueSummary } from "./integrations/wp-manager-service";
@@ -2110,6 +2111,22 @@ export async function runReadTool(
     }
     case "list_media_folders": {
       return { ok: true, data: { folders: await listMediaFolders(businessId) } };
+    }
+    // Issue #883 package 2, batch Y — the account statement screen's read.
+    // Same fail-soft shape as the routes: date format is rejected up front,
+    // a missing account answers account_not_found rather than throwing.
+    case "get_account_statement": {
+      const accountId = typeof args.accountId === "string" ? args.accountId : "";
+      if (!accountId) return { ok: false, data: { error: "account_required" } };
+      const isoDate = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
+      const dateFrom = isoDate(args.dateFrom);
+      const dateTo = isoDate(args.dateTo);
+      if ((args.dateFrom !== undefined && !dateFrom) || (args.dateTo !== undefined && !dateTo)) {
+        return { ok: false, data: { error: "invalid_date" } };
+      }
+      const statement = await getAccountStatement(businessId, accountId, { dateFrom, dateTo });
+      if (!statement) return { ok: false, data: { error: "account_not_found" } };
+      return { ok: true, data: { statement } };
     }
     case "list_audit_log": {
       const AUDIT_MAX_LIMIT = 200;

@@ -2837,6 +2837,24 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     {
       type: "function",
       function: {
+        name: "get_account_statement",
+        description:
+          "صورت‌حساب یک حساب از دفتر — ماهیت مدیون/بستانکار، ماندهٔ افتتاح، سطرهای حرکت و ماندهٔ پایان در بازهٔ ISO.",
+        parameters: {
+          type: "object",
+          properties: {
+            accountId: { type: "string", description: "شناسهٔ حساب — از list_accounts" },
+            dateFrom: { type: "string", description: "YYYY-MM-DD — اختیاری" },
+            dateTo: { type: "string", description: "YYYY-MM-DD — اختیاری" },
+          },
+          required: ["accountId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "list_audit_log",
         description:
           "دفتر رویداد کسب‌وکار — چه کسی چه کرد (forcement log)؛ فیلتر موجودیت، عمل، عامل، یا موجودیت id؛ صفحه‌بندی مکان‌نما با before.",

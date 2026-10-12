@@ -65,9 +65,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Accounting",
     entity: "Chart of accounts",
     routes: ["ledger/accounts"],
-    note: "list, create/edit/disable, statement, history",
-    ops: { listDetail: ["list_accounts"], create: ["account.create"], update: ["account.update", "account.disable"] },
-    test: "integration/ledger.integration.test.ts",
+    note: "account history rides list_audit_log {entity: account} — same service, stricter gate is the audit screen's own teamManage",
+    ops: { listDetail: ["list_accounts", "get_account_statement"], create: ["account.create"], update: ["account.update", "account.disable"] },
+    test: "integration/chart-of-accounts.integration.test.ts",
   },
   {
     id: "accounting.entries",
@@ -76,7 +76,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["ledger/entries"],
     note: "list, detail, reverse (manual drafts covered by journal.manual.propose)",
     ops: { listDetail: ["list_journal_entries", "list_manual_journal_drafts"], lifecycle: ["journal.manual.propose", "journal.draft.approve", "journal.draft.reject"] },
-    test: "integration/ledger.integration.test.ts",
+    test: "integration/ledger-reports.integration.test.ts",
   },
   {
     id: "accounting.ar",

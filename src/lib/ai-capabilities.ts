@@ -127,6 +127,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_media_folders: PERMISSIONS.mediaView,
   // Batch W — the audit-trail screen's own gate (who did what, business-wide).
   list_audit_log: PERMISSIONS.teamManage,
+  // Batch Y — the chart-of-accounts statement screen's gate.
+  get_account_statement: PERMISSIONS.ledgerView,
   list_barcode_templates: PERMISSIONS.menuView,
   // Batch Q — the sales-invoice screens' read gate.
   list_sales_invoices: PERMISSIONS.ordersView,
