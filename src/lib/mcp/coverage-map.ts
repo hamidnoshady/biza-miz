@@ -114,7 +114,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Accounting",
     entity: "Fixed assets (register, depreciate, dispose, transfer)",
     routes: ["ledger/fixed-assets"],
-    ops: { listDetail: ["list_fixed_assets"], create: ["fixed-asset.create"], lifecycle: ["fixed-asset.depreciate", "fixed-asset.dispose"] },
+    ops: { listDetail: ["list_fixed_assets"], create: ["fixed-asset.create"], update: ["fixed-asset.set_acquisition"], lifecycle: ["fixed-asset.depreciate", "fixed-asset.dispose"] },
     test: "integration/fixed-assets.integration.test.ts",
   },
   {

@@ -1647,6 +1647,22 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_fixed_asset_set_acquisition",
+    actionType: "fixed-asset.set_acquisition",
+    english: "Set a fixed asset's acquisition source and (optionally) its source purchase entry.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixedAssetId: id("شناسهٔ دارایی — از list_fixed_assets"),
+        acquisitionSource: { type: "string", description: "منشأ تملیک — از مقادیر پذیرفته‌شدهٔ ثبت دارایی" },
+        acquisitionEntryId: id("شناسهٔ سند خرید — اختیاری"),
+      },
+      required: ["fixedAssetId", "acquisitionSource"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_account_delete",
     actionType: "account.delete",
     english:

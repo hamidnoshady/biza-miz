@@ -62,6 +62,7 @@ import { queueTriggeredMessageCampaign } from "./message-campaigns-service";
 import type { PurchaseItemInput } from "./purchase-lines";
 // Issue #883 package 2, batch A — accounting services (batch verbs).
 import { AccountsError, createAccount, updateAccount, deleteAccount } from "./accounts-service";
+
 import { approveDraft, rejectDraft } from "./manual-journal-service";
 import { ArError, receivePayment } from "./ar-service";
 import { ApError, payBill, reverseApPayment } from "./ap-service";
@@ -132,6 +133,7 @@ import {
   disposeFixedAsset,
   FixedAssetError,
   postDepreciation,
+  setFixedAssetAcquisition,
 } from "./fixed-assets-service";
 
 export interface AutopilotExecutionResult {
@@ -2675,6 +2677,28 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch Z — fixed-asset acquisition link ───────────
+// Byte-for-byte the PATCH route: enum/source validation and not-found are
+// the service's, surfacing as FixedAssetError codes.
+const fixedAssetSetAcquisition: AutopilotExecutor = async (ctx) => {
+  const fixedAssetId = str(ctx.payload.fixedAssetId) ?? str(ctx.payload.id);
+  const acquisitionSource = str(ctx.payload.acquisitionSource);
+  if (!fixedAssetId || !acquisitionSource) return fail("missing_fields");
+  const acquisitionEntryId = ctx.payload.acquisitionEntryId == null ? null : str(ctx.payload.acquisitionEntryId);
+  try {
+    const fixedAsset = await setFixedAssetAcquisition({
+      businessId: ctx.businessId,
+      fixedAssetId,
+      acquisitionSource,
+      acquisitionEntryId,
+    });
+    return { ok: true, result: { fixedAsset: { ...(fixedAsset as object) } } };
+  } catch (err) {
+    if (err instanceof FixedAssetError) return fail(err.message);
+    throw err;
+  }
+};
+
 // ── Issue #883 package 2, batch Y2 — chart-of-accounts delete ──────────────
 // The service owns every refusal (well-known codes, postings, draft lines,
 // child accounts, lost races) and names it with the route's own codes.
@@ -3189,6 +3213,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   websiteOrderStatus,
   websiteDomainSet,
   accountDelete,
+  fixedAssetSetAcquisition,
   mediaCollectionCreate,
   mediaCollectionRename,
   mediaCollectionDelete,

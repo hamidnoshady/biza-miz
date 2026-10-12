@@ -341,6 +341,8 @@ export type ActionType =
   | "media.asset.restore"
   // Batch Y2 — chart-of-accounts delete (refused by the service when used).
   | "account.delete"
+  // Batch Z — fixed-asset acquisition link (the register's only PATCH).
+  | "fixed-asset.set_acquisition"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -380,6 +382,7 @@ export type AutopilotExecutorKey =
   | "retailInvoiceVoid"
   | "websiteOrderStatus"
   | "websiteDomainSet"
+  | "fixedAssetSetAcquisition"
   | "accountDelete"
   | "mediaCollectionCreate"
   | "mediaCollectionRename"
@@ -1353,6 +1356,14 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "fixed-asset.set_acquisition": {
+    type: "fixed-asset.set_acquisition",
+    endpoint: "/api/ledger/fixed-assets/[id]",
+    method: "PATCH",
+    label: "اتصال منشأ تملیک دارایی ثابت — لینک تأمین (خرید) به سند",
+    payloadHint: '{ fixedAssetId: string, acquisitionSource: string, acquisitionEntryId?: string|null }',
+    executor: "fixedAssetSetAcquisition",
   },
   "account.delete": {
     type: "account.delete",

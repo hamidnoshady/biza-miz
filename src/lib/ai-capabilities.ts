@@ -271,6 +271,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "barcode.template.create": PERMISSIONS.menuEdit,
   "media.collection.create": PERMISSIONS.mediaManage,
   "account.delete": PERMISSIONS.accountsEdit,
+  "fixed-asset.set_acquisition": PERMISSIONS.financeAssetsManage,
   "media.collection.rename": PERMISSIONS.mediaManage,
   "media.collection.delete": PERMISSIONS.mediaManage,
   "media.asset.set_collection": PERMISSIONS.mediaManage,

@@ -15,9 +15,8 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (47)
+### Tenant (46)
 - **accounting.entries** (Accounting · Journal entries) — partial
-- **accounting.fixed-assets** (Accounting · Fixed assets (register, depreciate, dispose, transfer)) — partial
 - **accounting.payroll** (Accounting · Payroll (settings, staff, runs, advances)) — partial
 - **accounting.reconciliation** (Accounting · Bank reconciliation) — partial
 - **accounting.fiscal** (Accounting · Fiscal years & periods (open/close), readiness) — partial
@@ -87,7 +86,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 25 · partial: 37 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 26 · partial: 36 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -97,7 +96,7 @@ Counts — covered: 25 · partial: 37 · MCP gap: 10 · backend gap: 0 · n/a (i
 | Accounting | Payables (payments, aging, suppliers) | get_ap_upcoming, list_payments | ap.payment.record | — | ap.payment.reverse | — | finance.payables_manage, ledger.approve, ledger.view | step-up (always approve) | get_ap_upcoming, list_payments, ap.payment.record, ap.payment.reverse | integration/expense.integration.test.ts | covered |
 | Accounting | Cheques (receivable/payable) | list_cheques | cheque.create | — | cheque.transition | — | finance.cheques_manage, ledger.view | connection mode; step-up (always approve) | list_cheques, cheque.create, cheque.transition | — | covered |
 | Accounting | Expenses | get_expense, list_expenses | expense.categorize | — | expense.reverse | — | finance.expenses_manage, ledger.view | step-up (always approve) | get_expense, list_expenses, expense.categorize, expense.reverse | integration/expense.integration.test.ts | covered |
-| Accounting | Fixed assets (register, depreciate, dispose, transfer) | list_fixed_assets | fixed-asset.create | (route only) | fixed-asset.depreciate, fixed-asset.dispose | — | finance.assets_manage, ledger.view | connection mode; step-up (always approve) | list_fixed_assets, fixed-asset.create, fixed-asset.depreciate, fixed-asset.dispose | integration/fixed-assets.integration.test.ts | partial |
+| Accounting | Fixed assets (register, depreciate, dispose, transfer) | list_fixed_assets | fixed-asset.create | fixed-asset.set_acquisition | fixed-asset.depreciate, fixed-asset.dispose | — | finance.assets_manage, ledger.view | connection mode; step-up (always approve) | list_fixed_assets, fixed-asset.create, fixed-asset.set_acquisition, fixed-asset.depreciate, fixed-asset.dispose | integration/fixed-assets.integration.test.ts | covered |
 | Accounting | Payroll (settings, staff, runs, advances) | get_payroll_summary, list_payroll_advances, list_payroll_runs | payroll.advance.record, payroll.run.accrue | (route only) | payroll.advance.void, payroll.run.pay, payroll.run.void | — | payroll.manage, payroll.view | step-up (always approve) | get_payroll_summary, list_payroll_advances, list_payroll_runs, payroll.advance.record, payroll.run.accrue, payroll.advance.void, payroll.run.pay, payroll.run.void | integration/payroll.integration.test.ts | partial |
 | Accounting | Bank reconciliation | get_unreconciled_bank_lines, list_reconciliations | reconciliation.create | (route only) | reconciliation.complete | — | finance.reconciliation_manage, ledger.view | connection mode; step-up (always approve) | get_unreconciled_bank_lines, list_reconciliations, reconciliation.create, reconciliation.complete | integration/bank-reconciliation.integration.test.ts | partial |
 | Accounting | Fiscal years & periods (open/close), readiness | list_fiscal_years | (route only) | (route only) | (route only) | — | ledger.close_period, ledger.view | — | list_fiscal_years | integration/fiscal-readiness.integration.test.ts | partial |
