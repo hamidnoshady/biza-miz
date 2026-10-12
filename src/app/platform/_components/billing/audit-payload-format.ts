@@ -14,7 +14,7 @@
  * Pure module so the rules are unit-tested without rendering the tab.
  */
 import { formatJalali } from "@/lib/jalali";
-import { toPersianDigits } from "@/lib/digits";
+import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
 
 export const PAYLOAD_LABELS: Record<string, string> = {
@@ -65,7 +65,7 @@ export function payloadValueKind(key: string, value: unknown): PayloadValueKind 
 }
 
 function plainNumber(n: number): string {
-  return toPersianDigits(n.toLocaleString("en-US").replace(/,/g, "٬"));
+  return formatPersianNumber(n);
 }
 
 /** Operator-facing text for one payload value. */

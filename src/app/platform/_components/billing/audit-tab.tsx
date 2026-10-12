@@ -9,10 +9,11 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCwIcon } from "lucide-react";
-import { api, Card, ErrorBox, inputClass, selectClass, SkeletonRows } from "../../ui";
+import { api, Card, ErrorBox, selectClass, SkeletonRows } from "../../ui";
 import { PLATFORM_ROLE_LABELS } from "@/lib/platform-admin";
 import { formatJalali } from "@/lib/jalali";
 import { summarizePayload } from "./audit-payload-format";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 
 interface AuditEntry {
   id: string;
@@ -105,13 +106,13 @@ export function BillingAuditTab() {
               </option>
             ))}
           </select>
-          <input
-            type="date"
-            className={inputClass + " h-9 w-40"}
+          {/* Jalali picker (audit F11): a native date input opens a Gregorian calendar. */}
+          <JalaliDatePicker
             value={since}
-            onChange={(e) => setSince(e.target.value)}
-            aria-label="از تاریخ"
-            title="از تاریخ (میلادی)"
+            onChange={(iso) => setSince(iso)}
+            ariaLabel="از تاریخ"
+            placeholder="از تاریخ"
+            popoverClass="border-border bg-popover text-foreground"
           />
           <button
             type="button"
