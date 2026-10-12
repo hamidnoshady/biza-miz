@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **128 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **153 write verbs**
-(**53** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **158 write verbs**
+(**54** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -291,6 +291,11 @@ visible only to connections consented for every branch) and **153 write verbs**
 | `write_barcode_template_delete` | `barcode.template.delete` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_workspace_approval_request` | `workspace.approval.request` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_workspace_approval_decide` | `workspace.approval.decide` | workspace | high | always approval queue (step-up) | `workspace.approve` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_jewelry_item_create` | `jewelry.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_jewelry_item_update` | `jewelry.item.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_jewelry_stone_add` | `jewelry.stone.add` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_jewelry_stone_delete` | `jewelry.stone.delete` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_jewelry_item_consign` | `jewelry.item.consign` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_open` | `table.session.open` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_update` | `table.session.update` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

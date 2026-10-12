@@ -393,6 +393,12 @@ export type ActionType =
   // contracts and fix certified figures → every one steps up).
   | "workspace.approval.request"
   | "workspace.approval.decide"
+  // Batch AL1 — jewelry catalog (weight items, stones, consignment).
+  | "jewelry.item.create"
+  | "jewelry.item.update"
+  | "jewelry.stone.add"
+  | "jewelry.stone.delete"
+  | "jewelry.item.consign"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -443,6 +449,11 @@ export type AutopilotExecutorKey =
   | "backupConfigSet"
   | "backupRunNow"
   | "backupRestoreApply"
+  | "jewelryItemCreate"
+  | "jewelryItemUpdate"
+  | "jewelryStoneAdd"
+  | "jewelryStoneDelete"
+  | "jewelryItemConsign"
   | "workspaceApprovalRequest"
   | "workspaceApprovalDecide"
   | "productAttributeUpdate"
@@ -1439,6 +1450,46 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "jewelry.item.create": {
+    type: "jewelry.item.create",
+    endpoint: "/api/jewelry/items",
+    method: "POST",
+    label: "ایجاد قلم طلای وزنی — عیار، وزن ناخالص/خالص، هزینهٔ هر گرم",
+    payloadHint: '{ name: string≤200, sku?: string, purity: string, grossWeight: string, netWeight: string, unitCostPerGram?: number|null, locationId?: string }',
+    executor: "jewelryItemCreate",
+  },
+  "jewelry.item.update": {
+    type: "jewelry.item.update",
+    endpoint: "/api/jewelry/items/{id}",
+    method: "PATCH",
+    label: "ویرایش صفات وزنی قلم طلا — فیلدهای نامشخص دست‌نخورده می‌مانند",
+    payloadHint: '{ id: string, purity?: string, grossWeight?: string, netWeight?: string, unitCostPerGram?: number|null }',
+    executor: "jewelryItemUpdate",
+  },
+  "jewelry.stone.add": {
+    type: "jewelry.stone.add",
+    endpoint: "/api/jewelry/items/{id}/stones",
+    method: "POST",
+    label: "افزودن سنگ به قلم طلا — نوع، قیراط، هزینهٔ خرید (ریال صحیح)",
+    payloadHint: '{ itemId: string, stoneType: string, carat: string, cost: number, locationId?: string }',
+    executor: "jewelryStoneAdd",
+  },
+  "jewelry.stone.delete": {
+    type: "jewelry.stone.delete",
+    endpoint: "/api/jewelry/items/{id}/stones/{stoneId}",
+    method: "DELETE",
+    label: "حذف سنگ از قلم طلا — رویداد ثبت می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ itemId: string, stoneId: string, locationId?: string }',
+    executor: "jewelryStoneDelete",
+  },
+  "jewelry.item.consign": {
+    type: "jewelry.item.consign",
+    endpoint: "/api/jewelry/items/{id}/consign",
+    method: "POST",
+    label: "واگذاری قلم به امانت‌دار",
+    payloadHint: '{ id: string, consignorId: string, locationId?: string }',
+    executor: "jewelryItemConsign",
   },
   "workspace.approval.request": {
     type: "workspace.approval.request",

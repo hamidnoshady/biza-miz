@@ -877,6 +877,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Verticals",
     entity: "Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)",
     routes: ["jewelry"],
+    ops: {
+      create: ["jewelry.item.create", "jewelry.stone.add"],
+      update: ["jewelry.item.update", "jewelry.item.consign"],
+      lifecycle: ["jewelry.stone.delete"],
+    },
+    note: "money lanes (sell / buy-back / consignor payout / layaway settle) and the bulk gold-price update ship in AL2; AL1 covers the catalog + consignment lanes with item-audit events identical to the routes",
     test: "integration/jewelry.integration.test.ts",
   },
   {

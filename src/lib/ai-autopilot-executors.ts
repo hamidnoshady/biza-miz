@@ -33,6 +33,10 @@ import { decideEstimateApproval } from "./aec-boq-service";
 import { decideCertificateApproval, decideVariationApproval } from "./aec-commercial-service";
 import { decideCommitmentApproval, decideMaterialRequestApproval } from "./aec-procurement-service";
 import { decideSubmittalApproval } from "./aec-rfi-service";
+import { createItem, getItem, setWeightAttributes, getWeightAttributes, addStone, removeStone } from "./items-service";
+import { validateWeightAttributes } from "./gold";
+import { markAsConsigned } from "./consignment-service";
+import { recordItemEvent } from "./item-audit-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2682,6 +2686,150 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AL1 — jewelry catalog ────────────────────
+// The routes validate weight inputs BEFORE any write and mirror every write
+// with an item-audit event; both land here verbatim so the timeline on the
+// item screen is identical whether the change came from the till or chat.
+async function jewelryLocation(ctx: AutopilotExecutorContext): Promise<{ locationId: string } | AutopilotExecutionResult> {
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  return { locationId: branch.locationId };
+}
+const jewelryItemCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("missing_fields");
+  if (name.length > 200) return fail("item_name_too_long");
+  const weightInput = {
+    purity: str(ctx.payload.purity) ?? "",
+    grossWeight: str(ctx.payload.grossWeight) ?? "",
+    netWeight: str(ctx.payload.netWeight) ?? "",
+    unitCostPerGram:
+      typeof ctx.payload.unitCostPerGram === "number" ? ctx.payload.unitCostPerGram : ctx.payload.unitCostPerGram ?? null,
+  } as Parameters<typeof validateWeightAttributes>[0];
+  const weightErrors = validateWeightAttributes(weightInput);
+  if (weightErrors.length > 0) {
+    return { ok: false, result: { error: "invalid_weight_attributes", message: weightErrors.join("؛ ") }, errorCode: "invalid_weight_attributes" };
+  }
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await createItem({
+    locationId: branch.locationId,
+    name,
+    sku: str(ctx.payload.sku) ?? null,
+    tracking: "weight",
+  });
+  const weightAttrs = await setWeightAttributes(item.id, weightInput);
+  await recordItemEvent({
+    businessId: ctx.businessId,
+    locationId: branch.locationId,
+    itemId: item.id,
+    eventType: "item.created",
+    actorUserId: ctx.authorizedByUserId,
+    payload: { name, ...weightInput },
+  } as never);
+  return { ok: true, result: { item: { ...(item as object) }, weightAttributes: { ...(weightAttrs as object) } } };
+};
+const jewelryItemUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const item = await getItem(id);
+  if (!item) return fail("item_not_found");
+  const current = await getWeightAttributes(id);
+  if (!current) return fail("item_not_found");
+  const input = {
+    purity: str(ctx.payload.purity) ?? current.purity,
+    grossWeight: str(ctx.payload.grossWeight) ?? current.grossWeight,
+    netWeight: str(ctx.payload.netWeight) ?? current.netWeight,
+    unitCostPerGram:
+      ctx.payload.unitCostPerGram !== undefined
+        ? (ctx.payload.unitCostPerGram as number | null)
+        : current.unitCostPerGram,
+  } as Parameters<typeof validateWeightAttributes>[0];
+  const weightErrors = validateWeightAttributes(input);
+  if (weightErrors.length > 0) {
+    return { ok: false, result: { error: "invalid_weight_attributes", message: weightErrors.join("؛ ") }, errorCode: "invalid_weight_attributes" };
+  }
+  const weightAttrs = await setWeightAttributes(id, input);
+  await recordItemEvent({
+    businessId: ctx.businessId,
+    locationId: item.locationId,
+    itemId: id,
+    eventType: "item.weight_attrs_updated",
+    actorUserId: ctx.authorizedByUserId,
+    payload: { ...input },
+  } as never);
+  return { ok: true, result: { weightAttributes: { ...(weightAttrs as object) } } };
+};
+const jewelryStoneAdd: AutopilotExecutor = async (ctx) => {
+  const itemId = str(ctx.payload.itemId) ?? str(ctx.payload.id);
+  const stoneType = str(ctx.payload.stoneType) ?? "";
+  const carat = str(ctx.payload.carat) ?? "";
+  const cost = typeof ctx.payload.cost === "number" && Number.isFinite(ctx.payload.cost) ? ctx.payload.cost : null;
+  if (!itemId || cost === null) return fail("missing_fields");
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(itemId);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  try {
+    const stone = await addStone(itemId, { stoneType, carat, cost });
+    await recordItemEvent({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      itemId,
+      eventType: "item.stone_added",
+      actorUserId: ctx.authorizedByUserId,
+      payload: { stoneId: (stone as { id?: string }).id, stoneType, carat, cost },
+    } as never);
+    return { ok: true, result: { stone: { ...(stone as object) } } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+const jewelryStoneDelete: AutopilotExecutor = async (ctx) => {
+  const itemId = str(ctx.payload.itemId) ?? str(ctx.payload.id);
+  const stoneId = str(ctx.payload.stoneId);
+  if (!itemId || !stoneId) return fail("missing_fields");
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(itemId);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  const removed = await removeStone(stoneId, itemId);
+  if (!removed) return fail("stone_not_found");
+  await recordItemEvent({
+    businessId: ctx.businessId,
+    locationId: branch.locationId,
+    itemId,
+    eventType: "item.stone_removed",
+    actorUserId: ctx.authorizedByUserId,
+    payload: { stoneId },
+  } as never);
+  return { ok: true, result: { ok: true } };
+};
+const jewelryItemConsign: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  const consignorId = str(ctx.payload.consignorId);
+  if (!id || !consignorId) return fail("missing_fields");
+  const branch = await jewelryLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  try {
+    const consignment = await markAsConsigned(id, consignorId);
+    await recordItemEvent({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      itemId: id,
+      eventType: "item.consigned",
+      actorUserId: ctx.authorizedByUserId,
+      payload: { consignorId: (consignment as { consignorId?: string }).consignorId ?? consignorId },
+    } as never);
+    return { ok: true, result: { ok: true, consignment: { ...(consignment as object) } } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+
 // ── Issue #883 package 2, batch AK — workspace approvals ─────────────────
 // The decide executor mirrors the route's subject-type dispatch exactly:
 // every commercial subject runs through ITS register's decide service so the
@@ -4053,6 +4201,11 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  jewelryItemCreate,
+  jewelryItemUpdate,
+  jewelryStoneAdd,
+  jewelryStoneDelete,
+  jewelryItemConsign,
   workspaceApprovalRequest,
   workspaceApprovalDecide,
   productAttributeUpdate,
