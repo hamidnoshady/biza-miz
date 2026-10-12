@@ -98,7 +98,8 @@ describe("AccountingAppNav — «فضای کار حسابداری» is one ordin
     // The label lives on the row in the shared label skin — not on a heading
     // above it, and not only in a tooltip.
     const label = links[0].querySelector("span");
-    expect(label?.className).toContain("group-data-[state=collapsed]/sidebar:hidden");
+    expect(label?.className).toContain("group-data-[state=collapsed]/sidebar:sr-only");
+    expect(label?.className).not.toContain("group-data-[state=collapsed]/sidebar:hidden");
     expect(label?.className).toContain("truncate");
     // It wears a 20px glyph (the accounting calculator mapping), like every
     // ordinary row — `size-5`, aria-hidden, never a bespoke disclosure slot.
@@ -157,16 +158,18 @@ describe("AccountingAppNav — «فضای کار حسابداری» is one ordin
     expect(onNavigate).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps every row reachable at the icon rail, with the label hidden and a tooltip", () => {
+  it("keeps every row reachable at the icon rail, with the label visually hidden and still named", () => {
     renderNav({ collapsed: true });
     const link = screen.getByRole("link", { name: "فضای کار حسابداری" });
     // Still a link at 4rem — an icon rail must never hide a destination.
     expect(link.getAttribute("href")).toBe("/accounting/ledger");
-    // The label hides with the shared collapse rule (CSS), and the row is
-    // wired as a tooltip trigger so the icon keeps its name at the rail —
-    // exactly the `SidebarMenuButton tooltip={entry.label}` contract every
-    // other row wears.
-    expect(link.querySelector("span")?.className).toContain("group-data-[state=collapsed]/sidebar:hidden");
+    // The label is visually hidden with the shared collapse rule (`sr-only`),
+    // NOT `display:none`: a hidden label drops out of the accessibility tree
+    // and leaves the collapsed link with no accessible name. The row stays a
+    // tooltip trigger (`SidebarMenuButton tooltip={entry.label}`).
+    const label = link.querySelector("span");
+    expect(label?.className).toContain("group-data-[state=collapsed]/sidebar:sr-only");
+    expect(label?.className).not.toContain("group-data-[state=collapsed]/sidebar:hidden");
     expect(link.getAttribute("data-state")).toBe("closed");
   });
 

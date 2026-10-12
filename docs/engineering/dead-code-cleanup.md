@@ -381,3 +381,20 @@ surviving code.
   routes or compatibility URLs.
 
 The `export` keyword was also dropped from three symbols that only their own file used: `SectionGroup` (`dashboard/section-nav.tsx`), `NavEntries` (`dashboard/sidebar-nav-group.tsx`) and `RoleGuard` (`lib/trade-goods-routes.ts`). The code is kept. A repository-wide grep found no importer of any of the three, and `tsc --noEmit` must still pass without them exported.
+
+**Session 6 re-audit (after the `main` @ `b8b66b2` integration).** Every export in the
+38 `src`/`integration`/`scripts` files this PR touches was checked against a
+repository-wide reference sweep (`src`, `integration`, `scripts`, `electron`,
+`server.ts`, `middleware.ts`, `next.config.*`). Outcomes:
+
+- `EntryActiveTest`, `NAV_GROUP_LABEL_CLASS`, `NAV_GROUP_RULE_CLASS` (`dashboard/sidebar-nav-group.tsx`)
+  and `LedgerWorkspaceToolGroup` (`(app)/accounting/accounting-workspace.ts`) were exported
+  only for use inside their own file. The `export` keyword is dropped; the code is kept.
+- Left as they are, and not part of this PR's diff: `AppRoutePrefix` (`src/lib/app-routes.ts`)
+  and `PlatformSettingsPage` (`src/lib/settings-routes.ts`). Both are `main` code used inside
+  their own files. They are candidates for a later pass, not removals made here.
+- The collapsed-rail label class is changed from `group-data-[state=collapsed]/sidebar:hidden`
+  to `:sr-only` (`NAV_LABEL_CLASS`, and the same span in `dashboard/app-section-nav.tsx`). This is
+  an accessibility fix, not removal: `display:none` took every collapsed link out of the
+  accessible tree. `src/app/dashboard/sidebar-nav-label.test.ts` compiles the class with
+  Tailwind and asserts the visually-hidden rule.

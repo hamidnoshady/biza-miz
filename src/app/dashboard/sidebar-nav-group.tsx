@@ -35,18 +35,18 @@ import type {
 } from "@/app/(app)/accounting/accounting-workspace";
 
 /** The metadata type a group heading is written in — stated once. */
-export const NAV_GROUP_LABEL_CLASS =
+const NAV_GROUP_LABEL_CLASS =
   "px-3 pb-1 pt-2 text-[11px] font-semibold tracking-wide text-muted-foreground group-data-[state=collapsed]/sidebar:hidden";
 
 /**
  * The hairline that replaces a heading at the 4rem rail, where words are
  * hidden and two groups would otherwise read as one column of glyphs.
  */
-export const NAV_GROUP_RULE_CLASS =
+const NAV_GROUP_RULE_CLASS =
   "mx-2 hidden border-t border-border/70 group-data-[state=collapsed]/sidebar:block";
 
 /** Whether an entry is the page currently open — each menu's own rule. */
-export type EntryActiveTest = (entry: WorkspaceNavEntry) => boolean;
+type EntryActiveTest = (entry: WorkspaceNavEntry) => boolean;
 
 function EntryIcon({ entry }: { entry: WorkspaceNavEntry }) {
   // One resolver for every surface: an explicit `iconKey` names another

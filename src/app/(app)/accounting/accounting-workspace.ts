@@ -281,7 +281,7 @@ export function accountingWorkspaceGroups({
 }
 
 /** One heading of the workspace page, with the permitted tools under it. */
-export interface LedgerWorkspaceToolGroup {
+interface LedgerWorkspaceToolGroup {
   key: string;
   label: string;
   entries: WorkspaceNavEntry[];

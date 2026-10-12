@@ -32,6 +32,10 @@ const GROUP_SOURCE = readFileSync(
   fileURLToPath(new URL("../../dashboard/sidebar-nav-group.tsx", import.meta.url)),
   "utf8",
 );
+const NAV_LABEL_SOURCE = readFileSync(
+  fileURLToPath(new URL("../../dashboard/sidebar-nav-styles.ts", import.meta.url)),
+  "utf8",
+);
 /**
  * The «بازگشت» control is shared by every app sidebar (`app-section-nav.tsx`)
  * rather than respelled in each one, so the rule about its arrow is checked
@@ -126,7 +130,12 @@ describe("the Accounting menu is written for RTL", () => {
   });
 
   it("hides labels, not entries, when the rail collapses to icons", () => {
-    expect(GROUP_SOURCE).toMatch(/group-data-\[state=collapsed\]\/sidebar:hidden/);
+    // The row label is visually hidden (sr-only) at the rail, never display:none,
+    // so each collapsed link keeps the accessible name its tooltip describes.
+    expect(NAV_LABEL_SOURCE).toMatch(
+      /NAV_LABEL_CLASS =\s*\n?\s*"[^"]*group-data-\[state=collapsed\]\/sidebar:sr-only"/,
+    );
+    expect(NAV_LABEL_SOURCE).not.toMatch(/group-data-\[state=collapsed\]\/sidebar:hidden"/);
     // At 4rem the rows stay listed (with their tooltips) and only the hairline
     // separates groups — an icon rail must never hide a destination.
     expect(GROUP_SOURCE).toMatch(/hidden[^"]*group-data-\[state=collapsed\]\/sidebar:block/);
