@@ -354,6 +354,9 @@ export type ActionType =
   | "fiscal.year.close"
   // Batch Z5 — reversing a posted manual entry (a new mirror entry, never an edit).
   | "journal.entry.reverse"
+  // Batch AA — correcting/removing a posted stock count (adjustment re-do or full reversal).
+  | "inventory.count.edit"
+  | "inventory.count.reverse"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -396,6 +399,8 @@ export type AutopilotExecutorKey =
   | "payrollSettingsUpdate"
   | "fiscalYearCreate"
   | "fiscalPeriodSetStatus"
+  | "inventoryCountEdit"
+  | "inventoryCountReverse"
   | "journalEntryReverse"
   | "fiscalYearClose"
   | "reconciliationLineClear"
@@ -1374,6 +1379,23 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "inventory.count.edit": {
+    type: "inventory.count.edit",
+    endpoint: "/api/inventory/stock-counts/[id]",
+    method: "PATCH",
+    label: "اصلاح یک شمارش ثبت‌شده — برگشت سطرهای خوانده‌شده ثم ثبت سطرهای اصلاح‌شده در همان تراکنش",
+    payloadHint:
+      '{ countId: string, note?: string, lines?: Array<{ inventoryItemId: string, countedQty: number|string }> }',
+    executor: "inventoryCountEdit",
+  },
+  "inventory.count.reverse": {
+    type: "inventory.count.reverse",
+    endpoint: "/api/inventory/stock-counts/[id]",
+    method: "DELETE",
+    label: "برگشت کامل یک شمارش ثبت‌شده — موجودی برمی‌گردد و اسنادش معکوس می‌شود (الگوی ساخت سند معکوس)",
+    payloadHint: '{ countId: string }',
+    executor: "inventoryCountReverse",
   },
   "journal.entry.reverse": {
     type: "journal.entry.reverse",

@@ -442,6 +442,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "fiscal.year.close", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   // Batch Z5 — a posting reversal: new mirrored entry into the ledger.
   { actionType: "journal.entry.reverse", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
+  // Batch AA — edit re-does a posted count's adjustment inside one transaction
+  // (same tier as the create it corrects). Reverse unwinds a count's stock
+  // AND its ledger entries — a posting reversal, hence always_approve.
+  { actionType: "inventory.count.edit", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "inventory.count.reverse", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.collection.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "media.asset.set_collection", kind: "write", app: "workspace", risk: "low", approval: "mode" },

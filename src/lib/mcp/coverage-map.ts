@@ -257,11 +257,16 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["inventory/stock-counts", "inventory/periodic-closings", "inventory/visual-count-scans", "inventory/visual-profiles"],
     ops: {
       // Batch G (#883): the list detail share one service (the route's GET was
-      // extracted into listStockCounts verbatim); the create/reverse pair
-      // rides the earlier stock_count verbs.
+      // extracted into listStockCounts verbatim); the count-create lane is the
+      // adjustment's own verb (same /stock-counts POST); batch AA added the
+      // correct/reverse pair as client-transaction services like batch L.
       listDetail: ["list_stock_counts", "get_stock_count"],
+      create: ["inventory.adjustment.propose"],
+      update: ["inventory.count.edit"],
+      lifecycle: ["inventory.count.reverse"],
     },
-    test: "integration/stock.integration.test.ts",
+    note: "periodic closings and visual count scans (image upload/AI scan) stay route-only: a closing is an accounting period operation with no service-level undo, and the scan is a bytes flow",
+    test: "integration/item-stock-counts.integration.test.ts",
   },
   {
     id: "inventory.purchases-suppliers",

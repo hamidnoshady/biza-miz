@@ -1648,6 +1648,47 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_inventory_count_edit",
+    actionType: "inventory.count.edit",
+    english:
+      "Correct a posted stock count — reverses its posted lines then re-records the edited ones in the same transaction.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        countId: id("شناسهٔ شمارش — از list_stock_counts"),
+        note: { type: "string" },
+        lines: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              inventoryItemId: id("کد قلم — از list_inventory_items"),
+              countedQty: { type: "string", description: "مقدار شمارش‌شدهٔ واقعی" },
+            },
+            required: ["inventoryItemId", "countedQty"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["countId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_inventory_count_reverse",
+    actionType: "inventory.count.reverse",
+    english:
+      "Reverse a posted stock count in full — stock returns and its ledger entries are mirrored. Explicit approval each time.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: { countId: id("شناسهٔ شمارش — از list_stock_counts") },
+      required: ["countId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_journal_entry_reverse",
     actionType: "journal.entry.reverse",
     english:

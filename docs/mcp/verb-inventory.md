@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **126 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **127 write verbs**
-(**38** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **129 write verbs**
+(**39** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -265,6 +265,8 @@ visible only to connections consented for every branch) and **127 write verbs**
 | `write_fiscal_period_set_status` | `fiscal.period.set_status` | accounting | high | always approval queue (step-up) | `ledger.close_period` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_fiscal_year_close` | `fiscal.year.close` | accounting | high | always approval queue (step-up) | `ledger.close_period` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_journal_entry_reverse` | `journal.entry.reverse` | accounting | high | always approval queue (step-up) | `ledger.approve` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_inventory_count_edit` | `inventory.count.edit` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_inventory_count_reverse` | `inventory.count.reverse` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_delete` | `media.collection.delete` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_asset_set_collection` | `media.asset.set_collection` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

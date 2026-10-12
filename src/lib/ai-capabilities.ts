@@ -283,6 +283,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   // Same trust as approving a draft — the route's own comment; the screen
   // gates its button on ledger.approve too.
   "journal.entry.reverse": PERMISSIONS.ledgerApprove,
+  "inventory.count.edit": PERMISSIONS.inventoryAdjust,
+  "inventory.count.reverse": PERMISSIONS.inventoryAdjust,
   "media.collection.rename": PERMISSIONS.mediaManage,
   "media.collection.delete": PERMISSIONS.mediaManage,
   "media.asset.set_collection": PERMISSIONS.mediaManage,

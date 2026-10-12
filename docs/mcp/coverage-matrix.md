@@ -15,13 +15,12 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (42)
+### Tenant (41)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
 - **pos.tables** (POS · Dining tables & table sessions) — MCP gap
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
-- **inventory.counts** (Inventory · Stock counts / periodic closings / visual count scans) — partial
 - **inventory.purchases-suppliers** (Inventory · Purchases, supplier returns, suppliers) — partial
 - **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
@@ -82,7 +81,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 30 · partial: 32 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 31 · partial: 31 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -107,7 +106,7 @@ Counts — covered: 30 · partial: 32 · MCP gap: 10 · backend gap: 0 · n/a (i
 | Menu | Menu categories, items, modifier groups, modifiers, reorder | find_items, get_menu_performance, get_menu_tree | menu.category.create, menu.item.create | menu.category.update, menu.item.priceUpdate, menu.item.update | menu.item.disable | — | ledger.view, menu.edit, menu.view | connection mode; step-up (always approve) | find_items, get_menu_performance, get_menu_tree, menu.category.create, menu.item.create, menu.category.update, menu.item.priceUpdate, menu.item.update, menu.item.disable | integration/menu.integration.test.ts | covered |
 | Inventory | Stock items & stock levels | forecast_demand, get_stock_valuation | inventory.adjustment.propose | (route only) | (route only) | (route only) | inventory.adjust, inventory.view, parties.manage, purchases.manage | connection mode | forecast_demand, get_stock_valuation, inventory.adjustment.propose | integration/stock.integration.test.ts | partial |
 | Inventory | Warehouses, transfers, warehouse documents<br>_the warehouses screen itself is the branch/location directory — covered by list_branches and the branch.* writes; transfer ship/receive/cancel and the posting document are always_approve (priced layers move), transfer.create is a draft_ | list_inventory_transfers, list_warehouse_documents | transfer.create, warehouseDocument.create | — | transfer.cancel, transfer.receive, transfer.ship | — | inventory.adjust, inventory.view | connection mode; step-up (always approve) | list_inventory_transfers, list_warehouse_documents, transfer.create, warehouseDocument.create, transfer.cancel, transfer.receive, transfer.ship | integration/warehouse-document.integration.test.ts + retail-warehouse-document | covered |
-| Inventory | Stock counts / periodic closings / visual count scans | get_stock_count, list_stock_counts | (route only) | (route only) | (route only) | — | inventory.adjust, inventory.view | — | get_stock_count, list_stock_counts | integration/stock.integration.test.ts | partial |
+| Inventory | Stock counts / periodic closings / visual count scans<br>_periodic closings and visual count scans (image upload/AI scan) stay route-only: a closing is an accounting period operation with no service-level undo, and the scan is a bytes flow_ | get_stock_count, list_stock_counts | inventory.adjustment.propose | inventory.count.edit | inventory.count.reverse | — | inventory.adjust, inventory.view | connection mode; step-up (always approve) | get_stock_count, list_stock_counts, inventory.adjustment.propose, inventory.count.edit, inventory.count.reverse | integration/item-stock-counts.integration.test.ts | covered |
 | Inventory | Purchases, supplier returns, suppliers | get_supplier_performance, list_suppliers | inventory.reorder.draftPO, supplier.return.create | (route only) | (route only) | — | inventory.view, parties.manage, purchases.manage | connection mode; step-up (always approve) | get_supplier_performance, list_suppliers, inventory.reorder.draftPO, supplier.return.create | integration/purchases.integration.test.ts | partial |
 | Inventory | Production formulas & runs, modifier recipes<br>_the run itself is inventory.production.run (reversible via its own undo); formula shell/lines/edit/deactivate close the CRUD ring around it; modifier recipe assignment stays route-only (menu-screen layout, covered by recipe.assign elsewhere)_ | list_formulas, list_production_runs | production.formula.create, production.formulaInput.set | inventory.production.run, production.formula.update | production.formula.deactivate, production.formulaInput.delete | — | inventory.adjust, inventory.view | connection mode; step-up (always approve) | list_formulas, list_production_runs, production.formula.create, production.formulaInput.set, inventory.production.run, production.formula.update, production.formula.deactivate, production.formulaInput.delete | integration/production-runs.integration.test.ts | covered |
 | Inventory | Barcodes (lookup, bulk) | list_item_barcodes, list_items_without_barcode | barcode.assign | — | — | (route only) | inventory.adjust, inventory.view | connection mode | list_item_barcodes, list_items_without_barcode, barcode.assign | integration/stock.integration.test.ts | partial |

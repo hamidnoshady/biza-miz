@@ -17,7 +17,7 @@
  */
 import { getPool, query } from "./db";
 import type { AutopilotExecutorKey } from "./ai";
-import { createStockCount, reverseStockCount } from "./stock-count-service";
+import { createStockCount, editStockCount, reverseStockCount } from "./stock-count-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
@@ -43,6 +43,7 @@ import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
 import { createDraft, deleteDraft, ManualJournalError, reverseEntry, MANUAL_MEMO_MAX } from "./manual-journal-service";
+
 import { updateCustomer } from "./parties-service";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
 import { isWasteReason, recordWaste } from "./waste-service";
@@ -2688,6 +2689,95 @@ async function resolveWpOwnerConnection(
   return { id: connections[0].id };
 }
 
+// ── Issue #883 package 2, batch AA — stock-count edit & reverse ────────────
+// Both ride the client-transaction services the routes call, with the own
+// count's stored branch (never a guessed one) and the caller's exact code
+// map from the route table. A count edit reverses and re-records in one
+// transaction; a count reverse restores stock and mirrors the entries.
+const countEditErrorCodes = new Set([
+  "count_not_found", "count_not_reversible", "already_reversed", "count_layer_settled",
+  "count_stock_consumed", "stock_count_reversal_inconsistent", "no_items",
+  "invalid_item", "invalid_quantity", "quantity_precision_exceeded", "duplicate_item",
+  "item_not_found",
+]);
+function failCountEdit(err: unknown): AutopilotExecutionResult {
+  if (err instanceof MissingLedgerAccountError) return fail("ledger_account_missing");
+  const message = err instanceof Error ? err.message : "";
+  if (countEditErrorCodes.has(message)) return fail(message);
+  throw err;
+}
+async function stockCountLocation(businessId: string, countId: string): Promise<string | null> {
+  const { rows } = await query<{ location_id: string }>(
+    `SELECT location_id FROM stock_counts WHERE id = $1 AND business_id = $2`,
+    [countId, businessId],
+  );
+  return rows[0]?.location_id ?? null;
+}
+const inventoryCountEdit: AutopilotExecutor = async (ctx) => {
+  const countId = str(ctx.payload.countId) ?? str(ctx.payload.id);
+  if (!countId) return fail("missing_fields");
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const { rows: roleRows } = await query<{ role: string }>(`SELECT role FROM users WHERE id = $1`, [
+    ctx.authorizedByUserId,
+  ]);
+  const locationId = await stockCountLocation(ctx.businessId, countId);
+  if (!locationId) return fail("count_not_found");
+  const rawLines = Array.isArray(ctx.payload.lines)
+    ? (ctx.payload.lines as Record<string, unknown>[]).map((line) => ({
+        inventoryItemId: String(line.inventoryItemId),
+        countedQty: line.countedQty as string | number,
+      }))
+    : [];
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await editStockCount(client, {
+      businessId: ctx.businessId,
+      locationId,
+      countId,
+      note: ctx.payload.note === undefined ? undefined : str(ctx.payload.note) ?? null,
+      lines: rawLines,
+      createdBy: ctx.authorizedByUserId,
+      sync: { actorRole: (roleRows[0]?.role ?? "Owner") as Role },
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return failCountEdit(err);
+  } finally {
+    client.release();
+  }
+};
+const inventoryCountReverse: AutopilotExecutor = async (ctx) => {
+  const countId = str(ctx.payload.countId) ?? str(ctx.payload.id);
+  if (!countId) return fail("missing_fields");
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const { rows: roleRows } = await query<{ role: string }>(`SELECT role FROM users WHERE id = $1`, [
+    ctx.authorizedByUserId,
+  ]);
+  const locationId = await stockCountLocation(ctx.businessId, countId);
+  if (!locationId) return fail("count_not_found");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await reverseStockCount(client, {
+      businessId: ctx.businessId,
+      locationId,
+      countId,
+      createdBy: ctx.authorizedByUserId,
+      sync: { actorRole: (roleRows[0]?.role ?? "Owner") as Role },
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, id: result.id } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return failCountEdit(err);
+  } finally {
+    client.release();
+  }
+};
+
 // ── Issue #883 package 2, batch Z5 — manual-entry reversal ─────────────────
 // Mirrors the reverse route one-for-one: isUuid guard first (a normal 404,
 // never a Postgres cast error), memo bound, the approver's branch passed as
@@ -3407,6 +3497,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   payrollStaffTerms,
   reconciliationLineClear,
   journalEntryReverse,
+  inventoryCountEdit,
+  inventoryCountReverse,
   fiscalYearCreate,
   fiscalPeriodSetStatus,
   fiscalYearClose,
