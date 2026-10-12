@@ -210,6 +210,18 @@ export const PERMISSIONS = {
   payrollView: "payroll.view",
   payrollManage: "payroll.manage",
 
+  // Taxpayer e-invoicing (issue #866). One key per thing it changes: what the
+  // authority sees, what leaves the building, what is withdrawn, and who may hold
+  // the taxpayer's keys. A business can grant the reading without the sending.
+  taxView: "tax.view",
+  taxPrepare: "tax.prepare",
+  taxSend: "tax.send",
+  taxInquiry: "tax.inquiry",
+  taxAmend: "tax.amend",
+  taxCancel: "tax.cancel",
+  taxManageSettings: "tax.manage_settings",
+  taxExport: "tax.export",
+
   // Insight
   reportsView: "reports.view",
   reportsExport: "reports.export",
@@ -426,6 +438,7 @@ const {
   financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
   financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
   payrollView, payrollManage,
+  taxView, taxPrepare, taxSend, taxInquiry, taxAmend, taxCancel, taxManageSettings, taxExport,
   reportsView, reportsExport,
   dataImport, dataExport,
   teamView, teamManage, teamPermissionsManage, settingsManage, locationsManage, backupManage,
@@ -476,6 +489,10 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
     ledgerPropose,
+    // Taxpayer invoicing, operational half: prepare, send and inquire. The
+    // amendment, cancellation, export and the taxpayer's keys stay with the
+    // accountant and the administrator, who answer for what the authority holds.
+    taxView, taxPrepare, taxSend, taxInquiry,
     // «ورود و خروج داده». The manager already held every bulk door the product
     // had (crm.export gated both the customer export AND the customer import;
     // reports.export gated the report download), so granting these two keeps
@@ -508,6 +525,10 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
     payrollView, payrollManage,
+    // Taxpayer invoicing, accounting half: every record action except the
+    // taxpayer's keys, which only the administrator holds. Cancelling an accepted
+    // invoice and exporting the register are the two most consequential here.
+    taxView, taxPrepare, taxSend, taxInquiry, taxAmend, taxCancel, taxExport,
     reportsView, reportsExport,
     // Same reasoning as the manager's: the accountant already downloaded the
     // financial statements through reports.export, and importing a chart of

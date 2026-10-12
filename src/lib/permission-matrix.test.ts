@@ -89,6 +89,7 @@ describe("built-in role presets", () => {
       "settings.manage",
       "store_credit.issue", "store_credit.payout",
       "tables.edit", "tables.manage",
+      "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
       "website.manage", "website.settings_manage", "website.view",
       "woocommerce.configure", "woocommerce.manage", "woocommerce.sync", "woocommerce.view",
       "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.documents_issue", "workspace.manage", "workspace.view",
@@ -111,6 +112,7 @@ describe("built-in role presets", () => {
       "parties.manage", "parties.view",
       "payroll.manage", "payroll.view",
       "reports.export", "reports.view",
+      "tax.amend", "tax.cancel", "tax.export", "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
       "workspace.view",
     ]);
   });
@@ -166,6 +168,31 @@ describe("privilege boundaries that must not drift", () => {
     for (const role of ["manager", "accountant", "cashier", "waiter", "kitchen"] as const) {
       expect(hasPermission(role, {}, PERMISSIONS.teamManage)).toBe(false);
       expect(hasPermission(role, {}, PERMISSIONS.teamPermissionsManage)).toBe(false);
+    }
+  });
+
+  it("keeps the taxpayer's credentials with the administrator alone", () => {
+    // Issue #866: the keys that sign and send invoices in the taxpayer's name.
+    // Neither the accountant nor the manager writes them, even though both reach
+    // the register.
+    for (const role of ROLES) {
+      const expected = role === "owner" || role === "admin";
+      expect(hasPermission(role, {}, PERMISSIONS.taxManageSettings), role).toBe(expected);
+    }
+  });
+
+  it("keeps the authority-facing cancellation and the register export off the manager", () => {
+    expect(hasPermission("manager", {}, PERMISSIONS.taxCancel)).toBe(false);
+    expect(hasPermission("manager", {}, PERMISSIONS.taxAmend)).toBe(false);
+    expect(hasPermission("manager", {}, PERMISSIONS.taxExport)).toBe(false);
+    expect(hasPermission("accountant", {}, PERMISSIONS.taxCancel)).toBe(true);
+  });
+
+  it("keeps the taxpayer register away from the till and the floor", () => {
+    for (const role of ["cashier", "waiter", "kitchen"] as const) {
+      for (const key of [PERMISSIONS.taxView, PERMISSIONS.taxPrepare, PERMISSIONS.taxSend]) {
+        expect(hasPermission(role, {}, key), `${role} ${key}`).toBe(false);
+      }
     }
   });
 
