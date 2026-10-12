@@ -8,7 +8,8 @@
  * Determinism is the whole game here; a flaky snapshot gets ignored, and an
  * ignored check is not a check. So:
  *
- *  - one viewport (1440×900, DPR 1) and one timezone (Asia/Tehran), set on the
+ *  - one desktop viewport (1440×900, DPR 1), a 390×844 mobile viewport where a
+ *    screen claims one, and one timezone (Asia/Tehran), set on the
  *    browser context rather than inherited from the machine;
  *  - `prefers-reduced-motion: reduce`, which the app already honours globally —
  *    this parks every transition, skeleton shimmer and staggered entry at its
@@ -31,6 +32,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";
+import { selectVisualScreens } from "./visual-selection.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE_DIR = join(ROOT, "docs", "design", "visual");
@@ -89,7 +91,9 @@ const EXPECTED_CHROMIUM_VERSION = "141.0.7390.37";
  * canonical example of a shared pattern rather than because it is pretty.
  *
  * `theme` covers the language's two surfaces; `state` names a non-default
- * interaction worth freezing (an empty list, a focused control).
+ * interaction worth freezing (an empty list, a focused control). `viewport`
+ * overrides the default 1440×900 window for the mobile form of a screen —
+ * same DPR 1, so the comparison stays pixel-honest.
  */
 const SCREENS = [
   // — Accounting — the reference trial balance: table hierarchy + status pill.
@@ -124,6 +128,19 @@ const SCREENS = [
     anchor: "table",
   },
   { id: "accounting-receivables", path: "/accounting/receivables", theme: "light" },
+  /*
+   * The «دریافت و پرداخت» register: filter chips, search, the voucher table
+   * with its method/account column and status pill, and the ثبت action. The
+   * fixture holds one fully-reversed receipt (net-zero in every aggregation,
+   * so no other baseline moves), which is what makes the باطل‌شده status —
+   * the register's whole reason to keep reversed vouchers visible — appear.
+   * Mobile is a first-class layout here (stacked cards, full-width actions),
+   * so it gets its own baselines in both themes.
+   */
+  { id: "accounting-receipts", path: "/accounting/receipts", theme: "light" },
+  { id: "accounting-receipts-dark", path: "/accounting/receipts", theme: "dark" },
+  { id: "accounting-receipts-mobile", path: "/accounting/receipts", theme: "light", viewport: { width: 390, height: 844 } },
+  { id: "accounting-receipts-mobile-dark", path: "/accounting/receipts", theme: "dark", viewport: { width: 390, height: 844 } },
   // — CRM —
   { id: "crm-overview", path: "/crm/overview", theme: "light" },
   { id: "crm-deals", path: "/crm/deals", theme: "light" },
@@ -202,6 +219,8 @@ function comparePng(actualBuf, expectedBuf) {
 }
 
 async function main() {
+  const selectedIds = selectVisualScreens(SCREENS.map((screen) => screen.id), process.argv.slice(2), Boolean(process.env.CI));
+  const screens = SCREENS.filter((screen) => selectedIds.includes(screen.id));
   mkdirSync(BASELINE_DIR, { recursive: true });
   rmSync(DIFF_DIR, { recursive: true, force: true });
 
@@ -278,9 +297,10 @@ async function main() {
   /** Screens whose DOM never stopped changing — the other flake source. */
   const unsettled = [];
 
-  for (const screen of SCREENS) {
+  for (const screen of screens) {
     const context = await browser.newContext({
       ...contextOptions,
+      viewport: screen.viewport ?? contextOptions.viewport,
       storageState,
       colorScheme: screen.theme,
     });
@@ -324,6 +344,10 @@ async function main() {
       .catch(() => {
         busyAtCapture.push(screen.id);
       });
+
+    // A cold development compile can temporarily fail the health probe. Never
+    // approve that connection banner as normal UI; a genuinely offline run fails.
+    await page.getByText(/^سرور محلی در دسترس نیست/).waitFor({ state: "hidden", timeout: 45_000 });
 
     // Settled, not merely loaded. Without this the suite is ~10% flaky: a
     // screen whose data arrives in two waves briefly shows content, so the
@@ -448,7 +472,7 @@ async function main() {
     );
     process.exit(1);
   }
-  console.log(`Visual regression: ${SCREENS.length} screen(s) match their baselines.`);
+  console.log(`Visual regression: ${screens.length} screen(s) match their baselines.`);
 }
 
 main().catch((err) => {

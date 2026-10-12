@@ -12,6 +12,7 @@ import {
 } from "@/lib/ai-wallet-billing";
 import { MAX_RECEIPT_IMAGE_BYTES, parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 import { ReceiptOcrError, runReceiptOcr } from "@/lib/ai-receipt-service";
+import { listExpenseCategoryAccounts } from "@/lib/expense-service";
 import { hasMatchingMediaSignature } from "@/lib/media";
 import {
   findMediaAssetByHash,
@@ -101,9 +102,28 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     throw err;
   }
 
+  /*
+   * The tenant's own expense chart, not a fixed list of F&B codes: the model may
+   * only answer with an account this business actually has, and a suggestion that
+   * is not in the list is dropped on the way back (issue #832 §13). An empty
+   * chart is not an error — extraction still fills amount/vendor/date, the
+   * category is simply left for the person to choose.
+   *
+   * So is a chart that could not be read. It degrades to the same empty list —
+   * no vocabulary, therefore no suggestion — rather than to an unfiltered model
+   * answer, because the safe direction when the chart is unknown is «say nothing»
+   * and never «guess plausibly».
+   */
+  let expenseAccounts: { id: string; code: string; name: string }[] = [];
+  try {
+    expenseAccounts = await listExpenseCategoryAccounts(session.businessId);
+  } catch {
+    expenseAccounts = [];
+  }
+
   let extraction: Awaited<ReturnType<typeof runReceiptOcr>>;
   try {
-    extraction = await runReceiptOcr({ config, dataUrl: parsed.dataUrl });
+    extraction = await runReceiptOcr({ config, dataUrl: parsed.dataUrl, expenseAccounts });
   } catch (err) {
     // Mirrors /api/ai/invoice-ocr: no reservation to refund — a failed turn
     // settles nothing, so nothing is charged for a call that produced no

@@ -33,6 +33,9 @@ const STATUS_BY_ERROR: Record<string, number> = {
   code_already_redeemed: 409,
   code_revoked: 410,
   pairing_session_unavailable: 409,
+  // The desktop is too old for this chart. Not a retry-later condition: it
+  // needs an update, and the code it holds is still valid for that update.
+  pairing_requires_newer_client: 409,
 };
 
 /**
@@ -48,7 +51,13 @@ const STATUS_BY_ERROR: Record<string, number> = {
 export async function handlePairingRedeem(
   request: NextRequest,
 ): Promise<NextResponse> {
-  let body: { code?: string; deviceName?: string; installationId?: string };
+  let body: {
+    code?: string;
+    deviceName?: string;
+    installationId?: string;
+    /** The newest snapshot version the desktop can read. Absent for older builds. */
+    maxSnapshotVersion?: number;
+  };
   try {
     body = await request.json();
   } catch {
@@ -65,11 +74,16 @@ export async function handlePairingRedeem(
       : "Windows Business Suite";
   const installationId =
     typeof body.installationId === "string" ? body.installationId : null;
+  const maxSnapshotVersion =
+    typeof body.maxSnapshotVersion === "number" && Number.isInteger(body.maxSnapshotVersion)
+      ? body.maxSnapshotVersion
+      : undefined;
   const result = await redeemPairingCode(
     code,
     clientIp(request),
     deviceName,
     installationId,
+    { maxSnapshotVersion },
   );
   if (!result.ok) {
     return NextResponse.json(

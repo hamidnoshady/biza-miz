@@ -5,6 +5,7 @@ import { CircleAlertIcon, InfoIcon } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
+import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 
 /**
  * The dashboard's fetch wrapper.
@@ -28,17 +29,36 @@ export async function api<T = Record<string, unknown>>(
   url: string,
   init?: RequestInit,
 ): Promise<{ ok: boolean; status: number; data: T; aborted: boolean }> {
+  // Helper to detect abort at any point: AbortController can fire between
+  // `await fetch(...)` resolving and our next `await res.json()`, or even
+  // mid-stream during JSON parsing, in which case the json() catch block would
+  // otherwise surface as a spurious ok:true/empty-body (issue #824 review
+  // item 3). Check the signal explicitly on every exit path.
+  const isAborted = () => init?.signal?.aborted === true;
   try {
     const res = await fetch(url, {
       headers: init?.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
       ...init,
     });
+    // Abort can fire between headers arriving and body consumption.
+    if (isAborted()) {
+      return { ok: false, status: 0, data: {} as T, aborted: true };
+    }
     let data: T;
     try {
       data = (await res.json()) as T;
-    } catch {
+    } catch (jsonErr) {
+      // If the body stream was aborted mid-read, surface that rather than
+      // swallowing into {} — an AbortError during body consumption is a
+      // deliberate cancellation, not a malformed response.
+      if (isAborted() || (jsonErr instanceof DOMException && jsonErr.name === "AbortError")) {
+        return { ok: false, status: 0, data: {} as T, aborted: true };
+      }
       // A 204, an HTML error page from a proxy, or a body cut off mid-flight.
       data = {} as T;
+    }
+    if (isAborted()) {
+      return { ok: false, status: 0, data: {} as T, aborted: true };
     }
     // Section 12 (professional error handling) follow-up: a 5xx is the
     // server itself failing, not a validation rejection — worth capturing in
@@ -62,8 +82,7 @@ export async function api<T = Record<string, unknown>>(
     // `network_error` would put «ارتباط با سرور برقرار نشد» on screen every time
     // a newer search superseded an older one, which is the normal path, not a
     // failure. Callers that pass `init.signal` check `aborted` and return.
-    const aborted =
-      init?.signal?.aborted === true || (err instanceof DOMException && err.name === "AbortError");
+    const aborted = isAborted() || (err instanceof DOMException && err.name === "AbortError");
     if (!aborted) {
       recordApiFailure({ method: init?.method ?? "GET", url, status: 0, code: "network_error" });
     }
@@ -78,6 +97,9 @@ export async function api<T = Record<string, unknown>>(
 
 /** Persian messages for the API's error codes. */
 const ERROR_MESSAGES: Record<string, string> = {
+    // The fixed-asset register's domain errors live in their own dictionary
+    // (fixed-assets-errors.ts) — spread here so every screen shares them.
+    ...FIXED_ASSET_ERROR_TRANSLATIONS,
     unauthorized: "وارد نشده‌اید.",
     forbidden: "دسترسی مجاز نیست.",
     bad_request: "درخواست نامعتبر بود.",
@@ -126,6 +148,10 @@ const ERROR_MESSAGES: Record<string, string> = {
     account_has_postings: "این حساب سند خورده و قابل حذف نیست؛ می‌توانید آن را غیرفعال کنید.",
     account_has_draft_postings: "این حساب در یک پیش‌نویس استفاده شده و قابل حذف نیست.",
     account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
+    parent_has_active_children: "نمی‌توان حسابی را که زیرمجموعهٔ فعال دارد بایگانی کرد؛ ابتدا زیرمجموعه‌ها را بایگانی یا جابه‌جا کنید.",
+    ancestor_archived: "نمی‌توان این حساب را فعال کرد؛ یکی از حساب‌های والد در زنجیره هنوز بایگانی است.",
+    parent_type_mismatch: "نوع حساب زیرمجموعه باید با نوع شاخهٔ والد یکسان باشد.",
+    parent_archived: "نمی‌توان حساب را زیر یک حساب بایگانی‌شده ایجاد یا جابه‌جا کرد.",
     missing_file: "فایل را انتخاب کنید.",
     file_too_large: "حجم فایل بیش از حد مجاز است.",
     unsupported_format: "فرمت فایل پشتیبانی نمی‌شود. CSV یا XLSX استفاده کنید.",
@@ -375,6 +401,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     // Not a usable YYYY-MM-DD calendar date — what the ledger's aging and
     // voucher routes answer a malformed date parameter with.
     invalid_date: "تاریخ واردشده معتبر نیست.",
+    // A wrong-typed memo off the wire (a number, an object) — rejected as a
+    // 400, never trimmed into a TypeError 500.
+    invalid_memo: "شرح واردشده معتبر نیست.",
     // پروفایل کسب‌وکار و پروژه‌های AEC (issue #799، موج ۲)
     industry_mismatch: "این بخش فقط برای کسب‌وکارهای عمران، معماری و پیمانکاری است.",
     invalid_operating_profile: "پروفایل کسب‌وکار انتخابی معتبر نیست.",
@@ -503,11 +532,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     payment_not_found: "پرداخت موردنظر پیدا نشد.",
     payment_not_reversible: "این پرداخت سند قابل برگشت ندارد یا از این مسیر قابل برگشت نیست.",
     // Phase 22 — fixed assets & depreciation
-    fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-    fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
-    period_already_depreciated: "استهلاک این دوره قبلاً برای این دارایی ثبت شده است.",
-    fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است.",
     salvage_value_invalid: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
+    // Issue #833 — fixed-asset lifecycle
+    location_required: "انتخاب شعبه الزامی است.",
     // Phase 16 — bank & cash reconciliation
     invalid_account: "حساب انتخاب‌شده معتبر نیست.",
     statement_date_required: "تاریخ صورتحساب الزامی است.",
@@ -528,7 +555,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     // after it, so the server refuses it rather than warning about it.
     statement_date_in_future:
       "تاریخ صورتحساب نمی‌تواند در آینده باشد؛ تاریخ پایان صورتحسابی را وارد کنید که دریافت کرده‌اید.",
-    invalid_cursor: "نشانی صفحهٔ درخواستی معتبر نیست؛ فهرست را از نو بارگذاری کنید.",
     // Phase 17 — plan limits / feature gating
     feature_disabled: "این امکان برای کسب‌وکار شما فعال نیست.",
     branch_limit_exceeded: "به سقف تعداد شعبه در پلن فعلی رسیده‌اید. برای افزودن شعبهٔ بیشتر، پلن را ارتقا دهید.",
@@ -670,7 +696,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_domain_mode: "نوع تأمین دامنه معتبر نیست.",
     invalid_cdn_provider: "ارائه‌دهندهٔ CDN معتبر نیست.",
     invalid_cdn_status: "وضعیت CDN معتبر نیست.",
-    invalid_period: "مدت ثبت دامنه باید بین ۱ تا ۵ سال باشد.",
     invalid_operation: "نوع عملیات دامنه معتبر نیست.",
     // `invalid_status` is already mapped above (the floor-plan's table status)
     // and the CMS order select only ever submits one of its four options, so
@@ -728,8 +753,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     run_voided: "این تعهد ابطال شده و قابل پرداخت نیست.",
     run_not_found: "تعهد حقوق پیدا نشد.",
     no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
-    period_label_required: "عنوان دوره الزامی است.",
-    period_label_too_long: "عنوان دوره بیش از حد طولانی است.",
     invalid_accrual_date: "تاریخ تعهد معتبر نیست.",
     invalid_paid_date: "تاریخ پرداخت معتبر نیست.",
     // «حقوق ماهانه» is saved through ui.tsx's own errorMessage, so the wage

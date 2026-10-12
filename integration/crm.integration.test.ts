@@ -847,9 +847,11 @@ describe("the task list's filter", () => {
     const viewerId = await makeMember(own.businessId, "زهرا کریمی");
     const customerId = await makeCustomer(own.businessId, "مشتری پیگیری‌ها");
 
-    // The shop's own today, which is what the route bounds the states by.
+    // The shop's own today, which is what the route bounds the states by — the
+    // date plus the zone and day start that say where it begins.
     businessDay = await import("../src/lib/business-day-service");
-    const today = await businessDay.businessToday(own.businessId);
+    const shopDay = await businessDay.businessDayContext(own.businessId);
+    const today = shopDay.businessDate;
     const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000)
       .toISOString()
       .slice(0, 10);
@@ -906,7 +908,12 @@ describe("the task list's filter", () => {
     const run = async (query: Record<string, string>) => {
       const parsed = parseActivityViewFilters({ get: (key) => query[key] ?? null });
       expect(parsed.error).toBeNull();
-      const options = activityViewListOptions(parsed.filters, { viewerId, today });
+      const options = activityViewListOptions(parsed.filters, {
+        viewerId,
+        today,
+        timeZone: shopDay.timeZone,
+        startMinutes: shopDay.startMinutes,
+      });
       const rows = await crm.listActivities(own.businessId, options);
       return rows.map((row) => row.id).sort();
     };

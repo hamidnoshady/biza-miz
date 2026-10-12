@@ -107,3 +107,30 @@ export function formatQueueLabel(type: "dine_in" | "takeaway" | "delivery" | "re
   if (type === "delivery") return `D-${orderNumber}`;
   return `#${orderNumber}`;
 }
+
+/** How an order type reads on a screen — and on the paper, since a print document is built from these too. */
+export const ORDER_TYPE_LABELS: Record<string, string> = {
+  dine_in: "حضوری",
+  takeaway: "بیرون‌بر",
+  delivery: "ارسالی",
+  retail: "فروشگاهی",
+};
+
+/** `dine_in` with a table says which table, because that is what the runner carries the tray to. */
+export function orderTypeLabelOf(type: string, tableName?: string | null): string {
+  const label = ORDER_TYPE_LABELS[type] ?? type;
+  return type === "dine_in" && tableName ? `${label} — ${tableName}` : label;
+}
+
+/**
+ * The order's own document number as every surface prints it: a retail sale is
+ * «فاکتور ۴۲» (it is an invoice), everything else is the kitchen queue label.
+ *
+ * One helper because the printed receipt and the screen that shows the same
+ * order must not disagree about its number.
+ */
+export function orderDocumentLabel(order: { type: string; order_number: number | string }): string {
+  return order.type === "retail"
+    ? `فاکتور ${order.order_number}`
+    : formatQueueLabel(order.type as "dine_in" | "takeaway" | "delivery" | "retail", order.order_number);
+}

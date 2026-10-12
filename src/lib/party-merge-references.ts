@@ -144,6 +144,19 @@ export interface PartyReference {
    * CHECK forbids — so those rows are deleted instead of moved.
    */
   selfEdgeColumn?: string;
+  /**
+   * An audited-guard door, declared ON the reference that needs it.
+   *
+   * Some tables sit behind an immutability trigger that allows a party move
+   * only when the audit row exists first and a transaction-local flag is on.
+   * The SQL that writes that audit row belongs beside the reference's own
+   * declaration — it is part of what moving THIS reference means — and the
+   * merge service runs it, inside the merge transaction, immediately before
+   * the move statement, then turns the flag on. Same bind order as the move:
+   * business, loser, winner, then actor. The ledger attribution move
+   * (journal_lines.party_id, issue #863) is the one entry that uses this.
+   */
+  preMoveSql?: string;
 }
 
 /**
@@ -174,6 +187,78 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "رسید دریافت",
   },
   {
+    // Multicurrency (issue #863). The party attribution ON A LINE — the
+    // foreign open item itself. Amounts (debit/credit/foreign) are untouched:
+    // only who the ledger says the balance belongs to moves, exactly like the
+    // orders entry above. Parent-scoped: journal_lines is tenanted by its
+    // entry, and the generated UPDATE must hop through journal_entries.
+    table: "journal_lines",
+    column: "party_id",
+    scope: "parent",
+    parent: { table: "journal_entries", childColumn: "entry_id", parentColumn: "id" },
+    disposition: "move",
+    reason:
+      "A foreign receivable/payable leg IS the person's open balance — the settlement FIFO and the foreign party report resolve it live. Leaving it on the archived record hides real money from the survivor's file; moving it touches only the attribution, never the posted amounts.",
+    // The door through the journal's immutability guard: the attribution move
+    // lands in `ledger_party_attribution_moves` FIRST (same transaction), then
+    // `journal_immutable_columns_guard` accepts the party update under the
+    // transaction-local flag. Every other session still hits the guard.
+    preMoveSql: `INSERT INTO ledger_party_attribution_moves
+                   (business_id, line_id, entry_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, jl.id, jl.entry_id, jl.party_id, $3, $4
+                   FROM journal_lines jl
+                   JOIN journal_entries je ON je.id = jl.entry_id
+                  WHERE je.business_id = $1 AND jl.party_id = $2`,
+  },
+  {
+    // Multicurrency (issue #863). The lot trail's denormalized copy of the
+    // same attribution; it must keep agreeing with the settlement document
+    // and the lot line it points at, so it follows the same merge.
+    table: "fx_settlement_applications",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The application repeats its settlement's party for the audit trail; after a merge it must still name the surviving party or the trail contradicts the settlement document and the lot line it belongs to.",
+  },
+  {
+    // Multicurrency (issue #863). The attribution trail's own columns are
+    // HISTORY, not live attribution: a row records who the party WAS (old)
+    // and who it became (new) at a moment in time. Rewriting it to follow a
+    // later merge would falsify the audit record — the exact thing the
+    // append-only guard forbids. Both columns stay on the archived record.
+    table: "ledger_party_attribution_moves",
+    column: "old_party_id",
+    scope: "business",
+    disposition: "historical",
+    reason:
+      "The move's audit row records what happened, including the party that was archived; rewriting history is what the append-only guard exists to prevent.",
+  },
+  {
+    table: "ledger_party_attribution_moves",
+    column: "new_party_id",
+    scope: "business",
+    disposition: "historical",
+    reason:
+      "The destination of a recorded move is a fact about that move; a later merge of the winner must not rewrite it.",
+  },
+  {
+    table: "fixed_assets",
+    column: "custodian_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "An asset's custodian is operational: the register reads it live (history, responsibility), so it must resolve to the surviving party instead of an archived one. No journal line references the custodian — the trial balance is untouched.",
+  },
+  {
+    table: "fixed_assets",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The vendor an asset was bought from is a live register attribute (list, filters, export), not an audit row about the party itself; re-pointing keeps the provenance readable after two supplier files become one. The purchase journal entry is not touched.",
+  },
+  {
     table: "cheques",
     column: "customer_id",
     scope: "business",
@@ -191,6 +276,23 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     reason: "An instalment plan is a live obligation of the person, not of the record that lost a merge.",
     preview: true,
     previewLabel: "قرارداد اقساط",
+  },
+  {
+    table: "expenses",
+    column: "party_id",
+    scope: "business",
+    // An expense survives its party being deleted outright — `ON DELETE SET
+    // NULL` plus the free-text `vendor` snapshot keep the posted fact intact
+    // (issue #832 §12). A merge is a different act: it does not destroy the
+    // record, it declares that two rows were always the same person. Leaving
+    // the link on the loser would strand it on an archived row, and the ledger
+    // question the column exists to answer — «به این شخص/شرکت چقدر پرداختیم» —
+    // would silently lose every expense the loser had.
+    disposition: "move",
+    reason:
+      "The supplier link on a paid expense is a live ledger reference, not an audit annotation; the audit trail is the journal entry and the `vendor` snapshot, which a merge does not touch.",
+    preview: true,
+    previewLabel: "هزینه",
   },
 
   // -- Growth-owned programs ------------------------------------------------

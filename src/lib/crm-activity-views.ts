@@ -199,6 +199,14 @@ export function nextIsoDate(iso: string): string | undefined {
  * the row badges, because both read the same date — the one `businessToday`
  * resolved for the branch.
  *
+ * The date alone is not the whole day, so the branch's zone and day start travel
+ * with it (`dayTimeZone`/`dayStartMinutes`): `listActivities` compares
+ * timestamps, and «today» is only an instant once you say *where the day
+ * begins*. Without them the comparison falls back to the database session's
+ * timezone — on a UTC server that is the shop's 03:30, which is how the queue
+ * cards and the links they render came to disagree about a call due after
+ * midnight.
+ *
  * It lives with the vocabulary rather than in the route because the queue cards
  * emit documents and claim they are the same rows; a test can hold that claim
  * only if the link and the list read the same translation.
@@ -214,13 +222,34 @@ export interface ActivityViewListOptions {
   dueOnOrBefore?: string;
   dueBefore?: string;
   dueOnOrAfter?: string;
+  /**
+   * The shop's day the bounds above mean, when the caller resolved it: the
+   * branch's zone and its day start. `listActivities` needs both to turn an ISO
+   * date into the instants that date begins and ends, because the database
+   * session's timezone is not the shop's — see `activityViewListOptions`.
+   */
+  dayTimeZone?: string;
+  dayStartMinutes?: number | null;
 }
 
 export function activityViewListOptions(
   filters: ActivityViewFilters,
-  context: { viewerId: string | null; today: string },
+  context: {
+    viewerId: string | null;
+    /** The shop's own today — `businessToday`'s date half. */
+    today: string;
+    /**
+     * The branch's zone and business-day start, from the same context that
+     * produced `today`. They are what make the bounds *the shop's* day rather
+     * than midnight in the database session's zone; a caller that omits them
+     * gets the historical (session-zone) comparison, which is why every product
+     * caller passes them.
+     */
+    timeZone?: string;
+    startMinutes?: number | null;
+  },
 ): ActivityViewListOptions {
-  const { viewerId, today } = context;
+  const { viewerId, today, timeZone } = context;
   // `mine` becomes the caller's own id, never the query string: a
   // `?assignee=<someone-else>` with no member id to be resolves to nobody,
   // never to everybody.
@@ -255,6 +284,8 @@ export function activityViewListOptions(
         : filters.state === "planned"
           ? nextIsoDate(today)
           : undefined,
+    dayTimeZone: timeZone,
+    dayStartMinutes: timeZone === undefined ? undefined : context.startMinutes ?? null,
   };
 }
 

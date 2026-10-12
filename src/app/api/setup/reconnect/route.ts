@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRole, withTenantScope } from "@/lib/auth";
 import { normalizeServerAddress } from "@/lib/connection-code";
 import { localInstallationId, repairPairingSnapshot } from "@/lib/pairing-apply";
-import { validateSnapshot } from "@/lib/pairing-snapshot";
+import {
+  answersCapability,
+  DESKTOP_REDEEM_CAPABILITY,
+  validateSnapshot,
+} from "@/lib/pairing-snapshot";
 import { acknowledgePendingPairing } from "@/lib/server-sync";
 
 const REDEEM_TIMEOUT_MS = 30_000;
@@ -31,7 +35,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     remote = await fetch(`${address.url}/api/pairing/redeem`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, deviceName: process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite", installationId }),
+      body: JSON.stringify({
+        code,
+        deviceName: process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite",
+        installationId,
+        ...DESKTOP_REDEEM_CAPABILITY,
+      }),
       signal: AbortSignal.timeout(REDEEM_TIMEOUT_MS),
     });
   } catch {
@@ -42,6 +51,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const validated = validateSnapshot(payload.snapshot);
   if (!validated.ok || validated.snapshot.business.id !== session.businessId) {
     return NextResponse.json({ error: "repair_business_mismatch" }, { status: 409 });
+  }
+  if (!answersCapability(validated.snapshot.version)) {
+    return NextResponse.json({ error: "server_predates_account_state" }, { status: 502 });
   }
 
   const pairingSessionId = typeof payload.pairingSessionId === "string" ? payload.pairingSessionId : undefined;

@@ -1045,7 +1045,11 @@ describe("queues as views", () => {
     // The shop's own today — the date the queue's SQL and the list's bounds are
     // both judged by. Building the timestamps from it (rather than from the
     // browser's noon) is what makes «امروز» one date in both places.
-    const today = await day.businessToday(own.businessId);
+    // The whole day, not just its date: the queue cards bucket `due_at` by the
+    // branch's own day and the list's bounds are that same day, so the test
+    // passes the same context the route does.
+    const shopDay = await day.businessDayContext(own.businessId);
+    const today = shopDay.businessDate;
     const dayOffset = (offset: number) =>
       new Date(Date.parse(`${today}T00:00:00Z`) + offset * 86_400_000).toISOString().slice(0, 10);
 
@@ -1161,7 +1165,12 @@ describe("queues as views", () => {
       expect(parsed.error).toBeNull();
       const rows = await crm.listActivities(
         own.businessId,
-        activityViewListOptions(parsed.filters, { viewerId, today }),
+        activityViewListOptions(parsed.filters, {
+          viewerId,
+          today,
+          timeZone: shopDay.timeZone,
+          startMinutes: shopDay.startMinutes,
+        }),
       );
       return rows;
     };

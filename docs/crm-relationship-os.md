@@ -158,6 +158,14 @@ Design decisions worth keeping:
   *and* no legacy name — the definition `unowned_work` in the data-quality
   workspace already used. Before this, the queue and the filter it linked to
   described different rows; the integration test compares them per queue.
+- **«امروز» is the shop's day, not the database server's.** The queues bucket a
+  due date with `app_business_date(a.due_at, …)` and `listActivities` bounds the
+  `state=today`/`overdue` filters against that same day's own start and end —
+  both fed by `businessDayContext()`, the branch's timezone and day start. Before
+  this, both compared `due_at::date` against the *session's* calendar day, which
+  on a UTC server is already tomorrow from 20:30: a call due at 02:00 in Tehran
+  was counted under «عقب‌افتاده» for three and a half hours a night, and the
+  card and its link agreed with each other only by being wrong together.
 - **`possible_duplicates` counts with `phonePairKeySql`**, the same helper the
   duplicates screen uses — a count computed differently from the list it labels
   is the bug this file was written after.

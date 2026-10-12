@@ -15,6 +15,7 @@
  */
 import { getPool, query, withoutTenantScope, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
+import type { MigrationStatus } from "./migration-status-service";
 import type { PoolClient } from "pg";
 import { disableFeatures, seedChartOfAccounts } from "./business-provisioning";
 import { reconcilePaymentMethodsForIndustry } from "./payment-methods-service";
@@ -1179,6 +1180,38 @@ async function assertNoOperationalChildrenRemain(
  *    to make both reset and hard delete fail with a raw FK error once a
  *    tenant had any of them).
  */
+/**
+ * Issue #866 — purge only non-accepted, non-in-flight taxpayer records. They
+ * are immutable by design (a submission is never deleted in normal operation),
+ * Accepted and unresolved provider history blocks destructive operations.
+ * Other records RESTRICT-reference orders and branches they report, so they go
+ * first. The purge is transaction-local, the same as the factory-reset flag, and
+ * is the only path migration 0216 allows a deletion through. A correction points
+ * at the record it corrects, so records are removed leaves first.
+ */
+async function purgeTaxInvoiceRecords(client: PoolClient, businessId: string): Promise<void> {
+  const retained = await client.query(`SELECT 1 FROM tax_invoice_submissions
+    WHERE business_id = $1 AND (accepted_at IS NOT NULL OR status = 'accepted') LIMIT 1`, [businessId]);
+  if (retained.rowCount) throw new BusinessDeleteBlockedError("tax_accepted_retained");
+  const held = await client.query(`SELECT 1 FROM tax_invoice_submissions WHERE business_id = $1 AND retention_hold_at IS NOT NULL LIMIT 1`, [businessId]);
+  if (held.rowCount) throw new BusinessDeleteBlockedError("tax_retention_hold");
+  const pending = await client.query(`SELECT 1 FROM tax_invoice_submissions WHERE business_id = $1
+    AND status IN ('sending', 'submitted', 'awaiting_inquiry') LIMIT 1`, [businessId]);
+  if (pending.rowCount) throw new BusinessDeleteBlockedError("tax_inflight_retained");
+  await client.query("SELECT set_config('app.tax_submission_purge', 'on', true)");
+  await client.query("DELETE FROM tax_invoice_archives WHERE business_id = $1", [businessId]);
+  await client.query("DELETE FROM tax_invoice_events WHERE business_id = $1", [businessId]);
+  for (;;) {
+    const removed = await client.query(
+      `DELETE FROM tax_invoice_submissions AS s
+        WHERE s.business_id = $1
+          AND NOT EXISTS (SELECT 1 FROM tax_invoice_submissions AS c WHERE c.parent_submission_id = s.id)`,
+      [businessId],
+    );
+    if (!removed.rowCount) break;
+  }
+}
+
 async function clearBusinessDeleteBlockers(client: PoolClient, businessId: string): Promise<void> {
   // The migration-only escape hatch is transaction-local. It lets the
   // explicitly confirmed factory reset pass accounting immutability guards,
@@ -1189,6 +1222,7 @@ async function clearBusinessDeleteBlockers(client: PoolClient, businessId: strin
   // branch set before collecting/deleting data so a concurrent tenant request
   // cannot add a row halfway through this reset.
   await client.query("SELECT id FROM locations WHERE business_id = $1 FOR UPDATE", [businessId]);
+  await purgeTaxInvoiceRecords(client, businessId);
 
   const statements = [
     // Dependent rows first: their foreign keys are deliberately restrictive
@@ -3178,7 +3212,18 @@ export async function queryAudit(q: AuditQuery = {}): Promise<AuditListResult> {
 
 export interface SystemStatus {
   migrations: { filename: string; appliedAt: string }[];
-  pendingMigrations: number;
+  /**
+   * Retained for existing consumers: ordinary pending + gated/deferred, or null
+   * when the migration inventory could not be read. Never a confident zero
+   * standing in for "unknown" — see `migrationStatus`.
+   */
+  pendingMigrations: number | null;
+  /**
+   * The canonical migration status from `getMigrationStatus()`. Carries the
+   * ordinary/gated split, the stable reason codes and the redacted AI gateway
+   * secret-cutover state that `pendingMigrations` cannot express.
+   */
+  migrationStatus: MigrationStatus;
   pool: { total: number; idle: number; waiting: number };
   rlsEffective: boolean;
   backups: { businessId: string; businessName: string; status: string; ranAt: string | null }[];
@@ -3207,15 +3252,17 @@ export interface PlatformBackupLine {
  * connection pool's live figures, whether RLS is actually being enforced, and
  * the most recent backup run per business. Read-only and cheap — this is a
  * dashboard, not a control surface.
+ *
+ * `migrations` is the canonical status from `getMigrationStatus()` (see
+ * `src/lib/migration-status-service.ts`); the applied-migration list is derived
+ * from it rather than queried again, so the page cannot show two different
+ * answers about the same table.
  */
-export async function systemStatus(pendingMigrations: number): Promise<SystemStatus> {
+export async function systemStatus(migrations: MigrationStatus): Promise<SystemStatus> {
   const pool = getPool();
 
-  const [migrations, backups, counts, rls, backupHealth] = await withoutTenantScope("platform", () =>
+  const [backups, counts, rls, backupHealth] = await withoutTenantScope("platform", () =>
     Promise.all([
-      query<{ filename: string; applied_at: string }>(
-        `SELECT filename, applied_at FROM schema_migrations ORDER BY filename DESC LIMIT 30`,
-      ),
       query<{ business_id: string; business_name: string; status: string; ran_at: string | null }>(
         `SELECT DISTINCT ON (br.business_id)
                 br.business_id, b.name AS business_name, br.status, br.started_at AS ran_at
@@ -3239,8 +3286,12 @@ export async function systemStatus(pendingMigrations: number): Promise<SystemSta
   );
 
   return {
-    migrations: migrations.rows.map((m) => ({ filename: m.filename, appliedAt: m.applied_at })),
-    pendingMigrations,
+    migrations: migrations.applied.map((m) => ({
+      filename: m.filename,
+      appliedAt: m.appliedAt ?? "",
+    })),
+    pendingMigrations: migrations.pendingTotal,
+    migrationStatus: migrations,
     pool: {
       total: pool.totalCount,
       idle: pool.idleCount,

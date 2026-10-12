@@ -6,6 +6,7 @@ import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { loginRoster, resolveLoginBusinessId } from "@/lib/employee-service";
 import { readHybridIdentityStatus } from "@/lib/iam/login-credential-sync";
 import { phoneOtpEnforcementFor } from "@/lib/phone-otp";
+import { readTrustedDeviceToken, resolveTrustedDeviceSubject } from "@/lib/trusted-device";
 
 /**
  * Phase 20 Wave 2 — the name-then-PIN login redesign's first step: who is
@@ -40,8 +41,16 @@ export async function GET(request: NextRequest) {
 
   return withTenant(businessId, async () => {
     const deviceId = await resolveDeviceId(params.get("deviceToken"), businessId);
+    // Issue #885 — the one member this device may greet as trusted. Resolved
+    // from the trust cookie rather than from any member-wide stamp, so the
+    // door's routing hint agrees with what `pin-login` will actually decide:
+    // a second till is not trusted just because the first one verified.
+    const trusted = await resolveTrustedDeviceSubject({
+      businessId,
+      token: readTrustedDeviceToken(request),
+    });
     const [employees, enforcement, deployment] = await Promise.all([
-      loginRoster(businessId, params.get("locationId"), deviceId),
+      loginRoster(businessId, params.get("locationId"), deviceId, trusted?.userId ?? null),
       phoneOtpEnforcementFor(businessId),
       readDeploymentProfile(businessId),
     ]);

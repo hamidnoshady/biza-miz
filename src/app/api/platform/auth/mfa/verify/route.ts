@@ -19,7 +19,11 @@ import {
   recordAuthSuccess,
 } from "@/lib/login-lockout-service";
 import { PLATFORM_LOCKOUT_POLICY } from "@/lib/login-lockout";
-import { selectPrimaryMfaEnrolment, type MfaMethod } from "@/lib/mfa";
+import {
+  mayConfirmPendingEnrolmentAtLogin,
+  selectPrimaryMfaEnrolment,
+  type MfaMethod,
+} from "@/lib/mfa";
 
 export async function POST(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
@@ -89,6 +93,21 @@ export async function POST(request: NextRequest) {
 
     const detail = await verifyAndConfirmMfaCode({
       subjectRealm: "platform_admin",
+      /**
+       * Issue #854 (P1.11): confirm a pending enrolment here only when the
+       * account has no confirmed factor — the mid-enrolment lockout case. If a
+       * confirmed factor exists, the strict path applies and a half-finished
+       * enrolment cannot stand in as the second factor.
+       */
+      confirmPendingEnrolment: mayConfirmPendingEnrolmentAtLogin(enrolments, method),
+      /*
+       * Issue #854 (invariant 4): signing in spends a login challenge only —
+       * on both branches. The strict branch proves a confirmed factor; the
+       * mid-enrolment branch (no confirmed factor yet) uses the same
+       * `mfa_login` challenge the login screen already sent and activates the
+       * pending row as it succeeds.
+       */
+      smsPurposes: ["mfa_login"],
       subjectId: admin.id,
       method,
       code,
