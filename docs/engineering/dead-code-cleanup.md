@@ -398,3 +398,20 @@ repository-wide reference sweep (`src`, `integration`, `scripts`, `electron`,
   an accessibility fix, not removal: `display:none` took every collapsed link out of the
   accessible tree. `src/app/dashboard/sidebar-nav-label.test.ts` compiles the class with
   Tailwind and asserts the visually-hidden rule.
+
+**Session 6, integration with `main` @ `b606ad9f`.** Three navigation files and four
+data-layer files conflicted with `main`'s #824 (chart of accounts) and #866 (taxpayer
+invoices) work. Resolution, by file:
+
+- `accounts-service.ts`, `api/ledger/accounts/route.ts`, `chart-of-accounts-section.tsx`,
+  `data-transfer/entities/accounting.ts`: this branch had no change of its own in any of
+  them relative to `b8b66b2`, so `main`'s version is taken whole.
+- `accounting-headings.ts`: both sides kept. `main`'s `chart-of-accounts` title and
+  description and its `tax-invoices` heading are taken, and this branch's `ledger`
+  workspace-landing heading is kept.
+- `accounting-nav.ts`: the `ACCOUNTING_NAV_GROUPS` block stays deleted (see §10 above).
+  `main`'s `tax-invoices` section entry is kept.
+- `accounting-workspace.ts`: the derived `LEDGER_WORKSPACE_SECTION_KEYS` stays. The hand list
+  `main` added is dropped, and `tax-invoices` is in the `ledger-periods` division, as `main`
+  intended. The workspace pin in `accounting-workspace.test.ts` moves from sixteen to
+  seventeen tools, and a new test asserts the `tax.view` gate on the page and the menu.

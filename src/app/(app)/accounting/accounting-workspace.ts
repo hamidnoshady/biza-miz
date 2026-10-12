@@ -159,7 +159,7 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
     keys: ["receivables", "payables", "installments", "cheques"],
   },
   { key: "ledger-funds", label: "وجوه و هزینه", keys: ["receipts", "expenses", "reconciliation", "fixed-assets"] },
-  { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "vat", "payroll"] },
+  { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "vat", "tax-invoices", "payroll"] },
 ];
 
 /** Every ledger tool, in division order — derived, never a second list. */

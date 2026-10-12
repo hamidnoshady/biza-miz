@@ -41,6 +41,8 @@ import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
+import { TaxInvoicesSection } from "./tax-invoices-section";
+import { taxInvoiceCapabilitiesFor } from "./tax-invoice-capabilities";
 import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
 import { AccountingReportsSection } from "./reports-section";
 import { MulticurrencySection } from "./multicurrency-section";
@@ -442,6 +444,7 @@ export function AccountingManager({
               accounts={accounts ?? []}
             />
           ) : null}
+          {section === "tax-invoices" ? <TaxInvoicesSection refreshKey={refreshKey} capabilities={taxInvoiceCapabilitiesFor(permissions)} /> : null}
           {section === "financial-reports" ? <AccountingReportsSection /> : null}
           {section === "multicurrency" ? (
             <MulticurrencySection accounts={accounts ?? []} busy={busy} run={run} />

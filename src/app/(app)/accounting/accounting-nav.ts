@@ -84,6 +84,10 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   // menu and an API drift apart the next time either preset changes.
   { key: "payroll", label: "حقوق و دستمزد", permission: PERMISSIONS.payrollView },
   { key: "vat", label: "گزارش مالیات" },
+  // Taxpayer e-invoicing (issue #866). The section is the register of what was
+  // sent to the tax authority; the door is `tax.view`, and each action inside it
+  // asks for its own capability.
+  { key: "tax-invoices", label: "صورتحساب مؤدیان", permission: PERMISSIONS.taxView },
   { key: "fixed-assets", label: "دارایی‌های ثابت" },
   { key: "financial-reports", label: "گزارش‌های مالی" },
   { key: "growth", label: "رشد و بازاریابی" },

@@ -365,8 +365,35 @@ describe("the ledger workspace's own section list", () => {
   });
 });
 
+describe("the taxpayer register on the ledger workspace", () => {
+  // «صورتحساب مؤدیان» is a ledger tool gated by its own door, tax.view. The
+  // workspace page and the menu must both follow that door, and neither may
+  // invent a second rule of its own.
+  it("is listed on the workspace page only for members who hold tax.view", () => {
+    expect(of("owner").has(PERMISSIONS.taxView)).toBe(true);
+    expect(of("cashier").has(PERMISSIONS.taxView)).toBe(false);
+
+    const listed = (role: Role) =>
+      ledgerWorkspaceToolGroups(of(role)).flatMap((group) => group.entries.map((entry) => entry.section));
+    expect(listed("owner")).toContain("tax-invoices");
+    expect(listed("cashier")).not.toContain("tax-invoices");
+  });
+
+  it("is not a separate menu row: the one ledger link covers it, and that link lights on its page", () => {
+    // The menu carries one ledger link. Its tools, the taxpayer register
+    // included, are listed on the workspace page, so no second row appears.
+    for (const role of ["owner", "cashier"] as const) {
+      const rows = groupsFor(role).flatMap((group) => group.entries).filter((entry) => entry.section === "tax-invoices");
+      expect(rows, role).toHaveLength(0);
+    }
+    const [ledgerRow] = groupsFor("owner").flatMap((group) => group.entries).filter((entry) => entry.section === "ledger");
+    expect(workspaceEntryIsActive(ledgerRow, "/accounting/tax-invoices", "")).toBe(true);
+    expect(workspaceEntryIsActive(ledgerRow, "/accounting/overview", "")).toBe(false);
+  });
+});
+
 describe("the ledger tool divisions", () => {
-  it("gives every ledger tool exactly one division, and the tool set is exactly these sixteen", () => {
+  it("gives every ledger tool exactly one division, and the tool set is exactly these seventeen", () => {
     // The contract, written out: a tool added or dropped must change this list
     // on purpose. The tool set is derived from the divisions, so this is the one
     // place the membership is pinned — not a second copy of it.
@@ -374,7 +401,7 @@ describe("the ledger tool divisions", () => {
       "trial-balance", "entries", "manual", "multicurrency", "chart-of-accounts",
       "receivables", "payables", "installments", "cheques",
       "receipts", "expenses", "reconciliation", "fixed-assets",
-      "fiscal-periods", "vat", "payroll",
+      "fiscal-periods", "vat", "tax-invoices", "payroll",
     ];
     const placed = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
     expect(new Set(placed).size).toBe(placed.length);
@@ -386,7 +413,7 @@ describe("the ledger tool divisions", () => {
       ["trial-balance", "entries", "manual", "multicurrency", "chart-of-accounts"],
       ["receivables", "payables", "installments", "cheques"],
       ["receipts", "expenses", "reconciliation", "fixed-assets"],
-      ["fiscal-periods", "vat", "payroll"],
+      ["fiscal-periods", "vat", "tax-invoices", "payroll"],
     ]);
   });
 

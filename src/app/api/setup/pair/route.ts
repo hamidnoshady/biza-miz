@@ -6,7 +6,11 @@ import {
 } from "@/lib/connection-code";
 import { syncHybridLoginCredentials } from "@/lib/iam/login-credential-sync";
 import { applyPairingSnapshot, localInstallationId } from "@/lib/pairing-apply";
-import { validateSnapshot } from "@/lib/pairing-snapshot";
+import {
+  answersCapability,
+  DESKTOP_REDEEM_CAPABILITY,
+  validateSnapshot,
+} from "@/lib/pairing-snapshot";
 import { hasAnyUser } from "@/lib/setup-state";
 import { acknowledgePendingPairing } from "@/lib/server-sync";
 
@@ -105,6 +109,7 @@ export async function POST(request: NextRequest) {
           deviceName:
             process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite",
           installationId,
+          ...DESKTOP_REDEEM_CAPABILITY,
         }),
         signal: AbortSignal.timeout(REDEEM_TIMEOUT_MS),
       });
@@ -141,6 +146,11 @@ export async function POST(request: NextRequest) {
   const validation = validateSnapshot(payload.snapshot);
   if (!validation.ok) {
     return NextResponse.json({ error: "snapshot_invalid" }, { status: 502 });
+  }
+  // Checked before anything is written: an older cloud would restore archived
+  // and contra accounts as if they were ordinary active ones.
+  if (!answersCapability(validation.snapshot.version)) {
+    return NextResponse.json({ error: "server_predates_account_state" }, { status: 502 });
   }
 
   // Re-checked immediately before the write: the hasAnyUser() at the top is a
