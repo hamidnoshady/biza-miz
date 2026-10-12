@@ -262,6 +262,128 @@ describe("source-aware filter controls", () => {
   });
 });
 
+/**
+ * A saved report on the *default* source (`sales`), with an entity filter
+ * selection — loading it must not disturb that source's option list.
+ */
+const SAME_SOURCE_SAVED_REPORT = {
+  id: "saved-same",
+  name: "فروش نوشیدنی",
+  description: null,
+  is_standard: false,
+  version: 1,
+  config: {
+    view: "sales",
+    metric: "total",
+    dimension: "location",
+    aggregation: "sum",
+    visualization: "bar",
+    filters: { equals: { category: "cat-1" } },
+  },
+};
+
+describe("loading a saved report keeps its source's filter options", () => {
+  it("keeps already-loaded same-source options and shows the saved value as selected", async () => {
+    stubFetch({ saved: [SAME_SOURCE_SAVED_REPORT] });
+    render(<ReportBuilderSection capabilities={CAPABILITIES} />);
+
+    // The default source's entity options finish loading…
+    fireEvent.click(await screen.findByRole("button", { name: "دسته" }));
+    fireEvent.click(await screen.findByRole("option", { name: "نوشیدنی" }));
+
+    // …and a saved report on that same source is loaded into the builder.
+    fireEvent.click(await screen.findByRole("button", { name: "ویرایش / تغییر نام" }));
+    await waitFor(() => expect(screen.getByText("فروش نوشیدنی")).toBeTruthy());
+
+    // The options the picker already had are still there — loading the report
+    // cleared nothing — and the saved selection is the selected one, shown by
+    // its real label rather than the bare placeholder.
+    const trigger = screen.getByRole("button", { name: "دسته" });
+    fireEvent.click(trigger);
+    expect(within(screen.getByRole("listbox")).getByRole("option", { name: "نوشیدنی" })).toBeTruthy();
+    // The selected value is in the list, so the false «not available in this
+    // branch» stand-in must not be offered.
+    expect(screen.queryByText(/در این شعبه در دسترس نیست/)).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: "نوشیدنی" }));
+    expect(screen.getByRole("button", { name: "دسته" }).textContent).toContain("نوشیدنی");
+  });
+
+  it("keeps an in-flight same-source options request and applies it when it lands", async () => {
+    let resolveHeld: (response: Response) => void = () => {};
+    const held = new Promise<Response>((resolve) => {
+      resolveHeld = resolve;
+    });
+    let started = false;
+    let aborted = false;
+    stubFetch({
+      saved: [SAME_SOURCE_SAVED_REPORT],
+      onFilterOptions: (source, signal) => {
+        if (source === "sales") {
+          started = true;
+          signal?.addEventListener("abort", () => { aborted = true; });
+          return held;
+        }
+        return { ok: true, status: 200, json: async () => ({ options: {} }) } as Response;
+      },
+    });
+
+    render(<ReportBuilderSection capabilities={CAPABILITIES} />);
+    await waitFor(() => expect(started).toBe(true));
+
+    // The same-source report is loaded while that request is still open.
+    fireEvent.click(await screen.findByRole("button", { name: "ویرایش / تغییر نام" }));
+    await waitFor(() => expect(screen.getByText("فروش نوشیدنی")).toBeTruthy());
+
+    // The in-flight request must survive the load — aborting it here is what
+    // left the picker empty forever, since nothing re-runs the effect for a
+    // same-view load.
+    expect(aborted).toBe(false);
+
+    // When the options land, they apply and the saved value is selectable.
+    resolveHeld({ ok: true, status: 200, json: async () => ({ options: { category: [{ value: "cat-1", label: "نوشیدنی" }] } }) } as Response);
+    const trigger = await screen.findByRole("button", { name: "دسته" });
+    fireEvent.click(trigger);
+    await waitFor(() => {
+      expect(within(screen.getByRole("listbox")).getByRole("option", { name: "نوشیدنی" })).toBeTruthy();
+    });
+    expect(screen.queryByText(/در این شعبه در دسترس نیست/)).toBeNull();
+    expect(trigger.textContent).toContain("نوشیدنی");
+  });
+
+  it("still aborts and discards the old source's options when the saved report changes source", async () => {
+    let resolveOld: (response: Response) => void = () => {};
+    const held = new Promise<Response>((resolve) => {
+      resolveOld = resolve;
+    });
+    let oldAborted = false;
+    stubFetch({
+      saved: [SAVED_REPORT],
+      onFilterOptions: (source, signal) => {
+        if (source === "sales") {
+          signal?.addEventListener("abort", () => { oldAborted = true; });
+          return held;
+        }
+        return { ok: true, status: 200, json: async () => ({ options: {} }) } as Response;
+      },
+    });
+
+    render(<ReportBuilderSection capabilities={CAPABILITIES} />);
+
+    // `SAVED_REPORT` is on the `staff` source: loading it must abandon the
+    // in-flight options for the previous source.
+    fireEvent.click(await screen.findByRole("button", { name: "ویرایش / تغییر نام" }));
+    await waitFor(() => expect(oldAborted).toBe(true));
+
+    resolveOld({
+      ok: true,
+      status: 200,
+      json: async () => ({ options: { category: [{ value: "old-cat", label: "دستهٔ قدیمی" }] } }),
+    } as Response);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.queryByText("دستهٔ قدیمی")).toBeNull();
+  });
+});
+
 describe("an in-flight preview cannot land after the source changes", () => {
   it("drops a late response for the previous source and stays usable", async () => {
     let resolveOld: (response: Response) => void = () => {};

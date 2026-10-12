@@ -214,15 +214,17 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     [views, view],
   );
 
-  function invalidateFilterOptions() {
-    filterOptionsSequence.current += 1;
-    filterOptionsController.current?.abort();
-    filterOptionsController.current = null;
-    setFilterOptions({});
-    setFilterOptionsLoading(false);
-    setFilterOptionsError("");
-  }
-
+  /**
+   * The filter-options effect below is the single owner of the dynamic option
+   * list, and it is keyed by the view: when the view *changes*, its cleanup
+   * aborts the previous source's fetch and its body clears and reloads — the
+   * sequence guard keeps a late response for the abandoned source from
+   * overwriting the new one. When the view does *not* change, nothing must
+   * clear the list: a saved report that shares the current source keeps its
+   * already-loaded (or still-loading) options, because neither effect
+   * dependency would change afterwards and a cleared picker would have no
+   * recovery path.
+   */
   useEffect(() => {
     filterOptionsController.current?.abort();
     const sequence = ++filterOptionsSequence.current;
@@ -300,8 +302,10 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
       setDateFrom("");
       setDateTo("");
     }
-    // Equality filters and dynamic option lists belong to one source only.
-    invalidateFilterOptions();
+    // Equality filters belong to one source only. The dynamic option list
+    // follows the source through the effect above: a different view re-runs
+    // it, and a re-selection of the current view leaves the loaded options
+    // exactly where they are.
     setEquals({});
     // Invalidate before clearing, or a response for the previous source lands
     // on a form that no longer describes it.
@@ -419,7 +423,14 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
    */
   function loadIntoBuilder(report: SavedReportRow) {
     const state = builderStateFromConfig(report.config);
-    invalidateFilterOptions();
+    // Do not touch the filter options here. A saved report on a *different*
+    // source re-runs the options effect through `setView` (aborting the old
+    // fetch, clearing and reloading); one on the *same* source must keep the
+    // options that are already loaded — or still loading — for that source.
+    // Clearing them was a lifecycle gap: nothing re-ran the effect afterwards,
+    // so the entity pickers stayed empty without a loading state or a retry,
+    // and a saved value was offered under the false «not available in this
+    // branch» label even though the options for it were valid.
     setView(state.view);
     setMetric(state.metric);
     setAggregation(state.aggregation);
