@@ -1648,6 +1648,43 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_table_session_open",
+    actionType: "table.session.open",
+    english: "Open a table session at the branch (one session can seat several tables).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        tableId: id("یک میز"),
+        tableIds: { type: "array", items: { type: "string" }, description: "چند میز برای یک نشست" },
+        partySize: { type: "number" },
+        guestName: { type: "string" },
+        guestPhone: { type: "string" },
+        locationId: id("شعبه — پیش‌فرض پین"),
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_table_session_update",
+    actionType: "table.session.update",
+    english: "Update an open table session — set_note, set_guests (rebuilds the guest list), release, or merge a table in.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: id("نشست"),
+        action: { type: "string", enum: ["set_note", "set_guests", "release", "merge"] },
+        note: { type: "string", description: "فقط با set_note" },
+        customerIds: { type: "array", items: { type: "string" }, description: "فقط با set_guests — حداکثر ۵۰ مشتریِ واقعی" },
+        tableId: id("فقط با merge — میز جدید"),
+        locationId: id("شعبه — پیش‌فرض پین"),
+      },
+      required: ["id", "action"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_loyalty_points_redeem",
     actionType: "loyalty.points.redeem",
     english: "Redeem a customer's loyalty points — the customer's money; always asks a human first.",

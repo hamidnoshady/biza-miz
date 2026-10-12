@@ -3,11 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import {
-  computeSessionBill,
-  mergeTableIntoSession,
-  releaseSessionWithoutOrders,
-} from "@/lib/table-session-service";
+import { computeSessionBill, openSession, releaseSessionWithoutOrders, mergeTableIntoSession, setSessionGuests } from "@/lib/table-session-service";
 import { broadcast } from "@/lib/realtime";
 
 /** Session detail: header, its tables, its orders, and the combined bill. */
@@ -100,36 +96,12 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   try {
     await client.query("BEGIN");
     if (body.action === "set_guests") {
-      const customerIds = body.customerIds ?? [];
-      if (customerIds.length > 50 || new Set(customerIds.filter(Boolean)).size !== customerIds.filter(Boolean).length) {
-        throw Object.assign(new Error("invalid_guests"), { code: "invalid_guests", status: 400 });
-      }
-      const { rows: sessionRows } = await client.query<{ party_size: number | null }>(
-        `SELECT party_size FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE`,
-        [id, location.id],
-      );
-      if (sessionRows.length === 0) throw Object.assign(new Error("session_not_found"), { code: "session_not_found", status: 404 });
-      const partySize = Math.max(1, customerIds.length, Number(sessionRows[0].party_size ?? 0));
-      const selectedCustomerIds = customerIds.filter((value): value is string => Boolean(value));
-      if (selectedCustomerIds.length > 0) {
-        const { rows: ownedCustomers } = await client.query<{ id: string }>(
-          `SELECT id FROM parties WHERE business_id = $1 AND is_active AND id = ANY($2::uuid[])`,
-          [session.businessId, selectedCustomerIds],
-        );
-        if (ownedCustomers.length !== selectedCustomerIds.length) {
-          throw Object.assign(new Error("customer_not_found"), { code: "customer_not_found", status: 404 });
-        }
-      }
-      await client.query(`DELETE FROM table_session_customers WHERE session_id = $1`, [id]);
-      for (const [index, customerId] of customerIds.entries()) {
-        if (!customerId) continue;
-        await client.query(
-          `INSERT INTO table_session_customers (business_id, location_id, session_id, guest_number, customer_id)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [session.businessId, location.id, id, index + 1, customerId],
-        );
-      }
-      await client.query(`UPDATE table_sessions SET party_size = $2 WHERE id = $1`, [id, partySize]);
+      await setSessionGuests(client, {
+        businessId: session.businessId,
+        locationId: location.id,
+        sessionId: id,
+        customerIds: body.customerIds ?? [],
+      });
     } else if (body.action === "release") {
       await releaseSessionWithoutOrders(client, location.id, id, session.sub);
     } else if (body.action === "merge") {

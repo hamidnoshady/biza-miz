@@ -247,6 +247,51 @@ export async function releaseTableAfterOrderSettled(
  * the session still holds an active order, because that table's exit is the
  * checkout's job, not a manual override.
  */
+/**
+ * Replace the guest list on an open session — extracted verbatim from
+ * `PATCH /api/table-sessions/[id]` (batch AF #883) so the route and the
+ * cockpit executor call the same rules: ≤50 unique ids, all owned parties,
+ * guest numbers rebuild from 1, and party size never shrinks below the
+ * guest count.
+ */
+export async function setSessionGuests(
+  client: PoolClient,
+  input: { businessId: string; locationId: string; sessionId: string; customerIds: (string | null | undefined)[] },
+): Promise<void> {
+  const customerIds = input.customerIds;
+  if (customerIds.length > 50 || new Set(customerIds.filter(Boolean)).size !== customerIds.filter(Boolean).length) {
+    throw Object.assign(new Error("invalid_guests"), { code: "invalid_guests", status: 400 });
+  }
+  const { rows: sessionRows } = await client.query<{ party_size: number | null }>(
+    `SELECT party_size FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE`,
+    [input.sessionId, input.locationId],
+  );
+  if (sessionRows.length === 0) {
+    throw Object.assign(new Error("session_not_found"), { code: "session_not_found", status: 404 });
+  }
+  const partySize = Math.max(1, customerIds.length, Number(sessionRows[0].party_size ?? 0));
+  const selectedCustomerIds = customerIds.filter((value): value is string => Boolean(value));
+  if (selectedCustomerIds.length > 0) {
+    const { rows: ownedCustomers } = await client.query<{ id: string }>(
+      `SELECT id FROM parties WHERE business_id = $1 AND is_active AND id = ANY($2::uuid[])`,
+      [input.businessId, selectedCustomerIds],
+    );
+    if (ownedCustomers.length !== selectedCustomerIds.length) {
+      throw Object.assign(new Error("customer_not_found"), { code: "customer_not_found", status: 404 });
+    }
+  }
+  await client.query(`DELETE FROM table_session_customers WHERE session_id = $1`, [input.sessionId]);
+  for (const [index, customerId] of customerIds.entries()) {
+    if (!customerId) continue;
+    await client.query(
+      `INSERT INTO table_session_customers (business_id, location_id, session_id, guest_number, customer_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [input.businessId, input.locationId, input.sessionId, index + 1, customerId],
+    );
+  }
+  await client.query(`UPDATE table_sessions SET party_size = $2 WHERE id = $1`, [input.sessionId, partySize]);
+}
+
 export async function releaseSessionWithoutOrders(
   client: PoolClient,
   locationId: string,

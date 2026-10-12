@@ -19,7 +19,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
-- **pos.tables** (POS · Dining tables & table sessions) — MCP gap
+- **pos.tables** (POS · Dining tables & table sessions) — partial
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
 - **inventory.purchases-suppliers** (Inventory · Purchases, supplier returns, suppliers) — partial
 - **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
@@ -77,7 +77,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 35 · partial: 27 · MCP gap: 10 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 35 · partial: 28 · MCP gap: 9 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -98,7 +98,7 @@ Counts — covered: 35 · partial: 27 · MCP gap: 10 · backend gap: 0 · n/a (i
 | POS | Shifts (start/end/close, active) | list_shifts | shift.start | — | shift.close, shift.end | — | orders.create, team.manage | connection mode | list_shifts, shift.start, shift.close, shift.end | integration/shifts.integration.test.ts | covered |
 | POS | Kitchen display / floor / waiter queues<br>_read-only live queues; writes happen through order item actions_ | get_table_turnover_rate | (route only) | (route only) | (route only) | — | kitchen.view, tables.edit, tables.manage | — | get_table_turnover_rate | — | partial |
 | POS | Reservations | get_reservation_conflicts | (route only) | (route only) | (route only) | — | reservations.manage, reservations.view | — | get_reservation_conflicts | integration/reservations.integration.test.ts | partial |
-| POS | Dining tables & table sessions<br>_MCP gap by design for now: the floor is realtime — every write in these routes broadcasts to the live floor view and (for sessions) coordinates with open orders through ensureSessionForTable; a chat verb that skips the broadcast leaves the till screens stale, so the lanes stay route-only until the session orchestration is extracted like listInventoryTransfers was — see issue #883 follow-ups_ | (route only) | (route only) | (route only) | (route only) | — | tables.edit, tables.manage | — | — | — | MCP gap |
+| POS | Dining tables & table sessions<br>_batch AF: session open/update verbs broadcast table_session.updated exactly like the routes (the executor runs server-side, where the realtime hub lives), and setSessionGuests was extracted verbatim into the service so route and verb share the guest rules; floor-plan table CRUD (tables routes) still needs its own extraction — the designation lane is designer-side config_ | (route only) | table.session.open | table.session.update | (route only) | — | tables.edit, tables.manage | connection mode | table.session.open, table.session.update | — | partial |
 | Menu | Menu categories, items, modifier groups, modifiers, reorder | find_items, get_menu_performance, get_menu_tree | menu.category.create, menu.item.create | menu.category.update, menu.item.priceUpdate, menu.item.update | menu.item.disable | — | ledger.view, menu.edit, menu.view | connection mode; step-up (always approve) | find_items, get_menu_performance, get_menu_tree, menu.category.create, menu.item.create, menu.category.update, menu.item.priceUpdate, menu.item.update, menu.item.disable | integration/menu.integration.test.ts | covered |
 | Inventory | Stock items & stock levels | forecast_demand, get_stock_valuation | inventory.adjustment.propose | (route only) | (route only) | (route only) | inventory.adjust, inventory.view, parties.manage, purchases.manage | connection mode | forecast_demand, get_stock_valuation, inventory.adjustment.propose | integration/stock.integration.test.ts | partial |
 | Inventory | Warehouses, transfers, warehouse documents<br>_the warehouses screen itself is the branch/location directory — covered by list_branches and the branch.* writes; transfer ship/receive/cancel and the posting document are always_approve (priced layers move), transfer.create is a draft_ | list_inventory_transfers, list_warehouse_documents | transfer.create, warehouseDocument.create | — | transfer.cancel, transfer.receive, transfer.ship | — | inventory.adjust, inventory.view | connection mode; step-up (always approve) | list_inventory_transfers, list_warehouse_documents, transfer.create, warehouseDocument.create, transfer.cancel, transfer.receive, transfer.ship | integration/warehouse-document.integration.test.ts + retail-warehouse-document | covered |

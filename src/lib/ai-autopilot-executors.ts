@@ -21,6 +21,8 @@ import { createStockCount, editStockCount, reverseStockCount } from "./stock-cou
 import { saveMessageTemplate, pauseMessageCampaign, resumeMessageCampaign, launchMessageCampaign } from "./message-campaigns-service";
 import { redeemGiftCard, expireGiftCards } from "./promotions-service";
 import { redeemPoints, issueStoreCredit, useStoreCredit as payOutStoreCredit, storeCreditBalance, upsertProgram } from "./loyalty-service";
+import { openSession, releaseSessionWithoutOrders, mergeTableIntoSession, setSessionGuests } from "./table-session-service";
+import { broadcast } from "./realtime";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -2694,6 +2696,95 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AF — table sessions ───────────────────────
+// The two session handlers the floormaps use. Errors arrive from the client-
+// transaction services as thrown {code, status} errors, exactly as the routes
+// catch them, so the model sees the floor screen's own codes.
+function thrownCode(err: unknown): AutopilotExecutionResult {
+  const code = (err as { code?: string }).code;
+  if (code) return fail(code);
+  throw err;
+}
+const tableSessionOpen: AutopilotExecutor = async (ctx) => {
+  const rawIds = Array.isArray(ctx.payload.tableIds)
+    ? (ctx.payload.tableIds as unknown[]).map(String).filter(Boolean)
+    : ctx.payload.tableId !== undefined
+      ? [String(ctx.payload.tableId)]
+      : [];
+  const tableIds = [...new Set(rawIds)];
+  if (tableIds.length === 0) return fail("table_required");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const partySizeRaw = Number(ctx.payload.partySize);
+  const partySize = Number.isFinite(partySizeRaw) && partySizeRaw > 0 ? partySizeRaw : null;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { id } = await openSession(client, {
+      locationId: branch.locationId,
+      tableIds,
+      partySize,
+      guestName: str(ctx.payload.guestName) ?? null,
+      guestPhone: str(ctx.payload.guestPhone) ?? null,
+      openedBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    // Route parity: the live floor view listens for this exact event.
+    broadcast(branch.locationId, { type: "table_session.updated", sessionId: id });
+    return { ok: true, result: { ok: true, id } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return thrownCode(err);
+  } finally {
+    client.release();
+  }
+};
+const tableSessionUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.sessionId);
+  const action = str(ctx.payload.action);
+  if (!id) return fail("missing_fields");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  if (action === "set_note") {
+    const { rows } = await query<{ id: string }>(
+      "UPDATE table_sessions SET note = $3 WHERE id = $1 AND location_id = $2 AND status = 'open' RETURNING id",
+      [id, branch.locationId, str(ctx.payload.note) ?? null],
+    );
+    if (rows.length === 0) return fail("session_not_found");
+    return { ok: true, result: { ok: true } };
+  }
+  if (action !== "set_guests" && action !== "release" && action !== "merge") return fail("bad_request");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    if (action === "set_guests") {
+      const customerIds = Array.isArray(ctx.payload.customerIds) ? ctx.payload.customerIds : [];
+      await setSessionGuests(client, {
+        businessId: ctx.businessId,
+        locationId: branch.locationId,
+        sessionId: id,
+        customerIds: customerIds as (string | null | undefined)[],
+      });
+    } else if (action === "release") {
+      await releaseSessionWithoutOrders(client, branch.locationId, id, ctx.authorizedByUserId);
+    } else {
+      const newTableId = str(ctx.payload.tableId);
+      if (!newTableId) return fail("table_required");
+      await mergeTableIntoSession(client, branch.locationId, id, newTableId);
+    }
+    await client.query("COMMIT");
+    broadcast(branch.locationId, { type: "table_session.updated", sessionId: id });
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return thrownCode(err);
+  } finally {
+    client.release();
+  }
+};
+
 // ── Issue #883 package 2, batch AE — loyalty wallet lanes ─────────────────
 // Same pattern the routes use: one client transaction per movement, and the
 // route's composite failure shape ({error, message}) preserved verbatim —
@@ -3772,6 +3863,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   journalEntryReverse,
   inventoryCountEdit,
   inventoryCountReverse,
+  tableSessionOpen,
+  tableSessionUpdate,
   loyaltyPointsRedeem,
   loyaltyStoreCreditIssue,
   loyaltyStoreCreditUse,

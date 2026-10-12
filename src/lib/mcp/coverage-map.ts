@@ -207,7 +207,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "POS",
     entity: "Dining tables & table sessions",
     routes: ["tables", "table-sessions"],
-    note: "MCP gap by design for now: the floor is realtime — every write in these routes broadcasts to the live floor view and (for sessions) coordinates with open orders through ensureSessionForTable; a chat verb that skips the broadcast leaves the till screens stale, so the lanes stay route-only until the session orchestration is extracted like listInventoryTransfers was — see issue #883 follow-ups",
+    ops: {
+      create: ["table.session.open"],
+      update: ["table.session.update"],
+    },
+    note: "batch AF: session open/update verbs broadcast table_session.updated exactly like the routes (the executor runs server-side, where the realtime hub lives), and setSessionGuests was extracted verbatim into the service so route and verb share the guest rules; floor-plan table CRUD (tables routes) still needs its own extraction — the designation lane is designer-side config",
   },
 
   // ============================ Menu & pricing ============================

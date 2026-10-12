@@ -375,6 +375,9 @@ export type ActionType =
   | "loyalty.store_credit.issue"
   | "loyalty.store_credit.use"
   | "loyalty.program.upsert"
+  // Batch AF — table sessions (floor-plan table CRUD stays designer-side).
+  | "table.session.open"
+  | "table.session.update"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -422,6 +425,8 @@ export type AutopilotExecutorKey =
   | "messagingCampaignPause"
   | "messagingCampaignResume"
   | "giftCardRedeem"
+  | "tableSessionOpen"
+  | "tableSessionUpdate"
   | "loyaltyPointsRedeem"
   | "loyaltyStoreCreditIssue"
   | "loyaltyStoreCreditUse"
@@ -1409,6 +1414,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
     payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
     executor: "websiteDomainSet",
+  },
+  "table.session.open": {
+    type: "table.session.open",
+    endpoint: "/api/table-sessions",
+    method: "POST",
+    label: "باز کردن نشست میز — چند میز با یک نشست هم قابل پوشش است",
+    payloadHint: '{ tableId?: string | tableIds?: string[], partySize?: number, guestName?: string, guestPhone?: string, locationId?: string }',
+    executor: "tableSessionOpen",
+  },
+  "table.session.update": {
+    type: "table.session.update",
+    endpoint: "/api/table-sessions/{id}",
+    method: "PATCH",
+    label: "به‌روزرسانی نشست میز — یادداشت|مهمان|آزادسازی|ادغام میز",
+    payloadHint: '{ id: string, action: "set_note"|"set_guests"|"release"|"merge", note?: string, customerIds?: string[], tableId?: string, locationId?: string }',
+    executor: "tableSessionUpdate",
   },
   "loyalty.points.redeem": {
     type: "loyalty.points.redeem",

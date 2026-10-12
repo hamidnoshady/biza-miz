@@ -298,6 +298,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "loyalty.store_credit.issue": PERMISSIONS.storeCreditIssue,
   "loyalty.store_credit.use": PERMISSIONS.storeCreditPayout,
   "loyalty.program.upsert": PERMISSIONS.loyaltyManage,
+  "table.session.open": PERMISSIONS.tablesManage,
+  "table.session.update": PERMISSIONS.tablesManage,
   "media.collection.rename": PERMISSIONS.mediaManage,
   "media.collection.delete": PERMISSIONS.mediaManage,
   "media.asset.set_collection": PERMISSIONS.mediaManage,
