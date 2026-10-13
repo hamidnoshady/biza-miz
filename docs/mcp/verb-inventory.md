@@ -5,7 +5,7 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **264 write verbs**
+visible only to connections consented for every branch) and **275 write verbs**
 (**74** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -274,6 +274,17 @@ visible only to connections consented for every branch) and **264 write verbs**
 | `write_wp_content_sync` | `wp.content.sync` | website | low | connection write_mode | `woocommerce.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_wp_post_save` | `wp.post.save` | website | low | connection write_mode | `woocommerce.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_wp_media_create` | `wp.media.create` | website | low | connection write_mode | `woocommerce.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_commission_rule_save` | `commission.rule.save` | crm | low | connection write_mode | `commission.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_commission_rule_set_active` | `commission.rule.setActive` | crm | low | connection write_mode | `commission.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_courier_create` | `courier.create` | pos | low | connection write_mode | `delivery.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_courier_set_active` | `courier.setActive` | pos | low | connection write_mode | `delivery.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_delivery_assign` | `delivery.assign` | pos | low | connection write_mode | `delivery.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_delivery_status_set` | `delivery.status.set` | pos | low | connection write_mode | `delivery.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_business_day_close` | `businessDay.close` | pos | low | connection write_mode | `ledger.close_period` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_business_day_reopen` | `businessDay.reopen` | pos | low | connection write_mode | `ledger.close_period` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_business_day_config_save` | `businessDay.config.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_rollup_push` | `rollup.push` | workspace | low | connection write_mode | `rollup.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_rollup_location_set_active` | `rollup.location.setActive` | workspace | low | connection write_mode | `rollup.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

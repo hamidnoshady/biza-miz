@@ -204,7 +204,23 @@ import {
   PURCHASE_SETTLEMENT_METHODS,
   type PurchaseSettlementMethod,
 } from "./purchase-receive-service";
-import { getBusinessDayStatus } from "./business-day-service";
+import {
+  getBusinessDayStatus,
+  closeBusinessDay,
+  reopenBusinessDay,
+  setBusinessDayStart,
+  BusinessDayError,
+} from "./business-day-service";
+import { isValidStartMinutes, parseStartTime } from "./business-day";
+import { upsertCommissionRule, setCommissionRuleActive, type CommissionRuleInput } from "./commission-service";
+import {
+  createCourier,
+  setCourierActive,
+  assignCourier,
+  transitionDelivery,
+} from "./delivery-service";
+import { isDeliveryStatus } from "./delivery";
+import { runRollupPush, setRollupLocationActive } from "./rollup-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
@@ -5225,6 +5241,136 @@ const wpMediaCreate: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true, queued: true } };
 };
 
+// ── Issue #883 package 2, batch BF — the misc row's plain ops ───────────────
+const commissionRuleSave: AutopilotExecutor = async (ctx) => {
+  const body = ctx.payload as unknown as CommissionRuleInput;
+  if (!body.employeeId || !body.kind || !body.basis) return fail("missing_fields");
+  try {
+    const rule = await upsertCommissionRule(ctx.businessId, body);
+    return { ok: true, result: { ok: true, rule } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+const commissionRuleSetActive: AutopilotExecutor = async (ctx) => {
+  const ruleId = str(ctx.payload.ruleId);
+  if (!ruleId || typeof ctx.payload.isActive !== "boolean") return fail("missing_fields");
+  try {
+    await setCommissionRuleActive(ctx.businessId, ruleId, ctx.payload.isActive);
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    return { ok: false, result: { error: "not_found", message: (err as Error).message }, errorCode: "not_found" };
+  }
+};
+const courierCreate: AutopilotExecutor = async (ctx) => {
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const result = await createCourier(location.id, {
+    name: str(ctx.payload.name) ?? "",
+    phone: str(ctx.payload.phone),
+  });
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { ok: true, courier: result.data } };
+};
+const courierSetActive: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id || typeof ctx.payload.isActive !== "boolean") return fail("bad_request");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const result = await setCourierActive(location.id, id, ctx.payload.isActive);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { ok: true, courier: result.data } };
+};
+const deliveryAssign: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const courierId = typeof ctx.payload.courierId === "string" ? ctx.payload.courierId : null;
+  const result = await assignCourier(location.id, id, courierId);
+  if (!result.ok) return fail(result.error);
+  broadcast(location.id, { type: "order.updated", orderId: result.data.order_id });
+  return { ok: true, result: { ok: true, delivery: result.data } };
+};
+const deliveryStatusSet: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  if (typeof ctx.payload.status !== "string" || !isDeliveryStatus(ctx.payload.status)) return fail("invalid_delivery_status");
+  const status = ctx.payload.status;
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const result = await transitionDelivery(location.id, id, status);
+  if (!result.ok) return fail(result.error);
+  broadcast(location.id, { type: "order.updated", orderId: result.data.order_id });
+  return { ok: true, result: { ok: true, delivery: result.data } };
+};
+const businessDayClose: AutopilotExecutor = async (ctx) => {
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  try {
+    const businessDay = await closeBusinessDay(
+      location.id,
+      ctx.businessId,
+      ctx.authorizedByUserId ?? "",
+      (typeof ctx.payload.note === "string" ? ctx.payload.note.trim() : "") || null,
+    );
+    return { ok: true, result: { businessDay } };
+  } catch (err) {
+    if (err instanceof BusinessDayError) return fail(err.message);
+    throw err;
+  }
+};
+const businessDayReopen: AutopilotExecutor = async (ctx) => {
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  try {
+    const businessDay = await reopenBusinessDay(location.id, ctx.businessId, ctx.authorizedByUserId ?? "");
+    return { ok: true, result: { businessDay } };
+  } catch (err) {
+    if (err instanceof BusinessDayError) return fail(err.message);
+    throw err;
+  }
+};
+const businessDayConfigSave: AutopilotExecutor = async (ctx) => {
+  let startMinutes: number | null;
+  if (ctx.payload.startTime !== undefined) {
+    const text = (typeof ctx.payload.startTime === "string" ? ctx.payload.startTime : "").trim();
+    if (text === "") {
+      startMinutes = null;
+    } else {
+      const parsed = parseStartTime(text);
+      if (parsed === null) return fail("invalid_start_time");
+      startMinutes = parsed;
+    }
+  } else if (ctx.payload.startMinutes === null) {
+    startMinutes = null;
+  } else if (isValidStartMinutes(ctx.payload.startMinutes)) {
+    startMinutes = ctx.payload.startMinutes as number;
+  } else {
+    return fail("invalid_start_time");
+  }
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  try {
+    const businessDay = await setBusinessDayStart(location.id, ctx.businessId, ctx.authorizedByUserId ?? "", startMinutes);
+    return { ok: true, result: { businessDay } };
+  } catch (err) {
+    if (err instanceof BusinessDayError) return fail(err.message);
+    throw err;
+  }
+};
+const rollupPush: AutopilotExecutor = async (ctx) => {
+  const result = await runRollupPush(ctx.businessId);
+  return { ok: true, result: { result } };
+};
+const rollupLocationSetActive: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id || typeof ctx.payload.isActive !== "boolean") return fail("missing_fields");
+  const updated = await setRollupLocationActive(ctx.businessId, id, ctx.payload.isActive);
+  if (!updated) return fail("not_found");
+  return { ok: true, result: { ok: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -7466,6 +7612,17 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   wpContentSync,
   wpPostSave,
   wpMediaCreate,
+  commissionRuleSave,
+  commissionRuleSetActive,
+  courierCreate,
+  courierSetActive,
+  deliveryAssign,
+  deliveryStatusSet,
+  businessDayClose,
+  businessDayReopen,
+  businessDayConfigSave,
+  rollupPush,
+  rollupLocationSetActive,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

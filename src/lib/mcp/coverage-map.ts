@@ -887,9 +887,25 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Cross-cutting",
     entity: "Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup",
     routes: ["audit-log", "dashboard", "commission", "deliveries", "couriers", "business-day", "business-info", "bug-report", "industry", "security", "watch", "sessions", "rollup"],
-    ops: { listDetail: ["get_setup_state", "describe_app", "list_audit_log"] },
-    note: "small surfaces; the audit-log read mirrors the screen's validation contract (invalid cursors and filters are refused, never silently paged)",
-    test: "integration/auth-account-security.integration.test.ts",
+    ops: {
+      listDetail: ["get_setup_state", "describe_app", "list_audit_log"],
+      create: ["commission.rule.save", "courier.create", "businessDay.config.save"],
+      update: [
+        "commission.rule.setActive",
+        "courier.setActive",
+        "businessDay.config.save",
+        "rollup.location.setActive",
+      ],
+      lifecycle: [
+        "delivery.assign",
+        "delivery.status.set",
+        "businessDay.close",
+        "businessDay.reopen",
+        "rollup.push",
+      ],
+    },
+    note: "batch BF: the misc row's plain ops are live; still route-only by design — session revocation/self-deletes (identity-bound, same class as config.team), security lockout clears (access state), rollup config/token + per-location token issuance (credential-shaped, generateRollupToken returns a one-time secret), dashboard widget layouts (UI-only), bug-report POST (chat-side, not a business write), the watch prefix (its own batch), and audit-log/deliveries reads already ride list_* verbs",
+    test: "integration/business-day.integration.test.ts + commission.integration.test.ts",
   },
   {
     id: "misc.support",

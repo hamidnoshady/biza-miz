@@ -564,6 +564,22 @@ export type ActionType =
   | "wp.content.sync"
   | "wp.post.save"
   | "wp.media.create"
+  // Batch BF — the misc row's plain ops lanes: commission rules, couriers,
+  // deliveries, the business day (close/reopen/config), and the rollup
+  // button/toggles. Session revocation stays identity-bound; rollup's
+  // config/token and per-location token issuance are credential-shaped and
+  // stay route-only by design.
+  | "commission.rule.save"
+  | "commission.rule.setActive"
+  | "courier.create"
+  | "courier.setActive"
+  | "delivery.assign"
+  | "delivery.status.set"
+  | "businessDay.close"
+  | "businessDay.reopen"
+  | "businessDay.config.save"
+  | "rollup.push"
+  | "rollup.location.setActive"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -720,6 +736,17 @@ export type AutopilotExecutorKey =
   | "wpContentSync"
   | "wpPostSave"
   | "wpMediaCreate"
+  | "commissionRuleSave"
+  | "commissionRuleSetActive"
+  | "courierCreate"
+  | "courierSetActive"
+  | "deliveryAssign"
+  | "deliveryStatusSet"
+  | "businessDayClose"
+  | "businessDayReopen"
+  | "businessDayConfigSave"
+  | "rollupPush"
+  | "rollupLocationSetActive"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2566,6 +2593,94 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "افزودن رسانه با URL — فقط در حالت plugin و با capability؛ idempotency از operationId می‌آید",
     payloadHint: '{ connectionId: string, url: string, title?: string }',
     executor: "wpMediaCreate",
+  },
+  "commission.rule.save": {
+    type: "commission.rule.save",
+    endpoint: "/api/commission/rules",
+    method: "POST",
+    label: "ثبت/تغییر قانون کمیسیون — employeeId/kind/basis لازم‌اند",
+    payloadHint: '{ employeeId: string, kind: "percent"|"fixed", basis: "net"|"margin", value: number, itemIds?: string[], brandIds?: string[], categoryIds?: string[], activeFrom?: string|null, activeTo?: string|null, priority?: number, isActive?: bool }',
+    executor: "commissionRuleSave",
+  },
+  "commission.rule.setActive": {
+    type: "commission.rule.setActive",
+    endpoint: "/api/commission/rules",
+    method: "PATCH",
+    label: "فعال/خاموش‌کردن قانون — تاریخچه نگه داشته می‌شود",
+    payloadHint: '{ ruleId: string, isActive: bool }',
+    executor: "commissionRuleSetActive",
+  },
+  "courier.create": {
+    type: "courier.create",
+    endpoint: "/api/couriers",
+    method: "POST",
+    label: "افزودن پیک برای شعبهٔ فعال",
+    payloadHint: '{ name: string, phone?: string|null }',
+    executor: "courierCreate",
+  },
+  "courier.setActive": {
+    type: "courier.setActive",
+    endpoint: "/api/couriers/{id}",
+    method: "PATCH",
+    label: "فعال/خاموش‌کردن پیک",
+    payloadHint: '{ id: string, isActive: bool }',
+    executor: "courierSetActive",
+  },
+  "delivery.assign": {
+    type: "delivery.assign",
+    endpoint: "/api/deliveries/{id}",
+    method: "PATCH",
+    label: "اسناد پیک به رسید — courierId=null یعنی پس‌گرفتن",
+    payloadHint: '{ id: string, courierId: string|null }',
+    executor: "deliveryAssign",
+  },
+  "delivery.status.set": {
+    type: "delivery.status.set",
+    endpoint: "/api/deliveries/{id}",
+    method: "PATCH",
+    label: "تغییر وضعیت ارسال — transitionDelivery قانون‌های گذار را اعمال می‌کند",
+    payloadHint: '{ id: string, status: string }',
+    executor: "deliveryStatusSet",
+  },
+  "businessDay.close": {
+    type: "businessDay.close",
+    endpoint: "/api/business-day/close",
+    method: "POST",
+    label: "بستن روز کاری شعبهٔ فعال — note اختیاری",
+    payloadHint: '{ note?: string }',
+    executor: "businessDayClose",
+  },
+  "businessDay.reopen": {
+    type: "businessDay.reopen",
+    endpoint: "/api/business-day/close",
+    method: "DELETE",
+    label: "بازگشایی بستِ اشتباه — پنجره به شروعِ برنامه می‌رود",
+    payloadHint: '{}',
+    executor: "businessDayReopen",
+  },
+  "businessDay.config.save": {
+    type: "businessDay.config.save",
+    endpoint: "/api/business-day",
+    method: "PATCH",
+    label: "تنظیم شروع روز کاری — startTime مثل «18:00»؛ خاموش‌کردن با null",
+    payloadHint: '{ startTime?: string|null } یا { startMinutes?: number|null }',
+    executor: "businessDayConfigSave",
+  },
+  "rollup.push": {
+    type: "rollup.push",
+    endpoint: "/api/rollup/push",
+    method: "POST",
+    label: "اجرای فوری push همگام‌سازی به مرکز rollup",
+    payloadHint: '{}',
+    executor: "rollupPush",
+  },
+  "rollup.location.setActive": {
+    type: "rollup.location.setActive",
+    endpoint: "/api/rollup/locations/{id}",
+    method: "PATCH",
+    label: "فعال/خاموش‌کردن مکان rollup",
+    payloadHint: '{ id: string, isActive: bool }',
+    executor: "rollupLocationSetActive",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
