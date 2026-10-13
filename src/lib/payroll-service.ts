@@ -77,6 +77,7 @@ import {
 import { parseRialInput } from "./payroll-amounts";
 import { resolvePayoutAccount } from "./payroll-accounts";
 import { outstandingAdvances } from "./payroll-advances-service";
+import { standaloneCommissionOutstanding } from "./commission-settlement-service";
 import { asRial, clientRunner, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
 import { PayrollError } from "./payroll-errors";
 import {
@@ -617,7 +618,8 @@ async function mustGetRun(businessId: string, runId: string): Promise<PayrollRun
  * A run credits 2300 with the *net* wages it accrues; commission posts to 2300
  * when a sale does and a run settles it later. So the account's balance is the
  * sum of (a) runs accrued and not yet paid — net wages and commission both — and
- * (b) commission accruals no run has taken yet. This reports that decomposition
+ * (b) commission not yet paid that no payroll run has taken: accruals nobody has
+ * claimed, plus what a standalone settlement run has claimed or carried (#869). This reports that decomposition
  * next to the ledger balance; `difference` is what is left unexplained (a manual
  * journal on 2300, or commission paid outside payroll). A «پرداخت‌شده» run
  * therefore never hides an unsettled balance: the commission still owed shows up
@@ -641,13 +643,18 @@ export async function getPayrollLiability(businessId: string): Promise<PayrollLi
     ),
     query<{ total: string }>(
       `SELECT COALESCE(SUM(amount), 0)::text AS total
-         FROM commission_accruals WHERE business_id = $1 AND payroll_run_id IS NULL`,
+         FROM commission_accruals
+        WHERE business_id = $1 AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
       [businessId],
     ),
   ]);
+  // Commission a standalone settlement run has claimed but not paid, plus the
+  // balances closed runs carried forward (issue #869). Both are still owed by
+  // 2300, so they belong in the same «not yet paid» bucket as unclaimed rows.
+  const standalone = await standaloneCommissionOutstanding(businessId);
   const ledgerBalance = BigInt(ledger.rows[0].balance);
   const awaitingPayment = BigInt(awaiting.rows[0].total);
-  const unsettledCommission = BigInt(unsettled.rows[0].total);
+  const unsettledCommission = BigInt(unsettled.rows[0].total) + standalone;
   return {
     ledgerBalance: ledgerBalance.toString(),
     awaitingPayment: awaitingPayment.toString(),
@@ -704,7 +711,7 @@ async function collectCommission(
        FROM commission_accruals a
        JOIN users cu ON cu.id = a.employee_id AND cu.business_id = a.business_id
        LEFT JOIN journal_entries je ON je.id = a.entry_id
-      WHERE a.business_id = $1 AND a.payroll_run_id IS NULL
+      WHERE a.business_id = $1 AND a.payroll_run_id IS NULL AND a.settlement_run_id IS NULL
         AND COALESCE(je.entry_date, a.created_at::date) <= $2::date
       ORDER BY a.id
       ${options.lock ? "FOR UPDATE OF a" : ""}`,
@@ -1045,7 +1052,8 @@ export async function accruePayroll(params: {
         // The rows are locked by this transaction, so all of them are still free.
         const claimed = await client.query(
           `UPDATE commission_accruals SET payroll_run_id = $1
-            WHERE business_id = $2 AND id = ANY($3::uuid[]) AND payroll_run_id IS NULL`,
+            WHERE business_id = $2 AND id = ANY($3::uuid[])
+              AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
           [runId, params.businessId, lines.claimIds],
         );
         if (claimed.rowCount !== lines.claimIds.length) throw new PayrollError("commission_already_settled", 409);

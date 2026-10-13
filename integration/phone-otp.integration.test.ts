@@ -238,23 +238,39 @@ describe("loginRoster routing (the server-side loginMode)", () => {
     expect(modes["پنجرهٔ بسته"]).toBe("pin");
   });
 
-  it("routes by phone state and the 7-day window once enforced", async () => {
+  it("routes by phone state, and only this device's trust opens the PIN shortcut", async () => {
     await setPolicy(biz.id, PAST);
     const hadKey = process.env.KAVENEGAR_API_KEY;
     process.env.KAVENEGAR_API_KEY = "test-key";
     try {
+      // No device trust at all: every member with a number on file is routed
+      // to the code, whatever their verification history. This is the issue
+      // #885 change — the exemption used to hang off the member-wide
+      // `users.otp_login_at` stamp, so one till verifying let *every* till
+      // skip the code for seven days.
       const roster = await dbLib.withTenant(biz.id, () =>
-        employeeService.loginRoster(biz.id, null, null),
+        employeeService.loginRoster(biz.id, null, null, null),
       );
       const modes = Object.fromEntries(roster.map((e) => [e.fullName, e.loginMode]));
       // No number on file: the PIN still proves who, then the number is set.
       expect(modes["بی‌شماره"]).toBe("pin_then_otp");
       // A number is stored but unproven: straight to the code.
       expect(modes["تأییدنشده"]).toBe("otp");
-      // Verified inside the window: the 7-day PIN shortcut.
-      expect(modes["پنجرهٔ باز"]).toBe("pin");
-      // Verified but the window closed: the door wants the code again.
+      // Verified — recently and long ago alike. Verification alone no longer
+      // buys the shortcut, so the recency of the stamp is irrelevant here.
+      expect(modes["پنجرهٔ باز"]).toBe("otp");
       expect(modes["پنجرهٔ بسته"]).toBe("otp");
+
+      // The same roster, this time for a device that holds trust for one
+      // member. Only that member moves to the PIN pad; the colleague on the
+      // same shared till is still challenged in full.
+      const trusted = await dbLib.withTenant(biz.id, () =>
+        employeeService.loginRoster(biz.id, null, null, staff.freshWindow),
+      );
+      const trustedModes = Object.fromEntries(trusted.map((e) => [e.fullName, e.loginMode]));
+      expect(trustedModes["پنجرهٔ باز"]).toBe("pin");
+      expect(trustedModes["پنجرهٔ بسته"]).toBe("otp");
+      expect(trustedModes["تأییدنشده"]).toBe("otp");
     } finally {
       if (hadKey === undefined) delete process.env.KAVENEGAR_API_KEY;
       else process.env.KAVENEGAR_API_KEY = hadKey;
@@ -263,7 +279,7 @@ describe("loginRoster routing (the server-side loginMode)", () => {
 });
 
 describe("stampPhoneVerified and the challenge verify", () => {
-  it("opens the 7-day window and routes the member back to the PIN pad", async () => {
+  it("stamps the verification, which is an audit record and no longer a shortcut", async () => {
     await dbLib.withTenant(biz.id, () =>
       phoneOtp.stampPhoneVerified({ businessId: biz.id, userId: staff.unverified, phone: null }),
     );
@@ -271,18 +287,33 @@ describe("stampPhoneVerified and the challenge verify", () => {
       `SELECT phone_verified_at, otp_login_at FROM users WHERE id = $1`,
       [staff.unverified],
     );
+    // `phone_verified_at` is what the routing reads, and it is what makes the
+    // number proven.
     expect(rows[0].phone_verified_at).not.toBeNull();
+    // `otp_login_at` is still written, but as an audit stamp only: nothing in
+    // the login path reads it any more, which is exactly why the shortcut had
+    // to move to per-device trust.
     expect(Date.now() - new Date(rows[0].otp_login_at).getTime()).toBeLessThan(60_000);
 
     await setPolicy(biz.id, PAST);
     process.env.KAVENEGAR_API_KEY = "test-key";
     try {
+      // A freshly verified number does not by itself route the member back to
+      // the PIN pad. The stamp just happened, so under the old member-wide
+      // window this member would have skipped the code on every device for
+      // seven days.
       const roster = await dbLib.withTenant(biz.id, () =>
-        employeeService.loginRoster(biz.id, null, null),
+        employeeService.loginRoster(biz.id, null, null, null),
       );
       const entry = roster.find((e) => e.fullName === "تأییدنشده")!;
-      expect(entry.loginMode).toBe("pin");
       expect(entry.phoneState).toBe("verified");
+      expect(entry.loginMode).toBe("otp");
+
+      // It takes trust on *this* device to open the shortcut.
+      const trusted = await dbLib.withTenant(biz.id, () =>
+        employeeService.loginRoster(biz.id, null, null, staff.unverified),
+      );
+      expect(trusted.find((e) => e.fullName === "تأییدنشده")!.loginMode).toBe("pin");
     } finally {
       delete process.env.KAVENEGAR_API_KEY;
     }

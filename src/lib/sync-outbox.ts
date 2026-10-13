@@ -78,3 +78,53 @@ export async function appendSyncOutboxEvent(
     ],
   );
 }
+
+/**
+ * Record a business-wide event (#869): one that belongs to no location, such as a
+ * commission payout, which covers every branch at once. It is written with
+ * `scope = 'business'`, `business_id` set and `location_id` NULL. Nothing is
+ * borrowed from a branch.
+ *
+ * Only the cloud records these. A site pushes only its own location's rows, so a
+ * business-scope row written on a site would never leave it, and a payout made
+ * there would be silently unrecorded. Refusing is the safe answer.
+ *
+ * Same contract as `appendSyncOutboxEvent`: pass the PoolClient of the domain
+ * transaction, so the event commits or rolls back with the money it records. A
+ * replay of a peer's event stands down. A repeat of the same identity is absorbed
+ * by the business-scope unique index, so a retried or doubly delivered event lands
+ * once.
+ */
+export async function appendBusinessSyncOutboxEvent(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    clientEventId: string;
+    eventType: SyncEventType;
+    payload: Record<string, unknown>;
+    actorUserId: string | null;
+    actorRole: Role;
+    occurredAt?: string;
+    schemaVersion?: number;
+  },
+): Promise<void> {
+  if (deploymentRole() === "site") throw new Error("business_sync_event_cloud_only");
+  await client.query(
+    `INSERT INTO sync_events
+       (scope,business_id,location_id,client_event_id,event_type,payload,occurred_at,applied_at,
+        actor_user_id,actor_role,origin,schema_version)
+     SELECT 'business',$1::uuid,NULL,$2::uuid,$3::text,$4::jsonb,$5::timestamptz,now(),$6::text,$7::text,'local',$8::integer
+      WHERE coalesce(current_setting('app.sync_replay', true), '') <> 'on'
+     ON CONFLICT (business_id,client_event_id) WHERE scope = 'business' DO NOTHING`,
+    [
+      input.businessId,
+      syncClientEventId(input.clientEventId),
+      input.eventType,
+      JSON.stringify(input.payload),
+      input.occurredAt ?? new Date().toISOString(),
+      input.actorUserId,
+      input.actorRole,
+      input.schemaVersion ?? 1,
+    ],
+  );
+}

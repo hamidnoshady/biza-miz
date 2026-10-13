@@ -11,7 +11,7 @@ interface Ctx {
 /**
  * Closes a fiscal year: every period must already be `soft_closed`. Posts one
  * closing entry rolling revenue/expense into Retained Earnings, then locks
- * every period. `ledger.close_period` — owner and accountant, same gate as
+ * every period. `ledger.close_period` — the same effective capability as
  * soft-closing/locking a period.
  */
 export const POST = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {

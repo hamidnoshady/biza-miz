@@ -209,27 +209,31 @@ passed end to end:
 | Unpacked installed payload | 504.9 MiB | 600 MiB |
 | Positively staged runtime (local Linux build) | 153.9 MiB | 200 MiB |
 
-**Current budgets (2026-10-03).** The installer gate is 175 MiB and the unpacked
-payload's runaway detector is **620 MiB**, raised from 600 MiB when the AEC
-document-control wave took the traced runtime to 600.6 MiB against 0.2 MiB of
-headroom. The detector's job is to catch a payload that accidentally ships
-`node_modules`, a build cache or source maps rather than to freeze the app's
-growth.
+**Current configured budgets (2026-10-13; maintainer acceptance undecided).** The
+installer gate is 175 MiB and the workflow currently checks an unpacked payload
+limit of **640 MiB**. The issue #834 Windows package measured 620.2 MiB
+([run 38165434904](https://github.com/hamidnoshady/biza-miz/actions/runs/38165434904));
+the merged multicurrency/auth-hardening build on main measured 620.4 MiB on
+2026-10-11. Both exceed the former 620 MiB detector. The configured 640 MiB value
+is not yet accepted by the maintainer and is not a claim that either result meets
+the former 620 MiB policy. The AEC document-control wave took the traced runtime
+from 599.8 MiB to 600.6 MiB. The detector is intended to catch accidental
+inclusion of `node_modules`, build caches or source maps, not to freeze normal
+application growth.
 
-**Where the bytes are.** On Windows, commit `90cc02b` (run
-[37979722293](https://github.com/hamidnoshady/biza-miz/actions/runs/37979722293),
-measured by the size diagnostics): staged runtime 198.150 MiB, unpacked payload
-618.583 MiB, installer 161 MiB. The largest term is the per-route
-client-reference manifests (`*_client-reference-manifest.js`): 1,051 files,
-71.95 MiB. Each route carries a copy of the app's client-module map, so every
-new route handler adds about 67 KiB before its own code. The earlier note called
-about 103 MiB of `.next/server` "unminified chunks" the dominant term. That
-figure counted the manifests, route bundles and traces as chunks; the shared
-server chunks themselves are about 11 MiB. Next's `*.nft.json` build traces add
-8.3 MiB on a Linux build and are read only by `next build`. Shrinking the
-manifests is a framework-level change and is tracked separately. A Linux build
-also installs both glibc and musl libvips, about 36 MiB; Windows installs one
-set, 18.9 MiB, so Linux absolute sizes are not gate numbers.
+**Where the bytes are.** The dominant term is the per-route client-reference
+manifests (`*_client-reference-manifest.js`): on commit `90cc02b` (run
+[37979722293](https://github.com/hamidnoshady/biza-miz/actions/runs/37979722293))
+these numbered 1,051 files / 71.95 MiB of the staged runtime. Each route carries
+a copy of the app's client-module map, so every new route handler adds about
+67 KiB before its own code. The earlier note that called roughly 103 MiB of
+`.next/server` "unminified chunks" the dominant term was counting those manifests
+together with route bundles and traces; the shared server chunks themselves are
+about 11 MiB. Next's `*.nft.json` build traces add about 8.3 MiB on a Linux
+build and are read only by `next build`. Shrinking the manifests is a
+framework-level change and is tracked separately. A Linux build also installs
+both glibc and musl libvips (about 36 MiB); Windows installs one set (about
+18.9 MiB), so Linux absolute sizes are not gate numbers.
 
 Each desktop build records these categories, with exact bytes, traced packages,
 the largest files and a manifest, as `desktop-size-diagnostics` in the workflow

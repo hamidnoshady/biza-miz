@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isAuthRateLimitedPath,
+  isBrowserLoginMutationPath,
   isCentralExecutionPath,
   isPeerBackupPath,
   isPublicPath,
@@ -50,6 +51,65 @@ describe("isPublicPath", () => {
     // ...but the subtree rule must not open a path that only shares the text.
     expect(isPublicPath("/administrator")).toBe(false);
     expect(isPublicPath("/admindash")).toBe(false);
+  });
+
+  it("lets the signed-out phone-OTP door through (issue #885 L01)", () => {
+    // The regression this guards. Both endpoints were listed in
+    // AUTH_RATE_LIMITED_PATHS — so the platform already classified them as
+    // login traffic — but not here, which meant handleTenantAuth answered 401
+    // before the route handler ran. The visible «ورود با شمارهٔ موبایل» path
+    // therefore could not begin while signed out, and the form surfaced the
+    // 401 as «مهلت این مرحله تمام شده است» for a number that had simply never
+    // been valid. `api-guards.test.ts` had already documented both as
+    // necessarily-public credential exchanges; this list had not caught up.
+    expect(isPublicPath("/api/auth/phone-otp/request")).toBe(true);
+    expect(isPublicPath("/api/auth/phone-otp/verify")).toBe(true);
+  });
+
+  it("keeps the authenticated phone self-service gated, and the sibling routes too", () => {
+    // Opening the login door must not open the account-settings one. These
+    // act on a signed-in member's own number and have a session to require.
+    expect(isPublicPath("/api/auth/phone/self")).toBe(false);
+    expect(isPublicPath("/api/auth/phone")).toBe(false);
+    // Nor anything that merely shares the prefix.
+    expect(isPublicPath("/api/auth/phone-otp-decoy")).toBe(false);
+    expect(isPublicPath("/api/auth/phone-otp")).toBe(false);
+  });
+
+  it("serves the login capability probe without a session (issue #885 L04)", () => {
+    // The chooser asks what this install can do before it offers offline
+    // access, and no session exists when the chooser renders.
+    expect(isPublicPath("/api/auth/login-capabilities")).toBe(true);
+    expect(isPublicPath("/api/auth/login-capabilities-decoy")).toBe(false);
+  });
+
+  it("names the pre-session browser login mutations the Origin check covers", () => {
+    // These reach the browser login CSRF check because they return before the
+    // authenticated one, which only runs on requests that passed the session
+    // gate.
+    for (const path of [
+      "/api/auth/login",
+      "/api/auth/pin-login",
+      "/api/auth/phone-otp/request",
+      "/api/auth/phone-otp/verify",
+      "/api/auth/mfa/verify",
+      "/api/auth/directory",
+    ]) {
+      expect(isBrowserLoginMutationPath(path)).toBe(true);
+    }
+  });
+
+  it("leaves the deliberately cross-origin and bearer-authenticated paths out of it", () => {
+    // A desktop app talks to the cloud origin by design, and the machine
+    // families authenticate with a bearer credential rather than a cookie — an
+    // Origin check on either would only reject legitimate callers.
+    expect(isBrowserLoginMutationPath("/api/auth/desktop-session")).toBe(false);
+    expect(isBrowserLoginMutationPath("/api/auth/cloud-login/callback")).toBe(false);
+    expect(isBrowserLoginMutationPath("/api/server-sync/push")).toBe(false);
+    expect(isBrowserLoginMutationPath("/api/iam/snapshot")).toBe(false);
+    expect(isBrowserLoginMutationPath("/api/v1/orders")).toBe(false);
+    // The capability probe is a GET, so it is not a mutation at all.
+    expect(isBrowserLoginMutationPath("/api/auth/login-capabilities")).toBe(false);
   });
 
   it("still gates everything that is not declared public", () => {

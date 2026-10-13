@@ -5,6 +5,7 @@ import { getConnection } from "@/lib/integrations/connections-service";
 import { isHoloo } from "@/lib/integrations/provider-registry";
 import { beginImportRun, completeImportRun, listImportRuns } from "@/lib/integrations/holoo/migration-run-service";
 import { rollbackImportRun } from "@/lib/integrations/holoo/rollback-service";
+import { AccountsError } from "@/lib/accounts-service";
 import { applyBaseImport, previewBaseImport } from "@/lib/integrations/holoo/import-service";
 import { applyTransactions, previewTransactions } from "@/lib/integrations/holoo/transaction-import-service";
 import { importJournalVouchers, importOpeningBalance } from "@/lib/integrations/holoo/journal-import-service";
@@ -61,8 +62,15 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
 
   if (body.action === "rollback") {
     if (!body.runId) return NextResponse.json({ error: "missing_run_id" }, { status: 400 });
-    const result = await rollbackImportRun(session.businessId, body.runId, id);
-    return NextResponse.json({ ok: true, ...result });
+    try {
+      const result = await rollbackImportRun(session.businessId, body.runId, id);
+      return NextResponse.json({ ok: true, ...result });
+    } catch (err) {
+      // A refused rollback (a child or a draft that would be damaged) is an
+      // answer with its typed code, and nothing was deleted.
+      if (err instanceof AccountsError) return NextResponse.json({ error: err.message }, { status: err.status });
+      throw err;
+    }
   }
 
   if (body.action === "apply") {

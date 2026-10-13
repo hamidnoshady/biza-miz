@@ -75,6 +75,12 @@ interface FiscalPeriodRow extends Record<string, unknown> {
 
 interface TransitionRow extends Record<string, unknown> {
   status: FiscalPeriodStatus;
+  label: string;
+  starts_on: string;
+  ends_on: string;
+  soft_closed_at: string | null;
+  locked_at: string | null;
+  reopened_at: string | null;
 }
 
 interface LockedFiscalYearRow extends Record<string, unknown> {
@@ -118,6 +124,25 @@ async function rollback(client: { query: (text: string) => Promise<unknown> }): 
   await client.query("ROLLBACK").catch(() => {});
 }
 
+/** Insert one immutable lifecycle event on the caller's state transaction. */
+async function writeFiscalAudit(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    actorId: string | null;
+    action: string;
+    entity: "fiscal_year" | "fiscal_period";
+    entityId: string;
+    payload: Record<string, unknown>;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+    [input.businessId, input.actorId, input.action, input.entity, input.entityId, JSON.stringify(input.payload)],
+  );
+}
+
 /** Every fiscal year defined for this business, newest first. */
 export async function listFiscalYears(businessId: string): Promise<FiscalYearSummary[]> {
   const { rows } = await query<FiscalYearRow>(
@@ -157,7 +182,11 @@ export async function listPeriods(businessId: string, fiscalYearId: string): Pro
  * same year at once into the documented 409 instead of leaking a database
  * unique-violation as a 500.
  */
-export async function createFiscalYear(businessId: string, jy: number): Promise<FiscalYearSummary> {
+export async function createFiscalYear(
+  businessId: string,
+  jy: number,
+  actorId: string | null = null,
+): Promise<FiscalYearSummary> {
   const spec = fiscalYearSpec(jy);
   const client = await getPool().connect();
   try {
@@ -180,6 +209,40 @@ export async function createFiscalYear(businessId: string, jy: number): Promise<
         [businessId, fiscalYearId, period.label, period.startsOn, period.endsOn],
       );
     }
+
+    const { rows: adoptionRows } = await client.query<{
+      fiscal_control_required_from: string | null;
+      fiscal_control_adopted_at: string | null;
+    }>(
+      `SELECT fiscal_control_required_from::text AS fiscal_control_required_from,
+              fiscal_control_adopted_at::text AS fiscal_control_adopted_at
+         FROM businesses WHERE id = $1`,
+      [businessId],
+    );
+    await writeFiscalAudit(client, {
+      businessId,
+      actorId,
+      action: "fiscal_year.created",
+      entity: "fiscal_year",
+      entityId: fiscalYearId,
+      payload: {
+        fiscalYearId,
+        label: spec.label,
+        actorId,
+        before: null,
+        after: {
+          id: fiscalYearId,
+          label: spec.label,
+          startsOn: spec.startsOn,
+          endsOn: spec.endsOn,
+          closedAt: null,
+        },
+        startsOn: spec.startsOn,
+        endsOn: spec.endsOn,
+        fiscalControlRequiredFrom: adoptionRows[0]?.fiscal_control_required_from ?? null,
+        fiscalControlAdoptedAt: adoptionRows[0]?.fiscal_control_adopted_at ?? null,
+      },
+    });
 
     await client.query("COMMIT");
     return { id: fiscalYearId, label: spec.label, startsOn: spec.startsOn, endsOn: spec.endsOn, closedAt: null };
@@ -239,7 +302,9 @@ export async function setPeriodStatus(
     if (!fiscalYear) throw new FiscalPeriodError("period_not_found", 404);
 
     const { rows } = await client.query<TransitionRow>(
-      `SELECT status::text AS status FROM fiscal_periods
+      `SELECT status::text AS status, label, starts_on::text AS starts_on, ends_on::text AS ends_on,
+              soft_closed_at, locked_at, reopened_at
+         FROM fiscal_periods
         WHERE id = $1 AND business_id = $2 AND fiscal_year_id = $3
         FOR UPDATE`,
       [periodId, businessId, fiscalYearId],
@@ -274,8 +339,44 @@ export async function setPeriodStatus(
     }
 
     const { rows: updated } = await client.query<FiscalPeriodRow>(updateSql, params);
+    const next = updated[0];
+    const action =
+      status === "soft_closed"
+        ? "fiscal_period.soft_closed"
+        : status === "locked"
+          ? "fiscal_period.locked"
+          : "fiscal_period.reopened";
+    await writeFiscalAudit(client, {
+      businessId,
+      actorId,
+      action,
+      entity: "fiscal_period",
+      entityId: periodId,
+      payload: {
+        fiscalYearId,
+        periodId,
+        periodLabel: next.label,
+        actorId,
+        startsOn: next.starts_on,
+        endsOn: next.ends_on,
+        previousStatus: current.status,
+        newStatus: next.status,
+        before: {
+          status: current.status,
+          softClosedAt: current.soft_closed_at,
+          lockedAt: current.locked_at,
+          reopenedAt: current.reopened_at,
+        },
+        after: {
+          status: next.status,
+          softClosedAt: next.soft_closed_at,
+          lockedAt: next.locked_at,
+          reopenedAt: next.reopened_at,
+        },
+      },
+    });
     await client.query("COMMIT");
-    return toPeriod(updated[0]);
+    return toPeriod(next);
   } catch (err) {
     await rollback(client);
     throw err;

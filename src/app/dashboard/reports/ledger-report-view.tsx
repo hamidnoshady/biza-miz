@@ -428,13 +428,14 @@ function useDrillDown(
   dateFrom?: string,
   dateTo?: string,
   readOnly = false,
+  scope?: "branch" | "business-wide",
 ): { drill: DrillContext | undefined; panel: ReactNode } {
   const [target, setTarget] = useState<DrillDownTarget | null>(null);
   const drill: DrillContext = {
     dateFrom,
     dateTo,
     onDrillDown: (accountCode, accountName) =>
-      setTarget({ accountCode, accountName, dateFrom, dateTo }),
+      setTarget({ accountCode, accountName, dateFrom, dateTo, scope }),
   };
   const panel = target ? (
     <DrillDownPanel target={target} onClose={() => setTarget(null)} />
@@ -447,16 +448,19 @@ export function ProfitAndLossView({
   dateFrom,
   dateTo,
   readOnly = false,
+  scope,
 }: {
   readOnly?: boolean;
   report: ProfitAndLoss | Comparison<ProfitAndLoss>;
   dateFrom?: string;
   dateTo?: string;
+  /** The scope the statement was read at — the drill-down must match it. */
+  scope?: "branch" | "business-wide";
 }) {
   const money = useMoney();
   const current = isComparison(report) ? report.current : report;
   const previous = isComparison(report) ? report.previous : null;
-  const { drill, panel } = useDrillDown(dateFrom, dateTo, readOnly);
+  const { drill, panel } = useDrillDown(dateFrom, dateTo, readOnly, scope);
 
   return (
     <div>
@@ -537,15 +541,18 @@ export function BalanceSheetView({
   report,
   dateTo,
   readOnly = false,
+  scope,
 }: {
   readOnly?: boolean;
   report: BalanceSheet | Comparison<BalanceSheet>;
   dateTo?: string;
+  /** The scope the statement was read at — the drill-down must match it. */
+  scope?: "branch" | "business-wide";
 }) {
   const money = useMoney();
   const current = isComparison(report) ? report.current : report;
   const previous = isComparison(report) ? report.previous : null;
-  const { drill, panel } = useDrillDown(undefined, dateTo, readOnly);
+  const { drill, panel } = useDrillDown(undefined, dateTo, readOnly, scope);
 
   const equityLines = [
     ...current.equity,

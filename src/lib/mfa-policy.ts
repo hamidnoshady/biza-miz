@@ -12,6 +12,7 @@
  */
 import { query } from "./db";
 import { SETTING_KEYS } from "./settings";
+import { revokeTrustedDevicesForBusiness } from "./trusted-device";
 
 export interface MfaPolicy {
   /** Extend the second-factor requirement to `manager` memberships. */
@@ -62,6 +63,7 @@ export async function getMfaPolicy(businessId: string): Promise<MfaPolicy> {
 
 export async function setMfaPolicy(businessId: string, policy: MfaPolicy): Promise<MfaPolicy> {
   const next = normalizeMfaPolicy(policy);
+  const previous = await getMfaPolicy(businessId);
   await query(
     `INSERT INTO settings (business_id, location_id, key, value)
      VALUES ($1, NULL, $2, $3)
@@ -69,5 +71,42 @@ export async function setMfaPolicy(businessId: string, policy: MfaPolicy): Promi
      DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
     [businessId, SETTING_KEYS.mfaPolicy, JSON.stringify(next)],
   );
+
+  // Issue #885 — a policy change invalidates the trust earned under the old one.
+  //
+  // The seven-day device exemption exists to skip a *routine* challenge. When
+  // the owner widens the requirement, every exemption already granted was
+  // earned against a weaker rule, so honouring it would let a manager who had
+  // not been challenged in a week silently skip the very requirement just
+  // switched on. Trust is re-earnable the next time the member verifies, which
+  // is the whole point: this costs one challenge, not access.
+  //
+  // Only on an actual change, so re-saving the same policy does not log
+  // everyone out of their trusted devices for nothing.
+  /*
+   * Every field the policy can tighten is compared, not just the first one.
+   *
+   * `requireForAccountants` is a separate switch (#854) and it exempts exactly
+   * the same routine challenge, so an accountant's seven-day device trust is
+   * just as stale after it flips as a manager's is after theirs. Comparing only
+   * `requireForManagers` left a real hole: an owner could switch MFA on for
+   * every accountant in the business and not one of them would be asked, until
+   * their device trust happened to expire on its own.
+   *
+   * One revocation covers whichever field moved — the exemption is per device,
+   * not per role, so there is nothing to split.
+   */
+  const managersChanged = previous.requireForManagers !== next.requireForManagers;
+  const accountantsChanged = previous.requireForAccountants !== next.requireForAccountants;
+  if (managersChanged || accountantsChanged) {
+    const tightened =
+      (managersChanged && next.requireForManagers) ||
+      (accountantsChanged && next.requireForAccountants);
+    await revokeTrustedDevicesForBusiness({
+      businessId,
+      reason: tightened ? "mfa_policy_tightened" : "mfa_policy_changed",
+    });
+  }
+
   return next;
 }

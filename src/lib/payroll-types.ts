@@ -141,7 +141,11 @@ export interface PayrollLiability {
   ledgerBalance: string;
   /** Net wages + commission of runs that are accrued but not yet paid. */
   awaitingPayment: string;
-  /** Net commission accrued to staff and not yet included in any run (signed). */
+  /**
+   * Commission still owed that payroll does not pay in its own run (signed): accruals
+   * no run has claimed, plus what a standalone settlement run (#869) has claimed or
+   * carried forward and not yet paid.
+   */
   unsettledCommission: string;
   difference: string;
 }

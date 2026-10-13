@@ -41,6 +41,8 @@ import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
+import { TaxInvoicesSection } from "./tax-invoices-section";
+import { taxInvoiceCapabilitiesFor } from "./tax-invoice-capabilities";
 import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
 import { AccountingReportsSection } from "./reports-section";
 import { MulticurrencySection } from "./multicurrency-section";
@@ -396,7 +398,9 @@ export function AccountingManager({
               canBrowseMedia={canBrowseMedia}
             />
           ) : null}
-          {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
+          {section === "fiscal-periods" ? (
+            <FiscalPeriodsSection canManage={permissions.includes(PERMISSIONS.ledgerClosePeriod)} />
+          ) : null}
           {section === "directory" ? (
             <PartiesSection
               scope={partyScopeFor("accounting")}
@@ -416,7 +420,17 @@ export function AccountingManager({
             canReverseReceipts={canApproveLedger}
           /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
-          {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
+          {section === "cheques" ? (
+            <ChequesSection
+              busy={busy}
+              run={run}
+              /* The cheque register reads under `ledger.view`, but every write
+                 needs `finance.cheques_manage`. Thread the capability so a
+                 read-only accountant is not offered a dialog the API will
+                 refuse; the API check stays authoritative. */
+              canManage={permissions?.includes(PERMISSIONS.financeChequesManage) ?? false}
+            />
+          ) : null}
           {section === "reconciliation" ? (
             <ReconciliationSection busy={busy} run={run} canManage={canManageReconciliation} />
           ) : null}
@@ -442,6 +456,7 @@ export function AccountingManager({
               accounts={accounts ?? []}
             />
           ) : null}
+          {section === "tax-invoices" ? <TaxInvoicesSection refreshKey={refreshKey} capabilities={taxInvoiceCapabilitiesFor(permissions)} /> : null}
           {section === "financial-reports" ? <AccountingReportsSection /> : null}
           {section === "multicurrency" ? (
             <MulticurrencySection accounts={accounts ?? []} busy={busy} run={run} />

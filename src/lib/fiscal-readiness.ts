@@ -1,12 +1,13 @@
 /**
  * Fiscal-period readiness, the pure part (audit finding F08).
  *
- * Migration 0024's lock trigger deliberately lets a journal entry land on a
- * date that no fiscal period covers — a business that has never defined a
- * fiscal year can still sell, and imported history keeps the date it really
- * happened on. That stays the policy: **posting is never refused and no entry
- * is moved for want of a period**. What this module adds is the honest answer
- * to "are these books ready to be closed?":
+ * Until a business adopts fiscal controls, legacy uncovered posting remains
+ * compatible. The first defined year records an adoption instant: from then
+ * on, every newly inserted journal entry must be covered (even when its entry
+ * date is back-dated), while older uncovered entries keep their dates and
+ * remain visible for review. This module reports
+ * coverage and readiness; database triggers enforce the posting rule. It answers
+ * the honest question "are these books ready to be closed?":
  *
  *   - is any fiscal year configured at all;
  *   - does a period cover the business's today (the next sale's date);
@@ -116,9 +117,9 @@ export interface FiscalReadinessNotice {
 
 /**
  * The Persian warning a screen shows when the books are not ready, or null when
- * they are. Every date is Shamsi; the wording always says that nothing is
- * rejected or moved, because that is the policy and an owner reading "خارج از
- * دوره" will otherwise assume their sales were lost.
+ * they are. Every date is Shamsi. Historical uncovered entries remain as
+ * recorded; once controls are adopted, a new uncovered posting is rejected
+ * until its Jalali year is defined.
  */
 export function fiscalReadinessNotice(r: FiscalReadiness): FiscalReadinessNotice | null {
   if (r.ready) return null;
@@ -133,7 +134,7 @@ export function fiscalReadinessNotice(r: FiscalReadiness): FiscalReadinessNotice
     );
   } else if (!r.todayCovered) {
     lines.push(
-      `تاریخ امروز (${shamsi(r.today)}) در هیچ دورهٔ مالی تعریف‌شده‌ای نیست؛ اسناد امروز بیرون از دوره‌ها ثبت می‌شوند.${
+      `تاریخ امروز (${shamsi(r.today)}) در هیچ دورهٔ مالی تعریف‌شده‌ای نیست؛ ثبت سند با این تاریخ تا تعریف سال مالیِ مربوط ممکن نیست.${
         todayYear ? ` سال مالی ${toPersianDigits(todayYear)} را تعریف کنید.` : ""
       }`,
     );

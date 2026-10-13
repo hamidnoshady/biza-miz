@@ -161,13 +161,13 @@ async function localBacklog(businessId: string): Promise<{
   }>(
     `SELECT
        (SELECT count(*)::int FROM sync_events se JOIN locations l ON l.id = se.location_id
-         WHERE l.business_id = $1 AND se.origin = 'local' AND se.applied_at IS NOT NULL
+         WHERE l.business_id = $1 AND se.scope = 'location' AND se.origin = 'local' AND se.applied_at IS NOT NULL
            AND se.error IS NULL AND se.pushed_at IS NULL) AS unsent,
        (SELECT min(se.received_at) FROM sync_events se JOIN locations l ON l.id = se.location_id
-         WHERE l.business_id = $1 AND se.origin = 'local' AND se.applied_at IS NOT NULL
+         WHERE l.business_id = $1 AND se.scope = 'location' AND se.origin = 'local' AND se.applied_at IS NOT NULL
            AND se.error IS NULL AND se.pushed_at IS NULL) AS oldest,
        (SELECT count(*)::int FROM sync_events se JOIN locations l ON l.id = se.location_id
-         WHERE l.business_id = $1 AND se.pushed_at IS NULL AND se.push_attempts > 0) AS refused,
+         WHERE l.business_id = $1 AND se.scope = 'location' AND se.pushed_at IS NULL AND se.push_attempts > 0) AS refused,
        (SELECT count(*)::int FROM sync_domain_effects WHERE business_id = $1 AND status = 'deferred') AS deferred,
        (SELECT count(*)::int FROM sync_event_dead_letters WHERE business_id = $1 AND status = 'open') AS dead,
        (SELECT count(*)::int FROM sync_master_conflicts WHERE business_id = $1 AND status = 'open') AS conflicts`,

@@ -227,7 +227,7 @@ describe("§26's classification against the schema", () => {
       issued.code,
       "127.0.0.1",
       "Windows Business Suite",
-      installationId,
+      installationId, { maxSnapshotVersion: 7 },
     );
     expect(redeemed.ok).toBe(true);
     if (!redeemed.ok) return;

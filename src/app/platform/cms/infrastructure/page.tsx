@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { CmsDeployTargetRow } from "@/lib/cms/platform-client";
 import { formatPersianNumber } from "@/lib/digits";
+import { formatJalali } from "@/lib/jalali";
 import { api, Button, Card, ErrorBox, InfoBox, SkeletonRows, StatusBadge, useCan } from "../../ui";
 import { cmsErrorText } from "../text";
 
@@ -15,22 +16,39 @@ export default function CmsInfrastructurePage() {
   const [generatedAt, setGeneratedAt] = useState<null | string>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<null | string>(null);
+  // Per-resource state (audit F13): a failed read must never render as "none".
+  const [targetsLoaded, setTargetsLoaded] = useState(false);
+  const [targetsError, setTargetsError] = useState<null | string>(null);
+  const [routingLoaded, setRoutingLoaded] = useState(false);
+  const [routingError, setRoutingError] = useState<null | string>(null);
   const [busyId, setBusyId] = useState<null | string>(null);
 
   const load = useCallback(async () => {
     setError(null);
+    setTargetsError(null);
+    setRoutingError(null);
     const [targetsRes, routingRes] = await Promise.all([
       api<{ error?: string; targets?: CmsDeployTargetRow[] }>("/api/platform/cms/deploy-targets"),
       api<{ error?: string; routing?: { generatedAt: string; routes: { host: string; upstream: string }[] } }>(
         "/api/platform/cms/infrastructure",
       ),
     ]);
-    if (!targetsRes.ok) setError(cmsErrorText(targetsRes.data.error));
-    else setTargets(targetsRes.data.targets ?? []);
+    if (!targetsRes.ok) {
+      setTargetsError(cmsErrorText(targetsRes.data.error));
+      setTargets([]);
+    } else {
+      setTargets(targetsRes.data.targets ?? []);
+    }
+    setTargetsLoaded(true);
     if (routingRes.ok && routingRes.data.routing) {
       setGeneratedAt(routingRes.data.routing.generatedAt);
       setRoutes(routingRes.data.routing.routes ?? []);
+    } else {
+      setRoutingError(cmsErrorText(routingRes.data.error));
+      setRoutes([]);
+      setGeneratedAt(null);
     }
+    setRoutingLoaded(true);
     setLoading(false);
   }, []);
 
@@ -62,7 +80,11 @@ export default function CmsInfrastructurePage() {
       {error ? <ErrorBox>{error}</ErrorBox> : null}
 
       <Card title="سرورهای استقرار">
-        {targets.length === 0 ? (
+        {targetsError ? (
+          <ErrorBox>فهرست سرورها خوانده نشد: {targetsError}. این به معنای «هیچ سروری ثبت نشده» نیست.</ErrorBox>
+        ) : !targetsLoaded ? (
+          <SkeletonRows label="در حال خواندن سرورها" rows={2} />
+        ) : targets.length === 0 ? (
           <InfoBox>سرور استقراری ثبت نشده است؛ از پنل سایت‌ساز یا API مجموعهٔ deploy-targets اضافه کنید.</InfoBox>
         ) : (
           <ul className="space-y-3 text-sm">
@@ -98,9 +120,14 @@ export default function CmsInfrastructurePage() {
 
       <Card title="نقشهٔ مسیریابی لبه">
         <p className="text-xs text-muted-foreground">
-          {generatedAt ? `تولید: ${generatedAt}` : "—"} · {formatPersianNumber(routes.length)} میزبان
+          {generatedAt ? `تولید: ${formatJalali(generatedAt, { withTime: true })}` : "—"} ·{" "}
+          {formatPersianNumber(routes.length)} میزبان
         </p>
-        {routes.length === 0 ? (
+        {routingError ? (
+          <ErrorBox>نقشهٔ مسیریابی خوانده نشد: {routingError}. این به معنای «بدون مسیر» نیست.</ErrorBox>
+        ) : !routingLoaded ? (
+          <SkeletonRows label="در حال خواندن مسیرها" rows={2} />
+        ) : routes.length === 0 ? (
           <InfoBox>هیچ مسیر edge فعالی ثبت نشده است.</InfoBox>
         ) : (
           <div className="mt-3 max-h-80 overflow-auto rounded-lg border border-border">

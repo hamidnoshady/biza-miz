@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useMoney } from "@/components/money/money-context";
 import { Button } from "@/components/ui/button";
@@ -195,10 +196,18 @@ function CompanyCrmContent() {
               </tbody>
             </table>
             {customers !== null && customers.length === 0 ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                هنوز نگاشتی از صورتحساب پلتفرم ساخته نشده است؛ با نخستین رویداد معتبر Billing ایجاد
-                می‌شود.
-              </p>
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <p>
+                  هنوز نگاشتی از صورتحساب پلتفرم ساخته نشده است؛ با نخستین رویداد معتبر Billing ایجاد
+                  می‌شود.
+                </p>
+                <Link
+                  href="/platform/company/accounting"
+                  className="rounded-lg border border-border px-3 py-1.5 text-foreground hover:bg-muted"
+                >
+                  بررسی تطبیق صورتحساب‌ها
+                </Link>
+              </div>
             ) : null}
           </div>
         </section>

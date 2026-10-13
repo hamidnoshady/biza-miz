@@ -274,6 +274,37 @@ LAN, queued local mutations remain in IndexedDB or `sync_events` as
 appropriate, and synchronization retries after cloud reachability returns.
 The UI distinguishes local-server reachability from Internet/cloud status.
 
+### Business-scope events (issue #869)
+
+Almost every event belongs to one location, and every `sync_events` row carries
+that location. A business-wide money action has none: a commission payout covers
+every branch. Its event is recorded with `scope = 'business'`, `business_id` set and
+`location_id` NULL (migration 0217). It is never borrowed from a branch.
+
+- **Who records it:** only the cloud, in the transaction that moves the money
+  (`appendBusinessSyncOutboxEvent`, `src/lib/sync-outbox.ts`). A site refuses to
+  record one: a site pushes only its own location's rows, so a payout made there
+  would never leave it.
+- **Who receives it:** a location-bound credential (a site device) never does. Its
+  pull filters on the location and on `scope = 'location'`. A business-wide
+  credential (the per-business token, which resolves with no location) does. A
+  desktop acknowledges a pulled copy without applying it (`siteSkipsPulledEvent`,
+  effect class `commission_settlement`), and records that acknowledgement as an
+  applied effect, so a re-pull is a duplicate. The record needs a location to attach to,
+  so the desktop files the acknowledgement under its own location (or the business's first).
+- **Idempotency:** the event's `client_event_id` is derived from the payout's (or
+  reversal's) own id. The unique index `(business_id, client_event_id)` for business
+  rows lands a retried or doubly delivered event once. On a desktop the
+  `sync_domain_effects` key does the same.
+- **Replay:** the handler refuses a replayed copy (`business_event_not_replayable`, a
+  terminal dead letter). The money moved at its origin already, so applying it again
+  would move it twice.
+- **Isolation:** the `tenant_isolation` policy on `sync_events` has a business branch,
+  `scope = 'business' AND business_id = app_current_business()`, next to the location
+  branch. Another business neither reads such a row nor writes one.
+- **Location-scoped sync is unchanged.** The push, pull, health and connection-status
+  queries now also name `scope = 'location'`, so the rule is written where it applies.
+
 ## Supported event scope
 
 `src/lib/data-ownership.ts` is the versioned, machine-readable replication
@@ -293,7 +324,9 @@ production/reversal events, and (contract v3) shifts opened and cashed up
 derived from `shift.opened:<id>` / `shift.closed:<id>`; a second open shift for
 the same person is a terminal error and dead-letters visibly). Each is written
 in the local mutation transaction, uses stable IDs and `client_event_id`
-idempotency, and is applied through the versioned registry. Since contract v2
+idempotency, and is applied through the versioned registry. Commission payouts and their reversals
+(`commission.payout.recorded@1`, `commission.payout.reversed@1`, #869) are business-scope
+events the cloud records alone; see *Business-scope events* above. Since contract v2
 the **central server records the same events for a branch that has an active
 paired desktop**, so a bill, purchase or journal the owner records in the
 cloud for that branch reaches it; the desktop stays the operational authority

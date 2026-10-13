@@ -31,6 +31,11 @@ import {
   warrantyReport, warrantyReportPage,
   weightReconciliation,
 } from "./industry-reports-service";
+import {
+  vehicleInventoryReport,
+  vehicleReservationReport,
+  vehicleSalesReport,
+} from "./automotive-reports-service";
 import { listLayaways, listLayawaysPage } from "./jewelry-flagship-service";
 import { deadStockReport, lowStockReport, deadStockReportPage, lowStockReportPage } from "./retail-stock-service";
 import type { DateRangeFilters } from "./reports-service";
@@ -127,6 +132,25 @@ export async function runTradeReport(
     case "low_stock":
       if (!locationId) return { rows: [] };
       return { rows: await lowStockReport(locationId) };
+
+    // Issue #839 §14 — the dealership's reports. `locationId` null means "every
+    // branch", which these reports genuinely support (a dealer with two lots
+    // asks for all of them at once); the branch filter is applied when the
+    // caller has an active one, exactly as the manager's own screens do.
+    case "vehicle_stock_valuation":
+      return vehicleInventoryReport(businessId, {
+        locationId,
+        today: context.todayIso ?? new Date().toISOString().slice(0, 10),
+      }) as unknown as Record<string, unknown>;
+
+    case "vehicle_sales_profitability":
+      return vehicleSalesReport(businessId, { locationId, dateFrom: from ?? null, dateTo: to ?? null }) as unknown as Record<string, unknown>;
+
+    case "vehicle_reservations":
+      return vehicleReservationReport(businessId, {
+        locationId,
+        today: context.todayIso ?? new Date().toISOString().slice(0, 10),
+      }) as unknown as Record<string, unknown>;
 
     case "dead_stock": {
       if (!locationId) return { rows: [] };

@@ -106,6 +106,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   // RESTRICT means the children must go first, and fixed_assets itself
   // references journal_entries/parties/accounts, which the businesses delete
   // would cascade — the register's rows go before them either way.
@@ -116,6 +118,7 @@ beforeEach(async () => {
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM businesses");
+  await db.query("COMMIT");
 
   const bizRow = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Fixed Assets Co', $1) RETURNING id",

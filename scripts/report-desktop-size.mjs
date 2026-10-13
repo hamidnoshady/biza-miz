@@ -55,6 +55,21 @@ async function childSizes(target, depth = 2) {
   return rows.sort((a, b) => b.bytes - a.bytes);
 }
 
+/** Exact recursive sizes of every immediate component at a packaging boundary. */
+async function directChildren(target) {
+  if (!existsSync(target)) return [];
+  const entries = await readdir(target, { withFileTypes: true });
+  const rows = await Promise.all(entries.map(async (entry) => {
+    const absolute = path.join(target, entry.name);
+    return {
+      name: entry.name,
+      path: path.relative(root, absolute).replaceAll("\\", "/"),
+      bytes: await bytes(absolute),
+    };
+  }));
+  return rows.sort((a, b) => b.bytes - a.bytes);
+}
+
 const targets = [
   ["Next build", ".next"],
   ["Staged desktop runtime", ".desktop-runtime"],
@@ -70,8 +85,24 @@ const targets = [
   ["PostgreSQL client tools", ".desktop-assets/postgresql-tools"],
   ["Packaged staged runtime", "electron/dist/win-unpacked/resources/desktop-runtime"],
   ["Packaged PostgreSQL client tools", "electron/dist/win-unpacked/resources/postgresql-tools"],
+  ["Staged Next server", ".desktop-runtime/.next/server"],
+  ["Staged runtime dependencies", ".desktop-runtime/node_modules"],
+  ["Packaged Next server", "electron/dist/win-unpacked/resources/desktop-runtime/.next/server"],
+  ["Packaged runtime dependencies", "electron/dist/win-unpacked/resources/desktop-runtime/node_modules"],
+  ["Packaged Electron dependency files", "electron/dist/win-unpacked/resources/app.asar.unpacked/node_modules"],
 ];
 const measured = await Promise.all(targets.map(async ([label, relative]) => ({ label, relative, bytes: await bytes(path.join(root, relative)) })));
+const compositionTargets = [
+  ["Staged runtime", ".desktop-runtime"],
+  ["Final unpacked Windows application", "electron/dist/win-unpacked"],
+  ["Final application resources", "electron/dist/win-unpacked/resources"],
+  ["Packaged runtime", "electron/dist/win-unpacked/resources/desktop-runtime"],
+];
+const composition = await Promise.all(compositionTargets.map(async ([label, relative]) => ({
+  label,
+  relative,
+  rows: await directChildren(path.join(root, relative)),
+})));
 const roots = [path.join(root, ".desktop-runtime"), path.join(root, "electron", "dist", "win-unpacked")].filter(existsSync);
 const dirs = (await Promise.all(roots.map((directory) => childSizes(directory, 3)))).flat().sort((a, b) => b.bytes - a.bytes).slice(0, 50);
 const files = (await Promise.all(roots.map((directory) => largestFiles(directory, 100)))).flat().sort((a, b) => b.bytes - a.bytes).slice(0, 100);
@@ -91,6 +122,18 @@ const lines = [
   "|---|---|---:|",
   ...measured.map((row) => `| ${row.label} | \`${row.relative}\` | ${mib(row.bytes)} |`),
   "",
+  "## Exact top-level composition (recursive sizes)",
+  "",
+  ...composition.flatMap(({ label, relative, rows }) => [
+    `### ${label} (\`${relative}\`)`,
+    "",
+    "| Component | Size (bytes) | Size |",
+    "|---|---:|---:|",
+    ...(rows.length
+      ? rows.map((row) => `| \`${row.name}\` | ${row.bytes} | ${mib(row.bytes)} |`)
+      : ["| (not present) | 0 | 0.0 MiB |"]),
+    "",
+  ]),
   "## Top 50 directories/packages",
   "",
   ...dirs.map((row, index) => `${index + 1}. \`${row.path}\` — ${mib(row.bytes)}`),
@@ -101,4 +144,14 @@ const lines = [
   "",
 ];
 await writeFile(output, `${lines.join("\n")}\n`);
+if (process.env.GITHUB_ACTIONS === "true") {
+  const compositionNotice = composition
+    .map(({ label, rows }) => `${label}: ${rows.length ? rows.map((row) => `${row.name}=${row.bytes}B`).join(", ") : "not present"}`)
+    .join(" | ");
+  const largestDirectories = dirs.slice(0, 20).map((row) => `${row.path}=${row.bytes}B`).join(", ");
+  const largestFiles = files.slice(0, 10).map((row) => `${row.path}=${row.bytes}B`).join(", ");
+  console.log(
+    `::notice title=Desktop package composition::${compositionNotice} | Largest directories: ${largestDirectories} | Largest files: ${largestFiles}`,
+  );
+}
 console.log(`Desktop size report written to ${output}`);
