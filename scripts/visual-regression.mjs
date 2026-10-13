@@ -450,11 +450,6 @@ async function main() {
     if (UPDATE || !existsSync(baselinePath)) {
       writeFileSync(baselinePath, actual);
       recorded.push(screen.id);
-      if (screen.id.startsWith("accounting-cheques")) {
-        const b64 = actual.toString("base64");
-        const kind = screen.id.endsWith("dark") ? "warning" : "notice";
-        for (let i = 0; i < b64.length; i += 50000) console.log(`::${kind} title=VRDUMP ${screen.id} ${i / 50000}::${b64.slice(i, i + 50000)}`);
-      }
       continue;
     }
 
@@ -467,6 +462,29 @@ async function main() {
       const message =
         reason ?? `${(mismatch * 100).toFixed(2)}% of pixels changed${boundsText}`;
       failures.push({ id: screen.id, message });
+      if (screen.id.startsWith("accounting-cheques")) {
+        const { deflateSync } = await import("node:zlib");
+        const A = PNG.sync.read(actual);
+        const Bb = PNG.sync.read(readFileSync(baselinePath));
+        const D = PNG.sync.read(diff);
+        const bytes = [];
+        let last = -1;
+        let exact = 0;
+        for (let i = 0; i < A.data.length; i += 4) {
+          if (A.data[i] !== Bb.data[i] || A.data[i + 1] !== Bb.data[i + 1] || A.data[i + 2] !== Bb.data[i + 2]) exact++;
+          const marked = D.data[i] === 255 && D.data[i + 1] === 0 && D.data[i + 2] === 0 &&
+            !(A.data[i] === 255 && A.data[i + 1] === 0 && A.data[i + 2] === 0);
+          if (!marked) continue;
+          let delta = i / 4 - last;
+          last = i / 4;
+          while (delta >= 128) { bytes.push((delta & 127) | 128); delta >>>= 7; }
+          bytes.push(delta, A.data[i], A.data[i + 1], A.data[i + 2]);
+        }
+        const b64 = deflateSync(Buffer.from(bytes), { level: 9 }).toString("base64");
+        const kind = screen.id.endsWith("dark") ? "warning" : "notice";
+        console.log(`::error title=VRMETA ${screen.id}::exact=${exact} records=${bytes.length} b64=${b64.length}`);
+        for (let i = 0, n = 0; i < b64.length && n < 10; i += 4000, n++) console.log(`::${kind} title=VRPATCH ${screen.id} ${n}::${b64.slice(i, i + 4000)}`);
+      }
     }
   }
 
