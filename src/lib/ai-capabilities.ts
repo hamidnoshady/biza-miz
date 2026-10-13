@@ -348,6 +348,13 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "crm.customField.archive": PERMISSIONS.crmConfigure,
   // Batch AS — barcode bulk mint, the route's inventoryAdjust gate.
   "barcode.bulkMint": PERMISSIONS.inventoryAdjust,
+  // Batch AT — purchases & suppliers all sit behind purchasesManage.
+  "purchase.update": PERMISSIONS.purchasesManage,
+  "purchase.lifecycle": PERMISSIONS.purchasesManage,
+  "purchase.receive": PERMISSIONS.purchasesManage,
+  "purchase.delete": PERMISSIONS.purchasesManage,
+  "supplier.update": PERMISSIONS.purchasesManage,
+  "supplier.archive": PERMISSIONS.purchasesManage,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

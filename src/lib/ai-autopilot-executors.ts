@@ -93,6 +93,16 @@ import { buyBackGold, openLayaway, payLayaway, completeLayaway } from "./jewelry
 import { isPurity } from "./gold";
 import { recordGoldPrice, getGoldPrice } from "./gold-prices-service";
 import { mintMissingBarcodes } from "./inventory-item-barcodes-service";
+import { preparePurchaseLines, purchaseDateOrNull, PurchaseLineError } from "./purchase-lines";
+import {
+  supplierInvoiceOrError,
+  SUPPLIER_INVOICE_DUE_DATE_SQL,
+} from "./purchase-service";
+import {
+  receivePurchaseInTransaction,
+  PURCHASE_SETTLEMENT_METHODS,
+  type PurchaseSettlementMethod,
+} from "./purchase-receive-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -3200,6 +3210,247 @@ const barcodeBulkMint: AutopilotExecutor = async (ctx) => {
   }
 };
 
+// ── Issue #883 package 2, batch AT — purchases & suppliers close-out ────────
+// The whole cluster answers to purchasesManage and the pinned branch; every
+// step is the [id] routes' own SQL/run sequence so the envelopes stay exact.
+const purchaseUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const supplierId = str(ctx.payload.supplierId);
+  // Route order: supplier existence first (its own 404), then the parse step.
+  if (supplierId) {
+    const { rows: supplier } = await query(
+      "SELECT id FROM suppliers WHERE id = $1 AND location_id = $2",
+      [supplierId, branch.locationId],
+    );
+    if (supplier.length === 0) return fail("supplier_not_found");
+  }
+  let lines: Awaited<ReturnType<typeof preparePurchaseLines>>["lines"];
+  let total: string;
+  let purchaseDate: string | null;
+  let invoice: ReturnType<typeof supplierInvoiceOrError> | null = null;
+  try {
+    purchaseDate = purchaseDateOrNull(ctx.payload.purchaseDate);
+    ({ lines, total } = await preparePurchaseLines(
+      Array.isArray(ctx.payload.items) ? (ctx.payload.items as never) : [],
+      branch.locationId,
+    ));
+    if (ctx.payload.invoice !== undefined) invoice = supplierInvoiceOrError(ctx.payload.invoice);
+  } catch (err) {
+    if (err instanceof PurchaseLineError || err instanceof PurchaseServiceError) {
+      return { ok: false, result: { error: err.code }, errorCode: err.code };
+    }
+    throw err;
+  }
+  const note = ctx.payload.note === undefined ? undefined : str(ctx.payload.note);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows: locked } = await client.query<{ status: string }>(
+      "SELECT status::text AS status FROM purchases WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [id, branch.locationId],
+    );
+    const purchase = locked[0];
+    if (!purchase) { await client.query("ROLLBACK"); return fail("not_found"); }
+    if (purchase.status === "received") { await client.query("ROLLBACK"); return fail("purchase_received_cannot_edit"); }
+    if (purchase.status === "cancelled") { await client.query("ROLLBACK"); return fail("purchase_cancelled_cannot_edit"); }
+    // A cleared date means "leave the stored date alone" — the route's comment,
+    // verbatim semantics via COALESCE.
+    await client.query(
+      `UPDATE purchases SET supplier_id = $2, note = $3, total = $4,
+              purchase_date = COALESCE($6::date, purchase_date)
+        WHERE id = $1 AND location_id = $5`,
+      [id, supplierId || null, note?.trim() || null, total, branch.locationId, purchaseDate],
+    );
+    if (invoice) {
+      await client.query(
+        `UPDATE purchases
+            SET supplier_invoice_number = $2, supplier_invoice_date = $3::date, vat_amount = $4,
+                payment_terms_days = $5::integer,
+                payment_due_date = ${SUPPLIER_INVOICE_DUE_DATE_SQL("$6", "$5", "$3", "purchase_date")}
+          WHERE id = $1`,
+        [id, invoice.invoiceNumber, invoice.invoiceDate, invoice.vatAmount, invoice.paymentTermsDays, invoice.dueDate],
+      );
+    }
+    await client.query("DELETE FROM purchase_items WHERE purchase_id = $1", [id]);
+    for (const line of lines) {
+      await client.query(
+        `INSERT INTO purchase_items (purchase_id, inventory_item_id, quantity, unit_cost, extended_cost)
+         VALUES ($1, $2, $3, $4::numeric / $3::numeric, $4)`,
+        [id, line.inventoryItemId, line.baseQty, line.totalCost],
+      );
+    }
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, total } };
+  } catch (cause) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw cause;
+  } finally {
+    client.release();
+  }
+};
+// The route's draft -> ordered -> received | cancelled ladder, minus the
+// received step (its own always_approve verb below).
+const PURCHASE_TRANSITIONS: Record<string, string[]> = {
+  draft: ["ordered", "received", "cancelled"],
+  ordered: ["received", "cancelled"],
+  received: [],
+  cancelled: [],
+};
+const purchaseLifecycle: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  const nextStatus = str(ctx.payload.action);
+  if (!id || (nextStatus !== "ordered" && nextStatus !== "cancelled")) return fail("invalid_transition");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{ status: string }>(
+      "SELECT status::text AS status FROM purchases WHERE id=$1 AND location_id=$2 FOR UPDATE",
+      [id, branch.locationId],
+    );
+    const purchase = rows[0];
+    if (!purchase) { await client.query("ROLLBACK"); return fail("not_found"); }
+    if (!(PURCHASE_TRANSITIONS[purchase.status] ?? []).includes(nextStatus)) {
+      await client.query("ROLLBACK");
+      return fail("invalid_transition");
+    }
+    await client.query(
+      `UPDATE purchases SET status=$2::purchase_status,
+              ordered_at=CASE WHEN $2::purchase_status='ordered' THEN now() ELSE ordered_at END
+        WHERE id=$1`,
+      [id, nextStatus],
+    );
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, status: nextStatus } };
+  } catch (cause) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw cause;
+  } finally {
+    client.release();
+  }
+};
+// The PATCH {status:"received"} branch — stock-in + weighted-average roll +
+// journal, the route's exact run through receivePurchaseInTransaction.
+const purchaseReceive: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const settlementMethod: PurchaseSettlementMethod = PURCHASE_SETTLEMENT_METHODS.includes(
+    str(ctx.payload.settlementMethod) as PurchaseSettlementMethod,
+  )
+    ? (str(ctx.payload.settlementMethod) as PurchaseSettlementMethod)
+    : "credit";
+  const supplierId = str(ctx.payload.supplierId) || null;
+  const { rows: roleRows } = await query<{ role: string }>(`SELECT role FROM users WHERE id = $1`, [
+    ctx.authorizedByUserId,
+  ]);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const received = await receivePurchaseInTransaction(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      purchaseId: id,
+      settlementMethod,
+      supplierId,
+      createdBy: ctx.authorizedByUserId,
+      sync: { actorRole: (roleRows[0]?.role ?? "Owner") as Role },
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...received } };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    const code = err instanceof Error ? err.message : "apply_failed";
+    return { ok: false, result: { error: code }, errorCode: code };
+  } finally {
+    client.release();
+  }
+};
+const purchaseDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{ status: string }>(
+      "SELECT status::text AS status FROM purchases WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [id, branch.locationId],
+    );
+    const purchase = rows[0];
+    if (!purchase) { await client.query("ROLLBACK"); return fail("not_found"); }
+    if (purchase.status === "received") {
+      await client.query("ROLLBACK");
+      return fail("purchase_received_cannot_delete");
+    }
+    await client.query("DELETE FROM purchases WHERE id = $1 AND location_id = $2", [id, branch.locationId]);
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, deleted: true } };
+  } catch (cause) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw cause;
+  } finally {
+    client.release();
+  }
+};
+// ownedSupplier() from the suppliers [id] route: the supplier must belong to
+// the pinned branch, and its full edit semantics come after.
+const supplierUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: owned } = await query<{ id: string; party_id: string | null }>(
+    "SELECT id, party_id FROM suppliers WHERE id = $1 AND location_id = $2",
+    [id, branch.locationId],
+  );
+  if (!owned[0]) return fail("not_found");
+  const name = ctx.payload.name === undefined ? undefined : str(ctx.payload.name);
+  const phone = ctx.payload.phone === undefined ? undefined : str(ctx.payload.phone);
+  if (owned[0].party_id && (name !== undefined || phone !== undefined)) {
+    return fail("supplier_identity_on_party");
+  }
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  const set = (col: string, val: unknown) => { fields.push(`${col} = $${++i}`); values.push(val); };
+  if (name !== undefined) {
+    const trimmed = (name ?? "").trim();
+    if (!trimmed) return fail("missing_fields");
+    set("name", trimmed);
+  }
+  if (phone !== undefined) set("phone", phone?.trim() || null);
+  if (ctx.payload.notes !== undefined) set("notes", str(ctx.payload.notes)?.trim() || null);
+  if (ctx.payload.isActive !== undefined) set("is_active", Boolean(ctx.payload.isActive));
+  if (fields.length === 0) return fail("bad_request");
+  await query(`UPDATE suppliers SET ${fields.join(", ")} WHERE id = $1`, [id, ...values]);
+  return { ok: true, result: { ok: true } };
+};
+const supplierArchive: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: owned } = await query<{ id: string }>(
+    "SELECT id FROM suppliers WHERE id = $1 AND location_id = $2",
+    [id, branch.locationId],
+  );
+  if (!owned[0]) return fail("not_found");
+  const { rows: refs } = await query("SELECT 1 FROM purchases WHERE supplier_id = $1 LIMIT 1", [id]);
+  if (refs.length > 0) {
+    await query("UPDATE suppliers SET is_active = false WHERE id = $1", [id]);
+    return { ok: true, result: { ok: true, deactivated: true } };
+  }
+  await query("DELETE FROM suppliers WHERE id = $1", [id]);
+  return { ok: true, result: { ok: true, deactivated: false } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -5380,6 +5631,12 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   crmCustomFieldSave,
   crmCustomFieldArchive,
   barcodeBulkMint,
+  purchaseUpdate,
+  purchaseLifecycle,
+  purchaseReceive,
+  purchaseDelete,
+  supplierUpdate,
+  supplierArchive,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

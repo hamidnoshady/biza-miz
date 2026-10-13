@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **203 write verbs**
-(**63** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **209 write verbs**
+(**65** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -213,6 +213,12 @@ visible only to connections consented for every branch) and **203 write verbs**
 | `write_crm_custom_field_save` | `crm.customField.save` | crm | low | connection write_mode | `crm.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_crm_custom_field_archive` | `crm.customField.archive` | crm | low | connection write_mode | `crm.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_barcode_bulk_mint` | `barcode.bulkMint` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_purchase_update` | `purchase.update` | pos | low | connection write_mode | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_purchase_lifecycle` | `purchase.lifecycle` | pos | low | connection write_mode | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_purchase_receive` | `purchase.receive` | pos | high | always approval queue (step-up) | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_purchase_delete` | `purchase.delete` | pos | high | always approval queue (step-up) | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_supplier_update` | `supplier.update` | pos | low | connection write_mode | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_supplier_archive` | `supplier.archive` | pos | low | connection write_mode | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

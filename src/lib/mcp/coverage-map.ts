@@ -280,10 +280,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     ops: {
       // Batch G (#883): suppliers directory read + the supplier-return voucher
       // (stock-out + settlement posting, same tx as the route).
+      // Batch AT (#883): draft edit, ordered/cancelled transitions, receive
+      // (stock + ledger), draft delete, and the supplier edit/archive pair.
       listDetail: ["get_supplier_performance", "list_suppliers"],
       create: ["inventory.reorder.draftPO", "supplier.return.create"],
+      update: ["purchase.update", "supplier.update"],
+      lifecycle: ["purchase.lifecycle", "purchase.receive", "purchase.delete", "supplier.archive"],
     },
-    test: "integration/purchases.integration.test.ts",
+    note: "AT closes the [id] lanes: receive posts stock+ledger and delete erases a business record, so both are always_approve like the supplier-return voucher",
+    test: "integration/purchase-invoice-asset.integration.test.ts",
   },
   {
     id: "inventory.production",

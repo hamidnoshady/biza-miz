@@ -467,6 +467,15 @@ export type ActionType =
   // Batch AS — the barcode bulk mint: idempotent one-transaction labelling of
   // the whole branch, completing the barcodes row.
   | "barcode.bulkMint"
+  // Batch AT — purchases & suppliers fade to covered: draft edit, ordered/
+  // cancelled transitions, the ledger-heavy receive, draft deletion, and the
+  // supplier edit/archive pair.
+  | "purchase.update"
+  | "purchase.lifecycle"
+  | "purchase.receive"
+  | "purchase.delete"
+  | "supplier.update"
+  | "supplier.archive"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -562,6 +571,12 @@ export type AutopilotExecutorKey =
   | "crmCustomFieldSave"
   | "crmCustomFieldArchive"
   | "barcodeBulkMint"
+  | "purchaseUpdate"
+  | "purchaseLifecycle"
+  | "purchaseReceive"
+  | "purchaseDelete"
+  | "supplierUpdate"
+  | "supplierArchive"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1923,6 +1938,54 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "صدور بارکد داخلی برای همهٔ اقلام فاقد کد در شعبه — idempotent، در یک تراکنش",
     payloadHint: '{ locationId?: string }',
     executor: "barcodeBulkMint",
+  },
+  "purchase.update": {
+    type: "purchase.update",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "PATCH",
+    label: "بازنویسی پیش‌نویس خرید — اقلام جایگزین می‌شوند؛ دریافت‌شده/لغوشده قابل ویرایش نیست (مثل فرم ویرایش)",
+    payloadHint: '{ id: string, supplierId?: string|null, note?: string, purchaseDate?: string|null, items?: Array<{inventoryItemId, purchaseQty: string, totalCost: string}>, invoice?: object, locationId?: string }',
+    executor: "purchaseUpdate",
+  },
+  "purchase.lifecycle": {
+    type: "purchase.lifecycle",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "PATCH",
+    label: "گذر وضعیت سند خرید به ordered یا cancelled — دریافت با purchase.receive انجام می‌شود",
+    payloadHint: '{ id: string, action: "ordered"|"cancelled", locationId?: string }',
+    executor: "purchaseLifecycle",
+  },
+  "purchase.receive": {
+    type: "purchase.receive",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "PATCH",
+    label: "دریافت خرید — ورود موجودی، میانگین موزون و ثبت دفتر (همان مسیر PATCH status=received)",
+    payloadHint: '{ id: string, settlementMethod?: "cash"|"bank"|"credit"="credit", supplierId?: string }',
+    executor: "purchaseReceive",
+  },
+  "purchase.delete": {
+    type: "purchase.delete",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "DELETE",
+    label: "حذف سند خرید پیش‌نویس — دریافت‌شده delete نمی‌شود؛ یک حذف رکورد تجاری است",
+    payloadHint: '{ id: string, locationId?: string }',
+    executor: "purchaseDelete",
+  },
+  "supplier.update": {
+    type: "supplier.update",
+    endpoint: "/api/inventory/suppliers/{id}",
+    method: "PATCH",
+    label: "ویرایش تأمین‌کننده — نام/تلفن فقط وقتی party لینک نشده (قاعدهٔ supplier_identity_on_party)",
+    payloadHint: '{ id: string, name?: string, phone?: string|null, notes?: string|null, isActive?: boolean }',
+    executor: "supplierUpdate",
+  },
+  "supplier.archive": {
+    type: "supplier.archive",
+    endpoint: "/api/inventory/suppliers/{id}",
+    method: "DELETE",
+    label: "حذف/غیرفعال‌سازی تأمین‌کننده — اگر خرید دارد فقط غیرفعال می‌شود",
+    payloadHint: '{ id: string }',
+    executor: "supplierArchive",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

@@ -367,6 +367,15 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "crm.customField.archive", kind: "write", app: "crm", risk: "low", approval: "mode" },
   // Batch AS — idempotent branch-wide label mint completes the barcodes row.
   { actionType: "barcode.bulkMint", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AT — draft edits & ordered/cancelled steps are cheap corrections;
+  // receive posts stock + ledger and delete erases a business record, so both
+  // are always_approve/high like supplier.return.create before them.
+  { actionType: "purchase.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "purchase.lifecycle", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "purchase.receive", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "purchase.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "supplier.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "supplier.archive", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
