@@ -370,6 +370,10 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "floor.section.update": PERMISSIONS.tablesEdit,
   "floor.section.delete": PERMISSIONS.tablesEdit,
   "kitchen.item.status": PERMISSIONS.kitchenView,
+  // Batch AY — waste & write-downs are ledger postings behind inventoryAdjust.
+  "waste.record": PERMISSIONS.inventoryAdjust,
+  "writeDown.create": PERMISSIONS.inventoryAdjust,
+  "writeDown.reverse": PERMISSIONS.inventoryAdjust,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

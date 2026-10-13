@@ -2563,6 +2563,77 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_waste_record",
+    actionType: "waste.record",
+    english: "Record waste — stock leaves and the posting lands; approval is required.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        inventoryItemId: id("قلم موجودی"),
+        quantity: { oneOf: [{ type: "string" }, { type: "number" }] },
+        reason: { type: "string", description: "یکی از دلایل ضایعات سرویس" },
+        note: { type: "string" },
+        locationId: id("شعبه — پیش‌فرض پین"),
+      },
+      required: ["inventoryItemId", "quantity", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_down_create",
+    actionType: "writeDown.create",
+    english: "Write inventory down to net realisable value — ledger posting, idempotency key required.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        valuationDate: { type: "string", description: "YYYY-MM-DD" },
+        reason: { type: "string" },
+        idempotencyKey: { type: "string" },
+        lines: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { inventoryItemId: { type: "string" }, nrvValueRial: { oneOf: [{ type: "string" }, { type: "number" }] } },
+            required: ["inventoryItemId", "nrvValueRial"],
+            additionalProperties: false,
+          },
+        },
+        locationId: id("شعبه — پیش‌فرض پین"),
+      },
+      required: ["valuationDate", "reason", "idempotencyKey", "lines"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_down_reverse",
+    actionType: "writeDown.reverse",
+    english: "Reverse an NRV write-down — whole or by amounts; idempotency key required.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: id("سند تنزیل"),
+        reason: { type: "string" },
+        idempotencyKey: { type: "string" },
+        amounts: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { inventoryItemId: { type: "string" }, amountRial: { oneOf: [{ type: "string" }, { type: "number" }] } },
+            required: ["inventoryItemId", "amountRial"],
+            additionalProperties: false,
+          },
+          description: "خالی = برگشت کامل",
+        },
+        locationId: id("شعبه — پیش‌فرض پین"),
+      },
+      required: ["id", "reason", "idempotencyKey"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_jewelry_item_sell",
     actionType: "jewelry.item.sell",
     english: "Sell a weighted gold item — real sale document with making-charge/profit/VAT and settlement; always asks a human first.",

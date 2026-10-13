@@ -493,6 +493,11 @@ export type ActionType =
   | "floor.section.update"
   | "floor.section.delete"
   | "kitchen.item.status"
+  // Batch AY — waste & NRV write-downs: three ledger-posting lanes, every one
+  // of them behind explicit approval like the supplier-return voucher.
+  | "waste.record"
+  | "writeDown.create"
+  | "writeDown.reverse"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -605,6 +610,9 @@ export type AutopilotExecutorKey =
   | "floorSectionUpdate"
   | "floorSectionDelete"
   | "kitchenItemStatus"
+  | "wasteRecord"
+  | "writeDownCreate"
+  | "writeDownReverse"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2099,6 +2107,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "پیش‌بردن آیتم در صف آشپزخانه: preparing/ready/served — نقش‌ها همان محدودیت‌های board را دارند",
     payloadHint: '{ itemId: string, status: "preparing"|"ready"|"served", locationId?: string }',
     executor: "kitchenItemStatus",
+  },
+  "waste.record": {
+    type: "waste.record",
+    endpoint: "/api/inventory/waste",
+    method: "POST",
+    label: "ثبت ضایعات — خروج موجودی و ثبت دفتر؛ تأیید لازم",
+    payloadHint: '{ inventoryItemId: string, quantity: number|string, reason: "spoilage"|"... (waste reasons)", note?: string, locationId?: string }',
+    executor: "wasteRecord",
+  },
+  "writeDown.create": {
+    type: "writeDown.create",
+    endpoint: "/api/inventory/write-downs",
+    method: "POST",
+    label: "تنزیل موجودی به NRV — ثبت دفتر با idempotencyKey اجباری؛ تأیید لازم",
+    payloadHint: '{ valuationDate: "YYYY-MM-DD", reason: string, idempotencyKey: string, lines: Array<{ inventoryItemId: string, nrvValueRial: string|number }>, locationId?: string }',
+    executor: "writeDownCreate",
+  },
+  "writeDown.reverse": {
+    type: "writeDown.reverse",
+    endpoint: "/api/inventory/write-downs/{id}/reverse",
+    method: "POST",
+    label: "برگشت تنزیل NRV — می‌تواند جزئی باشد؛ idempotencyKey اجباری، تأیید لازم",
+    payloadHint: '{ id: string, reason: string, idempotencyKey: string, amounts?: Array<{ inventoryItemId: string, amountRial: string|number }>, locationId?: string }',
+    executor: "writeDownReverse",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

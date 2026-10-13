@@ -15,10 +15,9 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (15)
+### Tenant (14)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
-- **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
 - **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — partial
 - **cms.setup-design-domain** (Website / CMS · Connection, setup/build, design, domain/DNS, CDN) — partial
@@ -55,7 +54,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 53 · partial: 15 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 4
+Counts — covered: 54 · partial: 14 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 4
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -84,7 +83,7 @@ Counts — covered: 53 · partial: 15 · MCP gap: 0 · backend gap: 0 · n/a (in
 | Inventory | Purchases, supplier returns, suppliers<br>_AT closes the [id] lanes: receive posts stock+ledger and delete erases a business record, so both are always_approve like the supplier-return voucher_ | get_supplier_performance, list_suppliers | inventory.reorder.draftPO, supplier.return.create | purchase.update, supplier.update | purchase.delete, purchase.lifecycle, purchase.receive, supplier.archive | — | inventory.view, parties.manage, purchases.manage | connection mode; step-up (always approve) | get_supplier_performance, list_suppliers, inventory.reorder.draftPO, supplier.return.create, purchase.update, supplier.update, purchase.delete, purchase.lifecycle, purchase.receive, supplier.archive | integration/purchase-invoice-asset.integration.test.ts | covered |
 | Inventory | Production formulas & runs, modifier recipes<br>_the run itself is inventory.production.run (reversible via its own undo); formula shell/lines/edit/deactivate close the CRUD ring around it; modifier recipe assignment stays route-only (menu-screen layout, covered by recipe.assign elsewhere)_ | list_formulas, list_production_runs | production.formula.create, production.formulaInput.set | inventory.production.run, production.formula.update | production.formula.deactivate, production.formulaInput.delete | — | inventory.adjust, inventory.view | connection mode; step-up (always approve) | list_formulas, list_production_runs, production.formula.create, production.formulaInput.set, inventory.production.run, production.formula.update, production.formula.deactivate, production.formulaInput.delete | integration/production-runs.integration.test.ts | covered |
 | Inventory | Barcodes (lookup, bulk)<br>_AS closes the bulk column — the idempotent whole-branch mint_ | list_item_barcodes, list_items_without_barcode | barcode.assign | — | — | barcode.bulkMint | inventory.adjust, inventory.view | connection mode | list_item_barcodes, list_items_without_barcode, barcode.assign, barcode.bulkMint | integration/inventory-barcodes.integration.test.ts | covered |
-| Inventory | Waste & write-downs | get_waste_history | (route only) | — | (route only) | — | inventory.adjust, inventory.view | — | get_waste_history | integration/stock.integration.test.ts | partial |
+| Inventory | Waste & write-downs<br>_batch AY: every lane posts ledgers — explicit approval on all three like the supplier-return voucher; NRV lanes keep the idempotency-key requirement_ | get_waste_history | waste.record, writeDown.create | — | writeDown.reverse | — | inventory.adjust, inventory.view | step-up (always approve) | get_waste_history, waste.record, writeDown.create, writeDown.reverse | integration/stock.integration.test.ts | covered |
 | Inventory | stock/* routes<br>_legacy alias of the inventory/* surface_ | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, purchases.manage | — | — | — | duplicate surface |
 | CRM | Customers (profile, notes, tags, relationships, merge, duplicates, consent) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes | crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create | crm.customer.tag, crm.note.pin | crm.note.delete | — | crm.consent_manage, crm.manage, crm.merge, crm.view, ledger.view, parties.manage, parties.view | connection mode; step-up (always approve) | find_customers, get_at_risk_customers, get_customer_profile, get_customer_timeline, list_crm_activities, list_customer_notes, crm.consent.set, crm.customer.note, customer.note.add, party.customer.create, party.supplier.create, crm.customer.tag, crm.note.pin, crm.note.delete | integration/parties.integration.test.ts | covered |
 | CRM | Deals & leads (handoff, convert)<br>_the services are upserts (optional id), matching the routes' create-vs-update split; convert is transactional and duplicate-guarded, exactly the screen button_ | list_crm_deals, list_crm_leads | crm.deal.save, crm.lead.save | crm.deal.move_stage | crm.deal.delete, crm.lead.convert | — | crm.manage, crm.view | connection mode; step-up (always approve) | list_crm_deals, list_crm_leads, crm.deal.save, crm.lead.save, crm.deal.move_stage, crm.deal.delete, crm.lead.convert | integration/crm.integration.test.ts | covered |

@@ -335,7 +335,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Waste & write-downs",
     routes: ["inventory/waste", "inventory/write-downs"],
-    ops: { listDetail: ["get_waste_history"] },
+    ops: {
+      listDetail: ["get_waste_history"],
+      create: ["waste.record", "writeDown.create"],
+      lifecycle: ["writeDown.reverse"],
+    },
+    note: "batch AY: every lane posts ledgers — explicit approval on all three like the supplier-return voucher; NRV lanes keep the idempotency-key requirement",
     test: "integration/stock.integration.test.ts",
   },
   {

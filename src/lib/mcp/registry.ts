@@ -391,6 +391,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "floor.section.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "floor.section.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "kitchen.item.status", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AY — every lane posts to ledgers; explicit approval on all of them.
+  { actionType: "waste.record", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "writeDown.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "writeDown.reverse", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

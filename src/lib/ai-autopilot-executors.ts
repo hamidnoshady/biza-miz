@@ -98,6 +98,7 @@ import { canTransitionTable, type TableStatus } from "./table-sessions";
 import { canKitchenBump, canMarkServed, type OrderItemStatus } from "./order-item-status";
 import { recordCoworkerEvent } from "./ai-coworker-events";
 import { recordOrderStateStandalone } from "./order-state-sync";
+import { createNrvWriteDown, reverseNrvWriteDown } from "./nrv-service";
 import {
   decryptReservationPhones,
   encryptReservationPhone,
@@ -3926,6 +3927,109 @@ const kitchenItemStatus: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true } };
 };
 
+// ── Issue #883 package 2, batch AY — waste & NRV write-downs ───────────────
+// All three post ledgers; the registry steps every one of them up to explicit
+// approval. error envelopes stay word-for-word the routes'.
+const wasteRecord: AutopilotExecutor = async (ctx) => {
+  let quantity: string;
+  try {
+    quantity = positiveQuantityText(String(ctx.payload.quantity ?? ""));
+  } catch {
+    return fail("invalid_quantity");
+  }
+  const inventoryItemId = str(ctx.payload.inventoryItemId);
+  if (!inventoryItemId) return fail("invalid_item");
+  if (!isWasteReason(str(ctx.payload.reason))) return fail("invalid_waste_reason");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: item } = await query(
+    "SELECT id FROM inventory_items WHERE id = $1 AND location_id = $2 AND is_active",
+    [inventoryItemId, branch.locationId],
+  );
+  if (item.length === 0) return fail("item_not_found");
+  const role = await authorMembershipRole(ctx);
+  try {
+    const recorded = await recordWaste({
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      inventoryItemId,
+      quantity: quantity as QuantityText,
+      reason: str(ctx.payload.reason) as NonNullable<Parameters<typeof recordWaste>[0]["reason"]>,
+      note: str(ctx.payload.note)?.trim() || null,
+      createdBy: ctx.authorizedByUserId,
+      sync: { actorRole: role as Role },
+    });
+    return { ok: true, result: { ok: true, totalCost: recorded.postedCost } };
+  } catch (err) {
+    if (err instanceof MissingLedgerAccountError) {
+      return { ok: false, result: { error: "ledger_account_missing", code: err.code }, errorCode: "ledger_account_missing" };
+    }
+    if (err instanceof Error && err.message === "periodic_system_unsupported") return fail(err.message);
+    throw err;
+  }
+};
+const writeDownCreate: AutopilotExecutor = async (ctx) => {
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  try {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await createNrvWriteDown(client, {
+        businessId: ctx.businessId, locationId: branch.locationId, createdBy: ctx.authorizedByUserId,
+        valuationDate: str(ctx.payload.valuationDate) ?? "", reason: str(ctx.payload.reason) ?? "",
+        idempotencyKey: str(ctx.payload.idempotencyKey) ?? "",
+        lines: (Array.isArray(ctx.payload.lines) ? ctx.payload.lines : []).map((line) => {
+          const l = line as Record<string, unknown>;
+          return { inventoryItemId: String(l.inventoryItemId ?? ""), nrvValueRial: rialText(String(l.nrvValueRial ?? "")) };
+        }),
+      });
+      await client.query("COMMIT");
+      return { ok: true, result: { ok: true, ...result } };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      return { ok: false, result: { error: (err as Error).message }, errorCode: (err as Error).message };
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    return { ok: false, result: { error: (err as Error).message }, errorCode: (err as Error).message };
+  }
+};
+const writeDownReverse: AutopilotExecutor = async (ctx) => {
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  try {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await reverseNrvWriteDown(client, {
+        businessId: ctx.businessId, locationId: branch.locationId, originalId: id, createdBy: ctx.authorizedByUserId,
+        reason: str(ctx.payload.reason) ?? "",
+        idempotencyKey: str(ctx.payload.idempotencyKey) ?? "",
+        amounts: Array.isArray(ctx.payload.amounts)
+          ? (ctx.payload.amounts as Record<string, unknown>[]).map((line) => ({
+              inventoryItemId: String(line.inventoryItemId ?? ""), amountRial: rialText(String(line.amountRial ?? "")),
+            }))
+          : undefined,
+      });
+      await client.query("COMMIT");
+      return { ok: true, result: { ok: true, ...result } };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      return { ok: false, result: { error: (err as Error).message }, errorCode: (err as Error).message };
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    return { ok: false, result: { error: (err as Error).message }, errorCode: (err as Error).message };
+  }
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -6123,6 +6227,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   floorSectionUpdate,
   floorSectionDelete,
   kitchenItemStatus,
+  wasteRecord,
+  writeDownCreate,
+  writeDownReverse,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,
