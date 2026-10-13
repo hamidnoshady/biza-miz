@@ -8,7 +8,10 @@ import {
   TENANT_MFA_THEME,
   type MfaMethod,
 } from "@/components/auth/mfa-step";
+import { BusinessPicker, useBusinessSelection } from "@/components/auth/business-picker";
 import { lockoutMessage, useNextPath } from "@/components/auth/login-helpers";
+import { loginErrorMessage } from "@/lib/login-contract";
+import { networkErrorMessage, useLoginRequest } from "@/components/auth/use-login-request";
 import { toPersianDigits } from "@/lib/digits";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
 
@@ -23,6 +26,12 @@ interface LoginResponse {
   mfaState?: "grace" | "required";
   graceUntil?: string | null;
   graceDaysLeft?: number | null;
+  /** Present only on a real session — this is what "authenticated" means here. */
+  user?: { id: string; role: string; fullName: string };
+  business?: { id: string; name: string; slug: string };
+  /** Issue #854 (P1.19) — the multi-business answer, which carries no session. */
+  needsBusinessSelection?: boolean;
+  businesses?: { id: string; name: string }[];
 }
 
 /**
@@ -42,7 +51,17 @@ export default function AdminLoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  /*
+   * The shared bounded-request hook rather than a local `busy` flag.
+   *
+   * This form previously did `setBusy(true)`, awaited a bare `fetch`, and
+   * released `busy` on the line *after* the await. A network rejection
+   * therefore threw straight past the release and the submit button stayed
+   * disabled for the rest of the visit with no message explaining why — the
+   * only recovery was a reload. The hook releases in a `finally`, bounds the
+   * wait, and reports the failure as a failure.
+   */
+  const { busy, send } = useLoginRequest();
   /**
    * Phase 24 Wave 2 — the second-factor interstitial.
    *
@@ -57,6 +76,19 @@ export default function AdminLoginForm() {
     availableMethods: MfaMethod[];
   } | null>(null);
   /**
+   * Issue #854 (P1.19) — the missing step.
+   *
+   * A member of two businesses cannot be signed in until they name one, so
+   * `/api/auth/login` answers `{ needsBusinessSelection: true, businesses }`
+   * with **HTTP 200 and no session**. This door treated any `res.ok` as a
+   * successful login and navigated to the destination, which then bounced the
+   * user straight back here — a loop with no explanation on either screen.
+   *
+   * The step is `BusinessPicker` from `components/auth`, the same one the
+   * phone-OTP door renders, so the two cannot drift apart again.
+   */
+  const { selection, capture, clear } = useBusinessSelection();
+  /**
    * The grace nag: `mfaState: "grace"` arrives *alongside* a real session, so
    * this is a prompt, not a gate — the user is already signed in and may
    * dismiss it. Persisted for the length of the visit only; the countdown comes
@@ -69,28 +101,65 @@ export default function AdminLoginForm() {
     router.refresh();
   }
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
+  /**
+   * Sign in, optionally naming the business.
+   *
+   * The password door has no bearer token to replay: `/api/auth/login` requires
+   * `email`+`password` on *every* call (`missing_credentials` otherwise), so the
+   * business-selection round re-sends the same credentials plus the chosen id
+   * and the route re-verifies them. Nothing about the first response is trusted
+   * on the second call, which is why there is no token here.
+   */
+  async function submit(e: React.FormEvent | null, businessId?: string) {
+    e?.preventDefault();
     setError(null);
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    const data: LoginResponse = await res.json().catch(() => ({}));
-    setBusy(false);
+
+    const outcome = await send<LoginResponse>((signal) =>
+      fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password, ...(businessId ? { businessId } : {}) }),
+        signal,
+      }),
+    );
+
+    // A newer submit superseded this one; its state is already correct and
+    // applying this response on top would fight it.
+    if (outcome.stale) return;
+
+    /*
+     * The request never completed. This is the case the previous version could
+     * not represent at all: a rejection skipped the `setBusy(false)` line and
+     * the form reported nothing. It is deliberately *not* folded into the
+     * wrong-password message below — the credential was never evaluated, so
+     * telling the user to re-check it sends them to retype a correct password.
+     */
+    if (outcome.networkError) {
+      setError(networkErrorMessage(outcome.networkError));
+      return;
+    }
+
+    const { ok, status, data } = outcome;
 
     // A locked account answers 423 with the time it unlocks. Reporting that as
     // "wrong email or password" sends the user off to re-check a password that
     // is perfectly correct, and to keep trying, which is exactly what extends
     // the lockout.
-    if (res.status === 423) {
+    if (status === 423) {
       setError(lockoutMessage(data.lockedUntil));
       return;
     }
 
-    if (res.ok && data.mfaRequired && data.mfaToken) {
+    /*
+     * The selection request is checked before the MFA interstitial and before
+     * the success path: the response is `res.ok` with no cookie, so treating it
+     * as success is precisely the bug. It is also reachable *after* a wrong
+     * business id on the second round, in which case the list comes back again
+     * and the member simply picks another.
+     */
+    if (ok && capture(data)) return;
+
+    if (ok && data.mfaRequired && data.mfaToken) {
       setPending({
         token: data.mfaToken,
         method: data.mfaMethod ?? null,
@@ -99,7 +168,15 @@ export default function AdminLoginForm() {
       return;
     }
 
-    if (res.ok) {
+    /*
+     * Authenticated means the route sent the session shape, not merely that the
+     * status was 2xx. The old `if (res.ok)` accepted *any* 200 — including one
+     * whose body failed to parse and fell back to `{}` — and navigated to the
+     * destination with no cookie, which bounced straight back here looking like
+     * a broken form. `user` and `business` are set together on every success
+     * path in the route, so requiring both is exact rather than stricter.
+     */
+    if (ok && data.user && data.business) {
       if (data.mfaState === "grace") {
         setGraceNotice({ daysLeft: data.graceDaysLeft ?? null });
         return;
@@ -108,13 +185,34 @@ export default function AdminLoginForm() {
       return;
     }
 
-    setError("ایمیل یا رمز عبور نادرست است.");
+    /*
+     * Everything that is not a lockout, a selection request, an MFA prompt or a
+     * session is mapped by the shared helper rather than collapsed into one
+     * "wrong email or password". This door previously used that single string
+     * for all of them, so a member with no active membership, or one arriving on
+     * the wrong business origin, was told to re-check a password that was never
+     * the problem. 423 stays above because it carries the exact unlock time.
+     */
+    setError(loginErrorMessage({ status, code: data.error ?? null }));
   }
 
   // The MFA interstitial and the grace nag replace the form *inside* the same
   // card chrome — MfaStep's theme is only its inner spacing, not a page.
   let body: React.ReactNode;
-  if (pending) {
+  if (selection) {
+    body = (
+      <BusinessPicker
+        selection={selection}
+        busy={busy}
+        error={error}
+        onChoose={(businessId) => void submit(null, businessId)}
+        onCancel={() => {
+          clear();
+          setPassword("");
+        }}
+      />
+    );
+  } else if (pending) {
     body = (
       <MfaStep
         mfaToken={pending.token}

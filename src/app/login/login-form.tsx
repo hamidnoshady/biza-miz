@@ -28,6 +28,7 @@ import {
   useNextPath,
 } from "@/components/auth/login-helpers";
 import { roleLabel } from "@/lib/role-labels";
+import { withLoginNextParam } from "@/lib/login-contract";
 
 /**
  * The client half of the login page. Kept separate from the route so the
@@ -61,14 +62,33 @@ import { roleLabel } from "@/lib/role-labels";
  * remembered anymore) is never stuck.
  */
 export default function LoginForm() {
+  const router = useRouter();
+  // Where this visit was heading, so switching doors does not lose it
+  // (issue #885 L06).
+  const next = useNextPath("/dashboard");
   // `null` = "not decided yet" (still reading localStorage, first paint must
   // not flash the wrong screen); `false` = show the chooser now.
   const [remembered, setRemembered] = useState<boolean | null>(null);
   const [offlineNote, setOfflineNote] = useState(false);
 
   useEffect(() => {
-    setRemembered(readRememberedLoginDoor() === "staff");
-  }, []);
+    const door = readRememberedLoginDoor();
+    // Issue #885 L07 — both remembered doors are honoured.
+    //
+    // `login-door.ts` stores "admin" and "staff" symmetrically, but this was
+    // the only reader and it tested `=== "staff"`, so a browser that had
+    // chosen the manager door and asked to be remembered was shown the
+    // chooser again on every visit. The preference it had just written was
+    // dead on arrival.
+    //
+    // Still a UI shortcut and nothing more: `/admin` re-checks the credential
+    // server-side, and a stale or hand-edited value here costs one redirect.
+    if (door === "admin") {
+      router.replace(withLoginNextParam("/admin", next));
+      return;
+    }
+    setRemembered(door === "staff");
+  }, [next, router]);
 
   function chooseDoor(choice: DoorChoice) {
     // "admin" already navigated away inside the chooser; only "staff" and
@@ -103,7 +123,7 @@ export default function LoginForm() {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <div className="w-full max-w-3xl">
-          <LoginDoorChooser onChoose={chooseDoor} />
+          <LoginDoorChooser next={next} onChoose={chooseDoor} />
           <div className="mx-auto max-w-sm">
             <CloudLoginButton />
           </div>
@@ -281,7 +301,12 @@ function PinLogin() {
   /** The direct «ورود با شمارهٔ موبایل» tab — offered once the policy turns the feature on. */
   const [phoneTab, setPhoneTab] = useState(false);
   const [tabPhone, setTabPhone] = useState("");
-  const [tabBusinesses, setTabBusinesses] = useState<{ id: string; name: string }[] | null>(null);
+  /**
+   * Issue #854 (P1.18): the *send* step never names a business, so there is no
+   * business list to hold here any more. A multi-business number gets the same
+   * `sent` answer as any other, and the list — with a selection token — is what
+   * a *verified* code produces inside `PhoneOtpStep`.
+   */
 
   useEffect(() => {
     // Checked client-side only (guarded, not called during the server render)
@@ -310,16 +335,30 @@ function PinLogin() {
       }
 
       if (res.ok) {
+        // Issue #885 L17 — a 200 whose body this screen cannot read is a
+        // *failure*, not an empty roster.
+        //
+        // It used to be `data?.employees ?? []`, so a malformed body (a proxy
+        // serving an HTML error page with a 200, a half-written response, a
+        // contract change) rendered the "nobody here" state. That is the worst
+        // available reading of it: the till says no eligible quick-login
+        // accounts exist, which is a claim about who works there, when the
+        // truth is that the request did not answer. An operator looking at it
+        // goes looking for a staffing problem instead of a broken endpoint.
         const data = (await res.json().catch(() => null)) as {
           employees?: RosterEmployee[];
           policy?: RosterPolicy;
           credentialSync?: CredentialSyncNotice | null;
         } | null;
         if (cancelled) return;
+        if (!data || !Array.isArray(data.employees)) {
+          setRosterFailure("error");
+          return;
+        }
         setRosterFailure(null);
-        setEmployees(data?.employees ?? []);
-        setPolicy(data?.policy ?? null);
-        const notice = data?.credentialSync ?? null;
+        setEmployees(data.employees);
+        setPolicy(data.policy ?? null);
+        const notice = data.credentialSync ?? null;
         setCredentialSync(notice && notice.missing > 0 ? notice : null);
         return;
       }
@@ -462,17 +501,8 @@ function PinLogin() {
         error?: string;
         message?: string;
         retryAfterMs?: number;
-        needsBusinessSelection?: boolean;
-        businesses?: { id: string; name: string }[];
       };
 
-      if (data.needsBusinessSelection) {
-        // The typed number belongs to members of more than one business and
-        // this origin does not name one — ask which, then re-send addressed
-        // to it. (Only the direct tab can land here.)
-        setTabBusinesses(data.businesses ?? []);
-        return;
-      }
       if (res.status === 429) {
         const ms = typeof data.retryAfterMs === "number" ? data.retryAfterMs : 0;
         const seconds = Math.max(1, Math.ceil(ms / 1000));
@@ -490,7 +520,6 @@ function PinLogin() {
         return;
       }
 
-      setTabBusinesses(null);
       setOtpSent({ token: data.token, maskedPhone: data.maskedPhone ?? null });
       if (employeeId) rememberRecent(employeeId);
     } catch {
@@ -504,29 +533,68 @@ function PinLogin() {
     if (!selected) return;
     setBusy(true);
     setError(null);
-    const res = await fetch("/api/auth/pin-login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pin,
-        employeeId: selected.id,
-        deviceToken: readDeviceToken(),
-        // The adoption-window button: prove the PIN, then verify the number
-        // this same login — the OTP step that follows is voluntary today and
-        // becomes the gate the day the window closes.
-        ...(verifyMode ? { verifyPhone: true } : {}),
-      }),
-    });
+
+    // Issue #885 L05 — the request is guarded, and `busy` is released in a
+    // `finally`.
+    //
+    // It used to be `setBusy(true)`, a bare `await fetch`, and `setBusy(false)`
+    // on the line after. A network rejection (the till's Wi-Fi dropping, the
+    // local server restarting) threw out of this handler before that line, so
+    // the keypad stayed permanently disabled with no message and no way back
+    // short of a reload — on a shop floor that is an unusable login screen with
+    // no visible cause. The same defect on the manager form is fixed there with
+    // the shared `useLoginRequest` hook, which also adds the timeout and
+    // stale-response guard.
+    let res: Response;
+    try {
+      res = await fetch("/api/auth/pin-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pin,
+          employeeId: selected.id,
+          deviceToken: readDeviceToken(),
+          // The adoption-window button: prove the PIN, then verify the number
+          // this same login — the OTP step that follows is voluntary today and
+          // becomes the gate the day the window closes.
+          ...(verifyMode ? { verifyPhone: true } : {}),
+        }),
+      });
+    } catch {
+      setBusy(false);
+      setError("ارتباط با سرور برقرار نشد. اتصال شبکه را بررسی کنید.");
+      return;
+    }
+
     const data = (await res.json().catch(() => ({}))) as {
       phoneVerification?: "otp" | "set_phone";
       phoneToken?: string;
       maskedPhone?: string | null;
       lockedUntil?: unknown;
+      user?: { id?: string; role?: string; fullName?: string | null };
     };
     setBusy(false);
 
     if (res.status === 423) {
       setError(lockoutMessage(data.lockedUntil));
+      return;
+    }
+
+    // Issue #885, gap 5 — a 200 is not a login.
+    //
+    // The `.catch(() => ({}))` above is deliberate: a proxy error page or a
+    // truncated body must not throw out of this handler, which is the stuck
+    // keypad L05 fixed. But it also means `data` can legitimately be `{}`, and
+    // the old shape read "the request succeeded" as "the PIN was accepted" and
+    // called goNext(). A 200 carrying an empty object, an HTML error page, or
+    // a truncated response therefore navigated into the app with no session
+    // cookie behind it — a broken dashboard and no explanation.
+    //
+    // Only the route's own payload counts: it always names the member it just
+    // minted a session for. Anything else is reported as a failed attempt so
+    // the member can retry instead of being handed an empty app.
+    if (res.ok && !data.user?.id) {
+      setError("پاسخ سرور نامعتبر بود. دوباره تلاش کنید.");
       return;
     }
 
@@ -608,7 +676,6 @@ function PinLogin() {
             type="button"
             onClick={() => {
               setPhoneTab(false);
-              setTabBusinesses(null);
               setError(null);
               setOtpSpec(null);
               setOtpSent(null);
@@ -633,23 +700,6 @@ function PinLogin() {
               setError(null);
             }}
           />
-        ) : tabBusinesses ? (
-          <div className="space-y-2">
-            <p className="text-sm text-muted-foreground">
-              این شماره در چند کسب‌وکار ثبت شده است؛ وارد کدام می‌شوید؟
-            </p>
-            {tabBusinesses.map((b) => (
-              <button
-                key={b.id}
-                type="button"
-                disabled={busy}
-                onClick={() => void startOtp({ kind: "phone", phone: tabPhone, businessId: b.id })}
-                className="w-full rounded-lg border border-input px-3 py-2.5 text-sm font-semibold transition hover:bg-primary/10 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
-              >
-                {b.name}
-              </button>
-            ))}
-          </div>
         ) : (
           <form
             className="space-y-4"

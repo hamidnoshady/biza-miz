@@ -17,23 +17,27 @@
  */
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  ALL_PERMISSIONS,
-  isOwnerOnlyPermission,
-  PERMISSION_METADATA,
-  roleBasePermissions,
-  type Permission,
-} from "@/lib/permissions";
+import { PERMISSIONS, roleBasePermissions } from "@/lib/permissions";
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH, isValidPin } from "@/lib/pin-policy";
 import { roleLabel } from "@/lib/role-labels";
-import { ASSIGNABLE_ROLES, INVITABLE_ROLES, PIN_ROLES } from "@/lib/roles";
+import {
+  ASSIGNABLE_ROLES,
+  INVITABLE_ROLES,
+  PIN_ROLES,
+  loginCredentialModelForRole,
+} from "@/lib/roles";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { formatPhoneDisplay } from "@/lib/phone";
+import {
+  AccessChangeSummary,
+  PermissionEditor,
+} from "@/components/team/permission-editor";
 import { RolesManager } from "@/components/team/roles-manager";
 import { IamSyncCard } from "@/components/team/iam-sync-card";
 import { LocalToHybridGuide } from "@/components/team/local-to-hybrid-guide";
-import { partyScopeFor } from "@/lib/parties-scopes";
+import { SecurityConfirmDialog } from "@/components/auth/security-confirm-dialog";
+import { canViewParties, partyScopeFor } from "@/lib/parties-scopes";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -58,48 +62,14 @@ import {
 } from "../ui";
 
 
-const PERMISSION_LABELS: Record<string, string> = {
-  "orders.create": "ثبت سفارش",
-  "orders.void": "ابطال سفارش",
-  "orders.amend_closed": "ویرایش یا حذف سفارش بسته‌شده",
-  "orders.discount": "اعمال تخفیف",
-  "payments.take": "دریافت وجه",
-  "payments.refund": "بازپرداخت",
-  "tables.manage": "مدیریت میزها",
-  "reservations.manage": "مدیریت رزرو",
-  "kitchen.view": "نمایش آشپزخانه",
-  "delivery.manage": "مدیریت ارسال",
-  "menu.view": "مشاهدهٔ منو",
-  "menu.edit": "ویرایش منو",
-  "inventory.view": "مشاهدهٔ انبار",
-  "inventory.adjust": "اصلاح موجودی",
-  "purchases.manage": "مدیریت خرید",
-  // The party permission covers all three roles, so the label says «اشخاص» — a
-  // manager granting it to a cashier is also letting them edit suppliers and
-  // personnel, and the label must not hide that.
-  "parties.view": "مشاهدهٔ اشخاص",
-  "parties.manage": "مدیریت اشخاص",
-  // Phase G — «میز کار من». The two carved-out keys say what they commit the
-  // business to, not which screen they open: a member reading «مدیریت
-  // قراردادها» must understand it means signing, not filing.
-  "workspace.view": "مشاهدهٔ میز کار",
-  "workspace.manage": "مدیریت پروژه‌ها و وظایف",
-  "workspace.contracts_manage": "مدیریت قراردادهای اجرایی",
-  "workspace.approve": "تأیید درخواست‌ها",
-  "workspace.admin": "مدیریت همهٔ پروژه‌ها",
-  "ledger.view": "مشاهدهٔ دفتر",
-  "ledger.post": "ثبت سند",
-  "ledger.approve": "تأیید سند",
-  "ledger.close_period": "بستن دوره",
-  "accounts.edit": "ویرایش سرفصل‌ها",
-  "reports.view": "مشاهدهٔ گزارش",
-  "reports.export": "خروجی گزارش",
-  "team.manage": "مدیریت تیم",
-  "settings.manage": "تنظیمات",
-  "locations.manage": "مدیریت شعبه",
-  "backup.manage": "پشتیبان‌گیری",
-  "api.manage": "مدیریت کلیدهای API",
-};
+/** ... gone: the label map that used to live here.
+ *
+ * Issue #854 (P2.3) — this file carried a ~50-entry copy of the permission
+ * labels while `permission-registry.ts` carried the same labels *and* the
+ * groups, risk levels, dependencies and descriptions. The member editor now
+ * renders `PermissionEditor`, which reads the registry, so the copy has no
+ * reader — and a second copy of a catalogue is how the two drift.
+ */
 
 interface Member {
   id: string;
@@ -138,7 +108,19 @@ interface Invitation {
   status: "pending" | "accepted" | "revoked" | "expired";
   expiresAt: string;
   createdAt: string;
+  /** Issue #854 (P2.11): null means the invitation predates the column. */
+  locationScope?: "all" | "selected" | "home" | "none" | null;
+  customRoleId?: string | null;
+  customRoleName?: string | null;
 }
+
+/** One label per branch policy, shared by the invite form and its list. */
+const INVITE_SCOPE_LABELS: Record<NonNullable<Invitation["locationScope"]>, string> = {
+  all: "همهٔ شعبه‌ها",
+  selected: "شعبه‌های انتخابی",
+  home: "فقط شعبهٔ اصلی",
+  none: "بدون دسترسی شعبه",
+};
 
 const INVITATION_STATUS_LABELS: Record<Invitation["status"], string> = {
   pending: "در انتظار",
@@ -172,6 +154,22 @@ export function TeamManager({
   const [phoneEditing, setPhoneEditing] = useState<Member | null>(null);
   /** Which member's PIN/password reset dialog is open. */
   const [credentialsEditing, setCredentialsEditing] = useState<Member | null>(null);
+  /**
+   * Issue #854 (P2.26) — suspension and offboarding are destructive security
+   * actions; they wait behind a product confirmation that spells out the
+   * consequences, instead of a bare `confirm()` whose cancel path is only a
+   * reflex check. Only the dialog's confirm path sends the mutation.
+   */
+  const [pendingSuspend, setPendingSuspend] = useState<Member | null>(null);
+  const [pendingOffboard, setPendingOffboard] = useState<Member | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  /**
+   * Issue #854 (pass 4, gap 4) — an offboarded member does not «فعال‌سازی»:
+   * offboarding severed the identity linkage, revoked the credentials and
+   * wiped the branches, so coming back is an explicit ceremony with its own
+   * dialog, not the flip of a toggle.
+   */
+  const [rehiring, setRehiring] = useState<Member | null>(null);
 
   const load = useCallback(async () => {
     const [membersRes, invitesRes] = await Promise.all([
@@ -216,8 +214,46 @@ export function TeamManager({
     [locations],
   );
 
+  /** Issue #854 (P2.26) — the only paths that send these mutations. */
+  async function executeSuspend(member: Member) {
+    setPendingSuspend(null);
+    setConfirmBusy(true);
+    const ok = await mutate(`/api/team/${member.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ isActive: false }),
+    });
+    setConfirmBusy(false);
+    if (ok) setError("");
+  }
+
+  async function executeOffboard(member: Member) {
+    setPendingOffboard(null);
+    setConfirmBusy(true);
+    const ok = await mutate(`/api/team/${member.id}`, { method: "DELETE" });
+    setConfirmBusy(false);
+    if (ok) setError("");
+  }
+
   if (loading) return <LoadingSkeleton rows={3} />;
   const isOwner = role === "owner";
+  /**
+   * Issue #854 (P2.1 / P2.4) — two different questions.
+   *
+   * `canManage` is membership administration: roles, branches, suspension,
+   * credentials, invitations. `canManagePermissions` is the narrower capability
+   * of handing out *capabilities*, and it is deliberately not implied by the
+   * first: a manager who runs the floor may add a cashier without being able to
+   * grant `ledger.post`. The server enforces both (`membership-authority.ts`,
+   * `requirePermission(PERMISSIONS.teamPermissionsManage)`); this is the screen
+   * agreeing with it instead of offering controls that come back 403.
+   *
+   * `permissions` is optional because the personnel directory is also mounted
+   * from surfaces that do not carry it; a missing list means "not granted",
+   * which renders read-only rather than assuming authority.
+   */
+  const granted = permissions ?? [];
+  const canManagePermissions = isOwner || granted.includes(PERMISSIONS.teamPermissionsManage);
+  const canManage = isOwner || granted.includes(PERMISSIONS.teamManage);
 
   return (
     <div className="space-y-6">
@@ -245,6 +281,12 @@ export function TeamManager({
         description="اعضای کسب‌وکار، نقش‌ها و سطوح دسترسی آن‌ها را در سامانه مدیریت کنید."
       >
         <div className="space-y-3">
+          {!canManage ? (
+            <InfoBox>
+              شما دسترسی «مشاهدهٔ تیم» را دارید؛ تغییر نقش‌ها، شعبه‌ها و اعتبارنامه‌ها به
+              «مدیریت تیم» نیاز دارد.
+            </InfoBox>
+          ) : null}
           {members.length === 0 ? (
             <InfoBox>هنوز عضوی برای این کسب‌وکار ثبت نشده است.</InfoBox>
           ) : null}
@@ -295,29 +337,41 @@ export function TeamManager({
                   </p>
                 </div>
                 <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap">
-                  {(isOwner || member.role !== "owner") ? <SecondaryButton onClick={() => setEditing(member)}>ویرایش</SecondaryButton> : null}
-                  {(isOwner || member.role !== "owner") ? <SecondaryButton onClick={() => setPhoneEditing(member)}>
+                  {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton onClick={() => setEditing(member)}>ویرایش</SecondaryButton> : null}
+                  {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton onClick={() => setPhoneEditing(member)}>
                     شمارهٔ موبایل
                   </SecondaryButton> : null}
-                  {(isOwner || member.role !== "owner") ? <SecondaryButton onClick={() => setCredentialsEditing(member)}>
+                  {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton onClick={() => setCredentialsEditing(member)}>
                     رمز ورود
                   </SecondaryButton> : null}
-                  {(isOwner || member.role !== "owner") ? <SecondaryButton
+                  {/*
+                    Issue #854 (pass 4, gap 4) — the actions derive from the
+                    lifecycle: an active member suspends, a suspended/inactive
+                    one reactivates, and an *offboarded* one comes back only
+                    through the rehire ceremony — offboarding removed the
+                    identity linkage, the credentials and the branch scope, so
+                    a bare «فعال‌سازی» would restore a doorless membership.
+                  */}
+                  {(canManage && (isOwner || member.role !== "owner") && member.status !== "offboarded") ? <SecondaryButton
                     onClick={() => {
-                      if (member.isActive && !confirm(`حساب «${member.fullName}» تعلیق شود؟ دسترسی او بلافاصله قطع خواهد شد.`)) return;
-                      void mutate(`/api/team/${member.id}`, {
+                      // Issue #854 (P2.26) — suspension asks with consequences
+                      // spelled out; reactivation is harmless and asks nothing.
+                      if (member.isActive) setPendingSuspend(member);
+                      else void mutate(`/api/team/${member.id}`, {
                         method: "PATCH",
-                        body: JSON.stringify({ isActive: !member.isActive }),
+                        body: JSON.stringify({ isActive: true }),
                       });
                     }}
                   >
                     {member.isActive ? "تعلیق" : "فعال‌سازی"}
                   </SecondaryButton> : null}
-                  {(isOwner || member.role !== "owner") ? <SecondaryButton
-                    onClick={() => {
-                      if (!confirm(`همکاری «${member.fullName}» خاتمه یابد؟ دسترسی، نشست‌ها و اعتبارنامه‌های فعال لغو می‌شوند و سوابق تاریخی حفظ خواهند شد.`)) return;
-                      void mutate(`/api/team/${member.id}`, { method: "DELETE" });
-                    }}
+                  {(canManage && (isOwner || member.role !== "owner") && member.status === "offboarded") ? <SecondaryButton
+                    onClick={() => setRehiring(member)}
+                  >
+                    بازگشت به کار
+                  </SecondaryButton> : null}
+                  {(canManage && (isOwner || member.role !== "owner") && member.status !== "offboarded") ? <SecondaryButton
+                    onClick={() => setPendingOffboard(member)}
                     className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
                   >
                     قطع همکاری
@@ -329,7 +383,10 @@ export function TeamManager({
         </div>
       </SectionCard>
 
-      <RolesManager deploymentProfile={deploymentProfile} />
+      <RolesManager
+        deploymentProfile={deploymentProfile}
+        canManagePermissions={canManagePermissions}
+      />
       {deploymentProfile === "local" ? <LocalToHybridGuide members={members} /> : null}
       {deploymentProfile === "hybrid" ? <IamSyncCard /> : null}
 
@@ -338,6 +395,7 @@ export function TeamManager({
           member={editing}
           locations={locations}
           canManageOwners={isOwner}
+          canManagePermissions={canManagePermissions}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -366,8 +424,17 @@ export function TeamManager({
         />
       ) : null}
 
-      <InviteSection invitations={invitations} canManageOwners={isOwner} onChanged={load} onError={setError} />
-      <AddStaffSection onChanged={load} onError={setError} />
+      <InviteSection
+        invitations={invitations}
+        locations={locations}
+        canManage={canManage}
+        canManagePermissions={canManagePermissions}
+        canManageOwners={isOwner}
+        deploymentProfile={deploymentProfile}
+        onChanged={load}
+        onError={setError}
+      />
+      {canManage ? <AddStaffSection onChanged={load} onError={setError} /> : null}
 
       {/*
         Personnel as parties (scope `team`): a staff member is a counterparty for
@@ -376,12 +443,306 @@ export function TeamManager({
         here rather than in a screen of its own so the two views of one person cannot
         disagree about the name — and so editing a phone number here is editing it
         everywhere, the POS's customer picker included.
+
+        Issue #854 (pass 4, gap 3) — the directory is `/api/parties`-backed and
+        that route enforces `parties.view`, which a team manager's grant need
+        not include. The section is hidden rather than rendered into a 403, and
+        the permission itself is not widened to avoid the error.
       */}
-      <div>
-        <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-300">پروندهٔ کارکنان</p>
-        <PartiesSection scope={partyScopeFor("team")} role={role} permissions={permissions} />
-      </div>
+      {canViewParties(role, permissions) ? (
+        <div>
+          <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-300">پروندهٔ کارکنان</p>
+          <PartiesSection scope={partyScopeFor("team")} role={role} permissions={permissions} />
+        </div>
+      ) : null}
+
+      {/* Issue #854 (P2.26) — suspension/offboarding confirmations. */}
+      <SecurityConfirmDialog
+        open={pendingSuspend !== null}
+        title={pendingSuspend ? `تعلیق حساب «${pendingSuspend.fullName}»` : ""}
+        description="دسترسی این عضو به سامانه موقتاً قطع می‌شود."
+        consequences={[
+          "ورود او از همین لحظه قطع می‌شود و نشست‌های باز دیگر کار نمی‌کنند.",
+          "سوابق کاری، اسناد و ثبت‌هایی که ساخته دست‌نخورده می‌مانند.",
+          "هر زمان می‌توانید با «فعال‌سازی» حساب را بدون از دست رفتن اطلاعات برگردانید.",
+        ]}
+        confirmLabel="بله، تعلیق شود"
+        busy={confirmBusy}
+        onOpenChange={(next) => {
+          if (!next) setPendingSuspend(null);
+        }}
+        onConfirm={() => {
+          if (pendingSuspend) void executeSuspend(pendingSuspend);
+        }}
+      />
+      <SecurityConfirmDialog
+        open={pendingOffboard !== null}
+        title={pendingOffboard ? `قطع همکاری «${pendingOffboard.fullName}»` : ""}
+        description="همکاری این عضو با کسب‌وکار خاتمه می‌یابد."
+        consequences={[
+          "دسترسی، نشست‌های فعال و اعتبارنامه‌های ورود او لغو می‌شوند.",
+          "اگر ورود دومرحله‌ای یا شمارهٔ ورودی داشته، برای این کسب‌وکار بی‌اثر می‌شوند.",
+          "سوابق تاریخی و اسنادی که به نام او ثبت شده حفظ می‌شوند.",
+          "بازگشت دوبارهٔ همین شخص با «بازگشت به کار» انجام می‌شود؛ هویت، نقش و دسترسی‌های ذخیره‌شدهٔ همین حساب بازمی‌گردند.",
+        ]}
+        confirmLabel="بله، قطع همکاری شود"
+        busy={confirmBusy}
+        onOpenChange={(next) => {
+          if (!next) setPendingOffboard(null);
+        }}
+        onConfirm={() => {
+          if (pendingOffboard) void executeOffboard(pendingOffboard);
+        }}
+      />
+
+      {/* Issue #854 (pass 4, gap 4) — the rehire ceremony. */}
+      <RehireDialog
+        member={rehiring}
+        locations={locations}
+        onClose={() => setRehiring(null)}
+        onRehired={() => {
+          setRehiring(null);
+          void load();
+        }}
+      />
     </div>
+  );
+}
+
+/** Persian sentences for the refusals the rehire ceremony can answer with. */
+const REHIRE_ERROR_MESSAGES: Record<string, string> = {
+  not_offboarded: "این عضو در وضعیت «قطع همکاری» نیست؛ فقط اعضای قطع‌همکاری‌شده با این مسیر بازمی‌گردند.",
+  reason_required: "برای بازگشت به کار، دلیل این تغییر را بنویسید.",
+  reason_too_short: "دلیل نوشته‌شده کوتاه است؛ حداقل ۸ نویسه بنویسید.",
+  reason_too_long: "دلیل نوشته‌شده بلند است؛ حداکثر ۵۰۰ نویسه.",
+  permissions_manage_required: "بازگشت به کار مجوز «مدیریت دسترسی‌های تیم» لازم دارد.",
+  owner_only: "فقط مالک کسب‌وکار می‌تواند مالک را به کار برگرداند.",
+  grants_beyond_actor: "نمی‌توانید عضوی را با دسترسی‌هایی که خودتان ندارید به کار برگردانید.",
+  self_role_change: "بازگشت به کارِ خودتان مجاز نیست.",
+  identity_required: "این عضو ایمیل ثبت‌شده ندارد؛ هویت ورودش قابل بازیابی نیست.",
+  identity_not_found: "هویت ورود این عضو در سطح سامانه حذف شده است؛ با پشتیبانی تماس بگیرید.",
+  already_a_member: "هویت ورود این عضو همین حالا به عضوی دیگر در این کسب‌وکار متصل است.",
+  pin_required: "برای این نقش، رمز عددی فعالی برای بازیابی وجود ندارد؛ رمز عددی تازه‌ای تعیین کنید.",
+  pin_taken: "این رمز عددی در این کسب‌وکار استفاده شده است؛ رمز دیگری انتخاب کنید.",
+  invalid_pin: `رمز عددی باید ${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم باشد.`,
+  custom_role_not_found: "نقش سفارشی ذخیره‌شدهٔ این عضو دیگر فعال نیست؛ ابتدا نقش او را مشخص کنید.",
+  selected_locations_required: "شعبه‌های این عضو را انتخاب کنید.",
+  home_location_required: "شعبهٔ اصلی این عضو را انتخاب کنید.",
+  member_limit_exceeded: "سقف اعضای این کسب‌وکار پر است؛ ابتدا عضوی را خارج کنید یا سقف را افزایش دهید.",
+  cloud_confirmation_required: "این سایت در حالت ترکیبی فقط محدودسازی می‌کند؛ بازگشت به کار باید از فضای ابری انجام شود.",
+  unknown_location: "یکی از شعبه‌های انتخاب‌شده در این کسب‌وکار وجود ندارد.",
+};
+
+/**
+ * Issue #854 (pass 4, gap 4) — the rehire ceremony.
+ *
+ * Offboarding is deliberately destructive (identity linkage severed, staff
+ * credentials revoked, branch assignments wiped, history kept), so the way
+ * back is an explicit form rather than a toggle:
+ *
+ *  - the branch policy is named again — the old assignments are gone;
+ *  - a PIN-role member may get a fresh PIN, or leaves the field empty and the
+ *    PIN active at offboarding is restored (the server refuses when there is
+ *    nothing to restore, rather than activating a doorless member);
+ *  - a password-role member's global identity, password and MFA factors come
+ *    back with the relink — nothing here can bypass them;
+ *  - the re-grant of the stored role and permissions carries a reason, like
+ *    every access change.
+ */
+function RehireDialog({
+  member,
+  locations,
+  onClose,
+  onRehired,
+}: {
+  member: Member | null;
+  locations: TeamLocation[];
+  onClose: () => void;
+  onRehired: () => void;
+}) {
+  const [scope, setScope] = useState<Member["locationScope"]>("selected");
+  const [branchIds, setBranchIds] = useState<string[]>([]);
+  const [defaultLocationId, setDefaultLocationId] = useState("");
+  const [pin, setPin] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const memberId = member?.id ?? null;
+  useEffect(() => {
+    // A fresh ceremony for each member the dialog opens on.
+    setScope("selected");
+    setBranchIds([]);
+    setDefaultLocationId("");
+    setPin("");
+    setReason("");
+    setError("");
+  }, [memberId]);
+
+  if (!member) return null;
+  const isOwnerRole = member.role === "owner";
+  const isPinMember = PIN_ROLES.includes(member.role as (typeof PIN_ROLES)[number]);
+
+  function toggleBranch(id: string, checked: boolean) {
+    setBranchIds((current) => {
+      const next = checked ? [...current, id] : current.filter((entry) => entry !== id);
+      if (!checked && defaultLocationId === id) setDefaultLocationId("");
+      return next;
+    });
+  }
+
+  function chooseDefaultBranch(id: string) {
+    setDefaultLocationId(id);
+    if (id) setBranchIds((current) => (current.includes(id) ? current : [...current, id]));
+  }
+
+  async function submit() {
+    if (!member) return;
+    if (reason.trim().length < 8) {
+      setError("برای بازگشت به کار، دلیل این تغییر را بنویسید (حداقل ۸ نویسه).");
+      return;
+    }
+    if (!isOwnerRole && scope === "selected" && branchIds.length === 0) {
+      setError("شعبه‌های این عضو را انتخاب کنید.");
+      return;
+    }
+    if (!isOwnerRole && scope === "home" && !defaultLocationId) {
+      setError("شعبهٔ اصلی این عضو را انتخاب کنید.");
+      return;
+    }
+    if (isPinMember && pin && !isValidPin(pin)) {
+      setError(`رمز عددی باید ${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم باشد.`);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const res = await api<{ error?: string; reason?: string }>(`/api/team/${member.id}/rehire`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason: reason.trim(),
+        locationScope: isOwnerRole ? "all" : scope,
+        locationIds: !isOwnerRole && scope === "selected" ? branchIds : [],
+        defaultLocationId: !isOwnerRole && scope === "home" ? defaultLocationId : null,
+        ...(isPinMember && pin ? { pin } : {}),
+      }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const code = res.data.error ?? "";
+      setError(res.data.reason || REHIRE_ERROR_MESSAGES[code] || errorMessage(code));
+      return;
+    }
+    onRehired();
+  }
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+    >
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>بازگشت به کار «{member.fullName}»</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            قطع همکاری، هویت ورود، اعتبارنامه‌ها و شعبه‌های این عضو را لغو کرده اما نقش،
+            دسترسی‌ها و سوابق او را نگه داشته است. این فرم همهٔ آن‌ها را یک‌جا بازمی‌گرداند.
+          </p>
+          <ErrorBox>{error}</ErrorBox>
+
+          {isOwnerRole ? (
+            <InfoBox>مالک به همهٔ شعبه‌ها دسترسی دارد.</InfoBox>
+          ) : (
+            <>
+              <Field label="دامنهٔ شعبه">
+                <SearchableSelect
+                  value={scope}
+                  onChange={(value) => setScope(value as Member["locationScope"])}
+                  options={[
+                    { value: "all", label: "همهٔ شعبه‌ها" },
+                    { value: "selected", label: "شعبه‌های انتخابی" },
+                    { value: "home", label: "فقط شعبهٔ اصلی" },
+                  ]}
+                />
+              </Field>
+              {scope === "selected" ? (
+                <Field label="شعبه‌ها" hint="شعبه‌هایی که این عضو به آن‌ها دسترسی دارد.">
+                  {locations.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">شعبه‌ای ثبت نشده است.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {locations.map((location) => (
+                        <label key={location.id} className="flex items-center gap-2 text-sm">
+                          <Checkbox
+                            checked={branchIds.includes(location.id)}
+                            onCheckedChange={(checked) => toggleBranch(location.id, checked === true)}
+                          />
+                          <span>
+                            {location.name}
+                            {!location.isActive ? (
+                              <span className="ms-1 text-xs text-muted-foreground">(غیرفعال)</span>
+                            ) : null}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </Field>
+              ) : null}
+              {scope === "home" ? (
+                <Field label="شعبهٔ اصلی" hint="تنها شعبه‌ای که این عضو به آن دسترسی دارد.">
+                  <SearchableSelect
+                    value={defaultLocationId}
+                    onChange={chooseDefaultBranch}
+                    options={[
+                      { value: "", label: "— انتخاب نشده —" },
+                      ...locations.map((location) => ({ value: location.id, label: location.name })),
+                    ]}
+                  />
+                </Field>
+              ) : null}
+            </>
+          )}
+
+          {isPinMember ? (
+            <Field
+              label="رمز عددی (اختیاری)"
+              hint="خالی بگذارید تا رمز عددیِ زمان قطع همکاری بازیابی شود؛ یا رمز تازه‌ای تعیین کنید."
+            >
+              <input
+                className={`${inputClass} w-48 text-center tracking-[0.25em]`}
+                dir="ltr"
+                inputMode="numeric"
+                maxLength={PIN_MAX_LENGTH}
+                value={pin}
+                onChange={(e) => setPin(toLatinDigits(e.target.value).replace(/[^0-9]/g, ""))}
+                placeholder="----"
+              />
+            </Field>
+          ) : null}
+
+          <Field label="دلیل بازگشت به کار *">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="مثلاً: قرارداد دوباره از آبان شروع می‌شود."
+            />
+          </Field>
+        </div>
+        <DialogFooter>
+          <SecondaryButton onClick={onClose} disabled={busy}>
+            انصراف
+          </SecondaryButton>
+          <PrimaryButton onClick={() => void submit()} disabled={busy}>
+            {busy ? "در حال بازگرداندن…" : "بازگشت به کار"}
+          </PrimaryButton>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -400,12 +761,15 @@ function MemberEditorDialog({
   member,
   locations,
   canManageOwners,
+  canManagePermissions,
   onClose,
   onSaved,
 }: {
   member: Member;
   locations: TeamLocation[];
   canManageOwners: boolean;
+  /** Issue #854 (P2.4): whether this actor may hand out capabilities at all. */
+  canManagePermissions: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -414,10 +778,21 @@ function MemberEditorDialog({
   const [customRoleId, setCustomRoleId] = useState(member.customRoleId ?? "");
   const [customRoles, setCustomRoles] = useState<Array<{id:string;name:string;permissions:string[];isActive:boolean}>>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set(member.effectivePermissions));
+  /** The set as loaded — `AccessChangeSummary` diffs against this, not against the preset. */
+  const [initialSelected] = useState<Set<string>>(new Set(member.effectivePermissions));
   const [locationScope, setLocationScope] = useState(member.locationScope);
   const [branchIds, setBranchIds] = useState<string[]>(member.locationIds);
   const [defaultLocationId, setDefaultLocationId] = useState(member.defaultLocationId ?? "");
   const [permissionSearch, setPermissionSearch] = useState("");
+  /**
+   * Issue #854 (P2.4) — the operator's reason for an access change.
+   *
+   * The field appears only when this form is actually about to change access:
+   * the role, the custom role or the ticks. Asking for a justification while
+   * somebody fixes a typo in a name is how a required reason turns into "asdf"
+   * typed fifty times a week.
+   */
+  const [accessReason, setAccessReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => { void api<{roles:Array<{id:string;name:string;permissions:string[];isActive:boolean}>}>("/api/team/roles").then((res) => { if (res.ok) setCustomRoles(res.data.roles.filter((item) => item.isActive)); }); }, []);
@@ -450,6 +825,29 @@ function MemberEditorDialog({
   const customPreset = customRoles.find((item) => item.id === customRoleId)?.permissions;
   const preset = new Set<string>(customPreset ?? roleBasePermissions(role as never));
   const isOwnerRole = role === "owner";
+  /**
+   * Issue #854 (P1.12) — say what the new role needs *before* the save is
+   * refused.
+   *
+   * The server will not invent a credential on the member's behalf (see
+   * `assertRoleTransitionKeepsLoginPath`), so a cross-model role change needs
+   * one the member already has: a global identity for a password role, a PIN for
+   * a staff role. The refusal is correct either way; the admin should not have
+   * to learn it by pressing «ذخیره» and reading an error. This is a warning,
+   * never a substitute for the check — the client cannot know what the database
+   * will hold at commit time.
+   */
+  const credentialModelChanges =
+    loginCredentialModelForRole(role as never) !==
+    loginCredentialModelForRole(member.role as never);
+  const missingCredential =
+    credentialModelChanges && member.isActive
+      ? loginCredentialModelForRole(role as never) === "password" && !member.hasLogin
+        ? "این نقش با ایمیل و گذرواژه وارد می‌شود. این عضو هنوز هویت ورود ندارد؛ ابتدا برای او دعوت‌نامه بفرستید یا هویت ورودش را متصل کنید."
+        : loginCredentialModelForRole(role as never) === "pin" && !member.hasPin
+          ? "این نقش در دستگاه با رمز عددی وارد می‌شود. ابتدا از بخش «ورود و اعتبارنامه» برای این عضو رمز عددی تعیین کنید."
+          : ""
+      : "";
 
   async function save() {
     const name = fullName.trim();
@@ -457,18 +855,54 @@ function MemberEditorDialog({
       setError("نام عضو را بنویسید.");
       return;
     }
+    /**
+     * Issue #854 (P2.4) — is this save an access change?
+     *
+     * Compared against what was *loaded*, not against the role preset: the
+     * server compares against the stored row, and the two must agree or the
+     * form will either demand a reason the server does not want or send one it
+     * refuses to accept without.
+     */
+    const roleChanged = canManagePermissions && role !== member.role;
+    const customRoleChanged =
+      canManagePermissions && !isOwnerRole && (customRoleId || null) !== (member.customRoleId ?? null);
+    const permissionsChanged =
+      canManagePermissions &&
+      !isOwnerRole &&
+      ([...selected].sort().join("\u0000") !== [...initialSelected].sort().join("\u0000"));
+    const accessChanged = roleChanged || customRoleChanged || permissionsChanged;
+    if (accessChanged && accessReason.trim().length < 8) {
+      setError("برای تغییر نقش یا دسترسی‌ها، دلیل این تغییر را بنویسید (حداقل ۸ نویسه).");
+      return;
+    }
+
     setBusy(true);
     setError("");
     const granted = [...selected].filter((p) => !preset.has(p)).sort();
     const revoked = [...preset].filter((p) => !selected.has(p)).sort();
+    /**
+     * Issue #854 (P2.3/P2.4): the permission half of this form is only sent by
+     * an actor who holds `team.permissions_manage`. A read-only visit leaves
+     * `selected` untouched, so the diff would be empty anyway — but "empty"
+     * still means the server has to decide, and a client that posts an empty
+     * override set is a client that will one day post a non-empty one.
+     */
+    const accessFields = canManagePermissions && !isOwnerRole
+      ? {
+          customRoleId: customRoleId || null,
+          permissions: { granted, revoked },
+        }
+      : {};
     const res = await api<{ error?: string; reason?: string }>(`/api/team/${member.id}`, {
       method: "PATCH",
       body: JSON.stringify({
         fullName: name,
-        role,
-        customRoleId: customRoleId || null,
-        // An owner's set is not reducible (permissions.ts), so none is sent.
-        ...(isOwnerRole ? {} : { permissions: { granted, revoked } }),
+        // Issue #854 (P2.4) — stored with the actor and the change itself.
+        ...(accessChanged ? { reason: accessReason.trim() } : {}),
+        // The role itself is a capability change (it re-bases the preset), so
+        // it travels with the same permission rather than with the name edit.
+        ...(canManagePermissions ? { role } : {}),
+        ...accessFields,
         locationScope: isOwnerRole ? "all" : locationScope,
         locationIds: locationScope === "selected" ? branchIds : [],
         defaultLocationId: locationScope === "home" ? (defaultLocationId || null) : null,
@@ -496,6 +930,7 @@ function MemberEditorDialog({
         <div className="space-y-5 px-5 py-4">
         <div id="member-profile" className="scroll-mt-28">
         <ErrorBox>{error}</ErrorBox>
+        {missingCredential ? <InfoBox>{missingCredential}</InfoBox> : null}
 
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="نام و نام خانوادگی *">
@@ -570,47 +1005,66 @@ function MemberEditorDialog({
         </Field> : null}
 
         </div>
-        <div id="member-access" className="scroll-mt-28">{isOwnerRole ? (
-          <InfoBox>مالک به همهٔ بخش‌ها دسترسی دارد و دسترسی‌هایش قابل محدود کردن نیست.</InfoBox>
-        ) : (
-          <Field label="دسترسی‌ها" hint="تیک‌ها نسبت به نقش پایه خوانده می‌شوند: برداشتن تیکِ پیش‌فرض یعنی گرفتن آن دسترسی، و تیکِ اضافه یعنی اعطای آن.">
-            <input
-              className={`${inputClass} mb-3`}
-              value={permissionSearch}
-              onChange={(event) => setPermissionSearch(event.target.value)}
-              placeholder="جست‌وجوی نام، کلید یا گروه دسترسی"
-              aria-label="جست‌وجوی دسترسی‌ها"
-            />
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {ALL_PERMISSIONS.filter((permission) => {
-                if (isOwnerOnlyPermission(permission)) return false;
-                const metadata = PERMISSION_METADATA.get(permission);
-                const haystack = `${permission} ${PERMISSION_LABELS[permission] ?? ""} ${metadata?.group ?? ""} ${metadata?.description ?? ""}`.toLowerCase();
-                return haystack.includes(permissionSearch.trim().toLowerCase());
-              }).map((permission: Permission) => (
-                <label key={permission} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(permission)}
-                    onChange={(e) => {
-                      const next = new Set(selected);
-                      if (e.target.checked) next.add(permission);
-                      else next.delete(permission);
-                      setSelected(next);
-                    }}
-                  />
-                  <span>
-                    {PERMISSION_LABELS[permission] ?? permission}
-                    {(["high", "critical"] as const).includes(PERMISSION_METADATA.get(permission)?.risk as "high" | "critical") ? (
-                      <span className="ms-1 text-xs text-amber-600 dark:text-amber-400" title="دسترسی پرخطر">⚠</span>
-                    ) : null}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </Field>
-        )}
-
+        <div id="member-access" className="scroll-mt-28">
+          {/*
+            Issue #854 (P2.3/P2.4) — this used to be a second, private copy of the
+            permission catalogue: a flat grid of `ALL_PERMISSIONS` with labels from a
+            map kept here, no grouping, no risk signal and no provenance. All of that
+            already exists in `permission-registry.ts` and is rendered by
+            `PermissionEditor`, which is the component `roles-manager.tsx` uses — so
+            the same capability is described one way in both places now, and a
+            permission added to the registry appears here without this file changing.
+          */}
+          {isOwnerRole ? (
+            <InfoBox>مالک به همهٔ بخش‌ها دسترسی دارد و دسترسی‌هایش قابل محدود کردن نیست.</InfoBox>
+          ) : !canManagePermissions ? (
+            <InfoBox>
+              نمایش دسترسی‌ها در حالت فقط‌خواندنی است. برای تغییر دسترسی‌ها به مجوز
+              «مدیریت دسترسی‌ها» نیاز دارید.
+              <div className="mt-3">
+                <PermissionEditor
+                  preset={preset}
+                  selected={selected}
+                  onChange={() => {}}
+                  readOnly
+                />
+              </div>
+            </InfoBox>
+          ) : (
+            <Field
+              label="دسترسی‌ها"
+              hint="تیک‌ها نسبت به نقش پایه خوانده می‌شوند: برداشتن تیکِ پیش‌فرض یعنی گرفتن آن دسترسی، و تیکِ اضافه یعنی اعطای آن. وابستگی‌ها خودکار اعمال می‌شوند."
+            >
+              <PermissionEditor preset={preset} selected={selected} onChange={setSelected} />
+              <div className="mt-3">
+                <AccessChangeSummary before={initialSelected} after={selected} />
+              </div>
+              {/*
+                Issue #854 (P2.4) — shown exactly when the save would change
+                access, so the reason is asked for as part of the change rather
+                than refused as a surprise after the button is pressed.
+              */}
+              {(role !== member.role ||
+                (customRoleId || null) !== (member.customRoleId ?? null) ||
+                [...selected].sort().join("\u0000") !==
+                  [...initialSelected].sort().join("\u0000")) && (
+                <div className="mt-3">
+                  <Field
+                    label="دلیل این تغییر دسترسی"
+                    hint="با نام شما و خودِ تغییر در سابقهٔ حسابرسی ثبت می‌شود."
+                  >
+                    <textarea
+                      className={inputClass}
+                      value={accessReason}
+                      onChange={(e) => setAccessReason(e.target.value)}
+                      rows={2}
+                      maxLength={500}
+                    />
+                  </Field>
+                </div>
+              )}
+            </Field>
+          )}
         </div></div>
         <SheetFooter className="sticky bottom-0 border-t bg-background px-5 py-4">
           <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
@@ -863,28 +1317,82 @@ function CredentialsEditorDialog({
 
 function InviteSection({
   invitations,
+  locations,
+  canManage,
+  canManagePermissions,
   canManageOwners,
+  deploymentProfile,
   onChanged,
   onError,
 }: {
   invitations: Invitation[];
+  locations: TeamLocation[];
+  canManage: boolean;
+  canManagePermissions: boolean;
   canManageOwners: boolean;
+  deploymentProfile: "cloud" | "hybrid" | "local";
   onChanged: () => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [email, setEmail] = useState("");
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<string>("manager");
+  const [customRoleId, setCustomRoleId] = useState("");
+  const [customRoles, setCustomRoles] = useState<Array<{ id: string; name: string }>>([]);
+  // Issue #854 (P2.4): the invite's access reason — asked for exactly when the
+  // invite grants a custom role, mirroring the server's requirement.
+  const [inviteReason, setInviteReason] = useState("");
+  const [locationScope, setLocationScope] = useState<"all" | "selected" | "home" | "none">("all");
+  const [branchIds, setBranchIds] = useState<string[]>([]);
+  const [defaultLocationId, setDefaultLocationId] = useState("");
   const [link, setLink] = useState("");
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    if (!canManagePermissions) return;
+    void api<{ roles: Array<{ id: string; name: string; isActive: boolean }> }>("/api/team/roles").then(
+      (res) => {
+        if (res.ok) setCustomRoles(res.data.roles.filter((item) => item.isActive));
+      },
+    );
+  }, [canManagePermissions]);
+
+  /**
+   * Issue #854 (P2.11/P2.12) — the invitation carries the branch policy and the
+   * custom role, so the form asks for them.
+   *
+   * Before this, the API validated `locationScope`, `locationIds` and
+   * `customRoleId` and the form sent none of the three: every invite landed
+   * with the membership defaults, and the only way to give an invitee a
+   * restricted branch set or a custom role was to invite them wide and narrow
+   * them afterwards — a window in which they had more access than intended.
+   *
+   * `role` is deliberately still sent alongside a custom role: it is what the
+   * membership falls back to if the role is later deleted (`ON DELETE SET
+   * NULL`), and the server rejects the escalation either way.
+   */
   async function invite() {
+    if (customRoleId && inviteReason.trim().length < 8) {
+      onError("برای دعوت با نقش اختصاصی، دلیل این دسترسی را بنویسید (حداقل ۸ نویسه).");
+      return;
+    }
     setBusy(true);
     onError("");
     setLink("");
     const res = await api<{ url?: string; error?: string }>("/api/team/invitations", {
       method: "POST",
-      body: JSON.stringify({ email, fullName, role }),
+      body: JSON.stringify({
+        email,
+        fullName,
+        role,
+        ...(canManagePermissions ? { customRoleId: customRoleId || null } : {}),
+        // Sent only when the invite actually grants extra access — the same
+        // condition the server validates.
+        ...(customRoleId ? { reason: inviteReason.trim() } : {}),
+        locationScope,
+        locationIds: locationScope === "selected" ? branchIds : [],
+        defaultLocationId: locationScope === "home" ? defaultLocationId || null : null,
+      }),
     });
     setBusy(false);
     if (!res.ok) {
@@ -894,8 +1402,21 @@ function InviteSection({
     setLink(res.data.url ?? "");
     setEmail("");
     setFullName("");
+    setCustomRoleId("");
+    setInviteReason("");
     await onChanged();
   }
+
+  function toggleBranch(id: string, checked: boolean) {
+    setBranchIds((current) => {
+      const next = checked ? [...current, id] : current.filter((entry) => entry !== id);
+      if (!checked && defaultLocationId === id) setDefaultLocationId("");
+      return next;
+    });
+  }
+
+  /** A Hybrid site cannot originate memberships at all (#854 P1.13). */
+  const invitesBlocked = deploymentProfile === "hybrid";
 
   return (
     <SectionCard
@@ -907,33 +1428,133 @@ function InviteSection({
       }
       description="همکاران جدید را با ارسال لینک دعوت به سیستم اضافه کنید."
     >
-      <div className="grid gap-3 sm:grid-cols-3">
-        <Field label="نام">
-          <input className={inputClass} value={fullName} onChange={(e) => setFullName(e.target.value)} />
-        </Field>
-        <Field label="ایمیل">
-          <input
-            className={inputClass}
-            dir="ltr"
-            value={email}
-            type="email"
-            autoComplete="email"
-            onChange={(e) => setEmail(e.target.value)}
-          />
-        </Field>
-        <Field label="نقش">
-          <SearchableSelect
-            value={role}
-            onChange={setRole}
-            options={INVITABLE_ROLES.filter((r) => canManageOwners || r !== "owner").map((r) => ({ value: r, label: roleLabel(r) }))}
-          />
-        </Field>
-      </div>
-      <div className="mt-4">
-        <PrimaryButton onClick={invite} disabled={busy || !email || !fullName}>
-          ساخت لینک دعوت
-        </PrimaryButton>
-      </div>
+      {invitesBlocked ? (
+        <InfoBox>
+          این سایت در حالت ابری/محلی است: دعوت اعضا از فضای ابری انجام می‌شود و
+          ساخت دعوت روی این سایت ممکن نیست.
+        </InfoBox>
+      ) : !canManage ? (
+        <InfoBox>
+          شما دسترسی «مشاهدهٔ تیم» را دارید؛ ساخت یا لغو دعوت به «مدیریت تیم» نیاز دارد.
+        </InfoBox>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field label="نام">
+              <input className={inputClass} value={fullName} onChange={(e) => setFullName(e.target.value)} />
+            </Field>
+            <Field label="ایمیل">
+              <input
+                className={inputClass}
+                dir="ltr"
+                value={email}
+                type="email"
+                autoComplete="email"
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </Field>
+            <Field label="نقش">
+              <SearchableSelect
+                value={role}
+                onChange={setRole}
+                options={INVITABLE_ROLES.filter((r) => canManageOwners || r !== "owner").map((r) => ({ value: r, label: roleLabel(r) }))}
+              />
+            </Field>
+          </div>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {canManagePermissions ? (
+              <Field
+                label="نقش اختصاصی (اختیاری)"
+                hint="اگر انتخاب شود، دسترسی‌های همین نقش به عضو داده می‌شود."
+              >
+                <SearchableSelect
+                  value={customRoleId}
+                  onChange={setCustomRoleId}
+                  options={[
+                    { value: "", label: "— بدون نقش اختصاصی —" },
+                    ...customRoles.map((item) => ({ value: item.id, label: item.name })),
+                  ]}
+                />
+              </Field>
+            ) : null}
+            {canManagePermissions && customRoleId ? (
+              <Field
+                label="دلیل این دسترسی"
+                hint="با نام دعوت‌کننده در سابقهٔ حسابرسی ثبت می‌شود."
+              >
+                <textarea
+                  className={inputClass}
+                  value={inviteReason}
+                  onChange={(e) => setInviteReason(e.target.value)}
+                  rows={2}
+                  maxLength={500}
+                />
+              </Field>
+            ) : null}
+            <Field label="دسترسی شعبه" hint="از همان ابتدا محدود دعوت کنید، نه بعد از پذیرش.">
+              <SearchableSelect
+                value={locationScope}
+                onChange={(value) => setLocationScope(value as typeof locationScope)}
+                options={[
+                  { value: "all", label: "همهٔ شعبه‌ها" },
+                  { value: "selected", label: "شعبه‌های انتخابی" },
+                  { value: "home", label: "فقط شعبهٔ اصلی" },
+                  { value: "none", label: "بدون دسترسی شعبه" },
+                ]}
+              />
+            </Field>
+          </div>
+
+          {locationScope === "selected" ? (
+            <Field label="شعبه‌ها" hint="فقط شعبه‌های انتخاب‌شده در دسترس خواهند بود.">
+              {locations.length === 0 ? (
+                <p className="text-xs text-muted-foreground">شعبه‌ای ثبت نشده است.</p>
+              ) : (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {locations.map((location) => (
+                    <label key={location.id} className="flex items-center gap-2 text-sm">
+                      <Checkbox
+                        checked={branchIds.includes(location.id)}
+                        onCheckedChange={(checked) => toggleBranch(location.id, checked === true)}
+                      />
+                      <span>{location.name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </Field>
+          ) : null}
+
+          {locationScope === "home" ? (
+            <Field label="شعبهٔ اصلی" hint="تنها شعبه‌ای که این عضو به آن دسترسی دارد.">
+              <SearchableSelect
+                value={defaultLocationId}
+                onChange={setDefaultLocationId}
+                options={[
+                  { value: "", label: "— انتخاب نشده —" },
+                  ...locations.map((location) => ({ value: location.id, label: location.name })),
+                ]}
+              />
+            </Field>
+          ) : null}
+
+          <div className="mt-4">
+            <PrimaryButton
+              onClick={invite}
+              disabled={
+                busy ||
+                !email ||
+                !fullName ||
+                (locationScope === "selected" && branchIds.length === 0) ||
+                (locationScope === "home" && !defaultLocationId)
+              }
+            >
+              ساخت لینک دعوت
+            </PrimaryButton>
+          </div>
+        </>
+      )}
 
       {link && (
         <div className="mt-4">
@@ -953,14 +1574,18 @@ function InviteSection({
             <li key={invitation.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5">
               <span>
                 {invitation.fullName} · <span dir="ltr">{invitation.email}</span> ·{" "}
-                {roleLabel(invitation.role)} ·{" "}
+                {invitation.customRoleName ?? roleLabel(invitation.role)} ·{" "}
                 <span className="text-muted-foreground">
+                  {/* The branch policy travels with the invitation (P2.11). */}
+                  {invitation.locationScope
+                    ? `${INVITE_SCOPE_LABELS[invitation.locationScope]} · `
+                    : ""}
                   {INVITATION_STATUS_LABELS[invitation.status]}
                   {invitation.status === "pending" &&
                     ` تا ${toPersianDigits(formatJalali(new Date(invitation.expiresAt)))}`}
                 </span>
               </span>
-              {invitation.status === "pending" && (
+              {invitation.status === "pending" && canManage && (
                 <SecondaryButton
                   onClick={async () => {
                     const result = await api<{ error?: string }>(`/api/team/invitations/${invitation.id}`, { method: "DELETE" });

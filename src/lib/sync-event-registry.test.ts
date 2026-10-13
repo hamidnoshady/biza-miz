@@ -99,6 +99,23 @@ describe("sync domain failure classification", () => {
   });
 });
 
+describe("business-scope settlement events (issue #869)", () => {
+  it("registers the payout and its reversal as business-wide events, with no location rule", () => {
+    for (const type of ["commission.payout.recorded", "commission.payout.reversed"]) {
+      const definition = syncEventDefinition(type, 1);
+      expect(definition?.locationRule, type).toBe("business");
+      expect(definition?.effectClass, type).toBe("commission_settlement");
+      expect(definition?.payloadFields, type).not.toContain("locationId");
+    }
+  });
+
+  it("is acknowledged, never applied, by a desktop that pulls it: the money already moved at the cloud", () => {
+    for (const type of ["commission.payout.recorded", "commission.payout.reversed"]) {
+      expect(siteSkipsPulledEvent(syncEventDefinition(type, 1)!), type).toBe(true);
+    }
+  });
+});
+
 describe("pulled cloud events a desktop acknowledges without applying (Phase 46)", () => {
   it("skips stock, transfers and ledger reversals — the cloud owns them since Phase 45", () => {
     const skipped = SYNC_EVENT_REGISTRY.filter((definition) => siteSkipsPulledEvent(definition)).map((d) => d.type);

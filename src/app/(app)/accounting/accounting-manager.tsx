@@ -40,8 +40,11 @@ import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
+import { TaxInvoicesSection } from "./tax-invoices-section";
+import { taxInvoiceCapabilitiesFor } from "./tax-invoice-capabilities";
 import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
 import { AccountingReportsSection } from "./reports-section";
+import { MulticurrencySection } from "./multicurrency-section";
 import { AccountingSettingsSection } from "./settings-section";
 import styles from "./ledger-workspace.module.css";
 
@@ -170,6 +173,23 @@ export function AccountingManager({
    * API is going to refuse.
    */
   const canProposeLedger = permissions.includes(PERMISSIONS.ledgerPropose);
+  /**
+   * Whether this member may record receipts / payments in «دریافت و پرداخت».
+   * The workspace used to draw ثبت for everyone who could view the ledger, so
+   * a viewer got a 403 from a control that looked live. Plain booleans like
+   * `canApproveLedger`/`canProposeLedger` — `permissions` is required, so
+   * there is no unread-member case to represent (the section still accepts
+   * `undefined` and treats it as allowed, keeping the API as the gate for any
+   * future optional caller).
+   *
+   * The same pair feeds the subledger screens' settle actions: those screens
+   * are readable on `ledger.view`, but settling a balance is exactly these
+   * permissions, the ones the receipts and payments endpoints enforce —
+   * handing each side its own boolean is what keeps a live «دریافت وجه»
+   * button off an auditor's screen.
+   */
+  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
 
   /**
    * Whether this member may *write* in the expense register (issue #832 §3).
@@ -259,7 +279,6 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
-
   /*
    * Whether this member may run a reconciliation at all.
    *
@@ -267,13 +286,9 @@ export function AccountingManager({
    * mutation behind it — start, tick, complete, discard — requires
    * `finance.reconciliation_manage`. The screen used to draw all of those
    * controls for whoever could open it, so a read-only accountant's every click
-   * came back 403 under a generic error. `undefined` when the page could not
-   * read the member's effective permissions: the section then draws the
-   * controls and the API stays the gate, exactly like `canApproveLedger`.
+   * came back 403 under a generic error.
    */
-  const canManageReconciliation = permissions
-    ? permissions.includes(PERMISSIONS.financeReconciliationManage)
-    : undefined;
+  const canManageReconciliation = permissions.includes(PERMISSIONS.financeReconciliationManage);
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -393,15 +408,26 @@ export function AccountingManager({
               permissions={permissions}
             />
           ) : null}
-          {section === "receivables" ? <ArSection canSettle={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)} /> : null}
-          {section === "payables" ? <ApSection canSettle={!!permissions?.includes(PERMISSIONS.financePayablesManage)} /> : null}
+          {section === "receivables" ? <ArSection canSettle={canManageReceivables} /> : null}
+          {section === "payables" ? <ApSection canSettle={canManagePayables} /> : null}
           {section === "receipts" ? <ReceiptsPaymentsSection
-            canManageReceivables={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)}
-            canManagePayables={!!permissions?.includes(PERMISSIONS.financePayablesManage)}
-            canReversePayments={!!permissions?.includes(PERMISSIONS.ledgerApprove)}
+            canManageReceivables={canManageReceivables}
+            canManagePayables={canManagePayables}
+            canReversePayments={canApproveLedger}
+            canReverseReceipts={canApproveLedger}
           /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
-          {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
+          {section === "cheques" ? (
+            <ChequesSection
+              busy={busy}
+              run={run}
+              /* The cheque register reads under `ledger.view`, but every write
+                 needs `finance.cheques_manage`. Thread the capability so a
+                 read-only accountant is not offered a dialog the API will
+                 refuse; the API check stays authoritative. */
+              canManage={permissions?.includes(PERMISSIONS.financeChequesManage) ?? false}
+            />
+          ) : null}
           {section === "reconciliation" ? (
             <ReconciliationSection busy={busy} run={run} canManage={canManageReconciliation} />
           ) : null}
@@ -426,7 +452,11 @@ export function AccountingManager({
               accounts={accounts ?? []}
             />
           ) : null}
+          {section === "tax-invoices" ? <TaxInvoicesSection refreshKey={refreshKey} capabilities={taxInvoiceCapabilitiesFor(permissions)} /> : null}
           {section === "financial-reports" ? <AccountingReportsSection /> : null}
+          {section === "multicurrency" ? (
+            <MulticurrencySection accounts={accounts ?? []} busy={busy} run={run} />
+          ) : null}
           {section === "settings" ? <AccountingSettingsSection /> : null}
           {section === "growth" ? <GrowthAccountingView /> : null}
     </>

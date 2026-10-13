@@ -5,6 +5,7 @@ import { getConnection, listConnections } from "@/lib/integrations/connections-s
 import { isHoloo } from "@/lib/integrations/provider-registry";
 import { getHolooSettings } from "@/lib/integrations/holoo/connection-service";
 import { rollbackImportRun } from "@/lib/integrations/holoo/rollback-service";
+import { AccountsError } from "@/lib/accounts-service";
 import { listImportRuns } from "@/lib/integrations/holoo/migration-run-service";
 import { HolooProfileError, readHolooBaseForMigration } from "@/lib/integrations/holoo/pull-service";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
@@ -163,7 +164,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     const scopeAccess = await checkHolooScopePermissions(owner, selectedScopes);
     if (!scopeAccess.ok) return NextResponse.json({ error: "forbidden", requires: scopeAccess.missing }, { status: 403 });
 
-    const result = await rollbackImportRun(owner.businessId, runId, connectionId);
+    let result: Awaited<ReturnType<typeof rollbackImportRun>>;
+    try {
+      result = await rollbackImportRun(owner.businessId, runId, connectionId);
+    } catch (err) {
+      // A refused rollback changed nothing: report its typed code, and leave
+      // the job and the audit trail as they were.
+      if (err instanceof AccountsError) return NextResponse.json({ error: err.message }, { status: err.status });
+      throw err;
+    }
     await markProviderImportJobRolledBack(owner.businessId, runId);
     await recordDataTransferAudit({
       businessId: owner.businessId,

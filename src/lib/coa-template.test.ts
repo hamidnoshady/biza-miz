@@ -365,6 +365,24 @@ describe("validateAccounts", () => {
   it("rejects an empty list", () => {
     expect(validateAccounts([]).length).toBeGreaterThan(0);
   });
+
+  it("rejects a child whose type differs from its parent's (issue #824 §2, the wizard's own check)", () => {
+    const errors = validateAccounts([
+      { code: "1000", name: "دارایی", type: "asset" },
+      { code: "1100", name: "بدهی", type: "liability", parentCode: "1000" },
+    ]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("1100");
+  });
+
+  it("accepts a child whose type matches its parent's", () => {
+    expect(
+      validateAccounts([
+        { code: "1000", name: "دارایی", type: "asset" },
+        { code: "1100", name: "صندوق", type: "asset", parentCode: "1000" },
+      ]),
+    ).toEqual([]);
+  });
 });
 
 describe("isNonCurrentCode", () => {
