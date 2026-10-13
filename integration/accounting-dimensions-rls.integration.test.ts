@@ -139,3 +139,40 @@ describe("accounting_dimension_values RLS under the unprivileged role", () => {
     expect(rows[0].name).toBe("B");
   });
 });
+
+describe("fixed_assets RLS under the unprivileged role", () => {
+  it("returns only the tenant's own asset rows", async () => {
+    const a = await makeBusiness("Alpha");
+    const b = await makeBusiness("Beta");
+    // Minimally valid fixtures for fixed_assets: an owner user, a branch and an asset account per business.
+    const mk = async (bizId: string, code: string) => {
+      const u = await owner.query<{ id: string }>(
+        "INSERT INTO platform_users (email, full_name, password_hash) VALUES ($1,$2,'x') RETURNING id",
+        [`${code}-${randomUUID().slice(0,6)}@example.com`, code],
+      );
+      await owner.query(
+        "INSERT INTO users (id, business_id, email, full_name, role) VALUES ($1,$2,$3,$4,'owner')",
+        [u.rows[0].id, bizId, `${code}@example.com`, code],
+      );
+      const loc = await owner.query<{ id: string }>(
+        "INSERT INTO locations (business_id, name) VALUES ($1,'Main') RETURNING id",[bizId],
+      );
+      const acct = await owner.query<{ id: string }>(
+        "INSERT INTO accounts (business_id, code, name, type) VALUES ($1,'1101','A','asset') RETURNING id",[bizId],
+      );
+      const asset = await owner.query<{ id: string }>(
+        `INSERT INTO fixed_assets (business_id, code, name, acquisition_date, cost, salvage_value, useful_life_months, location_id, asset_account_id, created_by)
+         VALUES ($1,$2,$3,'2026-01-01',1000,0,60,$4,$5,$6) RETURNING id`,
+        [bizId, `FA-${code}`, code, loc.rows[0].id, acct.rows[0].id, u.rows[0].id],
+      );
+      return asset.rows[0].id;
+    };
+    const aAsset = await mk(a.id, "A");
+    await mk(b.id, "B");
+    const rows = await asTenant(app, a.id, async () => {
+      const { rows } = await app.query<{ id: string }>("SELECT id FROM fixed_assets");
+      return rows;
+    });
+    expect(rows.map((r) => r.id)).toEqual([aAsset]);
+  });
+});

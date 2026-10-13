@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { isDimensionKind, type DimensionKind } from "@/lib/accounting-dimensions";
+import { isDimensionKind, isDimensionUuid, type DimensionKind } from "@/lib/accounting-dimensions";
 import {
   AccountingDimensionError,
   createDimensionValue,
@@ -36,6 +36,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const q = (params.get("q") ?? "").trim();
   const idsParam = params.get("ids");
   const postable = params.get("postable") !== "0" && params.get("postable") !== "false";
+  const locationIdParam = params.get("locationId");
+  const locationId = locationIdParam && isDimensionUuid(locationIdParam) ? locationIdParam : null;
+  const effectiveDateParam = (params.get("effectiveDate") ?? "").trim();
+  const effectiveDate = /^\d{4}-\d{2}-\d{2}$/.test(effectiveDateParam) ? effectiveDateParam : null;
   const limitParam = Number(params.get("limit"));
   const searchLimit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, 50) : 20;
   const offsetParam = Number(params.get("offset"));
@@ -44,7 +48,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     !q && Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : undefined;
 
   const selectedIds = idsParam
-    ? idsParam.split(",").map((s) => s.trim()).filter(Boolean)
+    ? idsParam.split(",").map((s) => s.trim()).filter(Boolean).slice(0, 100)
     : [];
 
   const listResult = q
@@ -59,7 +63,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const [settings, searchHits, selected] = await Promise.all([
     listDimensionSettings(session.businessId),
     q
-      ? searchDimensionValues(session.businessId, { q, kind, postable, limit: searchLimit })
+      ? searchDimensionValues(session.businessId, {
+          q,
+          kind,
+          postable,
+          locationId: postable ? locationId : null,
+          effectiveDate: postable ? effectiveDate : null,
+          limit: searchLimit,
+        })
       : Promise.resolve([]),
     selectedIds.length > 0 ? getDimensionValuesByIds(session.businessId, selectedIds) : Promise.resolve([]),
   ]);

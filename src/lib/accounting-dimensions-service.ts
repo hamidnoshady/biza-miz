@@ -303,15 +303,14 @@ export async function searchDimensionValues(businessId: string, options: {
   q: string;
   kind?: DimensionKind;
   postable?: boolean;
+  locationId?: string | null;
+  /** Effective date (ISO yyyy-mm-dd) used to apply effective_from/to windows for postable searches. Defaults to today's local date in Asia/Tehran? We use CURRENT_DATE on the server so the client clock is never the authority. */
+  effectiveDate?: string | null;
   limit?: number;
 }): Promise<DimensionValueRecord[]> {
   const needle = options.q?.trim();
   if (!needle) return [];
   const safeLimit = Math.max(1, Math.min(50, options.limit ?? 20));
-  // Build a simple prefix+infix token against code and name, with a leading
-  // anchor on the code btree where possible. `lower(btrim(code))` matches the
-  // unique index expression so exact prefixes are indexable; name uses an ILIKE
-  // infix that is acceptable for small result sets under the hard LIMIT.
   const params: unknown[] = [businessId];
   const conditions: string[] = ["v.business_id = $1"];
   if (options.kind) {
@@ -321,6 +320,21 @@ export async function searchDimensionValues(businessId: string, options: {
   if (options.postable) {
     conditions.push("v.is_active");
     conditions.push("NOT EXISTS (SELECT 1 FROM accounting_dimension_values c WHERE c.parent_id = v.id)");
+    // Effective date window: defaults to CURRENT_DATE (server authority). A
+    // value with a future effective_from or past effective_to cannot be picked.
+    const useDate = options.effectiveDate ? true : false;
+    if (useDate) {
+      params.push(options.effectiveDate);
+      conditions.push(`(v.effective_from IS NULL OR v.effective_from <= $${params.length}::date)`);
+      conditions.push(`(v.effective_to   IS NULL OR v.effective_to   >= $${params.length}::date)`);
+    } else {
+      conditions.push("(v.effective_from IS NULL OR v.effective_from <= CURRENT_DATE)");
+      conditions.push("(v.effective_to   IS NULL OR v.effective_to   >= CURRENT_DATE)");
+    }
+    if (options.locationId) {
+      params.push(options.locationId);
+      conditions.push(`(v.location_id IS NULL OR v.location_id = $${params.length}::uuid)`);
+    }
   }
   params.push(`${needle}%`);
   params.push(`%${needle}%`);
@@ -347,13 +361,15 @@ export async function searchDimensionValues(businessId: string, options: {
  * dropped (callers treat missing ids as unassigned).
  */
 export async function getDimensionValuesByIds(businessId: string, ids: readonly string[]): Promise<DimensionValueRecord[]> {
-  const uuids = ids.filter((id) => isDimensionUuid(id));
+  const uuids = ids.filter((id) => isDimensionUuid(id)).slice(0, 100);
   if (uuids.length === 0) return [];
   const { rows } = await query<ValueRow>(
     `${VALUE_SELECT} WHERE v.business_id = $1 AND v.id = ANY($2::uuid[])`,
     [businessId, uuids],
   );
-  return rows.map(toValue);
+  // Preserve caller's id order so responses match the batch that was asked for.
+  const byId = new Map(rows.map((r) => [r.id, toValue(r)]));
+  return uuids.map((id) => byId.get(id)).filter((v): v is DimensionValueRecord => Boolean(v));
 }
 
 /**
