@@ -13,6 +13,7 @@
  * wave. This module is the foundation Wave 2 (Login Experience Redesign)
  * will call into.
  */
+import { PASSWORD_ROLES_SQL, STAFF_PIN_ROLES_SQL } from "./login-eligibility";
 import bcrypt from "bcryptjs";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
@@ -43,7 +44,6 @@ import {
 import {
   employeeLoginMode,
   memberPhoneState,
-  pinWindowActive,
   type EmployeeLoginMode,
   type MemberPhoneState,
 } from "./phone-otp-policy";
@@ -257,59 +257,14 @@ export async function listCredentials(
 }
 
 /**
- * Issues a new credential, revoking any previously active credential of the
- * same type first — an employee has at most one live PIN at a time. Only
- * `pin` is issuable in Wave 1 (see employee.ts's ISSUABLE_CREDENTIAL_TYPES).
+ * Issue #854 cleanup — `issueCredential` lived here: a second PIN-writing
+ * path that hashed with plain bcrypt and never wrote the blind index the
+ * unique-PIN constraint (P2.13) depends on. A full audit found it no callers
+ * — no route, job, script, dynamic import or test ever invoked it, and the
+ * live doors (`setPin`, cloud PIN replication) all write through the
+ * indexed path — so it is removed rather than left as a way around the
+ * one-source-of-truth rule.
  */
-export async function issueCredential(
-  employeeId: string,
-  businessId: string,
-  actorId: string | null,
-  credentialType: EmployeeCredentialType,
-  secret: string,
-): Promise<EmployeeCredentialSummary> {
-  if (!isIssuableCredentialType(credentialType)) {
-    throw new EmployeeError("credential_type_not_issuable");
-  }
-  if (credentialType === "pin" && !isValidPin(secret)) {
-    throw new EmployeeError("invalid_pin");
-  }
-
-  await ensureEmployeeProfile(employeeId, businessId);
-  const secretHash = await bcrypt.hash(secret, BCRYPT_COST);
-
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(
-      `UPDATE employee_credentials
-          SET status = 'revoked', revoked_at = now()
-        WHERE employee_id = $1 AND business_id = $2 AND credential_type = $3 AND status = 'active'`,
-      [employeeId, businessId, credentialType],
-    );
-    const { rows } = await client.query<CredentialRow>(
-      `INSERT INTO employee_credentials (employee_id, business_id, credential_type, secret_hash)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, employee_id, credential_type, status, last_used_at, created_at, revoked_at`,
-      [employeeId, businessId, credentialType, secretHash],
-    );
-    await auditEmployee(client, {
-      businessId,
-      actorId,
-      action: "employee.credential_issued",
-      employeeId,
-      payload: { credentialType },
-    });
-    await client.query("COMMIT");
-    return toCredentialSummary(rows[0]);
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
 export async function revokeCredential(
   credentialId: string,
   businessId: string,
@@ -341,43 +296,11 @@ export async function revokeCredential(
 }
 
 /**
- * Checks a presented secret against every active credential of the given
- * type in the business, the same linear bcrypt-compare scan pin-login and
- * isPinTaken already use for the low-entropy, per-business-unique PIN case —
- * hashed secrets can't be looked up by equality.
+ * Issue #854 cleanup — `verifyCredential` was removed with `issueCredential`:
+ * the same dead bcrypt-scan path with no callers. The doors that verify a PIN
+ * use `coalesce(ec.secret_hash, u.pin_hash)` against the credential store
+ * directly (pin-login, verify-pin, login-credentials-service).
  */
-export async function verifyCredential(
-  businessId: string,
-  credentialType: EmployeeCredentialType,
-  secret: string,
-): Promise<string | null> {
-  const { rows } = await query<{ id: string; employee_id: string; secret_hash: string }>(
-    `SELECT id, employee_id, secret_hash
-       FROM employee_credentials
-      WHERE business_id = $1 AND credential_type = $2 AND status = 'active'`,
-    [businessId, credentialType],
-  );
-  for (const row of rows) {
-    if (await bcrypt.compare(secret, row.secret_hash)) {
-      await query(`UPDATE employee_credentials SET last_used_at = now() WHERE id = $1`, [row.id]);
-      return row.employee_id;
-    }
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// WebAuthn (Wave 3 — biometric authentication)
-// ---------------------------------------------------------------------------
-//
-// A parallel path alongside issueCredential/verifyCredential above, not a
-// caller of them: those two are built around a bcrypt-hashed shared secret,
-// which a public-key credential isn't (see employee.ts's
-// ISSUABLE_CREDENTIAL_TYPES comment). webauthn.ts owns the cryptography;
-// everything here is what employee_credentials needs around it — resolving
-// which rows to exclude/allow in a ceremony, and persisting what a verified
-// one returns.
-
 interface WebauthnCredentialRow extends Record<string, unknown> {
   id: string;
   employee_id: string;
@@ -628,6 +551,14 @@ export interface CreateSessionInput {
   deviceLabel?: string | null;
   /** The paired device (Wave 4) this session was opened from, if the login route resolved one — lets revoking that device revoke this session too (see device-service.ts's revokeDevice). */
   deviceId?: string | null;
+  /**
+   * Issue #854 (P2.27): which door minted this session. Recorded so the
+   * Profile device card can say how a session was established instead of
+   * showing a raw user-agent next to a timestamp.
+   */
+  loginMethod?: string | null;
+  /** The raw user-agent, kept for the expandable detail on that card. */
+  userAgent?: string | null;
 }
 
 /** Issues a new, server-side-revocable session and returns the one-time plaintext token alongside it. */
@@ -640,8 +571,9 @@ export async function createSession(
   const { token, tokenHash } = generateSessionToken();
   const { rows } = await query<SessionRow>(
     `INSERT INTO employee_sessions
-       (employee_id, business_id, location_id, credential_id, token_hash, device_label, device_id, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (employee_id, business_id, location_id, credential_id, token_hash, device_label, device_id,
+        login_method, user_agent, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id, employee_id, business_id, location_id, issued_at, expires_at, last_seen_at, revoked_at`,
     [
       employeeId,
@@ -651,6 +583,8 @@ export async function createSession(
       tokenHash,
       input.deviceLabel ?? null,
       input.deviceId ?? null,
+      input.loginMethod ?? null,
+      input.userAgent ?? null,
       sessionExpiry(),
     ],
   );
@@ -1058,7 +992,6 @@ interface RosterRow extends Record<string, unknown> {
   has_webauthn: boolean;
   phone_e164: string | null;
   phone_verified_at: Date | null;
-  otp_login_at: Date | null;
 }
 
 /**
@@ -1079,6 +1012,7 @@ export async function loginRoster(
   businessId: string,
   locationId?: string | null,
   deviceId?: string | null,
+  trustedUserId?: string | null,
 ): Promise<LoginRosterEntry[]> {
   const profile = (await readDeploymentProfile(businessId)).profile;
   const allowPrivilegedSitePin = profile === "hybrid" || profile === "local";
@@ -1090,7 +1024,7 @@ export async function loginRoster(
   }
   const { rows } = await query<RosterRow>(
     `SELECT u.id, u.full_name, u.role::text AS role, e.photo_url,
-            u.phone_e164, u.phone_verified_at, u.otp_login_at,
+            u.phone_e164, u.phone_verified_at,
             EXISTS (
               SELECT 1 FROM employee_credentials c
                WHERE c.employee_id = u.id AND c.credential_type = 'webauthn' AND c.status = 'active'
@@ -1099,7 +1033,7 @@ export async function loginRoster(
        FROM users u
        LEFT JOIN employees e ON e.id = u.id
       WHERE u.is_active
-        AND (u.role IN ('cashier', 'waiter', 'kitchen') OR ($2::boolean AND u.role IN ('owner','admin','manager','accountant')))
+        AND (u.role IN ${STAFF_PIN_ROLES_SQL} OR ($2::boolean AND u.role IN ${PASSWORD_ROLES_SQL}))
         AND (u.pin_hash IS NOT NULL OR EXISTS (
           SELECT 1 FROM employee_credentials pin
            WHERE pin.employee_id = u.id AND pin.business_id = u.business_id
@@ -1111,8 +1045,10 @@ export async function loginRoster(
   );
 
   // Phase 42 — one policy read for the whole roster, then the per-member
-  // step is pure (employeeLoginMode): verified-number members inside their
-  // 7-day window keep the PIN pad, everyone else is routed to the OTP.
+  // step is pure (employeeLoginMode). Issue #885: the exemption that keeps a
+  // verified-number member on the PIN pad is this *device's* trust, resolved
+  // once by the route and narrowed to at most one member here, so a shared
+  // till never greets a colleague as trusted because somebody else verified.
   const { state } = await phoneOtpEnforcementFor(businessId);
   return rows.map((row) => {
     const phoneState = memberPhoneState(row.phone_e164, row.phone_verified_at);
@@ -1125,7 +1061,7 @@ export async function loginRoster(
       loginMode: employeeLoginMode({
         enforcement: state,
         phoneState,
-        pinWindow: pinWindowActive(row.otp_login_at),
+        deviceTrusted: trustedUserId != null && trustedUserId === row.id,
       }),
       phoneState,
     };

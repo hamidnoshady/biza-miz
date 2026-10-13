@@ -1026,6 +1026,16 @@ export async function mergeCustomers(
         for (const statement of prunePartyReferenceSql(reference)) {
           await query(statement, [businessId, loserId, winnerId]);
         }
+        // A reference that sits behind an immutability guard declares its own
+        // audited door (`preMoveSql`): the audit row lands FIRST (same
+        // transaction), then the transaction-local flag opens the guard for
+        // exactly the registered move that follows. Any other path — any
+        // other session, any other update — still hits the guard. Amounts,
+        // accounts and entries never move.
+        if (reference.preMoveSql) {
+          await query(reference.preMoveSql, [businessId, loserId, winnerId, options.mergedByUserId ?? null]);
+          await query(`SELECT set_config('app.ledger_party_move', 'on', true)`);
+        }
         await query(movePartyReferenceSql(reference), [businessId, loserId, winnerId]);
       } catch (error) {
         // A table that does not exist on this install is fine — industry tables

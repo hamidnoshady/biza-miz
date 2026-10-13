@@ -13,17 +13,21 @@
  *      which stamps `confirmed_at = now()`, promotes `is_primary` when no
  *      confirmed primary exists yet, and mints initial recovery codes.
  */
-import { createHmac, randomInt } from "node:crypto";
 import { generateSecret, generateURI } from "otplib";
 import { query, withoutTenantScope } from "./db";
-import { getRealmSecret } from "./jwt-secret";
 import { isMobilePhone, phoneE164 } from "./phone";
+import {
+  issueOtpChallenge,
+  liveChallengePhone,
+  type OtpPurpose,
+} from "./otp-challenge";
 import { totpQrDataUrl } from "./totp-qr";
 import {
   getAccountMfaEnrolments,
   provisionMfaEnrolment,
   type MfaSubjectRealm,
 } from "./mfa-service";
+import { isActiveMfaEnrolment } from "./mfa";
 import { checkMfaChallengeRateLimit, recordMfaChallenge } from "./mfa-rate-limit";
 import { getSmsProvider } from "./sms-config";
 
@@ -88,13 +92,55 @@ export function maskPhoneNumber(phone: string | null | undefined): string | null
 /**
  * Issue and send a 6-digit SMS OTP challenge for an account's `sms_otp`
  * enrolment (either confirmed or pending confirmation).
+ *
+ * Issue #854 (P0.8 / P1.17): the challenge is now minted through
+ * `issueOtpChallenge`, which binds it to `(subject, purpose, candidate phone)`
+ * and consumes any earlier live challenge for the same purpose in the same
+ * statement — rather than a `DELETE`-everything-then-`INSERT` that could race a
+ * concurrent verify. The `purpose` parameter is required, not defaulted,
+ * because "which transaction is this code for" is the whole point of the
+ * binding.
+ *
+ * The masked destination and the candidate phone are returned together so a
+ * caller can show «کد به … ارسال شد» without a second read and without ever
+ * reconstructing the number from the mask (P2.19).
  */
 export async function issueSmsMfaChallenge(input: {
   subjectRealm: MfaSubjectRealm;
   subjectId: string;
   email: string;
+  /** Which transaction this code authorises. */
+  purpose?: Extract<OtpPurpose, "mfa_login" | "mfa_enrol_sms" | "step_up_sms">;
+  /** Explicit destination override (a replacement number being proven). */
+  phoneE164?: string | null;
+  /**
+   * Issue #854 — whether the destination must come from a live factor: a
+   * confirmed SMS enrolment, or the owner-activation bootstrap row.
+   *
+   * The old lookup was "the first `sms_otp` row for this account", whichever one
+   * that was. `mfa_enrolments` holds exactly one row per method, and an
+   * interactive half-finished enrolment *reuses* that row, so signing in,
+   * starting an SMS enrolment and then asking for a step-up code sent the
+   * step-up challenge to a number nobody had proven — and the strict verifier
+   * accepted it, because its SMS branch never asked whether the row was a factor
+   * at all. Only the enrolment ceremony itself may address a row that is not yet
+   * a factor, and it does so by naming the number it just staged.
+   *
+   * **Defaults by purpose**, because the purpose already says which transaction
+   * this is and a caller cannot then forget a second flag:
+   *
+   *  - `step_up_sms` — always a live factor. A recent-auth proof must be a proof
+   *    of something the account already had.
+   *  - `mfa_login` — any row for the account. The login interstitial's
+   *    mid-enrolment branch is exactly the case of "no live factor yet, finish
+   *    the one you started" (`mayConfirmPendingEnrolmentAtLogin`), and the
+   *    *verifier* is what refuses to treat that pending row as a second factor
+   *    when a confirmed one already exists.
+   *  - `mfa_enrol_sms` — the ceremony's own staged row; an override names it.
+   */
+  requireActiveFactor?: boolean;
 }): Promise<
-  | { ok: true; maskedPhone: string | null }
+  | { ok: true; maskedPhone: string | null; candidatePhoneE164: string; challengeId: string }
   | {
       ok: false;
       error: "sms_not_enrolled" | "rate_limited" | "sms_dispatch_failed";
@@ -103,8 +149,19 @@ export async function issueSmsMfaChallenge(input: {
 > {
   return withoutTenantScope("platform", async () => {
     const enrolments = await getAccountMfaEnrolments(input.subjectRealm, input.subjectId);
-    const smsEnrolment = enrolments.find((e) => e.method === "sms_otp");
-    if (!smsEnrolment || !smsEnrolment.phone_e164) {
+    const requireActive =
+      input.requireActiveFactor ??
+      (input.purpose ?? "mfa_login") === "step_up_sms";
+    /**
+     * A live factor, not merely a row: see `requireActiveFactor`. The bootstrap
+     * SMS row counts (the owner's factor exists before its first confirmation),
+     * an interactive pending enrolment does not.
+     */
+    const smsEnrolment = requireActive
+      ? enrolments.find((e) => e.method === "sms_otp" && isActiveMfaEnrolment(e))
+      : enrolments.find((e) => e.method === "sms_otp");
+    const destination = input.phoneE164 ?? smsEnrolment?.phone_e164 ?? null;
+    if (!destination) {
       return { ok: false, error: "sms_not_enrolled" };
     }
 
@@ -117,32 +174,56 @@ export async function issueSmsMfaChallenge(input: {
       };
     }
 
-    const otp = String(randomInt(0, 1_000_000)).padStart(6, "0");
-    const secret = await getRealmSecret("platform");
-    const hashedOtp = createHmac("sha256", secret).update(otp).digest("hex");
-
-    await query(
-      `DELETE FROM mfa_challenges WHERE subject_realm = $1 AND subject_id = $2`,
-      [input.subjectRealm, input.subjectId],
-    );
-    await query(
-      `INSERT INTO mfa_challenges (subject_realm, subject_id, hashed_otp, expires_at)
-       VALUES ($1, $2, $3, now() + interval '5 minutes')`,
-      [input.subjectRealm, input.subjectId, hashedOtp],
-    );
+    const issued = await issueOtpChallenge({
+      subjectRealm: input.subjectRealm,
+      subjectId: input.subjectId,
+      purpose: input.purpose ?? "mfa_login",
+      candidatePhoneE164: destination,
+    });
 
     await recordMfaChallenge(input.email);
 
     try {
       const sms = await getSmsProvider();
-      await sms.sendOtp(smsEnrolment.phone_e164, otp);
+      await sms.sendOtp(destination, issued.code);
     } catch (err) {
       console.error("Failed to send SMS OTP", err);
+      // A code that never arrived must not sit live for five minutes.
+      await query(`UPDATE mfa_challenges SET consumed_at = now() WHERE id = $1`, [
+        issued.challengeId,
+      ]);
       return { ok: false, error: "sms_dispatch_failed" };
     }
 
-    return { ok: true, maskedPhone: maskPhoneNumber(smsEnrolment.phone_e164) };
+    return {
+      ok: true,
+      maskedPhone: maskPhoneNumber(destination),
+      candidatePhoneE164: destination,
+      challengeId: issued.challengeId,
+    };
   });
+}
+
+/**
+ * The destination a live SMS challenge is waiting on, so a resumed step-up
+ * (after a refresh) can say where the code went without the client having to
+ * remember it — and without the client being able to redirect it (#854 P2.19).
+ */
+export async function pendingSmsChallengeDestination(input: {
+  subjectRealm: MfaSubjectRealm;
+  subjectId: string;
+  purpose?: Extract<OtpPurpose, "mfa_login" | "mfa_enrol_sms" | "step_up_sms">;
+}): Promise<{ maskedPhone: string | null; expiresAt: string } | null> {
+  const live = await liveChallengePhone({
+    subjectRealm: input.subjectRealm,
+    subjectId: input.subjectId,
+    purpose: input.purpose ?? "mfa_login",
+  });
+  if (!live) return null;
+  return {
+    maskedPhone: maskPhoneNumber(live.candidatePhoneE164),
+    expiresAt: live.expiresAt.toISOString(),
+  };
 }
 
 export async function enrolMfaMethod(input: {
@@ -157,6 +238,14 @@ export async function enrolMfaMethod(input: {
    * round trip.
    */
   sendSmsChallenge?: boolean;
+  /**
+   * Issue #854 (P2.21) — the caller is replacing the phone of an already
+   * confirmed SMS factor. Only honoured for `sms_otp`, only when the named
+   * number differs from the confirmed one, and only for the confirmation
+   * ceremony: the confirmed row is left untouched until the new number proves
+   * itself, so the account is never factorless between steps.
+   */
+  replaceConfirmed?: boolean;
 }): Promise<EnrolMfaResult> {
   if (input.method !== "totp" && input.method !== "sms_otp") {
     return { ok: false, error: "invalid_method" };
@@ -177,9 +266,24 @@ export async function enrolMfaMethod(input: {
 
   return withoutTenantScope("platform", async () => {
     const enrolments = await getAccountMfaEnrolments(input.subjectRealm, input.subjectId);
+    const confirmedSameMethod = enrolments.find(
+      (e) => e.method === method && e.confirmed_at !== null,
+    );
+    /**
+     * The replacement door (P2.21): a confirmed SMS factor may be *replaced*
+     * by proving a different number, but never silently re-enrolled. Same
+     * number, or a TOTP factor, still gets the plain refusal.
+     */
+    const replacingConfirmedSms = Boolean(
+      input.replaceConfirmed &&
+        method === "sms_otp" &&
+        confirmedSameMethod &&
+        normalizedPhone &&
+        (confirmedSameMethod.phone_e164 ?? null) !== normalizedPhone,
+    );
     // Only block if this method is already CONFIRMED. An unconfirmed pending
     // enrolment can be replaced if the user restarted setup before confirming.
-    if (enrolments.some((e) => e.method === method && e.confirmed_at !== null)) {
+    if (confirmedSameMethod && !replacingConfirmedSms) {
       return { ok: false, error: "already_enrolled" };
     }
 
@@ -198,22 +302,45 @@ export async function enrolMfaMethod(input: {
       totpQr = await totpQrDataUrl(totpUrl);
     }
 
-    await provisionMfaEnrolment(
-      { query: (text: string, params?: unknown[]) => query(text, params as unknown[]) },
-      input.subjectRealm,
-      input.subjectId,
-      method,
-      false,
-      normalizedPhone,
-      totpSecret ? Buffer.from(totpSecret) : null,
-      { confirmed: false },
-    );
+    /**
+     * A replacement never touches the confirmed row: staging it as pending
+     * would un-confirm the account's only factor mid-ceremony. The swap is
+     * committed by `confirmMfaEnrolment`, after the new number redeems its
+     * own challenge.
+     */
+    if (!replacingConfirmedSms) {
+      await provisionMfaEnrolment(
+        { query: (text: string, params?: unknown[]) => query(text, params as unknown[]) },
+        input.subjectRealm,
+        input.subjectId,
+        method,
+        false,
+        normalizedPhone,
+        totpSecret ? Buffer.from(totpSecret) : null,
+        { confirmed: false },
+      );
+    }
 
     if (method === "sms_otp" && input.sendSmsChallenge) {
+      /**
+       * Issue #854 — the purpose the first code carries is the one the *confirm*
+       * step will look for.
+       *
+       * This call used to pass no purpose and inherit `mfa_login`, while
+       * `verifyAndConfirmPendingMfaEnrolment` spends `mfa_enrol_sms`. An SMS
+       * factor could therefore never be enrolled in one pass: the first code
+       * arrived and was rejected, the member pressed «ارسال مجدد» (which does
+       * mint `mfa_enrol_sms`) and only then could confirm. Naming it here — and
+       * naming the staged number, since the row is by definition not a factor
+       * yet — makes the first send and the resend the same transaction type.
+       */
       const challenge = await issueSmsMfaChallenge({
         subjectRealm: input.subjectRealm,
         subjectId: input.subjectId,
         email: input.email,
+        purpose: "mfa_enrol_sms",
+        phoneE164: normalizedPhone,
+        requireActiveFactor: false,
       });
       if (!challenge.ok && challenge.error !== "sms_not_enrolled") {
         return {

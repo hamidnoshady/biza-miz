@@ -16,6 +16,16 @@
  */
 
 const ACTION_LABELS: Record<string, string> = {
+  "commission.run.created": "ساخت دورهٔ تسویه پورسانت",
+  "commission.run.calculated": "محاسبهٔ دورهٔ تسویه پورسانت",
+  "commission.run.reviewed": "بازبینی دورهٔ تسویه پورسانت",
+  "commission.run.approved": "تأیید دورهٔ تسویه پورسانت",
+  "commission.run.rejected": "بازگشت دورهٔ تسویه به پیش‌نویس",
+  "commission.run.released": "آزادسازی دورهٔ تسویه برای پرداخت",
+  "commission.run.voided": "ابطال دورهٔ تسویه پورسانت",
+  "commission.run.closed": "بستن دورهٔ تسویه پورسانت",
+  "commission.payout.recorded": "پرداخت پورسانت",
+  "commission.payout.reversed": "ابطال پرداخت پورسانت",
   "employee.profile_updated": "ویرایش پروفایل کارمند",
   "employee.credential_issued": "صدور اعتبارنامه",
   "employee.credential_revoked": "ابطال اعتبارنامه",
@@ -52,10 +62,13 @@ const ACTION_LABELS: Record<string, string> = {
   "settings.business.update": "تغییر اطلاعات کسب‌وکار",
   "settings.mfa_policy.update": "تغییر سیاست ورود دومرحله‌ای",
   "impersonation.request": "درخواست ورود جانشینی",
+  "account.created": "ایجاد حساب",
   "account.renamed": "تغییر نام حساب",
   "account.reparented": "جابه‌جایی حساب در ساختار",
   "account.archived": "بایگانی حساب",
   "account.reactivated": "بازگردانی حساب از بایگانی",
+  "account.contra_changed": "تغییر وضعیت حساب کاهنده",
+  "account.deleted": "حذف حساب",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -68,6 +81,8 @@ const ENTITY_LABELS: Record<string, string> = {
   account: "حساب",
   settings: "تنظیمات",
   menu_item: "آیتم منو",
+  commission_run: "دورهٔ تسویه پورسانت",
+  commission_payout: "پرداخت پورسانت",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

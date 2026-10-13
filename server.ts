@@ -348,6 +348,14 @@ app.prepare().then(async () => {
     runWooCommerceSyncTick().catch((err) => console.error("woocommerce sync tick failed:", err));
   scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 90_000);
 
+  // Issue #866: taxpayer invoices. Central, like the Woo outbox: the books are
+  // authoritative there. Each pass sends due records, inquires the ones awaiting
+  // an answer, and recovers any send whose lease ran out (never by resending).
+  const { runTaxInvoiceTick, TAX_INVOICE_TICK_INTERVAL_MS } = await import("./src/lib/tax-invoice-service");
+  const taxInvoiceTick = () =>
+    runTaxInvoiceTick().catch((err) => console.error("tax invoice tick failed:", err));
+  scheduleCentralTick(taxInvoiceTick, TAX_INVOICE_TICK_INTERVAL_MS, 110_000);
+
   // Phase 38 (issue #381): push product/stock/price changes to the business's
   // website through website_outbox — the WooCommerce tick's shape exactly
   // (bypass to enumerate, withTenant per business, one business's failure
