@@ -35,11 +35,10 @@ import { decideCommitmentApproval, decideMaterialRequestApproval } from "./aec-p
 import { decideSubmittalApproval } from "./aec-rfi-service";
 import { createItem, getItem, setWeightAttributes, getWeightAttributes, addStone, removeStone } from "./items-service";
 import { validateWeightAttributes } from "./gold";
-import { markAsConsigned } from "./consignment-service";
+import { markAsConsigned, createConsignor, payConsignor } from "./consignment-service";
 import { recordItemEvent } from "./item-audit-service";
 import { sellWeightedItem } from "./gold-sales-service";
 import { buyBackGold, openLayaway, payLayaway, completeLayaway } from "./jewelry-flagship-service";
-import { payConsignor } from "./consignment-service";
 import { isPurity } from "./gold";
 import { recordGoldPrice, getGoldPrice } from "./gold-prices-service";
 import { getBusinessDayStatus } from "./business-day-service";
@@ -2691,6 +2690,24 @@ async function resolveWpOwnerConnection(
 }
 
 
+// ── Issue #883 package 2, batch AM — consignor directory close-out ──────
+// Mirrors POST /api/jewelry/consignors 1:1: name required (service trims and
+// rejects empties), phone/notes optional-null, envelope { ok, consignor }.
+const jewelryConsignorCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("missing_fields");
+  try {
+    const consignor = await createConsignor(ctx.businessId, {
+      name,
+      phone: str(ctx.payload.phone) ?? null,
+      notes: str(ctx.payload.notes) ?? null,
+    });
+    return { ok: true, result: { ok: true, consignor } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+
 // ── Issue #883 package 2, batch AL2 — jewelry money lanes ────────────────
 // Every verb mirrors its route 1:1: same client transaction, same ledger
 // error convention (MissingLedgerAccountError → ledger_account_missing),
@@ -4411,6 +4428,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   jewelryLayawayComplete,
   jewelryConsignorPayout,
   jewelryPriceRecord,
+  jewelryConsignorCreate,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

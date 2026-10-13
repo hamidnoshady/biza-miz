@@ -408,6 +408,9 @@ export type ActionType =
   | "jewelry.layaway.complete"
   | "jewelry.consignor.payout"
   | "jewelry.price.record"
+  // Batch AM — consignor directory close-out: creation only (the UI has no
+  // PATCH/DELETE on /jewelry/consignors either).
+  | "jewelry.consignor.create"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -465,6 +468,7 @@ export type AutopilotExecutorKey =
   | "jewelryLayawayComplete"
   | "jewelryConsignorPayout"
   | "jewelryPriceRecord"
+  | "jewelryConsignorCreate"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1522,6 +1526,14 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "ثبت نرخ روز طلا برای یک عیار — قیمت‌گذاری انبوه همهٔ اقلام همین عیار را تغییر می‌دهد؛ هر بار تأیید انسان",
     payloadHint: '{ purity: string, pricePerGram: number }',
     executor: "jewelryPriceRecord",
+  },
+  "jewelry.consignor.create": {
+    type: "jewelry.consignor.create",
+    endpoint: "/api/jewelry/consignors",
+    method: "POST",
+    label: "ثبت امانت‌دار جدید — نام (+ تلفن و یادداشت اختیاری)؛ مثل فرم دیرکتوری امانت‌داران",
+    payloadHint: '{ name: string, phone?: string|null, notes?: string|null }',
+    executor: "jewelryConsignorCreate",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
@@ -4050,6 +4062,19 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           name: "list_devices",
           description:
             "دستگاه‌های جفت‌شدهٔ تنانت — لیست دستگاه‌ها + شناسهٔ دستگاه جاریِ قابل‌استفاده برای rename/revoke.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_jewelry_items",
+          description:
+            "قلم‌های طلای وزنی تنانت در شعبهٔ جاری — نام، عیار، وزن و موجودی؛ متناظر جدول اقلام در بخش طلا.",
           parameters: {
             type: "object",
             properties: {},

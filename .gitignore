@@ -56,3 +56,4 @@ electron/build-output.log
 
 # Local read-only reporting browser-review screenshots (not approved baselines).
 .cache/platform-report-smoke/
+.local-pg/

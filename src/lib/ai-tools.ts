@@ -59,6 +59,7 @@ import { listCustomerNotes, listActivities } from "./crm-service";
 import { listMembers } from "./team-service";
 import { getBackupHealth, listBackupRuns } from "./backup-service";
 import { listDevices, findActiveDeviceId } from "./device-service";
+import { listWeightItems } from "./items-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
@@ -1688,6 +1689,15 @@ export async function runReadTool(
       return { ok: true, data: { code: card.code, balance, isActive: card.isActive, expiresAt: card.expiresAt, history } };
     }
     // Issue #883 package 2, batch G — stock counts + suppliers directory.
+    // Issue #883 package 2, batch AM — jewelry weight items, pinned-branch
+    // scoped exactly like the vertical_jewelry items table route.
+    case "list_jewelry_items": {
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const items = await listWeightItems(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: items.length, items } };
+    }
     // Issue #883 package 2, batch AI — paired devices.
     case "list_devices": {
       // No device token exists in the chat channel — currentDeviceId is

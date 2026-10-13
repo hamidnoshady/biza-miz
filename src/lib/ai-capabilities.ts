@@ -74,6 +74,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch F reads — campaigns.view on promotions, giftCards.view on cards.
   list_promotions: PERMISSIONS.campaignsView,
   list_devices: PERMISSIONS.settingsManage,
+  // Batch AM read — jewelry weight items table (vertical_jewelry list detail),
+  // same gate as every other inventory listing.
+  list_jewelry_items: PERMISSIONS.inventoryView,
   get_backup_status: PERMISSIONS.backupManage,
   get_gift_card_status: PERMISSIONS.giftCardsView,
   // Batch G reads — inventory.view on counts (the screen's GET gate), the
@@ -275,6 +278,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "jewelry.layaway.complete": PERMISSIONS.inventoryAdjust,
   "jewelry.consignor.payout": PERMISSIONS.inventoryAdjust,
   "jewelry.price.record": PERMISSIONS.inventoryAdjust,
+  // Batch AM — consignor directory creation rides the same inventory gate as
+  // the rest of the jewelry write surface.
+  "jewelry.consignor.create": PERMISSIONS.inventoryAdjust,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

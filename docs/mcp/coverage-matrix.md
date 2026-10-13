@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (34)
+### Tenant (33)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -44,7 +44,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
 - **misc.invoices** (Sales · Sales invoices & voids) — partial
-- **vertical_jewelry** (Verticals · Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)) — partial
 - **vertical_cosmetics** (Verticals · Cosmetics (rot management, suppliers, reports)) — partial
 - **vertical_haberdashery** (Verticals · Haberdashery (models, measurements, work orders)) — MCP gap
 - **vertical_tools** (Verticals · Tools & fittings (rentals, deposits, reports)) — MCP gap
@@ -74,7 +73,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 38 · partial: 28 · MCP gap: 6 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 39 · partial: 27 · MCP gap: 6 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -151,7 +150,7 @@ Counts — covered: 38 · partial: 28 · MCP gap: 6 · backend gap: 0 · n/a (in
 | Workspace | Workspace dashboard, insights, lookups, reports, search<br>_each service derives visibility from the real member row (exactly the screens' owner shape); lookup/search picker endpoints stay route-only (they exist to feed the screens' keyboards, not a conversation)_ | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | — | — | — | — | workspace.view | — | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | integration/workspace.integration.test.ts | covered |
 | Cross-cutting | server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs | (route only) | (route only) | (route only) | (route only) | — | team.permissions_manage | — | — | — | n/a (infra) |
 | Cross-cutting | tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata<br>_credential exchange surface — never an AI-callable verb_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
-| Verticals | Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)<br>_AL1 catalog + AL2 money lanes: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory CRUD itself ships in a follow-up (payouts are the wallets-relevant half)_ | (route only) | jewelry.buyback.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add | jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay | jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode; step-up (always approve) | jewelry.buyback.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add, jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay, jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | integration/jewelry.integration.test.ts | partial |
+| Verticals | Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)<br>_AL1 catalog + AL2 money lanes + AM directory close-out: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory is create-only in the UI too (no PATCH/DELETE routes exist), so the MCP surface matches it exactly_ | list_jewelry_items | jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add | jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay | jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode; step-up (always approve) | list_jewelry_items, jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add, jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay, jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | integration/jewelry.integration.test.ts | covered |
 | Verticals | Cosmetics (rot management, suppliers, reports) | get_near_expiry_items | (route only) | — | — | — | inventory.adjust, inventory.view, reports.view | — | get_near_expiry_items | integration/cosmetics.integration.test.ts | partial |
 | Verticals | Haberdashery (models, measurements, work orders) | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, orders.create, reports.view | — | — | integration/haberdashery.integration.test.ts | MCP gap |
 | Verticals | Tools & fittings (rentals, deposits, reports) | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, orders.create, reports.view | — | — | integration/tools-fittings.integration.test.ts | MCP gap |

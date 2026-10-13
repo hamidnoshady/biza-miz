@@ -123,6 +123,9 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "get_gift_card_status", kind: "read", app: "growth", branchPolicy: "agnostic" },
   { name: "get_backup_status", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_devices", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  // Batch AM read — jewelry weight items, scoped to the pinned branch exactly
+  // like the vertical_jewelry items table (listWeightItems(locationId)).
+  { name: "list_jewelry_items", kind: "read", app: "pos", branchPolicy: "pinned" },
   // Batch G — inventory readings and the suppliers directory.
   { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
@@ -508,6 +511,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "jewelry.layaway.complete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "jewelry.consignor.payout", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "jewelry.price.record", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  // Batch AM — consignor directory creation is a plain record insert (no
+  // ledger movement), so it follows the low-risk mode rule like catalog CRUD.
+  { actionType: "jewelry.consignor.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

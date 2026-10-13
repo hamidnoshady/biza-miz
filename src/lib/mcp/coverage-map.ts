@@ -878,11 +878,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)",
     routes: ["jewelry"],
     ops: {
-      create: ["jewelry.item.create", "jewelry.stone.add", "jewelry.buyback.create", "jewelry.layaway.create", "jewelry.price.record"],
+      listDetail: ["list_jewelry_items"],
+      create: ["jewelry.item.create", "jewelry.stone.add", "jewelry.buyback.create", "jewelry.layaway.create", "jewelry.price.record", "jewelry.consignor.create"],
       update: ["jewelry.item.update", "jewelry.item.consign", "jewelry.layaway.pay"],
       lifecycle: ["jewelry.stone.delete", "jewelry.item.sell", "jewelry.layaway.complete", "jewelry.consignor.payout"],
     },
-    note: "AL1 catalog + AL2 money lanes: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory CRUD itself ships in a follow-up (payouts are the wallets-relevant half)",
+    note: "AL1 catalog + AL2 money lanes + AM directory close-out: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory is create-only in the UI too (no PATCH/DELETE routes exist), so the MCP surface matches it exactly",
     test: "integration/jewelry.integration.test.ts",
   },
   {
