@@ -158,9 +158,18 @@ export async function applyLoginCredentials(
   // A legacy cloud names no identity IDs; compare against a local build masked
   // the same way, or every sync would rewrite perfectly converged rows.
   const legacyPayload = !credentials.some((c) => c.platformUserId != null);
-  const comparableLocal = legacyPayload
-    ? local.map((c) => ({ ...c, platformUserId: undefined }))
-    : local;
+  // Token version compares as a *floor*, not byte equality: the write below
+  // keeps `GREATEST(local, incoming)` for revocation monotonicity (a stale
+  // cloud payload must never un-revoke sessions), so after a site-only
+  // password put-back the local version legitimately stays above the cloud's.
+  // Converged means "applying the payload now would be a no-op" — which is
+  // exactly `min(local, incoming) == incoming`.
+  const incomingByMembership = new Map(credentials.map((c) => [c.membershipId, c]));
+  const comparableLocal = local.map((c) => ({
+    ...c,
+    platformUserId: legacyPayload ? undefined : c.platformUserId,
+    tokenVersion: Math.min(c.tokenVersion ?? 1, incomingByMembership.get(c.membershipId)?.tokenVersion ?? 1),
+  }));
   const result: LoginCredentialApplyResult = {
     changed: false, identitiesApplied: 0, bindingsRepaired: 0, bindingsStillBroken: 0,
     identitiesRekeyed: 0, identityEmailConflicts: 0,
@@ -223,13 +232,34 @@ export async function applyLoginCredentials(
         let platformUserId: string;
         let writeFields = true;
         if (plan.rekeyFrom) {
-          // Same person under a pre-v2 local UUID. Move every reference to the
-          // canonical ID before re-keying the row itself, so nothing points at
-          // a deleted identity and no credential material is copied or lost.
-          // Sessions that minted the old ID fail the token-version check until
-          // the member signs in again — the fail-closed direction.
+          // Same person under a pre-v2 local UUID. The canonical row is
+          // created first (under a unique placeholder email — the real one is
+          // still UNIQUE-held by the old row), then every reference moves,
+          // then the hollow old row is deleted and the shared field write
+          // below fills in the cloud's authoritative values. Order matters:
+          // `users.platform_user_id` is a non-deferrable FK, so references
+          // cannot point at the canonical ID before the row exists, and the
+          // PK cannot change while references still point at the old value.
+          // Nothing is copied or lost: password/MFA/recovery codes travel
+          // with the row; the token-version chain is preserved via GREATEST
+          // in the field write. Sessions that minted the old ID fail the
+          // token-version check until the member signs in again — the
+          // fail-closed direction.
           const old = plan.rekeyFrom;
           const to = plan.platformUserId as string;
+          const created = await client.query(
+            `INSERT INTO platform_users (id, email, password_hash, full_name, is_active, token_version)
+             SELECT $2::uuid, $3::citext,
+                    password_hash, full_name, is_active, token_version
+               FROM platform_users WHERE id = $1`,
+            [old, to, `__rekey__${to}@identity-rekey.invalid`],
+          );
+          if (created.rowCount !== 1) {
+            // The source row vanished between planning and the lock (a purge
+            // run, a concurrent repair). Refuse this record rather than
+            // relink the membership to an identity that does not exist.
+            throw new Error("identity_rekey_source_missing");
+          }
           await client.query(`UPDATE users SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
           await client.query(`UPDATE owner_activations SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
           await client.query(`UPDATE install_pairing_codes SET issued_by = $2 WHERE issued_by = $1`, [old, to]);
@@ -240,7 +270,7 @@ export async function applyLoginCredentials(
               [old, to],
             );
           }
-          await client.query(`UPDATE platform_users SET id = $2 WHERE id = $1`, [old, to]);
+          await client.query(`DELETE FROM platform_users WHERE id = $1`, [old]);
           platformUserId = to;
           result.identitiesRekeyed += 1;
         } else if (plan.insert) {
