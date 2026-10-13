@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
+import { reportCapabilities } from "@/lib/report-permissions";
 import { effectiveFeatures, requireFeatureForPage } from "@/lib/features";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
@@ -36,7 +37,7 @@ export default async function ReportsPage() {
         }
       />
       <ReportsManager
-        role={session.role}
+        capabilities={reportCapabilities(permissions)}
         canExplain={permissions.has(PERMISSIONS.reportsExport) && features.ai_assistant}
       />
     </PageShell>

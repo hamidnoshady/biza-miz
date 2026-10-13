@@ -33,7 +33,7 @@ export const GET = withTenantScope(async () => {
       money: m.money ?? false,
       aggregations: m.aggregations,
     })),
-    filters: view.filters?.map((f) => ({ key: f.key, label: f.label })) ?? [],
+    filters: view.filters?.map((f) => ({ key: f.key, label: f.label, control: f.control })) ?? [],
   }));
   return NextResponse.json({ views });
 });
