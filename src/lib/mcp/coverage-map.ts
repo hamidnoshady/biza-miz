@@ -310,7 +310,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       bulk: ["barcode.bulkMint"],
     },
     note: "AS closes the bulk column — the idempotent whole-branch mint",
-    test: "integration/stock.integration.test.ts",
+    test: "integration/inventory-barcodes.integration.test.ts",
   },
   {
     id: "inventory.waste-writedowns",
