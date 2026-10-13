@@ -100,10 +100,56 @@ import {
   getBusiness,
   renameBusinessSubdomain,
   updateBusiness,
+  systemStatus,
 } from "../platform-service";
 import { businessDestructivePhrase } from "../platform-admin";
 import { listPairingCodes, listPairingLocations } from "../pairing-service";
 import { listSiteDevices } from "../site-device-service";
+// Batch BN2 — the last exception rows: exception-inbox reads, per-business
+// app availability, and the access-control revocations (mirroring the
+// revoke_entitlement doctrine: withdrawing access is honest ops; issuing it
+// stays console-side).
+import {
+  businessAppAvailability,
+  setBusinessAppAvailability,
+} from "../app-availability-service";
+import { appForKey } from "../apps";
+import { updatePlatformAdmin } from "../platform-service";
+// Batch BN — support content (the platform's own knowledge base), the CMS
+// fleet's read lanes, the backup backup/restore console's safe verbs, and the
+// system/observability dials. All service-backed; credential-shaped lanes
+// (site API keys, backup restore tokens, release channels) stay console-side.
+import {
+  adminListKbArticles,
+  adminCreateKbArticle,
+  adminUpdateKbArticle,
+  adminDeleteKbArticle,
+  adminCreateKbCategory,
+  adminUpdateKbCategory,
+  adminDeleteKbCategory,
+  adminCreateKbTag,
+  adminUpdateKbTag,
+  adminDeleteKbTag,
+} from "../knowledge-service";
+import {
+  listMirroredCmsSites,
+  resolvePlatformCmsConfig,
+  listCmsSyncRuns,
+} from "../cms/platform-control-service";
+import {
+  fetchCmsRoutingTable,
+  fetchCmsThemePackages,
+  fetchCmsDeployTargets,
+} from "../cms/platform-client";
+import { provisionSite, issueSiteApiKey } from "../cms/client";
+import { runCmsMirror } from "../cms/platform-sync";
+import { getMigrationStatus } from "../migration-status-service";
+import { observabilityConfig, zoHealth } from "../observability";
+import {
+  listPlatformBackupRuns,
+  getPlatformBackupHealth,
+  runPlatformBackupNow,
+} from "../platform-backup-service";
 import { platformAudit } from "../platform-auth";
 
 const TOKEN_PREFIX = "pospmcp_";
@@ -287,6 +333,16 @@ interface PlatformToolInput {
   confirmExistingOwner?: boolean;
   timezone?: string;
   confirmation?: string;
+  // Batch BN — generic record-shaped writes (knowledge builder, CMS sites).
+  record?: Record<string, unknown>;
+  categoryId?: string;
+  query?: string;
+  // Batch BN2 inputs.
+  kind?: string;
+  app?: string;
+  write?: Record<string, unknown> | null;
+  sessionId?: string;
+  active?: boolean;
 }
 
 export interface PlatformMcpTool {
@@ -922,6 +978,199 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
       required: ["businessId"],
     },
   },
+  // ── Batch BN — knowledge, CMS fleet reads, backup, system dials ──────────
+  {
+    name: "list_kb_articles",
+    description: "List/search the platform knowledge base (builder view: drafts included).",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        status: { type: "string", enum: ["draft", "published"] },
+        categoryId: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "save_kb_category",
+    description: "Create a knowledge category (record.input) or update fields on an existing one (record.id + record.input).",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { id: { type: "string" }, record: { type: "object" } }, required: ["record"] },
+  },
+  {
+    name: "delete_kb_category",
+    description: "Delete a knowledge category. Fails category_has_children / category_has_articles while it holds content, exactly like the console.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "save_kb_tag",
+    description: "Create a knowledge tag (record.input) or rename one (record.id + record.input).",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { id: { type: "string" }, record: { type: "object" } }, required: ["record"] },
+  },
+  {
+    name: "delete_kb_tag",
+    description: "Delete a knowledge tag.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "save_kb_article",
+    description:
+      "Create a knowledge article (record.input: slug, title, bodyMd, status draft|published, …) or update an existing one (record.id + record.input). Publishing rules are the console's.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { id: { type: "string" }, record: { type: "object" } }, required: ["record"] },
+  },
+  {
+    name: "delete_kb_article",
+    description: "Hard-delete a knowledge article (the console DELETE lane — same guard).",
+    capability: "knowledge.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "list_cms_sites",
+    description: "List websites mirrored from the CMS fleet (the mirror is the console's single source).",
+    capability: "system.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_cms_sync_runs",
+    description: "Recent CMS push/pull/event-shipping sync runs.",
+    capability: "system.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: { limit: { type: "number" } } },
+  },
+  {
+    name: "get_cms_infrastructure",
+    description: "CMS routing table — the infrastructure lanes behind the websites. Reports an error when no CMS client is configured, like the console.",
+    capability: "system.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_cms_theme_packages",
+    description: "Theme packages hosted by the CMS service.",
+    capability: "system.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_cms_deploy_targets",
+    description: "Deployment targets configured on the CMS service.",
+    capability: "system.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "create_cms_site",
+    description:
+      "Provision a website on the CMS service ({record: {domain, name, type?}}). The API key minted for the site is returned ONCE — treat it as a credential. Step-up.",
+    capability: "cms.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: { type: "object", properties: { record: { type: "object" } }, required: ["record"] },
+  },
+  {
+    name: "list_backup_runs",
+    description: "Recent platform backup runs with their partial/limit flags, like the console table.",
+    capability: "backup.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: { limit: { type: "number" } } },
+  },
+  {
+    name: "get_backup_health",
+    description: "Backup health rollup: last success, stale markers, storage stats, queue depth.",
+    capability: "backup.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "run_backup_now",
+    description: "Run a platform backup immediately and wait for the result. Runs only when the backup engine is idle, like the console. Step-up.",
+    capability: "backup.run",
+    bridged: false,
+    stepUp: true,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_system_status",
+    description: "Platform status: migrations, worker activity, counters — the System view.",
+    capability: "system.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_observability_health",
+    description: "Health probe of the OpenSearch collector (observability disabled reports as such, like the console).",
+    capability: "system.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  // ── Batch BN2 — the exception rows' remaining lanes ─────────────────────
+  {
+    name: "list_cloud_exceptions",
+    description: "Standalone-installation support/bug-report inbox (payload is never logged by the route either). Optional kind filter.",
+    capability: "support.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { limit: { type: "number" }, kind: { type: "string" } },
+    },
+  },
+  {
+    name: "list_business_app_availability",
+    description: "Which apps are enabled/hidden for one business, with rollout metadata.",
+    capability: "business.reports.read",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: { businessId: { type: "string" } },
+      required: ["businessId"],
+    },
+  },
+  {
+    name: "set_business_app_availability",
+    description:
+      "Enable/hide an app for one business ({app, write: {available, hidden?…}} — write: null clears the override). Same guard as the console: unknown app keys fail.",
+    capability: "features.write",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        app: { type: "string" },
+        write: { type: "object", description: "Availability write; pass null to clear the override." },
+      },
+      required: ["businessId", "app", "write"],
+    },
+  },
+  {
+    name: "set_platform_admin_active",
+    description:
+      "Activate/deactivate a platform admin by id (admins.manage; same guards as the console PATCH — your own account cannot be deactivated by yourself, role fields untouched).",
+    capability: "admins.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        adminId: { type: "string" },
+        active: { type: "boolean" },
+      },
+      required: ["adminId", "active"],
+    },
+  },
   {
     name: "set_business_status",
     description: "Suspend or reactivate a business. Uses the console lifecycle service; audited.",
@@ -1535,6 +1784,214 @@ async function executePlatformTool(
           results[id] = { ok: true, installations, codes, locations };
         }
         return { perBusiness: results };
+      }
+      // ── Batch BN — knowledge, CMS fleet reads, backup, system dials ───────
+      case "list_kb_articles": {
+        const articles = await adminListKbArticles({
+          q: arg.query || undefined,
+          status: arg.status as "draft" | "published" | undefined,
+          categoryId: arg.categoryId || undefined,
+        });
+        return { articles };
+      }
+      case "save_kb_category": {
+        const input = (arg.record?.input ?? {}) as Record<string, unknown>;
+        const existingId = (arg.record?.id as string | undefined) ?? arg.id;
+        if (existingId) {
+          await adminUpdateKbCategory(existingId, input as never);
+          await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_category.update" });
+          return { ok: true, id: existingId };
+        }
+        const id = await adminCreateKbCategory(input as never, connection.adminId);
+        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_category.create" });
+        return { ok: true, id };
+      }
+      case "delete_kb_category": {
+        if (!arg.id) throw new Error("missing_fields");
+        await adminDeleteKbCategory(arg.id);
+        await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_category.delete" });
+        return { ok: true, id: arg.id };
+      }
+      case "save_kb_tag": {
+        const input = (arg.record?.input ?? {}) as Record<string, unknown>;
+        const existingId = (arg.record?.id as string | undefined) ?? arg.id;
+        if (existingId) {
+          await adminUpdateKbTag(existingId, input as never);
+          await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_tag.update" });
+          return { ok: true, id: existingId };
+        }
+        const id = await adminCreateKbTag(input as never, connection.adminId);
+        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_tag.create" });
+        return { ok: true, id };
+      }
+      case "delete_kb_tag": {
+        if (!arg.id) throw new Error("missing_fields");
+        await adminDeleteKbTag(arg.id);
+        await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_tag.delete" });
+        return { ok: true, id: arg.id };
+      }
+      case "save_kb_article": {
+        const input = (arg.record?.input ?? {}) as Record<string, unknown>;
+        const existingId = (arg.record?.id as string | undefined) ?? arg.id;
+        if (existingId) {
+          await adminUpdateKbArticle(existingId, input as never, connection.adminId);
+          await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_article.update" });
+          return { ok: true, id: existingId };
+        }
+        const id = await adminCreateKbArticle(input as never, connection.adminId);
+        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_article.create" });
+        return { ok: true, id };
+      }
+      case "delete_kb_article": {
+        if (!arg.id) throw new Error("missing_fields");
+        await adminDeleteKbArticle(arg.id);
+        await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_article.delete" });
+        return { ok: true, id: arg.id };
+      }
+      case "list_cms_sites": {
+        return { sites: await listMirroredCmsSites() };
+      }
+      case "list_cms_sync_runs": {
+        return { runs: await listCmsSyncRuns(arg.limit) };
+      }
+      case "get_cms_infrastructure": {
+        const config = await resolvePlatformCmsConfig();
+        if (!config) throw new Error("cms_not_configured");
+        const routing = await fetchCmsRoutingTable(config, { actor: connection.adminId });
+        return { routing };
+      }
+      case "list_cms_theme_packages": {
+        const config = await resolvePlatformCmsConfig();
+        if (!config) throw new Error("cms_not_configured");
+        const packages = await fetchCmsThemePackages(config, { actor: connection.adminId });
+        return { packages };
+      }
+      case "list_cms_deploy_targets": {
+        const config = await resolvePlatformCmsConfig();
+        if (!config) throw new Error("cms_not_configured");
+        const targets = await fetchCmsDeployTargets(config, { actor: connection.adminId });
+        return { targets };
+      }
+      case "create_cms_site": {
+        const config = await resolvePlatformCmsConfig();
+        if (!config) throw new Error("cms_not_configured");
+        const body = (arg.record ?? {}) as Record<string, unknown>;
+        const domain = typeof body.domain === "string" ? body.domain.trim() : "";
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        const type = (body.type as string | undefined) ?? "business";
+        if (!domain || !name) throw new Error("missing_fields");
+        if (type !== "business") throw new Error("unsupported_site_type");
+        const site = await provisionSite(config, { domain, name, type: "business" });
+        const result = site.site as unknown as { id: string };
+        const key = await issueSiteApiKey(config, {
+          name: `کنسول اسکو (${domain})`,
+          role: "site",
+          siteId: result.id,
+        });
+        await platformAuditSafe(connection, result.id, tool.name, "ok", {
+          action: "platform_cms.site.provision",
+          domain,
+        });
+        // The console refreshes the site mirror after a provision so the new
+        // site is immediately listable; same behaviour here.
+        await runCmsMirror({ actor: connection.adminId, startedBy: connection.adminId, trigger: "manual" });
+        return {
+          ok: true,
+          site: site.site,
+          // One-time plaintext credential — the console shows it once too.
+          apiKey: key.key,
+          warning: "Store the API key securely; it cannot be retrieved later.",
+        };
+      }
+      case "list_backup_runs": {
+        return { runs: await listPlatformBackupRuns(arg.limit) };
+      }
+      case "get_backup_health": {
+        return { health: await getPlatformBackupHealth() };
+      }
+      case "run_backup_now": {
+        const result = await runPlatformBackupNow(connection.adminId);
+        await platformAuditSafe(connection, "platform", tool.name, "ok", {
+          action: "backup.run_now",
+          local: result.local.status,
+          cloud: result.cloud.status,
+        });
+        return { ok: true, result };
+      }
+      case "get_system_status": {
+        const migrations = await getMigrationStatus();
+        return { status: await systemStatus(migrations) };
+      }
+      case "get_observability_health": {
+        const cfg = observabilityConfig();
+        if (!cfg) throw new Error("observability_not_configured");
+        return { health: await zoHealth(cfg) };
+      }
+      // ── Batch BN2 — exception rows' remaining lanes ──────────────────────
+      case "list_cloud_exceptions": {
+        const limit = Math.min(Math.max(Number(arg.limit) || 50, 1), 200);
+        const kind = arg.kind?.trim() || null;
+        const { rows } = await query<{ id: string; kind: string; occurredAt: string }>(
+          `SELECT i.id::text,i.installation_id AS "installationId",COALESCE(c.label,i.installation_id) AS "installationLabel",
+                  i.event_id::text AS "eventId",i.kind,i.aggregate_id::text AS "aggregateId",
+                  (i.payload - ARRAY['attachment','screenshot','userAgent']::text[]) AS payload,
+                  i.occurred_at::text AS "occurredAt",i.received_at::text AS "receivedAt"
+             FROM cloud_exception_inbox i
+             LEFT JOIN cloud_exception_installations c ON c.installation_id=i.installation_id
+            WHERE ($2::text IS NULL OR i.kind=$2)
+            ORDER BY i.received_at DESC LIMIT $1`,
+          [limit, kind],
+        );
+        return { events: rows };
+      }
+      case "list_business_app_availability": {
+        for (const id of targets) {
+          if (!(await getBusiness(id))) {
+            results[id] = { ok: false, error: "not_found" };
+            continue;
+          }
+          results[id] = { ok: true, apps: await businessAppAvailability(id) };
+        }
+        return { perBusiness: results };
+      }
+      case "set_business_app_availability": {
+        let appKey;
+        try {
+          appKey = appForKey(arg.app as never).key;
+        } catch {
+          throw new Error("unknown_app");
+        }
+        const write = arg.write === undefined ? undefined : arg.write;
+        if (write === undefined) throw new Error("missing_fields");
+        for (const id of targets) {
+          try {
+            if (!(await getBusiness(id))) throw new Error("not_found");
+            await setBusinessAppAvailability(id, appKey, write as never, connection.adminId);
+            await platformAuditSafe(connection, id, tool.name, "ok", {
+              action: "business.app_availability.write",
+              app: appKey,
+              cleared: write === null,
+            });
+            results[id] = { ok: true };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "set_platform_admin_active": {
+        if (!arg.adminId || typeof arg.active !== "boolean") throw new Error("missing_fields");
+        const updated = await updatePlatformAdmin({
+          targetAdminId: arg.adminId,
+          isActive: arg.active,
+          actorAdminId: connection.adminId,
+        });
+        if (!updated.ok) throw new Error(updated.error);
+        await platformAuditSafe(connection, arg.adminId, tool.name, "ok", {
+          action: "platform_admin.update",
+          isActive: arg.active,
+        });
+        return { ok: true, admin: updated.admin };
       }
       default:
         throw new Error(`No implementation for platform tool '${tool.name}'.`);

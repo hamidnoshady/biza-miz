@@ -1101,6 +1101,7 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
       listDetail: ["list_businesses", "get_business_identity"],
       create: ["provision_business"],
       update: ["update_business", "rename_business_subdomain"],
+      lifecycle: ["reset_business", "hard_delete_business"],
     },
     note: "batch BM: provisioning mirrors the console form (subdomain required in English, owner activation on, industry wizard rule via issue #840, AI key attempt audited on success) with the credential's admin as createdBy; owner-profile edits ride the access/identity tier and stay console-side",
     test: "integration/platform-mcp.integration.test.ts",
@@ -1111,7 +1112,9 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     entity: "Tenant lifecycle (provision, status, suspend, delete)",
     routes: ["platform/businesses"],
     ops: {
+      listDetail: ["list_businesses", "get_business_identity"],
       create: ["provision_business"],
+      update: ["update_business", "rename_business_subdomain"],
       lifecycle: ["set_business_status", "reset_business", "hard_delete_business", "list_provision_devices"],
     },
     note: "batch BM: reset/delete keep the console's typed-confirmation protocol (businessDestructivePhrase) and the protected-internal-business guard, stepUp-marked, owner-only like the routes; the DELETE lane's audit payload snapshots the dying tenant like the console's",
@@ -1131,7 +1134,12 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Tenants",
     entity: "Features & app availability",
     routes: ["platform/businesses", "platform/app-availability", "platform/feature-flags"],
-    ops: { listDetail: ["list_feature_flags", "list_business_features"], lifecycle: ["set_business_feature"] },
+    ops: {
+      listDetail: ["list_feature_flags", "list_business_features", "list_business_app_availability"],
+      create: ["set_business_feature"],
+      update: ["set_business_app_availability"],
+      lifecycle: ["set_business_feature"],
+    },
     test: "integration/platform-mcp.integration.test.ts",
   },
   {
@@ -1194,6 +1202,9 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Integrations",
     entity: "Cloud exceptions, messaging, notification/SMS config",
     routes: ["platform/cloud-exceptions", "platform/messaging", "platform/sms", "platform/mfa"],
+    ops: { listDetail: ["list_cloud_exceptions"] },
+    status: "route-only (by design)",
+    note: "batch BN2: the support/bug-report inbox rides support.manage read-side; every other lane under these prefixes mints or rotates provider credentials — cloud-exception install keys (the one-time plaintext POST), messaging/sms provider configs, the platform MFA provisioning pair — the connection-provisioning tier, same doctrine as the device key-maker",
     test: "integration/platform-cloud-exceptions.integration.test.ts",
   },
   {
@@ -1201,6 +1212,12 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — CMS",
     entity: "CMS sites, deployments, targets, keys",
     routes: ["platform/cms/sites", "platform/cms/deploy-targets", "platform/cms/keys"],
+    ops: {
+      listDetail: ["list_cms_sites", "list_cms_deploy_targets"],
+      create: ["create_cms_site"],
+    },
+    status: "route-only (by design)",
+    note: "batch BN: fleet reads + create_cms_site (provisionSite mirrors the console exactly and returns the one-time site key with the same warning); the lifecycle column stays console-side — key rotation lanes (cms/keys) and the site's own update/delete return or rotate site credentials",
     test: "integration/platform-cms.integration.test.ts",
   },
   {
@@ -1208,6 +1225,11 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — CMS",
     entity: "CMS config, runs, sync, infrastructure, theme packages, self tests, billing sync",
     routes: ["platform/cms/config", "platform/cms/runs", "platform/cms/sync", "platform/cms/infrastructure", "platform/cms/theme-packages", "platform/cms/self-tests", "platform/cms/billing-sync", "platform/cms/overview"],
+    ops: {
+      listDetail: ["list_cms_sync_runs", "get_cms_infrastructure", "list_cms_theme_packages"],
+    },
+    status: "route-only (by design)",
+    note: "batch BN: the diagnostic reads are verb-covered; the write columns hold credential/config lanes (platform CMS keys under cms.manage) and the console's run-trigger surfaces (sync/self-tests/billing-schedulers) — the config-as-secrets tier",
     test: "integration/platform-cms.integration.test.ts",
   },
   {
@@ -1215,6 +1237,9 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Ops",
     entity: "Updates/releases, system, observability, overview",
     routes: ["platform/updates", "platform/system", "platform/observability", "platform/overview"],
+    ops: { listDetail: ["get_system_status", "get_observability_health"] },
+    status: "route-only (by design)",
+    note: "batch BN: the read dials are verb-covered; the updates/release lanes under updates.manage are owner-only and hold real platform secrets (release channels, signing keys per the role table) — same tier as the PSP gateways",
     test: "integration/platform-admin.integration.test.ts",
   },
   {
@@ -1222,6 +1247,12 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Ops",
     entity: "Backup config, run, status, peers, tokens, restore",
     routes: ["platform/backup"],
+    ops: {
+      listDetail: ["list_backup_runs", "get_backup_health"],
+      lifecycle: ["run_backup_now"],
+    },
+    status: "route-only (by design)",
+    note: "batch BN: backup.read gets its runs and health, backup.run gets run_backup_now (stepUp, admin-audited); the write column stays console-side — config writes embed the encryption passphrase, restore/peers/tokens mint or redeem restore credentials, literally capability-split in the role table",
     test: "integration/platform-backup.integration.test.ts",
   },
   {
@@ -1233,8 +1264,10 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
       listDetail: ["list_audit_log", "list_bug_reports", "get_bug_report", "list_support_tickets", "get_support_ticket"],
       create: ["reply_support_ticket"],
       update: ["triage_support_ticket"],
+      lifecycle: ["set_platform_admin_active"],
     },
-    note: "batch BK: the audit log rides audit.read, bug reports ride audit.read like the route, the support desk rides support.manage with the credential's own admin stamped on replies (never a payload-claimed id); platform admins, sessions/auth and pairing stay route-only by design — that is the access/identity tier, same doctrine as the tenant config.team row",
+    note: "batch BK: the audit log rides audit.read, bug reports ride audit.read like the route, the support desk rides support.manage with the credential's own admin stamped on replies (never a payload-claimed id). Batch BN2: platform-admin deactivation/reactivation rides admins.manage (same console PATCH service and guards, including the no-self-deactivate rule). The rest of the auth/pairing/admins surface stays route-only by design — those lanes require the console's recent-auth step-up or mint access",
+    status: "route-only (by design)",
     test: "integration/platform-admin.integration.test.ts",
   },
   {
@@ -1242,6 +1275,13 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Content",
     entity: "Knowledge base (platform), media config",
     routes: ["platform/knowledge", "platform/media"],
+    ops: {
+      listDetail: ["list_kb_articles"],
+      create: ["save_kb_category", "save_kb_tag", "save_kb_article"],
+      update: ["save_kb_category", "save_kb_tag", "save_kb_article"],
+      lifecycle: ["delete_kb_category", "delete_kb_tag", "delete_kb_article"],
+    },
+    note: "batch BN: builder verbs write through knowledge-service exactly like the console (same delete guards, create-or-update by presence of a passed id); media stays on the credential-shaped register (provider config)",
     test: "integration/platform-knowledge.integration.test.ts",
   },
   {
