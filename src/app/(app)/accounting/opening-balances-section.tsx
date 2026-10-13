@@ -1325,8 +1325,10 @@ export function OpeningBalancesSection({
               type="button"
               role="tab"
               aria-selected={importMode === "file"}
-              className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
-                importMode === "file" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"
+              className={`flex-1 rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                importMode === "file"
+                  ? "border-amber-500/50 bg-background text-amber-700 dark:border-amber-500/40 dark:text-amber-300"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => setImportMode("file")}
             >
@@ -1336,8 +1338,10 @@ export function OpeningBalancesSection({
               type="button"
               role="tab"
               aria-selected={importMode === "json"}
-              className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
-                importMode === "json" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"
+              className={`flex-1 rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                importMode === "json"
+                  ? "border-amber-500/50 bg-background text-amber-700 dark:border-amber-500/40 dark:text-amber-300"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => setImportMode("json")}
             >
