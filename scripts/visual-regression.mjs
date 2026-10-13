@@ -450,6 +450,11 @@ async function main() {
     if (UPDATE || !existsSync(baselinePath)) {
       writeFileSync(baselinePath, actual);
       recorded.push(screen.id);
+      if (screen.id.startsWith("accounting-cheques")) {
+        const b64 = actual.toString("base64");
+        for (let i = 0; i < b64.length; i += 4000) console.log(`VRDUMP ${screen.id} ${i / 4000} ${b64.slice(i, i + 4000)}`);
+        console.log(`VRDUMP ${screen.id} END ${b64.length}`);
+      }
       continue;
     }
 
