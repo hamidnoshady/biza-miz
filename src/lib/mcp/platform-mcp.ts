@@ -86,6 +86,24 @@ import { getPublicMessageConfig, saveMessageRates } from "../messaging-billing";
 import { getMediaConfig, saveMediaTariff } from "../media-service";
 import { validateMediaTariffInput } from "../media";
 import { getAiCostingConfig, saveAiCostingConfig } from "../ai-gateway-service";
+// Batch BM — tenant lifecycle: provisioning, identity edits, and the typed-
+// phrase destructive lanes (reset / hard delete), all via the console's own
+// services with the same guards the routes enforce.
+import {
+  provisionBusiness,
+  validateProvisionBody,
+  shouldCompleteSetupForPlatformProvision,
+} from "../business-provisioning";
+import {
+  resetBusiness,
+  hardDeleteBusiness,
+  getBusiness,
+  renameBusinessSubdomain,
+  updateBusiness,
+} from "../platform-service";
+import { businessDestructivePhrase } from "../platform-admin";
+import { listPairingCodes, listPairingLocations } from "../pairing-service";
+import { listSiteDevices } from "../site-device-service";
 import { platformAudit } from "../platform-auth";
 
 const TOKEN_PREFIX = "pospmcp_";
@@ -258,6 +276,17 @@ interface PlatformToolInput {
   defaultSpendAction?: string;
   invoiceFooter?: string;
   taxRateBps?: number;
+  // Batch BM — tenant lifecycle inputs.
+  businessName?: string;
+  ownerName?: string;
+  email?: string;
+  subdomain?: string;
+  ownerPhone?: string;
+  industry?: string;
+  plan?: string;
+  confirmExistingOwner?: boolean;
+  timezone?: string;
+  confirmation?: string;
 }
 
 export interface PlatformMcpTool {
@@ -798,6 +827,101 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
       required: ["group"],
     },
   },
+  // ── Batch BM — tenant lifecycle ───────────────────────────────────────────
+  {
+    name: "provision_business",
+    description:
+      "Provision a new tenant (business + owner + chart of accounts + AI key attempt). Same input as the console form: subdomain is required in English, owner activation is on. Step-up: mints a business.",
+    capability: "business.provision",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessName: { type: "string" },
+        ownerName: { type: "string" },
+        email: { type: "string" },
+        subdomain: { type: "string", description: "DNS label on the root domain, typed by hand like the console." },
+        ownerPhone: { type: "string" },
+        industry: { type: "string" },
+        plan: { type: "string" },
+        confirmExistingOwner: { type: "boolean", description: "Proceed when the owner email is already a user." },
+      },
+      required: ["businessName", "ownerName", "email", "subdomain"],
+    },
+  },
+  {
+    name: "update_business",
+    description: "Edit a business's identity fields (name / timezone). No-key edits answer as unchanged, like the console.",
+    capability: "business.edit",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        name: { type: "string" },
+        timezone: { type: "string" },
+      },
+      required: ["businessId"],
+    },
+  },
+  {
+    name: "rename_business_subdomain",
+    description: "Rename a business's public subdomain — the alias changes and live sessions are invalidated, like the console's rename lane.",
+    capability: "business.edit",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        subdomain: { type: "string" },
+      },
+      required: ["businessId", "subdomain"],
+    },
+  },
+  {
+    name: "reset_business",
+    description:
+      "Wipe a business's operational data back to a clean shell. Requires confirmation = the same typed phrase the console shows for this business. Step-up.",
+    capability: "business.reset",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        confirmation: { type: "string", description: "Typed phrase — reset-<slug>." },
+      },
+      required: ["businessId", "confirmation"],
+    },
+  },
+  {
+    name: "hard_delete_business",
+    description:
+      "PERMANENTLY delete a business and every row under it. Requires confirmation = the same typed phrase the console shows for this business. Owner-only; step-up.",
+    capability: "business.delete",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        confirmation: { type: "string", description: "Typed phrase — delete-<slug>." },
+      },
+      required: ["businessId", "confirmation"],
+    },
+  },
+  {
+    name: "list_provision_devices",
+    description: "Provision-link issue history for one business (the key-maker lane shares business.provision).",
+    capability: "business.provision",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: { businessId: { type: "string" } },
+      required: ["businessId"],
+    },
+  },
   {
     name: "set_business_status",
     description: "Suspend or reactivate a business. Uses the console lifecycle service; audited.",
@@ -1293,6 +1417,124 @@ async function executePlatformTool(
           return { config: after };
         }
         throw new Error("invalid_rate_group");
+      }
+      // ── Batch BM — tenant lifecycle ───────────────────────────────────────
+      case "provision_business": {
+        const validated = validateProvisionBody(
+          {
+            businessName: arg.businessName,
+            ownerName: arg.ownerName,
+            email: arg.email,
+            subdomain: arg.subdomain,
+            ownerPhone: arg.ownerPhone,
+            industry: arg.industry,
+            plan: arg.plan,
+          } as never,
+          { requireSubdomain: true, ownerActivation: true },
+        );
+        if (validated.input === null) throw new Error(validated.error);
+        const provisioned = await provisionBusiness({
+          ...validated.input,
+          seedChartOfAccounts: true,
+          // Parity with the console route: F&B tenants must walk the wizard
+          // (issue #840); other industries arrive ready-to-enter.
+          completeSetup: shouldCompleteSetupForPlatformProvision(validated.input.industry),
+          createdBy: connection.adminId,
+          confirmExistingOwner: arg.confirmExistingOwner === true,
+        });
+        await platformAuditSafe(connection, provisioned.businessId, tool.name, "ok", {
+          action: "business.provision",
+        });
+        return provisioned;
+      }
+      case "update_business": {
+        if (arg.name === undefined && arg.timezone === undefined) throw new Error("nothing_to_change");
+        if (typeof arg.name === "string" && arg.name.trim() === "") throw new Error("invalid_name");
+        for (const id of targets) {
+          try {
+            const updated = await updateBusiness(id, {
+              name: typeof arg.name === "string" ? arg.name.trim() : undefined,
+              timezone: typeof arg.timezone === "string" ? arg.timezone : undefined,
+            });
+            if (!updated) throw new Error("not_found");
+            await platformAuditSafe(connection, id, tool.name, "ok", {
+              action: "business.update",
+              fields: { name: typeof arg.name === "string", timezone: typeof arg.timezone === "string" },
+            });
+            results[id] = { ok: true };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "rename_business_subdomain": {
+        if (!arg.subdomain) throw new Error("missing_fields");
+        for (const id of targets) {
+          try {
+            const result = await renameBusinessSubdomain(id, arg.subdomain);
+            await platformAuditSafe(connection, id, tool.name, "ok", {
+              action: "business.rename_subdomain",
+              subdomain: arg.subdomain,
+            });
+            results[id] = { ok: true, result };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "reset_business": {
+        for (const id of targets) {
+          try {
+            const business = await getBusiness(id);
+            if (!business) throw new Error("not_found");
+            if (business.ownershipKind === "platform_internal") throw new Error("protected_internal_business");
+            const expected = businessDestructivePhrase("reset", business.slug);
+            if ((arg.confirmation ?? "").trim() !== expected) throw new Error("confirmation_mismatch");
+            await resetBusiness(id);
+            await platformAuditSafe(connection, id, tool.name, "ok", { action: "business.reset" });
+            results[id] = { ok: true };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "hard_delete_business": {
+        for (const id of targets) {
+          try {
+            const business = await getBusiness(id);
+            if (!business) throw new Error("not_found");
+            if (business.ownershipKind === "platform_internal") throw new Error("protected_internal_business");
+            const expected = businessDestructivePhrase("delete", business.slug);
+            if ((arg.confirmation ?? "").trim() !== expected) throw new Error("confirmation_mismatch");
+            const result = await hardDeleteBusiness(id);
+            await platformAuditSafe(connection, id, tool.name, "ok", {
+              action: "business.delete",
+              snapshot: { name: business.name, slug: business.slug, industry: business.industry },
+            });
+            results[id] = { ok: true, result };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "list_provision_devices": {
+        for (const id of targets) {
+          if (!(await getBusiness(id))) {
+            results[id] = { ok: false, error: "not_found" };
+            continue;
+          }
+          const [installations, codes, locations] = await Promise.all([
+            listSiteDevices(id),
+            listPairingCodes(id),
+            listPairingLocations(id),
+          ]);
+          results[id] = { ok: true, installations, codes, locations };
+        }
+        return { perBusiness: results };
       }
       default:
         throw new Error(`No implementation for platform tool '${tool.name}'.`);

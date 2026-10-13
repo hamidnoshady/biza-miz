@@ -1097,7 +1097,12 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Tenants",
     entity: "Business directory (search, identity, usage, reports)",
     routes: ["platform/businesses"],
-    ops: { listDetail: ["list_businesses", "get_business_identity"] },
+    ops: {
+      listDetail: ["list_businesses", "get_business_identity"],
+      create: ["provision_business"],
+      update: ["update_business", "rename_business_subdomain"],
+    },
+    note: "batch BM: provisioning mirrors the console form (subdomain required in English, owner activation on, industry wizard rule via issue #840, AI key attempt audited on success) with the credential's admin as createdBy; owner-profile edits ride the access/identity tier and stay console-side",
     test: "integration/platform-mcp.integration.test.ts",
   },
   {
@@ -1105,7 +1110,11 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Tenants",
     entity: "Tenant lifecycle (provision, status, suspend, delete)",
     routes: ["platform/businesses"],
-    ops: { lifecycle: ["set_business_status"] },
+    ops: {
+      create: ["provision_business"],
+      lifecycle: ["set_business_status", "reset_business", "hard_delete_business", "list_provision_devices"],
+    },
+    note: "batch BM: reset/delete keep the console's typed-confirmation protocol (businessDestructivePhrase) and the protected-internal-business guard, stepUp-marked, owner-only like the routes; the DELETE lane's audit payload snapshots the dying tenant like the console's",
     test: "integration/platform-mcp.integration.test.ts",
   },
   {
@@ -1130,6 +1139,9 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Tenants",
     entity: "Tenant devices",
     routes: ["platform/businesses"],
+    ops: { listDetail: ["list_provision_devices"] },
+    status: "route-only (by design)",
+    note: "the key-maker POST lane mints device-pairing links — a short-lived ops credential into the business — and the read half is the provision-lifecycle row's list_provision_devices; minting ops keys stays in the console, same doctrine as the other connection-provisioning tiers",
   },
   {
     id: "platform.billing-plans",
