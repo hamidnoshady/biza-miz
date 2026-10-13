@@ -465,6 +465,21 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // ledger-posting waste/write-down lanes are separately high-risk.
   { actionType: "inventory.item.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "inventory.item.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch BH — the AEC registers. Creates/edits are mode/low like every other
+  // project desk record; deletes remove a project's data records and the
+  // review verb takes money-state decisions — both step up.
+  { actionType: "aec.record.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.record.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.record.delete", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  { actionType: "aec.record.action", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.record.review", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  { actionType: "aec.contract.commercial.save", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.boq.version.save", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.profile.save", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.projectProfile.save", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.participant.add", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.participant.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "aec.participant.remove", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

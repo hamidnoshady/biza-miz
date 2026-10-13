@@ -33,6 +33,134 @@ import { decideEstimateApproval } from "./aec-boq-service";
 import { decideCertificateApproval, decideVariationApproval } from "./aec-commercial-service";
 import { decideCommitmentApproval, decideMaterialRequestApproval } from "./aec-procurement-service";
 import { decideSubmittalApproval } from "./aec-rfi-service";
+// Batch BH — the AEC registers (src/app/api/aec/**). Each generic verb
+// dispatches the entity lane with the exact route capability gate.
+import {
+  AecError,
+  addProjectParticipant,
+  removeProjectParticipant,
+  saveBusinessAecProfile,
+  saveProjectAecProfile,
+  updateProjectParticipant,
+} from "./aec-service";
+import {
+  addSubmittalRevision,
+  applyRfiAction,
+  closeSubmittalRevision,
+  createRfi,
+  createSubmittal,
+  decideSubmittalRevision,
+  deleteRfi,
+  deleteSubmittal,
+  deleteSubmittalRevision,
+  rfiProjectId,
+  startSubmittalReview,
+  submittalProjectId,
+  submittalRevisionProjectId,
+  submitSubmittalRevision,
+  updateRfi,
+  updateSubmittal,
+  updateSubmittalRevision,
+} from "./aec-rfi-service";
+import {
+  applySiteIssueAction,
+  applySiteLogAction,
+  createChecklist,
+  createSiteIssue,
+  createSiteLog,
+  deleteChecklist,
+  deleteSiteIssue,
+  deleteSiteLog,
+  siteIssueProjectId,
+  siteLogProjectId,
+  updateChecklist,
+  updateSiteIssue,
+  updateSiteLog,
+} from "./aec-site-service";
+import { isSiteIssueAction, siteIssueActionNeedsApproval } from "./aec-site";
+import { isSubmittalDecision } from "./aec-rfi";
+import {
+  approveEstimateVersion,
+  createEstimate,
+  createEstimateVersion,
+  deleteEstimate,
+  estimateProjectId,
+  returnEstimateVersion,
+  saveDraftVersion,
+  startEstimateReview,
+  submitEstimateVersion,
+  updateEstimate,
+  versionContextProjectId,
+} from "./aec-boq-service";
+import {
+  applyCertificateAction,
+  applyVariationAction,
+  certificateProjectId,
+  contractProjectId,
+  createCertificate,
+  createVariation,
+  deleteCertificate,
+  deleteVariation,
+  saveContractCommercial,
+  updateCertificate,
+  updateVariation,
+  variationProjectId,
+} from "./aec-commercial-service";
+import {
+  isCertificateAction,
+  isVariationAction,
+  certificateActionNeedsApproval,
+  variationActionNeedsApproval,
+} from "./aec-commercial";
+import {
+  addRevision,
+  acknowledgeTransmittal,
+  createDrawing,
+  createTransmittal,
+  deleteDrawing,
+  deleteRevision,
+  deleteTransmittal,
+  drawingProjectId,
+  issueTransmittal,
+  revisionProjectId,
+  transmittalProjectId,
+  updateDrawing,
+  updateRevision,
+  updateTransmittal,
+} from "./aec-doc-service";
+import {
+  applyCommitmentAction,
+  applyMaterialRequestAction,
+  applyQuotationAction,
+  applyRfqAction,
+  commitmentProjectId,
+  createCommitment,
+  createMaterialRequest,
+  createRfq,
+  deleteCommitment,
+  deleteMaterialRequest,
+  deleteQuotation,
+  deleteRfq,
+  quotationProjectId,
+  recordDelivery,
+  recordQuotation,
+  requestProjectId,
+  rfqProjectId,
+  updateCommitment,
+  updateMaterialRequest,
+  updateQuotation,
+  updateRfq,
+} from "./aec-procurement-service";
+import {
+  isCommitmentAction,
+  isMaterialRequestAction,
+  isQuotationAction,
+  isRfqAction,
+  commitmentActionNeedsApproval,
+  materialRequestActionNeedsApproval,
+  quotationActionNeedsApproval,
+  rfqActionNeedsApproval,
+} from "./aec-procurement";
 import { createItem, createVariantChild, getItem, setWeightAttributes, getWeightAttributes, addStone, removeStone } from "./items-service";
 import { validateVariantAttributes, type VariantAttributeInput } from "./items";
 import { createBrand, updateItemProfile, type ItemProfileInput } from "./item-brands-service";
@@ -7543,6 +7671,434 @@ const reportSavedDelete: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { savedReportId, deleted: true } };
 };
 
+// ── Batch BH — AEC registers close (54 lanes under /api/aec/**) ─────────────
+// Four grouped verbs in front of one uniform route pattern: aecOwner(perm) +
+// requireProjectCapability(owner, projectId, tier) + service call +
+// handleAecError. Review-side actions ride a separate verb because the routes
+// demand workspaceApprove there (the MCP capability mirrors it). Field photo
+// upload carries media bytes and stays route-only by design.
+function failAec(err: unknown): AutopilotExecutionResult {
+  if (err instanceof AecError || err instanceof WorkspaceError) return fail(err.code);
+  throw err;
+}
+
+type Body = Record<string, unknown>;
+type AecOwner = NonNullable<Awaited<ReturnType<typeof workspaceOwnerFor>>>;
+
+/** Service payloads are typed interfaces; the executor result wants a record. */
+function aecOk(value: unknown): AutopilotExecutionResult {
+  return { ok: true, result: value as Record<string, unknown> };
+}
+
+// Create lanes: parent = "project" (projectId payload key), parent = "id"
+// (resolve project through the parent entity), parent = null (tenant-level
+// checklists, like the route that only calls aecOwner).
+const AEC_CREATE = {
+  rfi: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createRfi(o, id, b) },
+  site_issue: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createSiteIssue(o, id, b) },
+  site_log: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createSiteLog(o, id, b) },
+  variation: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createVariation(o, id, b) },
+  request: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createMaterialRequest(o, id, b) },
+  submittal: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createSubmittal(o, id, b) },
+  transmittal: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createTransmittal(o, id, b) },
+  document: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createDrawing(o, id, b) },
+  certificate: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createCertificate(o, id, b) },
+  commitment: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createCommitment(o, id, b) },
+  estimate: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createEstimate(o, id, b) },
+  rfq: { parent: "project" as const, run: (o: AecOwner, id: string, b: Body) => createRfq(o, id, b) },
+  checklist: { parent: null, run: (o: AecOwner, _id: string, b: Body) => createChecklist(o, b) },
+  quotation: {
+    parent: "id" as const,
+    projectOfParent: (o: AecOwner, id: string) => rfqProjectId(o.businessId, id),
+    run: (o: AecOwner, id: string, b: Body) => recordQuotation(o, id, b),
+  },
+  estimate_version: {
+    parent: "id" as const,
+    projectOfParent: (o: AecOwner, id: string) => estimateProjectId(o.businessId, id),
+    run: (o: AecOwner, id: string, b: Body) => createEstimateVersion(o, id, b),
+  },
+  document_revision: {
+    parent: "id" as const,
+    projectOfParent: (o: AecOwner, id: string) => drawingProjectId(o.businessId, id),
+    run: (o: AecOwner, id: string, b: Body) => addRevision(o, id, b),
+  },
+  commitment_delivery: {
+    parent: "id" as const,
+    projectOfParent: (o: AecOwner, id: string) => commitmentProjectId(o.businessId, id),
+    run: (o: AecOwner, id: string, b: Body) => recordDelivery(o, id, b),
+  },
+  submittal_revision: {
+    parent: "id" as const,
+    projectOfParent: (o: AecOwner, id: string) => submittalProjectId(o.businessId, id),
+    run: (o: AecOwner, id: string, b: Body) => addSubmittalRevision(o, id, b),
+  },
+} as const;
+type AecCreateEntity = keyof typeof AEC_CREATE;
+
+// Edit lanes: entity id → projectIdOf → capability "manage" → updateX/deleteX
+// (checklists are tenant-level, like the route).
+const AEC_CUD = {
+  rfi: { projectIdOf: rfiProjectId, update: updateRfi, delete: deleteRfi },
+  site_issue: { projectIdOf: siteIssueProjectId, update: updateSiteIssue, delete: deleteSiteIssue },
+  site_log: { projectIdOf: siteLogProjectId, update: updateSiteLog, delete: deleteSiteLog },
+  variation: { projectIdOf: variationProjectId, update: updateVariation, delete: deleteVariation },
+  request: { projectIdOf: requestProjectId, update: updateMaterialRequest, delete: deleteMaterialRequest },
+  submittal: { projectIdOf: submittalProjectId, update: updateSubmittal, delete: deleteSubmittal },
+  transmittal: { projectIdOf: transmittalProjectId, update: updateTransmittal, delete: deleteTransmittal },
+  document: { projectIdOf: drawingProjectId, update: updateDrawing, delete: deleteDrawing },
+  certificate: { projectIdOf: certificateProjectId, update: updateCertificate, delete: deleteCertificate },
+  commitment: { projectIdOf: commitmentProjectId, update: updateCommitment, delete: deleteCommitment },
+  estimate: { projectIdOf: estimateProjectId, update: updateEstimate, delete: deleteEstimate },
+  rfq: { projectIdOf: rfqProjectId, update: updateRfq, delete: deleteRfq },
+  quotation: { projectIdOf: quotationProjectId, update: updateQuotation, delete: deleteQuotation },
+  submittal_revision: {
+    projectIdOf: submittalRevisionProjectId,
+    update: updateSubmittalRevision,
+    delete: deleteSubmittalRevision,
+  },
+  drawing_revision: { projectIdOf: revisionProjectId, update: updateRevision, delete: deleteRevision },
+  checklist: { projectIdOf: null, update: updateChecklist, delete: deleteChecklist },
+} as const;
+type AecCudEntity = keyof typeof AEC_CUD;
+
+// Status lanes: manage-side action verbs. `needsApproval` true means the
+// entity's review-side set (aec.record.review) like the routes' split guard.
+const AEC_RFI_ACTIONS = ["open", "answer", "close", "cancel"];
+const AEC_SITE_LOG_ACTIONS = ["submit", "reopen"];
+const AEC_TRANSMITTAL_ACTIONS = ["issue", "acknowledge"];
+
+interface AecActionEntry {
+  projectIdOf: (businessId: string, id: string) => Promise<string>;
+  isAction: (action: string) => boolean;
+  needsApproval: (action: string) => boolean;
+  apply: (owner: AecOwner, id: string, action: string, payload: Body) => Promise<unknown>;
+}
+
+const AEC_ACTIONS: Record<string, AecActionEntry> = {
+  rfi: {
+    projectIdOf: rfiProjectId,
+    isAction: (a) => AEC_RFI_ACTIONS.includes(a),
+    needsApproval: () => false,
+    apply: (o, id, a, b) => applyRfiAction(o, id, a as never, b),
+  },
+  site_issue: {
+    projectIdOf: siteIssueProjectId,
+    isAction: (a) => isSiteIssueAction(a),
+    needsApproval: (a) => siteIssueActionNeedsApproval(a as never),
+    apply: (o, id, a, b) =>
+      applySiteIssueAction(o, id, a as never, {
+        resolutionNote: b.resolutionNote,
+        result: b.result,
+        closeoutNote: b.closeoutNote,
+      }),
+  },
+  site_log: {
+    projectIdOf: siteLogProjectId,
+    isAction: (a) => AEC_SITE_LOG_ACTIONS.includes(a),
+    needsApproval: () => false,
+    apply: (o, id, a) => applySiteLogAction(o, id, a as never),
+  },
+  variation: {
+    projectIdOf: variationProjectId,
+    isAction: (a) => isVariationAction(a),
+    needsApproval: (a) => variationActionNeedsApproval(a as never),
+    apply: (o, id, a, b) =>
+      applyVariationAction(o, id, a as never, { approvedAmountRial: b.approvedAmountRial, note: b.note }),
+  },
+  request: {
+    projectIdOf: requestProjectId,
+    isAction: (a) => isMaterialRequestAction(a),
+    needsApproval: (a) => materialRequestActionNeedsApproval(a as never),
+    apply: (o, id, a, b) => applyMaterialRequestAction(o, id, a as never, { note: b.note }),
+  },
+  certificate: {
+    projectIdOf: certificateProjectId,
+    isAction: (a) => isCertificateAction(a),
+    needsApproval: (a) => certificateActionNeedsApproval(a as never),
+    apply: (o, id, a, b) =>
+      applyCertificateAction(o, id, a as never, { approvedAmountRial: b.approvedAmountRial, note: b.note }),
+  },
+  commitment: {
+    projectIdOf: commitmentProjectId,
+    isAction: (a) => isCommitmentAction(a),
+    needsApproval: (a) => commitmentActionNeedsApproval(a as never),
+    apply: (o, id, a, b) => applyCommitmentAction(o, id, a as never, { note: b.note, deliveredOn: b.deliveredOn }),
+  },
+  rfq: {
+    projectIdOf: rfqProjectId,
+    isAction: (a) => isRfqAction(a),
+    needsApproval: () => rfqActionNeedsApproval(),
+    apply: (o, id, a) => applyRfqAction(o, id, a as never),
+  },
+  quotation: {
+    projectIdOf: quotationProjectId,
+    isAction: (a) => isQuotationAction(a),
+    needsApproval: () => quotationActionNeedsApproval(),
+    apply: (o, id, a) => applyQuotationAction(o, id, a as never),
+  },
+  transmittal: {
+    projectIdOf: transmittalProjectId,
+    isAction: (a) => AEC_TRANSMITTAL_ACTIONS.includes(a),
+    needsApproval: () => false,
+    apply: (o, id, a, b) => (a === "issue" ? issueTransmittal(o, id) : acknowledgeTransmittal(o, id, b)),
+  },
+};
+
+// These two workflows split inside a single status lane: their "submit" runs
+// manage-side (workspace.manage + capability "manage"), the rest review-side
+// (workspace.approve + capability "view"), exactly as the routes gate.
+AEC_ACTIONS.submittal_revision = {
+  projectIdOf: (b, id) => submittalRevisionProjectId(b, id).then((row) => row.projectId),
+  isAction: (a) => ["submit", "start_review", "decide", "close"].includes(a),
+  needsApproval: (a) => a !== "submit",
+  apply: (o, id, a, b) => {
+    if (a === "submit") return submitSubmittalRevision(o, id, b);
+    if (a === "start_review") return startSubmittalReview(o, id);
+    if (a === "close") return closeSubmittalRevision(o, id);
+    const decision = str(b.decision) ?? "";
+    if (!isSubmittalDecision(decision)) throw new AecError("invalid_submittal_decision");
+    return decideSubmittalRevision(o, id, decision, str(b.note) ?? "");
+  },
+};
+AEC_ACTIONS.boq_version = {
+  projectIdOf: (b, id) => versionContextProjectId(b, id).then((row) => row.projectId),
+  isAction: (a) => ["submit", "start_review", "approve", "return"].includes(a),
+  needsApproval: (a) => a !== "submit",
+  apply: (o, id, a, b) => {
+    if (a === "submit") return submitEstimateVersion(o, id, b);
+    if (a === "start_review") return startEstimateReview(o, id);
+    if (a === "approve") return approveEstimateVersion(o, id, str(b.note) ?? "");
+    return returnEstimateVersion(o, id, str(b.note) ?? "");
+  },
+};
+
+// Review-side lanes: routes demand workspaceApprove + capability "view".
+const AEC_REVIEW: Record<string, AecActionEntry> = {
+  site_issue: AEC_ACTIONS.site_issue,
+  variation: AEC_ACTIONS.variation,
+  request: AEC_ACTIONS.request,
+  certificate: AEC_ACTIONS.certificate,
+  commitment: AEC_ACTIONS.commitment,
+  quotation: AEC_ACTIONS.quotation,
+  submittal_revision: AEC_ACTIONS.submittal_revision,
+  boq_version: AEC_ACTIONS.boq_version,
+};
+
+function aecSideRefuse(entry: AecActionEntry, action: string, side: "manage" | "review"): string | null {
+  const reviewSide = entry.needsApproval(action);
+  if (side === "manage" && reviewSide) return "use_review_verb";
+  if (side === "review" && !reviewSide) return "use_action_verb";
+  return null;
+}
+
+const aecRecordCreate: AutopilotExecutor = async (ctx) => {
+  const entity = str(ctx.payload.entity) as AecCreateEntity | null;
+  const entry = entity ? AEC_CREATE[entity] : undefined;
+  if (!entry) return fail("bad_entity");
+  const body = (ctx.payload.record ?? {}) as Body;
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    if (entry.parent === "project") {
+      const projectId = str(ctx.payload.projectId);
+      if (!projectId) return fail("project_required");
+      await requireProjectCapability(owner, projectId, "manage");
+      return aecOk(await entry.run(owner, projectId, body));
+    }
+    if (entry.parent === "id") {
+      const parentId = str(ctx.payload.parentId);
+      if (!parentId) return fail("parent_required");
+      const projectId = await entry.projectOfParent(owner, parentId);
+      await requireProjectCapability(owner, projectId, "manage");
+      return aecOk(await entry.run(owner, parentId, body));
+    }
+    return aecOk(await entry.run(owner, "", body));
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecRecordUpdate: AutopilotExecutor = async (ctx) => {
+  const entity = str(ctx.payload.entity) as AecCudEntity | null;
+  const entry = entity ? AEC_CUD[entity] : undefined;
+  const id = str(ctx.payload.id);
+  if (!entry || !id) return fail("missing_fields");
+  const patch = (ctx.payload.patch ?? {}) as Body;
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    if (entry.projectIdOf) {
+      const found = await entry.projectIdOf(ctx.businessId, id);
+      await requireProjectCapability(owner, typeof found === "string" ? found : found.projectId, "manage");
+    }
+    return aecOk(await entry.update(owner, id, patch));
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecRecordDelete: AutopilotExecutor = async (ctx) => {
+  const entity = str(ctx.payload.entity) as AecCudEntity | null;
+  const entry = entity ? AEC_CUD[entity] : undefined;
+  const id = str(ctx.payload.id);
+  if (!entry || !id) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    if (entry.projectIdOf) {
+      const found = await entry.projectIdOf(ctx.businessId, id);
+      await requireProjectCapability(owner, typeof found === "string" ? found : found.projectId, "manage");
+    }
+    await entry.delete(owner, id);
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecRecordAction: AutopilotExecutor = async (ctx) => {
+  const entry = AEC_ACTIONS[str(ctx.payload.entity) ?? ""];
+  const id = str(ctx.payload.id);
+  const action = str(ctx.payload.action) ?? "";
+  if (!entry || !id) return fail("missing_fields");
+  if (!entry.isAction(action)) return fail("invalid_action");
+  const refuse = aecSideRefuse(entry, action, "manage");
+  if (refuse) return fail(refuse);
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const projectId = await entry.projectIdOf(ctx.businessId, id);
+    await requireProjectCapability(owner, projectId, "manage");
+    return aecOk(await entry.apply(owner, id, action, ctx.payload as Body));
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecRecordReview: AutopilotExecutor = async (ctx) => {
+  const entry = AEC_REVIEW[str(ctx.payload.entity) ?? ""];
+  const id = str(ctx.payload.id);
+  const action = str(ctx.payload.action) ?? "";
+  if (!entry || !id) return fail("missing_fields");
+  if (!entry.isAction(action)) return fail("invalid_action");
+  const refuse = aecSideRefuse(entry, action, "review");
+  if (refuse) return fail(refuse);
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const projectId = await entry.projectIdOf(ctx.businessId, id);
+    await requireProjectCapability(owner, projectId, "view");
+    return aecOk(await entry.apply(owner, id, action, ctx.payload as Body));
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecContractCommercialSave: AutopilotExecutor = async (ctx) => {
+  const contractId = str(ctx.payload.contractId) ?? str(ctx.payload.id);
+  if (!contractId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    // The route only gates when the contract resolves to a project.
+    const projectId = await contractProjectId(ctx.businessId, contractId);
+    if (projectId) await requireProjectCapability(owner, projectId, "manage");
+    const commercial = await saveContractCommercial(owner, contractId, (ctx.payload.commercial ?? {}) as Body);
+    return { ok: true, result: { commercial } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecBoqVersionSave: AutopilotExecutor = async (ctx) => {
+  const versionId = str(ctx.payload.versionId) ?? str(ctx.payload.id);
+  if (!versionId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const { projectId } = await versionContextProjectId(ctx.businessId, versionId);
+    await requireProjectCapability(owner, projectId, "manage");
+    const tree = await saveDraftVersion(owner, versionId, (ctx.payload.tree ?? {}) as Body);
+    return { ok: true, result: { tree } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecProfileSave: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const profile = await saveBusinessAecProfile(owner, (ctx.payload.profile ?? {}) as Body);
+    return { ok: true, result: { profile } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecProjectProfileSave: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId) ?? str(ctx.payload.id);
+  if (!projectId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await requireProjectCapability(owner, projectId, "manage");
+    const profile = await saveProjectAecProfile(owner, projectId, (ctx.payload.profile ?? {}) as Body);
+    return { ok: true, result: { profile } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecParticipantAdd: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId);
+  if (!projectId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await requireProjectCapability(owner, projectId, "manage");
+    const participants = await addProjectParticipant(owner, projectId, (ctx.payload.participant ?? {}) as Body);
+    return { ok: true, result: { participants } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecParticipantUpdate: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId);
+  const participantId = str(ctx.payload.participantId);
+  if (!projectId || !participantId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await requireProjectCapability(owner, projectId, "manage");
+    const participants = await updateProjectParticipant(
+      owner,
+      projectId,
+      participantId,
+      (ctx.payload.participant ?? {}) as Body,
+    );
+    return { ok: true, result: { participants } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
+const aecParticipantRemove: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId);
+  const participantId = str(ctx.payload.participantId);
+  if (!projectId || !participantId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await requireProjectCapability(owner, projectId, "manage");
+    const participants = await removeProjectParticipant(owner, projectId, participantId);
+    return { ok: true, result: { participants } };
+  } catch (err) {
+    return failAec(err);
+  }
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -7752,6 +8308,18 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   rollupLocationSetActive,
   inventoryItemSave,
   inventoryItemDelete,
+  aecRecordCreate,
+  aecRecordUpdate,
+  aecRecordDelete,
+  aecRecordAction,
+  aecRecordReview,
+  aecContractCommercialSave,
+  aecBoqVersionSave,
+  aecProfileSave,
+  aecProjectProfileSave,
+  aecParticipantAdd,
+  aecParticipantUpdate,
+  aecParticipantRemove,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

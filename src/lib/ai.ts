@@ -584,6 +584,23 @@ export type ActionType =
   // item is deactivated instead, exactly like the route does.
   | "inventory.item.save"
   | "inventory.item.delete"
+  // Batch BH — the AEC registers close. Four grouped verbs dispatch the 54
+  // uniform lanes (create/update/delete/status) entity-by-entity with the
+  // exact route capability checks, plus the few profile/commercial PUTs and
+  // the participant lane. Record deletes step up (data-record deletes);
+  // review-side actions run under workspaceApprove like the routes.
+  | "aec.record.create"
+  | "aec.record.update"
+  | "aec.record.delete"
+  | "aec.record.action"
+  | "aec.record.review"
+  | "aec.contract.commercial.save"
+  | "aec.boq.version.save"
+  | "aec.profile.save"
+  | "aec.projectProfile.save"
+  | "aec.participant.add"
+  | "aec.participant.update"
+  | "aec.participant.remove"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -753,6 +770,18 @@ export type AutopilotExecutorKey =
   | "rollupLocationSetActive"
   | "inventoryItemSave"
   | "inventoryItemDelete"
+  | "aecRecordCreate"
+  | "aecRecordUpdate"
+  | "aecRecordDelete"
+  | "aecRecordAction"
+  | "aecRecordReview"
+  | "aecContractCommercialSave"
+  | "aecBoqVersionSave"
+  | "aecProfileSave"
+  | "aecProjectProfileSave"
+  | "aecParticipantAdd"
+  | "aecParticipantUpdate"
+  | "aecParticipantRemove"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2703,6 +2732,102 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف قلم انبار — قلمِ ارجاع‌داده‌شده غیرفعال می‌شود (deactivated: true)",
     payloadHint: '{ id: string }',
     executor: "inventoryItemDelete",
+  },
+  "aec.record.create": {
+    type: "aec.record.create",
+    endpoint: "/api/aec/projects/{projectId}/<entity>",
+    method: "POST",
+    label: "ساخت رکورد AEC — entity + parent; بدنهٔ رکورد دقیقاً مانند فرم صفحه",
+    payloadHint: '{ entity: "rfi"|"site_issue"|"site_log"|"variation"|"request"|"submittal"|"transmittal"|"document"|"certificate"|"commitment"|"participant"|"estimate"|"rfq"|"checklist"|"quotation"|"estimate_version"|"document_revision"|"commitment_delivery"|"submittal_revision", projectId?: string (والد برای بیشترموجودیت‌ها), parentId?: string (rfq برای quotation، estimateestimate_version، drawing برای document_revision، commitment برای delivery، submittal برای revision), record: object — سند مانند فرم }',
+    executor: "aecRecordCreate",
+  },
+  "aec.record.update": {
+    type: "aec.record.update",
+    endpoint: "/api/aec/<entity>/{id}",
+    method: "PATCH",
+    label: "ویرایش رکورد AEC — patch همان بدنهٔ PATCH صفحه",
+    payloadHint: '{ entity: rfi|site_issue|site_log|variation|request|submittal|transmittal|document|certificate|commitment|estimate|rfq|quotation|checklist|submittal_revision|drawing_revision, id: string, patch: object }',
+    executor: "aecRecordUpdate",
+  },
+  "aec.record.delete": {
+    type: "aec.record.delete",
+    endpoint: "/api/aec/<entity>/{id}",
+    method: "DELETE",
+    label: "حذف رکورد AEC — رکورد دادهٔ پروژه است؛ تأیید صریح لازم",
+    payloadHint: '{ entity: مانند update، id: string }',
+    executor: "aecRecordDelete",
+  },
+  "aec.record.action": {
+    type: "aec.record.action",
+    endpoint: "/api/aec/<entity>/{id}/status",
+    method: "POST",
+    label: "اقدام manage-side — action‌های ثبت‌کننده (آن‌هایی که رخداد بنویسند، نه تصمیم تصویب)",
+    payloadHint: '{ entity: rfi|site_issue|site_log|variation|request|submittal_revision|boq_version|certificate|commitment|rfq|quotation|transmittal, id: string, action: string, note?: string, approvedAmountRial?: number, deliveredOn?: string, resolutionNote?: string, result?: string, closeoutNote?: string }',
+    executor: "aecRecordAction",
+  },
+  "aec.record.review": {
+    type: "aec.record.review",
+    endpoint: "/api/aec/<entity>/{id}/status",
+    method: "POST",
+    label: "اقدام review-side (workspaceApprove) — تصمیم‌های تصویب/رد؛ قفل money-state است، تأیید صریح لازم",
+    payloadHint: '{ entity: site_issue|variation|request|submittal_revision|boq_version|certificate|commitment|quotation, id: string, action: string, note?: string, result?: string, approvedAmountRial?: number }',
+    executor: "aecRecordReview",
+  },
+  "aec.contract.commercial.save": {
+    type: "aec.contract.commercial.save",
+    endpoint: "/api/aec/contracts/{id}/commercial",
+    method: "PUT",
+    label: "سند قرارداد تجاری پروژه — ساختار دادهٔ مانند فرم می‌آید",
+    payloadHint: '{ contractId: string, commercial: object }',
+    executor: "aecContractCommercialSave",
+  },
+  "aec.boq.version.save": {
+    type: "aec.boq.version.save",
+    endpoint: "/api/aec/boq/versions/{id}",
+    method: "PUT",
+    label: "ذخیرهٔ پیش‌نویس نسخهٔ صورت‌وضعیت — tree کامل",
+    payloadHint: '{ versionId: string, tree: object }',
+    executor: "aecBoqVersionSave",
+  },
+  "aec.profile.save": {
+    type: "aec.profile.save",
+    endpoint: "/api/aec/profile",
+    method: "PUT",
+    label: "پروفایل سازمانی AEC کسب‌وکار (settingsManage)",
+    payloadHint: '{ profile: object }',
+    executor: "aecProfileSave",
+  },
+  "aec.projectProfile.save": {
+    type: "aec.projectProfile.save",
+    endpoint: "/api/aec/projects/{projectId}/profile",
+    method: "PUT",
+    label: "پروفایل AEC یک پروژه",
+    payloadHint: '{ projectId: string, profile: object }',
+    executor: "aecProjectProfileSave",
+  },
+  "aec.participant.add": {
+    type: "aec.participant.add",
+    endpoint: "/api/aec/projects/{projectId}/participants",
+    method: "POST",
+    label: "افزودن شرکت‌کنندهٔ پروژه",
+    payloadHint: '{ projectId: string, participant: object }',
+    executor: "aecParticipantAdd",
+  },
+  "aec.participant.update": {
+    type: "aec.participant.update",
+    endpoint: "/api/aec/projects/{projectId}/participants/{participantId}",
+    method: "PATCH",
+    label: "ویرایش شرکت‌کنندهٔ پروژه",
+    payloadHint: '{ projectId: string, participantId: string, participant: object }',
+    executor: "aecParticipantUpdate",
+  },
+  "aec.participant.remove": {
+    type: "aec.participant.remove",
+    endpoint: "/api/aec/projects/{projectId}/participants/{participantId}",
+    method: "DELETE",
+    label: "حذف شرکت‌کنندهٔ پروژه — تأیید صریح لازم",
+    payloadHint: '{ projectId: string, participantId: string }',
+    executor: "aecParticipantRemove",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

@@ -259,7 +259,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       bulk: ["barcode.bulkMint"],
     },
     note: "batch BG: item masters close the row; the delete mirrors the screen's reference check (a referenced item deactivates instead, deactivated:true comes back); the stock reads and adjustment-propose lanes were already covered, and the bulk column the bare inventory prefix pulls in (inventory/barcodes/bulk) rides barcode.bulkMint like the barcodes row",
-    test: "integration/stock.integration.test.ts",
+    test: "integration/inventory-barcodes.integration.test.ts + inventory-visual-count.integration.test.ts",
   },
   {
     id: "inventory.warehouses-transfers",
@@ -680,8 +680,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
         "get_aec_project_financial_health", "get_boq_variance", "get_latest_drawing_revision",
         "list_project_commercial_risks", "list_delayed_project_activities", "list_upcoming_milestones",
       ],
+      create: ["aec.record.create", "aec.participant.add"],
+      update: ["aec.record.update", "aec.contract.commercial.save", "aec.boq.version.save", "aec.profile.save", "aec.projectProfile.save", "aec.participant.update"],
+      lifecycle: ["aec.record.action", "aec.record.review", "aec.record.delete", "aec.participant.remove"],
     },
-    status: undefined,
+    note: "batch BH: four grouped verbs dispatch the 54 uniform lanes entity-by-entity with the exact route capability gates (workspaceManage, workspaceApprove for review-side status actions like the routes, settingsManage for the org profile); record deletes and participant removal are always_approve/high (data-record deletes); review actions likewise (money-state decisions); the field photo upload carries media bytes and stays route-only by design, like the other media lanes",
+    test: "integration/aec-rfi.integration.test.ts + aec-boq + aec-commercial + aec-document-control + aec-procurement + aec-site",
   },
 
   // ============================ Business configuration ============================

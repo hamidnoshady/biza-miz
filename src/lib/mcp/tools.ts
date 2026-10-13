@@ -3447,6 +3447,216 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
       additionalProperties: false,
     },
   },
+  // Batch BH — the AEC registers. The 54 uniform lanes dispatch through four
+  // grouped verbs + profile/commercial PUTs + participant lanes; the record
+  // body is the same object the screen's form posts.
+  {
+    name: "write_aec_record_create",
+    actionType: "aec.record.create",
+    english: "Create an AEC project record (rfi, site issue/log, variation, request, submittal, transmittal, document, certificate, commitment, estimate, rfq, checklist, or a parent-attached row: quotation, estimate_version, document_revision, commitment_delivery, submittal_revision) — record body is the same object the desk form posts.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity: {
+          type: "string",
+          enum: ["rfi", "site_issue", "site_log", "variation", "request", "submittal", "transmittal", "document", "certificate", "commitment", "estimate", "rfq", "checklist", "quotation", "estimate_version", "document_revision", "commitment_delivery", "submittal_revision"],
+        },
+        projectId: id("پروژهٔ والد — برای بیشتر موجودیت‌ها"),
+        parentId: id("والد موجودیت‌های زیرین — rfq برای quotation، estimate برای estimate_version، drawing برای document_revision، commitment برای commitment_delivery، submittal برای submittal_revision"),
+        record: { type: "object", additionalProperties: true },
+      },
+      required: ["entity"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_record_update",
+    actionType: "aec.record.update",
+    english: "Edit an AEC project record — the patch body is exactly what the screen's form PATCHes.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity: {
+          type: "string",
+          enum: ["rfi", "site_issue", "site_log", "variation", "request", "submittal", "transmittal", "document", "certificate", "commitment", "estimate", "rfq", "quotation", "submittal_revision", "drawing_revision", "checklist"],
+        },
+        id: id("رکورد"),
+        patch: { type: "object", additionalProperties: true },
+      },
+      required: ["entity", "id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_record_delete",
+    actionType: "aec.record.delete",
+    english: "Delete an AEC project record — data-record delete: always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity: {
+          type: "string",
+          enum: ["rfi", "site_issue", "site_log", "variation", "request", "submittal", "transmittal", "document", "certificate", "commitment", "estimate", "rfq", "quotation", "submittal_revision", "drawing_revision", "checklist"],
+        },
+        id: id("رکورد"),
+      },
+      required: ["entity", "id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_record_action",
+    actionType: "aec.record.action",
+    english: "Run a manage-side AEC status action (rfi open/answer/close/cancel, site log submit/reopen, transmittal issue/acknowledge, rfq/quotation lifecycle, plus each entity's record-keeping actions) — approval-side actions live on write_aec_record_review, like the screen.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity: {
+          type: "string",
+          enum: ["rfi", "site_issue", "site_log", "variation", "request", "submittal_revision", "boq_version", "certificate", "commitment", "rfq", "quotation", "transmittal"],
+        },
+        id: id("رکورد"),
+        action: { type: "string" },
+        note: { type: "string" },
+        approvedAmountRial: { type: "number" },
+        deliveredOn: { type: "string" },
+        resolutionNote: { type: "string" },
+        result: { type: "string" },
+        closeoutNote: { type: "string" },
+      },
+      required: ["entity", "id", "action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_record_review",
+    actionType: "aec.record.review",
+    english: "Run a review-side AEC status action under workspace.approve (site issue/variation/certificate/commitment/quotation approval decisions, submittal decide/close, boq approve/return) — money-state decisions: always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity: {
+          type: "string",
+          enum: ["site_issue", "variation", "request", "submittal_revision", "boq_version", "certificate", "commitment", "quotation"],
+        },
+        id: id("رکورد"),
+        action: { type: "string" },
+        decision: { type: "string" },
+        note: { type: "string" },
+        approvedAmountRial: { type: "number" },
+      },
+      required: ["entity", "id", "action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_contract_commercial_save",
+    actionType: "aec.contract.commercial.save",
+    english: "Save a project contract's commercial terms — the same object the contract form PUTs.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        contractId: id("قرارداد"),
+        commercial: { type: "object", additionalProperties: true },
+      },
+      required: ["contractId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_boq_version_save",
+    actionType: "aec.boq.version.save",
+    english: "Save a boq draft version — the full tree the estimate editor PUTs.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        versionId: id("نسخهٔ صورت‌وضعیت"),
+        tree: { type: "object", additionalProperties: true },
+      },
+      required: ["versionId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_profile_save",
+    actionType: "aec.profile.save",
+    english: "Save the business-level AEC profile (settingsManage, like the screen).",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: { profile: { type: "object", additionalProperties: true } },
+      required: ["profile"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_project_profile_save",
+    actionType: "aec.projectProfile.save",
+    english: "Save one project's AEC profile.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: id("پروژه"),
+        profile: { type: "object", additionalProperties: true },
+      },
+      required: ["projectId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_participant_add",
+    actionType: "aec.participant.add",
+    english: "Add a project participant.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: id("پروژه"),
+        participant: { type: "object", additionalProperties: true },
+      },
+      required: ["projectId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_participant_update",
+    actionType: "aec.participant.update",
+    english: "Edit a project participant.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: id("پروژه"),
+        participantId: id("شرکت‌کننده"),
+        participant: { type: "object", additionalProperties: true },
+      },
+      required: ["projectId", "participantId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_aec_participant_remove",
+    actionType: "aec.participant.remove",
+    english: "Remove a project participant — always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: id("پروژه"),
+        participantId: id("شرکت‌کننده"),
+      },
+      required: ["projectId", "participantId"],
+      additionalProperties: false,
+    },
+  },
   {
     name: "write_jewelry_item_sell",
     actionType: "jewelry.item.sell",
