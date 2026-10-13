@@ -266,6 +266,8 @@ describe("GET /api/platform/ai/gateway", () => {
     expect(fleetSql).toContain("virtual_key_ciphertext");
     expect(fleetSql).not.toContain("virtual_key,");
     expect(fleetSql).toContain("LIMIT $7::int");
+    expect(fleetSql).toContain("OFFSET (\n            SELECT (page - 1)::bigint * $7::bigint\n            FROM page_info\n          )");
+    expect(fleetSql).not.toContain("OFFSET ((p.page - 1) * $7::int)");
     expect(values).toEqual([true, false, true, "", "all", "", 20, 1]);
   });
 
@@ -286,6 +288,29 @@ describe("GET /api/platform/ai/gateway", () => {
     const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway"));
     expect(res.status).toBe(503);
     expect((await res.json()).error).toBe("ai_configuration_load_failed");
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET pagination input hardening and authorization", () => {
+  it.each([
+    ["negative", "pageSize=-5&page=-3", 1, 1],
+    ["fractional", "pageSize=1.9&page=2.9", 1, 2],
+    ["extremely large", "pageSize=999999999999&page=999999999999", 100, 2_147_483_647],
+    ["non-finite", "pageSize=Infinity&page=NaN", 20, 1],
+  ])("bounds %s pagination values without a database cast error", async (_label, search, expectedSize, expectedPage) => {
+    const res = await GET(new NextRequest(`http://localhost:3000/api/platform/ai/gateway?${search}`));
+    expect(res.status).toBe(200);
+    const [, values] = vi.mocked(query).mock.calls[0];
+    expect(values).toEqual([true, false, true, "", "all", "", expectedSize, expectedPage]);
+  });
+
+  it("does not query the platform database when ai.read is denied", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValueOnce({
+      error: new Response(JSON.stringify({ error: "forbidden" }), { status: 403 }),
+    } as never);
+    const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway"));
+    expect(res.status).toBe(403);
     expect(query).not.toHaveBeenCalled();
   });
 });
@@ -448,6 +473,8 @@ describe("fleet search, filtering and pagination (issue #757 P1-6)", () => {
     expect(json.locations).toEqual([{ id: "loc-51", businessId: "biz-1", name: "شعبه پنجاه‌ویکم" }]);
     const [sql, values] = vi.mocked(query).mock.calls[1];
     expect(sql).toContain("LIMIT $4::int");
+    expect(sql).toContain("OFFSET (\n            SELECT (page - 1)::bigint * $4::bigint\n            FROM page_info\n          )");
+    expect(sql).not.toContain("OFFSET ((p.page - 1) * $4::int)");
     expect(values).toEqual(["biz-1", "%شعبه%", "", 50, 2]);
   });
 });

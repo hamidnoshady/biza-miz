@@ -199,8 +199,10 @@ async function scanCommercialControls(
   securityBudget: { guarantee: { value: number }; insurance: { value: number } },
   deliveryBudget: { value: number },
 ): Promise<void> {
-  const certificates = await swallowCapability(() =>
-    pendingCertificates(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
+  const certificates = await swallowCapability(
+    businessId,
+    "pending_certificates",
+    () => pendingCertificates(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
   );
   for (const certificate of certificates) {
     if (budget.value >= MAX_OVERDUE_PER_SCAN) break;
@@ -220,8 +222,10 @@ async function scanCommercialControls(
     budget.value += 1;
   }
 
-  const awaitingPayment = await swallowCapability(() =>
-    certifiedClaimsAwaitingPayment(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
+  const awaitingPayment = await swallowCapability(
+    businessId,
+    "certified_claims_awaiting_payment",
+    () => certifiedClaimsAwaitingPayment(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
   );
   for (const claim of awaitingPayment) {
     if (budget.value >= MAX_OVERDUE_PER_SCAN) break;
@@ -239,8 +243,10 @@ async function scanCommercialControls(
     budget.value += 1;
   }
 
-  const securities = await swallowCapability(() =>
-    expiringSecurities(businessId, { withinDays: GUARANTEE_WINDOW_DAYS, limit: MAX_OVERDUE_PER_SCAN * 2 }),
+  const securities = await swallowCapability(
+    businessId,
+    "expiring_securities",
+    () => expiringSecurities(businessId, { withinDays: GUARANTEE_WINDOW_DAYS, limit: MAX_OVERDUE_PER_SCAN * 2 }),
   );
   for (const security of securities) {
     const key = security.kind === "insurance" ? "aec.insurance_expiring" : "aec.guarantee_expiring";
@@ -274,8 +280,10 @@ async function scanCommercialControls(
   // §29's procurement delivery delay (Wave 9). The queue already excludes an
   // award that has been delivered or closed, so a reminder here always means
   // "the supplier is late", never "somebody forgot to update a field".
-  const delays = await swallowCapability(() =>
-    delayedCommitments(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
+  const delays = await swallowCapability(
+    businessId,
+    "delayed_commitments",
+    () => delayedCommitments(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
   );
   for (const delay of delays) {
     if (deliveryBudget.value >= MAX_OVERDUE_PER_SCAN) break;
@@ -306,7 +314,14 @@ async function scanAecRegisters(businessId: string): Promise<number> {
 
   const today = await businessToday(businessId);
   const { rfis, submittals } = await overdueRegisters(businessId);
-  const siteIssues = await overdueSiteIssues(businessId, MAX_OVERDUE_PER_SCAN);
+  // `pendingSiteIssues` is intentionally gated by `qa_qc`. Site reminders are
+  // optional, so a business that has RFIs, procurement or commercial controls
+  // enabled must still complete the rest of this scan when QA/QC is off.
+  const siteIssues = await swallowCapability(
+    businessId,
+    "overdue_site_issues",
+    () => overdueSiteIssues(businessId, MAX_OVERDUE_PER_SCAN),
+  );
 
   let queued = 0;
   // One budget per register, not one for the scan: a project with fifty late
@@ -417,18 +432,62 @@ const CERTIFICATE_PENDING_DAYS = 14;
 const GUARANTEE_WINDOW_DAYS = 60;
 
 /**
- * Runs a commercial read that may be switched off.
- *
- * The certificate, guarantee and insurance queues all raise
- * `capability_disabled` for a business that has the industry but not the
- * capability — a switch, not a failure — and the hourly sweep must not throw on
- * it. Anything else is a real error and goes up.
+ * Keep background-scan logs useful without logging secrets or row contents.
+ * Business ids are safe correlation identifiers; error details are deliberately
+ * reduced to a stable code/name because database messages can contain SQL
+ * context that should not be sent to an application log.
  */
-async function swallowCapability<T>(read: () => Promise<T[]>): Promise<T[]> {
+function notificationScanLog(
+  component: string,
+  level: "info" | "error",
+  event: string,
+  fields: Record<string, string | number | boolean | null>,
+): void {
+  const line = JSON.stringify({
+    level,
+    component,
+    event,
+    ts: new Date().toISOString(),
+    ...fields,
+  });
+  if (level === "error") console.error(line);
+  else console.info(line);
+}
+
+function aecScanLog(
+  level: "info" | "error",
+  event: string,
+  fields: Record<string, string | number | boolean | null>,
+): void {
+  notificationScanLog("aec-notification-scan", level, event, fields);
+}
+
+function safeScanError(error: unknown): { name: string; code: string | null } {
+  if (!(error instanceof Error)) return { name: "unknown_error", code: null };
+  const code = "code" in error && typeof error.code === "string" ? error.code : null;
+  return { name: error.name || "Error", code };
+}
+
+/**
+ * Runs a read that may be switched off.
+ *
+ * Every optional AEC register raises `capability_disabled` for a business that
+ * has the industry but not the capability — a switch, not a failure — and the
+ * hourly sweep must not throw on it. Anything else is a real error and goes up
+ * to the per-business tick boundary.
+ */
+async function swallowCapability<T>(
+  businessId: string,
+  operation: string,
+  read: () => Promise<T[]>,
+): Promise<T[]> {
   try {
     return await read();
   } catch (error) {
-    if (error instanceof AecError && error.code === "capability_disabled") return [];
+    if (error instanceof AecError && error.code === "capability_disabled") {
+      aecScanLog("info", "capability_skipped", { businessId, operation, reason: error.code });
+      return [];
+    }
     throw error;
   }
 }
@@ -459,10 +518,13 @@ export async function runLowStockScanTick(): Promise<number> {
       try {
         queued += await withTenant(businessId, () => scanLowStock(businessId));
       } catch (error) {
-        console.error(
-          `low-stock scan failed for business ${businessId}:`,
-          error instanceof Error ? error.message : error,
-        );
+        const failure = safeScanError(error);
+        notificationScanLog("notification-scan", "error", "business_scan_failed", {
+          businessId,
+          operation: "scan_low_stock",
+          errorName: failure.name,
+          errorCode: failure.code,
+        });
       }
     }
     return queued;
@@ -495,10 +557,13 @@ export async function runAecOverdueScanTick(): Promise<number> {
       try {
         queued += await withTenant(businessId, () => scanOverdueAecRegisters(businessId));
       } catch (error) {
-        console.error(
-          `AEC overdue scan failed for business ${businessId}:`,
-          error instanceof Error ? error.message : error,
-        );
+        const failure = safeScanError(error);
+        aecScanLog("error", "business_scan_failed", {
+          businessId,
+          operation: "scan_overdue_aec_registers",
+          errorName: failure.name,
+          errorCode: failure.code,
+        });
       }
     }
     return queued;
