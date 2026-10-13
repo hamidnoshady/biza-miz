@@ -23,11 +23,17 @@ In scope (done or in progress on this branch):
   bridge command (bridge version 2), the registration client mounted in `WorkspaceShell`, and a
   Settings UI for both self-service (`/settings/profile`) and admin (`native_devices.manage`,
   inside the "دستگاه‌های ثبت‌شده" tab) revocation/reactivation
+- **mobile card/row representation (Phase 7 below)**: `DataCardTable`, a column-declared table
+  that renders as a `<table>` on a wide screen and a labelled card list on a phone, promoted from
+  the reports section's own `ReportTable` into the shared `data-table.tsx` so every module can use
+  it; applied to `crm/leads-section.tsx` as the first adopter outside reports. The remaining
+  `DataTable` call sites without a phone view are listed as follow-up (mechanical, not a design
+  question).
 
-Deferred (listed as follow-up work below): the mobile shell redesign, the list/card
-representations, biometric re-authentication, push, background sync, the scanner, camera, share
-and file flows, printers, CRM Caller ID and post-call CRM, feature flags, and store promotion
-from a candidate.
+Deferred (listed as follow-up work below): the rest of the mobile shell redesign (the app-style top
+bar and bottom nav issue #884 describes), the remaining list/table screens' card adoption,
+biometric re-authentication, push, background sync, the scanner, camera, share and file flows,
+printers, CRM Caller ID and post-call CRM, feature flags, and store promotion from a candidate.
 
 ## Baseline and what could be verified here
 
@@ -187,6 +193,62 @@ What is here:
       a native device is revoked — out of scope until the FCM slice exists.
 - [ ] Device-on-a-list verification on a real signed build — the sandbox cannot run Gradle.
 
+## Phase 7 — mobile card/row representation (acceptance criterion #10)
+
+The issue asks that "major lists/tables have mobile-native card/row representations" — a
+horizontally-scrollable `<table>` on a phone is still a desktop table, not a native list. Auditing
+every `DataTable` call site (`grep -rl "dashboard/data-table\""`, ~70 files) found that about 13
+screens (the reports section, several accounting sections, `parties-section.tsx`,
+`stock/warehouses-section.tsx`, `growth/customers-section.tsx`) already carry a hand-built phone
+card view beside their table, and the reports section had in fact already converged on one
+reusable, column-declared component for it (`ReportTable`) after the same table got copied by hand
+across several report screens and drifted. The remaining ~45 screens render a plain table with no
+phone view at all.
+
+Retrofitting every one of the ~45 remaining screens in one pass is a mechanical task, not a design
+one, and several of them (e.g. `products-list-section.tsx`, with expandable "family" rows and a
+selectable panel) are complex enough that converting them without a real device or a screenshot
+tool to check the result is a visual-regression risk, not a safe mechanical edit. So this phase:
+
+- [x] Promotes the reports section's `ReportTable` into `@/app/dashboard/data-table` as
+      `DataCardTable` (plus `DataCardTableColumn`/`DataCardTableFooterCell`), so it is the one
+      engine for every module, not only reports: a column says how to render a cell, its alignment,
+      and whether it is `desktopOnly`; that declaration drives both the desktop `<table>` and a
+      phone `<ul>` of cards, with a configurable breakpoint (`sm` default, `lg` for a table too wide
+      for a small tablet). `ReportTable` is kept as a thin wrapper over it (same types, same
+      props), so none of its ~7 existing callers changed.
+- [x] One small robustness fix while promoting it: the phone card's heading now renders in a
+      `<div>`, not a `<p>` — a first column whose cell is a whole block (name, organisation and
+      phone stacked, as in the example below) is invalid inside a `<p>`, and the old `ReportTable`
+      callers' first columns were all plain text so this never surfaced there.
+- [x] Converts `src/app/(app)/crm/leads-section.tsx` — a genuinely "major" list (CRM leads) with no
+      previous phone view — to `DataCardTable`, as the first adopter outside reports. Six columns,
+      no row-level clicking/expansion, so the conversion carried no behavioural change; the row
+      actions ("ویرایش"/"تبدیل") and the convert-to-customer flow are unchanged.
+- [x] Tests: `DataCardTable` itself (`data-table.test.tsx`, 4 new tests — same columns render in
+      both halves, `desktopOnly` is excluded from the cards, `cardTitle` overrides the default
+      heading without duplicating the first column, the empty state and footer render in both
+      halves) and `crm/leads-section.test.tsx` (3 new tests — the lead appears in both the table
+      and the card list from the one column declaration; the "ویرایش" and "تبدیل" row actions still
+      fire the same dialog/request they did before the conversion).
+- [x] Docs: `docs/design-system.md` §Tables gained a "Mobile card fallback" subsection naming
+      `DataCardTable` as the one way to give a list/table a phone view, instead of hand-rolling one.
+- [ ] The remaining ~45 `DataTable` call sites without a phone view: `products-list-section.tsx`
+      and `price-lists-section.tsx`, `locations-manager.tsx`, `backup-manager.tsx`, the inventory
+      and stock document/level/purchase lists, most of the accounting module's remaining sections
+      (`menu/categories-panel.tsx`, `multicurrency-section.tsx`, the tax-invoice screens,
+      `payroll-accrual-panel.tsx`), the `settings/transfer` import/export/history screens, the
+      `workspace` module's projects/tasks/teams/contracts/documents/approvals/reports screens and
+      every per-project panel, `growth/commission-run(s)`, `websites/cms` billing and sync,
+      `ai/usage`, `setup/accounts`, and `reports/drill-down-panel.tsx`/`shift-orders-section.tsx`.
+      Each is a mechanical adoption of `DataCardTable` — the component exists and is proven on two
+      different modules now — but each still needs a per-screen read (some have row clicks, some
+      have multi-line or expandable rows) and ideally a real-device or screenshot check before
+      converting, which this slice's sandbox cannot do.
+- [ ] `src/app/platform/**` (the super-admin console) is explicitly out of scope — it is a
+      deliberately separate visual identity per `design-lint.test.ts`'s own header, and is not part
+      of the tenant-facing app the Android TWA wraps.
+
 ## Acceptance criteria — issue #884
 
 The 28 items in the issue's "Acceptance criteria" section. "Done" means implemented here and
@@ -204,7 +266,7 @@ this slice and is listed under follow-up work.
 | 7 | Android can detect supported native capabilities | Partial | `resolveCapability` and `NativeProvider`. The app reports `notifications` only. |
 | 8 | Mobile/TWA UI uses a real app shell | Deferred | The shell redesign (top bar, `Home \| Sales \| + \| CRM \| More`) is a separate slice. The existing bottom bar is unchanged. |
 | 9 | All major platform modules remain accessible on Android | Partial | The TWA opens the full web platform, so nothing is hidden. Verify on a device. |
-| 10 | Major lists/tables have mobile-native card/row representations | Deferred | Existing design-system rules are unchanged and remain authoritative. |
+| 10 | Major lists/tables have mobile-native card/row representations | Partial | `DataCardTable` (`src/app/dashboard/data-table.tsx`) declares a table's columns once and renders both the desktop grid and a phone card list from it — promoted from the reports section's own `ReportTable`, which is now a thin wrapper over it. Used by ~13 screens already (reports, several accounting sections, `parties-section.tsx`) plus the new `crm/leads-section.tsx`. Most other `DataTable` call sites (~45) still render a bare, horizontally-scrolling table on a phone; adopting `DataCardTable` there is tracked, mechanical follow-up, not a design question (docs/design-system.md §Mobile card fallback). |
 | 11 | Device registration and revocation work | Partial | `native_app_devices`, registration/list/revoke/reactivate APIs, live enforcement in `checkNativeDevice`, the `device.identity` bridge command, and a self-/admin-service Settings UI are all in (Phase 6). Not verified on a signed device build. |
 | 12 | Biometric re-authentication works | Deferred | Capability key `biometric` is reserved; no implementation. |
 | 13 | Push notifications deep-link correctly | Deferred | No FCM in this slice. |
@@ -763,3 +825,11 @@ Settings UI pass, added on top of the above:
 (mounts it inside the existing "devices" tab, below `DeviceSettings`),
 `src/app/(app)/settings/profile/profile-section.tsx` (`SelfNativeDevicesCard`, mounted on
 `/settings/profile` — the self-service half, reachable by every role, unlike the admin tab).
+
+Phase 7 (mobile card/row representation), added on top of the above:
+`src/app/dashboard/data-table.tsx` (`DataCardTable`, `DataCardTableColumn`,
+`DataCardTableFooterCell`) and its new tests. Changed: `src/app/dashboard/reports/report-table.tsx`
+(now a thin wrapper over `DataCardTable`, same `ReportTable`/`ReportTableColumn`/
+`ReportTableFooterCell` names and props for its existing callers),
+`src/app/(app)/crm/leads-section.tsx` (converted to `DataCardTable`) and its new test,
+`docs/design-system.md` (§Tables gained "Mobile card fallback").
