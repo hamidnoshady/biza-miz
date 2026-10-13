@@ -39,6 +39,53 @@ import {
   SupportTicketNotFoundError,
 } from "../platform-service";
 import { validateTicketInput } from "../support-service";
+// Batch BL — the Billing Control Center. Every verb rides the console's own
+// services with the capability the route demands, and the money/price-policy
+// writes are stepUp like their consoles.
+import {
+  listBillingPlans,
+  saveBillingPlan,
+  activatePlan,
+  retirePlan,
+  deleteDraftPlan,
+  listFeatureCatalogue,
+  listPlanFeatures,
+  savePlanFeature,
+  deletePlanFeature,
+  listEntitlements,
+  grantEntitlement,
+  revokeEntitlement,
+} from "../billing-plans-service";
+import {
+  listSubscriptions,
+  listInvoices,
+  voidBillingInvoice,
+  applyInvoicePayment,
+  changeBusinessPlan,
+  cancelBusinessSubscription,
+  reactivateBusinessSubscription,
+  setAutoRenew,
+} from "../subscription-service";
+import {
+  listPayments,
+  saveCreditPackage,
+  grantCredits,
+  deductCredits,
+  getWallet,
+} from "../wallet-service";
+import { reviewManualPayment } from "../billing-service";
+import {
+  listSpendPolicies,
+  getSpendPolicy,
+  evaluateBusinessSpend,
+  saveSpendPolicy,
+  readCommercialSettings,
+  saveCommercialSettings,
+} from "../billing/runtime";
+import { getPublicMessageConfig, saveMessageRates } from "../messaging-billing";
+import { getMediaConfig, saveMediaTariff } from "../media-service";
+import { validateMediaTariffInput } from "../media";
+import { getAiCostingConfig, saveAiCostingConfig } from "../ai-gateway-service";
 import { platformAudit } from "../platform-auth";
 
 const TOKEN_PREFIX = "pospmcp_";
@@ -168,6 +215,49 @@ interface PlatformToolInput {
   q?: string;
   page?: number;
   pageSize?: number;
+  // Batch BL — billing lanes.
+  planKey?: string;
+  name?: string;
+  description?: string | null;
+  monthlyPriceRial?: number | null;
+  monthlyAiCreditRial?: number | null;
+  sortOrder?: number;
+  trialDays?: number;
+  graceDays?: number;
+  limits?: Record<string, unknown>;
+  featureKey?: string;
+  pricingModel?: "included" | "monthly" | "per_use" | "addon";
+  priceRial?: number;
+  freeUntil?: string | null;
+  freeLimit?: number | null;
+  expiresAt?: string | null;
+  activeOnly?: boolean;
+  isActive?: boolean;
+  creditRial?: number;
+  note?: string;
+  amountRial?: number;
+  invoiceId?: string;
+  paymentId?: string;
+  action?: string;
+  atPeriodEnd?: boolean;
+  autoRenew?: boolean;
+  group?: "messaging" | "media" | "ai";
+  values?: Record<string, unknown>;
+  monthlyBudgetRial?: number | null;
+  actionAtLimit?: string;
+  thresholds?: number[];
+  withLines?: boolean;
+  id?: string;
+  invoicePrefix?: string;
+  defaultDueDays?: number;
+  defaultGraceDays?: number;
+  rounding?: "ceil" | "floor";
+  minimumTopUpRial?: number;
+  overagePolicy?: "charge" | "block";
+  prorationPolicy?: "none" | "daily";
+  defaultSpendAction?: string;
+  invoiceFooter?: string;
+  taxRateBps?: number;
 }
 
 export interface PlatformMcpTool {
@@ -359,6 +449,353 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
         assignedAdminId: { type: "string", description: "null unassigns." },
       },
       required: ["ticketId"],
+    },
+  },
+  // ── Batch BL — Billing Control Center (billing.view / plans/manage lanes) ─
+  {
+    name: "list_billing_plans",
+    description: "The platform's billing plans (optionally only active ones).",
+    capability: "billing.view",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { activeOnly: { type: "boolean" } },
+    },
+  },
+  {
+    name: "list_plan_features",
+    description: "Feature lines of one billing plan — or the whole per-use catalogue when planKey is omitted.",
+    capability: "billing.view",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { planKey: { type: "string" } },
+    },
+  },
+  {
+    name: "list_entitlements",
+    description: "The per-business feature grants (entitlements).",
+    capability: "billing.view",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: { businessId: { type: "string" } },
+      required: ["businessId"],
+    },
+  },
+  {
+    name: "list_billing_invoices",
+    description: "Platform invoices, filterable by status and business, paged like the console.",
+    capability: "billing.view",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string" },
+        businessId: { type: "string" },
+        limit: { type: "number" },
+        offset: { type: "number" },
+        withLines: { type: "boolean" },
+      },
+    },
+  },
+  {
+    name: "list_billing_payments",
+    description: "Platform payments, filterable by status and business.",
+    capability: "billing.view",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["pending", "verified", "failed", "cancelled"] },
+        businessId: { type: "string" },
+        limit: { type: "number" },
+        offset: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "list_billing_subscriptions",
+    description: "Business subscriptions, filterable by status and business.",
+    capability: "billing.view",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string" },
+        businessId: { type: "string" },
+        limit: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "list_spend_policies",
+    description: "All spend policies — or one business's policy plus live evaluated spend.",
+    capability: "billing.view",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { businessId: { type: "string" } },
+    },
+  },
+  {
+    name: "get_commercial_settings",
+    description: "The commercial configuration every invoice/quote is computed from (billing.manage, like the console read).",
+    capability: "billing.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "save_billing_plan",
+    description:
+      "Create or edit a billing plan. A new plan must ship every limit as an explicit limited/unlimited choice, same as the console form. Step-up: price policy.",
+    capability: "plans.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        planKey: { type: "string", description: "Present = edit that plan." },
+        name: { type: "string" },
+        description: { type: "string" },
+        monthlyPriceRial: { type: "number" },
+        monthlyAiCreditRial: { type: "number" },
+        status: { type: "string", enum: ["draft", "active", "retired"] },
+        sortOrder: { type: "number" },
+        trialDays: { type: "number" },
+        graceDays: { type: "number" },
+        limits: { type: "object", description: "limitKey → { unlimited: true } | { value: number }" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "set_plan_status",
+    description: "Activate or retire a billing plan — flips what the store can sell.",
+    capability: "plans.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        planKey: { type: "string" },
+        action: { type: "string", enum: ["activate", "retire"] },
+      },
+      required: ["planKey", "action"],
+    },
+  },
+  {
+    name: "delete_draft_plan",
+    description: "Delete a DRAFT plan (active/retired plans cannot be deleted).",
+    capability: "plans.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { planKey: { type: "string" } },
+      required: ["planKey"],
+    },
+  },
+  {
+    name: "save_plan_feature",
+    description: "Set one feature line on a plan (included/monthly/per_use/addon with its price). Step-up: price policy.",
+    capability: "plans.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        planKey: { type: "string" },
+        featureKey: { type: "string" },
+        pricingModel: { type: "string", enum: ["included", "monthly", "per_use", "addon"] },
+        priceRial: { type: "number" },
+        freeUntil: { type: "string" },
+        freeLimit: { type: "number" },
+        sortOrder: { type: "number" },
+      },
+      required: ["planKey", "featureKey", "pricingModel", "priceRial"],
+    },
+  },
+  {
+    name: "delete_plan_feature",
+    description: "Remove a feature line from a plan.",
+    capability: "plans.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { planKey: { type: "string" }, featureKey: { type: "string" } },
+      required: ["planKey", "featureKey"],
+    },
+  },
+  {
+    name: "save_credit_package",
+    description: "Create or edit a wallet credit package. Step-up: price policy.",
+    capability: "billing.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Present = edit that package." },
+        name: { type: "string" },
+        priceRial: { type: "number" },
+        creditRial: { type: "number" },
+        isActive: { type: "boolean" },
+        sortOrder: { type: "number" },
+      },
+      required: ["name", "priceRial", "creditRial", "isActive", "sortOrder"],
+    },
+  },
+  {
+    name: "grant_entitlement",
+    description: "Grant one business a feature entitlement. Step-up: grants a concession.",
+    capability: "billing.manage",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        featureKey: { type: "string" },
+        expiresAt: { type: "string" },
+        freeUntil: { type: "string" },
+        freeLimit: { type: "number" },
+      },
+      required: ["businessId", "featureKey"],
+    },
+  },
+  {
+    name: "revoke_entitlement",
+    description: "Revoke one business's feature entitlement. Step-up.",
+    capability: "billing.manage",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        featureKey: { type: "string" },
+      },
+      required: ["businessId", "featureKey"],
+    },
+  },
+  {
+    name: "run_subscription_action",
+    description: "change_plan / cancel / reactivate / set_auto_renew for a business's subscription — the console lane, audited. Step-up.",
+    capability: "billing.manage",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        action: { type: "string", enum: ["change_plan", "cancel", "reactivate", "set_auto_renew"] },
+        planKey: { type: "string" },
+        atPeriodEnd: { type: "boolean" },
+        autoRenew: { type: "boolean" },
+      },
+      required: ["businessId", "action"],
+    },
+  },
+  {
+    name: "review_manual_payment",
+    description: "Approve or reject a bank-transfer manual payment — posts the settlement or the rejection. Step-up.",
+    capability: "payments.review",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        paymentId: { type: "string" },
+        action: { type: "string", enum: ["approve", "reject"] },
+      },
+      required: ["paymentId", "action"],
+    },
+  },
+  {
+    name: "adjust_business_wallet",
+    description: "Grant (positive) or deduct (negative) wallet credit for one business — a money posting, audited with the wallet's before/after. Step-up.",
+    capability: "adjustments.manage",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        amountRial: { type: "number", description: "Non-zero; grants when positive, deducts when negative." },
+        note: { type: "string" },
+      },
+      required: ["businessId", "amountRial"],
+    },
+  },
+  {
+    name: "act_billing_invoice",
+    description: "Void an invoice or apply a payment to it. Step-up.",
+    capability: "billing.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        invoiceId: { type: "string" },
+        action: { type: "string", enum: ["void", "apply_payment"] },
+        amountRial: { type: "number", description: "Required for apply_payment." },
+      },
+      required: ["invoiceId", "action"],
+    },
+  },
+  {
+    name: "save_spend_policy",
+    description: "Set a business's monthly spend budget and what happens at the limit. Step-up.",
+    capability: "billing.manage",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        monthlyBudgetRial: { type: "number" },
+        actionAtLimit: { type: "string", enum: ["continue", "warn_only", "block_noncritical", "throttle_noncritical"] },
+        thresholds: { type: "array" },
+      },
+      required: ["businessId", "actionAtLimit"],
+    },
+  },
+  {
+    name: "save_commercial_settings",
+    description:
+      "Edit the commercial configuration (invoice prefix, due/grace days, overage + proration policy, top-up floor, tax bps…). Step-up: platform-wide price policy.",
+    capability: "billing.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        invoicePrefix: { type: "string" },
+        defaultDueDays: { type: "number" },
+        defaultGraceDays: { type: "number" },
+        rounding: { type: "string", enum: ["ceil", "floor"] },
+        minimumTopUpRial: { type: "number" },
+        overagePolicy: { type: "string", enum: ["charge", "block"] },
+        prorationPolicy: { type: "string", enum: ["none", "daily"] },
+        defaultSpendAction: { type: "string" },
+        invoiceFooter: { type: "string" },
+        taxRateBps: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "save_billing_rates",
+    description:
+      "Edit one rate group: messaging (SMS/email), media (storage/enhance tariff) or ai (costing rates). Step-up: platform-wide price policy.",
+    capability: "billing.manage",
+    bridged: false,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        group: { type: "string", enum: ["messaging", "media", "ai"] },
+        values: { type: "object", description: "The rate fields of that group (partial merge, like the console form)." },
+      },
+      required: ["group"],
     },
   },
   {
@@ -570,6 +1007,292 @@ async function executePlatformTool(
           if (err instanceof SupportTicketNotFoundError) throw new Error("not_found");
           throw err;
         }
+      }
+      // ── Batch BL — billing reads ──────────────────────────────────────────
+      case "list_billing_plans":
+        return { plans: await listBillingPlans(arg.activeOnly === true) };
+      case "list_plan_features":
+        if (arg.planKey) return { features: await listPlanFeatures(arg.planKey) };
+        return { catalogue: await listFeatureCatalogue() };
+      case "list_entitlements": {
+        for (const id of targets) results[id] = await listEntitlements(id);
+        return { perBusiness: results };
+      }
+      case "list_billing_invoices":
+        return {
+          invoices: await listInvoices({
+            businessId: arg.businessId,
+            status: arg.status,
+            limit: arg.limit ?? 100,
+            offset: arg.offset ?? 0,
+            withLines: arg.withLines === true,
+          }),
+        };
+      case "list_billing_payments":
+        return {
+          payments: await listPayments({
+            businessId: arg.businessId,
+            status: arg.status as never,
+            limit: arg.limit ?? 100,
+            offset: arg.offset ?? 0,
+          }),
+        };
+      case "list_billing_subscriptions":
+        return {
+          subscriptions: await listSubscriptions({
+            status: (arg.status || undefined) as never,
+            businessId: arg.businessId,
+            limit: arg.limit ?? 200,
+          }),
+        };
+      case "list_spend_policies":
+        if (!arg.businessId) return { policies: await listSpendPolicies() };
+        return {
+          policy: await getSpendPolicy(arg.businessId),
+          spend: await evaluateBusinessSpend(arg.businessId),
+        };
+      case "get_commercial_settings":
+        return { settings: await readCommercialSettings() };
+      // ── Batch BL — plan & package writes (plans.manage / billing.manage) ──
+      case "save_billing_plan": {
+        if (!arg.name) throw new Error("missing_fields");
+        const plan = await saveBillingPlan({
+          key: arg.planKey,
+          name: arg.name,
+          description: arg.description,
+          monthlyPriceRial: arg.monthlyPriceRial,
+          monthlyAiCreditRial: arg.monthlyAiCreditRial,
+          status: arg.status as never,
+          sortOrder: arg.sortOrder ?? 0,
+          trialDays: arg.trialDays,
+          graceDays: arg.graceDays,
+          limits: arg.limits as never,
+        });
+        return { plan };
+      }
+      case "set_plan_status": {
+        if (!arg.planKey) throw new Error("missing_fields");
+        if (arg.action === "activate") return { plan: await activatePlan(arg.planKey) };
+        if (arg.action === "retire") return { plan: await retirePlan(arg.planKey) };
+        throw new Error("invalid_lifecycle_action");
+      }
+      case "delete_draft_plan": {
+        if (!arg.planKey) throw new Error("missing_fields");
+        await deleteDraftPlan(arg.planKey);
+        return { ok: true };
+      }
+      case "save_plan_feature": {
+        if (!arg.planKey || !arg.featureKey || !arg.pricingModel) throw new Error("missing_fields");
+        const feature = await savePlanFeature({
+          planKey: arg.planKey,
+          featureKey: arg.featureKey,
+          pricingModel: arg.pricingModel,
+          priceRial: arg.priceRial ?? 0,
+          freeUntil: arg.freeUntil,
+          freeLimit: arg.freeLimit,
+          sortOrder: arg.sortOrder ?? 0,
+        });
+        return { feature };
+      }
+      case "delete_plan_feature": {
+        if (!arg.planKey || !arg.featureKey) throw new Error("missing_fields");
+        await deletePlanFeature(arg.planKey, arg.featureKey);
+        return { ok: true };
+      }
+      case "save_credit_package": {
+        if (!arg.name) throw new Error("missing_fields");
+        const pkg = await saveCreditPackage({
+          id: arg.id,
+          name: arg.name,
+          priceRial: Number(arg.priceRial ?? 0),
+          creditRial: Number(arg.creditRial ?? 0),
+          isActive: arg.isActive !== false,
+          sortOrder: arg.sortOrder ?? 0,
+        });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "package.saved", id: pkg.id ?? arg.id });
+        return { package: pkg };
+      }
+      case "grant_entitlement": {
+        if (!arg.featureKey) throw new Error("missing_fields");
+        for (const id of targets) {
+          try {
+            await grantEntitlement({
+              businessId: id,
+              featureKey: arg.featureKey,
+              source: "admin_grant" as never,
+              expiresAt: arg.expiresAt,
+              freeUntil: arg.freeUntil,
+              freeLimit: arg.freeLimit,
+              grantedBy: connection.adminId,
+            });
+            results[id] = { ok: true, feature: arg.featureKey, granted: true };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "revoke_entitlement": {
+        if (!arg.featureKey) throw new Error("missing_fields");
+        for (const id of targets) {
+          try {
+            await revokeEntitlement(id, arg.featureKey);
+            results[id] = { ok: true, feature: arg.featureKey, revoked: true };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      // ── Batch BL — runtime writes ─────────────────────────────────────────
+      case "run_subscription_action": {
+        const action = String(arg.action ?? "");
+        for (const id of targets) {
+          try {
+            let outcome: unknown;
+            if (action === "change_plan") {
+              if (!arg.planKey) throw new Error("missing_fields");
+              outcome = await changeBusinessPlan({ businessId: id, planKey: arg.planKey, source: "admin" });
+            } else if (action === "cancel") {
+              outcome = await cancelBusinessSubscription(id, { atPeriodEnd: arg.atPeriodEnd === true });
+            } else if (action === "reactivate") {
+              outcome = await reactivateBusinessSubscription(id);
+            } else if (action === "set_auto_renew") {
+              outcome = await setAutoRenew(id, arg.autoRenew !== false);
+            } else {
+              throw new Error("invalid_lifecycle_action");
+            }
+            await platformAuditSafe(connection, id, tool.name, "ok", { action: `subscription.${action}`, planKey: arg.planKey });
+            results[id] = { ok: true, outcome };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "review_manual_payment": {
+        if (!arg.paymentId) throw new Error("missing_fields");
+        if (arg.action !== "approve" && arg.action !== "reject") throw new Error("invalid_review_action");
+        const status = await reviewManualPayment({
+          paymentId: arg.paymentId,
+          action: arg.action,
+          platformAdminId: connection.adminId,
+        });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: `payment.${arg.action}`, paymentId: arg.paymentId, status });
+        return { status };
+      }
+      case "adjust_business_wallet": {
+        const amount = Math.trunc(Number(arg.amountRial ?? 0));
+        if (!amount || !Number.isFinite(amount)) throw new Error("bad_amount");
+        for (const id of targets) {
+          try {
+            const before = await getWallet(id);
+            const entry =
+              amount > 0
+                ? await grantCredits({
+                    businessId: id,
+                    amountRial: amount,
+                    note: arg.note?.trim() || undefined,
+                    platformAdminId: connection.adminId,
+                  })
+                : await deductCredits({
+                    businessId: id,
+                    amountRial: Math.abs(amount),
+                    note: arg.note?.trim() || undefined,
+                    platformAdminId: connection.adminId,
+                  });
+            const afterWallet = await getWallet(id);
+            await platformAuditSafe(connection, id, tool.name, "ok", {
+              action: "wallet.adjusted",
+              amountRial: amount,
+              note: arg.note?.trim() || null,
+              before: before.balanceRial,
+              after: afterWallet.balanceRial,
+            });
+            results[id] = { ok: true, entry, before: before.balanceRial, after: afterWallet.balanceRial };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "act_billing_invoice": {
+        if (!arg.invoiceId) throw new Error("missing_fields");
+        if (arg.action === "void") return { invoice: await voidBillingInvoice(arg.invoiceId) };
+        if (arg.action === "apply_payment") {
+          const amount = Math.trunc(Number(arg.amountRial ?? 0));
+          if (!amount || amount <= 0) throw new Error("bad_amount");
+          return { invoice: await applyInvoicePayment(arg.invoiceId, amount) };
+        }
+        throw new Error("invalid_lifecycle_action");
+      }
+      case "save_spend_policy": {
+        const actionAtLimit = String(arg.actionAtLimit ?? "");
+        if (!["continue", "warn_only", "block_noncritical", "throttle_noncritical"].includes(actionAtLimit)) {
+          throw new Error("invalid_action");
+        }
+        for (const id of targets) {
+          try {
+            await saveSpendPolicy({
+              businessId: id,
+              monthlyBudgetRial: arg.monthlyBudgetRial ?? null,
+              actionAtLimit: actionAtLimit as never,
+              thresholds: arg.thresholds,
+            });
+            results[id] = { ok: true, actionAtLimit };
+          } catch (err) {
+            results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+        return { perBusiness: results };
+      }
+      case "save_commercial_settings": {
+        await saveCommercialSettings({
+          invoicePrefix: arg.invoicePrefix,
+          defaultDueDays: arg.defaultDueDays,
+          defaultGraceDays: arg.defaultGraceDays,
+          rounding: arg.rounding,
+          minimumTopUpRial: arg.minimumTopUpRial,
+          overagePolicy: arg.overagePolicy,
+          prorationPolicy: arg.prorationPolicy,
+          defaultSpendAction: arg.defaultSpendAction,
+          invoiceFooter: arg.invoiceFooter,
+          taxRateBps: arg.taxRateBps,
+        });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "commercial_settings.saved" });
+        return { settings: await readCommercialSettings() };
+      }
+      case "save_billing_rates": {
+        const group = String(arg.group ?? "");
+        const values = (arg.values ?? {}) as Record<string, unknown>;
+        if (group === "messaging") {
+          const before = (await getPublicMessageConfig()).rate;
+          const rate = await saveMessageRates({
+            smsRialPerSegment: values.smsRialPerSegment === undefined ? undefined : Number(values.smsRialPerSegment),
+            emailRialPerSend: values.emailRialPerSend === undefined ? undefined : Number(values.emailRialPerSend),
+          });
+          await platformAuditSafe(connection, null, tool.name, "ok", { action: "messaging_rate.changed", before, after: rate });
+          return { rate };
+        }
+        if (group === "media") {
+          const before = await getMediaConfig();
+          const parsed = validateMediaTariffInput(values, before);
+          if (!parsed.ok) throw new Error(parsed.error);
+          await saveMediaTariff(parsed.tariff, connection.adminId);
+          await platformAuditSafe(connection, null, tool.name, "ok", {
+            action: "media_tariff.changed",
+            before: { dailyFlatRial: before.dailyFlatRial, dailyPerGbRial: before.dailyPerGbRial },
+            after: parsed.tariff,
+          });
+          return { tariff: parsed.tariff };
+        }
+        if (group === "ai") {
+          const before = await getAiCostingConfig();
+          const after = await saveAiCostingConfig(values as never);
+          await platformAuditSafe(connection, null, tool.name, "ok", { action: "ai_costing.changed", before, after });
+          return { config: after };
+        }
+        throw new Error("invalid_rate_group");
       }
       default:
         throw new Error(`No implementation for platform tool '${tool.name}'.`);
