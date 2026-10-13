@@ -114,6 +114,21 @@ import {
 } from "./ai-coworker-service";
 import { coworkerErrorMessage } from "./ai-coworker";
 import { validateMemoryInput, createMemoryEntry, deleteMemoryEntry, type MemoryScope } from "./ai-memory";
+import { setSetting } from "./settings";
+import { normalizeBranchName } from "./branch-input";
+import {
+  DEFAULT_COST_DRIFT_THRESHOLD_PERCENT,
+  MAX_COST_DRIFT_THRESHOLD_PERCENT,
+  MAX_OVERHEAD_PERCENT,
+  getEffectiveOverheadRate,
+  getPricingConfig,
+  setPricingConfig,
+  type PricingConfig,
+} from "./pricing-service";
+import { setMfaPolicy } from "./mfa-policy";
+import { setOnlinePlatformsConfig } from "./online-platforms-service";
+import { MAX_ONLINE_PLATFORM_COMMISSION_PERCENT, validCommissionPercent } from "./online-platforms";
+import { validateAccounts, nextAccountLevel, type AccountLevel } from "./coa-template";
 import {
   decryptReservationPhones,
   encryptReservationPhone,
@@ -282,6 +297,7 @@ import {
 import type { SegmentDefinition } from "./segments";
 import type { ConsentChannel } from "./crm-shared";
 import type { TaxSetting } from "./setup-state";
+import { resolveActiveLocation } from "./setup-state";
 import {
   createFixedAsset,
   disposeFixedAsset,
@@ -4183,6 +4199,309 @@ const memoryDelete: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true } };
 };
 
+// ── Issue #883 package 2, batch BA — the settings doc-lane saves ────────────
+// Every mirror keeps the route's own merge-and-validate order, the route's
+// error names, and the route's transactions.
+const SETTINGS_MAX_NAME = 200;
+interface BusinessPrefsBean { currencyDisplay: "rial" | "toman"; language: "fa"; calendar: "jalali" }
+interface BusinessProfileBean { legalName?: string; taxId?: string; email?: string; website?: string; receiptFooter?: string }
+const settingsBusinessSave: AutopilotExecutor = async (ctx) => {
+  const businessName = str(ctx.payload.businessName);
+  const locationName = str(ctx.payload.locationName);
+  if (!businessName || !locationName) return fail("missing_fields");
+  const address = str(ctx.payload.address);
+  const phone = str(ctx.payload.phone);
+  const legalName = str(ctx.payload.legalName);
+  const taxId = str(ctx.payload.taxId);
+  const website = str(ctx.payload.website);
+  const receiptFooter = str(ctx.payload.receiptFooter);
+  // The route keeps per-field caps: name 200, address 500, phone 30,
+  // taxId 50, website 200, receiptFooter 500 — re-implemented here with the
+  // same thresholds so a too-long write fails with the same error.
+  if (
+    (businessName?.length ?? 0) > SETTINGS_MAX_NAME ||
+    (address?.length ?? 0) > 500 ||
+    (phone?.length ?? 0) > 30 ||
+    (legalName?.length ?? 0) > SETTINGS_MAX_NAME ||
+    (taxId?.length ?? 0) > 50 ||
+    (website?.length ?? 0) > 200 ||
+    (receiptFooter?.length ?? 0) > 500
+  ) {
+    return fail("field_too_long");
+  }
+  const email = str(ctx.payload.email);
+  if (email && !/^\S+@\S+\.\S+$/.test(email)) return fail("invalid_email");
+
+  const location = ctx.authorizedByUserId
+    ? await resolveActiveLocation({
+        sub: ctx.authorizedByUserId,
+        businessId: ctx.businessId,
+        locationId: null,
+      } as SessionPayload)
+    : null;
+  if (!location) return fail("no_location");
+
+  const prefs: BusinessPrefsBean = {
+    currencyDisplay: ctx.payload.currencyDisplay === "rial" ? "rial" : "toman",
+    language: "fa",
+    calendar: "jalali",
+  };
+  const profile: BusinessProfileBean = {
+    legalName: legalName || undefined,
+    taxId: taxId || undefined,
+    email: email || undefined,
+    website: website || undefined,
+    receiptFooter: receiptFooter || undefined,
+  };
+
+  // Branch edits go through the branch screen's audited, duplicate-checked
+  // updateBranch — never straight SQL on locations.
+  const normalizedLocationName = normalizeBranchName(locationName);
+  const branchInput: { name?: string; address?: string | null; phone?: string | null } = {};
+  if (normalizedLocationName !== location.name) branchInput.name = normalizedLocationName;
+  if ((address || null) !== location.address) branchInput.address = address || null;
+  if ((phone || null) !== location.phone) branchInput.phone = phone || null;
+  if (Object.keys(branchInput).length > 0) {
+    try {
+      await updateBranch({
+        businessId: ctx.businessId,
+        locationId: location.id,
+        actorId: ctx.authorizedByUserId ?? "",
+        ...branchInput,
+      });
+    } catch (err) {
+      if (err instanceof BranchError) return fail(err.message);
+      throw err;
+    }
+  }
+
+  const { rows: beforeRows } = await query<{ name: string }>(
+    "SELECT name FROM businesses WHERE id = $1",
+    [ctx.businessId],
+  );
+  const beforeProfile = await getSetting<BusinessProfileBean>(ctx.businessId, SETTING_KEYS.businessProfile);
+  const beforePrefs = await getSetting<BusinessPrefsBean>(ctx.businessId, SETTING_KEYS.businessPrefs);
+  const beforeName = beforeRows[0]?.name;
+
+  await query("UPDATE businesses SET name = $1 WHERE id = $2", [businessName, ctx.businessId]);
+  await Promise.all([
+    setSetting(ctx.businessId, SETTING_KEYS.businessPrefs, prefs),
+    setSetting(ctx.businessId, SETTING_KEYS.businessProfile, profile),
+  ]);
+
+  const changed: Record<string, unknown> = {};
+  if (businessName !== beforeName) changed.businessName = businessName;
+  if (prefs.currencyDisplay !== beforePrefs?.currencyDisplay) changed.currencyDisplay = prefs.currencyDisplay;
+  for (const key of ["legalName", "taxId", "email", "website", "receiptFooter"] as const) {
+    const value = profile[key];
+    if (value !== beforeProfile?.[key]) changed[key] = value ?? null;
+  }
+  if (Object.keys(changed).length > 0) {
+    await query(
+      `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, $3, 'settings.business.update', 'settings', 'business', $4)`,
+      [ctx.businessId, location.id, ctx.authorizedByUserId, JSON.stringify(changed)],
+    );
+  }
+  return { ok: true, result: { ok: true } };
+};
+function parseOptionalPercent(
+  value: unknown,
+  max: number,
+): { ok: true; value: number | null } | { ok: false } {
+  if (value === null) return { ok: true, value: null };
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value >= max) {
+    return { ok: false };
+  }
+  return { ok: true, value };
+}
+const settingsPricingSave: AutopilotExecutor = async (ctx) => {
+  const body = ctx.payload;
+  const existing = await getPricingConfig(ctx.businessId);
+  const defaultMarginPercent = parseOptionalPercent(
+    body.defaultMarginPercent !== undefined ? body.defaultMarginPercent : existing.defaultMarginPercent,
+    100,
+  );
+  if (!defaultMarginPercent.ok) return fail("invalid_margin");
+  const fallbackOverheadPercent = parseOptionalPercent(
+    body.fallbackOverheadPercent !== undefined ? body.fallbackOverheadPercent : existing.fallbackOverheadPercent,
+    MAX_OVERHEAD_PERCENT,
+  );
+  if (!fallbackOverheadPercent.ok) return fail("invalid_overhead");
+  const rawMode = body.overheadMode !== undefined ? body.overheadMode : existing.overheadMode ?? "automatic";
+  if (rawMode !== "automatic" && rawMode !== "manual") return fail("invalid_overhead_mode");
+  const overheadMode = rawMode;
+  if (overheadMode === "manual" && fallbackOverheadPercent.value === null) {
+    return fail("manual_overhead_required");
+  }
+  const driftCandidate =
+    body.costDriftThresholdPercent !== undefined
+      ? body.costDriftThresholdPercent
+      : existing.costDriftThresholdPercent ?? DEFAULT_COST_DRIFT_THRESHOLD_PERCENT;
+  const costDriftThresholdPercent =
+    typeof driftCandidate === "number" &&
+    Number.isFinite(driftCandidate) &&
+    driftCandidate > 0 &&
+    driftCandidate < MAX_COST_DRIFT_THRESHOLD_PERCENT
+      ? driftCandidate
+      : null;
+  if (costDriftThresholdPercent === null) return fail("invalid_drift_threshold");
+  const pricing: PricingConfig = {
+    defaultMarginPercent: defaultMarginPercent.value,
+    fallbackOverheadPercent: fallbackOverheadPercent.value,
+    overheadMode,
+    costDriftThresholdPercent,
+  };
+  await setPricingConfig(ctx.businessId, pricing);
+  let effective: unknown = null;
+  try {
+    effective = await getEffectiveOverheadRate(ctx.businessId, pricing);
+  } catch {
+    effective = null; // explanatory status — must not block the setting save
+  }
+  return { ok: true, result: { ok: true, pricing, effectiveOverhead: effective } };
+};
+const settingsTaxSave: AutopilotExecutor = async (ctx) => {
+  const defaultRate = Number(ctx.payload.defaultRate);
+  if (!Number.isFinite(defaultRate) || defaultRate < 0 || defaultRate > 100) return fail("invalid_rate");
+  const categories = Array.isArray(ctx.payload.categories) ? ctx.payload.categories : [];
+  const parsedCategories: { id: string; taxRate: number }[] = [];
+  for (const category of categories as { id?: unknown; taxRate?: unknown }[]) {
+    const rate = Number(category?.taxRate);
+    if (typeof category?.id !== "string" || !category.id || !Number.isFinite(rate) || rate < 0 || rate > 100) {
+      return fail("invalid_category_rate");
+    }
+    parsedCategories.push({ id: category.id, taxRate: rate });
+  }
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO settings (business_id, location_id, key, value)
+       VALUES ($1, NULL, $2, $3)
+       ON CONFLICT (business_id, location_id, key)
+       DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [ctx.businessId, SETTING_KEYS.tax, JSON.stringify({ defaultRate })],
+    );
+    for (const category of parsedCategories) {
+      await client.query(
+        `UPDATE menu_categories mc
+            SET tax_rate = $1
+           FROM locations l
+          WHERE mc.id = $2 AND l.id = mc.location_id AND l.business_id = $3`,
+        [category.taxRate, category.id, ctx.businessId],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  return { ok: true, result: { ok: true } };
+};
+const settingsOnlinePlatformsSave: AutopilotExecutor = async (ctx) => {
+  if (!Object.prototype.hasOwnProperty.call(ctx.payload, "snappfoodCommissionPercent")) {
+    return fail("missing_fields");
+  }
+  let snappfood: { commissionPercent: number } | null = null;
+  const rawCommission = ctx.payload.snappfoodCommissionPercent;
+  if (rawCommission !== null && rawCommission !== undefined) {
+    if (!validCommissionPercent(rawCommission)) {
+      return { ok: false, result: { error: "invalid_commission_percent", max: MAX_ONLINE_PLATFORM_COMMISSION_PERCENT }, errorCode: "invalid_commission_percent" };
+    }
+    snappfood = { commissionPercent: rawCommission };
+  }
+  await setOnlinePlatformsConfig(ctx.businessId, { snappfood });
+  return { ok: true, result: { ok: true } };
+};
+const settingsMfaPolicySave: AutopilotExecutor = async (ctx) => {
+  const policy = await setMfaPolicy(ctx.businessId, { requireForManagers: ctx.payload.requireForManagers === true });
+  return { ok: true, result: { policy } };
+};
+// The chart-of-accounts swap is the route's own guarded transaction: any
+// journal line anywhere veto's it, parent/child loops and over-deep trees are
+// rejected with the same Persian messages, all-or-nothing.
+const settingsAccountsSave: AutopilotExecutor = async (ctx) => {
+  const rawAccounts = Array.isArray(ctx.payload.accounts) ? ctx.payload.accounts : [];
+  const accounts = (rawAccounts as Record<string, unknown>[]).map((account) => ({
+    code: String(account?.code ?? "").trim(),
+    name: String(account?.name ?? "").trim(),
+    type: account?.type,
+    parentCode: account?.parentCode ? String(account.parentCode).trim() : undefined,
+    isContra: Boolean(account?.isContra),
+  })) as Parameters<typeof validateAccounts>[0];
+  const messages = validateAccounts(accounts);
+  if (messages.length > 0) {
+    return { ok: false, result: { error: "invalid_accounts", messages }, errorCode: "invalid_accounts" };
+  }
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows: used } = await client.query(
+      `SELECT 1 FROM journal_lines jl
+        JOIN accounts a ON a.id = jl.account_id
+       WHERE a.business_id = $1 LIMIT 1`,
+      [ctx.businessId],
+    );
+    if (used.length > 0) {
+      await client.query("ROLLBACK");
+      return fail("accounts_in_use");
+    }
+    await client.query("DELETE FROM accounts WHERE business_id = $1", [ctx.businessId]);
+    const idByCode = new Map<string, string>();
+    const levelByCode = new Map<string, AccountLevel>();
+    const pending = [...accounts];
+    while (pending.length > 0) {
+      const ready = pending.filter((account) => !account.parentCode || idByCode.has(account.parentCode));
+      if (ready.length === 0) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          result: { error: "invalid_accounts", messages: ["ساختار والد/فرزند حساب‌ها حلقه دارد."] },
+          errorCode: "invalid_accounts",
+        };
+      }
+      for (const account of ready) {
+        const parentLevel = account.parentCode ? (levelByCode.get(account.parentCode) ?? null) : null;
+        const level = nextAccountLevel(parentLevel);
+        if (!level) {
+          await client.query("ROLLBACK");
+          return {
+            ok: false,
+            result: { error: "invalid_accounts", messages: ["ساختار حساب‌ها از سطح «تفصیلی» عمیق‌تر است."] },
+            errorCode: "invalid_accounts",
+          };
+        }
+        const result = await client.query(
+          `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [
+            ctx.businessId,
+            account.parentCode ? idByCode.get(account.parentCode) : null,
+            account.code,
+            account.name,
+            account.type,
+            level,
+            account.isContra,
+          ],
+        );
+        idByCode.set(account.code, result.rows[0].id);
+        levelByCode.set(account.code, level);
+        pending.splice(pending.indexOf(account), 1);
+      }
+    }
+    await client.query("COMMIT");
+  } catch (cause) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw cause;
+  } finally {
+    client.release();
+  }
+  return { ok: true, result: { ok: true, created: accounts.length } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -6391,6 +6710,12 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   coworkerJobRun,
   memoryAdd,
   memoryDelete,
+  settingsBusinessSave,
+  settingsPricingSave,
+  settingsTaxSave,
+  settingsOnlinePlatformsSave,
+  settingsMfaPolicySave,
+  settingsAccountsSave,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

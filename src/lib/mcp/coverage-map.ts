@@ -675,8 +675,19 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms)",
     routes: ["settings"],
-    ops: { listDetail: ["get_setup_state"] },
-    test: "integration/business-settings.integration.test.ts",
+    ops: {
+      listDetail: ["get_setup_state"],
+      update: [
+        "settings.business.save",
+        "settings.pricing.save",
+        "settings.tax.save",
+        "settings.onlinePlatforms.save",
+        "settings.mfaPolicy.save",
+        "settings.accounts.save",
+      ],
+    },
+    note: "batch BA-1: the six doc-lane saves mirror their PUTs field-for-field (partial-merge semantics, validators, transactions); the logo upload stays route-only (multipart binary); payment-method/printer/template/print-rule lanes ride batch BA-2",
+    test: "integration/pricing.integration.test.ts + growth-settings + ai-autopilot",
   },
   {
     id: "config.team",

@@ -509,6 +509,16 @@ export type ActionType =
   | "coworker.job.run"
   | "memory.add"
   | "memory.delete"
+  // Batch BA — the settings doc-lane saves. Each mirror re-reads the settings
+  // the route reads, keeps the partial-update semantics (omitted = unchanged),
+  // and runs the same validators; settings.accounts.save replaces the chart
+  // of accounts inside the route's own guarded transaction.
+  | "settings.business.save"
+  | "settings.pricing.save"
+  | "settings.tax.save"
+  | "settings.onlinePlatforms.save"
+  | "settings.mfaPolicy.save"
+  | "settings.accounts.save"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -632,6 +642,12 @@ export type AutopilotExecutorKey =
   | "coworkerJobRun"
   | "memoryAdd"
   | "memoryDelete"
+  | "settingsBusinessSave"
+  | "settingsPricingSave"
+  | "settingsTaxSave"
+  | "settingsOnlinePlatformsSave"
+  | "settingsMfaPolicySave"
+  | "settingsAccountsSave"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2214,6 +2230,54 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف نرم حافظهٔ دستیار (بایگانی‌شده)",
     payloadHint: '{ id: string, scope?: "tenant"|"app"|"project"="tenant", projectId?: string }',
     executor: "memoryDelete",
+  },
+  "settings.business.save": {
+    type: "settings.business.save",
+    endpoint: "/api/settings/business",
+    method: "PUT",
+    label: "ذخیرهٔ هویت کسب‌وکار + نام/آدرس/تلفن شعبهٔ فعال — همان متن فرم کسب‌وکار؛ نام فیلد‌ها لازم‌اند",
+    payloadHint: '{ businessName: string, locationName: string, address?: string, phone?: string, legalName?: string, taxId?: string, website?: string, receiptFooter?: string, email?: string, currencyDisplay?: "toman"|"rial" }',
+    executor: "settingsBusinessSave",
+  },
+  "settings.pricing.save": {
+    type: "settings.pricing.save",
+    endpoint: "/api/settings/pricing",
+    method: "PUT",
+    label: "سیاست قیمت‌گذاری کسب‌وکار — فیلدِ فرستاده‌نشده تغییر نمی‌کند؛ null دو برآورد را پاک می‌کند",
+    payloadHint: '{ defaultMarginPercent?: number|null, fallbackOverheadPercent?: number|null, overheadMode?: "automatic"|"manual", costDriftThresholdPercent?: number }',
+    executor: "settingsPricingSave",
+  },
+  "settings.tax.save": {
+    type: "settings.tax.save",
+    endpoint: "/api/settings/tax",
+    method: "PUT",
+    label: "نرخ پیش‌فرض مالیات + نرخ‌های هر دسته — یک تراکنش برای همهٔ تغییرات",
+    payloadHint: '{ defaultRate: number (۰تا۱۰۰), categories?: Array<{ id: string, taxRate: number }> }',
+    executor: "settingsTaxSave",
+  },
+  "settings.onlinePlatforms.save": {
+    type: "settings.onlinePlatforms.save",
+    endpoint: "/api/settings/online-platforms",
+    method: "PUT",
+    label: "نرخ کمیسیون اسنپ‌فود — کلید الزامی است؛ null=پاک‌کردن قرارداد",
+    payloadHint: '{ snappfoodCommissionPercent: number|null }',
+    executor: "settingsOnlinePlatformsSave",
+  },
+  "settings.mfaPolicy.save": {
+    type: "settings.mfaPolicy.save",
+    endpoint: "/api/settings/mfa-policy",
+    method: "PUT",
+    label: "سیاست ورود دومرحله‌ای — الزامی برای مدیران؟",
+    payloadHint: '{ requireForManagers: boolean }',
+    executor: "settingsMfaPolicySave",
+  },
+  "settings.accounts.save": {
+    type: "settings.accounts.save",
+    endpoint: "/api/settings/accounts",
+    method: "PUT",
+    label: "جایگزینی کامل سرفصل حساب‌ها — فقط وقتی هیچ سندی پست نشده باشد",
+    payloadHint: '{ accounts: Array<{ code: string, name: string, type: string, parentCode?: string, isContra?: bool }> }',
+    executor: "settingsAccountsSave",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

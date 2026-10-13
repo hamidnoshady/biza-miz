@@ -383,6 +383,14 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "coworker.job.run": PERMISSIONS.aiManage,
   "memory.add": PERMISSIONS.aiManage,
   "memory.delete": PERMISSIONS.aiManage,
+  // Batch BA — settings manages its own key; only the chart-of-accounts swap
+  // rides accounting's edit key.
+  "settings.business.save": PERMISSIONS.settingsManage,
+  "settings.pricing.save": PERMISSIONS.settingsManage,
+  "settings.tax.save": PERMISSIONS.settingsManage,
+  "settings.onlinePlatforms.save": PERMISSIONS.settingsManage,
+  "settings.mfaPolicy.save": PERMISSIONS.settingsManage,
+  "settings.accounts.save": PERMISSIONS.accountsEdit,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

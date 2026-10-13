@@ -406,6 +406,13 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "coworker.job.run", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "memory.add", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "memory.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  // Batch BA — the settings saves are plain config writes under settingsManage.
+  { actionType: "settings.business.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "settings.pricing.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "settings.tax.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "settings.onlinePlatforms.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "settings.mfaPolicy.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "settings.accounts.save", kind: "write", app: "accounting", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
