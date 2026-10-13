@@ -255,6 +255,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "menu.item.priceUpdate": PERMISSIONS.menuEdit,
   "menu.item.disable": PERMISSIONS.menuEdit,
   "order.discount.apply": PERMISSIONS.ordersDiscount,
+  "order.amend.apply": PERMISSIONS.ordersAmendClosed,
+  "order.return.create": PERMISSIONS.paymentsRefund,
   "inventory.reorder.draftPO": PERMISSIONS.purchasesManage,
   "inventory.adjustment.propose": PERMISSIONS.inventoryAdjust,
   "reservation.create": PERMISSIONS.reservationsManage,

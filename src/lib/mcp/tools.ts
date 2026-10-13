@@ -3447,6 +3447,71 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
       additionalProperties: false,
     },
   },
+  // Batch BJ — the extracted money lanes of pos.orders.
+  {
+    name: "write_order_amend_apply",
+    actionType: "order.amend.apply",
+    english: "Amend or void a completed order — posts the ledger correction and returns stock: always asks a human first.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        orderId: id("سفارش تکمیل‌شده"),
+        kind: { type: "string", enum: ["edit", "void"] },
+        reason: { type: "string" },
+        lines: {
+          type: "array",
+          description: "مجموعهٔ کامل دلخواه برای kind=edit — هر خط جاافتاده ابطال می‌شود",
+          items: {
+            type: "object",
+            properties: {
+              orderItemId: { type: "string" },
+              menuItemId: { type: "string" },
+              quantity: { type: "number" },
+              note: { type: "string" },
+              modifierIds: { type: "array", items: { type: "string" } },
+            },
+          },
+        },
+        discount: { type: "object", additionalProperties: true },
+        note: { type: "string" },
+        tipAmount: { type: "number" },
+        paymentMethod: { type: "string" },
+        reference: { type: "string" },
+      },
+      required: ["orderId", "kind"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_order_return_create",
+    actionType: "order.return.create",
+    english: "Refund a customer return (money back + stock ledger row): always asks a human first. Idempotent on idempotencyKey; a replay returns duplicate: true without notifying again.",
+    destructive: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        orderId: id("سفارش"),
+        refundMethod: { type: "string", enum: ["cash", "card", "card_to_card", "online", "credit"] },
+        refundAmountRial: { type: "string", description: "مبلغ به ریال، متن، EXACT" },
+        reason: { type: "string" },
+        idempotencyKey: { type: "string" },
+        lines: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              orderItemId: { type: "string" },
+              quantity: { type: "string" },
+              disposition: { type: "string", enum: ["restockable", "discarded"] },
+            },
+          },
+        },
+      },
+      required: ["orderId", "refundAmountRial"],
+      additionalProperties: false,
+    },
+  },
   // Batch BH — the AEC registers. The 54 uniform lanes dispatch through four
   // grouped verbs + profile/commercial PUTs + participant lanes; the record
   // body is the same object the screen's form posts.

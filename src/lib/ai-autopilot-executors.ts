@@ -33,6 +33,14 @@ import { decideEstimateApproval } from "./aec-boq-service";
 import { decideCertificateApproval, decideVariationApproval } from "./aec-commercial-service";
 import { decideCommitmentApproval, decideMaterialRequestApproval } from "./aec-procurement-service";
 import { decideSubmittalApproval } from "./aec-rfi-service";
+// Batch BJ — the extracted money lanes of /api/orders/[id]/{amend,returns}.
+import { amendClosedOrder, OrderAmendmentError } from "./order-amendment-service";
+import { validateAmendment, type AmendmentInput } from "./order-amendments";
+import { createCustomerReturn } from "./customer-return-service";
+import { appendSyncOutboxEvent } from "./sync-outbox";
+import { recordNotification } from "./notification-events";
+import { notificationDedupeKey } from "./notifications";
+import { tomanText } from "./ai-labels";
 // Batch BH — the AEC registers (src/app/api/aec/**). Each generic verb
 // dispatches the entity lane with the exact route capability gate.
 import {
@@ -8099,6 +8107,149 @@ const aecParticipantRemove: AutopilotExecutor = async (ctx) => {
   }
 };
 
+// ── Batch BJ — pos.orders money lanes that sit on extracted services ────────
+// Amend/re-settle posts a ledger correction against a closed order; a
+// customer return refunds + restocks. Always_approve/high like every posting
+// lane. Pay/settle itself is still inline orchestration in the route — it
+// stays route-only until a manager-service extraction lands (issue #883
+// follow-up), which the row note documents.
+const ORDER_AMEND_KNOWN_FAILURES = new Set([
+  "order_not_found",
+  "order_not_completed",
+  "order_has_returns",
+  "item_not_found",
+  "duplicate_item",
+  "invalid_item",
+  "no_items",
+  "menu_item_not_found",
+  "modifier_not_found",
+  "consumption_layer_settled",
+  "consumption_reversal_inconsistent",
+  "fiscal_period_locked",
+  "fiscal_period_soft_closed",
+  "negative_ingredient_requirement",
+]);
+
+const orderAmendApply: AutopilotExecutor = async (ctx) => {
+  const orderId = str(ctx.payload.orderId) ?? str(ctx.payload.id);
+  if (!orderId) return fail("missing_fields");
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const { orderId: _ignored, id: _ignoredToo, ...body } = ctx.payload;
+  const validated = validateAmendment(body as unknown as AmendmentInput);
+  if (!validated.ok) return fail(validated.error);
+  const { rows: roleRows } = await query<{ role: string }>(
+    `SELECT role FROM users WHERE id = $1`,
+    [ctx.authorizedByUserId],
+  );
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await amendClosedOrder(client, {
+      businessId: ctx.businessId,
+      locationId: location.id,
+      orderId,
+      actorId: ctx.authorizedByUserId,
+      input: validated.value,
+    });
+    // Same delivery the route commits: the paired peer replays the correction
+    // (migration 0190), so the outbox event lands in this transaction.
+    await appendSyncOutboxEvent(client, {
+      locationId: location.id,
+      clientEventId: `order-amendment:${result.id}`,
+      eventType: "order.amendment.posted",
+      payload: { orderId, input: body as Record<string, unknown>, newItemIds: result.addedItemIds },
+      actorUserId: ctx.authorizedByUserId,
+      actorRole: (roleRows[0]?.role ?? "Owner") as Role,
+    });
+    await client.query("COMMIT");
+    broadcast(location.id, { type: "order.updated", orderId });
+    return aecOk(result);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (err instanceof OrderAmendmentError) return fail(err.message);
+    if (err instanceof MissingLedgerAccountError) return fail("ledger_account_missing");
+    const message = err instanceof Error ? err.message : "";
+    if (ORDER_AMEND_KNOWN_FAILURES.has(message)) return fail(message);
+    if (message.startsWith("inventory_exact_cutover_required")) return fail("inventory_exact_cutover_required");
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+const orderReturnCreate: AutopilotExecutor = async (ctx) => {
+  const orderId = str(ctx.payload.orderId) ?? str(ctx.payload.id);
+  if (!orderId) return fail("missing_fields");
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const refundMethod = (str(ctx.payload.refundMethod) ?? "cash") as
+    | "cash"
+    | "card"
+    | "card_to_card"
+    | "online"
+    | "credit";
+  if (!["cash", "card", "card_to_card", "online", "credit"].includes(refundMethod)) {
+    return fail("invalid_refund_method");
+  }
+  if (!str(ctx.payload.refundAmountRial)) return fail("invalid_rial");
+  const rawLines = Array.isArray(ctx.payload.lines) ? (ctx.payload.lines as Record<string, unknown>[]) : [];
+  const lines = rawLines.map((line) => ({
+    orderItemId: str(line.orderItemId) ?? "",
+    quantity: positiveQuantityText(str(line.quantity) ?? ""),
+    disposition: (line.disposition === "restockable" ? "restockable" : "discarded") as
+      | "restockable"
+      | "discarded",
+  }));
+  const { rows: roleRows } = await query<{ role: string }>(
+    `SELECT role FROM users WHERE id = $1`,
+    [ctx.authorizedByUserId],
+  );
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await createCustomerReturn(client, {
+      businessId: ctx.businessId,
+      locationId: location.id,
+      orderId,
+      refundMethod,
+      refundAmount: rialText(str(ctx.payload.refundAmountRial) ?? ""),
+      reason: str(ctx.payload.reason) ?? "",
+      idempotencyKey: str(ctx.payload.idempotencyKey) ?? "",
+      createdBy: ctx.authorizedByUserId,
+      sync: { actorRole: (roleRows[0]?.role ?? "Owner") as Role },
+      lines,
+    });
+    await client.query("COMMIT");
+    // The route's owner-facing card rides `duplicate === false` only — an
+    // idempotent replay must not claim a second refund happened.
+    if (!(result as { duplicate?: boolean }).duplicate) {
+      await recordNotification({
+        businessId: ctx.businessId,
+        locationId: location.id,
+        eventKey: "payment.refunded",
+        severity: "important",
+        title: "برگشت وجه به مشتری",
+        body: `${tomanText(Number((result as { refundAmount?: string }).refundAmount ?? 0))}${str(ctx.payload.reason)?.trim() ? ` — ${str(ctx.payload.reason)?.trim()}` : ""}`,
+        url: "/accounting/orders",
+        amountRial: Number((result as { refundAmount?: string }).refundAmount ?? 0),
+        dedupeKey: notificationDedupeKey("payment.refunded", (result as { id: string }).id),
+        payload: { orderId, returnId: (result as { id: string }).id },
+      });
+    }
+    return aecOk(result);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    // The route's catch straight-returns err.message; keep that code surface.
+    if (err instanceof Error && err.message) return fail(err.message);
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -8320,6 +8471,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   aecParticipantAdd,
   aecParticipantUpdate,
   aecParticipantRemove,
+  orderAmendApply,
+  orderReturnCreate,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

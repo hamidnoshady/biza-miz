@@ -601,6 +601,11 @@ export type ActionType =
   | "aec.participant.add"
   | "aec.participant.update"
   | "aec.participant.remove"
+  // Batch BJ — closes the pos.orders money lanes that sit on extracted
+  // services. Amend/re-settle + customer return post ledger corrections, so
+  // both are high/always-approve like every other posting lane.
+  | "order.amend.apply"
+  | "order.return.create"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -782,6 +787,8 @@ export type AutopilotExecutorKey =
   | "aecParticipantAdd"
   | "aecParticipantUpdate"
   | "aecParticipantRemove"
+  | "orderAmendApply"
+  | "orderReturnCreate"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1043,6 +1050,24 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     autopilotCategory: "money",
     executor: "orderDiscount",
     revertible: "while_open",
+  },
+  "order.amend.apply": {
+    type: "order.amend.apply",
+    endpoint: "/api/orders/{id}/amend",
+    method: "POST",
+    label: "تصحیح/ابطال سفارش تکمیل‌شده — ثبت اصلاح حساب‌داری + بازگردانی انبار؛ تأیید صریح لازم",
+    payloadHint:
+      '{ orderId: string, kind: "edit"|"void", reason: string, lines؟: [{ orderItemId?|menuItemId?, quantity?, note?, modifierIds? }] (edit: مجموعهٔ کامل دلخواه — هر خط جاافتاده ابطال می‌شود), discount?: { type, value }|null, note?, tipAmount?, paymentMethod?, reference? }',
+    executor: "orderAmendApply",
+  },
+  "order.return.create": {
+    type: "order.return.create",
+    endpoint: "/api/orders/{id}/returns",
+    method: "POST",
+    label: "برگشت وجه/کالا از مشتری — استرداد + زیان سند انبار؛ تأیید صریح لازم",
+    payloadHint:
+      '{ orderId: string, refundMethod?: "cash"|"card"|"card_to_card"|"online"|"credit" (پیش‌فرض cash), refundAmountRial: string (ریال، متن EXACT), reason?: string, idempotencyKey?: string, lines?: [{ orderItemId, quantity: string, disposition?: "restockable"|"discarded" }] }',
+    executor: "orderReturnCreate",
   },
   "inventory.reorder.draftPO": {
     type: "inventory.reorder.draftPO",

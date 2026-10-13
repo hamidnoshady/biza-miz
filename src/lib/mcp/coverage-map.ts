@@ -173,8 +173,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "POS",
     entity: "Orders (open, amend, pay, refund/returns)",
     routes: ["orders"],
-    note: "amend, pay/settle and returns/refunds stay MCP gaps by design for now: their posting orchestration is inline in the route handlers (COGS, outbox, loyalty, refunds post with about/reversal shape). A money path is only exposed after its orchestration is extracted into a shared service — see issue #883 package 2 follow-ups.",
-    ops: { listDetail: ["get_void_pattern", "list_orders", "get_order"], create: ["order.discount.apply", "order.create"] },
+    note: "batch BJ: amend/re-settle and customer returns ride the extracted order-amendment/customer-return services with the route's outbox + broadcast + notification behaviour intact — always_approve/high like every posting lane; the discount lens maps the PATCH update column; pay/settle itself stays route-only for now: its orchestration (COGS layers, outbox, loyalty, platform commissions, store-credit difference) is still inline in the route handler and moves to a shared service as an #883 package-2 follow-up",
+    ops: {
+      listDetail: ["get_void_pattern", "list_orders", "get_order"],
+      create: ["order.create"],
+      update: ["order.discount.apply"],
+      lifecycle: ["order.amend.apply", "order.return.create"],
+    },
     test: "integration/orders.integration.test.ts",
   },
   {

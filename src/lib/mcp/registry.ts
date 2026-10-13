@@ -289,6 +289,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "menu.item.priceUpdate", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "menu.item.disable", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "order.discount.apply", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch BJ — ledger corrections on a sale: high/always-approve like every
+  // other posting lane.
+  { actionType: "order.amend.apply", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  { actionType: "order.return.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "inventory.reorder.draftPO", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "inventory.adjustment.propose", kind: "write", app: "pos", risk: "low", approval: "mode" },
   // Financial posting — this books an expense into the ledger RIGHT NOW, not

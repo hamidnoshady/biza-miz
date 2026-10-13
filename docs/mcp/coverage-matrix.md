@@ -15,8 +15,8 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (1)
-- **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
+### Tenant (0)
+_none — every entity row is covered or deliberately out of scope_
 
 ### Platform (17)
 - **platform.biz-directory** (Platform — Tenants · Business directory (search, identity, usage, reports)) — partial
@@ -41,7 +41,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 63 · partial: 1 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 8
+Counts — covered: 64 · partial: 0 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 8
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -58,7 +58,7 @@ Counts — covered: 63 · partial: 1 · MCP gap: 0 · backend gap: 0 · n/a (inf
 | Accounting | VAT & trial balance | get_vat_liability, run_report | — | — | — | — | ledger.view | — | get_vat_liability, run_report | integration/ledger.integration.test.ts | covered |
 | Accounting | Installment contracts | list_installment_plans | installment.plan.create | — | installment.item.pay | — | finance.installments_manage, ledger.view | connection mode; step-up (always approve) | list_installment_plans, installment.plan.create, installment.item.pay | integration/installments.integration.test.ts | covered |
 | Accounting | Ledger overview / settings / shift sales | run_accounting_review | — | — | — | — | ledger.view | — | run_accounting_review | — | covered |
-| POS | Orders (open, amend, pay, refund/returns)<br>_amend, pay/settle and returns/refunds stay MCP gaps by design for now: their posting orchestration is inline in the route handlers (COGS, outbox, loyalty, refunds post with about/reversal shape). A money path is only exposed after its orchestration is extracted into a shared service — see issue #883 package 2 follow-ups._ | get_order, get_void_pattern, list_orders | order.create, order.discount.apply | (route only) | (route only) | — | orders.amend_closed, orders.create, orders.view, payments.refund, payments.take, reports.view | connection mode | get_order, get_void_pattern, list_orders, order.create, order.discount.apply | integration/orders.integration.test.ts | partial |
+| POS | Orders (open, amend, pay, refund/returns)<br>_batch BJ: amend/re-settle and customer returns ride the extracted order-amendment/customer-return services with the route's outbox + broadcast + notification behaviour intact — always_approve/high like every posting lane; the discount lens maps the PATCH update column; pay/settle itself stays route-only for now: its orchestration (COGS layers, outbox, loyalty, platform commissions, store-credit difference) is still inline in the route handler and moves to a shared service as an #883 package-2 follow-up_ | get_order, get_void_pattern, list_orders | order.create | order.discount.apply | order.amend.apply, order.return.create | — | orders.amend_closed, orders.create, orders.view, payments.refund, payments.take, reports.view | connection mode; step-up (always approve) | get_order, get_void_pattern, list_orders, order.create, order.discount.apply, order.amend.apply, order.return.create | integration/orders.integration.test.ts | covered |
 | POS | Shifts (start/end/close, active) | list_shifts | shift.start | — | shift.close, shift.end | — | orders.create, team.manage | connection mode | list_shifts, shift.start, shift.close, shift.end | integration/shifts.integration.test.ts | covered |
 | POS | Kitchen display / floor / waiter queues<br>_batch AX: section config rides tablesEdit; the bump lane keeps the board's role gates (kitchen roles bump, waiter/cashier serve) checked against the author's membership role, with the ready coworker event firing only when the final unready line lands_ | get_table_turnover_rate | floor.section.create | floor.section.update, kitchen.item.status | floor.section.delete, kitchen.item.status | — | kitchen.view, tables.edit, tables.manage | connection mode | get_table_turnover_rate, floor.section.create, floor.section.update, kitchen.item.status, floor.section.delete, kitchen.item.status | — | covered |
 | POS | Reservations<br>_batch AW: the overlap-checked create/edit keep the advisory table lock sequencing; seat opens the table session with the same broadcast the floor emits; the physical delete steps up (business-record erasure) — cancel is the normal path_ | get_reservation_conflicts | reservation.create | reservation.edit | reservation.delete, reservation.lifecycle | — | reservations.manage, reservations.view | connection mode; step-up (always approve) | get_reservation_conflicts, reservation.create, reservation.edit, reservation.delete, reservation.lifecycle | integration/reservation-concurrency.integration.test.ts | covered |

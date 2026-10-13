@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **277 write verbs**
-(**74** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **291 write verbs**
+(**79** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -162,6 +162,8 @@ visible only to connections consented for every branch) and **277 write verbs**
 | `write_menu_item_price` | `menu.item.priceUpdate` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_menu_item_availability` | `menu.item.disable` | pos | low | connection write_mode | `menu.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_order_discount` | `order.discount.apply` | pos | low | connection write_mode | `orders.discount` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_order_amend_apply` | `order.amend.apply` | pos | high | always approval queue (step-up) | `orders.amend_closed` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_order_return_create` | `order.return.create` | pos | high | always approval queue (step-up) | `payments.refund` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_purchase_draft` | `inventory.reorder.draftPO` | pos | low | connection write_mode | `purchases.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_stock_count` | `inventory.adjustment.propose` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_expense` | `expense.categorize` | accounting | high | always approval queue (step-up) | `finance.expenses_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
@@ -287,6 +289,18 @@ visible only to connections consented for every branch) and **277 write verbs**
 | `write_rollup_location_set_active` | `rollup.location.setActive` | workspace | low | connection write_mode | `rollup.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_inventory_item_save` | `inventory.item.save` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_inventory_item_delete` | `inventory.item.delete` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_record_create` | `aec.record.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_record_update` | `aec.record.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_record_delete` | `aec.record.delete` | workspace | high | always approval queue (step-up) | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_record_action` | `aec.record.action` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_record_review` | `aec.record.review` | workspace | high | always approval queue (step-up) | `workspace.approve` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_contract_commercial_save` | `aec.contract.commercial.save` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_boq_version_save` | `aec.boq.version.save` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_profile_save` | `aec.profile.save` | workspace | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_project_profile_save` | `aec.projectProfile.save` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_participant_add` | `aec.participant.add` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_participant_update` | `aec.participant.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_aec_participant_remove` | `aec.participant.remove` | workspace | high | always approval queue (step-up) | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
