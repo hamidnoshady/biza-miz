@@ -29,6 +29,7 @@ import {
   HistoryIcon,
   LayersIcon,
   PackageXIcon,
+  PencilIcon,
   PlusIcon,
   SearchIcon,
   TrendingDownIcon,
@@ -91,6 +92,10 @@ export interface FixedAssetRow {
   disposalReason?: string | null;
   archivedAt?: string | null;
   fullyDepreciated?: boolean;
+  costCenterId?: string | null;
+  profitCenterId?: string | null;
+  departmentId?: string | null;
+  detailDimensionId?: string | null;
 }
 
 export interface DepreciationHistoryItem {
@@ -297,7 +302,13 @@ export function FixedAssetsSection({
   const [estimateTarget, setEstimateTarget] = useState<FixedAssetRow | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<FixedAssetRow | null>(null);
   const [reverseTarget, setReverseTarget] = useState<{ asset: FixedAssetRow; entry: DepreciationHistoryItem } | null>(null);
+  const [dimensionsTarget, setDimensionsTarget] = useState<FixedAssetRow | null>(null);
   const [journalPeekTarget, setJournalPeekTarget] = useState<{ entryId: string; title: string } | null>(null);
+
+  // A single catalogue for the register's dimension pickers (edit dialog). The
+  // create form loads its own so opening the dialog does not require mounting
+  // the form first.
+  const dimCatalog = useDimensionCatalog();
 
   // Stale-response guard: a filter change invalidates whatever is in flight,
   // so a slow answer for the previous query can never flash into the new
@@ -750,6 +761,7 @@ export function FixedAssetsSection({
                             onEstimate={() => setEstimateTarget(a)}
                             onArchive={() => setArchiveTarget(a)}
                             onDelete={() => setDeleteTarget(a)}
+                            onEditDimensions={() => setDimensionsTarget(a)}
                           />
                         </Td>
                       </DataTableRow>
@@ -847,6 +859,7 @@ export function FixedAssetsSection({
                             onEstimate={() => setEstimateTarget(a)}
                             onArchive={() => setArchiveTarget(a)}
                             onDelete={() => setDeleteTarget(a)}
+                            onEditDimensions={() => setDimensionsTarget(a)}
                           />
                         )}
                       </div>
@@ -979,6 +992,24 @@ export function FixedAssetsSection({
       {/* Journal entry drill-down */}
       {journalPeekTarget ? (
         <JournalPeekDialog entryId={journalPeekTarget.entryId} title={journalPeekTarget.title} onClose={() => setJournalPeekTarget(null)} />
+      ) : null}
+
+      {/* Default-dimensions edit (prospective only; history untouched). */}
+      {dimensionsTarget ? (
+        <AssetDimensionsDialog
+          asset={dimensionsTarget}
+          catalog={dimCatalog.catalog}
+          catalogError={dimCatalog.error}
+          catalogLoaded={dimCatalog.loaded}
+          onCatalogRetry={dimCatalog.retry}
+          busy={busy || isSubmitting}
+          onClose={() => setDimensionsTarget(null)}
+          onSuccess={(message) => {
+            setDimensionsTarget(null);
+            setLocalNotice(message);
+            refresh();
+          }}
+        />
       ) : null}
     </div>
   );
@@ -1540,6 +1571,7 @@ function AssetActions({
   onEstimate,
   onArchive,
   onDelete,
+  onEditDimensions,
 }: {
   asset: FixedAssetRow;
   busy: boolean;
@@ -1552,6 +1584,7 @@ function AssetActions({
   onEstimate: () => void;
   onArchive: () => void;
   onDelete: () => void;
+  onEditDimensions: () => void;
 }) {
   if (!canManage) {
     return compact ? (
@@ -1595,6 +1628,19 @@ function AssetActions({
           <HistoryIcon className="size-3.5" />
           <span>تاریخچه</span>
         </button>
+
+        {canManage ? (
+          <button
+            type="button"
+            onClick={onEditDimensions}
+            disabled={busy}
+            className="rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title="ویرایش ابعاد پیش‌فرض دارایی (آتی)"
+            aria-label={`ویرایش ابعاد ${asset.name}`}
+          >
+            <PencilIcon className="size-4" />
+          </button>
+        ) : null}
 
         {!disposed && !archived ? (
           <>
@@ -1710,6 +1756,15 @@ function AssetActions({
           </button>
         </>
       ) : null}
+
+      <button
+        type="button"
+        onClick={onEditDimensions}
+        disabled={busy}
+        className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      >
+        ویرایش ابعاد پیش‌فرض
+      </button>
 
       {canDelete ? (
         <button
@@ -3072,5 +3127,132 @@ function FixedAssetReconciliationNotice({ reconciliation }: { reconciliation: Fi
         ) : null}
       </ul>
     </InfoBox>
+  );
+}
+
+/**
+ * Edit an existing asset's DEFAULT dimensions (issue #868).
+ *
+ * This PATCH is atomic with the acquisition link and never rewrites posted
+ * history — `updateFixedAsset` applies dimensions prospectively, so
+ * previously-posted depreciation/disposal legs keep their original
+ * attribution. The dialog makes that explicit in the copy above the pickers,
+ * surfaces selected-id resolution via useDimensionSearch (remote search for
+ * large catalogues), supports clearing every dimension, refreshes the list
+ * on success, and shows an ErrorBox when the catalogue or submit fails.
+ */
+function AssetDimensionsDialog({
+  asset,
+  catalog,
+  catalogError,
+  catalogLoaded,
+  onCatalogRetry,
+  busy,
+  onClose,
+  onSuccess,
+}: {
+  asset: FixedAssetRow;
+  catalog: ReturnType<typeof useDimensionCatalog>["catalog"];
+  catalogError: string | null;
+  catalogLoaded: boolean;
+  onCatalogRetry: () => void;
+  busy: boolean;
+  onClose: () => void;
+  onSuccess: (message: string) => void;
+}) {
+  const [dims, setDims] = useState<DimensionDraft>(() => ({
+    cost_center: asset.costCenterId ?? undefined,
+    profit_center: asset.profitCenterId ?? undefined,
+    department: asset.departmentId ?? undefined,
+    detail: asset.detailDimensionId ?? undefined,
+  }));
+  const [submitting, setSubmitting] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const dirty =
+    (dims.cost_center ?? null) !== (asset.costCenterId ?? null) ||
+    (dims.profit_center ?? null) !== (asset.profitCenterId ?? null) ||
+    (dims.department ?? null) !== (asset.departmentId ?? null) ||
+    (dims.detail ?? null) !== (asset.detailDimensionId ?? null);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLocalError(null);
+    setSubmitting(true);
+    const payload = dimensionPayload(dims);
+    const body: Record<string, unknown> = { dimensions: payload ?? {} };
+    const res = await api<{ fixedAsset?: FixedAssetRow; error?: string }>(
+      `/api/ledger/fixed-assets/${asset.id}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    );
+    setSubmitting(false);
+    if (!res.ok || !res.data || res.data.error) {
+      setLocalError(errorMessageOrRaw(res.data?.error) ?? `خطای ناشناخته (کد ${res.status ?? "network"})`);
+      return;
+    }
+    onSuccess("ابعاد پیش‌فرض دارایی به‌روزرسانی شد؛ اسناد ثبت‌شده تغییر نکردند و ثبت‌های آتی از مقادیر جدید استفاده می‌کنند.");
+  }
+
+  return (
+    <OverlayDialog
+      headingId="asset-dimensions-dialog-heading"
+      describedById="asset-dimensions-dialog-description"
+      onClose={onClose}
+      dismissible={!(busy || submitting)}
+      className={`${overlayPanelClass} max-h-[88vh] w-full max-w-xl overflow-y-auto p-4 sm:p-6`}
+    >
+      <form onSubmit={submit}>
+        <header className="mb-4 flex items-start justify-between gap-3 border-b border-border pb-4">
+          <div>
+            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">ابعاد پیش‌فرض دارایی</p>
+            <h3 id="asset-dimensions-dialog-heading" className="mt-1 text-lg font-bold text-foreground">
+              ویرایش ابعاد «{asset.name}»
+            </h3>
+          </div>
+          <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={busy || submitting} aria-label="بستن">
+            <XIcon className="size-4" />
+          </Button>
+        </header>
+
+        <p id="asset-dimensions-dialog-description" className="mb-3 text-xs leading-6 text-muted-foreground">
+          مقادیر انتخاب‌شده فقط روی <strong>ثبت‌های آتی</strong> (استهلاک دوره‌های بعدی، واگذاری و برگشت‌های بعدی) اعمال
+          می‌شوند. اسناد قبلی ثبت‌شده در دفتر تغییر نمی‌کنند تا گزارش‌های تاریخی مخدوش نشوند. برای پاک کردن یک مقدار،
+          گزینه «بدون …» را انتخاب کنید.
+        </p>
+
+        {localError ? <ErrorBox>{localError}</ErrorBox> : null}
+
+        {catalogError ? (
+          <DimensionCatalogError error={catalogError} onRetry={onCatalogRetry} />
+        ) : !catalogLoaded ? (
+          <DimensionFieldsSkeleton />
+        ) : (
+          <DimensionFields
+            idPrefix="edit-asset-dimensions"
+            catalog={catalog}
+            locationId={asset.locationId ?? null}
+            value={dims}
+            onChange={setDims}
+            disabled={busy || submitting}
+          />
+        )}
+
+        {catalog?.truncated ? (
+          <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+            فهرست ابعاد بیش از {catalog.truncatedAt?.toLocaleString("fa-IR") ?? "۲۰۰۰"} مقدار دارد؛ با تایپ کردن در هر
+            انتخاب‌گر جستجوی سرور فعال می‌شود.
+          </p>
+        ) : null}
+
+        <div className="mt-5 flex flex-col-reverse gap-2 rounded-b-xl border-t border-border pt-4 sm:flex-row sm:justify-end">
+          <SecondaryButton type="button" onClick={onClose} disabled={busy || submitting}>
+            انصراف
+          </SecondaryButton>
+          <PrimaryButton type="submit" disabled={busy || submitting || !dirty || !catalogLoaded}>
+            {submitting ? "در حال ذخیره…" : "ذخیره ابعاد پیش‌فرض"}
+          </PrimaryButton>
+        </div>
+      </form>
+    </OverlayDialog>
   );
 }
