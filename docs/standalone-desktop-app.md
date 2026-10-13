@@ -210,7 +210,7 @@ passed end to end:
 | Positively staged runtime (local Linux build) | 153.9 MiB | 200 MiB |
 
 **Current budgets (2026-10-03).** The installer gate is 175 MiB and the unpacked
-payload's runaway detector is **620 MiB**, raised from 600 MiB when the AEC
+payload's runaway detector is **640 MiB**, raised from 620 MiB on 2026-10-11, when the merged multicurrency and auth-hardening work measured 620.4 MiB unpacked (installer 161.3 MiB). It was raised from 600 MiB before that, when the AEC
 document-control wave took the traced runtime to 600.6 MiB against 0.2 MiB of
 headroom. The detector's job is to catch a payload that accidentally ships
 `node_modules`, a build cache or source maps rather than to freeze the app's

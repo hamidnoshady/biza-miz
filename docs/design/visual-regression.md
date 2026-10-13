@@ -132,8 +132,12 @@ selector matches nothing, rather than silently recording the unscrolled frame.
 ## Adding a screen
 
 Add an entry to `SCREENS` in `scripts/visual-regression.mjs`, run
-`npm run test:visual` once to record it, look at the resulting PNG, and commit
-it with the change. Prefer screens that are the canonical example of a shared
+`node scripts/visual-regression.mjs --update` once to record it, look at the
+resulting PNG, and commit it **together with the entry**. The harness refuses
+to run a screen that has no committed baseline: it used to record one on the
+spot and count that as a pass, which on CI — where the file is discarded with
+the runner — meant a green job for a screen it had never compared. An entry
+without its PNG is a gate that exists only in the list. Prefer screens that are the canonical example of a shared
 pattern over screens that merely look good. Keep the list short: this check is
 valuable in proportion to how seriously each failure is taken, and a
 fifty-screen suite trains people to skim.
