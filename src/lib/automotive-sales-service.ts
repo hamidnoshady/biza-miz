@@ -52,7 +52,7 @@ import {
 // Side-effect import: registers the automotive.* posting rules (revenue, COGS,
 // deposits) with the engine.
 import "./automotive-posting-rules";
-import { reverseLiveEntry } from "./retail-invoice-void-service";
+import { reverseLiveEntry, RetailInvoiceVoidError, voidRetailInvoice } from "./retail-invoice-void-service";
 
 export class VehicleSaleError extends VehicleError {
   constructor(code: string, message: string, status = 409) {
@@ -495,6 +495,119 @@ export async function reverseVehicleSale(
     );
   }
 
+  // The car side of the reversal: `returned`, current-sale facts cleared, the
+  // occurrence closed with the mirror ids, and the domain event. Shared by the
+  // invoice path and the legacy no-invoice path below.
+  const releaseVehicle = async (reversalEntryIds: string[]): Promise<void> => {
+    await ensureVehicleState(client, {
+      businessId: input.businessId,
+      serialId: input.serialId,
+      locationId: sale.location_id,
+      state: "returned",
+      actorId: input.actorId,
+      command: "sale_reversed",
+    });
+    const { rowCount: clearedSaleFacts } = await client.query(
+      `UPDATE automotive_vehicle_attributes
+          SET sold_order_id = NULL, sold_order_item_id = NULL, sold_customer_id = NULL,
+              sold_on = NULL, sale_price_rial = NULL, frozen_effective_cost_rial = NULL,
+              sold_by = NULL, updated_at = now()
+        WHERE business_id = $1 AND serial_id = $2 AND location_id = $4
+          AND state = 'returned' AND sold_order_item_id IS NOT DISTINCT FROM $3`,
+      [input.businessId, input.serialId, sale.order_item_id, input.locationId],
+    );
+    if (clearedSaleFacts !== 1) {
+      throw new VehicleSaleError("sale_state_mismatch", "واقعیت‌های فروش خودرو با سابقهٔ برگشت همگام نیست.", 409);
+    }
+    await client.query(`UPDATE item_serials SET sold_at = NULL WHERE id = $1`, [input.serialId]);
+    const { rowCount: reversedSales } = await client.query(
+      `UPDATE automotive_vehicle_sales
+          SET status = 'reversed', reversal_reason = $3, reversal_entry_ids = $4::uuid[],
+              reversed_by = $5, reversed_at = now()
+        WHERE sale_id = $1 AND business_id = $2 AND status = 'active'`,
+      [sale.sale_id, input.businessId, reason, reversalEntryIds, input.actorId ?? null],
+    );
+    if (reversedSales !== 1) {
+      throw new VehicleSaleError("sale_already_reversed", "این سابقهٔ فروش قبلاً برگشت شده است.", 409);
+    }
+
+    await emitDomainEvent(client, {
+      businessId: input.businessId,
+      locationId: sale.location_id,
+      eventType: "automotive.sale_reversed",
+      payload: {
+        serialId: input.serialId,
+        stockNumber: vehicle.stock_number,
+        saleId: sale.sale_id,
+        orderId: sale.order_id,
+        orderItemId: sale.order_item_id,
+        customerId: sale.customer_id,
+        soldOn: sale.sold_on,
+        salePriceRial: sale.sale_price_rial,
+        // The number the reversal was based on: what the books posted, not what
+        // the car's cost has become since.
+        frozenEffectiveCostRial: sale.frozen_effective_cost_rial,
+        reversedEntryIds: reversalEntryIds,
+        reason,
+      },
+      sourceType: "automotive_vehicle_sale",
+      sourceId: sale.sale_id,
+      createdBy: input.actorId ?? null,
+    });
+  };
+
+  if (sale.order_id && sale.order_item_id) {
+    // The sale was an invoice line: undo the whole invoice footprint (order
+    // status, payments, commission, loyalty) with the retail void engine, so
+    // the shift stops reporting money the ledger has given back and the
+    // invoice cannot stay "completed" over a car that can be resold.
+    const { rows: otherLines } = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM order_items
+        WHERE order_id = $1 AND id <> $2 AND status <> 'voided'`,
+      [sale.order_id, sale.order_item_id],
+    );
+    if (Number(otherLines[0]?.count ?? 0) > 0) {
+      throw new VehicleSaleError(
+        "invoice_has_other_lines",
+        "فاکتور این خودرو ردیف‌های دیگری هم دارد؛ برگشت تنها یک ردیف از فاکتور به‌صورت خودکار ممکن نیست.",
+        409,
+      );
+    }
+    const reversalEntryIds: string[] = [];
+    try {
+      await voidRetailInvoice(
+        client,
+        {
+          businessId: input.businessId,
+          locationId: sale.location_id,
+          orderId: sale.order_id,
+          actorId: input.actorId ?? null,
+          reason,
+        },
+        {
+          entryDate: await businessDate(client, sale.location_id),
+          memo: `برگشت فروش خودرو${vehicle.stock_number ? ` — ${vehicle.stock_number}` : ""}`,
+          vehicleLineReversal: async (line) => {
+            if (line.orderItemId !== sale.order_item_id || line.serialId !== input.serialId) {
+              throw new VehicleSaleError("sale_state_mismatch", "ردیف فاکتور با خودروی برگشتی یکی نیست.", 409);
+            }
+            reversalEntryIds.push(...line.reversalEntryIds);
+            await releaseVehicle(line.reversalEntryIds);
+          },
+        },
+      );
+      // The entries this sale posted, mirrored; commission/loyalty reversals
+      // are the invoice's and stay recorded on its amendment.
+      return { reversalEntryIds };
+    } catch (err) {
+      if (err instanceof RetailInvoiceVoidError) {
+        throw new VehicleSaleError("invoice_void_refused", err.message, err.status);
+      }
+      throw err;
+    }
+  }
+
+  // A sale with no invoice line (direct caller): mirror the posted entries.
   const amendmentId = randomUUID();
   const reversalEntryIds: string[] = [];
   for (const entryId of entryIds) {
@@ -508,62 +621,7 @@ export async function reverseVehicleSale(
     });
     if (reversalEntryId) reversalEntryIds.push(reversalEntryId);
   }
-
-  await ensureVehicleState(client, {
-    businessId: input.businessId,
-    serialId: input.serialId,
-    locationId: sale.location_id,
-    state: "returned",
-    actorId: input.actorId,
-    command: "sale_reversed",
-  });
-  const { rowCount: clearedSaleFacts } = await client.query(
-    `UPDATE automotive_vehicle_attributes
-        SET sold_order_id = NULL, sold_order_item_id = NULL, sold_customer_id = NULL,
-            sold_on = NULL, sale_price_rial = NULL, frozen_effective_cost_rial = NULL,
-            sold_by = NULL, updated_at = now()
-      WHERE business_id = $1 AND serial_id = $2 AND location_id = $4
-        AND state = 'returned' AND sold_order_item_id IS NOT DISTINCT FROM $3`,
-    [input.businessId, input.serialId, sale.order_item_id, input.locationId],
-  );
-  if (clearedSaleFacts !== 1) {
-    throw new VehicleSaleError("sale_state_mismatch", "واقعیت‌های فروش خودرو با سابقهٔ برگشت همگام نیست.", 409);
-  }
-  await client.query(`UPDATE item_serials SET sold_at = NULL WHERE id = $1`, [input.serialId]);
-  const { rowCount: reversedSales } = await client.query(
-    `UPDATE automotive_vehicle_sales
-        SET status = 'reversed', reversal_reason = $3, reversal_entry_ids = $4::uuid[],
-            reversed_by = $5, reversed_at = now()
-      WHERE sale_id = $1 AND business_id = $2 AND status = 'active'`,
-    [sale.sale_id, input.businessId, reason, reversalEntryIds, input.actorId ?? null],
-  );
-  if (reversedSales !== 1) {
-    throw new VehicleSaleError("sale_already_reversed", "این سابقهٔ فروش قبلاً برگشت شده است.", 409);
-  }
-
-  await emitDomainEvent(client, {
-    businessId: input.businessId,
-    locationId: sale.location_id,
-    eventType: "automotive.sale_reversed",
-    payload: {
-      serialId: input.serialId,
-      stockNumber: vehicle.stock_number,
-      saleId: sale.sale_id,
-      orderId: sale.order_id,
-      orderItemId: sale.order_item_id,
-      customerId: sale.customer_id,
-      soldOn: sale.sold_on,
-      salePriceRial: sale.sale_price_rial,
-      // The number the reversal was based on: what the books posted, not what
-      // the car's cost has become since.
-      frozenEffectiveCostRial: sale.frozen_effective_cost_rial,
-      reversedEntryIds: reversalEntryIds,
-      reason,
-    },
-    sourceType: "automotive_vehicle_sale",
-    sourceId: sale.sale_id,
-    createdBy: input.actorId ?? null,
-  });
+  await releaseVehicle(reversalEntryIds);
 
   return { reversalEntryIds };
 }

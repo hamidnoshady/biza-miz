@@ -36,6 +36,7 @@ let provisioning: typeof import("../src/lib/business-provisioning");
 let automotive: typeof import("../src/lib/automotive-service");
 let reservations: typeof import("../src/lib/automotive-reservation-service");
 let vehicleSales: typeof import("../src/lib/automotive-sales-service");
+let invoiceVoid: typeof import("../src/lib/retail-invoice-void-service");
 let invoiceService: typeof import("../src/lib/retail-invoice-service");
 let postingEngine: typeof import("../src/lib/posting-engine");
 let exact: typeof import("../src/lib/inventory-exact");
@@ -172,6 +173,7 @@ beforeAll(async () => {
   automotive = await import("../src/lib/automotive-service");
   reservations = await import("../src/lib/automotive-reservation-service");
   vehicleSales = await import("../src/lib/automotive-sales-service");
+  invoiceVoid = await import("../src/lib/retail-invoice-void-service");
   invoiceService = await import("../src/lib/retail-invoice-service");
   postingEngine = await import("../src/lib/posting-engine");
   void postingEngine;
@@ -1190,7 +1192,8 @@ async function sellThroughInvoice(input: {
   price: number;
   discount?: number;
   vatPercent: number;
-  tenderAmount: number | null;
+  /** `null` sends no tender; `"open"` sends one tender with no amount, which takes whatever is left. */
+  tenderAmount: number | null | "open";
   customerId?: string | null;
   tenderMethod?: "cash" | "bank" | "credit";
 }) {
@@ -1205,7 +1208,9 @@ async function sellThroughInvoice(input: {
       tenders:
         input.tenderAmount == null
           ? []
-          : [{ method: input.tenderMethod ?? "cash", amount: exact.rialText(String(input.tenderAmount)) }],
+          : input.tenderAmount === "open"
+            ? [{ method: input.tenderMethod ?? "cash" }]
+            : [{ method: input.tenderMethod ?? "cash", amount: exact.rialText(String(input.tenderAmount)) }],
       lines: [
         {
           kind: "vehicle",
@@ -1654,6 +1659,98 @@ describe("selling the exact car", () => {
       { status: "reversed", order_id: invoice.orderId },
       { status: "active", order_id: resale.orderId },
     ]);
+  });
+
+  it("records only the balance when an open tender settles a car with a deposit", async () => {
+    const car = await carReadyToSell("S-3-OPEN", 700_000_000, 0);
+    await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: car.serialId,
+        customerId: biz.customerId,
+        depositRial: 50_000_000,
+        depositMethod: "cash",
+        actorId: biz.ownerId,
+      }),
+    );
+    // No amount typed: the tender takes the balance, which is the 981,000,000
+    // total less the 50,000,000 already held, never the whole total again.
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 9,
+      tenderAmount: "open",
+      customerId: biz.customerId,
+    });
+    const { rows: payments } = await db.query<{ amount: string }>(
+      "SELECT amount::text FROM payments WHERE order_id = $1",
+      [invoice.orderId],
+    );
+    expect(payments.map((row) => row.amount)).toEqual(["931000000"]);
+    expect(await accountBalance("1100")).toBe(981_000_000);
+    expect(await depositBalance()).toBe(0);
+  });
+
+  it("voids the invoice with the car, so the order and its payments are undone too", async () => {
+    const car = await carReadyToSell("S-5-VOID", 700_000_000, 0);
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 9,
+      tenderAmount: 981_000_000,
+    });
+    await withTransaction((client) =>
+      vehicleSales.reverseVehicleSale(client, {
+        businessId: biz.id,
+        serialId: car.serialId,
+        locationId: biz.locationId,
+        reason: "فسخ فروش",
+        actorId: biz.ownerId,
+      }),
+    );
+    const { rows: orders } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM orders WHERE id = $1",
+      [invoice.orderId],
+    );
+    expect(orders[0].status).toBe("voided");
+    const { rows: paid } = await db.query<{ total: string }>(
+      "SELECT COALESCE(SUM(amount), 0)::text AS total FROM payments WHERE order_id = $1",
+      [invoice.orderId],
+    );
+    expect(paid[0].total).toBe("0");
+    const { rows: amendments } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM order_amendments WHERE order_id = $1",
+      [invoice.orderId],
+    );
+    expect(amendments[0].count).toBe("1");
+    expect(await accountBalance("1100")).toBe(0);
+    expect(await accountBalance("1370")).toBe(700_000_000);
+    expect((await automotive.getVehicle(biz.id, car.serialId))?.state).toBe("returned");
+  });
+
+  it("refuses to void a car invoice through the generic invoice void", async () => {
+    const car = await carReadyToSell("S-5-GENERIC", 700_000_000, 0);
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 9,
+      tenderAmount: 981_000_000,
+    });
+    await expect(
+      withTransaction((client) =>
+        invoiceVoid.voidRetailInvoice(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          orderId: invoice.orderId,
+          actorId: biz.ownerId,
+          reason: "اشتباه",
+        }),
+      ),
+    ).rejects.toThrow(/برگشت فروش/);
+    // Nothing moved: the car is still sold and the sale is still in the books.
+    expect((await automotive.getVehicle(biz.id, car.serialId))?.state).toBe("sold");
+    expect(await accountBalance("4590")).toBe(-900_000_000);
   });
 
   it("reads a vehicle line's sale back from the invoice, vehicle named", async () => {

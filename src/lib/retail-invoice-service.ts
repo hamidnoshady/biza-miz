@@ -283,6 +283,9 @@ export async function createRetailInvoice(
   const orderId = orderRows[0].id;
 
   const lines: RetailInvoiceLine[] = [];
+  // Reservation deposits the vehicle lines applied. That money was collected
+  // when the car was reserved, so it is not part of what the tenders pay today.
+  let depositAppliedTotal = 0n;
 
   // Phase 27 Wave 6 — the shared promotion engine, evaluated over the retail
   // cart exactly as order-totals.ts evaluates it over an F&B cart. Promotions
@@ -344,6 +347,9 @@ export async function createRetailInvoice(
     // the line row exists; stamping it here keeps the car and the invoice
     // inseparable in one transaction.
     if (line.kind === "vehicle") {
+      if (settled.snapshot.kind === "vehicle") {
+        depositAppliedTotal += rialBigInt(rialText(settled.snapshot.depositApplied));
+      }
       if (settled.vehicleSaleId == null || settled.vehicleSaleVatPercent == null) {
         throw new RetailInvoiceError("سابقهٔ فروش خودرو ساخته نشد.");
       }
@@ -452,7 +458,12 @@ export async function createRetailInvoice(
   // checkout can write more than one live positive row — each slice of this
   // invoice's settlement is stamped 1..N here, exactly like the café's own
   // split-payment insert in api/orders/[id]/pay/route.ts.
-  const resolvedTenders = resolveTenderAmounts(input.tenders, total);
+  //
+  // An open slice resolves against what is collected *now*: the invoice total
+  // less any reservation deposit a vehicle line applied. Resolving it against
+  // the full total would record the deposit as today's cash a second time.
+  const collectedNow = rialText((rialBigInt(total) - depositAppliedTotal).toString());
+  const resolvedTenders = resolveTenderAmounts(input.tenders, collectedNow);
   let settlementSeq = 0;
   for (let i = 0; i < input.tenders.length; i++) {
     const amount = resolvedTenders[i].amount;

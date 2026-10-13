@@ -8,6 +8,7 @@ import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from ".
 import { JalaliDatePicker } from "../jalali-date-picker";
 import { MediaPickerDialog, mediaFileUrl, type PickedMedia } from "../media/media-picker";
 import { formatJalali } from "@/lib/jalali";
+import { useMoney, type MoneyApi } from "@/components/money/money-context";
 import {
   VEHICLE_BODY_TYPES,
   VEHICLE_BODY_TYPE_LABELS,
@@ -164,18 +165,16 @@ function editFormFor(vehicle: VehicleDetailDto): EditForm {
   };
 }
 
-function priceFormFor(vehicle: VehicleDetailDto): PriceForm {
+/** Stored Rial → the figure a price field shows in the business's unit. */
+function priceFormFor(vehicle: VehicleDetailDto, money: MoneyApi): PriceForm {
+  const field = (rial: number | null | undefined) => (rial == null ? "" : String(money.toInput(rial)));
   return {
-    askingPriceRial: String(vehicle.askingPriceRial),
-    minimumPriceRial: vehicle.minimumPriceRial == null ? "" : String(vehicle.minimumPriceRial),
-    wholesalePriceRial: vehicle.wholesalePriceRial == null ? "" : String(vehicle.wholesalePriceRial),
-    promotionalPriceRial: vehicle.promotionalPriceRial == null ? "" : String(vehicle.promotionalPriceRial),
+    askingPriceRial: field(vehicle.askingPriceRial),
+    minimumPriceRial: field(vehicle.minimumPriceRial),
+    wholesalePriceRial: field(vehicle.wholesalePriceRial),
+    promotionalPriceRial: field(vehicle.promotionalPriceRial),
     reason: "",
   };
-}
-
-function money(value: number | null | undefined): string {
-  return value == null ? "—" : value.toLocaleString("fa-IR");
 }
 
 function displayDate(value: string | null | undefined): string {
@@ -235,6 +234,11 @@ export function VehicleDetailDialog({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  // Prices are typed and shown in the business's unit and sent as integer Rial.
+  const moneyApi = useMoney();
+  const { unitLabel } = moneyApi;
+  const money = (value: number | null | undefined) => (value == null ? "—" : moneyApi.format(value, { withUnit: false }));
+  const toRial = (value: number | null) => (value == null ? null : moneyApi.fromInput(value));
   const [vehicle, setVehicle] = useState<VehicleDetailDto | null>(null);
   const [priceHistory, setPriceHistory] = useState<VehiclePriceHistoryEntry[]>([]);
   const [canSeePriceHistory, setCanSeePriceHistory] = useState(false);
@@ -277,7 +281,7 @@ export function VehicleDetailDialog({
         const next = detailResult.data.vehicle;
         setVehicle(next);
         setEditForm(editFormFor(next));
-        setPriceForm(priceFormFor(next));
+        setPriceForm(priceFormFor(next, moneyApi));
         setPriceHistory(detailResult.data.priceHistory ?? []);
         setCanSeePriceHistory(detailResult.data.canSeePriceHistory === true);
         setTransfers(detailResult.data.transfers ?? []);
@@ -297,7 +301,7 @@ export function VehicleDetailDialog({
       setMediaLoading(false);
     });
     await Promise.all([detailRequest, mediaRequest]);
-  }, [serialId]);
+  }, [serialId, moneyApi]);
 
   useEffect(() => {
     void load();
@@ -381,15 +385,15 @@ export function VehicleDetailDialog({
     setError("");
     setNotice("");
     const body: Record<string, number | null | string> = {
-      askingPriceRial: asking.value,
+      askingPriceRial: toRial(asking.value),
       reason: priceForm.reason.trim() || "",
     };
     if (canSeeCost) {
-      body.wholesalePriceRial = wholesale.value;
-      body.promotionalPriceRial = promotional.value;
+      body.wholesalePriceRial = toRial(wholesale.value);
+      body.promotionalPriceRial = toRial(promotional.value);
     }
     if (canOverrideMinPrice && (canSeeCost || priceForm.minimumPriceRial.trim() !== "")) {
-      body.minimumPriceRial = minimum.value;
+      body.minimumPriceRial = toRial(minimum.value);
     }
     const result = await api<{ priceHistory?: VehiclePriceHistoryEntry[]; error?: string; message?: string }>(
       `/api/automotive/vehicles/${serialId}/price`,
@@ -612,7 +616,7 @@ export function VehicleDetailDialog({
                       <Field label="سال مدل"><input className={inputClass} value={vehicle.modelYear == null ? "—" : `${vehicle.modelYear} (${vehicle.vehicleYearCalendar === "jalali" ? "شمسی" : "میلادی"})`} readOnly /></Field>
                       <Field label="سال تولید"><input className={inputClass} value={vehicle.productionYear == null ? "—" : String(vehicle.productionYear)} readOnly /></Field>
                       <Field label="شرط"><input className={inputClass} value={vehicle.condition === "new" ? "نو" : "کارکرده"} readOnly /></Field>
-                      <Field label="قیمت فروش (ریال)"><input className={inputClass} value={money(vehicle.askingPriceRial)} readOnly dir="ltr" /></Field>
+                      <Field label={`قیمت فروش (${unitLabel})`}><input className={inputClass} value={money(vehicle.askingPriceRial)} readOnly dir="ltr" /></Field>
                       <Field label="VIN"><input className={inputClass} value={editForm.vin} onChange={(event) => setEditForm((form) => ({ ...form, vin: event.target.value }))} disabled={!canEditHere || busy} dir="ltr" /></Field>
                       <Field label="شماره شاسی"><input className={inputClass} value={editForm.chassisNumber} onChange={(event) => setEditForm((form) => ({ ...form, chassisNumber: event.target.value }))} disabled={!canEditHere || busy} dir="ltr" /></Field>
                       <Field label="شماره موتور"><input className={inputClass} value={editForm.engineNumber} onChange={(event) => setEditForm((form) => ({ ...form, engineNumber: event.target.value }))} disabled={!canEditHere || busy} dir="ltr" /></Field>
@@ -675,10 +679,10 @@ export function VehicleDetailDialog({
                 <div className="space-y-4">
                   <SectionCard title="قیمت‌گذاری" description="تغییرات قیمت مستقل از بهای خرید ثبت می‌شوند">
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                      <Field label="قیمت فروش (ریال)"><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.askingPriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, askingPriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field>
-                      {canOverrideMinPrice ? <Field label="حداقل قیمت (ریال)"><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.minimumPriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, minimumPriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field> : null}
-                      {canSeeCost ? <Field label="قیمت عمده (ریال)"><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.wholesalePriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, wholesalePriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field> : null}
-                      {canSeeCost ? <Field label="قیمت تبلیغاتی (ریال)"><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.promotionalPriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, promotionalPriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field> : null}
+                      <Field label={`قیمت فروش (${unitLabel})`}><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.askingPriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, askingPriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field>
+                      {canOverrideMinPrice ? <Field label={`حداقل قیمت (${unitLabel})`}><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.minimumPriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, minimumPriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field> : null}
+                      {canSeeCost ? <Field label={`قیمت عمده (${unitLabel})`}><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.wholesalePriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, wholesalePriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field> : null}
+                      {canSeeCost ? <Field label={`قیمت تبلیغاتی (${unitLabel})`}><PersianNumberInput className={inputClass} inputMode="numeric" value={priceForm.promotionalPriceRial} onChange={(event) => setPriceForm((form) => ({ ...form, promotionalPriceRial: event.target.value }))} disabled={!canPriceHere || busy} /></Field> : null}
                       <Field label="دلیل تغییر"><input className={inputClass} value={priceForm.reason} onChange={(event) => setPriceForm((form) => ({ ...form, reason: event.target.value }))} disabled={!canPriceHere || busy} /></Field>
                     </div>
                     {canPriceHere ? <div className="mt-4"><PrimaryButton type="button" onClick={savePrice} disabled={busy}>{busy ? "در حال ذخیره…" : "ثبت قیمت و تاریخچه"}</PrimaryButton></div> : null}
@@ -688,7 +692,7 @@ export function VehicleDetailDialog({
                     <SectionCard title="تاریخچهٔ کامل قیمت" description="قیمت قبلی و جدید هر تغییر، همراه با عامل و دلیل">
                       {priceHistory.length === 0 ? <EmptyState title="تغییری ثبت نشده">با ثبت اولین تغییر، سابقهٔ قیمت این خودرو در همین‌جا می‌ماند.</EmptyState> : (
                         <DataTable caption="تاریخچهٔ قیمت خودرو">
-                          <DataTableHead><Th>زمان</Th><Th>قیمت فروش</Th>{canSeeCost ? <Th>حداقل قیمت</Th> : null}{canSeeCost ? <Th>عمده</Th> : null}{canSeeCost ? <Th>تبلیغاتی</Th> : null}<Th>تغییردهنده</Th><Th>دلیل</Th></DataTableHead>
+                          <DataTableHead><Th>زمان</Th><Th>قیمت فروش ({unitLabel})</Th>{canSeeCost ? <Th>حداقل قیمت</Th> : null}{canSeeCost ? <Th>عمده</Th> : null}{canSeeCost ? <Th>تبلیغاتی</Th> : null}<Th>تغییردهنده</Th><Th>دلیل</Th></DataTableHead>
                           <DataTableBody>{priceHistory.map((entry) => (
                             <DataTableRow key={entry.id}>
                               <Td>{displayDate(entry.changedAt)}</Td>
@@ -805,15 +809,15 @@ export function VehicleDetailDialog({
               {selectedTab === "costs" && canSeeCost ? (
                 <SectionCard title="بهای تمام‌شده و هزینه‌ها" description="هزینه‌ها در همان سرویس خودرو و با مجوز هزینه خوانده می‌شوند">
                   <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <Summary label="بهای خرید" value={`${money(vehicle.purchaseCostRial)} ریال`} />
-                    <Summary label="بهای تمام‌شدهٔ مؤثر" value={`${money(vehicle.effectiveCostRial)} ریال`} />
-                    <Summary label="هزینهٔ سرمایه‌ای" value={`${money(vehicle.capitalizedCostRial)} ریال`} />
-                    <Summary label="هزینهٔ دوره‌ای" value={`${money(vehicle.periodExpenseRial)} ریال`} />
+                    <Summary label="بهای خرید" value={`${money(vehicle.purchaseCostRial)} ${unitLabel}`} />
+                    <Summary label="بهای تمام‌شدهٔ مؤثر" value={`${money(vehicle.effectiveCostRial)} ${unitLabel}`} />
+                    <Summary label="هزینهٔ سرمایه‌ای" value={`${money(vehicle.capitalizedCostRial)} ${unitLabel}`} />
+                    <Summary label="هزینهٔ دوره‌ای" value={`${money(vehicle.periodExpenseRial)} ${unitLabel}`} />
                   </div>
                   {(vehicle.costs ?? []).length === 0 ? <EmptyState title="هزینه‌ای ثبت نشده">هزینه‌های این خودرو از بخش «هزینهٔ خودرو» ثبت می‌شوند.</EmptyState> : (
                     <DataTable caption="هزینه‌های خودرو">
                       <DataTableHead><Th>تاریخ</Th><Th>دسته</Th><Th>ثبت حسابداری</Th><Th>مبلغ</Th><Th>فروشنده</Th><Th>مرجع سند</Th><Th>وضعیت</Th></DataTableHead>
-                      <DataTableBody>{vehicle.costs!.map((cost) => <DataTableRow key={cost.id}><Td>{displayDate(cost.incurredOn)}</Td><Td>{cost.category}</Td><Td>{cost.posting === "capitalized" ? "سرمایه‌ای" : "هزینهٔ دوره"}</Td><Td>{money(cost.amountRial)} ریال</Td><Td>{cost.vendorName ?? "—"}</Td><Td>{cost.documentRef ?? "—"}</Td><Td>{cost.status === "active" ? "فعال" : `باطل‌شده: ${cost.voidReason ?? "—"}`}</Td></DataTableRow>)}</DataTableBody>
+                      <DataTableBody>{vehicle.costs!.map((cost) => <DataTableRow key={cost.id}><Td>{displayDate(cost.incurredOn)}</Td><Td>{cost.category}</Td><Td>{cost.posting === "capitalized" ? "سرمایه‌ای" : "هزینهٔ دوره"}</Td><Td>{money(cost.amountRial)} {unitLabel}</Td><Td>{cost.vendorName ?? "—"}</Td><Td>{cost.documentRef ?? "—"}</Td><Td>{cost.status === "active" ? "فعال" : `باطل‌شده: ${cost.voidReason ?? "—"}`}</Td></DataTableRow>)}</DataTableBody>
                     </DataTable>
                   )}
                 </SectionCard>

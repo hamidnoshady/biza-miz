@@ -25,6 +25,10 @@ import { VehicleDetailDialog } from "./vehicle-detail-dialog";
 import { formatJalali } from "@/lib/jalali";
 import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { JalaliDatePicker } from "../jalali-date-picker";
+import { useMoney } from "@/components/money/money-context";
+import { PaymentWays, usePaymentMethods } from "../payment-ways";
+import { emptyPaymentDraft, paymentDraftBody, type PaymentDraft } from "@/lib/payment-draft";
+import { ledgerSettlementFor } from "@/lib/payment-methods";
 
 type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "leads" | "expenses";
 
@@ -118,9 +122,27 @@ interface OverviewDto {
   };
 }
 
-function money(value: number | undefined | null): string {
-  if (value == null) return "—";
-  return value.toLocaleString("fa-IR");
+/**
+ * Amounts are stored and sent as integer Rial, but typed and shown in the
+ * business's chosen unit (تومان or ریال). This is the screen's only
+ * conversion point: `toRial` on the way to the API, `toInput` when a stored
+ * figure seeds a field.
+ */
+function useVehicleMoney() {
+  const api = useMoney();
+  return useMemo(
+    () => ({
+      unit: api.unit,
+      unitLabel: api.unitLabel,
+      money: (value: number | undefined | null): string => (value == null ? "—" : api.format(value, { withUnit: false })),
+      toRial: (input: string): number => {
+        const value = Math.trunc(Number(input.trim() || 0));
+        return Number.isFinite(value) && value > 0 ? api.fromInput(value) : 0;
+      },
+      toInput: (rial: number | null | undefined): string => (rial ? String(api.toInput(rial)) : ""),
+    }),
+    [api],
+  );
 }
 
 function branchScopeParams(branchFilter: string): URLSearchParams {
@@ -221,6 +243,7 @@ export function AutomotiveManager({
   const [minAgeDays, setMinAgeDays] = useState("");
   const [maxAgeDays, setMaxAgeDays] = useState("");
   const [pageIndex, setPageIndex] = useState(0);
+  const { money, unitLabel, toRial } = useVehicleMoney();
   const pageSize = 25;
 
   const run: Runner = useCallback(async (fn) => {
@@ -254,7 +277,8 @@ export function AutomotiveManager({
     if (modelFilter.trim()) stockParams.set("model", modelFilter.trim());
     for (const [key, value] of [
       ["modelYearFrom", modelYearFrom], ["modelYearTo", modelYearTo],
-      ["minPriceRial", minPriceRial], ["maxPriceRial", maxPriceRial],
+      ["minPriceRial", minPriceRial.trim() ? String(toRial(minPriceRial)) : ""],
+      ["maxPriceRial", maxPriceRial.trim() ? String(toRial(maxPriceRial)) : ""],
       ["minMileageKm", minMileageKm], ["maxMileageKm", maxMileageKm],
       ["minAgeDays", minAgeDays], ["maxAgeDays", maxAgeDays],
     ]) {
@@ -300,7 +324,7 @@ export function AutomotiveManager({
   }, [
     search, condition, stateFilter, branchFilter, makeFilter, modelFilter,
     modelYearFrom, modelYearTo, minPriceRial, maxPriceRial,
-    minMileageKm, maxMileageKm, minAgeDays, maxAgeDays, pageIndex, reloadKey,
+    minMileageKm, maxMileageKm, minAgeDays, maxAgeDays, pageIndex, reloadKey, toRial,
   ]);
 
   // Workflow pickers have their own unfiltered, paginated dataset. Searching or
@@ -366,10 +390,10 @@ export function AutomotiveManager({
               <KpiCard label="رزروشده" value={String(overview?.summary.reserved ?? 0)} />
               <KpiCard label="فروش‌رفتهٔ این ماه" value={String(soldThisMonth)} />
               {canSeeCost ? (
-                <KpiCard label="درآمد این ماه (بی‌مالیات)" value={money(overview?.summary.revenueThisMonthRial)} />
+                <KpiCard label={`درآمد این ماه (بی‌مالیات، ${unitLabel})`} value={money(overview?.summary.revenueThisMonthRial)} />
               ) : null}
               {canSeeCost ? (
-                <KpiCard label="سود ناخالص این ماه" value={money(overview?.summary.grossProfitThisMonthRial)} />
+                <KpiCard label={`سود ناخالص این ماه (${unitLabel})`} value={money(overview?.summary.grossProfitThisMonthRial)} />
               ) : null}
               {canSeeCost ? (
                 <KpiCard
@@ -387,8 +411,8 @@ export function AutomotiveManager({
              />
               {canSeeCost ? (
                 <>
-                  <KpiCard label="ارزش موجودی (ریال)" value={money(overview?.summary.stockValueRial)} />
-                  <KpiCard label="حاشیهٔ بالقوه (ریال)" value={money(overview?.summary.potentialMarginRial)} />
+                  <KpiCard label={`ارزش موجودی (${unitLabel})`} value={money(overview?.summary.stockValueRial)} />
+                  <KpiCard label={`حاشیهٔ بالقوه (${unitLabel})`} value={money(overview?.summary.potentialMarginRial)} />
                 </>
               ) : null}
               <KpiCard label="کند / راکد" value={`${overview?.summary.slowCount ?? 0} / ${overview?.summary.deadCount ?? 0}`} />
@@ -479,10 +503,10 @@ export function AutomotiveManager({
               <Field label="سال ساخت تا">
                 <PersianNumberInput className={inputClass} inputMode="numeric" value={modelYearTo} onChange={(event) => updateListFilter(setModelYearTo, event.target.value)} />
               </Field>
-              <Field label="حداقل قیمت فروش (ریال)">
+              <Field label={`حداقل قیمت فروش (${unitLabel})`}>
                 <PersianNumberInput className={inputClass} inputMode="numeric" value={minPriceRial} onChange={(event) => updateListFilter(setMinPriceRial, event.target.value)} />
               </Field>
-              <Field label="حداکثر قیمت فروش (ریال)">
+              <Field label={`حداکثر قیمت فروش (${unitLabel})`}>
                 <PersianNumberInput className={inputClass} inputMode="numeric" value={maxPriceRial} onChange={(event) => updateListFilter(setMaxPriceRial, event.target.value)} />
               </Field>
               <Field label="حداقل کارکرد (کیلومتر)">
@@ -512,10 +536,10 @@ export function AutomotiveManager({
                 <Th>خودرو</Th>
                 <Th>نوع</Th>
                 <Th>کارکرد</Th>
-                {canSeeCost ? <Th>بهای خرید</Th> : null}
-                {canSeeCost ? <Th>بهای تمام‌شده</Th> : null}
-                <Th>قیمت فروش</Th>
-                {canSeeCost ? <Th>حاشیهٔ بالقوه</Th> : null}
+                {canSeeCost ? <Th>بهای خرید ({unitLabel})</Th> : null}
+                {canSeeCost ? <Th>بهای تمام‌شده ({unitLabel})</Th> : null}
+                <Th>قیمت فروش ({unitLabel})</Th>
+                {canSeeCost ? <Th>حاشیهٔ بالقوه ({unitLabel})</Th> : null}
                 <Th>روز در انبار</Th>
                 <Th>وضعیت</Th>
                 <Th>شعبه</Th>
@@ -686,6 +710,7 @@ function AcquireSection({ run, canEditCost, canOverrideMinPrice }: { run: Runner
   const [askingPrice, setAskingPrice] = useState("");
   const [minimumPrice, setMinimumPrice] = useState("");
   const [busy, setBusy] = useState(false);
+  const { unitLabel, toRial } = useVehicleMoney();
 
   async function submit() {
     setBusy(true);
@@ -707,11 +732,11 @@ function AcquireSection({ run, canEditCost, canOverrideMinPrice }: { run: Runner
           acquisition: canEditCost ? {
             date: acquisitionDate,
             source: acquisitionSource,
-            costRial: Number(purchaseCost || 0),
+            costRial: toRial(purchaseCost),
             settlement,
           } : null,
-          askingPriceRial: Number(askingPrice || 0),
-          minimumPriceRial: canOverrideMinPrice && minimumPrice ? Number(minimumPrice) : null,
+          askingPriceRial: toRial(askingPrice),
+          minimumPriceRial: canOverrideMinPrice && minimumPrice ? toRial(minimumPrice) : null,
         }),
       });
       if (result.ok) {
@@ -798,7 +823,7 @@ function AcquireSection({ run, canEditCost, canOverrideMinPrice }: { run: Runner
             <Field as="div" label="تاریخ خرید">
               <JalaliDatePicker value={acquisitionDate} onChange={setAcquisitionDate} ariaLabel="تاریخ خرید خودرو" />
             </Field>
-            <Field label="بهای خرید (ریال)">
+            <Field label={`بهای خرید (${unitLabel})`}>
               <PersianNumberInput className={inputClass} inputMode="numeric" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} />
             </Field>
             <Field label="طرف حساب پرداخت">
@@ -812,10 +837,10 @@ function AcquireSection({ run, canEditCost, canOverrideMinPrice }: { run: Runner
         ) : (
           <p className="self-center text-xs text-muted-foreground">خودرو به‌صورت پیش‌نویس ثبت می‌شود؛ ثبت خرید و بهای آن به دسترسی مستقل «ویرایش بهای خودرو» نیاز دارد.</p>
         )}
-        <Field label="قیمت فروش (ریال)">
-          <input className={inputClass} inputMode="numeric" value={askingPrice} onChange={(event) => setAskingPrice(event.target.value)} />
+        <Field label={`قیمت فروش (${unitLabel})`}>
+          <PersianNumberInput className={inputClass} inputMode="numeric" value={askingPrice} onChange={(event) => setAskingPrice(event.target.value)} />
         </Field>
-        {canOverrideMinPrice ? <Field label="حداقل قیمت (ریال)"><PersianNumberInput className={inputClass} inputMode="numeric" value={minimumPrice} onChange={(event) => setMinimumPrice(event.target.value)} /></Field> : null}
+        {canOverrideMinPrice ? <Field label={`حداقل قیمت (${unitLabel})`}><PersianNumberInput className={inputClass} inputMode="numeric" value={minimumPrice} onChange={(event) => setMinimumPrice(event.target.value)} /></Field> : null}
       </div>
       <div className="mt-4 flex items-center gap-2">
         <PrimaryButton onClick={submit} disabled={busy || !make.trim() || !model.trim()}>
@@ -854,6 +879,7 @@ function ExpensesSection({ vehicles, vehiclesLoading, canRecord, run }: { vehicl
   const [documentRef, setDocumentRef] = useState("");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
+  const { money, unitLabel, toRial } = useVehicleMoney();
 
   const selected = vehicles.find((vehicle) => vehicle.serialId === serialId);
   if (!canRecord) return null;
@@ -869,7 +895,7 @@ function ExpensesSection({ vehicles, vehiclesLoading, canRecord, run }: { vehicl
           body: JSON.stringify({
             category,
             posting,
-            amountRial: Number(amount || 0),
+            amountRial: toRial(amount),
             incurredOn,
             settlement,
             documentRef: documentRef || null,
@@ -919,11 +945,11 @@ function ExpensesSection({ vehicles, vehiclesLoading, canRecord, run }: { vehicl
             <option value="period_expense">هزینهٔ دوره — بازسازی و آماده‌سازی</option>
           </select>
         </Field>
-        <Field label="مبلغ (ریال)">
-          <input className={inputClass} inputMode="numeric" value={amount} onChange={(event) => setAmount(event.target.value)} />
+        <Field label={`مبلغ (${unitLabel})`}>
+          <PersianNumberInput className={inputClass} inputMode="numeric" value={amount} onChange={(event) => setAmount(event.target.value)} />
         </Field>
-        <Field label="تاریخ (YYYY-MM-DD)">
-          <input className={inputClass} value={incurredOn} onChange={(event) => setIncurredOn(event.target.value)} />
+        <Field as="div" label="تاریخ هزینه">
+          <JalaliDatePicker value={incurredOn} onChange={setIncurredOn} ariaLabel="تاریخ هزینهٔ خودرو" />
         </Field>
         <Field label="پرداخت">
           <select className={inputClass} value={settlement} onChange={(event) => setSettlement(event.target.value)}>
@@ -943,7 +969,7 @@ function ExpensesSection({ vehicles, vehiclesLoading, canRecord, run }: { vehicl
       {selected ? (
         <p className="mt-3 text-xs text-muted-foreground">
           خودروی {selected.displayName} — وضعیت {VEHICLE_STATE_LABELS[selected.state]}
-          {selected.effectiveCostRial != null ? ` · بهای تمام‌شدهٔ مؤثر فعلی: ${money(selected.effectiveCostRial)} ریال` : ""}
+          {selected.effectiveCostRial != null ? ` · بهای تمام‌شدهٔ مؤثر فعلی: ${money(selected.effectiveCostRial)} ${unitLabel}` : ""}
         </p>
       ) : null}
       <div className="mt-4">
@@ -1034,6 +1060,7 @@ function ReservationsSection({ vehicles, vehiclesLoading, canReserve, canCancel,
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [releaseReason, setReleaseReason] = useState<Record<string, string>>({});
+  const { money, unitLabel, toRial } = useVehicleMoney();
 
   useEffect(() => {
     let cancelled = false;
@@ -1055,7 +1082,7 @@ function ReservationsSection({ vehicles, vehiclesLoading, canReserve, canCancel,
   }, [reloadKey]);
 
   const reservable = vehicles.filter((vehicle) => vehicle.state === "in_stock" || vehicle.state === "acquired");
-  const depositRial = Math.max(0, Math.trunc(Number(deposit || 0)));
+  const depositRial = toRial(deposit);
 
   async function submit() {
     if (!serialId || !customer) return;
@@ -1142,12 +1169,12 @@ function ReservationsSection({ vehicles, vehiclesLoading, canReserve, canCancel,
               onChange={(event) => setExpiresAtTime(event.target.value)}
            />
           </Field>
-          <Field label="ودیعه (ریال)">
-            <input
+          <Field label={`ودیعه (${unitLabel})`}>
+            <PersianNumberInput
               className={inputClass}
               inputMode="numeric"
               value={deposit}
-              onChange={(event) => setDeposit(event.target.value.replace(/[^0-9]/g, ""))}
+              onChange={(event) => setDeposit(event.target.value)}
            />
           </Field>
           <Field label="روش دریافت ودیعه">
@@ -1220,7 +1247,7 @@ function ReservationsSection({ vehicles, vehiclesLoading, canReserve, canCancel,
                     {reservation.expiresAtTime ? ` — ${reservation.expiresAtTime}` : ""}
                   </Td>
                   <Td>
-                    {money(reservation.depositRial)} ریال
+                    {money(reservation.depositRial)} {unitLabel}
                     {reservation.depositRial > 0 ? (
                       <div className="text-xs text-muted-foreground">
                         {DEPOSIT_METHODS.find((method) => method.value === reservation.depositMethod)?.label ??
@@ -1291,7 +1318,7 @@ function ReservationsSection({ vehicles, vehiclesLoading, canReserve, canCancel,
                         {HOLD_STATUS_LABELS[reservation.status]}
                       </StatusBadge>
                     </Td>
-                    <Td>{money(reservation.depositRial)} ریال</Td>
+                    <Td>{money(reservation.depositRial)} {unitLabel}</Td>
                     <Td>{reservation.releaseReason ?? "—"}</Td>
                   </DataTableRow>
                 ))}
@@ -1348,7 +1375,19 @@ function SalesSection({
   const [price, setPrice] = useState("");
   const [discount, setDiscount] = useState("");
   const vatPercent = defaultVatPercent;
-  const [tenderMethod, setTenderMethod] = useState<"cash" | "bank" | "credit">("cash");
+  const { money, unit, unitLabel, toRial, toInput } = useVehicleMoney();
+  // The business's own payment ways, through the same panel the POS uses, so a
+  // renamed, disabled or reference-required way behaves here as it does at the
+  // till, and a car can be paid in slices. Only ways the invoice engine can
+  // post are offered (a cheque settles the account in its register instead).
+  const paymentWays = usePaymentMethods(canSell);
+  const settlementWays = useMemo(
+    () => paymentWays.methods.filter((way) => way.isActive && ledgerSettlementFor(way.settlement) !== null),
+    [paymentWays.methods],
+  );
+  const [paymentDraftState, setPaymentDraft] = useState<PaymentDraft | null>(null);
+  const paymentDraft = paymentDraftState ?? emptyPaymentDraft(settlementWays);
+  const [paymentError, setPaymentError] = useState("");
   const [override, setOverride] = useState(false);
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<{ orderNumber: string; total: string } | null>(null);
@@ -1358,8 +1397,8 @@ function SalesSection({
   const sold = vehicles.filter((vehicle) => vehicle.state === "sold");
   const selected = sellable.find((vehicle) => vehicle.serialId === serialId);
 
-  const priceRial = Math.max(0, Math.trunc(Number(price || 0)));
-  const discountRial = Math.max(0, Math.trunc(Number(discount || 0)));
+  const priceRial = toRial(price);
+  const discountRial = toRial(discount);
   const net = Math.max(0, priceRial - discountRial);
   const vat = Math.round((net * vatPercent) / 100);
   const total = net + vat;
@@ -1372,6 +1411,21 @@ function SalesSection({
 
   async function submit() {
     if (!selected) return;
+    let tenders: { method: string; amount?: number; paymentMethodId: string; reference?: string }[] = [];
+    if (dueNow > 0) {
+      const built = paymentDraftBody(paymentDraft, settlementWays, dueNow, unit);
+      if (!built.ok) {
+        setPaymentError(errorMessage(built.error) || built.error);
+        return;
+      }
+      tenders = built.value.map((slice) => ({
+        method: ledgerSettlementFor(settlementWays.find((way) => way.id === slice.methodId)!.settlement)!,
+        amount: slice.amount,
+        paymentMethodId: slice.methodId,
+        reference: slice.reference,
+      }));
+    }
+    setPaymentError("");
     setBusy(true);
     setReceipt(null);
     const result = await run(async () => {
@@ -1392,7 +1446,7 @@ function SalesSection({
                 overrideMinPrice: override,
               },
             ],
-            tenders: dueNow > 0 ? [{ method: tenderMethod, amount: dueNow }] : [],
+            tenders,
           }),
         },
       );
@@ -1407,6 +1461,7 @@ function SalesSection({
       setPrice("");
       setDiscount("");
       setOverride(false);
+      setPaymentDraft(null);
     }
     setBusy(false);
   }
@@ -1439,7 +1494,7 @@ function SalesSection({
                 setSerialId(event.target.value);
                 const next = sellable.find((vehicle) => vehicle.serialId === event.target.value);
                 if (next) {
-                  setPrice(String(next.askingPriceRial || ""));
+                  setPrice(toInput(next.askingPriceRial));
                   if (next.reservedForCustomerId && next.reservedForName) {
                     setCustomer({ id: next.reservedForCustomerId, name: next.reservedForName } as PickerCustomer);
                   }
@@ -1457,20 +1512,20 @@ function SalesSection({
           <Field label="مشتری">
             <CustomerPicker customer={customer} onChange={setCustomer} idPrefix="automotive-sale" canCreate={canCreateCustomer} />
           </Field>
-          <Field label="مبلغ خودرو (ریال)">
-            <input
+          <Field label={`مبلغ خودرو (${unitLabel})`}>
+            <PersianNumberInput
               className={inputClass}
               inputMode="numeric"
               value={price}
-              onChange={(event) => setPrice(event.target.value.replace(/[^0-9]/g, ""))}
+              onChange={(event) => setPrice(event.target.value)}
            />
           </Field>
-          <Field label="تخفیف (ریال)">
-            <input
+          <Field label={`تخفیف (${unitLabel})`}>
+            <PersianNumberInput
               className={inputClass}
               inputMode="numeric"
               value={discount}
-              onChange={(event) => setDiscount(event.target.value.replace(/[^0-9]/g, ""))}
+              onChange={(event) => setDiscount(event.target.value)}
            />
           </Field>
           <Field label="مالیات بر ارزش افزوده">
@@ -1479,28 +1534,38 @@ function SalesSection({
               <span className="ms-2 text-muted-foreground">طبق تنظیمات مالیات کسب‌وکار</span>
             </div>
           </Field>
-          <Field label="روش پرداخت">
-            <select
-              className={inputClass}
-              value={tenderMethod}
-              onChange={(event) => setTenderMethod(event.target.value as "cash" | "bank" | "credit")}
-            >
-              <option value="cash">نقدی</option>
-              <option value="bank">کارت‌خوان / بانکی</option>
-              <option value="credit">نسیه (حساب مشتری)</option>
-            </select>
-          </Field>
         </div>
+
+        {dueNow > 0 ? (
+          <div className="mt-3">
+            <PaymentWays
+              methods={settlementWays}
+              draft={paymentDraft}
+              onChange={(next) => {
+                setPaymentDraft(next);
+                setPaymentError("");
+              }}
+              due={dueNow}
+              disabled={busy}
+              loaded={paymentWays.loaded}
+              loadError={paymentWays.error}
+              onReload={paymentWays.reload}
+              idPrefix="automotive-sale-pay"
+              customer={customer ? { id: customer.id, name: customer.name } : null}
+            />
+            {paymentError ? <p className="mt-2 text-sm text-rose-700" role="alert">{paymentError}</p> : null}
+          </div>
+        ) : null}
 
         <div className="mt-3 space-y-1 text-sm text-muted-foreground">
           <p>
-            جمع فاکتور: <span className="font-medium text-foreground">{money(total)}</span> ریال (خالص {money(net)} +
+            جمع فاکتور: <span className="font-medium text-foreground">{money(total)}</span> {unitLabel} (خالص {money(net)} +
             مالیات {money(vat)})
           </p>
           {depositApplied > 0 ? (
             <p>
-              بیعانهٔ رزرو کسر می‌شود: {money(depositApplied)} ریال — مبلغ قابل دریافت امروز{" "}
-              <span className="font-medium text-foreground">{money(dueNow)}</span> ریال
+              بیعانهٔ رزرو کسر می‌شود: {money(depositApplied)} {unitLabel} — مبلغ قابل دریافت امروز{" "}
+              <span className="font-medium text-foreground">{money(dueNow)}</span> {unitLabel}
             </p>
           ) : null}
           {selected?.reservedForName ? (
@@ -1510,12 +1575,12 @@ function SalesSection({
           ) : null}
           {belowFloor ? (
             <p className="text-rose-700 dark:text-rose-300">
-              مبلغ واردشده از حداقل قیمت تعیین‌شده ({money(selected?.minimumPriceRial)} ریال) کمتر است
+              مبلغ واردشده از حداقل قیمت تعیین‌شده ({money(selected?.minimumPriceRial)} {unitLabel}) کمتر است
               {canSeeCost ? "" : " — برای فروش زیر این حد با مدیر هماهنگ کنید"}.
             </p>
           ) : null}
           {canSeeCost && selected?.effectiveCostRial != null && net > 0 ? (
-            <p>حاشیهٔ ناخالص این فروش: {money(net - selected.effectiveCostRial)} ریال</p>
+            <p>حاشیهٔ ناخالص این فروش: {money(net - selected.effectiveCostRial)} {unitLabel}</p>
           ) : null}
         </div>
 
@@ -1539,7 +1604,7 @@ function SalesSection({
 
         {receipt ? (
           <p className="mt-3 text-sm text-emerald-700 dark:text-emerald-300">
-            فاکتور {receipt.orderNumber} به مبلغ {money(Number(receipt.total))} ریال صادر شد؛ خودرو فروخته‌شده
+            فاکتور {receipt.orderNumber} به مبلغ {money(Number(receipt.total))} {unitLabel} صادر شد؛ خودرو فروخته‌شده
             علامت خورده و بیعانهٔ رزرو (در صورت وجود) از فاکتور کسر شده است.
           </p>
         ) : null}
@@ -1552,8 +1617,8 @@ function SalesSection({
           <DataTable caption="خودروهای فروخته‌شده">
             <DataTableHead>
               <Th>خودرو</Th>
-              {canSeeCost ? <Th>بهای تمام‌شدهٔ منجمد</Th> : null}
-              <Th>مبلغ فروش</Th>
+              {canSeeCost ? <Th>بهای تمام‌شدهٔ منجمد ({unitLabel})</Th> : null}
+              <Th>مبلغ فروش ({unitLabel})</Th>
               <Th>تاریخ فروش</Th>
               <Th>وضعیت</Th>
               {canSell ? <Th>برگشت فروش</Th> : null}
@@ -1692,6 +1757,7 @@ function LeadsSection({ vehicles, vehiclesLoading, canManage, run }: { vehicles:
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const { unitLabel, toRial, toInput } = useVehicleMoney();
 
   // Preferences form, seeded from the profile each time one is opened.
   const [make, setMake] = useState("");
@@ -1746,8 +1812,8 @@ function LeadsSection({ vehicles, vehiclesLoading, canManage, run }: { vehicles:
       setCondition(preferences?.condition ?? "any");
       setYearFrom(preferences?.modelYearFrom == null ? "" : String(preferences.modelYearFrom));
       setYearTo(preferences?.modelYearTo == null ? "" : String(preferences.modelYearTo));
-      setBudgetFrom(preferences?.budgetFromRial == null ? "" : String(preferences.budgetFromRial));
-      setBudgetTo(preferences?.budgetToRial == null ? "" : String(preferences.budgetToRial));
+      setBudgetFrom(toInput(preferences?.budgetFromRial));
+      setBudgetTo(toInput(preferences?.budgetToRial));
       setTradeIn(preferences?.tradeIn ?? false);
       setTradeInDescription(preferences?.tradeInDescription ?? "");
       setTestDrive(preferences?.testDriveRequestedAt != null);
@@ -1756,7 +1822,7 @@ function LeadsSection({ vehicles, vehiclesLoading, canManage, run }: { vehicles:
     return () => {
       cancelled = true;
     };
-  }, [leadId]);
+  }, [leadId, toInput]);
 
   const digits = (value: string) => value.replace(/[^0-9]/g, "");
 
@@ -1772,8 +1838,8 @@ function LeadsSection({ vehicles, vehiclesLoading, canManage, run }: { vehicles:
           condition,
           modelYearFrom: yearFrom ? Number(yearFrom) : null,
           modelYearTo: yearTo ? Number(yearTo) : null,
-          budgetFromRial: budgetFrom ? Number(budgetFrom) : null,
-          budgetToRial: budgetTo ? Number(budgetTo) : null,
+          budgetFromRial: budgetFrom ? toRial(budgetFrom) : null,
+          budgetToRial: budgetTo ? toRial(budgetTo) : null,
           tradeIn,
           tradeInDescription: tradeInDescription || null,
           // Present means "set (or clear) it", so unticking the box clears a
@@ -1896,7 +1962,7 @@ function LeadsSection({ vehicles, vehiclesLoading, canManage, run }: { vehicles:
                 onChange={(event) => setYearTo(digits(event.target.value))}
              />
             </Field>
-            <Field label="حداقل بودجه (ریال)">
+            <Field label={`حداقل بودجه (${unitLabel})`}>
               <input
                 className={inputClass}
                 inputMode="numeric"
@@ -1905,7 +1971,7 @@ function LeadsSection({ vehicles, vehiclesLoading, canManage, run }: { vehicles:
                 onChange={(event) => setBudgetFrom(digits(event.target.value))}
              />
             </Field>
-            <Field label="حداکثر بودجه (ریال)">
+            <Field label={`حداکثر بودجه (${unitLabel})`}>
               <input
                 className={inputClass}
                 inputMode="numeric"

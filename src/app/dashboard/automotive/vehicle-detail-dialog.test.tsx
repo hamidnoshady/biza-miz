@@ -155,13 +155,16 @@ describe("vehicle detail dialog", () => {
 
     await screen.findByDisplayValue("AUTO-17");
     await user.click(screen.getByRole("tab", { name: "قیمت و تاریخچه" }));
-    expect(screen.queryByLabelText("حداقل قیمت (ریال)")).toBeNull();
-    expect(screen.queryByLabelText("قیمت عمده (ریال)")).toBeNull();
-    expect(screen.queryByLabelText("قیمت تبلیغاتی (ریال)")).toBeNull();
+    expect(screen.queryByLabelText("حداقل قیمت (تومان)")).toBeNull();
+    expect(screen.queryByLabelText("قیمت عمده (تومان)")).toBeNull();
+    expect(screen.queryByLabelText("قیمت تبلیغاتی (تومان)")).toBeNull();
     expect(screen.queryByText("بهای تمام‌شده")).toBeNull();
 
-    await user.clear(screen.getByLabelText("قیمت فروش (ریال)"));
-    await user.type(screen.getByLabelText("قیمت فروش (ریال)"), "920000000");
+    // The business shows Toman (the default unit): the field is seeded with
+    // the stored Rial as Toman, and what is typed is sent back as Rial.
+    expect((screen.getByLabelText("قیمت فروش (تومان)") as HTMLInputElement).value).toBe("۹۰٬۰۰۰٬۰۰۰");
+    await user.clear(screen.getByLabelText("قیمت فروش (تومان)"));
+    await user.type(screen.getByLabelText("قیمت فروش (تومان)"), "92000000");
     await user.click(screen.getByRole("button", { name: "ثبت قیمت و تاریخچه" }));
     await waitFor(() => expect(postBodies).toHaveLength(1));
     expect(postBodies[0]).toEqual({ askingPriceRial: 920_000_000, reason: "" });
