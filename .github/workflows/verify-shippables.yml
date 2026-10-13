@@ -324,7 +324,14 @@ jobs:
           $bytes = (Get-ChildItem .desktop-runtime -Recurse -File | Measure-Object Length -Sum).Sum
           $mib = [math]::Round($bytes / 1MB, 1)
           Write-Host "staged desktop runtime: $mib MiB"
-          if ($bytes -gt 200MB) { throw "Staged runtime $mib MiB exceeds 200 MiB budget" }
+          # The reporting-integrity wave (issue #819) shipped new server routes
+          # and the report scope contract into the desktop runtime, which grew
+          # this stage from under the old line to just past it (the #819 branch
+          # flapped across 200 MiB between two builds of the same commit). Same
+          # convention as the post-package budget in build-desktop-installer.yml:
+          # move the line with a 20 MiB headroom; the real win (minifying the
+          # compile pass) is tracked separately, not smuggled into a feature.
+          if ($bytes -gt 220MB) { throw "Staged runtime $mib MiB exceeds 220 MiB budget" }
 
   plugin:
     name: WordPress plugin
