@@ -476,6 +476,12 @@ export type ActionType =
   | "purchase.delete"
   | "supplier.update"
   | "supplier.archive"
+  // Batch AV — the dining floor plan: structural edits mirror the designer
+  // (tablesEdit); status steps mirror the floor (tablesManage) and broadcast
+  // exactly like the routes.
+  | "table.edit"
+  | "table.status"
+  | "table.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -577,6 +583,9 @@ export type AutopilotExecutorKey =
   | "purchaseDelete"
   | "supplierUpdate"
   | "supplierArchive"
+  | "tableEdit"
+  | "tableStatus"
+  | "tableDelete"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1986,6 +1995,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف/غیرفعال‌سازی تأمین‌کننده — اگر خرید دارد فقط غیرفعال می‌شود",
     payloadHint: '{ id: string }',
     executor: "supplierArchive",
+  },
+  "table.edit": {
+    type: "table.edit",
+    endpoint: "/api/tables",
+    method: "POST",
+    label: "ساخت/ویرایش ساختاری میز پذیرایی — بدون id ساخت جدید؛ وضعیت عملیاتی با table.status",
+    payloadHint: '{ id?: string, name?: string, zone?: string|null, sectionId?: string|null, capacity?: int=2, posX?: int, posY?: int, width?: int, height?: int, shape?: "rect"|"circle", isActive?: bool, locationId?: string }',
+    executor: "tableEdit",
+  },
+  "table.status": {
+    type: "table.status",
+    endpoint: "/api/tables/{id}",
+    method: "PATCH",
+    label: "تغییر وضعیت عملیاتی میز free/cleaning/out_of_service — نشستن فقط از طریق session",
+    payloadHint: '{ id: string, status: "free"|"cleaning"|"out_of_service", locationId?: string }',
+    executor: "tableStatus",
+  },
+  "table.delete": {
+    type: "table.delete",
+    endpoint: "/api/tables/{id}",
+    method: "DELETE",
+    label: "غیرفعال‌سازی میز — تا session بازی داشته باشد حذف نمی‌شود",
+    payloadHint: '{ id: string, locationId?: string }',
+    executor: "tableDelete",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

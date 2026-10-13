@@ -208,10 +208,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Dining tables & table sessions",
     routes: ["tables", "table-sessions"],
     ops: {
-      create: ["table.session.open"],
-      update: ["table.session.update"],
+      create: ["table.session.open", "table.edit"],
+      update: ["table.session.update", "table.edit", "table.status"],
+      lifecycle: ["table.status", "table.delete"],
     },
-    note: "batch AF: session open/update verbs broadcast table_session.updated exactly like the routes (the executor runs server-side, where the realtime hub lives), and setSessionGuests was extracted verbatim into the service so route and verb share the guest rules; floor-plan table CRUD (tables routes) still needs its own extraction — the designation lane is designer-side config",
+    note: "batch AF: session open/update verbs broadcast table_session.updated exactly like the routes (the executor runs server-side, where the realtime hub lives), and setSessionGuests was extracted verbatim into the service so route and verb share the guest rules; batch AV closes the floor-plan lanes — structural edits keep tablesEdit, status keeps tablesManage, and the broadcast + refusal codes are word-for-word the routes'",
   },
 
   // ============================ Menu & pricing ============================

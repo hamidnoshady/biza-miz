@@ -355,6 +355,10 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "purchase.delete": PERMISSIONS.purchasesManage,
   "supplier.update": PERMISSIONS.purchasesManage,
   "supplier.archive": PERMISSIONS.purchasesManage,
+  // Batch AV — floor-plan structure vs operational status, the routes' two keys.
+  "table.edit": PERMISSIONS.tablesEdit,
+  "table.delete": PERMISSIONS.tablesEdit,
+  "table.status": PERMISSIONS.tablesManage,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

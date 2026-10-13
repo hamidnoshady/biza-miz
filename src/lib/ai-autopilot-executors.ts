@@ -93,6 +93,8 @@ import { buyBackGold, openLayaway, payLayaway, completeLayaway } from "./jewelry
 import { isPurity } from "./gold";
 import { recordGoldPrice, getGoldPrice } from "./gold-prices-service";
 import { mintMissingBarcodes } from "./inventory-item-barcodes-service";
+import { resolveSectionId } from "./floor";
+import { canTransitionTable, type TableStatus } from "./table-sessions";
 import { preparePurchaseLines, purchaseDateOrNull, PurchaseLineError } from "./purchase-lines";
 import {
   supplierInvoiceOrError,
@@ -3210,6 +3212,122 @@ const barcodeBulkMint: AutopilotExecutor = async (ctx) => {
   }
 };
 
+// ── Issue #883 package 2, batch AV — dining floor plan ──────────────────────
+// Structural edits and operational status use two different capability keys —
+// the verbs are split the same way the routes split the guards, and a chat
+// payload can't accidentally mix them.
+const clampTablePos = (v: unknown, def: number) => (Number.isFinite(v) ? Math.max(0, Math.round(Number(v))) : def);
+const clampTableSize = (v: unknown, def: number) =>
+  Number.isFinite(v) ? Math.min(400, Math.max(30, Math.round(Number(v)))) : def;
+const tableEdit: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  if (!id) {
+    // ── POST /api/tables ──
+    const name = str(ctx.payload.name)?.trim();
+    const capacity = Number.isFinite(ctx.payload.capacity) ? Number(ctx.payload.capacity) : 2;
+    if (!name || capacity <= 0) return fail("missing_fields");
+    const shape = ctx.payload.shape === "circle" ? "circle" : "rect";
+    const { rows: dup } = await query("SELECT id FROM dining_tables WHERE location_id = $1 AND name = $2", [
+      branch.locationId, name,
+    ]);
+    if (dup.length > 0) return fail("table_exists");
+    const sectionId = await resolveSectionId(branch.locationId, ctx.payload.sectionId === undefined ? undefined : str(ctx.payload.sectionId));
+    if (sectionId === false) return fail("section_not_found");
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO dining_tables (location_id, name, zone, section_id, capacity, sort_order,
+              pos_x, pos_y, width, height, shape)
+       SELECT $1, $2, $3, $4, $5, COALESCE(MAX(sort_order) + 1, 0), $6, $7, $8, $9, $10
+         FROM dining_tables WHERE location_id = $1
+       RETURNING id`,
+      [
+        branch.locationId, name, str(ctx.payload.zone)?.trim() || null, sectionId, capacity,
+        clampTablePos(ctx.payload.posX, 20), clampTablePos(ctx.payload.posY, 20),
+        clampTableSize(ctx.payload.width, 80), clampTableSize(ctx.payload.height, 80), shape,
+      ],
+    );
+    return { ok: true, result: { ok: true, id: rows[0]?.id } };
+  }
+  // ── PATCH /api/tables/[id], structural fields only ──
+  const { rows: existing } = await query<{ id: string }>(
+    "SELECT id FROM dining_tables WHERE id = $1 AND location_id = $2",
+    [id, branch.locationId],
+  );
+  if (existing.length === 0) return fail("table_not_found");
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  const set = (col: string, val: unknown) => { fields.push(`${col} = $${++i}`); values.push(val); };
+  if (ctx.payload.name !== undefined) {
+    const name = str(ctx.payload.name)?.trim();
+    if (!name) return fail("missing_fields");
+    const { rows: dup } = await query(
+      "SELECT id FROM dining_tables WHERE location_id = $1 AND name = $2 AND id <> $3",
+      [branch.locationId, name, id],
+    );
+    if (dup.length > 0) return fail("table_exists");
+    set("name", name);
+  }
+  if (ctx.payload.zone !== undefined) set("zone", str(ctx.payload.zone)?.trim() || null);
+  if (ctx.payload.sectionId !== undefined) {
+    const sectionId = await resolveSectionId(branch.locationId, str(ctx.payload.sectionId));
+    if (sectionId === false) return fail("section_not_found");
+    set("section_id", sectionId);
+  }
+  if (ctx.payload.capacity !== undefined) {
+    const capacity = Number(ctx.payload.capacity);
+    if (!Number.isFinite(capacity) || capacity <= 0) return fail("missing_fields");
+    set("capacity", capacity);
+  }
+  if (ctx.payload.isActive !== undefined) set("is_active", Boolean(ctx.payload.isActive));
+  if (ctx.payload.posX !== undefined) set("pos_x", clampTablePos(ctx.payload.posX, 0));
+  if (ctx.payload.posY !== undefined) set("pos_y", clampTablePos(ctx.payload.posY, 0));
+  if (ctx.payload.width !== undefined) set("width", clampTableSize(ctx.payload.width, 80));
+  if (ctx.payload.height !== undefined) set("height", clampTableSize(ctx.payload.height, 80));
+  if (ctx.payload.shape !== undefined) set("shape", ctx.payload.shape === "circle" ? "circle" : "rect");
+  if (fields.length === 0) return fail("bad_request");
+  await query(`UPDATE dining_tables SET ${fields.join(", ")} WHERE id = $1`, [id, ...values]);
+  return { ok: true, result: { ok: true } };
+};
+const tableStatus: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  const to = str(ctx.payload.status) as TableStatus | null;
+  if (!id || !to) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: existing } = await query<{ id: string; status: TableStatus }>(
+    "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2",
+    [id, branch.locationId],
+  );
+  if (existing.length === 0) return fail("table_not_found");
+  // bill_requested stays unset-able exactly like the route; seating is the
+  // session's verb, refused with the route's own code.
+  const validTargets: TableStatus[] = ["free", "seated", "cleaning", "out_of_service"];
+  if (!validTargets.includes(to)) return fail("invalid_status");
+  if (existing[0].status !== to && !canTransitionTable(existing[0].status, to)) return fail("invalid_transition");
+  if (to === "seated") return fail("seat_via_session");
+  await query("UPDATE dining_tables SET status = $2 WHERE id = $1", [id, to]);
+  broadcast(branch.locationId, { type: "table.status", tableId: id, status: to });
+  return { ok: true, result: { ok: true } };
+};
+const tableDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: existing } = await query("SELECT id FROM dining_tables WHERE id = $1 AND location_id = $2", [
+    id, branch.locationId,
+  ]);
+  if (existing.length === 0) return fail("table_not_found");
+  const { rows: active } = await query(
+    "SELECT 1 FROM table_session_tables WHERE table_id = $1 AND released_at IS NULL", [id],
+  );
+  if (active.length > 0) return fail("table_in_use");
+  await query("UPDATE dining_tables SET is_active = false, section_id = NULL, status = 'free' WHERE id = $1", [id]);
+  return { ok: true, result: { ok: true } };
+};
+
 // ── Issue #883 package 2, batch AT — purchases & suppliers close-out ────────
 // The whole cluster answers to purchasesManage and the pinned branch; every
 // step is the [id] routes' own SQL/run sequence so the envelopes stay exact.
@@ -5637,6 +5755,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   purchaseDelete,
   supplierUpdate,
   supplierArchive,
+  tableEdit,
+  tableStatus,
+  tableDelete,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

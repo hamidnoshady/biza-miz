@@ -376,6 +376,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "purchase.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "supplier.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "supplier.archive", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AV — floor-plan config + operational table states.
+  { actionType: "table.edit", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "table.status", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "table.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
