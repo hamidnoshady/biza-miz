@@ -634,9 +634,38 @@ new regression, baseline left untouched.
 **`main` moved yet again immediately after this CI run finished** (`0c4a77ce` → `862488a1`,
 11 more commits including a large "Automotive business type" wave, issue #839/#858). This is now
 the fourth time `main` has advanced enough to risk a new conflict within this single work session.
-Given that pattern, work paused here to flag the tradeoff to the user — continuing to chase `main`
-indefinitely versus accepting the current green, freshly-merged state (`2010bab1`) as the point for
-human/CI re-verification at actual merge time — rather than silently starting a fourth merge cycle.
+Work paused here to flag the tradeoff to the user; the user's answer was "keep going".
+
+### Fourth merge
+
+`origin/main` as of `862488a1` merged into the branch with **zero textual conflicts** this time —
+`git merge origin/main --no-commit --no-ff` auto-merged every file cleanly (including
+`src/app/dashboard/workspace-shell.tsx`, `src/lib/billing/catalog/routes.ts`, `src/lib/db.ts`,
+`src/lib/permission-registry.ts`, `src/lib/permissions.ts`), 174 files changed overall. No stray
+conflict markers anywhere in the tree (repo-wide grep, excluding `node_modules`). `package.json` /
+`package-lock.json` unchanged, so no `npm ci` was needed. 5 new migrations arrived from the
+automotive-business-type wave (`0211_automotive_industry.sql`, `0212_automotive_vehicle_stock.sql`,
+`0213_automotive_crm_lead_preferences.sql`, `0215_automotive_vehicle_sale_occurrences.sql`,
+`0216_automotive_media_and_price_history.sql`) and applied cleanly; as before, duplicate numeric
+prefixes with this branch's and other branches' own 0211-0216 files are not a collision because the
+migration runner orders by full filename.
+
+Semantic spot-check: `permissions.ts`'s capability table grew to **129 keys, 0 duplicates** (up
+from 116 after the third merge); `nativeDevicesManage` and `NativeDeviceRegistrar` (this branch's
+own device-registry foundation pieces) remain present and wired exactly once.
+
+Verification before committing:
+- `npx tsc --noEmit`: clean.
+- `npm run lint` (`eslint --max-warnings=0`): clean.
+- `npm test` (unit): **832 files, 10,785 tests passed, 0 failures**.
+- `npm run db:migrate`: applied exactly the 5 new migrations above cleanly.
+- `npm run test:db`: **218 files, 3,258 tests passed, 2 skipped, 0 failures** (~46 minutes).
+
+Given `main`'s continued, unrelenting velocity (this is the fourth merge-and-verify cycle in one
+session, three of which needed real conflict resolution), this remains the point where PR #890's
+mergeable status and CI must be re-checked immediately before any real merge or approval — further
+re-syncs with `main` should happen at that time rather than being chased indefinitely in this
+session.
 
 ## Files
 

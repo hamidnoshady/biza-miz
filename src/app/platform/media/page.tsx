@@ -9,5 +9,11 @@
 import { MediaConsoleManager } from "./media-console-manager";
 
 export default function PlatformMediaPage() {
-  return <MediaConsoleManager />;
+  // The page's H1 (audit F28): the manager's cards are sections below it.
+  return (
+    <div className="space-y-4">
+      <h1 className="text-xl font-bold">رسانه و فایل‌ها</h1>
+      <MediaConsoleManager />
+    </div>
+  );
 }

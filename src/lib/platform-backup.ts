@@ -323,6 +323,12 @@ export function platformBackupPassphrase(
 export interface MaskedPlatformBackupConfig extends Omit<PlatformBackupConfig, "passphrase" | "cloud"> {
   passphrase: "";
   hasPassphrase: boolean;
+  /**
+   * Encryption that will actually be applied: requested AND a passphrase is
+   * set. A requested-but-unkeyed configuration is `false` here, and runs are
+   * refused rather than downgraded (audit F03).
+   */
+  effectiveEncryption: boolean;
   cloud: Omit<PlatformBackupCloudConfig, "secretAccessKey"> & {
     secretAccessKey: "";
     hasSecretAccessKey: boolean;
@@ -333,9 +339,13 @@ export interface MaskedPlatformBackupConfig extends Omit<PlatformBackupConfig, "
 export function maskPlatformBackupConfig(config: PlatformBackupConfig, env?: Partial<NodeJS.ProcessEnv>): MaskedPlatformBackupConfig {
   const passphraseSet = Boolean(platformBackupPassphrase(config, env));
   const warnings: string[] = [];
-  if (!passphraseSet) {
+  if (config.encryptLocal && !passphraseSet) {
     warnings.push(
-      "No encryption passphrase is set, so artifacts are written in plaintext and cannot be handed to a peer safely.",
+      "Encryption is required but no passphrase is set: backup runs are refused until a passphrase is configured. Nothing is written in plaintext.",
+    );
+  } else if (!config.encryptLocal) {
+    warnings.push(
+      "Local encryption is off: artifacts are plaintext and are never offered to peers.",
     );
   }
   if (config.servingEnabled) {
@@ -353,6 +363,7 @@ export function maskPlatformBackupConfig(config: PlatformBackupConfig, env?: Par
     ...config,
     passphrase: "",
     hasPassphrase: passphraseSet,
+    effectiveEncryption: config.encryptLocal && passphraseSet,
     cloud: {
       ...config.cloud,
       secretAccessKey: "",

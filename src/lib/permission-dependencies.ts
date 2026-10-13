@@ -28,6 +28,22 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "purchases.manage": ["inventory.view"],
   "parties.manage": ["parties.view"],
 
+  // Vehicles (issue #839). Every vehicle act needs the vehicle list; the two
+  // money writes also need to *see* cost, so a role cannot record or change a
+  // figure its holder may not read. Reading cost implies only the list.
+  "vehicles.create": ["vehicles.view"],
+  "vehicles.edit": ["vehicles.view"],
+  "vehicles.cost_view": ["vehicles.view"],
+  "vehicles.cost_edit": ["vehicles.view", "vehicles.cost_view"],
+  "vehicles.price_edit": ["vehicles.view"],
+  "vehicles.reserve": ["vehicles.view"],
+  "vehicles.reservation_cancel": ["vehicles.view"],
+  "vehicles.sell": ["vehicles.view"],
+  "vehicles.override_min_price": ["vehicles.view"],
+  "vehicles.transfer": ["vehicles.view"],
+  "vehicles.expense_record": ["vehicles.view", "vehicles.cost_view"],
+  "vehicles.archive": ["vehicles.view"],
+
   // CRM
   "crm.manage": ["crm.view"],
   "crm.merge": ["crm.view"],

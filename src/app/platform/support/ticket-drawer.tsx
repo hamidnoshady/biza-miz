@@ -16,7 +16,7 @@ import {
   TICKET_PRIORITIES,
   TICKET_PRIORITY_LABELS,
   TICKET_STATUSES,
-  TICKET_STATUS_LABELS,
+  ticketStatusLabel,
 } from "@/lib/support-tickets";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -86,7 +86,7 @@ export function statusBadge(status: string) {
   return (
     <PlatformStatusBadge
       tone={STATUS_TONE[status] ?? "neutral"}
-      label={TICKET_STATUS_LABELS[status as keyof typeof TICKET_STATUS_LABELS] ?? status}
+      label={ticketStatusLabel(status, "operator")}
     />
   );
 }
@@ -246,7 +246,7 @@ export function SupportTicketDrawer({
               <LabeledSelect
                 label="وضعیت"
                 value={ticket.status}
-                options={TICKET_STATUSES.map((v) => ({ value: v, label: TICKET_STATUS_LABELS[v] }))}
+                options={TICKET_STATUSES.map((v) => ({ value: v, label: ticketStatusLabel(v, "operator") }))}
                 disabled={patch.busy}
                 onChange={(v) => void patch.mutate({ status: v })}
               />
