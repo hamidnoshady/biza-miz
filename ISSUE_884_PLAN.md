@@ -566,6 +566,56 @@ PR #890's mergeable status should be re-checked immediately before any actual me
 another conflict in these same two budget-history files is plausible, and should get the same
 treatment (combine the causes honestly) rather than a reflexive re-bump of the numbers.
 
+### Third merge (`f29bf706`)
+
+The predicted re-conflict happened almost immediately: minutes after the second merge's plan-doc
+update was pushed, `main` had advanced again — PR #920, "Reporting integrity: branch isolation,
+permissions, Report Builder, exports & shift reports" (issue #819), had merged, plus a routine
+"Desktop v1.0.46" version bump commit. `gh pr view 890` flipped back to
+`mergeable: CONFLICTING` / `mergeStateStatus: DIRTY`.
+
+`f29bf706` merges `origin/main` as of `0c4a77ce` (`e42ae004` being the actual #920/#819 merge
+commit). Conflicts were, for a fourth time, limited to the same two budget-history comment blocks
+in `.github/workflows/build-desktop-installer.yml` and `.github/workflows/verify-shippables.yml`:
+issue #819's branch had independently crossed the same 620→640 MiB line with its own accepted
+sign-off ("the increase to 640 was accepted with the #819 size review"), landing at 620.3 MiB on
+its branch versus 620.2 MiB already on `main`. Resolved the same way as before — one narrative
+documenting all **four** now-independent crossings, not picking a side:
+
+1. AEC wave: 600 → 620 MiB baseline
+2. issue #884 (device-registry, this branch): 618.6 → 621.4 MiB, owner-approved
+3. issue #819 (reporting-integrity): 620.3 MiB on its branch vs 620.2 MiB on `main`, accepted with
+   the #819 size review
+4. #834 / main-growth: 620.4 MiB, maintainer acceptance left **explicitly undecided** — this open
+   question is still preserved verbatim, not smoothed into false consensus.
+
+`docs/standalone-desktop-app.md` auto-merged cleanly this time (unlike the first merge). All of
+#920/#819's own feature files (`src/app/dashboard/workspace-shell.tsx`,
+`src/lib/permission-registry.ts`, `src/lib/permissions.ts`, the new
+`integration/reporting-integrity.integration.test.ts`, three new migrations
+`0211_reporting_integrity.sql` / `0212_saved_report_versions.sql` /
+`0216_dashboard_layout_revisions.sql`, and a large set of reporting/dashboard route and test files)
+merged with no conflict markers. `package.json` / `package-lock.json` were unchanged by this merge,
+so no `npm ci` was needed.
+
+Verification performed before committing:
+- Repo-wide `grep` for conflict markers: zero matches.
+- Both resolved YAML files parse with `yaml.safe_load`.
+- `src/lib/permissions.ts`: **116 keys, 0 duplicates** (grew from 113 thanks to #819's new
+  permissions); `nativeDevicesManage` still appears exactly once in both `permissions.ts` and
+  `permission-registry.ts`.
+- `NativeDeviceRegistrar` import and usage still intact in `workspace-shell.tsx`.
+- `npx tsc --noEmit`: clean.
+- `npm run lint` (`eslint --max-warnings=0`): clean.
+- `npm test` (unit): **813 files, 10,592 tests passed, 0 failures**.
+- `npm run db:migrate`: applied exactly the 3 new migrations above cleanly.
+- `npm run test:db`: **216 files, 3,203 tests passed, 1 skipped, 0 failures** (~45 minutes).
+
+This is the third conflict-and-resolve cycle against `main` within one session. `main`'s velocity
+means PR #890 should be re-checked for mergeability again right before it is actually merged —
+the same treatment (merge both sides' narratives honestly, never silently re-bump a budget number
+to force green) should be applied if a fourth conflict appears.
+
 ## Files
 
 
