@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { BUSINESS_WIDE_SCOPE, branchScope } from "../src/lib/report-scope";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -104,18 +105,26 @@ beforeEach(async () => {
   }
 });
 
-async function makeInventoryItem(avgCost: number, unit = "g"): Promise<string> {
+async function makeLocation(name: string): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
-    "INSERT INTO inventory_items (location_id, name, unit, avg_cost) VALUES ($1, 'Coffee', $2, $3) RETURNING id",
-    [biz.locationId, unit, avgCost],
+    "INSERT INTO locations (business_id, name) VALUES ($1, $2) RETURNING id",
+    [biz.id, name],
   );
   return rows[0].id;
 }
 
-async function makeMenuItem(name: string, price: number): Promise<string> {
+async function makeInventoryItem(avgCost: number, unit = "g", locationId = biz.locationId): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    "INSERT INTO inventory_items (location_id, name, unit, avg_cost) VALUES ($1, 'Coffee', $2, $3) RETURNING id",
+    [locationId, unit, avgCost],
+  );
+  return rows[0].id;
+}
+
+async function makeMenuItem(name: string, price: number, locationId = biz.locationId): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
     "INSERT INTO menu_items (location_id, name, price) VALUES ($1, $2, $3) RETURNING id",
-    [biz.locationId, name, price],
+    [locationId, name, price],
   );
   return rows[0].id;
 }
@@ -128,16 +137,18 @@ async function makeSoldOrderItem(opts: {
   closedAt: string;
   itemStatus?: "served" | "voided";
   snapshot?: { inventoryItemId: string; requiredQuantity: number };
+  locationId?: string;
 }): Promise<string> {
+  const locationId = opts.locationId ?? biz.locationId;
   const orderNumber = Math.floor(Math.random() * 1_000_000);
   const order = await db.query<{ id: string }>(
     `INSERT INTO orders (location_id, order_number, status) VALUES ($1, $2, 'open') RETURNING id`,
-    [biz.locationId, orderNumber],
+    [locationId, orderNumber],
   );
   const orderItem = await db.query<{ id: string }>(
     `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, status)
      VALUES ($1, $2, $3, 'item', $4, $5, $6) RETURNING id`,
-    [biz.locationId, order.rows[0].id, opts.menuItemId, opts.unitPrice, opts.quantity, opts.itemStatus ?? "served"],
+    [locationId, order.rows[0].id, opts.menuItemId, opts.unitPrice, opts.quantity, opts.itemStatus ?? "served"],
   );
   if (opts.snapshot) {
     await db.query(
@@ -154,10 +165,15 @@ async function makeSoldOrderItem(opts: {
   return orderItem.rows[0].id;
 }
 
-async function postLedgerAmount(accountId: string, amountRial: number, entryDate: string): Promise<void> {
+async function postLedgerAmount(
+  accountId: string,
+  amountRial: number,
+  entryDate: string,
+  locationId = biz.locationId,
+): Promise<void> {
   const entry = await db.query<{ id: string }>(
     "INSERT INTO journal_entries (business_id, location_id, entry_date, source_type) VALUES ($1, $2, $3, 'test') RETURNING id",
-    [biz.id, biz.locationId, entryDate],
+    [biz.id, locationId, entryDate],
   );
   await db.query("INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, 0)", [
     entry.rows[0].id,
@@ -180,7 +196,11 @@ describe("getFoodCostVariance", () => {
     await postLedgerAmount(acct.cogs, 22_000, "2025-06-15");
     await postLedgerAmount(acct.waste, 3_000, "2025-06-15");
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
 
     expect(report.items).toHaveLength(1);
     const [item] = report.items;
@@ -199,6 +219,75 @@ describe("getFoodCostVariance", () => {
     expect(report.unexplainedVariance).toBe(2_000);
   });
 
+  it("aggregates all branches only for explicit business-wide scope", async () => {
+    const otherLocationId = await makeLocation("Second branch");
+    const mainMenuItemId = await makeMenuItem("Main espresso", 100_000);
+    const otherMenuItemId = await makeMenuItem("Second-branch espresso", 100_000, otherLocationId);
+    const mainInventoryItemId = await makeInventoryItem(500);
+    const otherInventoryItemId = await makeInventoryItem(250, "g", otherLocationId);
+
+    await makeSoldOrderItem({
+      menuItemId: mainMenuItemId,
+      unitPrice: 100_000,
+      quantity: 1,
+      closedAt: "2025-06-15T10:00:00Z",
+      snapshot: { inventoryItemId: mainInventoryItemId, requiredQuantity: 10 },
+    });
+    await makeSoldOrderItem({
+      menuItemId: otherMenuItemId,
+      unitPrice: 100_000,
+      quantity: 1,
+      closedAt: "2025-06-15T10:00:00Z",
+      snapshot: { inventoryItemId: otherInventoryItemId, requiredQuantity: 20 },
+      locationId: otherLocationId,
+    });
+
+    // This broken cross-location reference is allowed by the legacy single-ID
+    // foreign key, but must never attribute Branch B's closed order to Branch A.
+    const foreignOrder = await db.query<{ id: string }>(
+      "INSERT INTO orders (location_id, order_number, status) VALUES ($1, $2, 'open') RETURNING id",
+      [otherLocationId, Math.floor(Math.random() * 1_000_000)],
+    );
+    const mismatchedItem = await db.query<{ id: string }>(
+      `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, status)
+       VALUES ($1, $2, $3, 'mismatched branch item', 100000, 99, 'served') RETURNING id`,
+      [biz.locationId, foreignOrder.rows[0].id, mainMenuItemId],
+    );
+    await db.query(
+      `INSERT INTO order_item_inventory_snapshots
+       (order_item_id, inventory_item_id, required_quantity, source_menu_item_id)
+       VALUES ($1, $2, 10, $3)`,
+      [mismatchedItem.rows[0].id, mainInventoryItemId, mainMenuItemId],
+    );
+    await db.query("UPDATE orders SET status = 'completed', closed_at = $2 WHERE id = $1", [
+      foreignOrder.rows[0].id,
+      "2025-06-15T10:00:00Z",
+    ]);
+
+    await postLedgerAmount(acct.cogs, 11_000, "2025-06-15");
+    await postLedgerAmount(acct.cogs, 6_000, "2025-06-15", otherLocationId);
+    await postLedgerAmount(acct.waste, 1_000, "2025-06-15");
+    await postLedgerAmount(acct.waste, 500, "2025-06-15", otherLocationId);
+
+    const filters = { dateFrom: "2025-06-01", dateTo: "2025-06-30" };
+    const branchReport = await reportsService.getFoodCostVariance(biz.id, filters, branchScope(biz.locationId));
+    expect(branchReport.items.map((item) => item.menuItemId)).toEqual([mainMenuItemId]);
+    expect(branchReport.items[0].unitsSold).toBe(1);
+    expect(branchReport.items[0].revenue).toBe(100_000);
+    expect(branchReport.theoreticalCost).toBe(5_000);
+    expect(branchReport.actualCogs).toBe(11_000);
+    expect(branchReport.wasteCost).toBe(1_000);
+
+    const businessReport = await reportsService.getFoodCostVariance(biz.id, filters, BUSINESS_WIDE_SCOPE);
+    expect(businessReport.items.map((item) => item.menuItemId).sort()).toEqual(
+      [mainMenuItemId, otherMenuItemId].sort(),
+    );
+    expect(businessReport.items.find((item) => item.menuItemId === mainMenuItemId)?.unitsSold).toBe(1);
+    expect(businessReport.theoreticalCost).toBe(10_000);
+    expect(businessReport.actualCogs).toBe(17_000);
+    expect(businessReport.wasteCost).toBe(1_500);
+  });
+
   it("excludes orders closed outside the requested date range", async () => {
     const inventoryItemId = await makeInventoryItem(500);
     const menuItemId = await makeMenuItem("اسپرسو", 100_000);
@@ -210,7 +299,11 @@ describe("getFoodCostVariance", () => {
       snapshot: { inventoryItemId, requiredQuantity: 20 },
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toHaveLength(0);
     expect(report.theoreticalCost).toBe(0);
   });
@@ -227,7 +320,11 @@ describe("getFoodCostVariance", () => {
       snapshot: { inventoryItemId, requiredQuantity: 20 },
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toHaveLength(0);
   });
 
@@ -240,7 +337,11 @@ describe("getFoodCostVariance", () => {
       closedAt: "2025-06-15T10:00:00Z",
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toHaveLength(1);
     expect(report.items[0].theoreticalCost).toBe(0);
     expect(report.items[0].revenue).toBe(150_000);
@@ -268,12 +369,20 @@ describe("getFoodCostVariance", () => {
       snapshot: { inventoryItemId, requiredQuantity: 80 },
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items.map((i) => i.menuItemId)).toEqual([expensiveItem, cheapItem]);
   });
 
   it("returns zeroed totals with no data in range", async () => {
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toEqual([]);
     expect(report.theoreticalCost).toBe(0);
     expect(report.actualCogs).toBe(0);

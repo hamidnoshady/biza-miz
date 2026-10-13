@@ -13,7 +13,7 @@
  * already notes there's no till/shift entity in the schema). Wiring those needs a
  * schema decision first, not just another read tool.
  */
-import { businessToday } from "./business-day-service";
+import { businessToday, locationBusinessToday } from "./business-day-service";
 import { shiftIsoDate } from "./business-day";
 import { phoneMatchKeys, phoneMatchSql } from "./parties-service";
 import { query } from "./db";
@@ -26,7 +26,9 @@ import {
   getVatReport,
   runStandardReportRows,
 } from "./reports-service";
-import { computeSetupState } from "./setup-state";
+import { branchScope, BUSINESS_WIDE_SCOPE, isConsolidatedStandardReport, parseReportScope } from "./report-scope";
+import { authorizedReportScopeForUser, reportScopeDenialReasonText } from "./report-scope-service";
+import { computeSetupState, resolveActiveLocationForUser } from "./setup-state";
 import { getArAging } from "./ar-service";
 import { getApAging } from "./ap-service";
 import { listPayrollRuns, listStaffWages } from "./payroll-service";
@@ -70,7 +72,8 @@ import { isFeatureEnabled } from "./features";
 import { INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile, labelFor as industryLabelFor } from "./industry-profile";
 import { canUseAiTool, SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
-import type { Permission } from "./permissions";
+import { PERMISSIONS, type Permission } from "./permissions";
+import { normalizeOptionalIsoDate } from "./iso-date";
 
 export interface ToolResult {
   ok: boolean;
@@ -102,6 +105,46 @@ function cap<T>(rows: T[], limit = 50): T[] {
   return rows.slice(0, limit);
 }
 
+const READ_TOOL_DATE_RANGE_NAMES = new Set([
+  "get_menu_performance",
+  "get_void_pattern",
+  "get_waste_history",
+  "get_supplier_performance",
+  "get_table_turnover_rate",
+  "get_courier_performance",
+  "get_branch_comparison",
+  "run_report",
+  "get_vat_liability",
+  "get_staff_commission",
+]);
+const READ_TOOL_SINGLE_DATE_NAMES = new Set(["get_ar_aging", "run_accounting_review"]);
+
+/** Reject malformed wire dates before a read can reach a PostgreSQL date cast. */
+function readToolDateError(name: string, args: Record<string, unknown>): string | null {
+  const keys = READ_TOOL_DATE_RANGE_NAMES.has(name)
+    ? ["dateFrom", "dateTo"] as const
+    : READ_TOOL_SINGLE_DATE_NAMES.has(name)
+      ? ["asOfDate"] as const
+      : [];
+  const dates = new Map<string, string>();
+  for (const key of keys) {
+    const parsed = normalizeOptionalIsoDate(args[key]);
+    if (!parsed.ok) return "تاریخ واردشده معتبر نیست؛ تاریخ را به‌صورت واقعی YYYY-MM-DD بفرست.";
+    if (parsed.value) dates.set(key, parsed.value);
+  }
+  const dateFrom = dates.get("dateFrom");
+  const dateTo = dates.get("dateTo");
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    return "تاریخ شروع نمی‌تواند بعد از تاریخ پایان باشد.";
+  }
+  return null;
+}
+
+function readToolOptionalDate(value: unknown): string | undefined {
+  const parsed = normalizeOptionalIsoDate(value);
+  return parsed.ok ? parsed.value ?? undefined : undefined;
+}
+
 /**
  * Default lookback window for tools that accept an optional date range.
  *
@@ -117,13 +160,20 @@ async function defaultRange(
   businessId: string,
   args: Record<string, unknown>,
   days = 30,
+  locationId?: string | null,
 ): Promise<{ dateFrom: string; dateTo: string }> {
-  const hasFrom = typeof args.dateFrom === "string";
-  const hasTo = typeof args.dateTo === "string";
+  const requestedFrom = readToolOptionalDate(args.dateFrom);
+  const requestedTo = readToolOptionalDate(args.dateTo);
+  const hasFrom = requestedFrom !== undefined;
+  const hasTo = requestedTo !== undefined;
   // Only pay for the lookup when the caller left a bound open.
-  const today = hasFrom && hasTo ? "" : await businessToday(businessId);
-  const dateTo = hasTo ? (args.dateTo as string) : today;
-  const dateFrom = hasFrom ? (args.dateFrom as string) : shiftIsoDate(today, -(days - 1));
+  const today = hasFrom && hasTo
+    ? ""
+    : locationId
+      ? await locationBusinessToday(businessId, locationId)
+      : await businessToday(businessId);
+  const dateTo = requestedTo ?? today;
+  const dateFrom = requestedFrom ?? shiftIsoDate(today, -(days - 1));
   return { dateFrom, dateTo };
 }
 
@@ -131,8 +181,8 @@ async function defaultRange(
 // Wave 1 — orders & menu
 // ---------------------------------------------------------------------------
 
-async function menuPerformance(businessId: string, args: Record<string, unknown>) {
-  const { dateFrom, dateTo } = await defaultRange(businessId, args);
+async function menuPerformance(businessId: string, args: Record<string, unknown>, locationId: string | null) {
+  const { dateFrom, dateTo } = await defaultRange(businessId, args, 30, locationId);
   const { rows: sold } = await query<{
     menu_item_id: string;
     item_name: string;
@@ -144,9 +194,10 @@ async function menuPerformance(businessId: string, args: Record<string, unknown>
             sum(quantity)::text AS quantity, sum(revenue)::text AS revenue
        FROM v_menu_item_performance
       WHERE business_id = $1 AND sale_date BETWEEN $2 AND $3 AND menu_item_id IS NOT NULL
+        AND ($4::uuid IS NULL OR location_id = $4)
       GROUP BY menu_item_id
       ORDER BY sum(quantity) DESC`,
-    [businessId, dateFrom, dateTo],
+    [businessId, dateFrom, dateTo, locationId],
   );
   const shaped = sold.map((r) => ({
     menuItemId: r.menu_item_id,
@@ -160,14 +211,15 @@ async function menuPerformance(businessId: string, args: Record<string, unknown>
     `SELECT mi.id, mi.name, mc.name AS category_name
        FROM menu_items mi
        JOIN locations l ON l.id = mi.location_id
-       LEFT JOIN menu_categories mc ON mc.id = mi.category_id
+       LEFT JOIN menu_categories mc ON mc.id = mi.category_id AND mc.location_id = mi.location_id
       WHERE l.business_id = $1 AND mi.is_active
+        AND ($2::uuid IS NULL OR l.id = $2)
         AND NOT EXISTS (
-          SELECT 1 FROM order_items oi
-           WHERE oi.menu_item_id = mi.id AND oi.status != 'voided'
+           SELECT 1 FROM order_items oi
+           WHERE oi.menu_item_id = mi.id AND oi.location_id = mi.location_id AND oi.status != 'voided'
         )
       ORDER BY mi.name`,
-    [businessId],
+    [businessId, locationId],
   );
 
   return {
@@ -182,37 +234,40 @@ async function menuPerformance(businessId: string, args: Record<string, unknown>
   };
 }
 
-async function voidPattern(businessId: string, args: Record<string, unknown>) {
-  const { dateFrom, dateTo } = await defaultRange(businessId, args);
+async function voidPattern(businessId: string, args: Record<string, unknown>, locationId: string | null) {
+  const { dateFrom, dateTo } = await defaultRange(businessId, args, 30, locationId);
   const { rows: byItem } = await query<{ name_snapshot: string; void_count: string }>(
     `SELECT oi.name_snapshot, count(*)::text AS void_count
        FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id
+       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
        JOIN locations l ON l.id = o.location_id
       WHERE l.business_id = $1 AND oi.status = 'voided' AND oi.created_at::date BETWEEN $2 AND $3
+        AND ($4::uuid IS NULL OR l.id = $4)
       GROUP BY oi.name_snapshot
       ORDER BY count(*) DESC`,
-    [businessId, dateFrom, dateTo],
+    [businessId, dateFrom, dateTo, locationId],
   );
   const { rows: byOpener } = await query<{ full_name: string | null; void_count: string }>(
     `SELECT u.full_name, count(*)::text AS void_count
        FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id
+       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
        JOIN locations l ON l.id = o.location_id
        LEFT JOIN users u ON u.id = o.opened_by
       WHERE l.business_id = $1 AND oi.status = 'voided' AND oi.created_at::date BETWEEN $2 AND $3
+        AND ($4::uuid IS NULL OR l.id = $4)
       GROUP BY o.opened_by, u.full_name
       ORDER BY count(*) DESC`,
-    [businessId, dateFrom, dateTo],
+    [businessId, dateFrom, dateTo, locationId],
   );
   const { rows: byHour } = await query<{ hour: string; void_count: string }>(
     `SELECT extract(hour FROM oi.created_at)::text AS hour, count(*)::text AS void_count
        FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id
+       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
        JOIN locations l ON l.id = o.location_id
       WHERE l.business_id = $1 AND oi.status = 'voided' AND oi.created_at::date BETWEEN $2 AND $3
+        AND ($4::uuid IS NULL OR l.id = $4)
       GROUP BY 1 ORDER BY 1`,
-    [businessId, dateFrom, dateTo],
+    [businessId, dateFrom, dateTo, locationId],
   );
 
   return {
@@ -245,7 +300,7 @@ async function voidPattern(businessId: string, args: Record<string, unknown>) {
  * empty result), how much is on hand right now, and what it is worth — so the
  * model can say "«نان» غیرفعال است" instead of "پیدا نشد".
  */
-async function findItems(businessId: string, args: Record<string, unknown>) {
+async function findItems(businessId: string, args: Record<string, unknown>, locationId: string | null) {
   const search = typeof args.query === "string" ? args.query.trim() : "";
   const kind = args.kind === "menu" || args.kind === "inventory" ? args.kind : "all";
   if (search.length === 0) return { ok: false as const, data: { error: "عبارت جست‌وجو خالی است." } };
@@ -273,12 +328,15 @@ async function findItems(businessId: string, args: Record<string, unknown>) {
          FROM inventory_items i
          JOIN locations l ON l.id = i.location_id
          LEFT JOIN LATERAL (
-           SELECT sum(quantity) AS total FROM stock_movements WHERE inventory_item_id = i.id
+           SELECT sum(quantity) AS total
+             FROM stock_movements sm
+            WHERE sm.inventory_item_id = i.id AND sm.location_id = i.location_id
          ) sm ON true
         WHERE l.business_id = $1 AND i.name ILIKE $2
+          AND ($3::uuid IS NULL OR l.id = $3)
         ORDER BY i.is_active DESC, i.name
         LIMIT 25`,
-      [businessId, pattern],
+      [businessId, pattern, locationId]
     );
     for (const row of rows) {
       results.push({
@@ -308,13 +366,14 @@ async function findItems(businessId: string, args: Record<string, unknown>) {
     }>(
       `SELECT m.id, m.name, m.price::text AS price, m.is_active,
               c.name AS category_name, l.name AS location_name
-         FROM menu_items m
-         JOIN locations l ON l.id = m.location_id
-         LEFT JOIN menu_categories c ON c.id = m.category_id
+       FROM menu_items m
+       JOIN locations l ON l.id = m.location_id
+       LEFT JOIN menu_categories c ON c.id = m.category_id AND c.location_id = m.location_id
         WHERE l.business_id = $1 AND m.name ILIKE $2
+          AND ($3::uuid IS NULL OR l.id = $3)
         ORDER BY m.is_active DESC, m.name
         LIMIT 25`,
-      [businessId, pattern],
+      [businessId, pattern, locationId]
     );
     for (const row of rows) {
       results.push({
@@ -356,12 +415,12 @@ async function findItems(businessId: string, args: Record<string, unknown>) {
  * valuation tool, which knows only what is on the shelf *now* and nothing about
  * what left it.
  */
-async function wasteHistory(businessId: string, args: Record<string, unknown>) {
+async function wasteHistory(businessId: string, args: Record<string, unknown>, locationId: string | null) {
   const search = typeof args.itemQuery === "string" && args.itemQuery.trim().length > 0
     ? `%${args.itemQuery.trim()}%`
     : null;
-  const dateFrom = typeof args.dateFrom === "string" ? args.dateFrom : null;
-  const dateTo = typeof args.dateTo === "string" ? args.dateTo : null;
+  const dateFrom = readToolOptionalDate(args.dateFrom) ?? null;
+  const dateTo = readToolOptionalDate(args.dateTo) ?? null;
 
   const { rows } = await query<{
     item_name: string;
@@ -382,16 +441,17 @@ async function wasteHistory(businessId: string, args: Record<string, unknown>) {
             min(sm.occurred_at)::date::text AS first_at,
             max(sm.occurred_at)::date::text AS last_at
        FROM stock_movements sm
-       JOIN inventory_items ii ON ii.id = sm.inventory_item_id
+       JOIN inventory_items ii ON ii.id = sm.inventory_item_id AND ii.location_id = sm.location_id
        JOIN locations l ON l.id = sm.location_id
       WHERE l.business_id = $1 AND sm.type = 'waste'
         AND ($2::text IS NULL OR ii.name ILIKE $2)
         AND ($3::date IS NULL OR sm.occurred_at >= $3::date)
         AND ($4::date IS NULL OR sm.occurred_at < ($4::date + 1))
+        AND ($5::uuid IS NULL OR sm.location_id = $5)
       GROUP BY ii.name, ii.unit, sm.waste_reason
       ORDER BY sum(sm.cost_value_rial) DESC NULLS LAST
       LIMIT 60`,
-    [businessId, search, dateFrom, dateTo],
+    [businessId, search, dateFrom, dateTo, locationId]
   );
 
   const lines = rows.map((row) => ({
@@ -430,15 +490,17 @@ async function wasteHistory(businessId: string, args: Record<string, unknown>) {
  * It would offer to do things this business cannot do, and fail to mention
  * things it can. This is the orientation it was missing.
  */
-async function describeApp(businessId: string) {
+async function describeApp(businessId: string, locationId: string | null) {
   const [{ rows: business }, { rows: locations }] = await Promise.all([
     query<{ name: string; industry: Industry }>(
       "SELECT name, industry FROM businesses WHERE id = $1",
       [businessId],
     ),
     query<{ name: string; is_active: boolean }>(
-      "SELECT name, is_active FROM locations WHERE business_id = $1 ORDER BY created_at",
-      [businessId],
+      `SELECT name, is_active FROM locations
+        WHERE business_id = $1 AND ($2::uuid IS NULL OR id = $2)
+        ORDER BY created_at`,
+      [businessId, locationId],
     ),
   ]);
 
@@ -483,7 +545,7 @@ async function describeApp(businessId: string) {
 // Wave 1 — inventory
 // ---------------------------------------------------------------------------
 
-async function stockValuation(businessId: string) {
+async function stockValuation(businessId: string, locationId: string | null) {
   const { rows } = await query<{
     inventory_item_id: string;
     item_name: string;
@@ -493,9 +555,9 @@ async function stockValuation(businessId: string) {
   }>(
     `SELECT inventory_item_id, item_name, unit, stock_qty::text, valuation::text
        FROM v_inventory_valuation
-      WHERE business_id = $1
+      WHERE business_id = $1 AND ($2::uuid IS NULL OR location_id = $2)
       ORDER BY valuation DESC`,
-    [businessId],
+    [businessId, locationId],
   );
   const shaped = rows.map((r) => ({
     inventoryItemId: r.inventory_item_id,
@@ -510,8 +572,8 @@ async function stockValuation(businessId: string) {
   };
 }
 
-async function supplierPerformance(businessId: string, args: Record<string, unknown>) {
-  const { dateFrom, dateTo } = await defaultRange(businessId, args, 90);
+async function supplierPerformance(businessId: string, args: Record<string, unknown>, locationId: string | null) {
+  const { dateFrom, dateTo } = await defaultRange(businessId, args, 90, locationId);
   const { rows } = await query<{
     supplier_id: string | null;
     supplier_name: string | null;
@@ -525,12 +587,13 @@ async function supplierPerformance(businessId: string, args: Record<string, unkn
             avg(extract(epoch FROM (p.received_at - p.ordered_at)) / 86400.0)::text AS avg_lead_days
        FROM purchases p
        JOIN locations l ON l.id = p.location_id
-       LEFT JOIN suppliers s ON s.id = p.supplier_id
+       LEFT JOIN suppliers s ON s.id = p.supplier_id AND s.location_id = p.location_id
       WHERE l.business_id = $1 AND p.status = 'received'
         AND p.received_at IS NOT NULL AND p.received_at::date BETWEEN $2 AND $3
+        AND ($4::uuid IS NULL OR p.location_id = $4)
       GROUP BY s.id, s.name
       ORDER BY sum(p.total) DESC`,
-    [businessId, dateFrom, dateTo],
+    [businessId, dateFrom, dateTo, locationId],
   );
   return {
     dateFrom,
@@ -552,7 +615,7 @@ async function supplierPerformance(businessId: string, args: Record<string, unkn
 // Wave 1 — reservations & floor
 // ---------------------------------------------------------------------------
 
-async function reservationConflicts(businessId: string) {
+async function reservationConflicts(businessId: string, locationId: string | null) {
   const { rows } = await query<{
     table_name: string;
     a_id: string;
@@ -566,16 +629,17 @@ async function reservationConflicts(businessId: string) {
             a.id AS a_id, a.customer_name AS a_customer, a.reserved_at::text AS a_at,
             b.id AS b_id, b.customer_name AS b_customer, b.reserved_at::text AS b_at
        FROM reservations a
-       JOIN reservations b ON b.table_id = a.table_id AND a.id < b.id
+       JOIN reservations b ON b.table_id = a.table_id AND b.location_id = a.location_id AND a.id < b.id
        JOIN locations l ON l.id = a.location_id
-       JOIN dining_tables dt ON dt.id = a.table_id
+       JOIN dining_tables dt ON dt.id = a.table_id AND dt.location_id = a.location_id
       WHERE l.business_id = $1
+        AND ($2::uuid IS NULL OR l.id = $2)
         AND a.status IN ('booked', 'seated') AND b.status IN ('booked', 'seated')
         AND a.reserved_at >= now() - interval '1 day'
         AND a.reserved_at < b.reserved_at + make_interval(mins => b.duration_minutes)
         AND b.reserved_at < a.reserved_at + make_interval(mins => a.duration_minutes)
       ORDER BY a.reserved_at`,
-    [businessId],
+    [businessId, locationId],
   );
   return {
     conflictCount: rows.length,
@@ -590,8 +654,8 @@ async function reservationConflicts(businessId: string) {
   };
 }
 
-async function tableTurnoverRate(businessId: string, args: Record<string, unknown>) {
-  const { dateFrom, dateTo } = await defaultRange(businessId, args);
+async function tableTurnoverRate(businessId: string, args: Record<string, unknown>, locationId: string | null) {
+  const { dateFrom, dateTo } = await defaultRange(businessId, args, 30, locationId);
   const { rows } = await query<{
     table_id: string | null;
     table_name: string | null;
@@ -603,9 +667,10 @@ async function tableTurnoverRate(businessId: string, args: Record<string, unknow
             avg(duration_minutes)::text AS avg_duration_minutes, avg(revenue)::text AS avg_revenue
        FROM v_table_turnover
       WHERE business_id = $1 AND closed_at::date BETWEEN $2 AND $3
+        AND ($4::uuid IS NULL OR location_id = $4)
       GROUP BY table_id, table_name
       ORDER BY count(*) DESC`,
-    [businessId, dateFrom, dateTo],
+    [businessId, dateFrom, dateTo, locationId]
   );
   return {
     dateFrom,
@@ -627,8 +692,8 @@ async function tableTurnoverRate(businessId: string, args: Record<string, unknow
 // Wave 1 — delivery
 // ---------------------------------------------------------------------------
 
-async function courierPerformance(businessId: string, args: Record<string, unknown>) {
-  const { dateFrom, dateTo } = await defaultRange(businessId, args);
+async function courierPerformance(businessId: string, args: Record<string, unknown>, locationId: string | null) {
+  const { dateFrom, dateTo } = await defaultRange(businessId, args, 30, locationId);
   const { rows } = await query<{
     courier_id: string | null;
     courier_name: string | null;
@@ -642,9 +707,10 @@ async function courierPerformance(businessId: string, args: Record<string, unkno
             avg(avg_delivery_minutes)::text AS avg_delivery_minutes
        FROM v_courier_performance
       WHERE business_id = $1 AND delivery_date BETWEEN $2 AND $3
+        AND ($4::uuid IS NULL OR location_id = $4)
       GROUP BY courier_id, courier_name
       ORDER BY sum(delivery_count) DESC`,
-    [businessId, dateFrom, dateTo],
+    [businessId, dateFrom, dateTo, locationId]
   );
   return {
     dateFrom,
@@ -667,7 +733,7 @@ async function courierPerformance(businessId: string, args: Record<string, unkno
 // Wave 1 — customers
 // ---------------------------------------------------------------------------
 
-async function customerProfile(businessId: string, args: Record<string, unknown>) {
+async function customerProfile(businessId: string, args: Record<string, unknown>, locationId: string | null) {
   const customerId = typeof args.customerId === "string" ? args.customerId : "";
   if (!customerId) return { error: "customerId لازم است." };
   const customer = await getCustomer(businessId, customerId);
@@ -685,12 +751,14 @@ async function customerProfile(businessId: string, args: Record<string, unknown>
             avg(o.total)::text AS avg_ticket
        FROM orders o
        JOIN locations l ON l.id = o.location_id
-      WHERE l.business_id = $1 AND o.customer_id = $2 AND o.status = 'completed'`,
-    [businessId, customerId],
+      WHERE l.business_id = $1 AND o.customer_id = $2 AND o.status = 'completed'
+        AND ($3::uuid IS NULL OR o.location_id = $3)`,
+    [businessId, customerId, locationId],
   );
   const stats = rows[0];
 
   return {
+    scopeNote: "اطلاعات پایهٔ پرونده از CRM تجمیعی است؛ آمار خرید این پاسخ فقط برای شعبهٔ فعال شماست.",
     customer,
     orderCount: Number(stats?.order_count ?? 0),
     totalSpent: Number(stats?.total_spent ?? 0),
@@ -700,7 +768,7 @@ async function customerProfile(businessId: string, args: Record<string, unknown>
   };
 }
 
-async function atRiskCustomers(businessId: string, args: Record<string, unknown>) {
+async function atRiskCustomers(businessId: string, args: Record<string, unknown>, locationId: string | null) {
   const minOrders = Number.isFinite(Number(args.minOrders)) ? Math.max(1, Number(args.minOrders)) : 3;
   const lapsedDays = Number.isFinite(Number(args.lapsedDays)) ? Math.max(1, Number(args.lapsedDays)) : 30;
 
@@ -718,10 +786,11 @@ async function atRiskCustomers(businessId: string, args: Record<string, unknown>
        JOIN orders o ON o.customer_id = c.id AND o.status = 'completed'
        JOIN locations l ON l.id = o.location_id AND l.business_id = c.business_id
       WHERE c.business_id = $1 AND c.is_active
+        AND ($4::uuid IS NULL OR o.location_id = $4)
       GROUP BY c.id, c.name, c.phone
       HAVING count(o.id) >= $2 AND max(o.closed_at) < now() - make_interval(days => $3::int)
       ORDER BY sum(o.total) DESC`,
-    [businessId, minOrders, lapsedDays],
+    [businessId, minOrders, lapsedDays, locationId]
   );
   return {
     minOrders,
@@ -760,6 +829,7 @@ async function atRiskCustomers(businessId: string, args: Record<string, unknown>
 async function listCustomerSegmentsTool(businessId: string) {
   const segments = await listSegmentsWithCounts(businessId);
   return {
+    scopeNote: "بخش‌های مشتریان و شمار اعضا متعلق به فهرست CRM تجمیعی کل کسب‌وکار هستند.",
     segments: cap(
       segments.map((segment) => ({
         segmentId: segment.id,
@@ -792,6 +862,7 @@ async function previewCustomerSegmentTool(businessId: string, args: Record<strin
   });
 
   return {
+    scopeNote: "پیش‌نمایش مخاطب از CRM تجمیعی کل کسب‌وکار است، نه یک شعبه.",
     purpose,
     count: preview.count,
     totalBeforeConsent: preview.totalBeforeConsent,
@@ -826,6 +897,7 @@ async function customerTimelineTool(businessId: string, args: Record<string, unk
   const events = await customerTimeline(businessId, customerId, { limit });
 
   return {
+    scopeNote: "پرونده و رویدادهای CRM این مشتری تجمیعی بین همهٔ شعب کسب‌وکار هستند.",
     customer: {
       customerId: file.id,
       name: file.name,
@@ -857,7 +929,7 @@ async function customerTimelineTool(businessId: string, args: Record<string, unk
   };
 }
 
-async function findCustomersTool(businessId: string, args: Record<string, unknown>) {
+async function findCustomersTool(businessId: string, args: Record<string, unknown>, locationId: string | null) {
   const search = typeof args.query === "string" ? args.query.trim() : "";
   if (!search) return { error: "عبارت جست‌وجو خالی است." };
 
@@ -892,7 +964,11 @@ async function findCustomersTool(businessId: string, args: Record<string, unknow
        FROM parties c
        LEFT JOIN orders o
          ON o.customer_id = c.id AND o.status = 'completed'
-       LEFT JOIN locations l ON l.id = o.location_id AND l.business_id = c.business_id
+        AND ($6::uuid IS NULL OR o.location_id = $6)
+        AND EXISTS (
+          SELECT 1 FROM locations scoped_l
+           WHERE scoped_l.id = o.location_id AND scoped_l.business_id = c.business_id
+        )
       WHERE c.business_id = $1
         AND (c.name ILIKE $2 OR c.phone ILIKE $2 OR c.email ILIKE $2
              OR ${phoneMatchSql("c", "$3", "$4")}
@@ -900,10 +976,11 @@ async function findCustomersTool(businessId: string, args: Record<string, unknow
       GROUP BY c.id
       ORDER BY c.is_active DESC, sum(o.total) DESC NULLS LAST, c.name
       LIMIT 25`,
-    [businessId, `%${search}%`, keys.bidx, keys.e164, keys.last4],
+    [businessId, `%${search}%`, keys.bidx, keys.e164, keys.last4, locationId]
   );
 
   return {
+    scopeNote: "جست‌وجو از دفتر مشتریان مشترک کل کسب‌وکار است؛ آمار سفارش و هزینه فقط از شعبهٔ فعال می‌آید.",
     query: search,
     customers: cap(
       rows.map((row) => ({
@@ -975,12 +1052,16 @@ async function unreconciledBankLines(businessId: string) {
       lines: cap(lines, 20),
     });
   }
-  return { accounts: results };
+  return {
+    scopeNote: "این گزارش ردیف‌های تطبیق‌نشدهٔ دفتر تجمیعی کل کسب‌وکار و همهٔ شعب را می‌خواند.",
+    accounts: results,
+  };
 }
 
 async function apUpcoming(businessId: string) {
   const aging = await getApAging(businessId);
   return {
+    scopeNote: "این گزارش از دفتر پرداختنی تجمیعی کل کسب‌وکار و همهٔ شعب است.",
     asOfDate: aging.asOfDate,
     note: "این کسب‌وکار تاریخ سررسید فاکتور را ثبت نمی‌کند؛ فهرست بر اساس قدمت فاکتور (قدیمی‌ترین اول) مرتب شده تا اولویت پرداخت را نشان دهد.",
     totals: aging.totals,
@@ -1020,6 +1101,7 @@ async function branchComparison(businessId: string, args: Record<string, unknown
   const laborByLocation = new Map(wages.map((r) => [r.location_id, Number(r.labor_cost)]));
 
   return {
+    scopeNote: "مقایسهٔ تجمیعی همهٔ شعب؛ اجرای آن فقط با گزارش‌های business-wide مجاز است.",
     dateFrom,
     dateTo,
     note: "«هزینهٔ نیروی انسانی» برآورد حقوق ماهانهٔ کارکنان فعال هر شعبه است، نه هزینهٔ واقعی دورهٔ گزارش.",
@@ -1034,14 +1116,16 @@ async function branchComparison(businessId: string, args: Record<string, unknown
   };
 }
 
-async function forecastDemand(businessId: string, args: Record<string, unknown>) {
+async function forecastDemand(businessId: string, args: Record<string, unknown>, locationId: string | null) {
   const horizonDays = Number.isFinite(Number(args.horizonDays))
     ? Math.min(Math.max(1, Number(args.horizonDays)), 30)
     : 7;
   const lookbackDays = 28;
   // Same reason as defaultRange: the views this averages over are bucketed by
   // business date, so the window has to be expressed in them too.
-  const dateTo = await businessToday(businessId);
+  const dateTo = locationId
+    ? await locationBusinessToday(businessId, locationId)
+    : await businessToday(businessId);
   const dateFrom = shiftIsoDate(dateTo, -(lookbackDays - 1));
   const menuItemId = typeof args.menuItemId === "string" ? args.menuItemId : null;
 
@@ -1051,8 +1135,9 @@ async function forecastDemand(businessId: string, args: Record<string, unknown>)
     const { rows } = await query<{ item_name: string | null; quantity: string }>(
       `SELECT max(item_name) AS item_name, coalesce(sum(quantity), 0)::text AS quantity
          FROM v_menu_item_performance
-        WHERE business_id = $1 AND menu_item_id = $2 AND sale_date BETWEEN $3 AND $4`,
-      [businessId, menuItemId, dateFrom, dateTo],
+        WHERE business_id = $1 AND menu_item_id = $2 AND sale_date BETWEEN $3 AND $4
+          AND ($5::uuid IS NULL OR location_id = $5)`,
+      [businessId, menuItemId, dateFrom, dateTo, locationId],
     );
     const totalQty = Number(rows[0]?.quantity ?? 0);
     const dailyAvg = totalQty / lookbackDays;
@@ -1070,8 +1155,9 @@ async function forecastDemand(businessId: string, args: Record<string, unknown>)
   const { rows } = await query<{ order_count: string; revenue: string }>(
     `SELECT coalesce(sum(order_count), 0)::text AS order_count, coalesce(sum(total), 0)::text AS revenue
        FROM v_sales_by_day
-      WHERE business_id = $1 AND sale_date BETWEEN $2 AND $3`,
-    [businessId, dateFrom, dateTo],
+      WHERE business_id = $1 AND sale_date BETWEEN $2 AND $3
+        AND ($4::uuid IS NULL OR location_id = $4)`,
+    [businessId, dateFrom, dateTo, locationId],
   );
   const dailyOrders = Number(rows[0]?.order_count ?? 0) / lookbackDays;
   const dailyRevenue = Number(rows[0]?.revenue ?? 0) / lookbackDays;
@@ -1134,9 +1220,9 @@ async function floorMenuItemDetails(scope: FloorReadScope, args: Record<string, 
               '[]'::jsonb
             ) AS ingredients
        FROM menu_items mi
-       LEFT JOIN menu_categories mc ON mc.id = mi.category_id
+       LEFT JOIN menu_categories mc ON mc.id = mi.category_id AND mc.location_id = mi.location_id
        LEFT JOIN menu_item_ingredients mii ON mii.menu_item_id = mi.id
-       LEFT JOIN inventory_items ii ON ii.id = mii.inventory_item_id
+       LEFT JOIN inventory_items ii ON ii.id = mii.inventory_item_id AND ii.location_id = mi.location_id
       WHERE mi.location_id = $1 AND mi.is_active AND ${itemCondition}
       GROUP BY mi.id, mi.name, mi.description, mi.price, mc.name
       ORDER BY mi.name
@@ -1266,6 +1352,8 @@ export async function runReadTool(
    */
   actorUserId?: string,
   permissions?: ReadonlySet<Permission>,
+  /** Set only by an authenticated connection whose credential is branch-pinned. */
+  pinnedLocationId?: string,
 ): Promise<ToolResult> {
   // The provider-facing catalogue and production executor paths pass an
   // effective permission set. Keep the low-level executor compatible with
@@ -1275,6 +1363,9 @@ export async function runReadTool(
   if (permissions && !canUseAiTool(name, permissions)) {
     return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
   }
+  const dateError = readToolDateError(name, args);
+  if (dateError) return { ok: false, data: { error: dateError } };
+
   // Issue #799 §23 — the AEC read tools. Kept out of the switch below for the
   // same reason the workspace tools are: they share one executor, and that
   // executor needs the business's industry (an AEC question from a café must
@@ -1316,13 +1407,49 @@ export async function runReadTool(
       : { ok: false, data: { error: result.error ?? "خطا در خواندن میز کار" } };
   }
 
+  // Trading, stock and branch operations are narrower than a business's
+  // tenant scope. A user read resolves their current branch; an MCP credential
+  // is pinned to the branch its issuer approved; trusted system callers with
+  // neither identity keep their explicit tenant-wide system scope. `undefined`
+  // is the fail-closed state (an identified member with no accessible branch).
+  let branchLocationPromise: Promise<string | null | undefined> | undefined;
+  const branchLocationForRead = () => {
+    branchLocationPromise ??= (async () => {
+      if (pinnedLocationId !== undefined) {
+        if (!pinnedLocationId.trim()) return undefined;
+        if (actorUserId) {
+          const assigned = await resolveActiveLocationForUser(businessId, actorUserId, pinnedLocationId);
+          if (assigned?.id !== pinnedLocationId) return undefined;
+        }
+        return pinnedLocationId;
+      }
+      if (!actorUserId) return null;
+      const assigned = await resolveActiveLocationForUser(businessId, actorUserId);
+      return assigned?.id;
+    })();
+    return branchLocationPromise;
+  };
+  const noBranchAccess: ToolResult = {
+    ok: false,
+    data: { error: reportScopeDenialReasonText("no_accessible_branch") },
+  };
+  const branchRead = async (
+    read: (locationId: string | null) => Promise<unknown>,
+  ): Promise<ToolResult> => {
+    const locationId = await branchLocationForRead();
+    if (locationId === undefined) return noBranchAccess;
+    return { ok: true, data: await read(locationId) };
+  };
+
   switch (name) {
     case "get_setup_state": {
+      // Setup is business-level metadata (settingsManage), not a branch's trading.
       const state = await computeSetupState(businessId);
       // Trim to what the model needs — drop nothing important but keep it compact.
       return {
         ok: true,
         data: {
+          scopeNote: "این فقط فرادادهٔ راه‌اندازی تجمیعی کسب‌وکار است؛ شعبهٔ location، شعبهٔ اصلی تنظیم راه‌اندازی است نه گزارش عملیات شعبه.",
           business: state.business,
           location: state.location,
           prefs: state.prefs,
@@ -1366,82 +1493,183 @@ export async function runReadTool(
           },
         };
       }
-      const dateFrom = typeof args.dateFrom === "string" ? args.dateFrom : undefined;
-      const dateTo = typeof args.dateTo === "string" ? args.dateTo : undefined;
+      const dateFrom = readToolOptionalDate(args.dateFrom);
+      const dateTo = readToolOptionalDate(args.dateTo);
+
+      /*
+       * Scope (issue #819). This tool used to call the reporting services with
+       * no location at all, so «فروش امروز» answered a branch-pinned cashier
+       * with the whole business's sales; the trade reports went through
+       * `primaryLocationId`, i.e. whichever branch the business created first.
+       * Both are the same bug the routes had, in a third front door.
+       *
+       * The scope now follows the member: `authorizedReportScopeForUser` resolves
+       * the acting user's own branch. The consolidated form has to be asked for
+       * by name *and* the member has to hold `reports.business_wide` — the model
+       * cannot widen a read by choosing an argument, because the capability is
+       * read from the resolved permission set, never from the tool call.
+       */
+      const requested = parseReportScope(typeof args.scope === "string" ? args.scope : undefined);
+      if (requested === null) {
+        return { ok: false, data: { error: "مقدار scope نامعتبر است؛ فقط branch یا business-wide." } };
+      }
+      // A pinned connection has an actor or a fixed location and can never
+      // inherit this trusted path. Background/system reads retain their
+      // explicit all-branch authority; ordinary user reads still resolve a
+      // live assigned branch and must request elevated scope explicitly.
+      const trustedSystemRead =
+        !actorUserId && pinnedLocationId === undefined &&
+        (permissions === undefined || permissions.has(PERMISSIONS.reportsBusinessWide));
+      if (
+        requested === "business-wide" &&
+        !isConsolidatedStandardReport(key) &&
+        !trustedSystemRead
+      ) {
+        return { ok: false, data: { error: "این گزارش فقط برای یک شعبه اجرا می‌شود." } };
+      }
+      const hasBusinessWide = Boolean(permissions?.has(PERMISSIONS.reportsBusinessWide)) || trustedSystemRead;
+      const resolved = actorUserId
+        ? await authorizedReportScopeForUser(businessId, actorUserId, {
+            requested,
+            hasBusinessWide,
+            pinnedLocationId,
+          })
+        : pinnedLocationId && requested !== "business-wide"
+          ? { ok: true as const, scope: branchScope(pinnedLocationId) }
+          : trustedSystemRead && requested !== "branch"
+            ? { ok: true as const, scope: BUSINESS_WIDE_SCOPE }
+            : await authorizedReportScopeForUser(businessId, undefined, { requested, hasBusinessWide });
+      if (!resolved.ok) {
+        return { ok: false, data: { error: reportScopeDenialReasonText(resolved.reason) } };
+      }
+      const scope = resolved.scope;
+      const branchLocationId = scope.mode === "branch" ? scope.locationId : undefined;
+      const scopeLocationName =
+        "location" in scope &&
+        typeof scope.location === "object" &&
+        scope.location !== null &&
+        "name" in scope.location &&
+        typeof scope.location.name === "string"
+          ? scope.location.name
+          : undefined;
+      const scopeNote =
+        scope.mode === "business-wide"
+          ? "این نتیجه برای همهٔ شعب کسب‌وکار است."
+          : pinnedLocationId && !actorUserId
+            ? "این نتیجه فقط برای شعبهٔ ثبت‌شدهٔ اتصال است."
+            : `این نتیجه فقط برای شعبهٔ فعال شما (${scopeLocationName ?? "شعبه"}) است.`;
 
       if (key === "profit_and_loss") {
-        return { ok: true, data: await getProfitAndLoss(businessId, { dateFrom, dateTo }) };
+        return {
+          ok: true,
+          data: {
+            scopeNote,
+            report: await getProfitAndLoss(businessId, { dateFrom, dateTo }, scope),
+          },
+        };
       }
       if (key === "balance_sheet") {
-        return { ok: true, data: await getBalanceSheet(businessId, dateTo) };
+        return {
+          ok: true,
+          data: { scopeNote, report: await getBalanceSheet(businessId, dateTo, scope) },
+        };
       }
       if (reportShape(def) !== "rows") {
         const report = await runTradeReport(key, {
           businessId,
-          locationId: await primaryLocationId(businessId),
+          locationId: branchLocationId ?? null,
           industry: industry ?? "food_service",
           filters: { dateFrom, dateTo },
         });
-        if (report) return { ok: true, data: { label: def.label, ...report } };
+        if (report) return { ok: true, data: { label: def.label, scopeNote, ...report } };
       }
-      const rows = await runStandardReportRows(key, businessId, { dateFrom, dateTo });
-      return { ok: true, data: { label: def.label, rowCount: rows.length, rows: cap(rows) } };
+      const rows = await runStandardReportRows(key, businessId, scope, { dateFrom, dateTo });
+      return { ok: true, data: { label: def.label, scopeNote, rowCount: rows.length, rows: cap(rows) } };
     }
 
     case "get_menu_performance":
-      return { ok: true, data: await menuPerformance(businessId, args) };
+      return branchRead((locationId) => menuPerformance(businessId, args, locationId));
 
     case "get_void_pattern":
-      return { ok: true, data: await voidPattern(businessId, args) };
+      return branchRead((locationId) => voidPattern(businessId, args, locationId));
 
     // Phase 33 — name→id resolution, so the assistant never asks an owner for
     // a UUID, and never reports "پیدا نشد" for an item that is merely disabled.
-    case "find_items":
-      return findItems(businessId, args);
+    case "find_items": {
+      const locationId = await branchLocationForRead();
+      return locationId === undefined ? noBranchAccess : findItems(businessId, args, locationId);
+    }
 
-    case "get_waste_history":
-      return wasteHistory(businessId, args);
+    case "get_waste_history": {
+      const locationId = await branchLocationForRead();
+      return locationId === undefined ? noBranchAccess : wasteHistory(businessId, args, locationId);
+    }
 
-    case "describe_app":
-      return describeApp(businessId);
+    case "describe_app": {
+      const locationId = await branchLocationForRead();
+      return locationId === undefined ? noBranchAccess : describeApp(businessId, locationId);
+    }
 
     case "get_stock_valuation":
-      return { ok: true, data: await stockValuation(businessId) };
+      return branchRead((locationId) => stockValuation(businessId, locationId));
 
     case "get_supplier_performance":
-      return { ok: true, data: await supplierPerformance(businessId, args) };
+      return branchRead((locationId) => supplierPerformance(businessId, args, locationId));
 
     case "get_reservation_conflicts":
-      return { ok: true, data: await reservationConflicts(businessId) };
+      return branchRead((locationId) => reservationConflicts(businessId, locationId));
 
     case "get_table_turnover_rate":
-      return { ok: true, data: await tableTurnoverRate(businessId, args) };
+      return branchRead((locationId) => tableTurnoverRate(businessId, args, locationId));
 
     case "get_courier_performance":
-      return { ok: true, data: await courierPerformance(businessId, args) };
+      return branchRead((locationId) => courierPerformance(businessId, args, locationId));
 
     case "get_customer_profile":
-      return { ok: true, data: await customerProfile(businessId, args) };
+      return branchRead((locationId) => customerProfile(businessId, args, locationId));
 
-    // Phase 38 — the website manager's three reads. A missing connection is
-    // an answer («وب‌سایتی متصل نیست»), not an exception.
+    // Phase 38 — the website manager's three reads. The connected site and
+    // product catalogue are business-level integration data, not POS branch
+    // trading. A missing connection is an answer («وب‌سایتی متصل نیست»), not an exception.
     case "list_website_posts": {
       const result = await listWebsitePostsTool(businessId, {
         status: typeof args.status === "string" ? args.status : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
       });
-      return result.ok ? { ok: true, data: result.data } : { ok: false, data: { error: websiteToolError(result.error) } };
+      return result.ok
+        ? {
+            ok: true,
+            data: {
+              ...result.data,
+              scopeNote: "این محتوا از وب‌سایت متصل به کل کسب‌وکار است و به شعبهٔ فعال POS محدود نمی‌شود.",
+            },
+          }
+        : { ok: false, data: { error: websiteToolError(result.error) } };
     }
 
     case "list_website_products": {
       const result = await listWebsiteProductsTool(businessId, {
         limit: typeof args.limit === "number" ? args.limit : undefined,
       });
-      return result.ok ? { ok: true, data: result.data } : { ok: false, data: { error: websiteToolError(result.error) } };
+      return result.ok
+        ? {
+            ok: true,
+            data: {
+              ...result.data,
+              scopeNote: "این فهرست از کاتالوگ وب‌سایت متصل به کل کسب‌وکار است و به شعبهٔ فعال POS محدود نمی‌شود.",
+            },
+          }
+        : { ok: false, data: { error: websiteToolError(result.error) } };
     }
 
     case "get_website_status":
-      return { ok: true, data: await websiteStatusTool(businessId) };
+      return {
+        ok: true,
+        data: {
+          ...(await websiteStatusTool(businessId)),
+          scopeNote: "وضعیت اتصال و صف همگام‌سازی فرادادهٔ کل کسب‌وکار است، نه گزارش عملیات یک شعبه.",
+        },
+      };
 
     // Phase C — the two messaging reads that feed messaging.campaign.create.
     // Both list the business's own rows; the campaign create action still runs
@@ -1454,17 +1682,20 @@ export async function runReadTool(
       const templates = await listMessageTemplates(businessId, channel);
       return {
         ok: true,
-        data: cap(
-          templates.map((t) => ({
-            templateId: t.id,
-            channel: t.channel,
-            name: t.name,
-            subject: t.subject,
-            body: t.body,
-            createdAt: t.createdAt,
-          })),
-          50,
-        ),
+        data: {
+          scopeNote: "قالب‌ها متعلق به کل کسب‌وکار هستند و به شعبهٔ فعال POS محدود نمی‌شوند.",
+          templates: cap(
+            templates.map((t) => ({
+              templateId: t.id,
+              channel: t.channel,
+              name: t.name,
+              subject: t.subject,
+              body: t.body,
+              createdAt: t.createdAt,
+            })),
+            50,
+          ),
+        },
       };
     }
 
@@ -1472,29 +1703,32 @@ export async function runReadTool(
       const campaigns = await listMessageCampaigns(businessId);
       return {
         ok: true,
-        data: cap(
-          campaigns.map((c) => ({
-            campaignId: c.id,
-            name: c.name,
-            channel: c.channel,
-            status: c.status,
-            templateId: c.templateId,
-            segmentId: c.segmentId,
-            totalRecipients: c.totalRecipients,
-            sentCount: c.sentCount,
-            deliveredCount: c.deliveredCount,
-            failedCount: c.failedCount,
-            createdAt: c.createdAt,
-            startedAt: c.startedAt,
-            completedAt: c.completedAt,
-          })),
-          50,
-        ),
+        data: {
+          scopeNote: "کمپین‌های پیام متعلق به کل کسب‌وکار هستند و شمار گیرندگان و ارسال‌ها بین شعب تجمیع شده است.",
+          campaigns: cap(
+            campaigns.map((c) => ({
+              campaignId: c.id,
+              name: c.name,
+              channel: c.channel,
+              status: c.status,
+              templateId: c.templateId,
+              segmentId: c.segmentId,
+              totalRecipients: c.totalRecipients,
+              sentCount: c.sentCount,
+              deliveredCount: c.deliveredCount,
+              failedCount: c.failedCount,
+              createdAt: c.createdAt,
+              startedAt: c.startedAt,
+              completedAt: c.completedAt,
+            })),
+            50,
+          ),
+        },
       };
     }
 
     case "get_at_risk_customers":
-      return { ok: true, data: await atRiskCustomers(businessId, args) };
+      return branchRead((locationId) => atRiskCustomers(businessId, args, locationId));
 
     // Phase 36 — the CRM's four read tools.
     case "list_customer_segments":
@@ -1507,12 +1741,22 @@ export async function runReadTool(
       return { ok: true, data: await customerTimelineTool(businessId, args) };
 
     case "find_customers":
-      return { ok: true, data: await findCustomersTool(businessId, args) };
+      return branchRead((locationId) => findCustomersTool(businessId, args, locationId));
 
+    // Finance, accounting and payroll registers below deliberately follow
+    // their business-level domain scope and own capability gates; they are not
+    // operational `reports.view` reads and do not inherit a branch scope.
     case "get_ar_aging": {
-      const asOfDate = typeof args.asOfDate === "string" ? args.asOfDate : undefined;
+      const asOfDate = readToolOptionalDate(args.asOfDate);
       const report = await getArAging(businessId, asOfDate);
-      return { ok: true, data: { ...report, rows: cap(report.rows, 30) } };
+      return {
+        ok: true,
+        data: {
+          ...report,
+          rows: cap(report.rows, 30),
+          scopeNote: "این گزارش از دفتر مطالبات تجمیعی کل کسب‌وکار و همهٔ شعب است.",
+        },
+      };
     }
 
     case "get_ap_upcoming":
@@ -1533,6 +1777,7 @@ export async function runReadTool(
       return {
         ok: true,
         data: {
+          scopeNote: "این خلاصهٔ حقوق، جمع کارکنان کل کسب‌وکار و همهٔ شعب است.",
           recentRuns: runs,
           staffCount: wages.length,
           staffWithWageCount: staffWithWage.length,
@@ -1542,16 +1787,25 @@ export async function runReadTool(
     }
 
     case "get_vat_liability": {
-      const dateFrom = typeof args.dateFrom === "string" ? args.dateFrom : undefined;
-      const dateTo = typeof args.dateTo === "string" ? args.dateTo : undefined;
-      return { ok: true, data: await getVatReport(businessId, { dateFrom, dateTo }) };
+      const dateFrom = readToolOptionalDate(args.dateFrom);
+      const dateTo = readToolOptionalDate(args.dateTo);
+      const report = await getVatReport(businessId, { dateFrom, dateTo });
+      // VAT control accounts are part of the business-level ledger; ledger.view
+      // is the accounting capability that permits the consolidated read.
+      return {
+        ok: true,
+        data: {
+          ...report,
+          scopeNote: "این گزارش از دفتر مالیاتی تجمیعی کل کسب‌وکار و همهٔ شعب است.",
+        },
+      };
     }
 
     case "get_branch_comparison":
       return { ok: true, data: await branchComparison(businessId, args) };
 
     case "forecast_demand":
-      return { ok: true, data: await forecastDemand(businessId, args) };
+      return branchRead((locationId) => forecastDemand(businessId, args, locationId));
 
     case "get_menu_item_details":
       return needsFloorScope(floorScope)
@@ -1568,21 +1822,29 @@ export async function runReadTool(
       if (industry !== "cosmetics") {
         return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای آرایشی و بهداشتی در دسترس است." } };
       }
-      const locationId = await primaryLocationId(businessId);
+      const scopedLocationId = await branchLocationForRead();
+      if (scopedLocationId === undefined) return noBranchAccess;
+      const locationId = scopedLocationId ?? await primaryLocationId(businessId);
       if (!locationId) return { ok: true, data: [] };
       return { ok: true, data: await nearExpiryBatches(locationId) };
     }
 
     case "get_staff_commission": {
-      const dateFrom = typeof args.dateFrom === "string" ? args.dateFrom : undefined;
-      const dateTo = typeof args.dateTo === "string" ? args.dateTo : undefined;
-      return { ok: true, data: await staffCommissionReport(businessId, { from: dateFrom, to: dateTo }) };
+      const dateFrom = readToolOptionalDate(args.dateFrom);
+      const dateTo = readToolOptionalDate(args.dateTo);
+      // The central commission screen remains business-wide; the assistant
+      // follows the source sale's branch unless this is a trusted system read.
+      return branchRead((locationId) =>
+        staffCommissionReport(businessId, { from: dateFrom, to: dateTo }, locationId),
+      );
     }
 
     case "get_repurchase_candidates": {
-      const locationId = await primaryLocationId(businessId);
+      const scopedLocationId = await branchLocationForRead();
+      if (scopedLocationId === undefined) return noBranchAccess;
+      const locationId = scopedLocationId ?? await primaryLocationId(businessId);
       if (!locationId) return { ok: true, data: [] };
-      const today = new Date().toISOString().slice(0, 10);
+      const today = await locationBusinessToday(businessId, locationId);
       return { ok: true, data: await customersDueForRepurchase(businessId, locationId, today) };
     }
 
@@ -1591,11 +1853,12 @@ export async function runReadTool(
     // be the thing that finds a bookkeeping error), and the job list is the
     // owner's own standing instructions read back to them.
     case "run_accounting_review": {
-      const asOfDate = typeof args.asOfDate === "string" ? args.asOfDate : undefined;
+      const asOfDate = readToolOptionalDate(args.asOfDate);
       const review = await runAccountingReview(businessId, { asOfDate });
       return {
         ok: true,
         data: {
+          scopeNote: "این بررسی روی دفتر تجمیعی کل کسب‌وکار و همهٔ شعب اجرا شده است.",
           asOfDate: review.asOfDate,
           windowDays: review.windowDays,
           // The degraded checks travel with the headline. Without them the

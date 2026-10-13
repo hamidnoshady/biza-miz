@@ -85,7 +85,7 @@ describe("built-in role presets", () => {
       "payments.refund", "payments.take",
       "printing.execute",
       "purchases.manage",
-      "reports.export", "reports.view",
+      "reports.dashboard_defaults.manage", "reports.export", "reports.manage", "reports.view",
       "reservations.manage", "reservations.view",
       "settings.manage",
       "store_credit.issue", "store_credit.payout",
@@ -112,7 +112,7 @@ describe("built-in role presets", () => {
       "menu.view",
       "parties.manage", "parties.view",
       "payroll.manage", "payroll.view",
-      "reports.export", "reports.view",
+      "reports.export", "reports.manage", "reports.view",
       "tax.amend", "tax.cancel", "tax.export", "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
       "workspace.view",
     ]);
@@ -194,6 +194,12 @@ describe("privilege boundaries that must not drift", () => {
       for (const key of [PERMISSIONS.taxView, PERMISSIONS.taxPrepare, PERMISSIONS.taxSend]) {
         expect(hasPermission(role, {}, key), `${role} ${key}`).toBe(false);
       }
+    }
+  });
+
+  it("keeps consolidated cross-branch reporting out of every non-owner preset (issue #819)", () => {
+    for (const role of ROLES) {
+      expect(hasPermission(role, {}, PERMISSIONS.reportsBusinessWide)).toBe(role === "owner");
     }
   });
 

@@ -38,6 +38,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   layaway_payment: "قسط پیش‌فروش",
   consignment_payout: "تسویهٔ امانی",
   customer_return: "مرجوعی مشتری",
+  serial_return: "مرجوعی کالای سریالی",
   woocommerce_order: "سفارش ووکامرس",
   woocommerce_refund: "بازپرداخت ووکامرس",
   cms_store_order: "سفارش فروشگاه سایت",

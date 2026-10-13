@@ -576,7 +576,7 @@ export async function customersDueForRepurchase(
                       ORDER BY app_business_date(o.closed_at, l.timezone, l.business_day_start_minutes)::text) AS dates
        FROM orders o
        JOIN locations l ON l.id = o.location_id
-       JOIN order_items oi ON oi.order_id = o.id
+       JOIN order_items oi ON oi.order_id = o.id AND oi.location_id = o.location_id
        JOIN parties c ON c.id = o.customer_id
       WHERE o.location_id = $1
         AND l.business_id = $2
