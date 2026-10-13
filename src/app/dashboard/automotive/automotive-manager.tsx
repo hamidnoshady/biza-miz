@@ -1553,7 +1553,7 @@ function SalesSection({
               idPrefix="automotive-sale-pay"
               customer={customer ? { id: customer.id, name: customer.name } : null}
             />
-            {paymentError ? <p className="mt-2 text-sm text-rose-700" role="alert">{paymentError}</p> : null}
+            {paymentError ? <p className="mt-2 text-sm text-rose-700 dark:text-rose-300" role="alert">{paymentError}</p> : null}
           </div>
         ) : null}
 
