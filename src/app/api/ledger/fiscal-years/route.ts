@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { createFiscalYear, FiscalPeriodError, listFiscalYears } from "@/lib/fiscal-periods-service";
 import { isSupportedFiscalYear } from "@/lib/fiscal-periods";
 
-/** Every fiscal year defined for this business. Owner/manager/accountant may read; only owner/accountant may define one (see POST). */
+/** Every fiscal year defined for this business. Readers need ledger.view; creation needs ledger.close_period. */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;
@@ -13,8 +13,8 @@ export const GET = withTenantScope(async () => {
 
 /**
  * Defines a fiscal year (the Jalali year `jy`) and its twelve periods.
- * `ledger.close_period` — owner and accountant — the same permission that
- * gates soft-closing/locking a period, since defining a year is the same
+ * `ledger.close_period` — the same effective capability that gates
+ * soft-closing/locking a period, since defining a year is the same
  * kind of act: setting up the structure the rest of the phase's period
  * enforcement runs against.
  */
@@ -38,7 +38,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   try {
-    const fiscalYear = await createFiscalYear(session.businessId, jy);
+    const fiscalYear = await createFiscalYear(session.businessId, jy, session.sub);
     return NextResponse.json({ fiscalYear }, { status: 201 });
   } catch (err) {
     if (err instanceof FiscalPeriodError) {

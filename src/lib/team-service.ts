@@ -146,7 +146,7 @@ function toMember(row: MemberRow): TeamMember {
 export async function listMembers(businessId: string): Promise<TeamMember[]> {
   const { rows } = await query<MemberRow>(
     `SELECT u.id, u.role, u.custom_role_id, tr.name custom_role_name,
-            CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END custom_role_permissions,
+            CASE WHEN u.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END custom_role_permissions,
             u.full_name, u.email, u.is_active,
             u.membership_status, u.location_scope,
             (u.pin_hash IS NOT NULL OR EXISTS (

@@ -207,6 +207,7 @@ describe("customer return under سیستم ادواری", () => {
         journalLineInserts.push({ sql, params });
         return [];
       }
+      if (sql.includes("SELECT set_config('app.fiscal_constructing_entry_id'")) return [];
       if (sql.includes("UPDATE customer_returns SET inventory_event_id")) return [];
       if (sql.includes("UPDATE inventory_events SET posting_status")) return [];
       return undefined; // a restock query (snapshots/stock_movements/lots) fails the test here
