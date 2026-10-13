@@ -146,6 +146,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (body.locationScope !== undefined && !isLocationScope(body.locationScope)) {
     return NextResponse.json({ error: "invalid_location_scope" }, { status: 400 });
   }
+  // New PIN staff must never inherit the historical `all` fallback merely
+  // because a client omitted the field. Existing non-PIN setup clients retain
+  // their compatibility behavior; this interactive onboarding door requires an
+  // explicit visible policy.
+  if (isPinRole(role) && body.locationScope === undefined) {
+    return NextResponse.json({ error: "location_scope_required" }, { status: 400 });
+  }
   /**
    * Issue #854 (P2.10): the branch-scope invariants, enforced on create as well
    * as on update. `selected` with nothing selected and `home` with no branch

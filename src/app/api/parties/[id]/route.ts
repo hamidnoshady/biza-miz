@@ -3,6 +3,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { PartyValidationError, getParty, removeParty, updateParty } from "@/lib/parties-service";
 import { parsePartyRequestBody } from "@/lib/parties";
+import { projectPartyForRead } from "@/lib/party-read-projection";
 
 /**
  * One party: the file a directory row opens, and the record a picker's
@@ -22,7 +23,16 @@ export const GET = withTenantScope(
     const { id } = await params;
     const party = await getParty(session.businessId, id);
     if (!party) return NextResponse.json({ error: "party_not_found" }, { status: 404 });
-    return NextResponse.json({ party, customer: party });
+    const [team, payroll, ledger] = await Promise.all([
+      requirePermission(PERMISSIONS.teamManage),
+      requirePermission(PERMISSIONS.payrollView),
+      requirePermission(PERMISSIONS.ledgerView),
+    ]);
+    const projected = projectPartyForRead(party, {
+      personnelSensitive: !team.error || !payroll.error,
+      financial: !ledger.error,
+    });
+    return NextResponse.json({ party: projected, customer: projected });
   },
 );
 

@@ -170,11 +170,20 @@ export function TeamManager({
    * dialog, not the flip of a toggle.
    */
   const [rehiring, setRehiring] = useState<Member | null>(null);
+  const isOwner = role === "owner";
+  const granted = permissions ?? [];
+  const canManagePermissions = isOwner || granted.includes(PERMISSIONS.teamPermissionsManage);
+  const canManage = isOwner || granted.includes(PERMISSIONS.teamManage);
 
   const load = useCallback(async () => {
+    // Invitation metadata is administrative. A read-only `team.view` visit must
+    // not issue a request which is guaranteed to receive 403 and then obscure a
+    // roster that loaded successfully.
     const [membersRes, invitesRes] = await Promise.all([
       api<{ members: Member[]; locations?: TeamLocation[]; deploymentProfile?: "cloud" | "hybrid" | "local" }>("/api/team"),
-      api<{ invitations: Invitation[] }>("/api/team/invitations"),
+      canManage
+        ? api<{ invitations: Invitation[] }>("/api/team/invitations")
+        : Promise.resolve({ ok: true as const, data: { invitations: [] } }),
     ]);
     if (membersRes.ok) {
       setMembers(membersRes.data.members);
@@ -192,7 +201,7 @@ export function TeamManager({
       setError(errorMessage((invitesRes.data as { error?: string }).error));
     }
     setLoading(false);
-  }, []);
+  }, [canManage]);
 
   useEffect(() => {
     void load();
@@ -235,7 +244,6 @@ export function TeamManager({
   }
 
   if (loading) return <LoadingSkeleton rows={3} />;
-  const isOwner = role === "owner";
   /**
    * Issue #854 (P2.1 / P2.4) — two different questions.
    *
@@ -251,10 +259,6 @@ export function TeamManager({
    * from surfaces that do not carry it; a missing list means "not granted",
    * which renders read-only rather than assuming authority.
    */
-  const granted = permissions ?? [];
-  const canManagePermissions = isOwner || granted.includes(PERMISSIONS.teamPermissionsManage);
-  const canManage = isOwner || granted.includes(PERMISSIONS.teamManage);
-
   return (
     <div className="space-y-6">
       <ErrorBox>{error}</ErrorBox>
@@ -434,7 +438,7 @@ export function TeamManager({
         onChanged={load}
         onError={setError}
       />
-      {canManage ? <AddStaffSection onChanged={load} onError={setError} /> : null}
+      {canManage ? <AddStaffSection locations={locations} onChanged={load} onError={setError} /> : null}
 
       {/*
         Personnel as parties (scope `team`): a staff member is a counterparty for
@@ -1608,9 +1612,11 @@ function InviteSection({
 }
 
 function AddStaffSection({
+  locations,
   onChanged,
   onError,
 }: {
+  locations: TeamLocation[];
   onChanged: () => Promise<void>;
   onError: (message: string) => void;
 }) {
@@ -1620,6 +1626,9 @@ function AddStaffSection({
   // Phase 42 — optional login phone, stored unverified until the member's
   // first OTP proves it (mirrors PhoneEditorDialog above).
   const [phone, setPhone] = useState("");
+  const [locationScope, setLocationScope] = useState<"all" | "selected" | "home" | "none">("selected");
+  const [locationIds, setLocationIds] = useState<string[]>([]);
+  const [defaultLocationId, setDefaultLocationId] = useState("");
   const [busy, setBusy] = useState(false);
 
   /**
@@ -1642,7 +1651,15 @@ function AddStaffSection({
     onError("");
     const res = await api<{ error?: string }>("/api/team", {
       method: "POST",
-      body: JSON.stringify({ role, fullName, pin, phone: phone.trim() || undefined }),
+      body: JSON.stringify({
+        role,
+        fullName,
+        pin,
+        phone: phone.trim() || undefined,
+        locationScope,
+        locationIds: locationScope === "selected" ? locationIds : [],
+        defaultLocationId: locationScope === "home" ? defaultLocationId || null : null,
+      }),
     });
     setBusy(false);
     if (!res.ok) {
@@ -1678,7 +1695,7 @@ function AddStaffSection({
         </Field>
         <Field
           label={`رمز عددی (${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم)`}
-          hint="در هر شعبه باید یکتا باشد."
+          hint="در کل این کسب‌وکار باید یکتا باشد."
         >
           <input
             className={inputClass}
@@ -1703,11 +1720,65 @@ function AddStaffSection({
           />
         </Field>
       </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <Field label="دسترسی شعبه" hint="پیش از ساخت حساب، محدودهٔ کاری را صریحاً انتخاب کنید.">
+          <SearchableSelect
+            value={locationScope}
+            onChange={(value) => {
+              setLocationScope(value as typeof locationScope);
+              setLocationIds([]);
+              setDefaultLocationId("");
+            }}
+            options={[
+              { value: "selected", label: "شعبه‌های انتخابی" },
+              { value: "home", label: "فقط شعبهٔ اصلی" },
+              { value: "all", label: "همهٔ شعبه‌ها" },
+              { value: "none", label: "بدون دسترسی شعبه" },
+            ]}
+          />
+        </Field>
+        {locationScope === "home" ? (
+          <Field label="شعبهٔ اصلی">
+            <SearchableSelect
+              value={defaultLocationId}
+              onChange={setDefaultLocationId}
+              options={locations.map((location) => ({ value: location.id, label: location.name }))}
+            />
+          </Field>
+        ) : null}
+      </div>
+      {locationScope === "selected" ? (
+        <fieldset className="mt-3 rounded-xl border border-border p-3">
+          <legend className="px-1 text-sm font-medium text-foreground">شعبه‌های مجاز</legend>
+          <div className="flex flex-wrap gap-3">
+            {locations.map((location) => (
+              <label key={location.id} className="flex items-center gap-2 text-sm text-foreground">
+                <input
+                  type="checkbox"
+                  checked={locationIds.includes(location.id)}
+                  onChange={(event) => setLocationIds((current) =>
+                    event.target.checked
+                      ? [...current, location.id]
+                      : current.filter((id) => id !== location.id))}
+                />
+                {location.name}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ) : null}
       <div className="mt-4">
         {/* The same shape rule the backend gates on (pin-policy.ts) — the
             button says no before the request leaves, instead of answering
             with a 400 after it does. */}
-        <PrimaryButton onClick={add} disabled={busy || !fullName.trim() || !isValidPin(pin)}>
+        <PrimaryButton
+          onClick={add}
+          disabled={
+            busy || !fullName.trim() || !isValidPin(pin) ||
+            (locationScope === "selected" && locationIds.length === 0) ||
+            (locationScope === "home" && !defaultLocationId)
+          }
+        >
           افزودن
         </PrimaryButton>
       </div>

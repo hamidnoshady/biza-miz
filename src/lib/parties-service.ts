@@ -161,9 +161,13 @@ async function assertLinkedPartyFollowsCanonicalIdentity(
     [args.employeeUserId, businessId],
   );
   const member = rows[0];
-  // A dangling link (the membership is gone) owns nothing; the column's own
-  // ON DELETE SET NULL settles it, and there is no canonical value to defend.
-  if (!member) return;
+  // A relationship supplied by a client must resolve inside this business.
+  // Returning here used to turn "not visible in this tenant" into permission to
+  // write a cross-tenant user id. Migration 0221 backs this check with a
+  // composite FK so direct SQL and racing writes obey the same invariant.
+  if (!member) {
+    throw new PartyValidationError("employee_membership_not_found", "employeeUserId");
+  }
 
   const previous = args.previous ?? { displayName: "", email: null, phoneE164: null };
   const memberEmail = member.email ?? null;
@@ -1292,11 +1296,16 @@ export async function updateParty(
   }
 
   const phoneCols = phoneColumns(write.phone, dek);
-  // Issue #854 (pass 4, gap 5) — a linked personnel file may not grow an
-  // identity that disagrees with its membership's login fields.
-  if (existing.employeeUserId) {
+  // Validate the proposed link, not merely the link that happened to be stored
+  // before this edit. This covers first-link and relink as well as ordinary
+  // edits, and prevents a foreign-business membership id from crossing the
+  // tenant boundary.
+  const proposedEmployeeUserId = write.roles.includes("Employee")
+    ? (write.employeeUserId ?? existing.employeeUserId)
+    : null;
+  if (proposedEmployeeUserId) {
     await assertLinkedPartyFollowsCanonicalIdentity(businessId, {
-      employeeUserId: existing.employeeUserId,
+      employeeUserId: proposedEmployeeUserId,
       next: { displayName: write.displayName, email: write.email, phoneE164: phoneCols.e164 },
       previous: {
         displayName: existing.displayName,

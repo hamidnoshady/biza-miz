@@ -5,6 +5,19 @@ import { PartyValidationError, createParty, listParties, searchParties } from "@
 import { PARTY_ROLES, parsePartyRequestBody, type PartyRole } from "@/lib/parties";
 import { arBalancesForCustomers } from "@/lib/ar-service";
 import { storeCreditBalancesFor } from "@/lib/loyalty-service";
+import { projectPartiesForRead, type PartyReadAccess } from "@/lib/party-read-projection";
+
+async function partyReadAccess(): Promise<PartyReadAccess> {
+  const [team, payroll, ledger] = await Promise.all([
+    requirePermission(PERMISSIONS.teamManage),
+    requirePermission(PERMISSIONS.payrollView),
+    requirePermission(PERMISSIONS.ledgerView),
+  ]);
+  return {
+    personnelSensitive: !team.error || !payroll.error,
+    financial: !ledger.error,
+  };
+}
 
 /**
  * The party directory — one endpoint for «اشخاص» in every app.
@@ -36,6 +49,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const rolesOrError = rolesFrom(params);
   if (typeof rolesOrError === "string") return NextResponse.json({ error: rolesOrError }, { status: 400 });
   const roles = rolesOrError;
+  const readAccess = await partyReadAccess();
 
   if (!params.has("page") && !params.has("pageSize") && !params.has("includeInactive")) {
     const parties = await searchParties(session.businessId, q, {
@@ -51,14 +65,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         arBalancesForCustomers(session.businessId, ids),
         storeCreditBalancesFor(session.businessId, ids),
       ]);
-      const withBalances = parties.map((party) => ({
+      const withBalances = projectPartiesForRead(parties, readAccess).map((party) => ({
         ...party,
-        balance: arBalances.get(party.id) ?? 0,
-        storeCredit: storeCredits.get(party.id) ?? 0,
+        balance: arBalances.get(String(party.id)) ?? 0,
+        storeCredit: storeCredits.get(String(party.id)) ?? 0,
       }));
       return NextResponse.json({ parties: withBalances, customers: withBalances });
     }
-    return NextResponse.json({ parties, customers: parties });
+    const projected = projectPartiesForRead(parties, readAccess);
+    return NextResponse.json({ parties: projected, customers: projected });
   }
 
   const { parties, total } = await listParties(session.businessId, {
@@ -76,7 +91,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // `businessId` is what the directory namespaces its local drafts by, and it is
   // already in the session this route read: the origin names the tenant, and no
   // other business's row can appear here to be leaked by it.
-  return NextResponse.json({ parties, customers: parties, total, businessId: session.businessId });
+  const projected = projectPartiesForRead(parties, readAccess);
+  return NextResponse.json({ parties: projected, customers: projected, total, businessId: session.businessId });
 });
 
 /** `?role=Supplier&role=Employee` or `?role=Customer`; anything else is a 400. */
