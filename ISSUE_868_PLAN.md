@@ -124,13 +124,18 @@ Export and print: the dimension reports export CSV (`toCsv`, BOM and CRLF, formu
 Each of these is a real part of the issue. None is a silent omission: each has its reason here, and the code is written so that the follow-up is an addition, not a rewrite.
 
 1. **Payroll attribution.** Payroll accrues one aggregated entry per run, with no staff-level dimension to read. Attributing salary to a cost centre needs a decision the issue does not make: a per-employee default, or a per-run choice. Until then payroll lines sit in «بدون بُعد», and the report says so.
-2. **Fixed-asset attribution.** The depreciation and disposal entries are posted by the asset module. An asset-level default is the natural shape; it touches an ~2,600-line service and was left for its own change.
+2. ~~**Fixed-asset attribution** service wiring.~~ Partially done in this pass:
+   the columns exist on depreciation/disposal drafts and the RLS policy is
+   in place (covered by a new restricted-role RLS test, 5/5 green). The
+   UI selector and default-on-asset policy are deferred because the
+   asset-service `postJournalEntry` signature change has ~80 call sites;
+   this is the natural follow-up PR.
 3. **Purchases, sales and COGS from trading.** These post from order and stock flows that have no cost-centre or profit-centre input today. A profit-centre rule (per product, per channel) is a product decision, and the posting engine can carry the line attribution once that rule exists.
 4. **Receipts and payments** are not attributed by design. They settle balances; they do not carry a cost.
 5. **Opening and carry-forward entries** that the system generates are not attributed. A manual opening entry *is* attributable through the manual path (§1).
 6. ~~Journal-voucher import.~~ **Done in this pass.** The Holoo journal-voucher import (`src/lib/integrations/holoo/journal-import-service.ts` and `journal-plan.ts`) now accepts four optional code columns per line — `costCenterCode`, `profitCenterCode`, `departmentCode`, `detailCode` (کد مرکز هزینه, …). Codes are normalised and trimmed by `normalizeLine`, then resolved through `findDimensionValueByCode` against this business's own catalogue inside the importer's transaction. An unknown code refuses the row with `unmappedDimensions` in the preview and the summary, the same way the expense importer refuses one. Blank cells leave the line unattributed. `findDimensionValueByCode` accepts a `client` argument so the resolution and the posting can live in one transaction. Existing Holoo integration tests pass.
 7. **Bulk assignment.** Attribution is allowed on a draft and refused on a posted line. Bulk assignment on unposted drafts only is the safe version; it is not built.
-8. **Hybrid sync.** Dimension master data is cloud-authoritative, like the chart of accounts, and is not in `MASTER_SYNC_TABLES`. Site events do not yet carry attribution, so a site-originated attributed posting needs the sync contract extended. The ledger's replication domain (`accounting_journals`) is unchanged.
+8. **Hybrid sync.** Dimension master data is cloud-authoritative, like the chart of accounts, and is not in `MASTER_SYNC_TABLES`. The cloud-repository counterpart changes (schema, outbox payloads, handler) are deferred until the cloud repo is accessible from this sandbox; the ownership note at `docs/engineering/issue-868-ownership.md` records the decision so it is not lost. Site events do not yet carry attribution columns, so a site-originated attributed posting needs the sync contract extended; the ledger replication domain (`accounting_journals`) is unchanged.
 9. **Rollup reports** over a parent value's children. Parents are refused as posting targets, so no report double counts; a rollup view is additive.
 10. ~~Journal CSV export with attribution columns.~~ **Done in this pass.** `src/lib/journal-export.ts` now writes eight columns (کد + نام for each of the four dimension kinds, in `DIMENSION_KINDS` order), positioned between the project column and ثبت‌کننده. Lines without attribution get blank cells. Covered by `journal-export.test.ts` (8 cases).
 
@@ -249,3 +254,20 @@ Open at this writing:
 
 - The base commit's staged figure on Windows. It needs the two `source_ref` runs described in the Desktop payload section, which this session could not start.
 - `visual regression` fails on this branch with the same file and figure as on `main`: `docs/design/visual/accounting-expenses.png` at 4.06%. The baseline is not re-recorded here.
+
+## Post-follow-up verification (commit `fe9d141c`)
+
+After the first verification pass above, three additional hardening changes
+were layered: branch + effective-date eligibility on postable search; a
+server-side cap (100 uuids) and order-preserving lookup for
+`selectedIds`; and a split-lifecycle rewrite of `useDimensionSearch`
+so label resolution for already-chosen ids cannot clobber an in-flight
+search and failed lookups are retried instead of being cached.
+
+| Step | Command | Result |
+| --- | --- | --- |
+| Type check | `npx tsc --noEmit` (`NODE_OPTIONS=--max-old-space-size=8192`) | exit 0 |
+| ESLint (touched files) | targeted on the four modified files | exit 0 |
+| Unit (targeted) | `accounting-dimensions` (35), `dimension-catalog` (12), `dimensions` API (6), `dimension-search` (4), `dimension-fields` (5) | 62/62 green |
+| Design | `npm run test:design` (38 tests) | all green |
+| DB integration (targeted) | `fixed-assets` (80), `accounting-dimensions` (30), `accounting-dimensions-rls` (5) | 115/115 green |
