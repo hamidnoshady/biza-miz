@@ -130,6 +130,34 @@ import { setOnlinePlatformsConfig } from "./online-platforms-service";
 import { MAX_ONLINE_PLATFORM_COMMISSION_PERCENT, validCommissionPercent } from "./online-platforms";
 import { validateAccounts, nextAccountLevel, type AccountLevel } from "./coa-template";
 import {
+  validatePaymentMethodInput,
+  MAX_PAYMENT_METHOD_NAME,
+  CUSTOM_PAYMENT_SETTLEMENTS,
+  isPaymentSettlement,
+  type PaymentMethodInput,
+} from "./payment-methods";
+import {
+  createPaymentMethod,
+  listPaymentMethods,
+  reorderPaymentMethods,
+  paymentMethodsByIds,
+  updatePaymentMethod,
+  paymentCountForMethod,
+  deletePaymentMethod,
+  type PaymentMethodPatch,
+} from "./payment-methods-service";
+import { parsePrinterInput, type ExistingPrinter } from "./printing/printer-input";
+import { PRINTER_COLUMNS } from "./printing/printer-columns";
+import { connectionJsonOf } from "./printing/types";
+import {
+  createPrintTemplate,
+  updatePrintTemplate,
+  deletePrintTemplate,
+} from "./print-templates-service";
+import { builtInTemplate } from "./print-template";
+import { getPrintTemplate, loadRoutablePrinters } from "./printing/plan";
+import { isDocType, printerAcceptsDocument } from "./printing/routing";
+import {
   decryptReservationPhones,
   encryptReservationPhone,
   lockTableForReservationWrite,
@@ -4502,6 +4530,310 @@ const settingsAccountsSave: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true, created: accounts.length } };
 };
 
+// ── Issue #883 package 2, batch BA-2 — the settings registry lanes ──────────
+const paymentMethodCreate: AutopilotExecutor = async (ctx) => {
+  const parsed = validatePaymentMethodInput(ctx.payload as unknown as Record<string, unknown> as PaymentMethodInput);
+  if (!parsed.ok) return fail(parsed.error);
+  const paymentMethod = await createPaymentMethod(ctx.businessId, parsed.value);
+  return { ok: true, result: { paymentMethod } };
+};
+function booleanPatch(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+const paymentMethodUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const existing = (await paymentMethodsByIds(ctx.businessId, [id])).get(id);
+  if (!existing) return fail("payment_method_not_found");
+  const input = ctx.payload;
+  const patch: PaymentMethodPatch = {};
+  if (input.name !== undefined) {
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    if (!name || name.length > MAX_PAYMENT_METHOD_NAME) return fail("invalid_name");
+    patch.name = name;
+  }
+  if (input.settlement !== undefined) {
+    if (existing.isBuiltin) return fail("builtin_settlement_locked");
+    if (!isPaymentSettlement(input.settlement) || !CUSTOM_PAYMENT_SETTLEMENTS.includes(input.settlement)) {
+      return fail("invalid_settlement");
+    }
+    if (input.settlement !== existing.settlement && (await paymentCountForMethod(ctx.businessId, id)) > 0) {
+      return fail("payment_method_settlement_locked");
+    }
+    patch.settlement = input.settlement;
+  }
+  for (const key of ["isActive", "opensDrawer", "requiresReference"] as const) {
+    if (input[key] === undefined) continue;
+    const value = booleanPatch(input[key]);
+    if (value === null) return fail("bad_request");
+    patch[key] = value;
+  }
+  if (Object.keys(patch).length === 0) return fail("bad_request");
+  if (patch.isActive === false && existing.isActive) {
+    const all = await listPaymentMethods(ctx.businessId, { includeInactive: true });
+    if (!all.some((method) => method.id !== id && method.isActive)) {
+      return fail("last_active_payment_method");
+    }
+  }
+  const updated = await updatePaymentMethod(ctx.businessId, id, patch);
+  if (!updated) return fail("payment_method_not_found");
+  return { ok: true, result: { paymentMethod: updated } };
+};
+const paymentMethodDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const existing = (await paymentMethodsByIds(ctx.businessId, [id])).get(id);
+  if (!existing) return fail("payment_method_not_found");
+  if (existing.isBuiltin) return fail("builtin_payment_method");
+  if ((await paymentCountForMethod(ctx.businessId, id)) > 0) return fail("payment_method_in_use");
+  if (existing.isActive) {
+    const all = await listPaymentMethods(ctx.businessId, { includeInactive: true });
+    if (!all.some((method) => method.id !== id && method.isActive)) {
+      return fail("last_active_payment_method");
+    }
+  }
+  const deleted = await deletePaymentMethod(ctx.businessId, id);
+  if (!deleted) {
+    if ((await paymentCountForMethod(ctx.businessId, id)) > 0) return fail("payment_method_in_use");
+    return fail("payment_method_not_found");
+  }
+  return { ok: true, result: { ok: true } };
+};
+const paymentMethodReorder: AutopilotExecutor = async (ctx) => {
+  const order = ctx.payload.order;
+  if (!Array.isArray(order) || order.some((id) => typeof id !== "string")) return fail("bad_request");
+  if (!(await reorderPaymentMethods(ctx.businessId, order as string[]))) {
+    return fail("invalid_payment_method_order");
+  }
+  return { ok: true, result: { paymentMethods: await listPaymentMethods(ctx.businessId, { includeInactive: true }) } };
+};
+// Printers/Templates/Rules resolve the ACTIVE branch the same way their
+// routes do (the settings screens operate per branch).
+async function settingsActiveLocation(ctx: AutopilotExecutorContext) {
+  if (!ctx.authorizedByUserId) return null;
+  return resolveActiveLocation({
+    sub: ctx.authorizedByUserId,
+    businessId: ctx.businessId,
+    locationId: null,
+  } as SessionPayload);
+}
+const printerCreate: AutopilotExecutor = async (ctx) => {
+  const input = parsePrinterInput(ctx.payload as unknown as Record<string, unknown>);
+  if (!input) return fail("invalid_printer");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    if (input.isDefault) {
+      await client.query(
+        `UPDATE printers SET is_default = false WHERE location_id = $1 AND kind = $2`,
+        [location.id, input.kind],
+      );
+    }
+    const { rows } = await client.query(
+      `INSERT INTO printers
+         (location_id, name, kind, connection, is_active, printer_class, supports_drawer, supports_cut, is_default, paper, paper_width_mm)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING ${PRINTER_COLUMNS}`,
+      [
+        location.id,
+        input.name,
+        input.kind,
+        JSON.stringify(connectionJsonOf(input.connection)),
+        input.isActive,
+        input.printerClass,
+        input.openDrawer,
+        input.supportsCut,
+        input.isDefault,
+        input.paper,
+        input.paperWidthMm,
+      ],
+    );
+    await client.query("COMMIT");
+    return { ok: true, result: { printer: rows[0] } };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    return fail("printer_save_failed");
+  } finally {
+    client.release();
+  }
+};
+const printerUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const { rows: existingRows } = await query<{
+    id: string; name: string; kind: ExistingPrinter["kind"]; connection: Record<string, unknown>; is_active: boolean;
+    paper: string | null; paper_width_mm: number | null; supports_drawer: boolean | null;
+    supports_cut: boolean | null; is_default: boolean | null;
+  }>(
+    `SELECT ${PRINTER_COLUMNS} FROM printers WHERE id = $1 AND location_id = $2`,
+    [id, location.id],
+  );
+  const existing = existingRows[0] as (typeof existingRows)[number] | undefined;
+  if (!existing) return fail("printer_not_found");
+  const fallback: ExistingPrinter = {
+    name: existing.name,
+    kind: existing.kind,
+    connection: existing.connection,
+    is_active: existing.is_active,
+    paper: existing.paper ?? null,
+    paper_width_mm: existing.paper_width_mm ?? null,
+    supports_drawer: existing.supports_drawer ?? null,
+    supports_cut: existing.supports_cut ?? null,
+    is_default: existing.is_default ?? null,
+  };
+  const patch = { ...ctx.payload };
+  delete patch.id;
+  const input = parsePrinterInput(patch as unknown as Record<string, unknown>, fallback);
+  if (!input) return fail("invalid_printer");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    if (input.isDefault) {
+      await client.query(
+        `UPDATE printers SET is_default = false WHERE location_id = $1 AND kind = $2 AND id <> $3`,
+        [location.id, input.kind, id],
+      );
+    }
+    const { rows } = await client.query(
+      `UPDATE printers
+          SET name = $1, kind = $2, connection = $3, is_active = $4,
+              printer_class = $5, supports_drawer = $6, supports_cut = $7,
+              is_default = $8, paper = $9, paper_width_mm = $10
+        WHERE id = $11 AND location_id = $12
+        RETURNING ${PRINTER_COLUMNS}`,
+      [
+        input.name,
+        input.kind,
+        JSON.stringify(connectionJsonOf(input.connection)),
+        input.isActive,
+        input.printerClass,
+        input.openDrawer,
+        input.supportsCut,
+        input.isDefault,
+        input.paper,
+        input.paperWidthMm,
+        id,
+        location.id,
+      ],
+    );
+    await client.query("COMMIT");
+    if (rows.length === 0) return fail("printer_not_found");
+    return { ok: true, result: { printer: rows[0] } };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    return fail("printer_save_failed");
+  } finally {
+    client.release();
+  }
+};
+const printerDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const { rows } = await query("DELETE FROM printers WHERE id = $1 AND location_id = $2 RETURNING id", [id, location.id]);
+  if (rows.length === 0) return fail("printer_not_found");
+  return { ok: true, result: { ok: true } };
+};
+const printTemplateSave: AutopilotExecutor = async (ctx) => {
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const id = str(ctx.payload.id);
+  if (id) {
+    const result = await updatePrintTemplate({
+      locationId: location.id,
+      id,
+      template: ctx.payload.template,
+      isDefault: typeof ctx.payload.isDefault === "boolean" ? ctx.payload.isDefault : undefined,
+    });
+    if (result.error) return fail(result.error);
+    return { ok: true, result: { template: result.template } };
+  }
+  const result = await createPrintTemplate({
+    locationId: location.id,
+    template: ctx.payload.template,
+    isDefault: ctx.payload.isDefault === true,
+  });
+  if (result.error) return fail(result.error);
+  return { ok: true, result: { template: result.template } };
+};
+const printTemplateDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  const removed = await deletePrintTemplate(location.id, id);
+  if (!removed) return fail("template_not_found");
+  return { ok: true, result: { ok: true } };
+};
+const settingsPrintRulesSave: AutopilotExecutor = async (ctx) => {
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return fail("no_location");
+  if (!isDocType(ctx.payload.documentType)) return fail("bad_request");
+  const documentType = ctx.payload.documentType;
+  let templateKey: string | null = null;
+  let templateId: string | null = null;
+  const requestedId = typeof ctx.payload.templateId === "string" && ctx.payload.templateId.trim() ? ctx.payload.templateId.trim() : null;
+  const requestedKey = typeof ctx.payload.templateKey === "string" && ctx.payload.templateKey.trim() ? ctx.payload.templateKey.trim() : null;
+  if (requestedId) {
+    const saved = await getPrintTemplate(location.id, requestedId);
+    if (!saved) return fail("template_not_found");
+    if (saved.docType !== documentType) return fail("incompatible_template");
+    templateId = saved.id;
+  } else if (requestedKey) {
+    const builtIn = builtInTemplate(requestedKey);
+    if (builtIn) {
+      if (builtIn.docType !== documentType) return fail("incompatible_template");
+      templateKey = builtIn.key;
+    } else {
+      const saved = await getPrintTemplate(location.id, requestedKey);
+      if (!saved) return fail("template_not_found");
+      if (saved.docType !== documentType) return fail("incompatible_template");
+      templateId = saved.id;
+    }
+  }
+  const { routable } = await loadRoutablePrinters(location.id);
+  const printerId = typeof ctx.payload.printerId === "string" && ctx.payload.printerId ? ctx.payload.printerId : null;
+  const fallbackPrinterId =
+    typeof ctx.payload.fallbackPrinterId === "string" && ctx.payload.fallbackPrinterId ? ctx.payload.fallbackPrinterId : null;
+  const printerError = (id: string | null, role: "primary" | "fallback"): AutopilotExecutionResult | null => {
+    if (!id) return null;
+    const printer = routable.find((item) => item.id === id);
+    if (!printer) return { ok: false, result: { error: "printer_not_found", role }, errorCode: "printer_not_found" };
+    if (!printerAcceptsDocument(printer, documentType)) {
+      return { ok: false, result: { error: "incompatible_printer", role, printerName: printer.name }, errorCode: "incompatible_printer" };
+    }
+    return null;
+  };
+  const primaryError = printerError(printerId, "primary");
+  if (primaryError) return primaryError;
+  const fallbackError = printerError(fallbackPrinterId, "fallback");
+  if (fallbackError) return fallbackError;
+  if (printerId && fallbackPrinterId && printerId === fallbackPrinterId) {
+    return fail("duplicate_fallback_printer");
+  }
+  try {
+    await query(
+      `INSERT INTO print_rules (location_id, document_type, template_key, template_id, printer_id, fallback_printer_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (location_id, document_type) DO UPDATE
+         SET template_key = EXCLUDED.template_key,
+             template_id = EXCLUDED.template_id,
+             printer_id = EXCLUDED.printer_id,
+             fallback_printer_id = EXCLUDED.fallback_printer_id,
+             updated_at = now()`,
+      [location.id, documentType, templateKey, templateId, printerId, fallbackPrinterId],
+    );
+    return { ok: true, result: { ok: true, rule: { documentType, templateKey, templateId, printerId, fallbackPrinterId } } };
+  } catch {
+    return fail("print_rules_failed");
+  }
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -6716,6 +7048,16 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   settingsOnlinePlatformsSave,
   settingsMfaPolicySave,
   settingsAccountsSave,
+  paymentMethodCreate,
+  paymentMethodUpdate,
+  paymentMethodDelete,
+  paymentMethodReorder,
+  printerCreate,
+  printerUpdate,
+  printerDelete,
+  printTemplateSave,
+  printTemplateDelete,
+  settingsPrintRulesSave,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

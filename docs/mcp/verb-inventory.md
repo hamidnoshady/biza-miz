@@ -5,7 +5,7 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **237 write verbs**
+visible only to connections consented for every branch) and **247 write verbs**
 (**71** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -247,6 +247,16 @@ visible only to connections consented for every branch) and **237 write verbs**
 | `write_settings_online_platforms_save` | `settings.onlinePlatforms.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_settings_mfa_policy_save` | `settings.mfaPolicy.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_settings_accounts_save` | `settings.accounts.save` | accounting | low | connection write_mode | `accounts.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payment_method_create` | `paymentMethod.create` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payment_method_update` | `paymentMethod.update` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payment_method_delete` | `paymentMethod.delete` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_payment_method_reorder` | `paymentMethod.reorder` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_printer_create` | `printer.create` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_printer_update` | `printer.update` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_printer_delete` | `printer.delete` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_print_template_save` | `printTemplate.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_print_template_delete` | `printTemplate.delete` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_settings_print_rules_save` | `settings.printRules.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

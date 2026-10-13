@@ -677,6 +677,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["settings"],
     ops: {
       listDetail: ["get_setup_state"],
+      create: ["paymentMethod.create", "printer.create", "printTemplate.save"],
       update: [
         "settings.business.save",
         "settings.pricing.save",
@@ -684,10 +685,16 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
         "settings.onlinePlatforms.save",
         "settings.mfaPolicy.save",
         "settings.accounts.save",
+        "paymentMethod.update",
+        "paymentMethod.reorder",
+        "printer.update",
+        "printTemplate.save",
+        "settings.printRules.save",
       ],
+      lifecycle: ["paymentMethod.delete", "printer.delete", "printTemplate.delete"],
     },
-    note: "batch BA-1: the six doc-lane saves mirror their PUTs field-for-field (partial-merge semantics, validators, transactions); the logo upload stays route-only (multipart binary); payment-method/printer/template/print-rule lanes ride batch BA-2",
-    test: "integration/pricing.integration.test.ts + growth-settings + ai-autopilot",
+    note: "BA-1 doc saves + BA-2 registry lanes close the row: every guard from the route stays (built-in settlement locks, in-use veto, last-active guard, compatible-printer checks, the printer default flip in one transaction); only the logo upload stays route-only (multipart binary)",
+    test: "integration/pricing.integration.test.ts + printing + payments lanes",
   },
   {
     id: "config.team",

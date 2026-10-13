@@ -519,6 +519,20 @@ export type ActionType =
   | "settings.onlinePlatforms.save"
   | "settings.mfaPolicy.save"
   | "settings.accounts.save"
+  // Batch BA-2 — the settings registry lanes: payment methods (including the
+  // cashier-grid order), printers and print templates, and the per-document
+  // print rule. The route's guards (built-in locks, in-use vetoes,
+  // last-active guard) and transactions run identically.
+  | "paymentMethod.create"
+  | "paymentMethod.update"
+  | "paymentMethod.delete"
+  | "paymentMethod.reorder"
+  | "printer.create"
+  | "printer.update"
+  | "printer.delete"
+  | "printTemplate.save"
+  | "printTemplate.delete"
+  | "settings.printRules.save"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -648,6 +662,16 @@ export type AutopilotExecutorKey =
   | "settingsOnlinePlatformsSave"
   | "settingsMfaPolicySave"
   | "settingsAccountsSave"
+  | "paymentMethodCreate"
+  | "paymentMethodUpdate"
+  | "paymentMethodDelete"
+  | "paymentMethodReorder"
+  | "printerCreate"
+  | "printerUpdate"
+  | "printerDelete"
+  | "printTemplateSave"
+  | "printTemplateDelete"
+  | "settingsPrintRulesSave"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2278,6 +2302,86 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "جایگزینی کامل سرفصل حساب‌ها — فقط وقتی هیچ سندی پست نشده باشد",
     payloadHint: '{ accounts: Array<{ code: string, name: string, type: string, parentCode?: string, isContra?: bool }> }',
     executor: "settingsAccountsSave",
+  },
+  "paymentMethod.create": {
+    type: "paymentMethod.create",
+    endpoint: "/api/settings/payment-methods",
+    method: "POST",
+    label: "ساخت روش پرداخت سفارشی — settlement از انواع مجاز",
+    payloadHint: '{ name: string, settlement: string, opensDrawer?: bool, requiresReference?: bool }',
+    executor: "paymentMethodCreate",
+  },
+  "paymentMethod.update": {
+    type: "paymentMethod.update",
+    endpoint: "/api/settings/payment-methods/{id}",
+    method: "PATCH",
+    label: "ویرایش روش پرداخت — settlementِ روشِ پول‌گرفته قفل است؛ آخرین روش فعال غیرفعال نمی‌شود",
+    payloadHint: '{ id: string, name?: string, settlement?: string, isActive?: bool, opensDrawer?: bool, requiresReference?: bool }',
+    executor: "paymentMethodUpdate",
+  },
+  "paymentMethod.delete": {
+    type: "paymentMethod.delete",
+    endpoint: "/api/settings/payment-methods/{id}",
+    method: "DELETE",
+    label: "حذف روش پرداخت — builtin/پول‌گرفته/تنها فعال محفوظ است (به‌جای آن غیرفعال کنید)",
+    payloadHint: '{ id: string }',
+    executor: "paymentMethodDelete",
+  },
+  "paymentMethod.reorder": {
+    type: "paymentMethod.reorder",
+    endpoint: "/api/settings/payment-methods",
+    method: "PUT",
+    label: "چینش یک‌شبهٔ گرید صندوق — ترتیب کامل شناسه‌ها یک‌جا",
+    payloadHint: '{ order: string[] }',
+    executor: "paymentMethodReorder",
+  },
+  "printer.create": {
+    type: "printer.create",
+    endpoint: "/api/settings/printers",
+    method: "POST",
+    label: "افزودن چاپگر — is_default بقیه را همان‌تراکنش رها می‌کند",
+    payloadHint: '{ name: string, kind: "receipt"|"kitchen"|"label", connection: object, isActive?: bool, printerClass?: string, openDrawer?: bool, supportsCut?: bool, isDefault?: bool, paper?: string, paperWidthMm?: number }',
+    executor: "printerCreate",
+  },
+  "printer.update": {
+    type: "printer.update",
+    endpoint: "/api/settings/printers/{id}",
+    method: "PATCH",
+    label: "ویرایش چاپگر — فیلدهای وصل‌نشده به fallbackِ رکورد می‌چسبند؛ تعویض is_default تکی",
+    payloadHint: '{ id: string, name?: string, kind?: string, connection?: object, isActive?: bool, printerClass?: string, openDrawer?: bool, supportsCut?: bool, isDefault?: bool, paper?: string, paperWidthMm?: number }',
+    executor: "printerUpdate",
+  },
+  "printer.delete": {
+    type: "printer.delete",
+    endpoint: "/api/settings/printers/{id}",
+    method: "DELETE",
+    label: "حذف چاپگر — به همین شعبه",
+    payloadHint: '{ id: string }',
+    executor: "printerDelete",
+  },
+  "printTemplate.save": {
+    type: "printTemplate.save",
+    endpoint: "/api/settings/print-templates",
+    method: "POST",
+    label: "ساخت/جایگزینی قالب چاپ — با id جایگزینی (PUT)؛ isDefault بدون id پیش‌فرض false",
+    payloadHint: '{ id?: string, template: object, isDefault?: bool }',
+    executor: "printTemplateSave",
+  },
+  "printTemplate.delete": {
+    type: "printTemplate.delete",
+    endpoint: "/api/settings/print-templates/{id}",
+    method: "DELETE",
+    label: "حذف قالب چاپ — به همین شعبه",
+    payloadHint: '{ id: string }',
+    executor: "printTemplateDelete",
+  },
+  "settings.printRules.save": {
+    type: "settings.printRules.save",
+    endpoint: "/api/settings/print-rules",
+    method: "PUT",
+    label: "قانون چاپ هر سند — قالب (builtin یا ذخیره) + چاپگر/پشتیبان سازگار؛ fallback ≠ primary",
+    payloadHint: '{ documentType: string, templateId?: string, templateKey?: string, printerId?: string, fallbackPrinterId?: string }',
+    executor: "settingsPrintRulesSave",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
