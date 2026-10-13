@@ -438,3 +438,109 @@ describe("summary vouchers", () => {
     ).rejects.toThrow("scope_empty");
   });
 });
+
+describe("the reviewed register fixes", () => {
+  async function postMemo(entryDate: string, memo: string, amount = 10_000): Promise<string> {
+    const client = await dbLib.getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const entryId = await ledgerService.postJournalEntry(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        entryDate,
+        memo,
+        sourceType: "manual",
+        sourceId: null,
+        createdBy: user.id,
+        lines: [
+          { accountId: acct["5100"], debit: amount, credit: 0 },
+          { accountId: acct["1100"], debit: 0, credit: amount },
+        ],
+      });
+      await client.query("COMMIT");
+      return entryId as string;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  it("search matches the number OR the memo — the pattern is bound to both ILIKEs", async () => {
+    await postMemo("2025-06-10", "اجاره دفتر");
+    await postMemo("2025-06-11", "برق تابستانه");
+    await postMemo("2025-06-12", "کرایه خودرو");
+
+    const byMemo = await voucherService.listVoucherRegister(biz.id, { search: "برق" });
+    expect(byMemo.total).toBe(1);
+    expect(byMemo.rows[0].voucherNumber).toBe("MJ-1404-000002");
+    expect(byMemo.rows[0].memo).toBe("برق تابستانه");
+
+    // The other side of the OR: a fragment of the number itself.
+    const byNumber = await voucherService.listVoucherRegister(biz.id, { search: "000003" });
+    expect(byNumber.total).toBe(1);
+    expect(byNumber.rows[0].memo).toBe("کرایه خودرو");
+
+    const none = await voucherService.listVoucherRegister(biz.id, { search: "نه‌چنین" });
+    expect(none.total).toBe(0);
+  });
+
+  it("fetches the complete filtered register page by page, capped at a page boundary", async () => {
+    // 450 legacy rows (unnumbered) inside 1404; the register backfills before it reads.
+    await db.query(
+      `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, created_by)
+       SELECT $1, $2, DATE '2025-04-01' + (i % 320), 'دوره آزمایشی ' || i, 'manual', $3
+         FROM generate_series(1, 450) AS i`,
+      [biz.id, biz.locationId, user.id],
+    );
+    for (const [accountId, debit, credit] of [
+      [acct["5100"], 100, 0],
+      [acct["1100"], 0, 100],
+    ] as const) {
+      await db.query(
+        `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+         SELECT je.id, $1, $2, $3 FROM journal_entries je
+          WHERE je.business_id = $4 AND je.source_type = 'manual'`,
+        [accountId, debit, credit, biz.id],
+      );
+    }
+
+    const all = await voucherService.fetchAllVoucherRegisterRows(biz.id, { sourceType: "manual" });
+    expect(all).toHaveLength(450);
+    const seqs = all.map((r) => r.sequenceNo);
+    expect(seqs[0]).toBe(1);
+    expect(seqs[449]).toBe(450);
+    for (let i = 1; i < seqs.length; i++) {
+      const prev = seqs[i - 1];
+      if (prev === null || prev === undefined) throw new Error("register row arrived unnumbered");
+      expect(seqs[i]).toBe(prev + 1);
+    }
+
+    // The hard cap stops the stream at a page boundary (200-row pages), never mid-page.
+    const capped = await voucherService.fetchAllVoucherRegisterRows(biz.id, { sourceType: "manual" }, 400);
+    expect(capped).toHaveLength(400);
+    const lastCapped = capped[399];
+    expect(lastCapped?.sequenceNo).toBe(400);
+  });
+
+  it("counts an allocated-but-unheld number as a gap, not just a counter readout", async () => {
+    await postMemo("2025-06-15", "پایه‌ای");
+    // An in-flight posting reserved up to 7 and died before commit: the range is
+    // allocated, the rows are unheld, and renumbering may never hand 2..7 out again.
+    await db.query(
+      `UPDATE voucher_sequences SET last_number = 7
+        WHERE business_id = $1 AND fiscal_year_label = '1404' AND document_type = 'manual'`,
+      [biz.id],
+    );
+
+    const report = await voucherService.voucherGapReport(biz.id, {
+      fiscalYearLabel: "1404",
+      documentType: "manual",
+    });
+    expect(report.counterMax).toBe(7);
+    expect(report.presentCount).toBe(1);
+    expect(report.gapCount).toBe(6);
+    expect(report.missing).toEqual([2, 3, 4, 5, 6, 7]);
+  });
+});

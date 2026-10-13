@@ -345,7 +345,9 @@ export async function listVoucherRegister(
   const params: unknown[] = [businessId];
   const add = (clause: string, ...values: unknown[]) => {
     params.push(...values);
-    where.push(clause.replace(/(\$\d)/g, (_m, n) => `$${params.length - values.length + Number(n)}`));
+    where.push(
+      clause.replace(/\$(\d+)/g, (_m, digit) => `$${params.length - values.length + Number(digit)}`),
+    );
   };
   if (filters.from && isValidIsoDate(filters.from)) add("je.entry_date >= $1::date", filters.from);
   if (filters.to && isValidIsoDate(filters.to)) add("je.entry_date <= $1::date", filters.to);
