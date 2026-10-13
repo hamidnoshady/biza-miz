@@ -734,7 +734,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "AI config, automations, coworker jobs/templates/review, widgets, memory, conversations, research",
     routes: ["ai"],
-    ops: { listDetail: ["list_coworker_jobs", "get_setup_state"] },
+    ops: {
+      listDetail: ["list_coworker_jobs", "get_setup_state"],
+      create: ["ai.automation.save", "coworker.job.save", "memory.add"],
+      update: ["ai.automation.save", "coworker.job.save"],
+      lifecycle: ["ai.automation.delete", "ai.automation.run", "coworker.job.delete", "coworker.job.run", "memory.delete"],
+    },
+    note: "batch AZ: automations/coworker jobs/memory are the centre's config records; the owner-only-auto rule re-checks the author's membership role exactly like the routes; manual runs carry high-risk visibility; ai.config PUT stays route-only by design (LLM provider keys are credential-shaped); chat/vision/OCR/research/proposals are compute lanes that never map onto MCP",
     test: "integration/ai-autopilot.integration.test.ts",
   },
   {

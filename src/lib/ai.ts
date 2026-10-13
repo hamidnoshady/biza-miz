@@ -498,6 +498,17 @@ export type ActionType =
   | "waste.record"
   | "writeDown.create"
   | "writeDown.reverse"
+  // Batch AZ — the AI centre's config records: automations, coworker jobs and
+  // assistant memory. The owner-only-auto rule is reapplied with the author's
+  // membership role, exactly like the routes do.
+  | "ai.automation.save"
+  | "ai.automation.delete"
+  | "ai.automation.run"
+  | "coworker.job.save"
+  | "coworker.job.delete"
+  | "coworker.job.run"
+  | "memory.add"
+  | "memory.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -613,6 +624,14 @@ export type AutopilotExecutorKey =
   | "wasteRecord"
   | "writeDownCreate"
   | "writeDownReverse"
+  | "aiAutomationSave"
+  | "aiAutomationDelete"
+  | "aiAutomationRun"
+  | "coworkerJobSave"
+  | "coworkerJobDelete"
+  | "coworkerJobRun"
+  | "memoryAdd"
+  | "memoryDelete"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2131,6 +2150,70 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "برگشت تنزیل NRV — می‌تواند جزئی باشد؛ idempotencyKey اجباری، تأیید لازم",
     payloadHint: '{ id: string, reason: string, idempotencyKey: string, amounts?: Array<{ inventoryItemId: string, amountRial: string|number }>, locationId?: string }',
     executor: "writeDownReverse",
+  },
+  "ai.automation.save": {
+    type: "ai.automation.save",
+    endpoint: "/api/ai/automations",
+    method: "POST",
+    label: "ساخت/ویرایش automation — با id ویرایش (PUT)؛ approvalMode=auto فقط مالک",
+    payloadHint: '{ id?: string, name?: string, locationId?: string|null, projectId?: string|null, triggerKind?: "schedule"|"event", eventKind?: string|null, scheduleHour?: int|null, scheduleWeekday?: int|null, conditions?: object, actionType?: string, actionPayload?: object, approvalMode?: "review_each"|"auto", enabled?: bool }',
+    executor: "aiAutomationSave",
+  },
+  "ai.automation.delete": {
+    type: "ai.automation.delete",
+    endpoint: "/api/ai/automations/{id}",
+    method: "DELETE",
+    label: "حذف automation — رکورد پیکربندی است",
+    payloadHint: '{ id: string }',
+    executor: "aiAutomationDelete",
+  },
+  "ai.automation.run": {
+    type: "ai.automation.run",
+    endpoint: "/api/ai/automations/{id}/run",
+    method: "POST",
+    label: "اجرای دستی automation — همان مسیر guardedِ تیک؛ auto فقط مالک",
+    payloadHint: '{ id: string }',
+    executor: "aiAutomationRun",
+  },
+  "coworker.job.save": {
+    type: "coworker.job.save",
+    endpoint: "/api/ai/coworker/jobs",
+    method: "POST",
+    label: "ساخت/ویرایش job کارمند — با id ویرایش (PATCH)؛ approvalMode=auto فقط مالک",
+    payloadHint: '{ id?: string, templateKey?: string, title?: string, locationId?: string|null, projectId?: string|null, triggerKind?: string, eventKind?: string|null, scheduleHour?: int|null, scheduleWeekday?: int|null, params?: object, approvalMode?: "review_each"|"auto", enabled?: bool }',
+    executor: "coworkerJobSave",
+  },
+  "coworker.job.delete": {
+    type: "coworker.job.delete",
+    endpoint: "/api/ai/coworker/jobs/{id}",
+    method: "DELETE",
+    label: "حذف job کارمند — رکورد پیکربندی است",
+    payloadHint: '{ id: string }',
+    executor: "coworkerJobDelete",
+  },
+  "coworker.job.run": {
+    type: "coworker.job.run",
+    endpoint: "/api/ai/coworker/jobs/{id}/run",
+    method: "POST",
+    label: "اجرای دستی job کارمند — نتیجهٔ run برمی‌گردد",
+    payloadHint: '{ id: string }',
+    executor: "coworkerJobRun",
+  },
+  "memory.add": {
+    type: "memory.add",
+    endpoint: "/api/ai/memory",
+    method: "POST",
+    label: "ثبت حافظهٔ دستیار — tenant/app/project؛ project دسترسی پروژه می‌خواهد",
+    payloadHint: '{ content: string, scope?: "tenant"|"app"|"project"="tenant", appKey?: string, projectId?: string }',
+    executor: "memoryAdd",
+  },
+  "memory.delete": {
+    type: "memory.delete",
+    endpoint: "/api/ai/memory",
+    method: "DELETE",
+    label: "حذف نرم حافظهٔ دستیار (بایگانی‌شده)",
+    payloadHint: '{ id: string, scope?: "tenant"|"app"|"project"="tenant", projectId?: string }',
+    executor: "memoryDelete",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **223 write verbs**
-(**69** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **231 write verbs**
+(**71** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -233,6 +233,14 @@ visible only to connections consented for every branch) and **223 write verbs**
 | `write_waste_record` | `waste.record` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_down_create` | `writeDown.create` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_down_reverse` | `writeDown.reverse` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_ai_automation_save` | `ai.automation.save` | workspace | low | connection write_mode | `ai.automations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_ai_automation_delete` | `ai.automation.delete` | workspace | low | connection write_mode | `ai.automations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_ai_automation_run` | `ai.automation.run` | workspace | high | always approval queue (step-up) | `ai.automations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_coworker_job_save` | `coworker.job.save` | workspace | low | connection write_mode | `ai.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_coworker_job_delete` | `coworker.job.delete` | workspace | low | connection write_mode | `ai.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_coworker_job_run` | `coworker.job.run` | workspace | high | always approval queue (step-up) | `ai.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_memory_add` | `memory.add` | workspace | low | connection write_mode | `ai.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_memory_delete` | `memory.delete` | workspace | low | connection write_mode | `ai.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

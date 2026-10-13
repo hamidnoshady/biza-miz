@@ -100,6 +100,21 @@ import { recordCoworkerEvent } from "./ai-coworker-events";
 import { recordOrderStateStandalone } from "./order-state-sync";
 import { createNrvWriteDown, reverseNrvWriteDown } from "./nrv-service";
 import {
+  createAutomation,
+  updateAutomation,
+  deleteAutomation,
+  getAutomation,
+  runAutomationNow,
+} from "./ai-automations-service";
+import {
+  createCoworkerJob,
+  updateCoworkerJob,
+  deleteCoworkerJob,
+  runCoworkerJobNow,
+} from "./ai-coworker-service";
+import { coworkerErrorMessage } from "./ai-coworker";
+import { validateMemoryInput, createMemoryEntry, deleteMemoryEntry, type MemoryScope } from "./ai-memory";
+import {
   decryptReservationPhones,
   encryptReservationPhone,
   lockTableForReservationWrite,
@@ -4030,6 +4045,144 @@ const writeDownReverse: AutopilotExecutor = async (ctx) => {
   }
 };
 
+// ── Issue #883 package 2, batch AZ — the AI centre's config records ─────────
+// The owner-only-auto rule: a manager may create these, but only an owner may
+// ask for unattended application — the routes' rule, rechecked with the
+// author's membership role.
+function copyIfDefined(target: Record<string, unknown>, payload: Record<string, unknown>, keys: readonly string[]) {
+  for (const key of keys) if (payload[key] !== undefined) target[key] = payload[key];
+  return target;
+}
+const aiAutomationSave: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  const approvalMode = str(ctx.payload.approvalMode);
+  if (approvalMode === "auto" && (await authorMembershipRole(ctx)) !== "owner") return fail("owner_required");
+  const input = copyIfDefined({}, ctx.payload, [
+    "name", "locationId", "projectId", "triggerKind", "eventKind", "scheduleHour", "scheduleWeekday",
+    "conditions", "actionType", "actionPayload", "approvalMode", "enabled",
+  ]);
+  const result = id
+    ? await updateAutomation(ctx.businessId, id, input, { authorizedBy: ctx.authorizedByUserId })
+    : await createAutomation(ctx.businessId, input, { userId: ctx.authorizedByUserId, authorizedBy: ctx.authorizedByUserId });
+  if (!result.ok) return { ok: false, result: { error: (result as { error?: string; errors?: string[] }).error ?? (result as { errors?: string[] }).errors?.[0] ?? "invalid_automation", errors: (result as { errors?: string[] }).errors }, errorCode: "invalid_automation" };
+  return { ok: true, result };
+};
+const aiAutomationDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const removed = await deleteAutomation(ctx.businessId, id);
+  if (!removed) return fail("not_found");
+  return { ok: true, result: { ok: true } };
+};
+const aiAutomationRun: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const automation = await getAutomation(ctx.businessId, id);
+  if (!automation) return fail("not_found");
+  if (!automation.enabled) return fail("automation_disabled");
+  if (automation.approvalMode === "auto" && (await authorMembershipRole(ctx)) !== "owner") {
+    return fail("owner_required");
+  }
+  const run = await runAutomationNow(ctx.businessId, id);
+  if (!run) return fail("not_found");
+  return { ok: true, result: { run } };
+};
+const coworkerJobSave: AutopilotExecutor = async (ctx) => {
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const id = str(ctx.payload.id);
+  const approvalMode = str(ctx.payload.approvalMode);
+  if (approvalMode === "auto" && (await authorMembershipRole(ctx)) !== "owner") return fail("owner_required");
+  const input = copyIfDefined({}, ctx.payload, [
+    "templateKey", "title", "locationId", "projectId", "triggerKind", "eventKind", "scheduleHour", "scheduleWeekday",
+    "params", "approvalMode", "enabled",
+  ]);
+  const result: { ok: boolean; errors?: string[]; job?: unknown } = id
+    ? await updateCoworkerJob(ctx.businessId, id, input, ctx.authorizedByUserId)
+    : await createCoworkerJob(ctx.businessId, input, ctx.authorizedByUserId);
+  if (!result.ok) {
+    const errors = result.errors ?? ["invalid_job"];
+    return { ok: false, result: { error: errors[0], errors, messages: errors.map(coworkerErrorMessage) }, errorCode: errors[0] };
+  }
+  return { ok: true, result: { job: result.job } };
+};
+const coworkerJobDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const removed = await deleteCoworkerJob(ctx.businessId, id);
+  if (!removed) return fail("coworker_job_not_found");
+  return { ok: true, result: { ok: true } };
+};
+const coworkerJobRun: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const result = await runCoworkerJobNow(ctx.businessId, id);
+  if (!result.ok) {
+    return { ok: false, result: { error: result.error, message: coworkerErrorMessage(result.error) }, errorCode: result.error };
+  }
+  return { ok: true, result: { ok: true, runIds: result.runIds } };
+};
+// Memory is project-aware: a project-scoped write re-checks the author's
+// workspace role with requireProjectCapability, mirroring the routes'
+// owner|creator|member access probe.
+const MEMORY_SCOPES = ["tenant", "app", "project"] as const;
+async function memoryScopeCheck(ctx: AutopilotExecutorContext, scope: MemoryScope, projectId: string | null): Promise<AutopilotExecutionResult | null> {
+  if (scope !== "project" || !projectId) return null;
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("forbidden");
+  try {
+    await requireProjectCapability(owner, projectId, "view");
+    return null;
+  } catch {
+    return fail("forbidden");
+  }
+}
+const memoryAdd: AutopilotExecutor = async (ctx) => {
+  const raw = str(ctx.payload.scope);
+  const scope = (raw ?? "tenant") as MemoryScope;
+  if (!(MEMORY_SCOPES as readonly string[]).includes(scope)) return fail("bad_scope");
+  const projectId = str(ctx.payload.projectId);
+  const denied = await memoryScopeCheck(ctx, scope, projectId);
+  if (denied) return denied;
+  const validation = validateMemoryInput({
+    businessId: ctx.businessId,
+    scope,
+    appKey: scope === "app" ? str(ctx.payload.appKey) : null,
+    projectId: scope === "project" ? projectId : null,
+    content: str(ctx.payload.content) ?? "",
+    source: "user",
+    createdBy: ctx.authorizedByUserId,
+  });
+  if (!validation.ok) return fail(validation.error);
+  try {
+    const entry = await createMemoryEntry({
+      businessId: ctx.businessId,
+      scope,
+      appKey: scope === "app" ? str(ctx.payload.appKey) : null,
+      projectId: scope === "project" ? projectId : null,
+      content: str(ctx.payload.content) ?? "",
+      source: "user",
+      createdBy: ctx.authorizedByUserId,
+    });
+    return { ok: true, result: { entry } };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "internal_error";
+    return fail(message);
+  }
+};
+const memoryDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("id_required");
+  const raw = str(ctx.payload.scope);
+  const scope = (raw ?? "tenant") as MemoryScope;
+  if (!(MEMORY_SCOPES as readonly string[]).includes(scope)) return fail("bad_scope");
+  const projectId = str(ctx.payload.projectId);
+  const denied = await memoryScopeCheck(ctx, scope, projectId);
+  if (denied) return denied;
+  const removed = await deleteMemoryEntry({ id, businessId: ctx.businessId, scope });
+  if (!removed) return fail("not_found");
+  return { ok: true, result: { ok: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -6230,6 +6383,14 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   wasteRecord,
   writeDownCreate,
   writeDownReverse,
+  aiAutomationSave,
+  aiAutomationDelete,
+  aiAutomationRun,
+  coworkerJobSave,
+  coworkerJobDelete,
+  coworkerJobRun,
+  memoryAdd,
+  memoryDelete,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

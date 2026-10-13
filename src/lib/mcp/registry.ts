@@ -395,6 +395,17 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "waste.record", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "writeDown.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "writeDown.reverse", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  // Batch AZ — automations/jobs are config records; their manual runs execute
+  // an action NOW, so they carry high-risk visibility. The owner-only-auto
+  // rule is re-checked inside with the author's membership role.
+  { actionType: "ai.automation.save", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "ai.automation.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "ai.automation.run", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  { actionType: "coworker.job.save", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "coworker.job.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "coworker.job.run", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  { actionType: "memory.add", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "memory.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
