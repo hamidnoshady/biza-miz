@@ -15,9 +15,8 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (16)
+### Tenant (15)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
-- **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
@@ -56,7 +55,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 52 · partial: 16 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 4
+Counts — covered: 53 · partial: 15 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 4
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -75,7 +74,7 @@ Counts — covered: 52 · partial: 16 · MCP gap: 0 · backend gap: 0 · n/a (in
 | Accounting | Ledger overview / settings / shift sales | run_accounting_review | — | — | — | — | ledger.view | — | run_accounting_review | — | covered |
 | POS | Orders (open, amend, pay, refund/returns)<br>_amend, pay/settle and returns/refunds stay MCP gaps by design for now: their posting orchestration is inline in the route handlers (COGS, outbox, loyalty, refunds post with about/reversal shape). A money path is only exposed after its orchestration is extracted into a shared service — see issue #883 package 2 follow-ups._ | get_order, get_void_pattern, list_orders | order.create, order.discount.apply | (route only) | (route only) | — | orders.amend_closed, orders.create, orders.view, payments.refund, payments.take, reports.view | connection mode | get_order, get_void_pattern, list_orders, order.create, order.discount.apply | integration/orders.integration.test.ts | partial |
 | POS | Shifts (start/end/close, active) | list_shifts | shift.start | — | shift.close, shift.end | — | orders.create, team.manage | connection mode | list_shifts, shift.start, shift.close, shift.end | integration/shifts.integration.test.ts | covered |
-| POS | Kitchen display / floor / waiter queues<br>_read-only live queues; writes happen through order item actions_ | get_table_turnover_rate | (route only) | (route only) | (route only) | — | kitchen.view, tables.edit, tables.manage | — | get_table_turnover_rate | — | partial |
+| POS | Kitchen display / floor / waiter queues<br>_batch AX: section config rides tablesEdit; the bump lane keeps the board's role gates (kitchen roles bump, waiter/cashier serve) checked against the author's membership role, with the ready coworker event firing only when the final unready line lands_ | get_table_turnover_rate | floor.section.create | floor.section.update, kitchen.item.status | floor.section.delete, kitchen.item.status | — | kitchen.view, tables.edit, tables.manage | connection mode | get_table_turnover_rate, floor.section.create, floor.section.update, kitchen.item.status, floor.section.delete, kitchen.item.status | — | covered |
 | POS | Reservations<br>_batch AW: the overlap-checked create/edit keep the advisory table lock sequencing; seat opens the table session with the same broadcast the floor emits; the physical delete steps up (business-record erasure) — cancel is the normal path_ | get_reservation_conflicts | reservation.create | reservation.edit | reservation.delete, reservation.lifecycle | — | reservations.manage, reservations.view | connection mode; step-up (always approve) | get_reservation_conflicts, reservation.create, reservation.edit, reservation.delete, reservation.lifecycle | integration/reservation-concurrency.integration.test.ts | covered |
 | POS | Dining tables & table sessions<br>_batch AF: session open/update verbs broadcast table_session.updated exactly like the routes (the executor runs server-side, where the realtime hub lives), and setSessionGuests was extracted verbatim into the service so route and verb share the guest rules; batch AV closes the floor-plan lanes — structural edits keep tablesEdit, status keeps tablesManage, and the broadcast + refusal codes are word-for-word the routes'_ | get_table_turnover_rate | table.edit, table.session.open | table.edit, table.session.update, table.status | table.delete, table.status | — | tables.edit, tables.manage | connection mode | get_table_turnover_rate, table.edit, table.session.open, table.edit, table.session.update, table.status, table.delete, table.status | — | covered |
 | Menu | Menu categories, items, modifier groups, modifiers, reorder | find_items, get_menu_performance, get_menu_tree | menu.category.create, menu.item.create | menu.category.update, menu.item.priceUpdate, menu.item.update | menu.item.disable | — | ledger.view, menu.edit, menu.view | connection mode; step-up (always approve) | find_items, get_menu_performance, get_menu_tree, menu.category.create, menu.item.create, menu.category.update, menu.item.priceUpdate, menu.item.update, menu.item.disable | integration/menu.integration.test.ts | covered |

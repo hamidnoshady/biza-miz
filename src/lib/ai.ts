@@ -487,6 +487,12 @@ export type ActionType =
   | "reservation.edit"
   | "reservation.lifecycle"
   | "reservation.delete"
+  // Batch AX — kitchen & floor queues: sections config rides tablesEdit, the
+  // bump lane stays behind the kitchen board's key with the role gates intact.
+  | "floor.section.create"
+  | "floor.section.update"
+  | "floor.section.delete"
+  | "kitchen.item.status"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -595,6 +601,10 @@ export type AutopilotExecutorKey =
   | "reservationEdit"
   | "reservationLifecycle"
   | "reservationDelete"
+  | "floorSectionCreate"
+  | "floorSectionUpdate"
+  | "floorSectionDelete"
+  | "kitchenItemStatus"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2057,6 +2067,38 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف فیزیکی رزرو — مسیر عادیِ کنسل، cancel است؛ یک پاک‌سازی رکورد است",
     payloadHint: '{ id: string }',
     executor: "reservationDelete",
+  },
+  "floor.section.create": {
+    type: "floor.section.create",
+    endpoint: "/api/floor/sections",
+    method: "POST",
+    label: "ساخت بخش سالن — اسم تکراری در همان شعبه rejected می‌شود",
+    payloadHint: '{ name: string, color?: string|null, assignedWaiterId?: string|null, locationId?: string }',
+    executor: "floorSectionCreate",
+  },
+  "floor.section.update": {
+    type: "floor.section.update",
+    endpoint: "/api/floor/sections/{id}",
+    method: "PATCH",
+    label: "ویرایش بخش سالن — نام/رنگ/گارسون/ترتیب",
+    payloadHint: '{ id: string, name?: string, color?: string|null, assignedWaiterId?: string|null, sortOrder?: int, locationId?: string }',
+    executor: "floorSectionUpdate",
+  },
+  "floor.section.delete": {
+    type: "floor.section.delete",
+    endpoint: "/api/floor/sections/{id}",
+    method: "DELETE",
+    label: "حذف بخش سالن — میزها جدا می‌شوند، پاک نمی‌شوند (کوچک‌حجم، config)",
+    payloadHint: '{ id: string, locationId?: string }',
+    executor: "floorSectionDelete",
+  },
+  "kitchen.item.status": {
+    type: "kitchen.item.status",
+    endpoint: "/api/kitchen/items/{itemId}",
+    method: "PATCH",
+    label: "پیش‌بردن آیتم در صف آشپزخانه: preparing/ready/served — نقش‌ها همان محدودیت‌های board را دارند",
+    payloadHint: '{ itemId: string, status: "preparing"|"ready"|"served", locationId?: string }',
+    executor: "kitchenItemStatus",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

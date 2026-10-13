@@ -365,6 +365,11 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "reservation.edit": PERMISSIONS.reservationsManage,
   "reservation.lifecycle": PERMISSIONS.reservationsManage,
   "reservation.delete": PERMISSIONS.reservationsManage,
+  // Batch AX — sections are floor-plan config; bumps stay behind kitchenView.
+  "floor.section.create": PERMISSIONS.tablesEdit,
+  "floor.section.update": PERMISSIONS.tablesEdit,
+  "floor.section.delete": PERMISSIONS.tablesEdit,
+  "kitchen.item.status": PERMISSIONS.kitchenView,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

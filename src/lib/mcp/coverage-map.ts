@@ -190,9 +190,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "POS",
     entity: "Kitchen display / floor / waiter queues",
     routes: ["kitchen", "floor", "waiter"],
-    ops: { listDetail: ["get_table_turnover_rate"] },
     status: undefined,
-    note: "read-only live queues; writes happen through order item actions",
+    ops: {
+      listDetail: ["get_table_turnover_rate"],
+      create: ["floor.section.create"],
+      update: ["floor.section.update", "kitchen.item.status"],
+      lifecycle: ["floor.section.delete", "kitchen.item.status"],
+    },
+    note: "batch AX: section config rides tablesEdit; the bump lane keeps the board's role gates (kitchen roles bump, waiter/cashier serve) checked against the author's membership role, with the ready coworker event firing only when the final unready line lands",
   },
   {
     id: "pos.reservations",

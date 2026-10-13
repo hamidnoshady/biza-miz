@@ -93,8 +93,11 @@ import { buyBackGold, openLayaway, payLayaway, completeLayaway } from "./jewelry
 import { isPurity } from "./gold";
 import { recordGoldPrice, getGoldPrice } from "./gold-prices-service";
 import { mintMissingBarcodes } from "./inventory-item-barcodes-service";
-import { resolveSectionId } from "./floor";
+import { resolveSectionId, validWaiterId } from "./floor";
 import { canTransitionTable, type TableStatus } from "./table-sessions";
+import { canKitchenBump, canMarkServed, type OrderItemStatus } from "./order-item-status";
+import { recordCoworkerEvent } from "./ai-coworker-events";
+import { recordOrderStateStandalone } from "./order-state-sync";
 import {
   decryptReservationPhones,
   encryptReservationPhone,
@@ -3798,6 +3801,131 @@ const reservationDelete: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true } };
 };
 
+// ── Issue #883 package 2, batch AX — kitchen & floor queues ────────────────
+/** The author's membership role — the value session.role carries on a route. */
+async function authorMembershipRole(ctx: AutopilotExecutorContext): Promise<string> {
+  if (!ctx.authorizedByUserId) return "Owner";
+  const { rows } = await query<{ role: string }>(
+    `SELECT m.role FROM memberships m WHERE m.user_id = $1 AND m.business_id = $2 ORDER BY m.created_at LIMIT 1`,
+    [ctx.authorizedByUserId, ctx.businessId],
+  );
+  return rows[0]?.role ?? "Owner";
+}
+const floorSectionCreate: AutopilotExecutor = async (ctx) => {
+  const name = str(ctx.payload.name)?.trim();
+  if (!name) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: dup } = await query("SELECT id FROM floor_sections WHERE location_id = $1 AND name = $2", [
+    branch.locationId, name,
+  ]);
+  if (dup.length > 0) return fail("section_exists");
+  const waiterId = await validWaiterId(branch.locationId, ctx.payload.assignedWaiterId === undefined ? undefined : str(ctx.payload.assignedWaiterId));
+  if (waiterId === false) return fail("waiter_not_found");
+  const { rows } = await query<{ id: string }>(
+    `INSERT INTO floor_sections (location_id, name, color, assigned_waiter_id, sort_order)
+     SELECT $1, $2, $3, $4, COALESCE(MAX(sort_order) + 1, 0)
+       FROM floor_sections WHERE location_id = $1
+     RETURNING id`,
+    [branch.locationId, name, str(ctx.payload.color)?.trim() || null, waiterId],
+  );
+  return { ok: true, result: { ok: true, id: rows[0].id } };
+};
+const floorSectionUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: owned } = await query("SELECT id FROM floor_sections WHERE id = $1 AND location_id = $2", [
+    id, branch.locationId,
+  ]);
+  if (!owned[0]) return fail("section_not_found");
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  const set = (col: string, val: unknown) => { fields.push(`${col} = $${++i}`); values.push(val); };
+  if (ctx.payload.name !== undefined) {
+    const name = str(ctx.payload.name)?.trim();
+    if (!name) return fail("missing_fields");
+    const { rows: dup } = await query(
+      "SELECT id FROM floor_sections WHERE location_id = $1 AND name = $2 AND id <> $3",
+      [branch.locationId, name, id],
+    );
+    if (dup.length > 0) return fail("section_exists");
+    set("name", name);
+  }
+  if (ctx.payload.color !== undefined) set("color", str(ctx.payload.color)?.trim() || null);
+  if (ctx.payload.assignedWaiterId !== undefined) {
+    const waiterId = await validWaiterId(branch.locationId, str(ctx.payload.assignedWaiterId));
+    if (waiterId === false) return fail("waiter_not_found");
+    set("assigned_waiter_id", waiterId);
+  }
+  if (ctx.payload.sortOrder !== undefined && Number.isFinite(ctx.payload.sortOrder)) set("sort_order", Number(ctx.payload.sortOrder));
+  if (fields.length === 0) return fail("bad_request");
+  await query(`UPDATE floor_sections SET ${fields.join(", ")} WHERE id = $1`, [id, ...values]);
+  return { ok: true, result: { ok: true } };
+};
+const floorSectionDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const { rows: owned } = await query("SELECT id FROM floor_sections WHERE id = $1 AND location_id = $2", [
+    id, branch.locationId,
+  ]);
+  if (!owned[0]) return fail("section_not_found");
+  await query("DELETE FROM floor_sections WHERE id = $1", [id]);
+  return { ok: true, result: { ok: true } };
+};
+// The kitchen "bump" (sent→preparing→ready) and waiter/cashier "served"
+// (ready→served) — both role gates re-applied with the author's membership
+// role; the coworker event fires only when the final unready line lands.
+const kitchenItemStatus: AutopilotExecutor = async (ctx) => {
+  const itemId = str(ctx.payload.itemId) ?? str(ctx.payload.id);
+  const to = str(ctx.payload.status) as OrderItemStatus | null;
+  if (!itemId || (to !== "preparing" && to !== "ready" && to !== "served")) return fail("invalid_status");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const role = await authorMembershipRole(ctx);
+  const { rows } = await query<{ id: string; status: OrderItemStatus; order_id: string }>(
+    `SELECT oi.id, oi.status, oi.order_id
+       FROM order_items oi JOIN orders o ON o.id = oi.order_id
+      WHERE oi.id = $1 AND oi.location_id = $2 AND o.status = 'open'`,
+    [itemId, branch.locationId],
+  );
+  const item = rows[0];
+  if (!item) return fail("item_not_found");
+  const canKitchen = ["owner", "manager", "kitchen"].includes(role) && canKitchenBump(item.status, to);
+  const canServe = ["owner", "manager", "waiter", "cashier"].includes(role) && canMarkServed(item.status, to);
+  if (!canKitchen && !canServe) return fail("invalid_transition");
+  if (to === "ready") {
+    await query("UPDATE order_items SET status = $2, ready_at = now() WHERE id = $1", [itemId, to]);
+  } else {
+    await query("UPDATE order_items SET status = $2 WHERE id = $1", [itemId, to]);
+  }
+  broadcast(branch.locationId, { type: "order.item_status", orderId: item.order_id, itemId, status: to });
+  await recordOrderStateStandalone({
+    locationId: branch.locationId,
+    orderId: item.order_id,
+    actor: { userId: ctx.authorizedByUserId ?? "", role: role as Role },
+  });
+  if (to === "ready") {
+    const { rows: readyOrders } = await query<{ customer_id: string }>(
+      `SELECT o.customer_id FROM orders o
+        WHERE o.id = $1 AND o.customer_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM order_items oi
+                           WHERE oi.order_id = o.id AND oi.status NOT IN ('ready', 'served'))`,
+      [item.order_id],
+    );
+    if (readyOrders[0]) await recordCoworkerEvent({
+      businessId: ctx.businessId, locationId: branch.locationId, kind: "order_ready",
+      payload: { customerId: readyOrders[0].customer_id, orderId: item.order_id },
+      dedupeKey: `order-ready:${item.order_id}`,
+    });
+  }
+  return { ok: true, result: { ok: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -5991,6 +6119,10 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   reservationEdit,
   reservationLifecycle,
   reservationDelete,
+  floorSectionCreate,
+  floorSectionUpdate,
+  floorSectionDelete,
+  kitchenItemStatus,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

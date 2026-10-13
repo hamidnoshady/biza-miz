@@ -386,6 +386,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "reservation.edit", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "reservation.lifecycle", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "reservation.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
+  // Batch AX — section config and the kitchen bump lane (role-gated inside).
+  { actionType: "floor.section.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "floor.section.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "floor.section.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "kitchen.item.status", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
