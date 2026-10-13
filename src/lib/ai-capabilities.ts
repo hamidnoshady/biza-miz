@@ -346,6 +346,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   // Batch AR — CRM custom fields, the route's crmConfigure gate.
   "crm.customField.save": PERMISSIONS.crmConfigure,
   "crm.customField.archive": PERMISSIONS.crmConfigure,
+  // Batch AS — barcode bulk mint, the route's inventoryAdjust gate.
+  "barcode.bulkMint": PERMISSIONS.inventoryAdjust,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

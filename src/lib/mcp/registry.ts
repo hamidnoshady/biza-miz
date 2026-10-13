@@ -365,6 +365,8 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // route's soft delete (mode/low like every config/template delete).
   { actionType: "crm.customField.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.customField.archive", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  // Batch AS — idempotent branch-wide label mint completes the barcodes row.
+  { actionType: "barcode.bulkMint", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

@@ -92,6 +92,7 @@ import { sellWeightedItem } from "./gold-sales-service";
 import { buyBackGold, openLayaway, payLayaway, completeLayaway } from "./jewelry-flagship-service";
 import { isPurity } from "./gold";
 import { recordGoldPrice, getGoldPrice } from "./gold-prices-service";
+import { mintMissingBarcodes } from "./inventory-item-barcodes-service";
 import { getBusinessDayStatus } from "./business-day-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
@@ -3179,6 +3180,26 @@ const haberdasheryItemCreate: AutopilotExecutor = createVariantItem;
 const haberdasheryItemSell = tradeGoodsSellExecutor("haberdashery");
 const haberdasheryStockUpdate = tradeGoodsStockExecutor();
 
+// ── Issue #883 package 2, batch AS — barcode bulk mint ─────────────────────
+// Mirrors POST /api/inventory/barcodes/bulk: one transaction, idempotent, the
+// same barcode_failed envelope the route answers on a rollback.
+const barcodeBulkMint: AutopilotExecutor = async (ctx) => {
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await mintMissingBarcodes(client, branch.locationId);
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return { ok: false, result: { error: "barcode_failed", message: (err as Error).message }, errorCode: "barcode_failed" };
+  } finally {
+    client.release();
+  }
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -5358,6 +5379,7 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   contractLifecycle,
   crmCustomFieldSave,
   crmCustomFieldArchive,
+  barcodeBulkMint,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

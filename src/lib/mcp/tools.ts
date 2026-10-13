@@ -2256,6 +2256,17 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_barcode_bulk_mint",
+    actionType: "barcode.bulkMint",
+    english: "Mint an internal barcode for every active item at the branch that has none — idempotent, one transaction.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: { locationId: id("شعبه — پیش‌فرض پین") },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_jewelry_item_sell",
     actionType: "jewelry.item.sell",
     english: "Sell a weighted gold item — real sale document with making-charge/profit/VAT and settlement; always asks a human first.",

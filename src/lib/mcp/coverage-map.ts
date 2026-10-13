@@ -304,7 +304,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Barcodes (lookup, bulk)",
     routes: ["inventory/barcodes", "barcodes"],
-    ops: { listDetail: ["list_item_barcodes", "list_items_without_barcode"], create: ["barcode.assign"] },
+    ops: {
+      listDetail: ["list_item_barcodes", "list_items_without_barcode"],
+      create: ["barcode.assign"],
+      bulk: ["barcode.bulkMint"],
+    },
+    note: "AS closes the bulk column — the idempotent whole-branch mint",
     test: "integration/stock.integration.test.ts",
   },
   {

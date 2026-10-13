@@ -464,6 +464,9 @@ export type ActionType =
   // archive is the route's soft delete.
   | "crm.customField.save"
   | "crm.customField.archive"
+  // Batch AS — the barcode bulk mint: idempotent one-transaction labelling of
+  // the whole branch, completing the barcodes row.
+  | "barcode.bulkMint"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -558,6 +561,7 @@ export type AutopilotExecutorKey =
   | "contractLifecycle"
   | "crmCustomFieldSave"
   | "crmCustomFieldArchive"
+  | "barcodeBulkMint"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1911,6 +1915,14 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "بایگانی فیلد دلخواه CRM — حذف نرم است، مقادیر ثبت‌شده باقی می‌ماند",
     payloadHint: '{ id: string }',
     executor: "crmCustomFieldArchive",
+  },
+  "barcode.bulkMint": {
+    type: "barcode.bulkMint",
+    endpoint: "/api/inventory/barcodes/bulk",
+    method: "POST",
+    label: "صدور بارکد داخلی برای همهٔ اقلام فاقد کد در شعبه — idempotent، در یک تراکنش",
+    payloadHint: '{ locationId?: string }',
+    executor: "barcodeBulkMint",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
