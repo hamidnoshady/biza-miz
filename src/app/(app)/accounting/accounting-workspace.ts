@@ -141,6 +141,8 @@ const WORKSPACE_GROUP_SLOTS: readonly { key: string; label: string; description?
       { href: ACCOUNTING_WORKSPACE_HREFS.delivery },
       { href: "/accounting/jewelry" },
       { href: "/accounting/watch" },
+      // Issue #839 — a dealership's vehicles are its operations.
+      { href: ACCOUNTING_WORKSPACE_HREFS.automotive },
       { href: ACCOUNTING_WORKSPACE_HREFS.cosmetics },
     ],
   },

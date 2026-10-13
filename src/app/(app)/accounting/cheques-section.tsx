@@ -54,7 +54,9 @@ import {
   XIcon,
   ChevronDownIcon,
   ExternalLinkIcon,
+  ArrowDownIcon,
   ArrowLeftIcon,
+  ArrowUpIcon,
 } from "lucide-react";
 
 import {
@@ -1140,10 +1142,21 @@ export function ChequesSection({
                 <SelectValue placeholder="مرتب‌سازی" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="due_asc">سررسید ↑ نزدیک‌ترین</SelectItem>
-                <SelectItem value="due_desc">سررسید ↓ دورترین</SelectItem>
-                <SelectItem value="amount_desc">مبلغ ↓ بیشترین</SelectItem>
-                <SelectItem value="amount_asc">مبلغ ↑ کمترین</SelectItem>
+                {/* Arrows are icons, not text: Vazirmatn has no U+2191/U+2193,
+                    so a text arrow falls back to whichever system font the
+                    machine has and renders differently on every one. */}
+                <SelectItem value="due_asc">
+                  سررسید <ArrowUpIcon aria-hidden className="size-3.5" /> نزدیک‌ترین
+                </SelectItem>
+                <SelectItem value="due_desc">
+                  سررسید <ArrowDownIcon aria-hidden className="size-3.5" /> دورترین
+                </SelectItem>
+                <SelectItem value="amount_desc">
+                  مبلغ <ArrowDownIcon aria-hidden className="size-3.5" /> بیشترین
+                </SelectItem>
+                <SelectItem value="amount_asc">
+                  مبلغ <ArrowUpIcon aria-hidden className="size-3.5" /> کمترین
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>

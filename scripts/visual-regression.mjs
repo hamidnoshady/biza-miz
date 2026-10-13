@@ -63,6 +63,16 @@ const UPDATE = process.argv.includes("--update");
 const MAX_DIFF_RATIO = 0.005;
 
 /**
+ * The browser's "now", frozen. A screen that counts days against today (the
+ * cheque register's «۱۸۸ روز گذشته» badges) otherwise renders a different
+ * number every day, and a baseline recorded on Monday fails on Thursday with
+ * nobody's code changed. The fixture's own dates are fixed (see
+ * scripts/seed-visual-fixture.ts), so the clock that reads them is too.
+ * Only `Date` is pinned; timers keep running, so loading still settles.
+ */
+const VISUAL_NOW = new Date("2026-10-10T08:30:00.000Z");
+
+/**
  * Per-channel colour tolerance for one pixel. CI's pinned Chromium is stable,
  * but GitHub runner font libraries still move edge antialiasing by more than
  * the old 12/255 threshold; 64 keeps glyph-edge noise out while black-vs-white
@@ -337,6 +347,7 @@ async function main() {
       (theme) => window.localStorage.setItem("theme", theme),
       screen.theme,
     );
+    await context.clock.setFixedTime(VISUAL_NOW);
     const page = await context.newPage();
     // NOT `networkidle`: this app holds an open WebSocket for live sync, so
     // the network is never idle and every navigation would time out. Wait for
