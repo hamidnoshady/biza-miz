@@ -262,6 +262,7 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // ---- Workspace / AEC (project desk is business-scoped, never branch-scoped) ----
   { name: "get_workspace_project_status", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "get_workspace_contract", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_custom_fields", kind: "read", app: "crm", branchPolicy: "agnostic" },
   { name: "list_workspace_tasks", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_expiring_contracts", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_workspace_approvals", kind: "read", app: "workspace", branchPolicy: "agnostic" },
@@ -360,6 +361,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "contract.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "contract.delete", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "contract.lifecycle", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  // Batch AR — CRM custom fields are config records; the archive is the
+  // route's soft delete (mode/low like every config/template delete).
+  { actionType: "crm.customField.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
+  { actionType: "crm.customField.archive", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

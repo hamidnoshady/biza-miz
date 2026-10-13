@@ -233,6 +233,13 @@ import type { Role } from "./auth-edge";
 import { getGrowthSettings } from "./growth-settings-service";
 import { createSegment, updateSegment, archiveSegment } from "./crm-segments-service";
 import { setAutomationActive } from "./crm-automation-service";
+import {
+  saveCustomField,
+  archiveCustomField,
+  CUSTOM_FIELD_TARGETS,
+  type CustomFieldTarget,
+  type CustomFieldType,
+} from "./crm-custom-fields-service";
 import type { SegmentDefinition } from "./segments";
 import type { ConsentChannel } from "./crm-shared";
 import type { TaxSetting } from "./setup-state";
@@ -1904,6 +1911,50 @@ const crmAutomationToggle: AutopilotExecutor = async (ctx) => {
   });
   if (!toggled) return fail("not_found");
   return { ok: true, result: { automationId, isActive } };
+};
+
+// ── Issue #883 package 2, batch AR — CRM custom fields close crm.config ───
+/** The audit actor of the CRM routes — the authorizing user's name, else id (the batch-D convention). */
+async function crmAuditActor(ctx: AutopilotExecutorContext): Promise<{ name: string; userId: string | null }> {
+  const { rows } = await query<{ full_name: string | null }>(
+    `SELECT full_name FROM users WHERE id = $1`,
+    [ctx.authorizedByUserId],
+  );
+  return { name: rows[0]?.full_name ?? ctx.authorizedByUserId ?? "mcp", userId: ctx.authorizedByUserId };
+}
+const crmCustomFieldSave: AutopilotExecutor = async (ctx) => {
+  const target = str(ctx.payload.target);
+  if (!target || !(CUSTOM_FIELD_TARGETS as readonly string[]).includes(target)) {
+    return fail("custom_field_target_invalid");
+  }
+  const actor = await crmAuditActor(ctx);
+  const result = await saveCustomField(
+    ctx.businessId,
+    {
+      id: str(ctx.payload.id) ?? undefined,
+      target: target as CustomFieldTarget,
+      key: str(ctx.payload.key) ?? undefined,
+      label: str(ctx.payload.label) ?? "",
+      fieldType: (str(ctx.payload.fieldType) ?? "text") as CustomFieldType,
+      options: Array.isArray(ctx.payload.options)
+        ? ctx.payload.options.filter((o): o is string => typeof o === "string")
+        : undefined,
+      isRequired: typeof ctx.payload.isRequired === "boolean" ? ctx.payload.isRequired : undefined,
+      helpText: str(ctx.payload.helpText) ?? undefined,
+      displayOrder: typeof ctx.payload.displayOrder === "number" ? ctx.payload.displayOrder : undefined,
+    },
+    actor,
+  );
+  if (!result.ok) return { ok: false, result: { error: result.error }, errorCode: result.error };
+  return { ok: true, result: { field: result.field } };
+};
+const crmCustomFieldArchive: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const actor = await crmAuditActor(ctx);
+  const archived = await archiveCustomField(ctx.businessId, id, actor);
+  if (!archived) return fail("custom_field_not_found");
+  return { ok: true, result: { result: "archived" } };
 };
 
 
@@ -5305,6 +5356,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   contractUpdate,
   contractDelete,
   contractLifecycle,
+  crmCustomFieldSave,
+  crmCustomFieldArchive,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

@@ -405,7 +405,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["crm/automations", "crm/custom-fields", "crm/audit"],
     // Batch D reads the rules and toggles each rule's on/off; rule-shape
     // editing stays on the screen (the rule DSL is screen-owned).
-    ops: { listDetail: ["list_crm_automations"], update: ["crm.automation.toggle"] },
+    ops: {
+      listDetail: ["list_crm_automations", "list_custom_fields"],
+      create: ["crm.customField.save"],
+      update: ["crm.automation.toggle", "crm.customField.save"],
+      lifecycle: ["crm.customField.archive"],
+    },
+    note: "AR close-out: automation create/rule DSL stays screen-owned by design (batch D decision); custom fields fully covered — save is the route's single create-or-edit POST, archive its soft delete",
     test: "integration/crm.integration.test.ts",
   },
   {

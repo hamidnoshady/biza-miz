@@ -71,6 +71,7 @@ import { listScheduledExports } from "./data-transfer/schedule-service";
 import { listExportTemplates, listMappingTemplates } from "./data-transfer/templates-service";
 import { findEntity, entitiesForIndustry, defaultExportFields, isImportable } from "./data-transfer/registry";
 import { DATA_MODULE_LABELS } from "./data-transfer/types";
+import { listCustomFields, CUSTOM_FIELD_TARGETS, type CustomFieldTarget } from "./crm-custom-fields-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
@@ -2004,6 +2005,22 @@ export async function runReadTool(
         .then(() => true)
         .catch(() => false);
       return { ok: true, data: { contract, canTransition } };
+    }
+    // Issue #883 package 2, batch AR — the CRM custom-field directory, grouped
+    // per target exactly like the configurator's GET.
+    case "list_custom_fields": {
+      const targetArg = String(args.target ?? "").trim();
+      const targets = targetArg
+        ? ([targetArg] as CustomFieldTarget[]).filter((t) => (CUSTOM_FIELD_TARGETS as readonly string[]).includes(t))
+        : [...CUSTOM_FIELD_TARGETS];
+      if (targetArg && targets.length === 0) return { ok: false, data: { error: "custom_field_target_invalid" } };
+      const groups = await Promise.all(
+        targets.map(async (target) => ({
+          target,
+          fields: await listCustomFields(businessId, target, { includeArchived: args.includeArchived !== false }),
+        })),
+      );
+      return { ok: true, data: { groups } };
     }
     // Issue #883 package 2, batch I — knowledge centre + media library reads.
     // Issue #883 package 2, batch O — the site's pages & media library.

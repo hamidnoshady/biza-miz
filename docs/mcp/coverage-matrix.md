@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (25)
+### Tenant (24)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -24,7 +24,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **inventory.purchases-suppliers** (Inventory · Purchases, supplier returns, suppliers) — partial
 - **inventory.barcodes** (Inventory · Barcodes (lookup, bulk)) — partial
 - **inventory.waste-writedowns** (Inventory · Waste & write-downs) — partial
-- **crm.config** (CRM · CRM automations, custom fields, audit) — partial
 - **growth.settings-campaigns** (Growth · Growth overview, settings, campaign audience, accounting) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
 - **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — partial
@@ -65,7 +64,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 47 · partial: 24 · MCP gap: 1 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 48 · partial: 23 · MCP gap: 1 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -101,7 +100,7 @@ Counts — covered: 47 · partial: 24 · MCP gap: 1 · backend gap: 0 · n/a (in
 | CRM | Cases & activities<br>_writes gate on partiesManage like their routes (the CRM screens share the parties lane); setCaseStatus drives the SLA clock identical to the screen button_ | list_crm_activities, list_crm_cases | crm.activity.create, crm.case.save | crm.activity.update, crm.case.set_status | crm.case.delete | — | crm.delete, parties.manage, parties.view | connection mode; step-up (always approve) | list_crm_activities, list_crm_cases, crm.activity.create, crm.case.save, crm.activity.update, crm.case.set_status, crm.case.delete | integration/crm.integration.test.ts | covered |
 | CRM | Pipelines & stages<br>_stage set edits (savePipelineStages) stay route-only: structural rework belongs to the settings screen, not a chat turn_ | list_crm_pipelines | crm.pipeline.create | crm.pipeline.update | — | — | crm.configure | connection mode | list_crm_pipelines, crm.pipeline.create, crm.pipeline.update | integration/crm.integration.test.ts | covered |
 | CRM | Segments, saved views, queues, RFM | get_repurchase_candidates, list_customer_segments, preview_customer_segment | crm.segment.create | crm.segment.update | crm.segment.archive | — | crm.configure, crm.manage, crm.view | connection mode | get_repurchase_candidates, list_customer_segments, preview_customer_segment, crm.segment.create, crm.segment.update, crm.segment.archive | integration/crm.integration.test.ts | covered |
-| CRM | CRM automations, custom fields, audit | list_crm_automations | (route only) | crm.automation.toggle | (route only) | — | crm.configure | step-up (always approve) | list_crm_automations, crm.automation.toggle | integration/crm.integration.test.ts | partial |
+| CRM | CRM automations, custom fields, audit<br>_AR close-out: automation create/rule DSL stays screen-owned by design (batch D decision); custom fields fully covered — save is the route's single create-or-edit POST, archive its soft delete_ | list_crm_automations, list_custom_fields | crm.customField.save | crm.automation.toggle, crm.customField.save | crm.customField.archive | — | crm.configure | connection mode; step-up (always approve) | list_crm_automations, list_custom_fields, crm.customField.save, crm.automation.toggle, crm.customField.save, crm.customField.archive | integration/crm.integration.test.ts | covered |
 | CRM | CRM overview, members, consent state, data quality<br>_consent state changes ride the customer row's crm.consent.set (logged legal event, always_approve); quality/merge POST stays route-only (mass mutation identity merge)_ | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members | — | crm.consent.set, crm.customer.tag | — | — | crm.merge, crm.view | connection mode; step-up (always approve) | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members, crm.consent.set, crm.customer.tag | integration/crm.integration.test.ts | covered |
 | CRM | Loyalty programs, store credit, redemptions<br>_every wallet lane (redeem / issue / payout) steps up forever — points and store credit are the customer's money; loyalty reports and the repurchase feed stay read lanes_ | get_repurchase_candidates | loyalty.program.upsert | — | loyalty.points.redeem, loyalty.store_credit.issue, loyalty.store_credit.use | — | loyalty.manage, loyalty.redeem, loyalty.view, store_credit.issue, store_credit.payout | connection mode; step-up (always approve) | get_repurchase_candidates, loyalty.program.upsert, loyalty.points.redeem, loyalty.store_credit.issue, loyalty.store_credit.use | integration/loyalty.integration.test.ts | covered |
 | Growth | Growth overview, settings, campaign audience, accounting<br>_growth settings screen (channels, tariffs, attribution windows) stays route-only — Twilio/SMS sender configuration is credential-shaped and never crosses the chat channel; campaign draft creation is proposal-only by design (see growth.messaging)_ | list_message_campaigns, list_message_templates | (route only) | (route only) | messaging.campaign.launch, messaging.campaign.pause, messaging.campaign.resume | — | campaigns.manage, growth.view, marketing.configure | connection mode; step-up (always approve) | list_message_campaigns, list_message_templates, messaging.campaign.launch, messaging.campaign.pause, messaging.campaign.resume | integration/crm.integration.test.ts | partial |

@@ -459,6 +459,11 @@ export type ActionType =
   | "contract.update"
   | "contract.delete"
   | "contract.lifecycle"
+  // Batch AR — CRM custom fields close out crm.config: config records, the
+  // save verb is the route's single POST (create and edit share it), the
+  // archive is the route's soft delete.
+  | "crm.customField.save"
+  | "crm.customField.archive"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -551,6 +556,8 @@ export type AutopilotExecutorKey =
   | "contractUpdate"
   | "contractDelete"
   | "contractLifecycle"
+  | "crmCustomFieldSave"
+  | "crmCustomFieldArchive"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1888,6 +1895,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "گذر چرخهٔ قرارداد — تکمیل/فسخ/تمدید/تجدید (endDate برای تمدید و تجدید)",
     payloadHint: '{ id: string, action: "complete"|"terminate"|"extend"|"renew", endDate?: string }',
     executor: "contractLifecycle",
+  },
+  "crm.customField.save": {
+    type: "crm.customField.save",
+    endpoint: "/api/crm/custom-fields",
+    method: "POST",
+    label: "ثبت/ویرایش فیلد دلخواه CRM — با id ویرایش، بدون id ساخت جدید (مثل فرم پیکربندی CRM)",
+    payloadHint: '{ target: "party"|"lead"|"deal"|"case", label: string, fieldType?: string="text", key?: string, options?: string[], isRequired?: bool, helpText?: string, displayOrder?: int, id?: string }',
+    executor: "crmCustomFieldSave",
+  },
+  "crm.customField.archive": {
+    type: "crm.customField.archive",
+    endpoint: "/api/crm/custom-fields/{id}",
+    method: "DELETE",
+    label: "بایگانی فیلد دلخواه CRM — حذف نرم است، مقادیر ثبت‌شده باقی می‌ماند",
+    payloadHint: '{ id: string }',
+    executor: "crmCustomFieldArchive",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
@@ -4446,6 +4469,22 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
             type: "object",
             properties: { id: { type: "string", description: "شناسهٔ قرارداد" } },
             required: ["id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_custom_fields",
+          description:
+            "فیلدهای دلخواه CRM گروه‌بندی‌شده بر اساس هدف — با بایگانی‌شده‌ها مگر includeArchived=0.",
+          parameters: {
+            type: "object",
+            properties: {
+              target: { type: "string", enum: ["party", "lead", "deal", "case"], description: "خالی = همهٔ اهداف" },
+              includeArchived: { type: "boolean", description: "پیش‌فرض true" },
+            },
             additionalProperties: false,
           },
         },

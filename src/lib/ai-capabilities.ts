@@ -95,6 +95,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_data_templates: PERMISSIONS.dataExport,
   // Batch AQ read — contract detail, same gate as its GET route.
   get_workspace_contract: PERMISSIONS.workspaceView,
+  // Batch AR read — the CRM configurator's field directory.
+  list_custom_fields: PERMISSIONS.crmConfigure,
   get_backup_status: PERMISSIONS.backupManage,
   get_gift_card_status: PERMISSIONS.giftCardsView,
   // Batch G reads — inventory.view on counts (the screen's GET gate), the
@@ -341,6 +343,9 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "contract.update": PERMISSIONS.workspaceContractsManage,
   "contract.delete": PERMISSIONS.workspaceContractsManage,
   "contract.lifecycle": PERMISSIONS.workspaceContractsManage,
+  // Batch AR — CRM custom fields, the route's crmConfigure gate.
+  "crm.customField.save": PERMISSIONS.crmConfigure,
+  "crm.customField.archive": PERMISSIONS.crmConfigure,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,
