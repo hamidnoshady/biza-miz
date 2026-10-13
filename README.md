@@ -1195,3 +1195,4 @@ Defaults chosen to keep moving; each is easy to revisit.
 | Migrations run clean on empty Postgres | `migrations/0001_foundation.sql` via `npm run db:migrate` |
 | ISO → Jalali → back with no drift | `src/lib/jalali.test.ts` (round-trips every day 2020–2030) |
 | Integer rial displays as Toman | `src/lib/money.test.ts` |
+
