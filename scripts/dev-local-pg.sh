@@ -12,7 +12,12 @@ BIN="$ROOT/node_modules/@embedded-postgres/linux-x64/native/bin"
 case "${1:-}" in
   setup)
     if [ ! -d "$DATADIR/base" ]; then
-      "$BIN/initdb" -D "$DATADIR" -U pos --pwfile=<(echo pos) >/dev/null
+      # A byte-wise (C/POSIX) ctype corrupts every multibyte regexp/translate the
+      # app relies on — e.g. the Persian search normaliser in shift-orders-service
+      # mangled 'علی رضایی' into garbage and the shift-orders report test lost
+      # all of its matches. Pin a UTF-8 ctype so the sandbox cluster behaves the
+      # way every strtouq developer machine (and CI) does.
+      "$BIN/initdb" -D "$DATADIR" -U pos --pwfile=<(echo pos) --encoding=UTF8 --locale=C.utf8 >/dev/null
       echo "listen_addresses = '127.0.0.1'" >> "$DATADIR/postgresql.conf"
     fi
     echo "setup: cluster ready at $DATADIR (start it, then run: bash $0 roles)"

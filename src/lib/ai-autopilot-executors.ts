@@ -95,6 +95,13 @@ import { recordGoldPrice, getGoldPrice } from "./gold-prices-service";
 import { mintMissingBarcodes } from "./inventory-item-barcodes-service";
 import { resolveSectionId } from "./floor";
 import { canTransitionTable, type TableStatus } from "./table-sessions";
+import {
+  decryptReservationPhones,
+  encryptReservationPhone,
+  lockTableForReservationWrite,
+  parseDate as parseReservationDate,
+  tableConflicts,
+} from "./reservation-service";
 import { preparePurchaseLines, purchaseDateOrNull, PurchaseLineError } from "./purchase-lines";
 import {
   supplierInvoiceOrError,
@@ -3569,6 +3576,228 @@ const supplierArchive: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true, deactivated: false } };
 };
 
+// ── Issue #883 package 2, batch AW — reservations ───────────────────────────
+/** The [id] route's loadReservation: location-scoped, phone decrypted once. */
+async function reservationForExecutor(businessId: string, locationId: string, id: string) {
+  const { rows } = await query<{
+    id: string; table_id: string | null; customer_name: string; customer_phone: string | null;
+    party_size: number; reserved_at: string; duration_minutes: number; status: string;
+    seated_session_id: string | null;
+  }>(
+    `SELECT id, table_id, customer_name, customer_phone, party_size, reserved_at,
+            duration_minutes, status, seated_session_id
+       FROM reservations WHERE id = $1 AND location_id = $2`,
+    [id, locationId],
+  );
+  if (!rows[0]) return null;
+  const [reservation] = await decryptReservationPhones(businessId, rows);
+  return reservation;
+}
+const reservationCreate: AutopilotExecutor = async (ctx) => {
+  const customerName = str(ctx.payload.customerName)?.trim();
+  if (!customerName) return fail("missing_fields");
+  const reservedAt = parseReservationDate(str(ctx.payload.reservedAt));
+  if (!reservedAt) return fail("invalid_time");
+  if (reservedAt.getTime() < Date.now() - 60 * 60 * 1000) return fail("time_in_past");
+  const partySize = Number.isFinite(ctx.payload.partySize) && Number(ctx.payload.partySize) > 0 ? Number(ctx.payload.partySize) : 0;
+  if (partySize <= 0) return fail("invalid_party_size");
+  const duration =
+    Number.isFinite(ctx.payload.durationMinutes) && Number(ctx.payload.durationMinutes) > 0
+      ? Math.min(600, Math.max(15, Math.round(Number(ctx.payload.durationMinutes))))
+      : 90;
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const tableId = str(ctx.payload.tableId) ?? null;
+  const customerPhone = str(ctx.payload.customerPhone)?.trim() || null;
+  const phoneCipher = await encryptReservationPhone(ctx.businessId, customerPhone);
+  // A booked table takes its advisory lock around check+insert, exactly the
+  // route's two-simultaneous-diners argument.
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    if (tableId) {
+      await lockTableForReservationWrite(client, branch.locationId, tableId);
+      const { rows: table } = await client.query(
+        "SELECT id FROM dining_tables WHERE id = $1 AND location_id = $2 AND is_active",
+        [tableId, branch.locationId],
+      );
+      if (table.length === 0) { await client.query("ROLLBACK"); return fail("table_not_found"); }
+      const conflicts = await tableConflicts(branch.locationId, tableId, reservedAt, duration, null, client);
+      if (conflicts.length > 0 && !ctx.payload.allowConflict) {
+        await client.query("ROLLBACK");
+        return { ok: false, result: { error: "reservation_conflict", conflicts }, errorCode: "reservation_conflict" };
+      }
+    }
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO reservations
+          (location_id, table_id, customer_name, customer_phone, party_size, reserved_at, duration_minutes, note, created_by,
+           customer_phone_enc, customer_phone_bidx)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        branch.locationId, tableId, customerName, customerPhone, partySize, reservedAt.toISOString(),
+        duration, str(ctx.payload.note)?.trim() || null, ctx.authorizedByUserId, phoneCipher.enc, phoneCipher.bidx,
+      ],
+    );
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, id: rows[0].id } };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+const reservationEdit: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const reservation = await reservationForExecutor(ctx.businessId, branch.locationId, id);
+  if (!reservation) return fail("reservation_not_found");
+  if (reservation.status !== "booked") return fail("reservation_not_booked");
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  const set = (col: string, val: unknown) => { fields.push(`${col} = $${++i}`); values.push(val); };
+  let effectiveTableId = reservation.table_id;
+  let effectiveReservedAt = new Date(reservation.reserved_at);
+  let effectiveDuration = reservation.duration_minutes;
+  if (ctx.payload.tableId !== undefined) {
+    const tableId = str(ctx.payload.tableId);
+    if (tableId) {
+      const { rows } = await query("SELECT id FROM dining_tables WHERE id = $1 AND location_id = $2 AND is_active", [
+        tableId, branch.locationId,
+      ]);
+      if (rows.length === 0) return fail("table_not_found");
+    }
+    effectiveTableId = tableId || null;
+    set("table_id", effectiveTableId);
+  }
+  if (ctx.payload.reservedAt !== undefined) {
+    const d = parseReservationDate(str(ctx.payload.reservedAt));
+    if (!d) return fail("invalid_time");
+    effectiveReservedAt = d;
+    set("reserved_at", d.toISOString());
+  }
+  if (ctx.payload.durationMinutes !== undefined) {
+    if (!Number.isFinite(ctx.payload.durationMinutes) || Number(ctx.payload.durationMinutes) <= 0) return fail("bad_request");
+    effectiveDuration = Math.min(600, Math.max(15, Math.round(Number(ctx.payload.durationMinutes))));
+    set("duration_minutes", effectiveDuration);
+  }
+  if (ctx.payload.customerName !== undefined) {
+    const name = str(ctx.payload.customerName)?.trim();
+    if (!name) return fail("missing_fields");
+    set("customer_name", name);
+  }
+  if (ctx.payload.customerPhone !== undefined) {
+    // Written as a triple — the BEFORE UPDATE trigger would otherwise drop
+    // the blind index and take the booking out of phone lookup (the route's
+    // comment, mirrored).
+    const phone = str(ctx.payload.customerPhone)?.trim() || null;
+    const cipher = await encryptReservationPhone(ctx.businessId, phone);
+    set("customer_phone", phone);
+    set("customer_phone_enc", cipher.enc);
+    set("customer_phone_bidx", cipher.bidx);
+  }
+  if (ctx.payload.partySize !== undefined) {
+    const n = Number(ctx.payload.partySize);
+    if (!Number.isFinite(n) || n <= 0) return fail("invalid_party_size");
+    set("party_size", Math.round(n));
+  }
+  if (ctx.payload.note !== undefined) set("note", str(ctx.payload.note)?.trim() || null);
+  if (fields.length === 0) return fail("bad_request");
+  set("updated_at", new Date().toISOString());
+  const recheckOverlap =
+    effectiveTableId &&
+    (ctx.payload.tableId !== undefined || ctx.payload.reservedAt !== undefined || ctx.payload.durationMinutes !== undefined);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    if (recheckOverlap) {
+      await lockTableForReservationWrite(client, branch.locationId, effectiveTableId!);
+      const conflicts = await tableConflicts(
+        branch.locationId, effectiveTableId!, effectiveReservedAt, effectiveDuration, reservation.id, client,
+      );
+      if (conflicts.length > 0 && !ctx.payload.allowConflict) {
+        await client.query("ROLLBACK");
+        return { ok: false, result: { error: "reservation_conflict", conflicts }, errorCode: "reservation_conflict" };
+      }
+    }
+    await client.query(`UPDATE reservations SET ${fields.join(", ")} WHERE id = $1`, [reservation.id, ...values]);
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+const reservationLifecycle: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  const action = str(ctx.payload.action);
+  if (!id || (action !== "cancel" && action !== "no_show" && action !== "seat")) return fail("bad_request");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const reservation = await reservationForExecutor(ctx.businessId, branch.locationId, id);
+  if (!reservation) return fail("reservation_not_found");
+  if (action === "cancel" || action === "no_show") {
+    if (reservation.status !== "booked") return fail("reservation_not_booked");
+    const to = action === "cancel" ? "cancelled" : "no_show";
+    await query("UPDATE reservations SET status = $2::reservation_status, updated_at = now() WHERE id = $1", [id, to]);
+    return { ok: true, result: { ok: true } };
+  }
+  // seat — the table session opens server-side with the reservation as its
+  // party, broadcast included, exactly like the floor does it.
+  if (reservation.status !== "booked") return fail("reservation_not_booked");
+  const tableIds = (Array.isArray(ctx.payload.tableIds) ? ctx.payload.tableIds.map((t) => String(t)).filter(Boolean) : []).length
+    ? (ctx.payload.tableIds as unknown[]).map((t) => String(t)).filter(Boolean)
+    : reservation.table_id
+      ? [reservation.table_id]
+      : [];
+  if (tableIds.length === 0) return fail("table_required");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { id: sessionId } = await openSession(client, {
+      locationId: branch.locationId,
+      tableIds,
+      partySize: reservation.party_size,
+      guestName: reservation.customer_name,
+      guestPhone: reservation.customer_phone,
+      reservationId: reservation.id,
+      openedBy: ctx.authorizedByUserId ?? "",
+    });
+    await client.query(
+      "UPDATE reservations SET status = 'seated', seated_session_id = $2, updated_at = now() WHERE id = $1",
+      [reservation.id, sessionId],
+    );
+    await client.query("COMMIT");
+    broadcast(branch.locationId, { type: "table_session.updated", sessionId });
+    return { ok: true, result: { ok: true, sessionId } };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    // openSession refuses with coded errors (table busy etc.) — forward them
+    // the way the route does.
+    const code = (err as { code?: string }).code;
+    if (code) return { ok: false, result: { error: code }, errorCode: code };
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+const reservationDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const reservation = await reservationForExecutor(ctx.businessId, branch.locationId, id);
+  if (!reservation) return fail("reservation_not_found");
+  await query("DELETE FROM reservations WHERE id = $1", [id]);
+  return { ok: true, result: { ok: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -5758,6 +5987,10 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   tableEdit,
   tableStatus,
   tableDelete,
+  reservationCreate,
+  reservationEdit,
+  reservationLifecycle,
+  reservationDelete,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

@@ -258,7 +258,6 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "inventory.reorder.draftPO": PERMISSIONS.purchasesManage,
   "inventory.adjustment.propose": PERMISSIONS.inventoryAdjust,
   "reservation.create": PERMISSIONS.reservationsManage,
-  "reservation.reschedule": PERMISSIONS.reservationsManage,
   "table.merge": PERMISSIONS.tablesManage,
   "courier.assign": PERMISSIONS.deliveryManage,
   "customer.note.add": PERMISSIONS.crmManage,
@@ -359,6 +358,13 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "table.edit": PERMISSIONS.tablesEdit,
   "table.delete": PERMISSIONS.tablesEdit,
   "table.status": PERMISSIONS.tablesManage,
+  // Batch AW — every reservation lane rides the same key the routes use;
+  // create/reschedule joined the map earlier (the legacy autopilot entries);
+  // reschedule stays mapped because the Wave-2 prompt still lists it.
+  "reservation.reschedule": PERMISSIONS.reservationsManage,
+  "reservation.edit": PERMISSIONS.reservationsManage,
+  "reservation.lifecycle": PERMISSIONS.reservationsManage,
+  "reservation.delete": PERMISSIONS.reservationsManage,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

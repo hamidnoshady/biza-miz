@@ -482,6 +482,11 @@ export type ActionType =
   | "table.edit"
   | "table.status"
   | "table.delete"
+  // Batch AW — reservations get the POST/PATCH/DELETE lanes the screen owns;
+  // the stale proposal pair collapses into these executor-backed verbs.
+  | "reservation.edit"
+  | "reservation.lifecycle"
+  | "reservation.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -586,6 +591,10 @@ export type AutopilotExecutorKey =
   | "tableEdit"
   | "tableStatus"
   | "tableDelete"
+  | "reservationCreate"
+  | "reservationEdit"
+  | "reservationLifecycle"
+  | "reservationDelete"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -874,15 +883,20 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     type: "reservation.create",
     endpoint: "/api/reservations",
     method: "POST",
-    label: "ثبت رزرو جدید",
+    label: "رزرو جدید — تداخل میز بررسی می‌شود مگر allowConflict (مثل فرم رزرو)",
     payloadHint:
-      '{ tableId?: string, customerName: string, customerPhone?: string, partySize: number, reservedAt: string /* ISO */, durationMinutes?: number, note?: string, allowConflict?: boolean }',
+      '{ customerName: string, reservedAt: string /* ISO */, partySize: number, durationMinutes?: number=90 (15..600), tableId?: string, customerPhone?: string, note?: string, allowConflict?: boolean, locationId?: string }',
+    executor: "reservationCreate",
   },
+  // Wave 2 keeps this manual-only placeholder even though reservation.edit is
+  // the executor-backed superset — the dashboard prompt contract lists it by
+  // name, and removing a listed name from the prompt is its own regression
+  // (test "dashboard prompt's catalog dump names every Wave 2 action").
   "reservation.reschedule": {
     type: "reservation.reschedule",
     endpoint: "/api/reservations/{reservationId}",
     method: "PATCH",
-    label: "تغییر زمان یا میز رزرو",
+    label: "تغییر زمان یا میز رزرو — برای اجرای واقعی از reservation.edit استفاده می‌شود",
     payloadHint:
       "{ reservationId: string, reservedAt?: string, durationMinutes?: number, tableId?: string|null, allowConflict?: boolean }",
   },
@@ -2019,6 +2033,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "غیرفعال‌سازی میز — تا session بازی داشته باشد حذف نمی‌شود",
     payloadHint: '{ id: string, locationId?: string }',
     executor: "tableDelete",
+  },
+  "reservation.edit": {
+    type: "reservation.edit",
+    endpoint: "/api/reservations/{id}",
+    method: "PATCH",
+    label: "ویرایش فیلدهای رزرو — فقط تا وقتی booked است؛ لمس میز/زمان تداخل را از نو بررسی می‌کند",
+    payloadHint: '{ id: string, tableId?: string|null, reservedAt?: string, durationMinutes?: int, customerName?: string, customerPhone?: string|null, partySize?: int, note?: string, allowConflict?: bool }',
+    executor: "reservationEdit",
+  },
+  "reservation.lifecycle": {
+    type: "reservation.lifecycle",
+    endpoint: "/api/reservations/{id}",
+    method: "PATCH",
+    label: "گذر رزرو: cancel/no_show ساده، seat میز(s) را session باز می‌کند",
+    payloadHint: '{ id: string, action: "cancel"|"no_show"|"seat", tableIds?: string[] }',
+    executor: "reservationLifecycle",
+  },
+  "reservation.delete": {
+    type: "reservation.delete",
+    endpoint: "/api/reservations/{id}",
+    method: "DELETE",
+    label: "حذف فیزیکی رزرو — مسیر عادیِ کنسل، cancel است؛ یک پاک‌سازی رکورد است",
+    payloadHint: '{ id: string }',
+    executor: "reservationDelete",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

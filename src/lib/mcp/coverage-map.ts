@@ -199,8 +199,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "POS",
     entity: "Reservations",
     routes: ["reservations"],
-    ops: { listDetail: ["get_reservation_conflicts"] },
-    test: "integration/reservations.integration.test.ts",
+    ops: {
+      listDetail: ["get_reservation_conflicts"],
+      create: ["reservation.create"],
+      update: ["reservation.edit"],
+      lifecycle: ["reservation.lifecycle", "reservation.delete"],
+    },
+    note: "batch AW: the overlap-checked create/edit keep the advisory table lock sequencing; seat opens the table session with the same broadcast the floor emits; the physical delete steps up (business-record erasure) — cancel is the normal path",
+    test: "integration/reservation-concurrency.integration.test.ts",
   },
   {
     id: "pos.tables",
@@ -208,6 +214,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Dining tables & table sessions",
     routes: ["tables", "table-sessions"],
     ops: {
+      listDetail: ["get_table_turnover_rate"],
       create: ["table.session.open", "table.edit"],
       update: ["table.session.update", "table.edit", "table.status"],
       lifecycle: ["table.status", "table.delete"],

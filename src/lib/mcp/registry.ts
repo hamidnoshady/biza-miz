@@ -380,6 +380,12 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "table.edit", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.status", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AW — bookings are cheap operational records; the physical delete
+  // steps up (business-record erasure, same rule as contract.delete).
+  { actionType: "reservation.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "reservation.edit", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "reservation.lifecycle", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "reservation.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
