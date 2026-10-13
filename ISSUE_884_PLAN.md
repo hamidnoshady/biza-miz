@@ -501,6 +501,71 @@ re-authentication, push notifications, background sync, barcode/camera/file/shar
 integration, native printing, Caller ID and post-call CRM activity, and the full mobile-shell
 navigation audit issue #884 asks for. None of those are started.
 
+## Merging main into this branch to resolve PR #890's conflicts
+
+`main` had advanced roughly 2,000 commits past this branch's original base by the time PR #890
+showed real merge conflicts, and advanced again mid-resolution (a second PR merged to `main` while
+this branch's first merge commit was being verified). Two merges were required, both pushed to this
+branch:
+
+1. `58afc25c` — merged `main` as of `3f429b7c`. Two textual conflicts, both comment-only, in
+   `.github/workflows/build-desktop-installer.yml` and `docs/standalone-desktop-app.md`: two
+   branches had independently raised the same Windows unpacked-payload/staged-runtime budgets
+   (620→640 MiB, 200→220 MiB) for different, parallel reasons — this branch's device-registry
+   slice (618.6→621.4 MiB) and `main`'s merged multicurrency/auth-hardening work (620.4 MiB).
+   Resolved by combining both causes into one accurate narrative rather than picking a side.
+2. `40f8203c` — merged `main` again as of `35cb0cd5` (which had landed issue #834's fiscal-period
+   work, including its own commit raising the *same* 640/220 MiB values but explicitly noting that
+   "maintainer acceptance of that increase remains undecided"). Same two files conflicted again, for
+   the same underlying reason. Resolved by writing one narrative that lists all three independent
+   crossings of the former 620 MiB budget and keeps the one still-open owner question (from the
+   issue #834 / main-growth side) visible rather than asserting a false consensus that every
+   increase was equally signed off.
+
+No other file needed manual conflict resolution; everything else merged cleanly with git's `ort`
+strategy despite the enormous amount of concurrent work on `main` (fiscal periods, chart-of-accounts,
+cheques, payroll, multicurrency, auth hardening). Both merges were spot-checked for *silent* semantic
+conflicts — not just textual ones — in every file this branch's own commits touch: `auth.ts`'s
+`resolveSessionFromToken` chain still calls `checkNativeDevice` last, `SessionPayload` still carries
+`nativeDeviceId`/`nativeDeviceGeneration`, `nativeDevicesManage` appears exactly once in both
+`permissions.ts` and `permission-registry.ts` with no duplicate permission keys anywhere in the
+merged 113-key table, and `db.ts`/`billing/catalog/routes.ts`/`layout.tsx`/`workspace-shell.tsx`
+all still carry this branch's additions intact.
+
+Verification after both merges (fresh `npm ci`, since `main` had also moved `package-lock.json`):
+all `.github/workflows/*.yml` still parse as valid YAML; `npx tsc --noEmit` clean; `npm run lint`
+(`eslint --max-warnings=0`) clean; `npm test` — **786 files, 10,354 tests passed, 0 failures**;
+`npm run db:migrate` — 329+ migrations apply cleanly, including both `0216_native_app_devices.sql`
+and `0217_native_app_devices_generation.sql` interleaved correctly with `main`'s own
+differently-named 0216/0217-numbered migrations (this repo's migration runner orders by full
+filename, not by numeric prefix, so same-numbered files from different branches are not a
+collision); `npm run test:db` — **215 files, 3,175 tests passed, 1 skipped, 0 failures**. An
+intermediate run of `test:db` showed 5 failures in `seed-live-chart`/`runtime-role-regrant`; the
+root cause was that this session had started a brand-new empty embedded Postgres and run the suite
+before running `npm run db:migrate` against it, not a merge defect — confirmed by re-running those
+two files in isolation (failed identically before migrating, passed cleanly after) and then by the
+0-failure full re-run above. `npm run build` still cannot complete in this sandbox's 3.8 GB RAM
+(pre-existing, unrelated to the merge); CI's `production build` job is the authoritative gate.
+
+**CI on the final merged commit (`40f8203c`), confirmed on GitHub directly:** 17 of 18 required
+jobs passed, including `production build` (5m8s), `integration tests (real database)` (29m10s,
+215 files / 3,175 tests, matching the local run), `unit tests` (4m46s), `type check`, `desktop
+shell`, `production container`, `packaged Windows end-to-end` (15m27s, proving the merged 640/220
+MiB budgets still hold against the combined payload), `android development debug`, `web native
+bridge tests`, `media E2E tests`, `design checks`, `API guard and permission tests`, `data transfer
+engine (real database)`, `Windows print connector` and `WordPress plugin`. Only `visual regression`
+failed — its annotations (`accounting-cheques-dark.png` 4.26%, `accounting-cheques.png` 6.23%,
+`accounting-chart-of-accounts.png` 4.08%) were compared directly against `main`'s own `test.yml` run
+at commit `96c437f1` (the exact commit this branch's second merge pulled in) and are byte-for-byte
+the same failure, with the same files and the same percentages, already failing on `main` itself
+before this branch touched it. Per the repo's rules, the baseline is not re-recorded to paper over
+a pre-existing flake on `main`.
+
+Because `main` is moving fast (two conflicting merges were needed within the same work session),
+PR #890's mergeable status should be re-checked immediately before any actual merge or approval —
+another conflict in these same two budget-history files is plausible, and should get the same
+treatment (combine the causes honestly) rather than a reflexive re-bump of the numbers.
+
 ## Files
 
 
