@@ -9,7 +9,7 @@
  *
  * What it proves, through the real HTTP boundary with a real owner session
  * (permission + tenant scoping enforced by the server, not assumed):
- *   1. An opening set for 1404 walks the full life — import preview, create,
+ *   1. An opening set for 1403 walks the full life — import preview, create,
  *      submit, approve, post — and posts as one ordinary OP-numbered entry
  *      the voucher register can see.
  *   2. A CSV import reads amounts in the business's selected unit: the same
@@ -18,10 +18,19 @@
  *      are soft-closed, and the close posts the P&L into retained earnings —
  *      a path the 0216 fiscal-authorization trigger guards for the live
  *      session.
- *   4. The carry-forward of the closed year into 1405 reconciles Rial for
+ *   4. The carry-forward of the closed year into 1404 reconciles Rial for
  *      Rial — A/R per customer, A/P per supplier, cash net of the year's
  *      activity, one equity line for the result — and is idempotent.
  *   5. The accounting workspace renders for the owner in a real browser.
+ *
+ * The walk runs on 1403, a year no other E2E in this job touches: the
+ * cheque-register E2E runs earlier against the same seeded database and posts
+ * entries dated inside 1404/1405 (issue dates of January 2026, bounces of
+ * February 2026), which would skew 1404's exact net-income and A/R/A/P/cash
+ * balances. 1403 stays pure — every 1403 ledger fact is this script's, so the
+ * close and the carry-forward can assert exact Rial — and the transition
+ * lands in 1404, which the other E2Es pollute but this script only reads
+ * (and never closes).
  *
  * Exits non-zero if any expectation fails. Nothing here is skipped or
  * retried into a pass.
@@ -40,8 +49,8 @@ if (!DATABASE_URL) {
   process.exit(2);
 }
 
-/** 1404 runs 2025-03-21 → 2026-03-20; 1405 runs 2026-03-21 → 2027-03-20. */
-const YEAR = { label1404: "1404", label1405: "1405", inside1404: "2025-04-05" };
+/** 1403 runs 2024-03-21 → 2025-03-20; 1404 runs 2025-03-21 → 2026-03-20. */
+const YEAR = { labelFrom: "1403", labelTo: "1404", insideFrom: "2024-04-05" };
 /** The opening set: a balanced 7,000,000 Rial against the year's start. */
 const OPENING = {
   cashDebit: 5_000_000,
@@ -226,6 +235,18 @@ async function run() {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   page.setDefaultTimeout(30_000);
+  // Every api() call is a same-origin fetch inside this page, so the page must
+  // be on the app's origin before the first one — login goes through the
+  // context's request API and does not navigate. On about:blank the relative
+  // URLs do not parse. The root may still be redirecting (unauthenticated
+  // visitors get sent to /login), so wait for the URL to settle — a fetch in
+  // a context about to be destroyed throws "Execution context was destroyed".
+  await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
+  await until(async () => {
+    const url = page.url();
+    await new Promise((r) => setTimeout(r, 150));
+    return url === page.url() ? url : null;
+  }, 10_000);
 
   const provisioning = new Client({ connectionString: DATABASE_URL });
   await provisioning.connect();
@@ -250,14 +271,14 @@ async function run() {
     }
     const { customerOne, supplierOne } = await ensureFixtures(provisioning, businessId);
 
-    const year1404 = await fiscalYearId(page, YEAR.label1404);
-    const year1405 = await fiscalYearId(page, YEAR.label1405);
-    check("fiscal years 1404 and 1405 are defined", Boolean(year1404 && year1405));
+    const yearFrom = await fiscalYearId(page, YEAR.labelFrom);
+    const yearTo = await fiscalYearId(page, YEAR.labelTo);
+    check("fiscal years 1403 and 1404 are defined", Boolean(yearFrom && yearTo));
 
     // 1 — the opening set's full life, Rial in, Rial out.
     const preview = await apiJson(page, "POST", "/api/ledger/opening-balances/import", {
-      fiscalYearLabel: YEAR.label1404,
-      effectiveDate: YEAR.inside1404,
+      fiscalYearLabel: YEAR.labelFrom,
+      effectiveDate: YEAR.insideFrom,
       lines: [
         { accountId: acct["1100"], debit: OPENING.cashDebit, credit: 0 },
         { accountId: acct["1200"], debit: OPENING.arDebit, credit: 0, partyType: "customer", partyId: customerOne },
@@ -273,8 +294,8 @@ async function run() {
     );
 
     const created = await apiJson(page, "POST", "/api/ledger/opening-balances", {
-      fiscalYearLabel: YEAR.label1404,
-      effectiveDate: YEAR.inside1404,
+      fiscalYearLabel: YEAR.labelFrom,
+      effectiveDate: YEAR.insideFrom,
       note: "E2E افتتاحیه",
       lines: preview.lines,
     });
@@ -287,8 +308,8 @@ async function run() {
     check("post lands the set in the ledger", posted?.posted !== false && posted?.error === undefined, JSON.stringify(posted));
 
     const register = await apiJson(page, "GET", "/api/ledger/vouchers?documentType=opening&limit=50");
-    const openingRow = (register.rows ?? []).find((r) => r.voucherNumber === "OP-1404-000001");
-    check("the register wears the opening number OP-1404-000001", Boolean(openingRow), JSON.stringify(register.rows?.map((r) => r.voucherNumber)));
+    const openingRow = (register.rows ?? []).find((r) => r.voucherNumber === "OP-1403-000001");
+    check("the register wears the opening number OP-1403-000001", Boolean(openingRow), JSON.stringify(register.rows?.map((r) => r.voucherNumber)));
     check(
       "the posted entry's totals are the set's totals",
       openingRow?.totalDebit === "7000000" && openingRow?.totalCredit === "7000000",
@@ -305,14 +326,14 @@ async function run() {
     // guard in parseOpeningImportFile); the preview's totals are decimal
     // strings. Compare the line amount as a string so the check rides
     // whichever of the two shapes the response carries.
-    const asToman = await importCsv(page, csv, "opening-e2e.csv", YEAR.label1404, YEAR.inside1404);
+    const asToman = await importCsv(page, csv, "opening-e2e.csv", YEAR.labelFrom, YEAR.insideFrom);
     check(
       "toman import reads 1,000,000 toman as 10,000,000 Rial",
       asToman.valid === true && String(asToman.lines?.find((l) => l.accountId === acct["1100"])?.debit) === "10000000",
       JSON.stringify(asToman.problems ?? asToman.lines ?? []),
     );
     await setUnit(provisioning, businessId, "rial");
-    const asRial = await importCsv(page, csv, "opening-e2e.csv", YEAR.label1404, YEAR.inside1404);
+    const asRial = await importCsv(page, csv, "opening-e2e.csv", YEAR.labelFrom, YEAR.insideFrom);
     check(
       "rial import reads the same file 1:1",
       asRial.valid === true && String(asRial.lines?.find((l) => l.accountId === acct["1100"])?.debit) === "1000000",
@@ -320,17 +341,17 @@ async function run() {
     );
 
     // 3 — the year's activity, then the close the trigger guards.
-    await manualEntry(page, "2025-06-15", "هزینه E2E", [
+    await manualEntry(page, "2024-06-15", "هزینه E2E", [
       { accountId: expenseAccount.id, debit: PNL.expense, credit: 0 },
       { accountId: acct["1100"], debit: 0, credit: PNL.expense },
     ]);
-    await manualEntry(page, "2025-07-15", "فروش E2E", [
+    await manualEntry(page, "2024-07-15", "فروش E2E", [
       { accountId: acct["1100"], debit: PNL.revenue, credit: 0 },
       { accountId: revenueAccount.id, debit: 0, credit: PNL.revenue },
     ]);
     check("the year's P&L is posted", true);
 
-    const periodsList = await apiJson(page, "GET", `/api/ledger/fiscal-years/${year1404}/periods`);
+    const periodsList = await apiJson(page, "GET", `/api/ledger/fiscal-years/${yearFrom}/periods`);
     check("the year has twelve periods", (periodsList.periods ?? []).length === 12);
     for (const period of periodsList.periods ?? []) {
       const patched = await apiJson(page, "PATCH", `/api/ledger/fiscal-periods/${period.id}`, {
@@ -338,7 +359,7 @@ async function run() {
       });
       check(`period ${period.label} soft-closed`, patched?.period?.status === "soft_closed", JSON.stringify(patched));
     }
-    const close = await apiJson(page, "POST", `/api/ledger/fiscal-years/${year1404}/close`, {});
+    const close = await apiJson(page, "POST", `/api/ledger/fiscal-years/${yearFrom}/close`, {});
     check(
       "the close posts the 9,000,000 Rial result",
       close.netIncome === "9000000" && Boolean(close.closingEntryId),
@@ -347,8 +368,8 @@ async function run() {
 
     // 4 — the carry-forward reconciles Rial for Rial.
     const forward = await apiJson(page, "POST", "/api/ledger/opening-balances/carry-forward", {
-      fromYearId: year1404,
-      toYearId: year1405,
+      fromYearId: yearFrom,
+      toYearId: yearTo,
     });
     check("the carry-forward proposal is balanced", forward.balanced === true && forward.idempotent === false, JSON.stringify(forward.notes ?? []));
     const lineWith = (debit, credit) =>
@@ -359,8 +380,8 @@ async function run() {
     check("the year's result lands in equity, not revenue", lineWith(0, PNL.revenue - PNL.expense));
 
     const again = await api(page, "POST", "/api/ledger/opening-balances/carry-forward", {
-      fromYearId: year1404,
-      toYearId: year1405,
+      fromYearId: yearFrom,
+      toYearId: yearTo,
     });
     const againBody = JSON.parse(again.text);
     check(
