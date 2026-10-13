@@ -18,6 +18,7 @@ let databaseName: string;
 let db: Client;
 
 let gateway: typeof import("../src/lib/ai-gateway-service");
+let pagination: typeof import("../src/lib/platform-ai-gateway-pagination");
 let dbLib: typeof import("../src/lib/db");
 
 let rlsActive = false;
@@ -56,6 +57,7 @@ beforeAll(async () => {
 
   process.env.DATABASE_URL = urlFor(databaseName);
   gateway = await import("../src/lib/ai-gateway-service");
+  pagination = await import("../src/lib/platform-ai-gateway-pagination");
   dbLib = await import("../src/lib/db");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -268,5 +270,175 @@ describe("Phase 39 branch layer", () => {
 
     const pubBiz = gateway.toPublicBusinessGateway(bizRow, config, "gpt-4o-mini");
     expect(pubBiz.effectiveModel).toBe("pos-chat");
+  });
+});
+
+describe("platform AI gateway pagination against PostgreSQL", () => {
+  const fleetDefaults: import("../src/lib/platform-ai-gateway-pagination").FleetPaginationInput = {
+    gatewayVirtualKeysEnabled: false,
+    gatewayUnavailable: false,
+    masterKeyConfigured: true,
+    searchPattern: "",
+    statusFilter: "all",
+    focusBusinessId: "",
+    pageSize: 2,
+    requestedPage: 1,
+  };
+
+  function fleetPage(
+    overrides: Partial<import("../src/lib/platform-ai-gateway-pagination").FleetPaginationInput> = {},
+  ) {
+    return pagination.listAiGatewayFleetPage({ ...fleetDefaults, ...overrides });
+  }
+
+  function businessIds(rows: Array<{ business_id: string | null }>): string[] {
+    return rows.flatMap((row) => (row.business_id ? [row.business_id] : []));
+  }
+
+  it("executes first, middle, last and beyond-last fleet pages with deterministic ordering", async () => {
+    await db.query(
+      "INSERT INTO businesses (name, slug) VALUES ('Gamma', $1), ('Delta', $2), ('Epsilon', $3)",
+      [`gamma-${randomUUID().slice(0, 8)}`, `delta-${randomUUID().slice(0, 8)}`, `epsilon-${randomUUID().slice(0, 8)}`],
+    );
+
+    const first = await fleetPage({ pageSize: 2, requestedPage: 1 });
+    const middle = await fleetPage({ pageSize: 2, requestedPage: 2 });
+    const last = await fleetPage({ pageSize: 2, requestedPage: 3 });
+    const beyondLast = await fleetPage({ pageSize: 2, requestedPage: 2_147_483_647 });
+
+    expect(first.rows.map((row) => row.business_name)).toEqual(["Alpha", "Beta"]);
+    expect(middle.rows.map((row) => row.business_name)).toEqual(["Delta", "Epsilon"]);
+    expect(last.rows.map((row) => row.business_name)).toEqual(["Gamma"]);
+    expect(beyondLast.rows.map((row) => row.business_name)).toEqual(["Gamma"]);
+    expect(first.rows[0]).toMatchObject({ total: 5, total_pages: 3, page: 1 });
+    expect(middle.rows[0]).toMatchObject({ total: 5, total_pages: 3, page: 2 });
+    expect(last.rows[0]).toMatchObject({ total: 5, total_pages: 3, page: 3 });
+    expect(beyondLast.rows[0]).toMatchObject({ total: 5, total_pages: 3, page: 3 });
+  });
+
+  it("returns a stable empty page and applies search and status filters in PostgreSQL", async () => {
+    await db.query("UPDATE feature_flags SET default_enabled = true WHERE key = 'ai_assistant'");
+    await db.query(
+      "INSERT INTO business_features (business_id, flag_key, enabled) VALUES ($1, 'ai_assistant', false)",
+      [beta.businessId],
+    );
+
+    const search = await fleetPage({ searchPattern: "%Alpha%", pageSize: 1 });
+    expect(search.rows.map((row) => row.business_name)).toEqual(["Alpha"]);
+    expect(search.rows[0]).toMatchObject({ total: 1, total_pages: 1, page: 1 });
+
+    const disabled = await fleetPage({ statusFilter: "entitlement_disabled", pageSize: 10 });
+    expect(disabled.rows.map((row) => row.business_name)).toEqual(["Beta"]);
+    expect(disabled.rows[0]).toMatchObject({ fleet_status: "entitlement_disabled" });
+
+    const empty = await fleetPage({ searchPattern: "%does-not-exist%", pageSize: 2, requestedPage: 99 });
+    expect(empty.rows).toHaveLength(1);
+    expect(empty.rows[0]).toMatchObject({ total: 0, total_pages: 1, page: 1, business_id: null });
+  });
+
+  it("keeps a focused business and focused location visible outside their requested pages", async () => {
+    const focused = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Zulu Focus', $1) RETURNING id",
+      [`zulu-${randomUUID().slice(0, 8)}`],
+    );
+    const focusedBusinessId = focused.rows[0].id;
+    const locations = await db.query<{ id: string; name: string }>(
+      `INSERT INTO locations (business_id, name) VALUES
+        ($1, 'Focus Branch A'), ($1, 'Focus Branch B'), ($1, 'Focus Branch Z')
+       RETURNING id, name`,
+      [focusedBusinessId],
+    );
+    const focusedLocationId = locations.rows.find((row) => row.name === "Focus Branch Z")!.id;
+
+    const firstLocationPage = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "",
+      focusLocationId: "",
+      pageSize: 1,
+      requestedPage: 1,
+    });
+    const middleLocationPage = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "",
+      focusLocationId: "",
+      pageSize: 1,
+      requestedPage: 2,
+    });
+    const lastLocationPage = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "",
+      focusLocationId: "",
+      pageSize: 1,
+      requestedPage: 3,
+    });
+    const beyondLocationPage = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "",
+      focusLocationId: "",
+      pageSize: 1,
+      requestedPage: 2_147_483_647,
+    });
+    expect(firstLocationPage.rows.map((row) => row.name)).toEqual(["Focus Branch A"]);
+    expect(middleLocationPage.rows.map((row) => row.name)).toEqual(["Focus Branch B"]);
+    expect(lastLocationPage.rows.map((row) => row.name)).toEqual(["Focus Branch Z"]);
+    expect(beyondLocationPage.rows.map((row) => row.name)).toEqual(["Focus Branch Z"]);
+    expect(beyondLocationPage.rows[0]).toMatchObject({ total: 3, total_pages: 3, page: 3 });
+    const locationSearch = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "%Branch B%",
+      focusLocationId: "",
+      pageSize: 10,
+      requestedPage: 1,
+    });
+    expect(locationSearch.rows.map((row) => row.name)).toEqual(["Focus Branch B"]);
+    const emptyLocationPage = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "%missing%",
+      focusLocationId: "",
+      pageSize: 2,
+      requestedPage: 99,
+    });
+    expect(emptyLocationPage.rows).toHaveLength(1);
+    expect(emptyLocationPage.rows[0]).toMatchObject({ total: 0, total_pages: 1, page: 1, id: null });
+
+    const fleet = await fleetPage({
+      pageSize: 1,
+      requestedPage: 1,
+      focusBusinessId: focusedBusinessId,
+    });
+    expect(fleet.rows.map((row) => row.business_name)).toEqual(["Alpha", "Zulu Focus"]);
+    expect(fleet.rows.find((row) => row.business_id === focusedBusinessId)?.is_focused).toBe(true);
+
+    const locationsPage = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "",
+      focusLocationId: focusedLocationId,
+      pageSize: 1,
+      requestedPage: 1,
+    });
+    expect(locationsPage.rows.map((row) => row.name)).toEqual(["Focus Branch A", "Focus Branch Z"]);
+    expect(locationsPage.rows.every((row) => row.business_id === focusedBusinessId)).toBe(true);
+
+    // A location id from another tenant cannot be pulled into the focused
+    // business's result, even though the platform query deliberately bypasses
+    // tenant RLS for the authenticated console.
+    const foreignLocation = await pagination.listAiGatewayLocationPage({
+      businessId: focusedBusinessId,
+      searchPattern: "",
+      focusLocationId: beta.location1Id,
+      pageSize: 10,
+      requestedPage: 1,
+    });
+    expect(foreignLocation.rows.map((row) => row.id)).not.toContain(beta.location1Id);
+  });
+
+  it.skipIf(!rlsActive)("keeps tenant reads isolated while the explicit platform read spans tenants", async () => {
+    const tenantRows = await asBusiness(alpha.businessId, () =>
+      dbLib.query<{ id: string }>("SELECT id FROM businesses ORDER BY name"),
+    );
+    expect(tenantRows.rows.map((row) => row.id)).toEqual([alpha.businessId]);
+
+    const platformRows = await fleetPage({ pageSize: 10 });
+    expect(businessIds(platformRows.rows)).toEqual([alpha.businessId, beta.businessId]);
   });
 });
