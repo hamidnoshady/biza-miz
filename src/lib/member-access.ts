@@ -1,75 +1,64 @@
 /**
- * The signed-in member's effective access — one server-side read.
- *
- * Three pages used to carry their own copy of "SELECT role, permissions FROM
- * users …" plus the `effectivePermissions(parseOverrides(…))` resolution beside
- * it (the settings body, the workspace shell, the orders page), and every new
- * page that needed to gate a button by permission would have grown a fourth.
- * Copies of a security-relevant read are how one screen says «شما مجوز دارید»
- * while the route behind it says 403.
- *
- * The read runs inside an explicit `withTenant` scope, never the ambient one
- * `getSession()` sets: that scope was applied with `enterWith()`, which does not
- * survive a concurrent `withTenant()`/`withoutTenantScope()` `run()` call
- * elsewhere in the process, so an ambient-scope read can come back empty
- * non-deterministically — see the withTenantScope doc comment in auth.ts.
- *
- * Framework-free apart from `db`/`next` types: server components and route
- * handlers both call it; nothing client-side ever sees it.
+ * The signed-in member's effective access, resolved by the same canonical
+ * authorization evaluator used by API guards. Server-rendered capability-aware
+ * controls must not drift from hybrid/site denials, custom-role state, or live
+ * membership changes that the mutation route will enforce.
  */
 import type { SessionPayload } from "./auth-edge";
-import { query, withTenant } from "./db";
-import { effectivePermissions, parseOverrides, type Permission } from "./permissions";
+import { authorize, loadMembership } from "./authorize";
+import type { Permission } from "./permissions";
 import type { Role } from "./auth-edge";
 
 export interface MemberAccess {
   /** The role as the database holds it right now — the token's can lag a change. */
   role: Role;
   isActive: boolean;
-  /** The preset ∪ granted \ revoked set, resolved once, ready to hand to a UI. */
+  /** The canonical effective permission set, including hybrid/site denials. */
   permissions: Set<Permission>;
 }
 
 /**
- * The member behind a session: their role, their active flag, and their
- * effective permissions. `null` when the membership is gone — a removed
- * member, a stale token — which callers should treat as "signed out" rather
- * than as "no permissions at all".
+ * The member behind a session: their live role, active flag, and effective
+ * permissions. Returns null when canonical authorization denies the member.
  */
-export async function memberAccessFor(
-  session: SessionPayload,
-): Promise<MemberAccess | null> {
-  return memberAccessForUser(session.businessId, session.sub, session.locationId);
+export async function memberAccessFor(session: SessionPayload): Promise<MemberAccess | null> {
+  const decision = await authorize(session);
+  if (!decision.ok) return null;
+  return {
+    role: decision.membership.role,
+    isActive: decision.membership.isActive,
+    permissions: decision.membership.permissions,
+  };
 }
 
-/** The same live access lookup for a non-session caller, such as an MCP token's authorizing member. */
+/**
+ * The same canonical membership read for a non-session caller, such as an MCP
+ * token's authorizing member: identified by (businessId, userId) with no live
+ * session claims.
+ *
+ * Built on `loadMembership` — the very read `authorize()` runs — so there is
+ * one permission resolver, not a parallel one; but the result is returned
+ * even when the membership is *suspended*, because the MCP layer distinguishes
+ * "authorizer no longer exists" (null → the connection's branch-pinned system
+ * read consent) from "authorizer exists but is suspended" (a member with
+ * `isActive: false` → reads nothing). Folding suspended into null would grant
+ * the system read consent to suspended members.
+ */
 export async function memberAccessForUser(
   businessId: string,
   userId: string,
   locationId: string | null = null,
 ): Promise<MemberAccess | null> {
-  const { rows } = await withTenant(
+  const membership = await loadMembership({
+    sub: userId,
     businessId,
-    () =>
-      query<{ role: Role; permissions: unknown; is_active: boolean; custom_role_permissions: string[] | null }>(
-        `SELECT u.role, u.permissions, u.is_active,
-                CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE NULL END AS custom_role_permissions
-           FROM users u
-           LEFT JOIN tenant_roles tr ON tr.id = u.custom_role_id AND tr.business_id = u.business_id
-          WHERE u.id = $1 AND u.business_id = $2`,
-        [userId, businessId],
-      ),
-    { locationId, userId },
-  );
-  const member = rows[0];
-  if (!member) return null;
+    locationId,
+    fullName: "",
+  } as SessionPayload);
+  if (!membership) return null;
   return {
-    role: member.role,
-    isActive: member.is_active,
-    permissions: effectivePermissions(
-      member.role,
-      parseOverrides(member.permissions),
-      member.custom_role_permissions,
-    ),
+    role: membership.role,
+    isActive: membership.isActive,
+    permissions: membership.permissions,
   };
 }

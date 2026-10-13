@@ -397,7 +397,9 @@ export function AccountingManager({
               canBrowseMedia={canBrowseMedia}
             />
           ) : null}
-          {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
+          {section === "fiscal-periods" ? (
+            <FiscalPeriodsSection canManage={permissions.includes(PERMISSIONS.ledgerClosePeriod)} />
+          ) : null}
           {section === "directory" ? (
             <PartiesSection
               scope={partyScopeFor("accounting")}

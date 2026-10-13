@@ -16,16 +16,6 @@
  */
 
 const ACTION_LABELS: Record<string, string> = {
-  "commission.run.created": "ساخت دورهٔ تسویه پورسانت",
-  "commission.run.calculated": "محاسبهٔ دورهٔ تسویه پورسانت",
-  "commission.run.reviewed": "بازبینی دورهٔ تسویه پورسانت",
-  "commission.run.approved": "تأیید دورهٔ تسویه پورسانت",
-  "commission.run.rejected": "بازگشت دورهٔ تسویه به پیش‌نویس",
-  "commission.run.released": "آزادسازی دورهٔ تسویه برای پرداخت",
-  "commission.run.voided": "ابطال دورهٔ تسویه پورسانت",
-  "commission.run.closed": "بستن دورهٔ تسویه پورسانت",
-  "commission.payout.recorded": "پرداخت پورسانت",
-  "commission.payout.reversed": "ابطال پرداخت پورسانت",
   "employee.profile_updated": "ویرایش پروفایل کارمند",
   "employee.credential_issued": "صدور اعتبارنامه",
   "employee.credential_revoked": "ابطال اعتبارنامه",
@@ -69,6 +59,11 @@ const ACTION_LABELS: Record<string, string> = {
   "account.reactivated": "بازگردانی حساب از بایگانی",
   "account.contra_changed": "تغییر وضعیت حساب کاهنده",
   "account.deleted": "حذف حساب",
+  "fiscal_year.created": "تعریف سال مالی",
+  "fiscal_period.soft_closed": "بستن موقت دورهٔ مالی",
+  "fiscal_period.locked": "قفل‌کردن دورهٔ مالی",
+  "fiscal_period.reopened": "بازگشایی دورهٔ مالی",
+  "fiscal_year.closed": "بستن نهایی سال مالی",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -79,6 +74,8 @@ const ENTITY_LABELS: Record<string, string> = {
   order: "سفارش",
   location: "شعبه",
   account: "حساب",
+  fiscal_year: "سال مالی",
+  fiscal_period: "دورهٔ مالی",
   settings: "تنظیمات",
   menu_item: "آیتم منو",
   commission_run: "دورهٔ تسویه پورسانت",

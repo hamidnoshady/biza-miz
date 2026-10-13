@@ -12,6 +12,7 @@ describe("accountingSectionHeading", () => {
     expect(accountingSectionHeading("trial-balance").title).toBe("تراز آزمایشی");
     expect(accountingSectionHeading("manual").title).toBe("ثبت سند دستی");
     expect(accountingSectionHeading("settings").title).toBe("تنظیمات حسابداری");
+    expect(accountingSectionHeading("fiscal-periods").title).toBe("سال‌ها و دوره‌های مالی");
   });
 
   it("gives the canonical chart of accounts its own page header (issue #824 §13)", () => {

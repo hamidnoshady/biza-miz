@@ -12,6 +12,7 @@
  * rather than only through route handlers.
  */
 import type { Role } from "./auth";
+import { PERMISSION_DEPENDENCIES as PERMISSION_DEPENDENCIES_SOURCE } from "./permission-dependencies";
 
 /**
  * Every capability the system recognises. Coarse enough to stay manageable in
@@ -696,62 +697,7 @@ function isPermission(value: string): value is Permission {
  * `team.manage` on its only owner would be permanently locked out of itself,
  * so overrides are simply not applied to an absolute role.
  */
-const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>> = {
-  [PERMISSIONS.crmManage]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmMerge]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmConsentManage]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmConfigure]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmDelete]: [PERMISSIONS.crmView],
-  [PERMISSIONS.inventoryAdjust]: [PERMISSIONS.inventoryView],
-  [PERMISSIONS.purchasesManage]: [PERMISSIONS.inventoryView],
-  [PERMISSIONS.menuEdit]: [PERMISSIONS.menuView],
-  [PERMISSIONS.ledgerPost]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.ledgerPropose]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeExpensesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeReceivablesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financePayablesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeChequesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeInstallmentsManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeReconciliationManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeAssetsManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.payrollManage]: [PERMISSIONS.payrollView],
-  [PERMISSIONS.ledgerApprove]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.accountsEdit]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.reportsExport]: [PERMISSIONS.reportsView],
-  [PERMISSIONS.reportsManage]: [PERMISSIONS.reportsView],
-  [PERMISSIONS.reportsBusinessWide]: [PERMISSIONS.reportsView],
-  [PERMISSIONS.reportsDashboardDefaultsManage]: [PERMISSIONS.reportsView],
-  [PERMISSIONS.workspaceAdmin]: [PERMISSIONS.workspaceView, PERMISSIONS.workspaceManage],
-  [PERMISSIONS.reservationsManage]: [PERMISSIONS.reservationsView],
-  [PERMISSIONS.teamManage]: [PERMISSIONS.teamView],
-  [PERMISSIONS.teamPermissionsManage]: [PERMISSIONS.teamView],
-  [PERMISSIONS.woocommerceManage]: [PERMISSIONS.woocommerceView],
-  [PERMISSIONS.woocommerceSync]: [PERMISSIONS.woocommerceView],
-  [PERMISSIONS.woocommerceConfigure]: [PERMISSIONS.woocommerceView],
-  [PERMISSIONS.websiteManage]: [PERMISSIONS.websiteView],
-  [PERMISSIONS.websiteSettingsManage]: [PERMISSIONS.websiteView],
-  [PERMISSIONS.cmsContentManage]: [PERMISSIONS.cmsView],
-  [PERMISSIONS.cmsPublish]: [PERMISSIONS.cmsView],
-  [PERMISSIONS.cmsConfigure]: [PERMISSIONS.cmsView],
-  // Growth (issue #764). A write implies its own read only — never
-  // growth.view, which is the management dashboard: granting a cashier
-  // gift-card redemption must not hand them the business's KPIs.
-  [PERMISSIONS.campaignsManage]: [PERMISSIONS.campaignsView],
-  [PERMISSIONS.loyaltyManage]: [PERMISSIONS.loyaltyView],
-  [PERMISSIONS.loyaltyRedeem]: [PERMISSIONS.loyaltyView],
-  [PERMISSIONS.storeCreditIssue]: [PERMISSIONS.loyaltyView],
-  [PERMISSIONS.storeCreditPayout]: [PERMISSIONS.loyaltyView],
-  [PERMISSIONS.giftCardsIssue]: [PERMISSIONS.giftCardsView],
-  [PERMISSIONS.giftCardsRedeem]: [PERMISSIONS.giftCardsView],
-  [PERMISSIONS.commissionManage]: [PERMISSIONS.commissionView],
-  [PERMISSIONS.commissionCalculate]: [PERMISSIONS.commissionView],
-  [PERMISSIONS.commissionApprove]: [PERMISSIONS.commissionView],
-  [PERMISSIONS.commissionPayout]: [PERMISSIONS.commissionView],
-  [PERMISSIONS.commissionReverse]: [PERMISSIONS.commissionView],
-  [PERMISSIONS.integrationsManage]: [PERMISSIONS.integrationsView],
-  [PERMISSIONS.mediaManage]: [PERMISSIONS.mediaView],
-  [PERMISSIONS.billingManage]: [PERMISSIONS.billingView],
-};
+const PERMISSION_DEPENDENCIES = PERMISSION_DEPENDENCIES_SOURCE;
 
 /**
  * Every permission a member holding `permission` also holds: the transitive
