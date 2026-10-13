@@ -21,6 +21,7 @@
  *    corrected forward, never rewritten.
  */
 import type { PoolClient } from "pg";
+import type { RialText } from "./inventory-exact";
 import { getPool, query } from "./db";
 import { isUuid } from "./uuid";
 import { isValidIsoDate } from "./jalali";
@@ -1052,6 +1053,29 @@ async function readCarryForwardInput(
 }
 
 /**
+ * The API-shaped proposal line: the exact-money contract is decimal strings
+ * across the service boundary (JSON cannot carry BigInt — the route's
+ * `NextResponse.json` throws on it), so the bigint the rule computes is
+ * serialized here, once, for every caller.
+ */
+export type CarryForwardApiLine = Omit<CarryForwardLine, "debit" | "credit"> & {
+  debit: RialText;
+  credit: RialText;
+};
+
+function toCarryForwardApiLines(lines: readonly CarryForwardLine[]): CarryForwardApiLine[] {
+  return lines.map((l) => ({
+    accountId: l.accountId,
+    debit: l.debit.toString() as RialText,
+    credit: l.credit.toString() as RialText,
+    partyType: l.partyType,
+    partyId: l.partyId,
+    reference: l.reference,
+    sourceNote: l.sourceNote,
+  }));
+}
+
+/**
  * Generates (or returns, on retry) the carry-forward proposal for a fiscal
  * year transition: the prior year's closing balances become the next year's
  * draft opening set. Idempotent per prior year — the 0217 unique index makes
@@ -1062,7 +1086,7 @@ export async function generateCarryForward(params: {
   fromYearId: string;
   toYearId: string;
   actorId: string;
-}): Promise<{ setId: string; idempotent: boolean; lines: CarryForwardLine[]; notes: string[]; balanced: boolean }> {
+}): Promise<{ setId: string; idempotent: boolean; lines: CarryForwardApiLine[]; notes: string[]; balanced: boolean }> {
   if (!isUuid(params.fromYearId) || !isUuid(params.toYearId)) {
     throw new OpeningBalanceError("fiscal_year_not_found", 404);
   }
@@ -1107,7 +1131,13 @@ export async function generateCarryForward(params: {
     );
     if (prior[0]) {
       await client.query("COMMIT");
-      return { setId: prior[0].id, idempotent: true, lines: proposal.lines, notes: proposal.notes, balanced: proposal.balanced };
+      return {
+        setId: prior[0].id,
+        idempotent: true,
+        lines: toCarryForwardApiLines(proposal.lines),
+        notes: proposal.notes,
+        balanced: proposal.balanced,
+      };
     }
 
     const { rows: setRows } = await client.query<{ id: string }>(
@@ -1140,7 +1170,13 @@ export async function generateCarryForward(params: {
       [setId, proposal.totalDebit.toString(), proposal.totalCredit.toString()],
     );
     await client.query("COMMIT");
-    return { setId, idempotent: false, lines: proposal.lines, notes: proposal.notes, balanced: proposal.balanced };
+    return {
+      setId,
+      idempotent: false,
+      lines: toCarryForwardApiLines(proposal.lines),
+      notes: proposal.notes,
+      balanced: proposal.balanced,
+    };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
