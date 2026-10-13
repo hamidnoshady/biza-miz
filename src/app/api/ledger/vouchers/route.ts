@@ -4,11 +4,14 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { VOUCHER_DOCUMENT_TYPES, VOUCHER_DOCUMENT_TYPE_SPECS } from "@/lib/voucher-numbering";
 import {
   VoucherError,
+  fetchAllVoucherRegisterRows,
   listVoucherRegister,
   type VoucherRegisterFilters,
 } from "@/lib/voucher-numbering-service";
 import { isValidIsoDate } from "@/lib/jalali";
-import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import type { MoneyUnit } from "@/lib/money";
 
 /**
  * «دفتر اسناد» — the voucher register (issue #867 report "voucher register
@@ -20,6 +23,10 @@ import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
  * The book is backfilled before it is read (the service does it), so the
  * register and its export number the same rows — entries posted before this
  * feature get their numbers in journal order on first read.
+ *
+ * The export speaks the business's selected unit like every other report:
+ * amount columns are converted to it and labelled with it («بدهکار (تومان)»),
+ * and dates come out Jalali — the file a human opens is the screen's shape.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -61,44 +68,50 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     }
   }
 
-  const filters: VoucherRegisterFilters = {
+  const filters: Omit<VoucherRegisterFilters, "cursor" | "limit"> = {
     from: from ?? undefined,
     to: to ?? undefined,
     documentType: documentType as VoucherRegisterFilters["documentType"],
     sourceType: params.get("sourceType") ?? undefined,
     search: params.get("search") ?? undefined,
-    cursor,
-    limit: params.get("limit") ? Number(params.get("limit")) : undefined,
   };
 
   try {
-    const result = await listVoucherRegister(session.businessId, filters);
-
     if (format) {
+      // The complete filtered result, not one page: keyset pagination in the
+      // service until the cursor runs out.
+      const rows = await fetchAllVoucherRegisterRows(session.businessId, filters);
+      const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(
+        session.businessId,
+        SETTING_KEYS.businessPrefs,
+      );
+      const unit: MoneyUnit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
       const table = {
         columns: [
           { key: "number", label: "شماره سند" },
           { key: "year", label: "سال مالی" },
           { key: "book", label: "دفتر" },
+          // A Date object: the shared exporter renders it Jalali, Persian
+          // digits — the ISO string is the storage form, not the file form.
           { key: "date", label: "تاریخ" },
           { key: "source", label: "منبع" },
           { key: "memo", label: "شرح" },
           { key: "reference", label: "شماره مرجع" },
-          { key: "debit", label: "بدهکار" },
-          { key: "credit", label: "بستانکار" },
+          { key: "debit", label: moneyColumnLabel("بدهکار", unit) },
+          { key: "credit", label: moneyColumnLabel("بستانکار", unit) },
           { key: "createdBy", label: "ثبت‌کننده" },
           { key: "state", label: "وضعیت" },
         ],
-        rows: result.rows.map((r) => ({
+        rows: rows.map((r) => ({
           number: r.voucherNumber ?? "",
           year: r.fiscalYearLabel,
           book: VOUCHER_DOCUMENT_TYPE_SPECS[r.documentType].label,
-          date: r.entryDate,
+          date: new Date(`${r.entryDate}T00:00:00Z`),
           source: r.sourceType ?? "",
           memo: r.memo ?? "",
           reference: r.voucherReference ?? "",
-          debit: r.totalDebit,
-          credit: r.totalCredit,
+          debit: moneyExportCell(r.totalDebit, unit, format === "xlsx" ? "excel" : "csv"),
+          credit: moneyExportCell(r.totalCredit, unit, format === "xlsx" ? "excel" : "csv"),
           createdBy: r.createdByName ?? "",
           state: r.reversedAt ? "برگشته" : "فعال",
         })),
@@ -119,6 +132,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
           });
     }
 
+    const result = await listVoucherRegister(session.businessId, { ...filters, cursor, limit: params.get("limit") ? Number(params.get("limit")) : undefined });
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof VoucherError) {

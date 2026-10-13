@@ -21,6 +21,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { useMoney } from "@/components/money/money-context";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import printStyles from "./vouchers-print.module.css";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -54,8 +56,6 @@ import {
   Td,
   Th,
 } from "@/app/dashboard/data-table";
-
-const rials = new Intl.NumberFormat("fa-IR");
 
 interface RegisterRow {
   id: string;
@@ -182,6 +182,9 @@ export function VouchersSection({
   /** `ledger.approve` — the renumber half of the numbering (privileged). */
   canApprove: boolean;
 }) {
+  // The business's selected money unit: every amount read-out and every
+  // import/export is denominated in it, storage stays integer Rial.
+  const money = useMoney();
   // ------------------------------------------------------------ the register
   const [rows, setRows] = useState<RegisterRow[] | null>(null);
   const [nextCursor, setNextCursor] = useState<RegisterPage["nextCursor"]>(null);
@@ -601,10 +604,10 @@ export function VouchersSection({
             </select>
           </Field>
           <Field label="از تاریخ">
-            <input className={inputClass} type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
+            <JalaliDatePicker className={inputClass} value={from} onChange={setFrom} ariaLabel="از تاریخ دفتر اسناد" placeholder="از تاریخ" />
           </Field>
           <Field label="تا تاریخ">
-            <input className={inputClass} type="date" value={to} onChange={(event) => setTo(event.target.value)} />
+            <JalaliDatePicker className={inputClass} value={to} onChange={setTo} ariaLabel="تا تاریخ دفتر اسناد" placeholder="تا تاریخ" />
           </Field>
           <Field label="جست‌وجو" hint="در شرح و شمارهٔ مرجع">
             <input
@@ -648,7 +651,7 @@ export function VouchersSection({
                     <Td className="max-w-56 truncate" title={row.memo ?? ""}>
                       {row.memo ?? "—"}
                     </Td>
-                    <Td className="text-muted-foreground">{toPersianDigits(rials.format(Number(row.totalDebit)))}</Td>
+                    <Td className="text-muted-foreground">{money.formatText(row.totalDebit, { withUnit: false })}</Td>
                     <Td>
                       {row.reversedAt ? (
                         <StatusBadge tone="danger">برگشته</StatusBadge>
@@ -691,7 +694,7 @@ export function VouchersSection({
                   </p>
                   {row.memo ? <p className="mt-1 text-xs text-foreground">{row.memo}</p> : null}
                   <p className="mt-1 text-xs text-muted-foreground">
-                    جمع {toPersianDigits(rials.format(Number(row.totalDebit)))}
+                    جمع {money.formatText(row.totalDebit, { withUnit: false })}
                     {row.voucherReference ? ` — مرجع: ${row.voucherReference}` : ""}
                   </p>
                   {canApprove ? (
@@ -797,10 +800,10 @@ export function VouchersSection({
             </select>
           </Field>
           <Field label="از تاریخ">
-            <input className={inputClass} type="date" value={summaryFrom} onChange={(event) => setSummaryFrom(event.target.value)} />
+            <JalaliDatePicker className={inputClass} value={summaryFrom} onChange={setSummaryFrom} ariaLabel="از تاریخ جمع‌بندی" placeholder="از تاریخ" />
           </Field>
           <Field label="تا تاریخ">
-            <input className={inputClass} type="date" value={summaryTo} onChange={(event) => setSummaryTo(event.target.value)} />
+            <JalaliDatePicker className={inputClass} value={summaryTo} onChange={setSummaryTo} ariaLabel="تا تاریخ جمع‌بندی" placeholder="تا تاریخ" />
           </Field>
           <div className="flex items-end">
             <PrimaryButton
@@ -837,7 +840,7 @@ export function VouchersSection({
                       <span className="text-sm font-semibold text-foreground">{summary.label}</span>
                     </div>
                     <span className="text-xs text-muted-foreground">
-                      {toPersianDigits(summary.entryCount)} سند — {toPersianDigits(rials.format(Number(summary.totalDebit)))}
+                      {toPersianDigits(summary.entryCount)} سند — {money.formatText(summary.totalDebit, { withUnit: false })}
                       {summary.createdByName ? ` — ${summary.createdByName}` : ""}
                     </span>
                   </div>
@@ -868,7 +871,7 @@ export function VouchersSection({
                                   <td className="py-2 pr-2 text-muted-foreground">{formatJalali(source.entryDate)}</td>
                                   <td className="py-2 pr-2 text-muted-foreground">{ledgerSourceLabel(source.sourceType)}</td>
                                   <td className="py-2 pr-2 text-muted-foreground">
-                                    {toPersianDigits(rials.format(Number(source.totalDebit)))}
+                                    {money.formatText(source.totalDebit, { withUnit: false })}
                                   </td>
                                 </tr>
                               ))}
@@ -1013,8 +1016,8 @@ export function VouchersSection({
                   <th>تاریخ</th>
                   <th>منبع</th>
                   <th>شرح</th>
-                  <th>بدهکار</th>
-                  <th>بستانکار</th>
+                  <th>{`بدهکار (${money.unitLabel})`}</th>
+                  <th>{`بستانکار (${money.unitLabel})`}</th>
                   <th>مرجع</th>
                 </tr>
               </thead>
@@ -1028,8 +1031,8 @@ export function VouchersSection({
                     <td>{formatJalali(row.entryDate)}</td>
                     <td>{row.sourceType ? ledgerSourceLabel(row.sourceType) : "—"}</td>
                     <td>{row.memo ?? ""}</td>
-                    <td className={printStyles.num}>{toPersianDigits(rials.format(Number(row.totalDebit)))}</td>
-                    <td className={printStyles.num}>{toPersianDigits(rials.format(Number(row.totalCredit)))}</td>
+                    <td className={printStyles.num}>{money.formatText(row.totalDebit, { withUnit: false })}</td>
+                    <td className={printStyles.num}>{money.formatText(row.totalCredit, { withUnit: false })}</td>
                     <td className={printStyles.num}>{row.voucherReference ?? ""}</td>
                   </tr>
                 ))}
@@ -1076,8 +1079,8 @@ export function VouchersSection({
                       <th>شماره سند پایه</th>
                       <th>تاریخ</th>
                       <th>منبع</th>
-                      <th>بدهکار</th>
-                      <th>بستانکار</th>
+                      <th>{`بدهکار (${money.unitLabel})`}</th>
+                      <th>{`بستانکار (${money.unitLabel})`}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1088,8 +1091,8 @@ export function VouchersSection({
                         </td>
                         <td>{formatJalali(source.entryDate)}</td>
                         <td>{source.sourceType ? ledgerSourceLabel(source.sourceType) : "—"}</td>
-                        <td className={printStyles.num}>{toPersianDigits(rials.format(Number(source.totalDebit)))}</td>
-                        <td className={printStyles.num}>{toPersianDigits(rials.format(Number(source.totalCredit)))}</td>
+                        <td className={printStyles.num}>{money.formatText(source.totalDebit, { withUnit: false })}</td>
+                        <td className={printStyles.num}>{money.formatText(source.totalCredit, { withUnit: false })}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1097,10 +1100,10 @@ export function VouchersSection({
                     <tr>
                       <th colSpan={3}>جمع</th>
                       <td className={printStyles.num}>
-                        {toPersianDigits(rials.format(Number(summaryDetail.totalDebit)))}
+                        {money.formatText(summaryDetail.totalDebit, { withUnit: false })}
                       </td>
                       <td className={printStyles.num}>
-                        {toPersianDigits(rials.format(Number(summaryDetail.totalCredit)))}
+                        {money.formatText(summaryDetail.totalCredit, { withUnit: false })}
                       </td>
                     </tr>
                   </tfoot>

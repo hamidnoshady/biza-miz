@@ -715,7 +715,7 @@ describe("accruing a period (issue #835 §4, §12, §13)", () => {
     server.accrualResponses = [{ status: 409, body: { error: "fiscal_period_locked" } }];
     await mount();
     submit();
-    expect(await screen.findByText(/دورهٔ مالی این تاریخ بسته شده/)).toBeTruthy();
+    expect(await screen.findByText(/این تاریخ قفل شده/)).toBeTruthy();
   });
 });
 

@@ -92,6 +92,7 @@ function respondWith(script: Script) {
     // the RETURNING carries it the way the real column does.
     if (sql.includes("INSERT INTO journal_entries")) return [{ id: "entry-1", entry_date: "2026-01-31" }];
     if (sql.includes("INSERT INTO journal_lines")) return [];
+    if (sql.includes("SELECT set_config('app.fiscal_constructing_entry_id'")) return [];
     if (sql.includes("UPDATE periodic_closings SET journal_entry_id")) return [];
     return undefined;
   };

@@ -157,6 +157,55 @@ describe("findVoucherGaps", () => {
     expect(report.maxSequenceNo).toBe(0);
     expect(report.gapCount).toBe(0);
   });
+
+  it("shows the allocated trailing hole: counter handed out a number no live entry holds", () => {
+    // 1..7 live, the counter has already given out 8 (its entry was deleted,
+    // or renumbered away). The 8 is a real hole renumbering may never reuse,
+    // even though the in-use sequence looks contiguous.
+    const report = findVoucherGaps(
+      [1, 2, 3, 4, 5, 6, 7].map((n) => ({ sequenceNo: n })),
+      "journal",
+      "1404",
+      8,
+    );
+    expect(report.maxSequenceNo).toBe(8);
+    expect(report.gapCount).toBe(1);
+    expect(report.missing).toEqual([8]);
+  });
+
+  it("shows a whole allocated tail, not just the last number", () => {
+    // Counter at 10, only 1..3 live: 4..10 were handed out and then vanished.
+    const report = findVoucherGaps(
+      [1, 2, 3].map((n) => ({ sequenceNo: n })),
+      "manual",
+      "1404",
+      10,
+    );
+    expect(report.maxSequenceNo).toBe(10);
+    expect(report.gapCount).toBe(7);
+    expect(report.missing).toEqual([4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it("ignores an allocated max below the in-use maximum (legacy counter)", () => {
+    const report = findVoucherGaps(
+      [1, 2, 5].map((n) => ({ sequenceNo: n })),
+      "journal",
+      "1404",
+      3,
+    );
+    expect(report.maxSequenceNo).toBe(5);
+    expect(report.gapCount).toBe(2);
+    expect(report.missing).toEqual([3, 4]);
+  });
+
+  it("keeps the trailing hole inside the missing-list cap", () => {
+    const rows = [1, 2, 3].map((n) => ({ sequenceNo: n }));
+    const report = findVoucherGaps(rows, "journal", "1404", 10_000);
+    expect(report.gapCount).toBe(9_997);
+    expect(report.missing.length).toBe(500);
+    expect(report.missingTruncated).toBe(true);
+    expect(report.missing[0]).toBe(4);
+  });
 });
 
 describe("voucherNumberDisplay", () => {

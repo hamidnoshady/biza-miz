@@ -14,6 +14,10 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import {
+  setAuthorizationSnapshot,
+  withAuthorizationContext,
+} from "../src/lib/authorization-context";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -43,6 +47,30 @@ const D = {
   end1404: "2026-03-20",
   start1405: "2026-03-21",
 };
+
+/**
+ * Run `fn` as the test's owner, the way the real request path does.
+ *
+ * Migration 0216 turns the fiscal-period trigger into a live-authorization
+ * boundary: journal entries may land in `soft_closed`/`locked` periods only
+ * for the actor whose *session* authorized it. That session state travels to
+ * Postgres as the `app.fiscal_*` GUCs, which db.ts stamps from the active
+ * tenant scope plus the request's authorization snapshot (see
+ * src/lib/authorization-context.ts). The test user is an active owner, so the
+ * snapshot mirrors what `authorize()` resolves for `ledger.close_period`.
+ */
+async function asOwner<T>(fn: () => Promise<T>): Promise<T> {
+  return withAuthorizationContext(async () => {
+    setAuthorizationSnapshot({
+      businessId: biz.id,
+      userId: user.id,
+      membershipActive: true,
+      businessActive: true,
+      canCloseFiscalPeriod: true,
+    });
+    return dbLib.withTenant(biz.id, fn, { userId: user.id });
+  });
+}
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -541,8 +569,13 @@ async function closeYear1404WithActivity(): Promise<{ chequeId: string; assetId:
   for (const period of periods) {
     await fiscalService.setPeriodStatus(biz.id, period.id, "soft_closed", user.id);
   }
-  const close = await closingService.closeFiscalYear(biz.id, years["1404"], user.id);
-  expect(close.netIncome).toBe(4_800_000);
+  // Migration 0216 makes the period-lock trigger a live-authorization boundary:
+  // the closing entry may land in soft-closed periods only for the actor whose
+  // session authorized the close (app.fiscal_* GUCs stamped from the tenant
+  // scope + permission snapshot, exactly like the /close route's request).
+  const close = await asOwner(() => closingService.closeFiscalYear(biz.id, years["1404"], user.id));
+  // Exact-money contract: Rial amounts cross the service boundary as decimal strings.
+  expect(close.netIncome).toBe("4800000");
   expect(close.closingEntryId).toBeTruthy();
 
   return { chequeId: cheque.rows[0].id, assetId: asset.rows[0].id, closingEntryId: close.closingEntryId as string };
@@ -720,5 +753,217 @@ describe("the fiscal transition", () => {
       actorId: user.id,
     });
     expect(reconciliation?.matched).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The reviewed fixes: year identity without a row, attribution on the edit
+// round-trip, party consistency at the boundary, the unlinked supplier, and
+// file import through the one codec layer.
+// ---------------------------------------------------------------------------
+
+describe("the reviewed boundary fixes", () => {
+  it("rejects an effective date in a different Jalali year than the label — with and without a fiscal-year row", async () => {
+    // With the 1404 row in place (2025-03-21 → 2026-03-20), a 1405 date is out.
+    await expect(
+      openingService.createOpeningSet({
+        businessId: biz.id,
+        fiscalYearLabel: "1404",
+        effectiveDate: D.start1405,
+        lines: cashEquityLines(),
+        actorId: user.id,
+      }),
+    ).rejects.toThrow("effective_date_outside_fiscal_year");
+
+    // Without any fiscal-year row the containment check has nothing to
+    // compare against — the calendar still answers, and still rejects.
+    await db.query("DELETE FROM fiscal_years WHERE business_id = $1", [biz.id]);
+    await expect(
+      openingService.createOpeningSet({
+        businessId: biz.id,
+        fiscalYearLabel: "1404",
+        effectiveDate: D.start1405, // 2026-03-21 is Farvardin 1, 1405
+        lines: cashEquityLines(),
+        actorId: user.id,
+      }),
+    ).rejects.toThrow("effective_date_outside_fiscal_year");
+
+    // And a matching date passes the check with no row at all: the set gets
+    // the label, the date and a null fiscal_year_id.
+    const { setId } = await openingService.createOpeningSet({
+      businessId: biz.id,
+      fiscalYearLabel: "1404",
+      effectiveDate: D.inside1404,
+      lines: cashEquityLines(),
+      actorId: user.id,
+    });
+    const detail = await openingService.getOpeningSet(biz.id, setId);
+    expect(detail?.set).toMatchObject({ fiscalYearLabel: "1404", fiscalYearId: null, effectiveDate: D.inside1404 });
+  });
+
+  it("applies the same parameter rules to the import preview", async () => {
+    await db.query("DELETE FROM fiscal_years WHERE business_id = $1", [biz.id]);
+    await expect(
+      openingService.previewOpeningImport({
+        businessId: biz.id,
+        fiscalYearLabel: "1404",
+        effectiveDate: D.start1405,
+        lines: cashEquityLines(),
+      }),
+    ).rejects.toThrow("effective_date_outside_fiscal_year");
+  });
+
+  it("keeps line attribution through the edit round-trip, and enforces party consistency at the boundary", async () => {
+    const { setId } = await openingService.createOpeningSet({
+      businessId: biz.id,
+      fiscalYearLabel: "1405",
+      effectiveDate: D.start1405,
+      lines: [
+        { accountId: acct["1200"], debit: 2_000_000, credit: 0, partyType: "customer", partyId: party.customerOne },
+        { accountId: acct["1100"], debit: 0, credit: 2_000_000 },
+      ],
+      actorId: user.id,
+    });
+    let detail = await openingService.getOpeningSet(biz.id, setId);
+    expect(detail?.lines.find((l) => l.partyType === "customer")).toMatchObject({ partyId: party.customerOne });
+
+    // The consistent pair survives an edit untouched.
+    await openingService.updateOpeningSetLines({
+      businessId: biz.id,
+      setId,
+      lines: [
+        { accountId: acct["1200"], debit: 2_000_000, credit: 0, partyType: "customer", partyId: party.customerOne },
+        { accountId: acct["1100"], debit: 0, credit: 2_000_000 },
+      ],
+      actorId: user.id,
+    });
+    detail = await openingService.getOpeningSet(biz.id, setId);
+    expect(detail?.lines.find((l) => l.partyType === "customer")).toMatchObject({ partyId: party.customerOne });
+
+    // A type without an id is not stored: the boundary drops the pair to the
+    // unattributed bucket — 0217's party_consistent makes the raw pair illegal,
+    // so no path may hand it to the table.
+    await openingService.updateOpeningSetLines({
+      businessId: biz.id,
+      setId,
+      lines: [
+        { accountId: acct["1200"], debit: 2_000_000, credit: 0, partyType: "customer", partyId: null },
+        { accountId: acct["1100"], debit: 0, credit: 2_000_000 },
+      ],
+      actorId: user.id,
+    });
+    detail = await openingService.getOpeningSet(biz.id, setId);
+    const arLine = detail?.lines.find((l) => l.accountId === acct["1200"]);
+    expect(arLine?.partyType).toBeNull();
+    expect(arLine?.partyId).toBeNull();
+  });
+
+  it("carries an unlinked supplier over as a named, type-less line", async () => {
+    // A supplier with no party row (location-only) — the 0217-consistent
+    // carry-forward must name it in the reference and carry no party type.
+    const supplierRow = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name, party_id) VALUES ($1, 'تأمین‌کننده بدون طرف', NULL) RETURNING id",
+      [biz.locationId],
+    );
+    const unlinked = supplierRow.rows[0].id;
+
+    // One credit purchase from it in 1404, then close the year.
+    const purchase = await db.query<{ id: string }>(
+      `INSERT INTO purchases (location_id, supplier_id, status, total, settlement_method, note, received_at)
+       VALUES ($1, $2, 'received', 1000000, 'credit', 'خرید از تأمین‌کننده بدون طرف', $3) RETURNING id`,
+      [biz.locationId, unlinked, D.inside1404],
+    );
+    await postEntry(D.inside1404, "purchase", purchase.rows[0].id, "خرید نسیه", [
+      { accountId: acct["1300"], debit: 1_000_000, credit: 0 },
+      { accountId: acct["2100"], debit: 0, credit: 1_000_000 },
+    ]);
+    const periods = await fiscalService.listPeriods(biz.id, years["1404"]);
+    for (const period of periods) {
+      await fiscalService.setPeriodStatus(biz.id, period.id, "soft_closed", user.id);
+    }
+    await asOwner(() => closingService.closeFiscalYear(biz.id, years["1404"], user.id));
+
+    const generated = await openingService.generateCarryForward({
+      businessId: biz.id,
+      fromYearId: years["1404"],
+      toYearId: years["1405"],
+      actorId: user.id,
+    });
+    expect(generated.balanced).toBe(true);
+
+    const detail = await openingService.getOpeningSet(biz.id, generated.setId);
+    const apLines = (detail?.lines ?? []).filter((l) => l.accountId === acct["2100"]);
+    expect(apLines).toHaveLength(1);
+    expect(apLines[0]).toMatchObject({
+      debit: "0",
+      credit: "1000000",
+      partyType: null,
+      partyId: null,
+      reference: "تأمین‌کننده بدون طرف",
+    });
+    // The set's own invariant: every line party-consistent, so the insert
+    // could not have tripped 0217's constraint.
+    for (const l of detail?.lines ?? []) {
+      expect((l.partyType === null) === (l.partyId === null)).toBe(true);
+    }
+  });
+
+  it("imports a CSV file in the business's selected unit, resolving accounts by code and name", async () => {
+    // Make this business a Rial business: the file's amounts are Rial, not Toman.
+    await db.query(
+      `INSERT INTO settings (business_id, location_id, key, value)
+       VALUES ($1, NULL, 'business.prefs', $2)
+       ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [biz.id, JSON.stringify({ currencyDisplay: "rial" })],
+    );
+
+    const { parseOpeningImportFile } = await import("../src/lib/opening-balances-service");
+    const csv = [
+      "کد حساب,نام,بدهکار,بستانکار,مرجع",
+      "1100,Cash,1000000,,",
+      "1200,Accounts Receivable,,2000000,برگه",
+      ",Cash,3000000,5000000,",
+    ].join("\n");
+
+    const rialResult = await parseOpeningImportFile({
+      businessId: biz.id,
+      filename: "opening.csv",
+      buffer: Buffer.from(csv, "utf8"),
+      unit: "rial",
+    });
+    expect(rialResult.problems).toEqual([]);
+    expect(rialResult.lines).toHaveLength(3);
+    expect(rialResult.lines[0]).toMatchObject({ accountId: acct["1100"], debit: 1_000_000, credit: 0 });
+    expect(rialResult.lines[1]).toMatchObject({
+      accountId: acct["1200"],
+      debit: 0,
+      credit: 2_000_000,
+      reference: "برگه",
+    });
+    // A name column resolves against the tenant's own chart (Cash = 1100).
+    expect(rialResult.lines[2]).toMatchObject({ accountId: acct["1100"], debit: 3_000_000, credit: 5_000_000 });
+
+    // The same file for a Toman business means Toman: ×10 in storage.
+    const tomanResult = await parseOpeningImportFile({
+      businessId: biz.id,
+      filename: "opening.csv",
+      buffer: Buffer.from(csv, "utf8"),
+      unit: "toman",
+    });
+    expect(tomanResult.lines[0]).toMatchObject({ debit: 10_000_000 });
+
+    // Row problems, not silent 0s: a decimal and an unknown account.
+    const badCsv = ["کد,بدهکار,بستانکار", "9999,100,", "1100,12.5,"].join("\n");
+    const badResult = await parseOpeningImportFile({
+      businessId: biz.id,
+      filename: "bad.csv",
+      buffer: Buffer.from(badCsv, "utf8"),
+      unit: "rial",
+    });
+    expect(badResult.lines).toEqual([]);
+    const kinds = badResult.problems.map((p) => p.problem).sort();
+    expect(kinds).toEqual(["invalid_amount", "missing_account"]);
+    expect(badResult.problems.find((p) => p.problem === "missing_account")?.rowIndex).toBe(2);
+    expect(badResult.problems.find((p) => p.problem === "invalid_amount")?.rowIndex).toBe(3);
   });
 });

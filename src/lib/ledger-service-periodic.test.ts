@@ -50,6 +50,7 @@ function scriptedClient(accounts: Record<string, string> = ACCOUNTS) {
       if (flat.includes("FROM voucher_sequences")) return { rows: [{ last_number: "0" }] };
       if (flat.includes("UPDATE voucher_sequences")) return { rows: [] };
       if (flat.includes("UPDATE journal_entries")) return { rows: [] };
+      if (flat.includes("SELECT set_config('app.fiscal_constructing_entry_id'")) return { rows: [] };
       throw new Error(`unexpected query: ${flat}`);
     },
   } as unknown as PoolClient;

@@ -12,8 +12,8 @@ const VALID_STATUSES: FiscalPeriodStatus[] = ["open", "soft_closed", "locked"];
 
 /**
  * Moves a period between open / soft-closed / locked / reopened.
- * `ledger.close_period` — owner and accountant, the resolved open question
- * on who may act on a closed-but-not-locked period; the same permission
+ * `ledger.close_period` — the same effective capability used by the database
+ * for posting to a closed-but-not-locked period; the same permission
  * gates both closing it and (later) posting into it while it's soft-closed,
  * since both are the same trust boundary.
  */

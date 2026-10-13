@@ -12,7 +12,7 @@
  * journal uses: `ledger.post` moves a draft forward, `ledger.approve`
  * decides.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -22,8 +22,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { useMoney } from "@/components/money/money-context";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
+import { effectiveDateMatchesFiscalYear } from "@/lib/opening-balances";
 import {
   EmptyState,
   LoadingSkeleton,
@@ -49,8 +52,6 @@ import {
 import type { AccountRow } from "./accounting-manager";
 import { createPortal } from "react-dom";
 import printStyles from "./opening-balances-print.module.css";
-
-const rials = new Intl.NumberFormat("fa-IR");
 
 type SetStatus = "draft" | "review" | "approved" | "posted" | "reversed";
 
@@ -129,6 +130,19 @@ interface ImportPreview {
   totalCredit: string;
   lineCount: number;
   accounts: { accountId: string; code: string; name: string; debit: string; credit: string }[];
+  /** File-path problems (row-numbered) — the JSON path never has any. */
+  problems?: { rowIndex: number | null; problem: string; detail?: string }[];
+  /** The server-normalized lines the preview validated — the create resends
+   * exactly these (a file's account names were resolved server-side). */
+  lines?: {
+    accountId: string;
+    debit: number;
+    credit: number;
+    partyType: string | null;
+    partyId: string | null;
+    reference: string | null;
+    sourceNote: string | null;
+  }[];
 }
 
 interface DraftLine {
@@ -137,6 +151,11 @@ interface DraftLine {
   credit: string;
   reference: string;
   sourceNote: string;
+  /** "" = unattributed; otherwise one of the party types (0217 constraint). */
+  partyType: string;
+  partyId: string;
+  /** Display name for the picked party (or the fallback reference text). */
+  partyName: string;
 }
 
 const STATUS_LABELS: Record<SetStatus, string> = {
@@ -159,6 +178,43 @@ const SOURCE_LABELS: Record<OpeningSet["source"], string> = {
   manual: "دستی",
   import: "در‌آورده",
   carry_forward: "انتقال سال",
+};
+
+/** A file-import problem, as the preview screen shows it. */
+function importProblemText(
+  problem: { rowIndex: number | null; problem: string; detail?: string },
+  unitLabel: string,
+): string {
+  const row = problem.rowIndex !== null ? `خط ${toPersianDigits(problem.rowIndex)}: ` : "";
+  switch (problem.problem) {
+    case "unsupported_format":
+      return "فقط فایل CSV یا XLSX پشتیبانی می‌شود.";
+    case "empty_file":
+      return "فایل خالی است یا سطر سرستون ندارد.";
+    case "unrecognised_headers":
+      return "ستون‌های فایل شناخته نشد؛ از «کد» یا «نام»، «بدهکار» و «بستانکار» (فارسی یا انگلیسی) استفاده کنید.";
+    case "missing_account_column":
+      return "ستون حساب (کد یا نام) در فایل پیدا نشد.";
+    case "missing_amount_columns":
+      return "ستون بدهکار یا بستانکار در فایل پیدا نشد.";
+    case "too_many_rows":
+      return `فایل بیش از سقف مجاز (${problem.detail ? toPersianDigits(problem.detail) : "۵۰۰"}) خط دارد.`;
+    case "invalid_amount":
+      return `${row}مبلغ عدد صحیح ${unitLabel} نیست — ${problem.detail ?? ""}`;
+    case "missing_account":
+      return `${row}حساب در سرفصل پیدا نشد — ${problem.detail ?? ""}`;
+    default:
+      return problem.detail ?? problem.problem;
+  }
+}
+
+/** Persian labels of the line attribution types (0217's party_type values). */
+const PARTY_TYPE_LABELS: Record<string, string> = {
+  customer: "مشتری",
+  supplier: "تأمین‌کننده",
+  cheque: "چک",
+  fixed_asset: "دارایی ثابت",
+  inventory: "موجودی",
 };
 
 function errorMessage(code: string | undefined): string {
@@ -196,7 +252,7 @@ function errorMessage(code: string | undefined): string {
 }
 
 function emptyDraftLine(): DraftLine {
-  return { accountId: "", debit: "", credit: "", reference: "", sourceNote: "" };
+  return { accountId: "", debit: "", credit: "", reference: "", sourceNote: "", partyType: "", partyId: "", partyName: "" };
 }
 
 export function OpeningBalancesSection({
@@ -213,6 +269,9 @@ export function OpeningBalancesSection({
   /** `ledger.approve` — the approve/post/reverse half of the set's life. */
   canApprove: boolean;
 }) {
+  // The business's selected money unit: every read-out and every typed amount
+  // is denominated in it, storage stays integer Rial.
+  const money = useMoney();
   const [sets, setSets] = useState<OpeningSet[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -261,9 +320,58 @@ export function OpeningBalancesSection({
   const [editorOpen, setEditorOpen] = useState(false);
   const [draftLines, setDraftLines] = useState<DraftLine[]>([emptyDraftLine()]);
   const [draftNote, setDraftNote] = useState("");
+  // Line attribution: a search per line (the directory is the platform's
+  // /api/parties — customers for A/R lines, suppliers for A/P lines).
+  const [partySearch, setPartySearch] = useState<Record<number, string>>({});
+  const [partyResults, setPartyResults] = useState<Record<number, { id: string; name: string }[]>>({});
+  const partySearchTimers = useRef<Record<number, number>>({});
+  // Latest term per line, so a late answer for an older term never paints.
+  const partySearchLatest = useRef<Record<number, string>>({});
+
+  function setDraftLine(index: number, patch: Partial<DraftLine>) {
+    setDraftLines((lines) => lines.map((l, i) => (i === index ? { ...l, ...patch } : l)));
+  }
+
+  function searchLineParties(index: number, term: string) {
+    const line = draftLines[index];
+    if (!line || (line.partyType !== "customer" && line.partyType !== "supplier")) return;
+    setPartySearch((current) => ({ ...current, [index]: term }));
+    partySearchLatest.current[index] = term;
+    if (partySearchTimers.current[index]) window.clearTimeout(partySearchTimers.current[index]);
+    partySearchTimers.current[index] = window.setTimeout(async () => {
+      try {
+        const role = line.partyType === "customer" ? "Customer" : "Supplier";
+        const { ok, data } = await api<{ parties?: { id: string; name: string }[] }>(
+          `/api/parties?q=${encodeURIComponent(term)}&role=${role}&limit=12`,
+        );
+        if (partySearchLatest.current[index] !== term) return;
+        setPartyResults((current) => ({
+          ...current,
+          [index]: ok ? (data.parties ?? []).map((p) => ({ id: p.id, name: p.name })) : [],
+        }));
+      } catch {
+        if (partySearchLatest.current[index] !== term) return;
+        setPartyResults((current) => ({ ...current, [index]: [] }));
+      }
+    }, 250);
+  }
+
+  function pickLineParty(index: number, id: string, name: string) {
+    setDraftLine(index, { partyId: id, partyName: name });
+    setPartySearch((current) => ({ ...current, [index]: "" }));
+    setPartyResults((current) => ({ ...current, [index]: [] }));
+  }
+
+  function clearLineParty(index: number) {
+    setDraftLine(index, { partyType: "", partyId: "", partyName: "" });
+    setPartySearch((current) => ({ ...current, [index]: "" }));
+    setPartyResults((current) => ({ ...current, [index]: [] }));
+  }
 
   // Import / preview
   const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<"file" | "json">("file");
+  const [importFile, setImportFile] = useState<File | null>(null);
   const [importText, setImportText] = useState("");
   const [importYear, setImportYear] = useState("");
   const [importDate, setImportDate] = useState("");
@@ -432,10 +540,17 @@ export function OpeningBalancesSection({
       detail.lines.length > 0
         ? detail.lines.map((l) => ({
             accountId: l.accountId,
-            debit: l.debit === "0" ? "" : l.debit,
-            credit: l.credit === "0" ? "" : l.credit,
+            // The stored amount is integer Rial; the input is denominated in
+            // the business's selected unit, so convert on the way in…
+            debit: l.debit === "0" ? "" : money.toInputText(l.debit),
+            credit: l.credit === "0" ? "" : money.toInputText(l.credit),
             reference: l.reference ?? "",
             sourceNote: l.sourceNote ?? "",
+            // …and the party attribution rides the round-trip untouched, so an
+            // edit never silently un-attributes a line (0217 constraint).
+            partyType: l.partyType ?? "",
+            partyId: l.partyId ?? "",
+            partyName: l.partyName ?? "",
           }))
         : [emptyDraftLine()],
     );
@@ -443,22 +558,55 @@ export function OpeningBalancesSection({
     setEditorOpen(true);
   }
 
-  function parseAmount(value: string): number {
-    const digits = value.replace(/[٠-۹]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d))).replace(/\D/g, "");
-    const n = Number(digits);
-    return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+  /**
+   * One typed amount → integer Rial, in the business's unit. `null` means the
+   * text is not a whole amount of that unit (decimal, garbage, negative, or
+   * out of range) — the save is refused, never silently coerced to 0.
+   */
+  function parseAmount(value: string): number | null {
+    const text = value.trim();
+    if (text === "") return 0;
+    try {
+      const rial = money.parse(text);
+      return rial >= 0 ? rial : null;
+    } catch {
+      return null;
+    }
   }
 
   async function saveEditor() {
     if (!detail || mutation) return;
-    const lines = draftLines
-      .filter((l) => l.accountId !== "" || parseAmount(l.debit) !== 0 || parseAmount(l.credit) !== 0)
-      .map((l) => ({
-        accountId: l.accountId,
-        debit: parseAmount(l.debit),
-        credit: parseAmount(l.credit),
-        reference: l.reference.trim() || null,
-        sourceNote: l.sourceNote.trim() || null,
+    const parsed = draftLines.map((l) => ({
+      l,
+      debit: parseAmount(l.debit),
+      credit: parseAmount(l.credit),
+    }));
+    if (parsed.some((p) => p.debit === null || p.credit === null)) {
+      setError(`مبالغ باید عدد صحیح به ${money.unitLabel} باشد — کسری و منفی قابل قبول نیست؛ خط نامعتبر را اصلاح کنید.`);
+      return;
+    }
+    // A party type without a picked party would be dropped by the boundary
+    // validation (0217's party-consistent rule) — say so instead of losing it.
+    if (
+      parsed.some(
+        (p) =>
+          (p.l.partyType === "customer" || p.l.partyType === "supplier") &&
+          p.l.partyId.trim() === "",
+      )
+    ) {
+      setError("برای خطی که نوع تخصیص «مشتری» یا «تأمین‌کننده» دارد، باید یک طرف انتخاب شود (یا تخصیص را خالی بگذارید).");
+      return;
+    }
+    const lines = parsed
+      .filter((p) => p.l.accountId !== "" || p.debit !== 0 || p.credit !== 0)
+      .map((p) => ({
+        accountId: p.l.accountId,
+        debit: p.debit,
+        credit: p.credit,
+        partyType: p.l.partyType || null,
+        partyId: p.l.partyId || null,
+        reference: p.l.reference.trim() || null,
+        sourceNote: p.l.sourceNote.trim() || null,
       }));
     setMutation("save-lines");
     setError("");
@@ -481,14 +629,45 @@ export function OpeningBalancesSection({
     }
   }
 
-  async function previewImport() {
-    setError("");
-    setImportPreview(null);
+  /** The import source as the active mode provides it. */
+  function importJsonLines(): unknown | { error: string } {
     let parsed: unknown;
     try {
       parsed = JSON.parse(importText);
     } catch {
-      setError("متن واردشده باید یک آرایهٔ JSON از خطوط باشد.");
+      return { error: "متن واردشده باید یک آرایهٔ JSON از خطوط باشد." };
+    }
+    return parsed;
+  }
+
+  async function previewImport() {
+    setError("");
+    setImportPreview(null);
+    if (importFile === null && importMode === "file") {
+      setError("فایلی انتخاب نشده است (CSV یا XLSX).");
+      return;
+    }
+    if (importFile !== null && importMode === "file") {
+      // File mode: the server parses (one codec layer, selected unit, account
+      // resolution) and answers with the validated lines to confirm.
+      const form = new FormData();
+      form.set("file", importFile);
+      form.set("fiscalYearLabel", importYear);
+      form.set("effectiveDate", importDate || "");
+      const { ok, data } = await api<ImportPreview & { error?: string }>(
+        "/api/ledger/opening-balances/import",
+        { method: "POST", body: form },
+      );
+      if (!ok) {
+        setError(errorMessage(data.error));
+        return;
+      }
+      setImportPreview(data);
+      return;
+    }
+    const parsed = importJsonLines();
+    if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+      setError((parsed as { error: string }).error);
       return;
     }
     const { ok, data } = await api<ImportPreview & { error?: string }>("/api/ledger/opening-balances/import", {
@@ -504,12 +683,10 @@ export function OpeningBalancesSection({
 
   async function createFromImport() {
     if (!importPreview?.valid || mutation) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(importText);
-    } catch {
-      return;
-    }
+    // The preview validated these exact lines — resend them, whether they came
+    // from a file (accounts resolved server-side) or the JSON textarea.
+    const lines = importPreview.lines;
+    if (!lines || lines.length === 0) return;
     setMutation("import");
     setError("");
     try {
@@ -520,8 +697,11 @@ export function OpeningBalancesSection({
           body: JSON.stringify({
             fiscalYearLabel: importYear,
             effectiveDate: importDate || null,
-            lines: parsed,
-            note: "در‌آورده شده از فایل",
+            lines,
+            note:
+              importMode === "file"
+                ? `در‌آورده شده از فایل${importFile ? " «" + importFile.name + "»" : ""}`
+                : "در‌آورده شده",
           }),
         },
       );
@@ -532,6 +712,7 @@ export function OpeningBalancesSection({
       setImportOpen(false);
       setImportPreview(null);
       setImportText("");
+      setImportFile(null);
       setNotice("پیش‌نویس از دادهٔ در‌آورده‌شده ساخته شد.");
       setSelectedId(data.setId);
       setRefreshKeySafe();
@@ -717,8 +898,8 @@ export function OpeningBalancesSection({
                     </span>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    جمع بدهکار {toPersianDigits(rials.format(Number(set.totalDebit)))} — بستانکار{" "}
-                    {toPersianDigits(rials.format(Number(set.totalCredit)))}
+                    جمع بدهکار {money.formatText(set.totalDebit, { withUnit: false })} — بستانکار{" "}
+                    {money.formatText(set.totalCredit, { withUnit: false })}
                     {set.createdByName ? ` — ثبت‌کننده: ${set.createdByName}` : ""}
                   </p>
                 </button>
@@ -804,8 +985,8 @@ export function OpeningBalancesSection({
                         <span className="font-medium">{line.accountCode}</span>{" "}
                         <span className="text-muted-foreground">{line.accountName}</span>
                       </Td>
-                      <Td>{line.debit === "0" ? "—" : toPersianDigits(rials.format(Number(line.debit)))}</Td>
-                      <Td>{line.credit === "0" ? "—" : toPersianDigits(rials.format(Number(line.credit)))}</Td>
+                      <Td>{line.debit === "0" ? "—" : money.formatText(line.debit, { withUnit: false })}</Td>
+                      <Td>{line.credit === "0" ? "—" : money.formatText(line.credit, { withUnit: false })}</Td>
                       <Td className="text-muted-foreground">
                         {line.partyName ? `${line.partyType ?? ""} ${line.partyName}`.trim() : line.reference ?? "—"}
                       </Td>
@@ -825,7 +1006,7 @@ export function OpeningBalancesSection({
                       <span className="text-xs text-muted-foreground">
                         {line.debit === "0" && line.credit === "0"
                           ? "—"
-                          : `${line.debit !== "0" ? `ب‌: ${toPersianDigits(rials.format(Number(line.debit)))} ` : ""}${line.credit !== "0" ? `س‌: ${toPersianDigits(rials.format(Number(line.credit)))}` : ""}`}
+                          : `${line.debit !== "0" ? `ب‌: ${money.formatText(line.debit, { withUnit: false })} ` : ""}${line.credit !== "0" ? `س‌: ${money.formatText(line.credit, { withUnit: false })}` : ""}`}
                       </span>
                     </div>
                     {(line.partyName || line.reference || line.sourceNote) ? (
@@ -876,15 +1057,15 @@ export function OpeningBalancesSection({
                               {row.label}
                             </td>
                             <td className="py-2 pr-2 text-muted-foreground">
-                              {toPersianDigits(rials.format(Number(row.expectedDebit)))}
+                              {money.formatText(row.expectedDebit, { withUnit: false })}
                             </td>
                             <td className="py-2 pr-2 text-muted-foreground">
-                              {toPersianDigits(rials.format(Number(row.expectedCredit)))}
+                              {money.formatText(row.expectedCredit, { withUnit: false })}
                             </td>
-                            <td className="py-2 pr-2">{toPersianDigits(rials.format(Number(row.actualDebit)))}</td>
-                            <td className="py-2 pr-2">{toPersianDigits(rials.format(Number(row.actualCredit)))}</td>
+                            <td className="py-2 pr-2">{money.formatText(row.actualDebit, { withUnit: false })}</td>
+                            <td className="py-2 pr-2">{money.formatText(row.actualCredit, { withUnit: false })}</td>
                             <td className={`py-2 pr-2 ${row.matched ? "text-muted-foreground" : "font-medium text-destructive"}`}>
-                              {row.matched ? "—" : toPersianDigits(rials.format(Number(row.difference)))}
+                              {row.matched ? "—" : money.formatText(row.difference, { withUnit: false })}
                             </td>
                           </tr>
                         ))}
@@ -943,7 +1124,9 @@ export function OpeningBalancesSection({
           <DialogHeader>
             <DialogTitle>ویرایش خطوط مجموعه</DialogTitle>
             <DialogDescription>
-              هر خط یک حساب، فقط یک طرف (بدهکار یا بستانکار) و مبلغ به ریال می‌خواهد. مجموع دو طرف باید برابرسند باشد.
+              هر خط یک حساب، فقط یک طرف (بدهکار یا بستانکار) و مبلغ به {money.unitLabel} می‌خواهد. تخصیص خط
+              (مشتری/تأمین‌کننده یا مرجع) در همین خط ویرایش می‌شود و در ذخیره حفظ می‌ماند. مجموع دو طرف باید
+              برابرسند باشد.
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-[50vh] space-y-2 overflow-y-auto pl-2">
@@ -969,7 +1152,7 @@ export function OpeningBalancesSection({
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-xs font-medium text-foreground">بدهکار (ریال)</span>
+                  <span className="mb-1 block text-xs font-medium text-foreground">{`بدهکار (${money.unitLabel})`}</span>
                   <input
                     className={inputClass}
                     inputMode="numeric"
@@ -981,7 +1164,7 @@ export function OpeningBalancesSection({
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-xs font-medium text-foreground">بستانکار (ریال)</span>
+                  <span className="mb-1 block text-xs font-medium text-foreground">{`بستانکار (${money.unitLabel})`}</span>
                   <input
                     className={inputClass}
                     inputMode="numeric"
@@ -1004,6 +1187,92 @@ export function OpeningBalancesSection({
                     }
                   />
                 </label>
+                <div className="sm:col-span-3 rounded-lg border border-dashed border-border/80 p-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="flex items-center gap-2 text-xs font-medium text-foreground">
+                      تخصیص (اختیاری)
+                      <select
+                        className={`${inputClass} h-8 w-44 text-xs`}
+                        value={line.partyType}
+                        onChange={(event) =>
+                          setDraftLine(index, {
+                            partyType: event.target.value,
+                            partyId: "",
+                            partyName: "",
+                          })
+                        }
+                      >
+                        <option value="">بدون تخصیص</option>
+                        <option value="customer">مشتری</option>
+                        <option value="supplier">تأمین‌کننده</option>
+                        {line.partyType !== "" &&
+                        line.partyType !== "customer" &&
+                        line.partyType !== "supplier" ? (
+                          <option value={line.partyType}>
+                            {PARTY_TYPE_LABELS[line.partyType] ?? line.partyType}
+                          </option>
+                        ) : null}
+                      </select>
+                    </label>
+                    {line.partyType === "customer" || line.partyType === "supplier" ? (
+                      <div className="min-w-52 flex-1">
+                        <input
+                          className={inputClass}
+                          value={partySearch[index] ?? ""}
+                          placeholder={
+                            line.partyType === "customer" ? "جست‌وجوی مشتری…" : "جست‌وجوی تأمین‌کننده…"
+                          }
+                          onChange={(event) => searchLineParties(index, event.target.value)}
+                          aria-label={
+                            line.partyType === "customer"
+                              ? `جست‌وجوی مشتری خط ${index + 1}`
+                              : `جست‌وجوی تأمین‌کننده خط ${index + 1}`
+                          }
+                        />
+                        {(partyResults[index] ?? []).length > 0 ? (
+                          <ul
+                            className="mt-1 max-h-40 overflow-y-auto rounded-lg border border-border/80 bg-background"
+                            role="listbox"
+                          >
+                            {(partyResults[index] ?? []).map((party) => (
+                              <li key={party.id}>
+                                <button
+                                  type="button"
+                                  className="w-full px-3 py-1.5 text-right text-xs hover:bg-muted/60"
+                                  onClick={() => pickLineParty(index, party.id, party.name)}
+                                >
+                                  {party.name}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {line.partyId !== "" ? (
+                      <span className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-0.5 text-xs">
+                        {PARTY_TYPE_LABELS[line.partyType] ?? ""} {line.partyName || "—"}.
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground"
+                          onClick={() => clearLineParty(index)}
+                          aria-label={`حذف تخصیص خط ${index + 1}`}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    ) : null}
+                    <label className="flex items-center gap-2 text-xs font-medium text-foreground">
+                      مرجع
+                      <input
+                        className={`${inputClass} h-8 w-40 text-xs`}
+                        value={line.reference}
+                        onChange={(event) => setDraftLine(index, { reference: event.target.value })}
+                        aria-label={`مرجع خط ${index + 1}`}
+                      />
+                    </label>
+                  </div>
+                </div>
                 <div className="flex items-end justify-end">
                   <SecondaryButton
                     className="text-destructive"
@@ -1046,29 +1315,94 @@ export function OpeningBalancesSection({
           <DialogHeader>
             <DialogTitle>در‌آوردن ترازات افتتاحیه با پیش‌نمایش</DialogTitle>
             <DialogDescription>
-              خطوط را به‌صورت آرایهٔ JSON بچسبانید؛ پیش از ثبت، همان اعتبارسنجی سرور — جمع‌ها، تفکیک به حساب و اولین
-              ایراد — پیش‌نمایش داده می‌شود و هیچ چیز ذخیره نمی‌شود.
+              فایل CSV یا XLSX (ستون‌های «کد یا نام»، «بدهکار»، «بستانکار» و اختیاری «مرجع»/«توضیح»؛ مبالغ به{" "}
+              {money.unitLabel}) انتخاب کنید یا آرایهٔ JSON بچسبانید؛ پیش از ثبت، همان اعتبارسنجی سرور — جمع‌ها،
+              تفکیک به حساب و اولین ایراد — پیش‌نمایش داده می‌شود و هیچ چیز ذخیره نمی‌شود.
             </DialogDescription>
           </DialogHeader>
+          <div className="flex gap-1 rounded-lg bg-muted/60 p-1" role="tablist" aria-label="نحوهٔ در‌آوردن">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={importMode === "file"}
+              className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                importMode === "file" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setImportMode("file")}
+            >
+              فایل (CSV / XLSX)
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={importMode === "json"}
+              className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                importMode === "json" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setImportMode("json")}
+            >
+              آرایهٔ JSON
+            </button>
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="سال مالی" hint="چهار رقم شمسی">
               <input className={inputClass} inputMode="numeric" maxLength={4} value={importYear} onChange={(event) => setImportYear(event.target.value)} />
             </Field>
             <Field label="تاریخ مؤثر">
-              <input className={inputClass} type="date" value={importDate} onChange={(event) => setImportDate(event.target.value)} />
+              <JalaliDatePicker
+                className={inputClass}
+                value={importDate}
+                onChange={(iso) => setImportDate(iso)}
+                ariaLabel="تاریخ مؤثر ترازات"
+                placeholder="انتخاب تاریخ"
+              />
             </Field>
           </div>
-          <Field
-            label="خطوط (JSON)"
-            hint='مثلاً [{"accountId":"…","debit":1000000},{"accountId":"…","credit":1000000}] — partyType/partyId/reference/sourceNote اختیاری‌اند.'
-          >
-            <textarea
-              className={`${inputClass} h-28 resize-none py-2 font-mono text-xs`}
-              dir="ltr"
-              value={importText}
-              onChange={(event) => setImportText(event.target.value)}
-            />
-          </Field>
+          {importYear.length === 4 &&
+          importDate !== "" &&
+          !effectiveDateMatchesFiscalYear(importYear, importDate) ? (
+            <p className="text-xs text-destructive">{errorMessage("effective_date_outside_fiscal_year")}</p>
+          ) : null}
+          {importMode === "file" ? (
+            <label className="block cursor-pointer rounded-xl border border-dashed border-border/80 p-4 text-center transition-colors hover:border-primary/50">
+              <span className="block text-sm font-medium text-foreground">انتخاب فایل</span>
+              <span className="mt-1 block text-xs text-muted-foreground">
+                CSV یا XLSX — حداکثر ۵۰۰ خط؛ مبالغ در واحد {money.unitLabel}
+              </span>
+              <input
+                type="file"
+                className="mt-3 block w-full cursor-pointer text-xs text-muted-foreground file:mr-3 file:cursor-pointer file:rounded-lg file:border-0 file:bg-primary/10 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-primary"
+                accept=".csv,.txt,.xlsx"
+                onChange={(event) => {
+                  const file = event.target.files?.[0] ?? null;
+                  setImportFile(file);
+                  setImportPreview(null);
+                  if (file && !/\.(csv|txt|xlsx)$/i.test(file.name)) {
+                    setError("فقط فایل CSV یا XLSX پشتیبانی می‌شود.");
+                  }
+                  event.target.value = "";
+                }}
+              />
+            </label>
+          ) : (
+            <Field
+              label="خطوط (JSON)"
+              hint='مثلاً [{"accountId":"…","debit":1000000},{"accountId":"…","credit":1000000}] — partyType/partyId/reference/sourceNote اختیاری‌اند.'
+            >
+              <textarea
+                className={`${inputClass} h-28 resize-none py-2 font-mono text-xs`}
+                dir="ltr"
+                value={importText}
+                onChange={(event) => setImportText(event.target.value)}
+              />
+            </Field>
+          )}
+          {importFile ? (
+            <p className="text-xs text-muted-foreground">
+              فایل انتخاب‌شده: {importFile.name} —{" "}
+              {toPersianDigits(Math.max(1, Math.round(importFile.size / 1024)))} کیلوبایت
+            </p>
+          ) : null}
           {importPreview ? (
             <div className="rounded-xl border border-border/80 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1078,18 +1412,25 @@ export function OpeningBalancesSection({
                     : "این مجموعه معتبر نیست"}
                 </StatusBadge>
                 <span className="text-xs text-muted-foreground">
-                  بدهکار {toPersianDigits(rials.format(Number(importPreview.totalDebit)))} — بستانکار{" "}
-                  {toPersianDigits(rials.format(Number(importPreview.totalCredit)))}
+                  بدهکار {money.formatText(importPreview.totalDebit, { withUnit: false })} — بستانکار{" "}
+                  {money.formatText(importPreview.totalCredit, { withUnit: false })}
                 </span>
               </div>
               {importPreview.problem ? (
                 <p className="mt-2 text-xs text-destructive">{errorMessage(importPreview.problem)}</p>
               ) : null}
+              {importPreview.problems && importPreview.problems.length > 0 ? (
+                <ul className="mt-2 max-h-40 list-inside list-disc space-y-1 overflow-y-auto text-xs text-destructive">
+                  {importPreview.problems.map((problem, i) => (
+                    <li key={i}>{importProblemText(problem, money.unitLabel)}</li>
+                  ))}
+                </ul>
+              ) : null}
               <ul className="mt-2 max-h-40 list-inside list-disc space-y-1 overflow-y-auto text-xs text-muted-foreground">
                 {importPreview.accounts.map((account) => (
                   <li key={account.accountId}>
-                    {account.code} — {account.name}: بدهکار {toPersianDigits(rials.format(Number(account.debit)))}، بستانکار{" "}
-                    {toPersianDigits(rials.format(Number(account.credit)))}
+                    {account.code} — {account.name}: بدهکار {money.formatText(account.debit, { withUnit: false })}، بستانکار{" "}
+                    {money.formatText(account.credit, { withUnit: false })}
                   </li>
                 ))}
               </ul>
@@ -1123,8 +1464,8 @@ export function OpeningBalancesSection({
               </p>
               <p>تاریخ مؤثر: {formatJalali(printData.set.effectiveDate)}</p>
               <p>
-                جمع بدهکار: {toPersianDigits(rials.format(Number(printData.set.totalDebit)))} — جمع بستانکار:{" "}
-                {toPersianDigits(rials.format(Number(printData.set.totalCredit)))}
+                جمع بدهکار: {money.formatText(printData.set.totalDebit, { withUnit: false })} — جمع بستانکار:{" "}
+                {money.formatText(printData.set.totalCredit, { withUnit: false })}
               </p>
               <p>تاریخ تولید: {toPersianDigits(formatJalali(new Date(), { withMonthName: true }))}</p>
             </header>
@@ -1134,8 +1475,8 @@ export function OpeningBalancesSection({
                   <th>حساب</th>
                   <th>مشخصه</th>
                   <th>توضیح</th>
-                  <th>بدهکار</th>
-                  <th>بستانکار</th>
+                  <th>{`بدهکار (${money.unitLabel})`}</th>
+                  <th>{`بستانکار (${money.unitLabel})`}</th>
                 </tr>
               </thead>
               <tbody>
@@ -1147,10 +1488,10 @@ export function OpeningBalancesSection({
                     <td>{line.partyName ? `${line.partyType ?? ""} ${line.partyName}`.trim() : line.reference ?? "—"}</td>
                     <td>{line.sourceNote ?? "—"}</td>
                     <td className={printStyles.num}>
-                      {line.debit === "0" ? "—" : toPersianDigits(rials.format(Number(line.debit)))}
+                      {line.debit === "0" ? "—" : money.formatText(line.debit, { withUnit: false })}
                     </td>
                     <td className={printStyles.num}>
-                      {line.credit === "0" ? "—" : toPersianDigits(rials.format(Number(line.credit)))}
+                      {line.credit === "0" ? "—" : money.formatText(line.credit, { withUnit: false })}
                     </td>
                   </tr>
                 ))}
@@ -1159,10 +1500,10 @@ export function OpeningBalancesSection({
                 <tr>
                   <th colSpan={3}>جمع</th>
                   <td className={printStyles.num}>
-                    {toPersianDigits(rials.format(Number(printData.set.totalDebit)))}
+                    {money.formatText(printData.set.totalDebit, { withUnit: false })}
                   </td>
                   <td className={printStyles.num}>
-                    {toPersianDigits(rials.format(Number(printData.set.totalCredit)))}
+                    {money.formatText(printData.set.totalCredit, { withUnit: false })}
                   </td>
                 </tr>
               </tfoot>
@@ -1189,19 +1530,19 @@ export function OpeningBalancesSection({
                       <tr key={row.key}>
                         <td>{row.label}</td>
                         <td className={printStyles.num}>
-                          {row.expectedDebit === "0" ? "—" : toPersianDigits(rials.format(Number(row.expectedDebit)))}
+                          {row.expectedDebit === "0" ? "—" : money.formatText(row.expectedDebit, { withUnit: false })}
                         </td>
                         <td className={printStyles.num}>
-                          {row.expectedCredit === "0" ? "—" : toPersianDigits(rials.format(Number(row.expectedCredit)))}
+                          {row.expectedCredit === "0" ? "—" : money.formatText(row.expectedCredit, { withUnit: false })}
                         </td>
                         <td className={printStyles.num}>
-                          {row.actualDebit === "0" ? "—" : toPersianDigits(rials.format(Number(row.actualDebit)))}
+                          {row.actualDebit === "0" ? "—" : money.formatText(row.actualDebit, { withUnit: false })}
                         </td>
                         <td className={printStyles.num}>
-                          {row.actualCredit === "0" ? "—" : toPersianDigits(rials.format(Number(row.actualCredit)))}
+                          {row.actualCredit === "0" ? "—" : money.formatText(row.actualCredit, { withUnit: false })}
                         </td>
                         <td className={printStyles.num}>
-                          {row.difference === "0" ? "—" : toPersianDigits(rials.format(Number(row.difference)))}
+                          {row.difference === "0" ? "—" : money.formatText(row.difference, { withUnit: false })}
                         </td>
                       </tr>
                     ))}

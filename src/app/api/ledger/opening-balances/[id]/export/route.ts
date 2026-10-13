@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getOpeningSet } from "@/lib/opening-balances-service";
-import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
 import { isUuid } from "@/lib/uuid";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import type { MoneyUnit } from "@/lib/money";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -29,6 +31,12 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (!result) return NextResponse.json({ error: "set_not_found" }, { status: 404 });
 
   const { set, lines } = result;
+  const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(
+    session.businessId,
+    SETTING_KEYS.businessPrefs,
+  );
+  const unit: MoneyUnit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
+  const money = (rialText: string) => moneyExportCell(rialText, unit, format === "xlsx" ? "excel" : "csv");
   const rowOf = (line: {
     code: string;
     name: string;
@@ -38,13 +46,14 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
     note: string;
   }) => ({
     year: set.fiscalYearLabel,
-    effective: set.effectiveDate,
+    // A Date object: the shared exporter renders it Jalali, Persian digits.
+    effective: new Date(`${set.effectiveDate}T00:00:00Z`),
     status: set.status,
     source: set.source,
     code: line.code,
     account: line.name,
-    debit: line.debit,
-    credit: line.credit,
+    debit: money(line.debit),
+    credit: money(line.credit),
     attribution: line.attribution,
     note: line.note,
   });
@@ -56,8 +65,8 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
       { key: "source", label: "منبع" },
       { key: "code", label: "کد حساب" },
       { key: "account", label: "حساب" },
-      { key: "debit", label: "بدهکار" },
-      { key: "credit", label: "بستانکار" },
+      { key: "debit", label: moneyColumnLabel("بدهکار", unit) },
+      { key: "credit", label: moneyColumnLabel("بستانکار", unit) },
       { key: "attribution", label: "مشخصه" },
       { key: "note", label: "توضیح" },
     ],

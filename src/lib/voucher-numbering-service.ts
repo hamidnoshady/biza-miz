@@ -354,9 +354,10 @@ export async function listVoucherRegister(
   }
   if (filters.sourceType) add("je.source_type = $1", filters.sourceType);
   if (filters.search && filters.search.trim()) {
-    const pattern = `%${filters.search.trim()}%`;
-    where.push("(je.voucher_number ILIKE $1 OR je.memo ILIKE $1)");
-    params.push(pattern);
+    // Through `add` — the clause's $1 must be renumbered past the params
+    // already bound (business id first); pushing the raw clause left both
+    // ILIKEs bound to $1 (the business id) and the pattern bound to nothing.
+    add("(je.voucher_number ILIKE $1 OR je.memo ILIKE $1)", `%${filters.search.trim()}%`);
   }
   if (filters.cursor) {
     if (filters.cursor.voucherNumber !== null) {
@@ -434,6 +435,28 @@ export async function listVoucherRegister(
   return { rows: out, nextCursor, total: Number(countRows[0]?.total ?? out.length) };
 }
 
+/**
+ * The complete filtered register, page by page — what an export must be.
+ * One `listVoucherRegister` call is one page (≤ 200 rows); a register with
+ * 3,000 entries in a year is not a 200-row file. Keyset cursor, same filters
+ * on every page, a hard cap so a runaway filter cannot stream forever.
+ */
+export async function fetchAllVoucherRegisterRows(
+  businessId: string,
+  filters: Omit<VoucherRegisterFilters, "cursor" | "limit">,
+  maxRows = 20_000,
+): Promise<VoucherRegisterRow[]> {
+  const out: VoucherRegisterRow[] = [];
+  let cursor: VoucherRegisterFilters["cursor"];
+  for (;;) {
+    const page = await listVoucherRegister(businessId, { ...filters, cursor, limit: 200 });
+    out.push(...page.rows);
+    cursor = page.nextCursor ?? undefined;
+    if (!cursor || out.length >= maxRows) break;
+  }
+  return out;
+}
+
 async function unnumberedCount(businessId: string): Promise<bigint> {
   const { rows } = await query<{ n: string }>(
     "SELECT count(*)::text AS n FROM journal_entries WHERE business_id = $1 AND voucher_number IS NULL",
@@ -467,20 +490,23 @@ export async function voucherGapReport(
     ],
   );
   const inUse = rows.map((r) => Number(r.sequence_no));
-  const report = findVoucherGaps(
-    inUse.map((sequenceNo) => ({ sequenceNo })),
-    params.documentType,
-    params.fiscalYearLabel,
-  );
   const { rows: counterRows } = await query<{ last_number: string }>(
     `SELECT last_number::text AS last_number FROM voucher_sequences
       WHERE business_id = $1 AND fiscal_year_label = $2 AND document_type = $3`,
     [businessId, params.fiscalYearLabel, params.documentType],
   );
-  // The counter and the in-use set must agree; if legacy data ever lags one
-  // behind the other, the report shows the wider of the two, never the hole.
-  const inUseMax = inUse.reduce((m, n) => Math.max(m, n), 0);
-  return { ...report, counterMax: Math.max(inUseMax, Number(BigInt(counterRows[0]?.last_number ?? "0"))) };
+  // The counter's high-water mark is part of the gap math: a number the
+  // counter has already handed out that no live entry holds (entry deleted,
+  // renumbered below it) is a hole renumbering may never reuse, so it shows
+  // in `missing` — not just in the counterMax readout.
+  const counterMax = Number(BigInt(counterRows[0]?.last_number ?? "0"));
+  const report = findVoucherGaps(
+    inUse.map((sequenceNo) => ({ sequenceNo })),
+    params.documentType,
+    params.fiscalYearLabel,
+    counterMax,
+  );
+  return { ...report, counterMax: Math.max(report.maxSequenceNo, counterMax) };
 }
 
 // ---------------------------------------------------------------------------

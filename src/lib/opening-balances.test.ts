@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   OPENING_LINES_MAX,
   buildCarryForwardProposal,
+  effectiveDateMatchesFiscalYear,
   openingLineNet,
   openingLineTotals,
   openingSetProblem,
@@ -113,6 +114,36 @@ describe("openingLineTotals / openingLineNet", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Year identity: the label is the Jalali year the effective date belongs to
+// ---------------------------------------------------------------------------
+
+describe("effectiveDateMatchesFiscalYear", () => {
+  it("matches a mid-year date to its Jalali year", () => {
+    // 2025-06-01 is Tir 1404; 2024-06-01 is Tir 1403.
+    expect(effectiveDateMatchesFiscalYear("1404", "2025-06-01")).toBe(true);
+    expect(effectiveDateMatchesFiscalYear("1403", "2024-06-01")).toBe(true);
+    expect(effectiveDateMatchesFiscalYear("1403", "2025-06-01")).toBe(false);
+  });
+
+  it("holds at the year boundary (Farvardin 1 / Esfand 30)", () => {
+    // Farvardin 1, 1404 = 2025-03-21; Esfand 30, 1403 = 2025-03-20.
+    expect(effectiveDateMatchesFiscalYear("1404", "2025-03-21")).toBe(true);
+    expect(effectiveDateMatchesFiscalYear("1403", "2025-03-20")).toBe(true);
+    expect(effectiveDateMatchesFiscalYear("1403", "2025-03-21")).toBe(false);
+    expect(effectiveDateMatchesFiscalYear("1404", "2025-03-20")).toBe(false);
+    // And into 1405: Farvardin 1, 1405 = 2026-03-21.
+    expect(effectiveDateMatchesFiscalYear("1405", "2026-03-21")).toBe(true);
+    expect(effectiveDateMatchesFiscalYear("1404", "2026-03-20")).toBe(true);
+  });
+
+  it("rejects a malformed label or date instead of guessing", () => {
+    expect(effectiveDateMatchesFiscalYear("144", "2025-06-01")).toBe(false);
+    expect(effectiveDateMatchesFiscalYear("1404", "2025-13-40")).toBe(false);
+    expect(effectiveDateMatchesFiscalYear("", "2025-06-01")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Carry-forward
 // ---------------------------------------------------------------------------
 
@@ -179,11 +210,25 @@ describe("buildCarryForwardProposal — a year that reconciles cleanly", () => {
     expect(arLines.find((l) => l.partyId === "p1")).toMatchObject({ debit: 5n * M, credit: 0n, partyType: "customer" });
     const c2 = arLines.find((l) => l.partyId === null)!;
     expect(c2.reference).toBe("مشتری دو"); // unlinked customers are named
+    // …and never carry a party type without a party id — that pair is a
+    // constraint violation in opening_balance_lines (0217 party_consistent).
+    expect(c2.partyType).toBeNull();
   });
 
   it("carries A/P per supplier as credits", () => {
     const s1 = proposal.lines.find((l) => l.partyId === "sp1")!;
     expect(s1).toMatchObject({ accountId: "ap", debit: 0n, credit: 2_500_000n, partyType: "supplier" });
+    const s2 = proposal.lines.find((l) => l.partyId === null && l.accountId === "ap" && l.reference !== null)!;
+    // The unlinked supplier (location-only, no party row) is a named line
+    // without a party type — the pair must stay consistent for the insert.
+    expect(s2).toMatchObject({ credit: 1_500_000n, reference: "تأمین‌کننده ب" });
+    expect(s2.partyType).toBeNull();
+  });
+
+  it("keeps every line party-consistent: type and id together, or neither", () => {
+    for (const l of proposal.lines) {
+      expect((l.partyType === null) === (l.partyId === null)).toBe(true);
+    }
   });
 
   it("carries fixed assets per item and one accumulated-depreciation line", () => {

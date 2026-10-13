@@ -25,6 +25,11 @@ import { getPool, query } from "./db";
 import { isUuid } from "./uuid";
 import { isValidIsoDate } from "./jalali";
 import { isSupportedFiscalYear } from "./fiscal-periods";
+import {
+  openingImportTableFromBuffer,
+  parseOpeningImportTable,
+  type OpeningImportProblem,
+} from "./opening-import";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { postJournalEntry, postExactMirrorEntry } from "./ledger-service";
 import {
@@ -37,6 +42,7 @@ import {
 } from "./ap-attribution";
 import {
   buildCarryForwardProposal,
+  effectiveDateMatchesFiscalYear,
   nonZeroOpeningLines,
   openingLineTotals,
   openingSetProblem,
@@ -213,19 +219,23 @@ function normalizedLines(payload: unknown): OpeningLineInput[] {
     if (debit === 0 && credit === 0) continue;
     const partyType =
       l.partyType === "customer" || l.partyType === "supplier" || l.partyType === "cheque" ||
-      l.partyType === "fixed_asset" || l.partyType === "inventory"
+        l.partyType === "fixed_asset" || l.partyType === "inventory"
         ? l.partyType
         : null;
-    // 0217's party_consistent constraint: a party without a type is dropped,
-    // a type without a resolvable party id keeps the type (an unattributed
-    // bucket is legal — that is how the subledgers say "no customer named").
-    const partyId = typeof l.partyId === "string" && isUuid(l.partyId) ? l.partyId : null;
+    // opening_balance_lines_party_consistent (0217): (party_type IS NULL) =
+    // (party_id IS NULL) — a type WITHOUT an id is a constraint violation,
+    // not an "unattributed bucket" (the bucket is type=NULL). Enforce it here,
+    // at the boundary, so no path can hand the DB an inconsistent pair: a
+    // resolvable id keeps the type it arrived with; anything else is stored
+    // unattributed, with the human-readable reference the row already carries.
+    const rawPartyId = typeof l.partyId === "string" && isUuid(l.partyId) ? l.partyId : null;
+    const partyId = partyType !== null && rawPartyId !== null ? rawPartyId : null;
     lines.push({
       accountId: typeof l.accountId === "string" && isUuid(l.accountId) ? l.accountId : "",
       debit,
       credit,
-      partyType,
-      partyId: partyType ? partyId : null,
+      partyType: partyId !== null ? partyType : null,
+      partyId,
       reference: typeof l.reference === "string" ? l.reference.slice(0, 200) : null,
       sourceNote: typeof l.sourceNote === "string" ? l.sourceNote.slice(0, 500) : null,
     });
@@ -296,6 +306,13 @@ export async function createOpeningSet(params: {
     throw new OpeningBalanceError("invalid_effective_date", 400);
   }
   const effectiveDate = params.effectiveDate;
+
+  // The label must name the Jalali year the date is in — the check that holds
+  // even when the business has no fiscal_years row, where the containment
+  // check below has nothing to compare against.
+  if (!effectiveDateMatchesFiscalYear(label, effectiveDate)) {
+    throw new OpeningBalanceError("effective_date_outside_fiscal_year", 400);
+  }
 
   const client = await getPool().connect();
   try {
@@ -669,6 +686,18 @@ export async function previewOpeningImport(params: {
   lineCount: number;
   accounts: { accountId: string; code: string; name: string; debit: string; credit: string }[];
 }> {
+  // Parameter-level rules are the create endpoint's, not the preview's guess:
+  // a preview that would create a set in the wrong year is no preview at all.
+  const label = (params.fiscalYearLabel ?? "").trim();
+  if (!/^[0-9]{4}$/.test(label) || !isSupportedFiscalYear(Number(label))) {
+    throw new OpeningBalanceError("invalid_fiscal_year", 400);
+  }
+  if (!params.effectiveDate || !isValidIsoDate(params.effectiveDate)) {
+    throw new OpeningBalanceError("invalid_effective_date", 400);
+  }
+  if (!effectiveDateMatchesFiscalYear(label, params.effectiveDate)) {
+    throw new OpeningBalanceError("effective_date_outside_fiscal_year", 400);
+  }
   const lines = normalizedLines(params.lines);
   const problem = openingSetProblem(lines);
   const { totalDebit, totalCredit } = openingLineTotals(nonZeroOpeningLines(lines));
@@ -698,6 +727,83 @@ export async function previewOpeningImport(params: {
     })
     .sort((x, y) => x.code.localeCompare(y.code));
   return { valid: !problem, problem, totalDebit: totalDebit.toString(), totalCredit: totalCredit.toString(), lineCount: lines.length, accounts };
+}
+
+// ---------------------------------------------------------------------------
+// File import (CSV / XLSX) — preview the way the screen previews
+// ---------------------------------------------------------------------------
+
+/**
+ * A file the accountant chose → normalized opening lines, ready for
+ * `previewOpeningImport`. The parsing is the pure part in `opening-import.ts`
+ * (codec layer + the exact-money primitive, in the business's selected unit);
+ * this function adds what only the database knows: which of the tenant's
+ * accounts each row names — by code first, then by exact name. A row that
+ * names no account is a problem the preview shows, never a guess.
+ */
+export async function parseOpeningImportFile(params: {
+  businessId: string;
+  filename: string;
+  buffer: Buffer;
+  unit: "toman" | "rial";
+}): Promise<{
+  lines: OpeningLineInput[];
+  problems: OpeningImportProblem[];
+}> {
+  const table = await openingImportTableFromBuffer(params.filename, params.buffer);
+  if ("problem" in table) return { lines: [], problems: [table.problem] };
+
+  const parsed = parseOpeningImportTable(table.headers, table.rows, params.unit);
+  const fileProblems = parsed.problems.filter((p) => p.rowIndex === null);
+  if (fileProblems.length > 0) return { lines: [], problems: parsed.problems };
+
+  const resolvable = parsed.lines.filter((l) => l.code !== "" || l.name !== "");
+  const codes = [...new Set(resolvable.map((l) => l.code).filter((c) => c !== ""))];
+  const names = [...new Set(resolvable.map((l) => l.name).filter((n) => n !== ""))];
+  const { rows } = await query<{ id: string; code: string; name: string }>(
+    `SELECT id, code, name
+       FROM accounts
+      WHERE business_id = $1
+        AND (($2::text[] IS NOT NULL AND code = ANY($2)) OR ($3::text[] IS NOT NULL AND name = ANY($3)))`,
+    [params.businessId, codes, names],
+  );
+  const byCode = new Map(rows.map((r) => [r.code, r.id]));
+  const byName = new Map(rows.map((r) => [r.name, r.id]));
+
+  const lines: OpeningLineInput[] = [];
+  const problems = [...parsed.problems];
+  for (const l of parsed.lines) {
+    const id = (l.code !== "" ? byCode.get(l.code) : undefined) ?? (l.name !== "" ? byName.get(l.name) : undefined);
+    if (!id) {
+      problems.push({
+        rowIndex: l.rowIndex,
+        problem: "missing_account",
+        detail: l.code !== "" ? `کد «${l.code}»` : `حساب «${l.name}»`,
+      });
+      continue;
+    }
+    // The line contract is numeric Rial; keep the primitive's range guard so
+    // a file cannot ask for more than a number the driver can carry.
+    const debit = Number(l.debit);
+    const credit = Number(l.credit);
+    if (!Number.isSafeInteger(debit) || !Number.isSafeInteger(credit)) {
+      problems.push({
+        rowIndex: l.rowIndex,
+        problem: "invalid_amount",
+        detail: "مبلغ از حد مجاز بیش است",
+      });
+      continue;
+    }
+    lines.push({
+      accountId: id,
+      debit,
+      credit,
+      reference: l.reference,
+      sourceNote: l.note,
+    });
+  }
+
+  return { lines, problems };
 }
 
 // ---------------------------------------------------------------------------

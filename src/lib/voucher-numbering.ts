@@ -181,6 +181,15 @@ export function findVoucherGaps(
   rows: readonly { sequenceNo: number }[],
   documentType: VoucherDocumentType,
   fiscalYearLabel: string,
+  /**
+   * The sequence the year's counter has already handed out
+   * (`voucher_sequences.last_number`). A number the counter allocated but no
+   * live entry holds — the entry was deleted, or renumbered below it — is a
+   * real hole: renumbering may never reuse it, so the report must show it.
+   * The report scans 1..max(in-use, allocated); a counter below the in-use
+   * maximum (legacy data) adds nothing.
+   */
+  allocatedMax = 0,
 ): VoucherGapReport {
   const present = new Set<number>();
   let max = 0;
@@ -189,6 +198,7 @@ export function findVoucherGaps(
     present.add(row.sequenceNo);
     if (row.sequenceNo > max) max = row.sequenceNo;
   }
+  if (Number.isInteger(allocatedMax) && allocatedMax > max) max = allocatedMax;
   const missing: number[] = [];
   for (let n = 1; n <= max; n++) {
     if (!present.has(n)) {

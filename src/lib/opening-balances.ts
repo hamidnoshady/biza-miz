@@ -31,6 +31,7 @@
  * All money is exact — `bigint` Rial through this module, never a float.
  * The DB-touching half is `opening-balances-service.ts`.
  */
+import { isoDateToJalali } from "./jalali";
 import type { AccountType } from "./coa-template";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,20 @@ export interface OpeningLineInput {
 /** Caps: a set is a document a person reviews, not a file of arbitrary rows. */
 export const OPENING_LINES_MAX = 500;
 export const OPENING_NOTE_MAX = 500;
+
+/**
+ * An opening set's year identity: the label names the *Jalali* year the
+ * effective date belongs to. This is the check that holds even when the
+ * business has no `fiscal_years` row — a row's containment check cannot
+ * answer "which year is this date in", but the calendar can. A date in a
+ * different year than the label is a mistake the label can no longer fix, so
+ * every create/preview path must reject it, row or no row.
+ */
+export function effectiveDateMatchesFiscalYear(fiscalYearLabel: string, effectiveDate: string): boolean {
+  if (!/^[0-9]{4}$/.test(fiscalYearLabel)) return false;
+  const jalali = isoDateToJalali(effectiveDate);
+  return jalali !== null && jalali.jy === Number(fiscalYearLabel);
+}
 
 export type OpeningSetProblem =
   | "no_lines"
@@ -237,8 +252,13 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
     const attributed = input.arByCustomer.reduce((sum, c) => sum + c.balance, 0n);
     const control = netOf(arId);
     for (const c of input.arByCustomer) {
+      // opening_balance_lines_party_consistent: a party type may only ride
+      // with a resolvable party id. A party-less subledger row (legacy
+      // location-only customer) carries its name as reference instead —
+      // a type without an id is a constraint violation, not an "unattributed
+      // bucket" (the bucket is type=NULL with a note).
       const l = line(arId, c.balance, {
-        partyType: "customer",
+        partyType: c.partyId ? "customer" : null,
         partyId: c.partyId,
         reference: c.partyId ? null : c.name,
         sourceNote: `اعتبار ${c.name}`,
@@ -270,8 +290,10 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
     const control = netOf(apId);
     for (const s of input.apBySupplier) {
       // The business's debt to the supplier is a credit balance: signed net is negative.
+      // Party consistency as in A/R: an unlinked supplier (location-only, no
+      // party row) must not carry partyType="supplier" with a null id.
       const l = line(apId, -s.balance, {
-        partyType: "supplier",
+        partyType: s.partyId ? "supplier" : null,
         partyId: s.partyId,
         reference: s.partyId ? null : s.name,
         sourceNote: `بدهی به ${s.name}`,

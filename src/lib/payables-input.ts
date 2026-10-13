@@ -15,6 +15,7 @@
  * disagree about what is valid.
  */
 import { classifyAccounts, type AccountRole, type ClassifiableAccount } from "./account-classification";
+import { WELL_KNOWN_CODES } from "./coa-template";
 import { toLatinDigits } from "./digits";
 import { isValidIsoDate } from "./iso-date";
 
@@ -178,23 +179,85 @@ export function resolvePaymentDueDate(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Receipt / payment voucher: the cash or bank account and the bank reference
+// Receipt / payment voucher: the cash, bank or clearing account and the bank reference
 // ---------------------------------------------------------------------------
 
-export type VoucherMethod = "cash" | "bank";
+export type VoucherMethod = "cash" | "bank" | "clearing";
+
+export const VOUCHER_METHODS = ["cash", "bank", "clearing"] as const;
+
+export function isVoucherMethod(value: unknown): value is VoucherMethod {
+  return typeof value === "string" && (VOUCHER_METHODS as readonly string[]).includes(value);
+}
+
+/**
+ * Optional text off a JSON body: absent (or blank) is null — unset — while a
+ * wrong-typed value (a number, an object) is undefined, so the route answers
+ * its own field-specific 400 instead of `.trim()` throwing a TypeError 500.
+ */
+export function optionalBodyText(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return undefined;
+  return value.trim() || null;
+}
+
+/**
+ * Is this parsed JSON a body the routes can read fields from — a non-null,
+ * non-array object? `request.json()` happily answers `null`, `[]`, `"x"` or
+ * `42`; reading `.customerId` off `null` throws a TypeError 500, while off an
+ * array it silently yields `undefined` — a malformed submission mistaken for
+ * an empty one. Every voucher POST narrows through here first, so the answer
+ * is a controlled 400 before any property is touched.
+ */
+export function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export const VOUCHER_METHOD_LABELS: Record<VoucherMethod, string> = {
+  cash: "نقدی",
+  bank: "بانکی",
+  clearing: "در جریان وصول",
+};
 
 export const MAX_BANK_REFERENCE_LENGTH = 64;
 
 /**
  * Which voucher method an account can carry. Cash and petty cash are «نقدی»;
- * the business's bank accounts and the card/PSP clearing account (the default
- * the «بانکی» method has always posted to) are «بانکی». Anything else —
+ * the business's bank accounts are «بانکی»; the card/PSP clearing account is
+ * «در جریان وصول» — its own method since issue #829, when «بانکی» stopped
+ * posting to it (see `voucherDefaultAccountCode`). Anything else —
  * receivables, payables, VAT — is not where a voucher's money moves.
  */
 export function voucherMethodForRole(role: AccountRole | null | undefined): VoucherMethod | null {
   if (role === "cash" || role === "petty_cash") return "cash";
-  if (role === "bank" || role === "payment_clearing") return "bank";
+  if (role === "bank") return "bank";
+  if (role === "payment_clearing") return "clearing";
   return null;
+}
+
+/**
+ * The well-known account code a voucher method posts to when the voucher
+ * names no explicit account: cash → 1100 صندوق, bank → 1110 بانک,
+ * clearing → 1120 کارت‌خوان (در راه).
+ *
+ * The `bank` default changed with issue #829: before it, «بانکی» posted to
+ * the 1120 clearing account, so a plain bank transfer sat in
+ * «کارت‌خوان (در راه)» forever. Bank transfers now post to the real bank
+ * account (1110); card/POS/PSP money still in transit is recorded with the
+ * `clearing` method, which kept 1120. Legacy bank vouchers (stored cash
+ * account NULL, or an explicit 1120) still show their true posting — the
+ * NULL convention means \"the method's default took it\", and the journal
+ * mirrors the original entry's own lines, never a re-resolved default.
+ */
+export function voucherDefaultAccountCode(method: VoucherMethod): string {
+  switch (method) {
+    case "cash":
+      return WELL_KNOWN_CODES.cash;
+    case "bank":
+      return WELL_KNOWN_CODES.bank;
+    case "clearing":
+      return WELL_KNOWN_CODES.bankClearing;
+  }
 }
 
 export interface VoucherAccountChoice {

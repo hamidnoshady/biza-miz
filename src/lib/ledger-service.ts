@@ -117,7 +117,8 @@ export async function postExactJournalEntry(
   // Issue #867 — the document's number is part of its identity: assigned in
   // this same transaction from the stored entry_date, so an entry and its
   // voucher number commit together (and a posting that cannot be numbered
-  // rolls back with the rest).
+  // rolls back with the rest). The voucher columns are outside the fiscal
+  // trigger's column set, so numbering does not extend the construction grant.
   await assignVoucherNumber(client, {
     businessId: input.businessId,
     entryId: rows[0].id,
@@ -125,6 +126,10 @@ export async function postExactJournalEntry(
     sourceType: input.sourceType,
     voucherReference: input.voucherReference ?? null,
   });
+  // The DB line trigger grants insertion into a soft-closed period only while
+  // this freshly-created entry is being assembled. Do not let later statements
+  // in the same outer transaction reuse that construction marker.
+  await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
   return rows[0].id;
 }
 
@@ -978,6 +983,8 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
     ]);
   }
   // Issue #867 — see postExactJournalEntry: the number commits with the entry.
+  // The voucher columns are outside the fiscal trigger's column set, so
+  // numbering does not extend the construction grant.
   await assignVoucherNumber(client, {
     businessId: input.businessId,
     entryId,
@@ -985,6 +992,9 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
     sourceType: input.sourceType,
     voucherReference: input.voucherReference ?? null,
   });
+  // A soft-close construction token is single-use at the entry boundary, not
+  // a continuing authorization to append lines later in this transaction.
+  await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
   return entryId;
 }
 

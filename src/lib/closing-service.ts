@@ -1,24 +1,23 @@
 /**
- * Phase 16 — year-end closing entries.
+ * Phase 16 — exact year-end closing entries.
  *
- * Rolls a fiscal year's revenue/expense accounts into Retained Earnings
- * (WELL_KNOWN_CODES.retainedEarnings) and locks every one of its periods, in
- * one transaction. The closing entry itself is dated on the year's `ends_on`
- * and posted while the last period is still `soft_closed` (owner/accountant
- * may still post there per migration 0024's trigger) — the periods are only
- * locked *after* the entry is safely in, as the last step of the same
- * transaction, so there is no window where the trigger would need a special
- * case for the closing entry itself.
- *
- * DB-touching, so per repo convention it has no direct unit test — covered by
- * closing.integration.test.ts.
+ * Rolls a fiscal year's revenue/expense accounts into Retained Earnings and
+ * locks all twelve periods in one transaction. The closing entry is dated on
+ * the year's final day and constructed while the last period is soft-closed;
+ * the DB trigger allows that one initial parent-and-lines construction only
+ * when the live canonical authorization snapshot holds ledger.close_period.
  */
-import { getPool } from "./db";
+import { getPool, type PoolClient } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
-import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
+import {
+  accountIdsByCode,
+  MissingLedgerAccountError,
+  postExactJournalEntry,
+  type ExactJournalLine,
+} from "./ledger-service";
 import { FiscalPeriodError, readUncoveredEntries } from "./fiscal-periods-service";
 import { FISCAL_PERIOD_COUNT, fiscalPeriodLockErrorCode } from "./fiscal-periods";
-import type { JournalLine } from "./ledger";
+import type { RialText } from "./inventory-exact";
 import { isUuid } from "./uuid";
 
 export { MissingLedgerAccountError };
@@ -26,24 +25,90 @@ export { MissingLedgerAccountError };
 export interface CloseFiscalYearResult {
   fiscalYearId: string;
   closingEntryId: string | null;
-  netIncome: number;
+  /** Exact signed integer Rial, serialized as a decimal string. */
+  netIncome: string;
+}
+
+export interface ClosingBalance {
+  account_id: string;
+  account_type: "revenue" | "expense";
+  debit: string;
+  credit: string;
+}
+
+export interface CalculatedClosingLines {
+  lines: ExactJournalLine[];
+  netIncome: bigint;
 }
 
 /**
- * Closes fiscal year `fiscalYearId`: every period must already be
- * `soft_closed` (not still open, and not already locked by some other path) —
- * that's the point at which the year's books are considered reviewed and
- * ready. Posts one closing entry (or none, if the year had no revenue/expense
- * activity at all) and locks every period.
+ * Pure exact-Rial closing calculation. PostgreSQL aggregates arrive as decimal
+ * strings; this function never crosses JavaScript's floating-point boundary.
+ */
+export function calculateClosingLines(totals: readonly ClosingBalance[]): CalculatedClosingLines {
+  let netIncome = 0n;
+  const lines: ExactJournalLine[] = [];
+
+  for (const row of totals) {
+    const debit = BigInt(row.debit);
+    const credit = BigInt(row.credit);
+    if (debit < 0n || credit < 0n) throw new Error("invalid_closing_balance");
+
+    if (row.account_type === "revenue") {
+      const balance = credit - debit; // normal credit balance; close with a debit
+      netIncome += balance;
+      lines.push({
+        accountId: row.account_id,
+        debit: (balance > 0n ? balance : 0n).toString() as RialText,
+        credit: (balance < 0n ? -balance : 0n).toString() as RialText,
+      });
+    } else {
+      const balance = debit - credit; // normal debit balance; close with a credit
+      netIncome -= balance;
+      lines.push({
+        accountId: row.account_id,
+        debit: (balance < 0n ? -balance : 0n).toString() as RialText,
+        credit: (balance > 0n ? balance : 0n).toString() as RialText,
+      });
+    }
+  }
+
+  return { lines, netIncome };
+}
+
+async function writeClosingAudit(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    actorId: string;
+    action: string;
+    entity: "fiscal_period" | "fiscal_year";
+    entityId: string;
+    payload: Record<string, unknown>;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+    [input.businessId, input.actorId, input.action, input.entity, input.entityId, JSON.stringify(input.payload)],
+  );
+}
+
+async function rollback(client: PoolClient): Promise<void> {
+  await client.query("ROLLBACK").catch(() => {});
+}
+
+/**
+ * Closes fiscal year `fiscalYearId`: all twelve periods must already be
+ * soft-closed. Posts one exact closing entry (or none for an empty year),
+ * locks every period, and appends their audit events plus the final year event
+ * in the same transaction.
  */
 export async function closeFiscalYear(
   businessId: string,
   fiscalYearId: string,
   actorId: string,
 ): Promise<CloseFiscalYearResult> {
-  // Route params are untrusted. More importantly, doing this before `$1` is
-  // cast to uuid gives callers a normal accounting 404 rather than Postgres's
-  // syntax error for a stale/malformed URL.
   if (!isUuid(fiscalYearId)) throw new FiscalPeriodError("fiscal_year_not_found", 404);
 
   const client = await getPool().connect();
@@ -52,11 +117,12 @@ export async function closeFiscalYear(
 
     const { rows: yearRows } = await client.query<{
       id: string;
+      label: string;
       starts_on: string;
       ends_on: string;
       closed_at: string | null;
     }>(
-      `SELECT id, starts_on::text AS starts_on, ends_on::text AS ends_on, closed_at
+      `SELECT id, label, starts_on::text AS starts_on, ends_on::text AS ends_on, closed_at
          FROM fiscal_years WHERE id = $1 AND business_id = $2 FOR UPDATE`,
       [fiscalYearId, businessId],
     );
@@ -64,44 +130,37 @@ export async function closeFiscalYear(
     if (!year) throw new FiscalPeriodError("fiscal_year_not_found", 404);
     if (year.closed_at) throw new FiscalPeriodError("fiscal_year_already_closed", 409);
 
-    // Lock every child before deciding the year is ready. The per-period
-    // transition service locks this same set through the parent year, so an
-    // individual reopen cannot slip in while the closing entry is calculated.
-    const { rows: periods } = await client.query<{ status: string }>(
-      `SELECT status::text AS status
+    // Period transitions lock this parent before locking any child. Holding the
+    // same year row serializes final close against reopen/status transitions.
+    const { rows: periods } = await client.query<{
+      id: string;
+      label: string;
+      starts_on: string;
+      ends_on: string;
+      status: string;
+    }>(
+      `SELECT id, label, starts_on::text AS starts_on, ends_on::text AS ends_on, status::text AS status
          FROM fiscal_periods
         WHERE business_id = $1 AND fiscal_year_id = $2
         FOR UPDATE`,
       [businessId, fiscalYearId],
     );
     if (periods.length !== FISCAL_PERIOD_COUNT) {
-      // A year is only a year once all twelve Jalali months exist. This should
-      // be impossible through the atomic create flow, but must not let a
-      // damaged/manual data set produce a closing entry over a partial year.
       throw new FiscalPeriodError("periods_incomplete", 409);
     }
-    if (periods.some((p) => p.status !== "soft_closed")) {
+    if (periods.some((period) => period.status !== "soft_closed")) {
       throw new FiscalPeriodError("periods_not_ready", 409);
     }
 
-    // Audit F08: an entry dated on or before this year's end that no period
-    // covers would keep its revenue/expense out of the closing entry, with no
-    // period to lock it afterwards. Refuse the close and say which dates —
-    // the entries themselves are never rejected, moved or re-dated here; the
-    // owner covers them by defining the fiscal year(s) they belong to.
+    // Do not silently omit legacy entries dated outside all configured years.
     const uncovered = await readUncoveredEntries(businessId, { upTo: year.ends_on, client });
     if (uncovered.count > 0) {
       throw new FiscalPeriodError("uncovered_entries_before_close", 409, { uncovered });
     }
 
-    const { rows: totals } = await client.query<{
-      account_id: string;
-      account_type: "revenue" | "expense";
-      debit: string;
-      credit: string;
-    }>(
+    const { rows: totals } = await client.query<ClosingBalance>(
       `SELECT a.id AS account_id, a.type::text AS account_type,
-              SUM(jl.debit) AS debit, SUM(jl.credit) AS credit
+              SUM(jl.debit)::text AS debit, SUM(jl.credit)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id
          JOIN accounts a ON a.id = jl.account_id
@@ -112,35 +171,21 @@ export async function closeFiscalYear(
       [businessId, year.starts_on, year.ends_on],
     );
 
-    const lines: JournalLine[] = [];
-    let netIncome = 0;
-    for (const r of totals) {
-      const debit = Number(r.debit);
-      const credit = Number(r.credit);
-      if (r.account_type === "revenue") {
-        const balance = credit - debit; // normal credit balance
-        netIncome += balance;
-        lines.push({ accountId: r.account_id, debit: Math.max(balance, 0), credit: Math.max(-balance, 0) });
-      } else {
-        const balance = debit - credit; // normal debit balance
-        netIncome -= balance;
-        lines.push({ accountId: r.account_id, debit: Math.max(-balance, 0), credit: Math.max(balance, 0) });
-      }
-    }
-
-    if (netIncome !== 0) {
+    const calculated = calculateClosingLines(totals);
+    const lines = [...calculated.lines];
+    if (calculated.netIncome !== 0n) {
       const retainedEarnings = await accountIdsByCode(client, businessId, [WELL_KNOWN_CODES.retainedEarnings]);
       const retainedEarningsId = retainedEarnings.get(WELL_KNOWN_CODES.retainedEarnings)!;
       lines.push({
         accountId: retainedEarningsId,
-        debit: Math.max(-netIncome, 0),
-        credit: Math.max(netIncome, 0),
+        debit: (calculated.netIncome < 0n ? -calculated.netIncome : 0n).toString() as RialText,
+        credit: (calculated.netIncome > 0n ? calculated.netIncome : 0n).toString() as RialText,
       });
     }
 
     let closingEntryId: string | null = null;
     try {
-      closingEntryId = await postJournalEntry(client, {
+      closingEntryId = await postExactJournalEntry(client, {
         businessId,
         locationId: null,
         entryDate: year.ends_on,
@@ -152,24 +197,85 @@ export async function closeFiscalYear(
         postingKind: "closing",
       });
     } catch (err) {
-      if (fiscalPeriodLockErrorCode(err)) throw new FiscalPeriodError("period_locked_for_closing", 409);
+      const code = fiscalPeriodLockErrorCode(err);
+      if (code === "fiscal_period_not_defined") {
+        throw new FiscalPeriodError("fiscal_period_not_defined", 409);
+      }
+      if (code) throw new FiscalPeriodError("period_locked_for_closing", 409);
       throw err;
     }
 
-    await client.query(
-      `UPDATE fiscal_periods SET status = 'locked', locked_at = now(), locked_by = $3
-         WHERE business_id = $1 AND fiscal_year_id = $2 AND status = 'soft_closed'`,
+    const { rows: lockedPeriods } = await client.query<{
+      id: string;
+      label: string;
+      starts_on: string;
+      ends_on: string;
+      locked_at: string;
+    }>(
+      `UPDATE fiscal_periods
+          SET status = 'locked', locked_at = now(), locked_by = $3
+        WHERE business_id = $1 AND fiscal_year_id = $2 AND status = 'soft_closed'
+        RETURNING id, label, starts_on::text AS starts_on, ends_on::text AS ends_on, locked_at`,
       [businessId, fiscalYearId, actorId],
     );
-    await client.query(
-      `UPDATE fiscal_years SET closed_at = now(), closed_by = $3 WHERE id = $1 AND business_id = $2`,
+    for (const period of lockedPeriods) {
+      await writeClosingAudit(client, {
+        businessId,
+        actorId,
+        action: "fiscal_period.locked",
+        entity: "fiscal_period",
+        entityId: period.id,
+        payload: {
+          fiscalYearId,
+          periodId: period.id,
+          periodLabel: period.label,
+          actorId,
+          startsOn: period.starts_on,
+          endsOn: period.ends_on,
+          previousStatus: "soft_closed",
+          newStatus: "locked",
+          before: { status: "soft_closed" },
+          after: { status: "locked", lockedAt: period.locked_at },
+          closingEntryId,
+          netIncome: calculated.netIncome.toString(),
+          finalClose: true,
+        },
+      });
+    }
+
+    const { rows: closedYears } = await client.query<{ closed_at: string }>(
+      `UPDATE fiscal_years SET closed_at = now(), closed_by = $3
+        WHERE id = $1 AND business_id = $2 AND closed_at IS NULL
+        RETURNING closed_at`,
       [fiscalYearId, businessId, actorId],
     );
+    if (!closedYears[0]) throw new FiscalPeriodError("fiscal_year_already_closed", 409);
+
+    const exactNetIncome = calculated.netIncome.toString();
+    await writeClosingAudit(client, {
+      businessId,
+      actorId,
+      action: "fiscal_year.closed",
+      entity: "fiscal_year",
+      entityId: fiscalYearId,
+      payload: {
+        fiscalYearId,
+        label: year.label,
+        actorId,
+        startsOn: year.starts_on,
+        endsOn: year.ends_on,
+        closingEntryId,
+        netIncome: exactNetIncome,
+        before: { closedAt: null },
+        after: { closedAt: closedYears[0].closed_at, closingEntryId, netIncome: exactNetIncome },
+        lockedPeriodIds: lockedPeriods.map((period) => period.id),
+      },
+    });
 
     await client.query("COMMIT");
-    return { fiscalYearId, closingEntryId, netIncome };
+    return { fiscalYearId, closingEntryId, netIncome: exactNetIncome };
   } catch (err) {
-    await client.query("ROLLBACK");
+    await rollback(client);
     throw err;
   } finally {
     client.release();

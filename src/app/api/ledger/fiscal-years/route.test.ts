@@ -46,7 +46,7 @@ describe("POST /api/ledger/fiscal-years", () => {
 
     expect(response.status).toBe(201);
     expect(await response.json()).toEqual({ fiscalYear });
-    expect(fiscalService.createFiscalYear).toHaveBeenCalledWith(SESSION.businessId, 1405);
+    expect(fiscalService.createFiscalYear).toHaveBeenCalledWith(SESSION.businessId, 1405, SESSION.sub);
   });
 
   it.each([null, "1405", true, 1299, 1501, 1405.5])(
