@@ -1113,6 +1113,8 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Tenants",
     entity: "Owner & impersonation",
     routes: ["platform/businesses", "platform/impersonation"],
+    status: "route-only (by design)",
+    note: "owner credential resets and impersonation sessions (start/handoff/resume/close) are the access/identity tier — an impersonation token is a key to someone else's business, so these lanes never cross the chat channel, same doctrine as the tenant config.team row",
     test: "integration/platform-business-management.integration.test.ts",
   },
   {
@@ -1148,6 +1150,8 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Billing",
     entity: "Billing config, gateway credentials, audit",
     routes: ["platform/billing/config", "platform/billing/credentials", "platform/billing/audit"],
+    status: "route-only (by design)",
+    note: "PSP gateway credentials ride gateways.manage — owner-only, and the lanes handle real merchant secrets; billing audit records live inside the platform-billing integration lane, not an MCP verb",
     test: "integration/platform-billing.integration.test.ts",
   },
   {
@@ -1155,6 +1159,8 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — AI",
     entity: "AI config: models, gateway (LiteLLM), modes, prompts, agents, research, widgets",
     routes: ["platform/ai"],
+    status: "route-only (by design)",
+    note: "the AI control plane is ai.config.manage (owner-only): the LiteLLM gateway lanes carry provider API keys, and the prompts/agents/widgets lanes edit the mind every tenant's assistant runs on — both are the console's own secret-and-identity surface and stay out of the chat channel",
     test: "integration/platform-ai.integration.test.ts",
   },
   {
@@ -1197,6 +1203,12 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Security",
     entity: "Audit log, support tickets, admins, platform sessions, pairing",
     routes: ["platform/audit", "platform/support", "platform/admins", "platform/auth", "platform/pairing", "platform/bug-reports"],
+    ops: {
+      listDetail: ["list_audit_log", "list_bug_reports", "get_bug_report", "list_support_tickets", "get_support_ticket"],
+      create: ["reply_support_ticket"],
+      update: ["triage_support_ticket"],
+    },
+    note: "batch BK: the audit log rides audit.read, bug reports ride audit.read like the route, the support desk rides support.manage with the credential's own admin stamped on replies (never a payload-claimed id); platform admins, sessions/auth and pairing stay route-only by design — that is the access/identity tier, same doctrine as the tenant config.team row",
     test: "integration/platform-admin.integration.test.ts",
   },
   {
@@ -1228,6 +1240,7 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     entity: "Cross-business search/reporting",
     routes: ["platform/businesses"],
     ops: { listDetail: ["list_businesses", "get_business_identity"] },
-    status: undefined,
+    status: "route-only (by design)",
+    note: "the read half is the row's whole purpose; the write columns the shared platform/businesses prefix pulls in belong to the platform.biz-directory and platform.biz-lifecycle rows (batch BB-style split, same as config.data)",
   },
 ];

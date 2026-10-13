@@ -18,24 +18,20 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 ### Tenant (0)
 _none — every entity row is covered or deliberately out of scope_
 
-### Platform (17)
+### Platform (13)
 - **platform.biz-directory** (Platform — Tenants · Business directory (search, identity, usage, reports)) — partial
 - **platform.biz-lifecycle** (Platform — Tenants · Tenant lifecycle (provision, status, suspend, delete)) — partial
-- **platform.biz-owner** (Platform — Tenants · Owner & impersonation) — MCP gap
 - **platform.biz-features** (Platform — Tenants · Features & app availability) — partial
 - **platform.biz-devices** (Platform — Tenants · Tenant devices) — MCP gap
 - **platform.billing-plans** (Platform — Billing · Plans & packages (features, rates, settings)) — MCP gap
 - **platform.billing-runtime** (Platform — Billing · Subscriptions, invoices, payments, meters, manual review, spend, credits/overrides) — MCP gap
-- **platform.billing-config** (Platform — Billing · Billing config, gateway credentials, audit) — MCP gap
-- **platform.ai** (Platform — AI · AI config: models, gateway (LiteLLM), modes, prompts, agents, research, widgets) — MCP gap
 - **platform.integrations** (Platform — Integrations · Cloud exceptions, messaging, notification/SMS config) — MCP gap
 - **platform.cms-sites** (Platform — CMS · CMS sites, deployments, targets, keys) — MCP gap
 - **platform.cms-ops** (Platform — CMS · CMS config, runs, sync, infrastructure, theme packages, self tests, billing sync) — MCP gap
 - **platform.deploy-ops** (Platform — Ops · Updates/releases, system, observability, overview) — MCP gap
 - **platform.backup** (Platform — Ops · Backup config, run, status, peers, tokens, restore) — MCP gap
-- **platform.security** (Platform — Security · Audit log, support tickets, admins, platform sessions, pairing) — MCP gap
+- **platform.security** (Platform — Security · Audit log, support tickets, admins, platform sessions, pairing) — partial
 - **platform.knowledge** (Platform — Content · Knowledge base (platform), media config) — MCP gap
-- **platform.cross-business** (Platform — Search & reports · Cross-business search/reporting) — partial
 
 ## Tenant realm (posmcp_)
 
@@ -130,29 +126,29 @@ Counts — covered: 64 · partial: 0 · MCP gap: 0 · backend gap: 0 · n/a (inf
 
 Each tool carries a per-tool \`platformCan\` capability re-checked on every call; step-up rules mirror the tenant ones (billing/credits/restore/access/secrets/mass mutation/deletion/financial posting/large exports).
 
-Counts — covered: 0 · partial: 4 · MCP gap: 13 · backend gap: 0 · n/a (infra): 2 · duplicate surface: 0 · route-only (by design): 0
+Counts — covered: 0 · partial: 4 · MCP gap: 9 · backend gap: 0 · n/a (infra): 2 · duplicate surface: 0 · route-only (by design): 4
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | Platform — Tenants | Business directory (search, identity, usage, reports) | get_business_identity, list_businesses | (route only) | (route only) | (route only) | — | — | — | get_business_identity, list_businesses | integration/platform-mcp.integration.test.ts | partial |
 | Platform — Tenants | Tenant lifecycle (provision, status, suspend, delete) | (route only) | (route only) | (route only) | set_business_status | — | — | none (capability-managed) | set_business_status | integration/platform-mcp.integration.test.ts | partial |
-| Platform — Tenants | Owner & impersonation | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-business-management.integration.test.ts | MCP gap |
+| Platform — Tenants | Owner & impersonation<br>_owner credential resets and impersonation sessions (start/handoff/resume/close) are the access/identity tier — an impersonation token is a key to someone else's business, so these lanes never cross the chat channel, same doctrine as the tenant config.team row_ | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-business-management.integration.test.ts | route-only (by design) |
 | Platform — Tenants | Features & app availability | list_business_features, list_feature_flags | (route only) | (route only) | set_business_feature | — | — | none (capability-managed) | list_business_features, list_feature_flags, set_business_feature | integration/platform-mcp.integration.test.ts | partial |
 | Platform — Tenants | Tenant devices | (route only) | (route only) | (route only) | (route only) | — | — | — | — | — | MCP gap |
 | Platform — Billing | Plans & packages (features, rates, settings) | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-billing.integration.test.ts | MCP gap |
 | Platform — Billing | Subscriptions, invoices, payments, meters, manual review, spend, credits/overrides | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-billing.integration.test.ts | MCP gap |
-| Platform — Billing | Billing config, gateway credentials, audit | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-billing.integration.test.ts | MCP gap |
-| Platform — AI | AI config: models, gateway (LiteLLM), modes, prompts, agents, research, widgets | (route only) | (route only) | (route only) | — | — | — | — | — | integration/platform-ai.integration.test.ts | MCP gap |
+| Platform — Billing | Billing config, gateway credentials, audit<br>_PSP gateway credentials ride gateways.manage — owner-only, and the lanes handle real merchant secrets; billing audit records live inside the platform-billing integration lane, not an MCP verb_ | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-billing.integration.test.ts | route-only (by design) |
+| Platform — AI | AI config: models, gateway (LiteLLM), modes, prompts, agents, research, widgets<br>_the AI control plane is ai.config.manage (owner-only): the LiteLLM gateway lanes carry provider API keys, and the prompts/agents/widgets lanes edit the mind every tenant's assistant runs on — both are the console's own secret-and-identity surface and stay out of the chat channel_ | (route only) | (route only) | (route only) | — | — | — | — | — | integration/platform-ai.integration.test.ts | route-only (by design) |
 | Platform — Integrations | Cloud exceptions, messaging, notification/SMS config | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-cloud-exceptions.integration.test.ts | MCP gap |
 | Platform — CMS | CMS sites, deployments, targets, keys | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-cms.integration.test.ts | MCP gap |
 | Platform — CMS | CMS config, runs, sync, infrastructure, theme packages, self tests, billing sync | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-cms.integration.test.ts | MCP gap |
 | Platform — Ops | Updates/releases, system, observability, overview | (route only) | (route only) | (route only) | — | — | — | — | — | integration/platform-admin.integration.test.ts | MCP gap |
 | Platform — Ops | Backup config, run, status, peers, tokens, restore | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-backup.integration.test.ts | MCP gap |
-| Platform — Security | Audit log, support tickets, admins, platform sessions, pairing | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-admin.integration.test.ts | MCP gap |
+| Platform — Security | Audit log, support tickets, admins, platform sessions, pairing<br>_batch BK: the audit log rides audit.read, bug reports ride audit.read like the route, the support desk rides support.manage with the credential's own admin stamped on replies (never a payload-claimed id); platform admins, sessions/auth and pairing stay route-only by design — that is the access/identity tier, same doctrine as the tenant config.team row_ | get_bug_report, get_support_ticket, list_audit_log, list_bug_reports, list_support_tickets | reply_support_ticket | triage_support_ticket | (route only) | — | — | none (capability-managed) | get_bug_report, get_support_ticket, list_audit_log, list_bug_reports, list_support_tickets, reply_support_ticket, triage_support_ticket | integration/platform-admin.integration.test.ts | partial |
 | Platform — Content | Knowledge base (platform), media config | (route only) | (route only) | (route only) | (route only) | — | — | — | — | integration/platform-knowledge.integration.test.ts | MCP gap |
 | Platform — MCP | MCP connections management (console UI + management API)<br>_the management plane of this very feature; mint/list/revoke exist as HTTP+UI, not MCP verbs_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
 | Platform — Company | Platform's own company surfaces (CRM, growth, workspace, websites, reports, setup)<br>_the operator-of-record business; its rows use the *tenant* suite, not the platform realm_ | (route only) | (route only) | (route only) | (route only) | — | crm.view, growth.view, ledger.post, ledger.view, team.manage, website.manage, website.view, workspace.manage | — | — | — | n/a (infra) |
-| Platform — Search & reports | Cross-business search/reporting | get_business_identity, list_businesses | (route only) | (route only) | (route only) | — | — | — | get_business_identity, list_businesses | — | partial |
+| Platform — Search & reports | Cross-business search/reporting<br>_the read half is the row's whole purpose; the write columns the shared platform/businesses prefix pulls in belong to the platform.biz-directory and platform.biz-lifecycle rows (batch BB-style split, same as config.data)_ | get_business_identity, list_businesses | (route only) | (route only) | (route only) | — | — | — | get_business_identity, list_businesses | — | route-only (by design) |
 
 ## Unclassified routes (not claimed by any row)
 

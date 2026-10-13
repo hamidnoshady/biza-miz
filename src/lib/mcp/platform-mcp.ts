@@ -29,7 +29,16 @@ import {
   listFeatureFlags,
   businessFeatures,
   getBusinessIdentity,
+  queryAudit,
+  querySupportTickets,
+  getSupportTicket,
+  addSupportMessage,
+  updateSupportTicket,
+  queryBugReports,
+  getBugReport,
+  SupportTicketNotFoundError,
 } from "../platform-service";
+import { validateTicketInput } from "../support-service";
 import { platformAudit } from "../platform-auth";
 
 const TOKEN_PREFIX = "pospmcp_";
@@ -135,10 +144,30 @@ interface PlatformToolInput {
   businessIds?: string[];
   flagKey?: string;
   enabled?: boolean;
-  status?: "suspended" | "active";
+  /** Business status is validated inside the calling tool (active|suspended
+   * today) — widening the input type keeps support-ticket triage honest on
+   * the same property name, like the console forms. */
+  status?: string;
   search?: string;
   limit?: number;
   offset?: number;
+  // Batch BK — the security/support surface (ticket + report + audit ids and
+  // filters); support triage fields mirror the console's PATCH lanes.
+  ticketId?: string;
+  reportId?: string;
+  body?: string;
+  attachment?: string;
+  priority?: string;
+  category?: string;
+  assignedAdminId?: string | null;
+  adminId?: string;
+  actionFamily?: string;
+  entity?: string;
+  createdFrom?: string;
+  createdTo?: string;
+  q?: string;
+  page?: number;
+  pageSize?: number;
 }
 
 export interface PlatformMcpTool {
@@ -224,6 +253,115 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
     },
   },
   {
+    name: "list_audit_log",
+    description:
+      "Query the platform audit log — filter by business, admin, action family (e.g. 'business' matches 'business.provision'), entity, free text or date range.",
+    capability: "audit.read",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string", description: "Filter to one tenant's rows." },
+        adminId: { type: "string", description: "Filter to one platform admin." },
+        actionFamily: { type: "string", description: "Prefix match, e.g. 'platform_mcp'." },
+        entity: { type: "string" },
+        search: { type: "string" },
+        createdFrom: { type: "string" },
+        createdTo: { type: "string" },
+        page: { type: "number" },
+        pageSize: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "list_bug_reports",
+    description: "Search tenant bug reports by status or free text.",
+    capability: "audit.read",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string" },
+        q: { type: "string" },
+        businessId: { type: "string" },
+        page: { type: "number" },
+        pageSize: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "get_bug_report",
+    description: "Load one bug report in full.",
+    capability: "audit.read",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { reportId: { type: "string" } },
+      required: ["reportId"],
+    },
+  },
+  {
+    name: "list_support_tickets",
+    description: "Search the platform support desk by status, priority, category, assignee, business or text.",
+    capability: "support.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string" },
+        priority: { type: "string" },
+        category: { type: "string" },
+        assignedAdminId: { type: "string" },
+        businessId: { type: "string" },
+        q: { type: "string" },
+        page: { type: "number" },
+        pageSize: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "get_support_ticket",
+    description: "Load one support ticket with its message thread.",
+    capability: "support.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { ticketId: { type: "string" } },
+      required: ["ticketId"],
+    },
+  },
+  {
+    name: "reply_support_ticket",
+    description: "Answer a support ticket as the credential's own admin. The console's reply rules apply: the reply moves the ticket to the admin-replied state.",
+    capability: "support.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticketId: { type: "string" },
+        body: { type: "string", description: "Reply text, 1–4000 chars." },
+      },
+      required: ["ticketId", "body"],
+    },
+  },
+  {
+    name: "triage_support_ticket",
+    description: "Change a ticket's status / priority / category / assignee — same write the console PATCH lane runs.",
+    capability: "support.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticketId: { type: "string" },
+        status: { type: "string" },
+        priority: { type: "string" },
+        category: { type: "string" },
+        assignedAdminId: { type: "string", description: "null unassigns." },
+      },
+      required: ["ticketId"],
+    },
+  },
+  {
     name: "set_business_status",
     description: "Suspend or reactivate a business. Uses the console lifecycle service; audited.",
     capability: "business.suspend",
@@ -281,7 +419,7 @@ export async function callPlatformMcpTool(
   const results: Record<string, unknown> = {};
   const started = Date.now();
   try {
-    const data = await executePlatformTool(tool, arg, targets, results);
+    const data = await executePlatformTool(tool, arg, targets, results, connection);
     await platformAuditSafe(connection, targets[0] ?? null, tool.name, "ok", {
       targets: targets.length > 0 ? targets : undefined,
       elapsedMs: Date.now() - started,
@@ -303,6 +441,7 @@ async function executePlatformTool(
   arg: PlatformToolInput,
   targets: string[],
   results: Record<string, unknown>,
+  connection: PlatformMcpConnection,
 ): Promise<unknown> {
   return withoutTenantScope(`platform-mcp tool ${tool.name}`, async () => {
     switch (tool.name) {
@@ -337,15 +476,100 @@ async function executePlatformTool(
         return { perBusiness: results };
       }
       case "set_business_status": {
+        if (arg.status !== "active" && arg.status !== "suspended") {
+          throw new Error("status must be 'active' or 'suspended'");
+        }
         for (const id of targets) {
           try {
-            const result = await setBusinessStatus(id, arg.status!);
+            const result = await setBusinessStatus(id, arg.status);
             results[id] = result ? { ok: true, status: arg.status } : { ok: false, error: "not_found" };
           } catch (err) {
             results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
           }
         }
         return { perBusiness: results };
+      }
+      // ── Batch BK — security desk: audit + bug reports (audit.read) ────────
+      case "list_audit_log": {
+        return await queryAudit({
+          businessId: arg.businessId,
+          adminId: arg.adminId,
+          actionFamily: arg.actionFamily,
+          entity: arg.entity,
+          search: arg.search,
+          createdFrom: arg.createdFrom,
+          createdTo: arg.createdTo,
+          page: arg.page ?? 1,
+          pageSize: arg.pageSize ?? arg.limit ?? 40,
+        });
+      }
+      case "list_bug_reports": {
+        return await queryBugReports({
+          status: arg.status ?? "",
+          search: arg.q ?? arg.search ?? "",
+          businessId: arg.businessId,
+          page: arg.page ?? 1,
+          pageSize: arg.pageSize ?? arg.limit ?? 40,
+        });
+      }
+      case "get_bug_report": {
+        if (!arg.reportId) throw new Error("reportId is required");
+        return await getBugReport(arg.reportId);
+      }
+      // ── Batch BK — the support desk (support.manage) ──────────────────────
+      case "list_support_tickets": {
+        return await querySupportTickets({
+          status: arg.status,
+          priority: arg.priority,
+          category: arg.category,
+          search: arg.q ?? arg.search,
+          businessId: arg.businessId,
+          adminId: arg.adminId,
+          page: arg.page ?? 1,
+          pageSize: arg.pageSize ?? arg.limit ?? 40,
+        });
+      }
+      case "get_support_ticket": {
+        if (!arg.ticketId) throw new Error("ticketId is required");
+        return await getSupportTicket(arg.ticketId);
+      }
+      case "reply_support_ticket": {
+        if (!arg.ticketId) throw new Error("ticketId is required");
+        const text = (arg.body ?? "").trim();
+        const attachment = typeof arg.attachment === "string" ? arg.attachment : null;
+        const validation = validateTicketInput({ body: text, attachment });
+        if (validation.error) throw new Error(validation.error);
+        try {
+          // The route posts as the session admin; the bridge posts as the
+          // credential's own admin — never a claimed id from the payload.
+          return await addSupportMessage({
+            ticketId: arg.ticketId,
+            adminId: connection.adminId,
+            body: text,
+            attachment,
+          });
+        } catch (err) {
+          if (err instanceof SupportTicketNotFoundError) throw new Error("not_found");
+          throw err;
+        }
+      }
+      case "triage_support_ticket": {
+        if (!arg.ticketId) throw new Error("ticketId is required");
+        try {
+          const ticket = await updateSupportTicket({
+            ticketId: arg.ticketId,
+            adminId: connection.adminId,
+            status: arg.status,
+            priority: arg.priority,
+            category: arg.category,
+            assignedAdminId: arg.assignedAdminId,
+          });
+          if (!ticket) throw new Error("not_found");
+          return ticket;
+        } catch (err) {
+          if (err instanceof SupportTicketNotFoundError) throw new Error("not_found");
+          throw err;
+        }
       }
       default:
         throw new Error(`No implementation for platform tool '${tool.name}'.`);
