@@ -443,6 +443,12 @@ async function main() {
       );
     }
 
+    if (screen.id.startsWith("accounting-cheques")) {
+      const txt = await page.evaluate(() => (document.querySelector("table")?.innerText ?? "no table").replace(/\s+/g, " ").slice(0, 3000));
+      const all = await page.evaluate(() => document.body.innerText.replace(/\s+/g, " ").slice(0, 3500));
+      console.log(`::error title=VRTEXT ${screen.id} table::${txt}`);
+      console.log(`::error title=VRTEXT ${screen.id} body::${all}`);
+    }
     const actual = await page.screenshot({ fullPage: false });
     await context.close();
     const baselinePath = join(BASELINE_DIR, `${screen.id}.png`);
