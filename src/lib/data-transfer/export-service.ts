@@ -27,6 +27,7 @@ import { getSetting, SETTING_KEYS } from "../settings";
 import { renderReportTableHtml, type ReportPdfBusinessInfo } from "../report-pdf-template";
 import { defaultExportFields, findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
+import type { PartyReadAudience } from "../personnel-access";
 import { requireAdapter, type AdapterContext } from "./adapters";
 import { displayCell, sheetsToXlsxBuffer, toCsv, toJsonDocument } from "./codecs";
 import { recordDataTransferAudit } from "./audit";
@@ -159,6 +160,14 @@ export interface BuildExportInput {
   limit?: number;
   actorUserId: string | null;
   actorName: string;
+  /**
+   * What the requesting member may read of an Employee file (issue #947, TEAM-F01).
+   *
+   * Omitted means the internal full read, which is what a scheduled run with no
+   * member behind it gets; the routes pass the audience they resolved from the
+   * session, and the schedule runner passes the creator's.
+   */
+  partyAudience?: PartyReadAudience;
   /** Set when a schedule produced this export rather than a person. */
   scheduleId?: string | null;
 }
@@ -188,6 +197,7 @@ export async function buildExport(input: BuildExportInput): Promise<BuiltExport>
     locationId: input.locationId,
     actorUserId: input.actorUserId,
     actorName: input.actorName,
+    partyAudience: input.partyAudience,
   };
   const rows = await adapter.read(context, {
     fields: fieldKeys,

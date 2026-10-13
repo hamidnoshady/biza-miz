@@ -7,6 +7,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { createExportJob, listExportJobs } from "@/lib/data-transfer/export-service";
 import { getExportTemplate } from "@/lib/data-transfer/templates-service";
 import type { ExportFormat } from "@/lib/data-transfer/types";
+import { partyReadAudienceForPermissions } from "@/lib/personnel-access";
 import {
   dataOwner,
   entityAccess,
@@ -95,6 +96,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       ? (await resolveActiveLocation(owner.session))?.id ?? null
       : owner.locationId;
 
+    // Issue #947 (TEAM-F01) — an export is a read, and one that leaves the server.
+    // Narrowed to what this member may actually see, so a manager exporting the customer
+    // list cannot pick up the national ID of a colleague who is also a customer: the
+    // Employee rows come back with the personnel columns empty, exactly as the
+    // directory screen shows them.
+    const member = await memberAccessFor(owner.session);
+
     const { job, body: content } = await createExportJob({
       businessId: owner.businessId,
       locationId,
@@ -106,6 +114,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       limit: typeof body.limit === "number" ? body.limit : undefined,
       actorUserId: owner.actorUserId,
       actorName: owner.actorName,
+      partyAudience: partyReadAudienceForPermissions(member?.permissions),
     });
 
     return fileResponse(content, job.contentType, job.fileName, {

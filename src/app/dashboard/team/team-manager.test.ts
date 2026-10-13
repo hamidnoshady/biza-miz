@@ -30,6 +30,8 @@ const here = (relative: string) =>
 
 const TEAM_MANAGER = here("./team-manager.tsx");
 const TEAM_API = here("../../api/team/route.ts");
+const TEAM_SERVICE = here("../../../lib/team-service.ts");
+const PERSONNEL_FILE = here("../../../lib/personnel-file.ts");
 const MEMBER_API = here("../../api/team/[id]/route.ts");
 const CREDENTIALS_API = here("../../api/team/[id]/credentials/route.ts");
 const SETUP_USERS_API = here("../../api/setup/users/route.ts");
@@ -82,14 +84,88 @@ describe("the team screen sends what the API accepts", () => {
   });
 });
 
-describe("the personnel file follows the membership, but only when named", () => {
-  it("renames the party on a rename, and not on a suspend", () => {
-    // The guard is the fix: before it, every PATCH (suspend, permission
-    // change) called ensureEmployeeParty with whatever name the body happened
-    // to omit, stamping the party with a stale or blank label.
-    expect(MEMBER_API).toContain("const renameTo = body.fullName?.trim()");
-    expect(MEMBER_API).toContain("if (renameTo)");
-    expect(MEMBER_API).toContain("ensureEmployeeParty");
+describe("the personnel file follows the membership, and every door writes it", () => {
+  it("propagates a rename from the membership row, never from the body", () => {
+    /*
+     * The rename guard used to live in the route (`const renameTo = body.fullName?.trim()`)
+     * and was the fix for a PATCH that omitted a name stamping the party blank. The
+     * guard's *job* moved into the guarantee: the route forwards whatever the body
+     * said (or nothing), the service writes the row first, and the file is derived
+     * from the row that was written — so an omitted name is simply not a value the
+     * propagation can ever see, whatever door the edit came through.
+     */
+    expect(MEMBER_API).toContain("fullName: body.fullName");
+    expect(TEAM_SERVICE).toContain("full_name   = coalesce($4, full_name)");
+    expect(PERSONNEL_FILE).toContain("displayName: (member.full_name ?? \"\").trim()");
+  });
+
+  it("has one writer for the file, called by the membership service", () => {
+    /*
+     * Issue #947 (TEAM-F04). The file used to be created by whichever door
+     * remembered to: `POST /api/team` called `ensureEmployeeParty`, the setup
+     * wizard and the invitation finaliser each had their own writer, and the IAM
+     * replica had a third. Two of those doors had no writer at all, so a member
+     * created through them owned no personnel file — no payroll row could hang off
+     * them. The single guarantee now lives in `personnel-file.ts` and the routes do
+     * not write parties themselves; this asserts the two halves of that: the
+     * service calls it, and the member route no longer reaches for the old
+     * per-route writer.
+     */
+    expect(TEAM_SERVICE).toContain("ensurePersonnelFileForMembership");
+    expect(MEMBER_API).not.toContain("ensureEmployeeParty");
+    expect(TEAM_API).not.toContain("ensureEmployeeParty");
+  });
+
+  it("tells the member card whether the file exists or is still owed", () => {
+    // F04/F05 surface: the guarantee is either true or visibly owed, and the
+    // roster is where an owner sees which.
+    expect(TEAM_API).toContain("listPersonnelFileDrift");
+    expect(TEAM_API).toContain("retryPersonnelFileDrift");
+    expect(TEAM_MANAGER).toContain("personnelFileId");
+    expect(TEAM_MANAGER).toContain("personnelFileDrift");
+  });
+});
+
+describe("the branch policy is chosen, not inferred (issue #947, TEAM-F03)", () => {
+  it("sends an explicit branch policy from the PIN-staff form", () => {
+    /*
+     * The form used to send role/name/PIN/phone and nothing else, and
+     * `createMembership`'s INSERT ended in `ELSE 'all'` — so every PIN member
+     * created here silently received every branch of the business, with no
+     * `user_locations` row to show for it.
+     */
+    expect(TEAM_MANAGER).toContain("locationScope,");
+    expect(TEAM_MANAGER).toContain('locationIds: locationScope === "selected" ? branchIds : []');
+    expect(TEAM_MANAGER).toContain('defaultLocationId: locationScope === "home" ? defaultLocationId : null');
+    expect(TEAM_API).toContain("locationScope: isLocationScope(body.locationScope)");
+  });
+
+  it("leaves no SQL arm that can widen a policy by omission", () => {
+    // The decision itself lives in location-access.ts and is unit-tested; what
+    // this holds is that the service no longer carries a second, wider one.
+    expect(TEAM_SERVICE).not.toContain("ELSE 'all'::location_scope");
+    expect(TEAM_SERVICE).toContain("resolveMembershipBranchPolicy");
+  });
+
+  it("does not claim the PIN is unique per branch", () => {
+    // `isPinTaken` compares across the business and the keyed blind index enforces
+    // it business-wide; the old hint said the opposite.
+    expect(TEAM_MANAGER).not.toContain("در هر شعبه باید یکتا باشد");
+    expect(TEAM_MANAGER).toContain("در کل کسب‌وکار یکتاست");
+  });
+});
+
+describe("a read-only visit does not request what it may not read (TEAM-F06)", () => {
+  it("gates the invitations read on team.manage", () => {
+    // GET /api/team accepts team.view OR team.manage; /api/team/invitations needs
+    // team.manage. Asking for both unconditionally put a 403 about invitations —
+    // which the reader never requested — above a roster that had loaded fine.
+    expect(TEAM_MANAGER).toContain('"/api/team/invitations"');
+    expect(TEAM_MANAGER).toContain("canManage");
+    // The refusal is read as a *partial* failure, not as a broken page: the
+    // roster loaded, and the sentence says so.
+    expect(TEAM_MANAGER).toContain("if (!invitesRes) {");
+    expect(TEAM_MANAGER).toContain("بقیهٔ این صفحه کامل بارگذاری شده است");
   });
 });
 
@@ -255,7 +331,6 @@ describe("lifecycle-derived member actions (issue #854 pass 4, gap 4)", () => {
     // It delegates to the service ceremony — not an unlocked state flip.
     expect(REHIRE_API).toContain("rehireMembership");
     // The ceremony itself holds the membership row lock and takes a reason.
-    const TEAM_SERVICE = here("../../../lib/team-service.ts");
     expect(TEAM_SERVICE).toContain("FOR UPDATE");
     expect(TEAM_SERVICE).toContain("validateAccessChangeReason");
     const AUTHORITY = here("../../../lib/membership-authority.ts");

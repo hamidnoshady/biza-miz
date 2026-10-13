@@ -131,7 +131,15 @@ export default function UsersStep() {
               </Field>
             </>
           ) : (
-            <Field label="پین (۴ تا ۱۲ رقم) *" hint="برای ورود سریع در صفحهٔ ورود؛ در هر شعبه باید یکتا باشد.">
+            /*
+             * Issue #947 (TEAM-F03) — the wizard's hint claimed the PIN is unique per
+             * branch. `isPinTaken` and the business-wide blind index make it unique
+             * across the whole business.
+             */
+            <Field
+              label="پین (۴ تا ۱۲ رقم) *"
+              hint="برای ورود سریع در صفحهٔ ورود؛ در کل کسب‌وکار یکتاست."
+            >
               <input
                 className={`${inputClass} w-48 text-center tracking-[0.25em]`}
                 dir="ltr"

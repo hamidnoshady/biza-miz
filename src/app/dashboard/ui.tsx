@@ -762,6 +762,31 @@ const ERROR_MESSAGES: Record<string, string> = {
     user_not_found: "عضو موردنظر پیدا نشد.",
     installment_amount_too_small: "مبلغ هر قسط بسیار کم است؛ تعداد اقساط را کاهش دهید.",
     item_required: "قسط را انتخاب کنید.",
+    // Team & access — src/lib/iam/roles-service.ts and the membership writers.
+    //
+    // Issue #947 (TEAM-F08): retiring or editing a custom role answers with these
+    // codes, and none of them was in any message table, so a refused archive read
+    // «خطای غیرمنتظره» — the same sentence a genuine crash gets, which tells the
+    // owner nothing about the revision they are holding or the members still on
+    // the role. `revision_conflict` in particular is ordinary and recoverable
+    // (two tabs, or an edit after the role changed on another device) and must say
+    // so instead of implying the change was lost.
+    revision_conflict:
+      "این نقش از زمانی که این صفحه را باز کردید تغییر کرده است؛ صفحه را تازه کنید و تغییر را دوباره اعمال کنید.",
+    role_in_use:
+      "این نقش به یک یا چند عضو فعال تخصیص داده شده است؛ ابتدا اعضای آن را به نقش دیگری منتقل کنید.",
+    role_name_taken: "نقشی با همین نام در این کسب‌وکار وجود دارد.",
+    invalid_permissions: "دسترسی‌های انتخاب‌شده معتبر نیستند؛ فهرست دسترسی‌ها را تازه کنید.",
+    privilege_escalation: "نمی‌توانید دسترسی‌ای بدهید که خودتان آن را ندارید.",
+    actor_inactive: "حساب شما فعال نیست؛ دوباره وارد شوید.",
+    cloud_confirmation_required:
+      "این تغییر باید از فضای ابری انجام شود؛ روی این سایت فقط محدودسازی دسترسی ممکن است.",
+    // Branch policy of a membership or invitation (issue #947, TEAM-F03): the
+    // membership writers refuse an impossible scope instead of silently widening
+    // it to «همهٔ شعبه‌ها», and these three sentences are what the form shows.
+    invalid_location_scope: "سیاست دسترسی شعبه معتبر نیست؛ یکی از گزینه‌های فهرست را انتخاب کنید.",
+    selected_locations_required: "برای «شعبه‌های انتخابی» حداقل یک شعبه را انتخاب کنید.",
+    home_location_required: "برای «فقط شعبهٔ اصلی»، شعبهٔ اصلی را انتخاب کنید.",
 };
 
 export function errorMessage(code: string | undefined): string {

@@ -34,6 +34,11 @@ import { getApAging } from "./ap-service";
 import { listPayrollRuns, listStaffWages } from "./payroll-service";
 import { listBranches } from "./branch-service";
 import { getCustomer } from "./parties-service";
+import {
+  FULL_PARTY_AUDIENCE,
+  partyReadAudienceForPermissions,
+  type PartyReadAudience,
+} from "./personnel-access";
 import { computeSessionBill } from "./table-session-service";
 import { evenSplit } from "./table-sessions";
 import { nearExpiryBatches } from "./cosmetics-service";
@@ -733,10 +738,28 @@ async function courierPerformance(businessId: string, args: Record<string, unkno
 // Wave 1 — customers
 // ---------------------------------------------------------------------------
 
-async function customerProfile(businessId: string, args: Record<string, unknown>, locationId: string | null) {
+/**
+ * Issue #947 (TEAM-F01) — the assistant is a *reader* of the shared party record,
+ * so it reads through the caller's own audience rather than the raw row. A member
+ * whose grants stop at `parties.view` must not be able to ask the assistant for the
+ * personnel fields their own directory withholds; a trusted internal caller (no
+ * permission set at all, e.g. a scheduled job) keeps the full record.
+ */
+function aiPartyAudience(permissions?: ReadonlySet<Permission>): PartyReadAudience {
+  return permissions === undefined
+    ? FULL_PARTY_AUDIENCE
+    : partyReadAudienceForPermissions([...permissions]);
+}
+
+async function customerProfile(
+  businessId: string,
+  args: Record<string, unknown>,
+  locationId: string | null,
+  audience: PartyReadAudience = FULL_PARTY_AUDIENCE,
+) {
   const customerId = typeof args.customerId === "string" ? args.customerId : "";
   if (!customerId) return { error: "customerId لازم است." };
-  const customer = await getCustomer(businessId, customerId);
+  const customer = await getCustomer(businessId, customerId, audience);
   if (!customer) return { error: "مشتری یافت نشد." };
 
   const { rows } = await query<{
@@ -886,11 +909,21 @@ async function previewCustomerSegmentTool(businessId: string, args: Record<strin
   };
 }
 
-async function customerTimelineTool(businessId: string, args: Record<string, unknown>) {
+async function customerTimelineTool(
+  businessId: string,
+  args: Record<string, unknown>,
+  /*
+   * Issue #947 (TEAM-F01) — the timeline reads the same `parties` row the directory
+   * does, so it answers through the same audience: a member of staff who is also a
+   * customer keeps the assistant from showing the address and notes their own party
+   * read withholds (`getCustomerFile`).
+   */
+  audience: PartyReadAudience = FULL_PARTY_AUDIENCE,
+) {
   const customerId = typeof args.customerId === "string" ? args.customerId : "";
   if (!customerId) return { error: "customerId لازم است." };
 
-  const file = await getCustomerFile(businessId, customerId);
+  const file = await getCustomerFile(businessId, customerId, audience);
   if (!file) return { error: "مشتری یافت نشد." };
 
   const limit = Number.isFinite(Number(args.limit)) ? Math.max(1, Number(args.limit)) : 25;
@@ -1626,7 +1659,9 @@ export async function runReadTool(
       return branchRead((locationId) => courierPerformance(businessId, args, locationId));
 
     case "get_customer_profile":
-      return branchRead((locationId) => customerProfile(businessId, args, locationId));
+      return branchRead((locationId) =>
+        customerProfile(businessId, args, locationId, aiPartyAudience(permissions)),
+      );
 
     // Phase 38 — the website manager's three reads. The connected site and
     // product catalogue are business-level integration data, not POS branch
@@ -1738,7 +1773,7 @@ export async function runReadTool(
       return { ok: true, data: await previewCustomerSegmentTool(businessId, args) };
 
     case "get_customer_timeline":
-      return { ok: true, data: await customerTimelineTool(businessId, args) };
+      return { ok: true, data: await customerTimelineTool(businessId, args, aiPartyAudience(permissions)) };
 
     case "find_customers":
       return branchRead((locationId) => findCustomersTool(businessId, args, locationId));

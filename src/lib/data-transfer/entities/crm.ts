@@ -23,6 +23,7 @@ import {
 } from "../../parties-service";
 import { phoneE164 } from "../../phone";
 import { postgresDateToIso } from "../../jalali";
+import { FULL_PARTY_AUDIENCE, restrictPartyColumnsForAudience } from "../../personnel-access";
 import {
   registerAdapter,
   RowRejection,
@@ -245,6 +246,11 @@ async function readParties(
             p.economic_code     AS "economicCode",
             p.address,
             p.notes,
+            -- Issue #947 (TEAM-F01): the row has to say what it is before the
+            -- projection can decide — an Employee file's address is HR data, the
+            -- same column on a plain customer is ordinary CRM data. Compared on the
+            -- *stored* spelling (PARTY_ROLE_STORAGE in parties.ts), the one p.roles holds.
+            'employee' = ANY(p.roles) AS "isEmployee",
             p.tags,
             p.accounting_code   AS "accountingCode",
             p.is_active         AS "isActive",
@@ -263,13 +269,26 @@ async function readParties(
     params,
   );
 
-  return rows.map((row) => ({
-    ...row,
-    totalSpentRial: Number(row.totalSpentRial ?? 0),
-    lastPurchaseAt: isoDate(row.lastPurchaseAt),
-    createdAt: isoDate(row.createdAt),
-    tags: tagList(row.tags),
-  }));
+  return rows.map((row) => {
+    // The audience is applied *here*, at the row, because this adapter never builds a
+    // `Party`: `restrictPartyColumnsForAudience` is the flat half of the same rule
+    // `partyForAudience` applies to `/api/parties`, so a customer export and the
+    // directory screen cannot disagree about an Employee's national ID. `isEmployee` is
+    // dropped again afterwards — it is the projection's input, not a column the entity
+    // declares, and `buildExport` keeps only the fields the operator asked for anyway.
+    const { isEmployee, ...projected } = restrictPartyColumnsForAudience(
+      row as Record<string, unknown> & { isEmployee?: boolean },
+      context.partyAudience ?? FULL_PARTY_AUDIENCE,
+      row.isEmployee === true,
+    );
+    return {
+      ...projected,
+      totalSpentRial: Number(row.totalSpentRial ?? 0),
+      lastPurchaseAt: isoDate(row.lastPurchaseAt),
+      createdAt: isoDate(row.createdAt),
+      tags: tagList(row.tags),
+    };
+  });
 }
 
 async function writeParty(

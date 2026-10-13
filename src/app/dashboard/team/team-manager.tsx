@@ -90,7 +90,25 @@ interface Member {
   defaultLocationId: string | null;
   overrides: { granted?: string[]; revoked?: string[] };
   effectivePermissions: string[];
+  /**
+   * Issue #947 (TEAM-F04/F05) — the personnel file this membership owns, and
+   * whether it is still owed. `null` with `personnelFileDrift` false means the
+   * member has no file and nothing is outstanding (an offboarded member whose file
+   * was archived, or a membership the guarantee could not be asked about yet).
+   */
+  personnelFileId: string | null;
+  personnelFileDrift: boolean;
   createdAt: string;
+}
+
+/** One open drift episode, as `GET /api/team` reports it. */
+interface PersonnelFileDrift {
+  userId: string;
+  fullName: string;
+  reason: "file_missing" | "identity_stale";
+  lastError: string | null;
+  attempts: number;
+  lastAttemptAt: string;
 }
 
 /** A branch as `/api/team` hands it to the screen — enough to assign people to. */
@@ -129,6 +147,20 @@ const INVITATION_STATUS_LABELS: Record<Invitation["status"], string> = {
   expired: "منقضی",
 };
 
+/**
+ * One label per membership status — shared by the row's chip and the roster's status
+ * filter, so «تعلیق‌شده» means the same thing in both (issue #947, TEAM-F08: this used
+ * to be an inline literal at the single point that rendered it).
+ */
+const MEMBER_STATUS_LABELS: Record<Member["status"], string> = {
+  invited: "دعوت‌شده",
+  active: "فعال",
+  suspended: "تعلیق‌شده",
+  locked: "قفل‌شده",
+  inactive: "غیرفعال",
+  offboarded: "قطع همکاری",
+};
+
 /** Which role options the editor offers — every assignable role, labelled once. */
 const ROLE_OPTIONS = ASSIGNABLE_ROLES.map((value) => ({ value, label: roleLabel(value) }));
 
@@ -145,6 +177,35 @@ export function TeamManager({
   const [members, setMembers] = useState<Member[]>([]);
   const [locations, setLocations] = useState<TeamLocation[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
+  /** Issue #947 (TEAM-F05) — the members whose file is still owed, and why. */
+  const [personnelDrift, setPersonnelDrift] = useState<PersonnelFileDrift[]>([]);
+  /**
+   * Issue #947 (TEAM-F08) — narrowing the roster.
+   *
+   * A business with forty staff scrolled this list to find one person, and the only
+   * tool was the browser's own find. The filter is client-side on purpose: the roster is
+   * already in memory (one `GET /api/team`), so a round trip per keystroke would be a
+   * slower way to search the same array.
+   */
+  const [memberSearch, setMemberSearch] = useState("");
+  /**
+   * Issue #947 (TEAM-F07) — connecting a standalone personnel file to an account.
+   *
+   * The guaranteed direction is «an account creates its file» (the onboarding doors and
+   * `ensurePersonnelFileForMembership`), and a file created by hand through the party
+   * directory has no account behind it. This is the controlled way to connect the two:
+   * the owner picks an *unlinked* Employee file, `PUT /api/parties/:id` validates the
+   * target (`employee_link_unknown` / `employee_link_taken`) and audits the change, and
+   * the membership→file sync then brings the name, mobile and email over from the
+   * account. A second file for the same member is refused by the database, not by this
+   * dialog.
+   */
+  const [fileLinkTarget, setFileLinkTarget] = useState<Member | null>(null);
+  const [fileLinkOptions, setFileLinkOptions] = useState<{ value: string; label: string }[]>([]);
+  const [fileLinkChoice, setFileLinkChoice] = useState("");
+  const [fileLinkBusy, setFileLinkBusy] = useState(false);
+  const [fileLinkError, setFileLinkError] = useState("");
+  const [memberStatus, setMemberStatus] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [deploymentProfile, setDeploymentProfile] = useState<"cloud" | "hybrid" | "local">("cloud");
@@ -171,10 +232,44 @@ export function TeamManager({
    */
   const [rehiring, setRehiring] = useState<Member | null>(null);
 
+  /**
+   * Issue #854 (P2.1/P2.4) — two different questions.
+   *
+   * `canManage` is membership administration: roles, branches, suspension,
+   * credentials, invitations. `canManagePermissions` is the narrower capability
+   * of handing out *capabilities*, and it is deliberately not implied by the
+   * first. The server enforces both; this screen agrees with it instead of
+   * offering controls that come back 403.
+   *
+   * They are computed before `load` because the loader needs them: see the
+   * capability-gated invitations read below (issue #947, TEAM-F06).
+   */
+  const granted = permissions ?? [];
+  const isOwner = role === "owner";
+  const canManagePermissions = isOwner || granted.includes(PERMISSIONS.teamPermissionsManage);
+  const canManage = isOwner || granted.includes(PERMISSIONS.teamManage);
+
   const load = useCallback(async () => {
+    /**
+     * Issue #947 (TEAM-F06) — a read-only visit does not request what it may not read.
+     *
+     * `GET /api/team` accepts `team.view` OR `team.manage`, but the invitations
+     * list requires `team.manage` outright. The loader asked for both, always, and
+     * then surfaced the refusal: a member whose whole purpose for opening this tab
+     * was to *see* the roster was met with an error about invitations they never
+     * asked for, above a roster that had loaded perfectly. A capability the screen
+     * knows it lacks is not a failed request — so it is not made.
+     */
     const [membersRes, invitesRes] = await Promise.all([
-      api<{ members: Member[]; locations?: TeamLocation[]; deploymentProfile?: "cloud" | "hybrid" | "local" }>("/api/team"),
-      api<{ invitations: Invitation[] }>("/api/team/invitations"),
+      api<{
+        members: Member[];
+        locations?: TeamLocation[];
+        deploymentProfile?: "cloud" | "hybrid" | "local";
+        personnelFileDrift?: PersonnelFileDrift[];
+      }>("/api/team"),
+      canManage
+        ? api<{ invitations: Invitation[] }>("/api/team/invitations")
+        : Promise.resolve(null),
     ]);
     if (membersRes.ok) {
       setMembers(membersRes.data.members);
@@ -183,16 +278,32 @@ export function TeamManager({
       // the place's name, and a second permission-gated call for a list this
       // screen already owns would only be a way to make it fail separately.
       if (membersRes.data.locations) setLocations(membersRes.data.locations);
+      setPersonnelDrift(membersRes.data.personnelFileDrift ?? []);
     } else {
       setError(errorMessage((membersRes.data as { error?: string }).error));
     }
-    if (invitesRes.ok) {
+    if (!invitesRes) {
+      setInvitations([]);
+    } else if (invitesRes.ok) {
       setInvitations(invitesRes.data.invitations);
     } else if (membersRes.ok) {
-      setError(errorMessage((invitesRes.data as { error?: string }).error));
+      /*
+       * A refusal here is not the same failure as a broken one. The roster loaded,
+       * so the page is usable and the sentence must say exactly that much: the
+       * invitations list needs «مدیریت تیم», and the rest of the screen is intact.
+       * Anything else (a 500, a dropped connection) keeps the mapped message.
+       */
+      const code = (invitesRes.data as { error?: string }).error;
+      setError(
+        invitesRes.status === 403 ||
+          code === "forbidden" ||
+          code === "permissions_manage_required"
+          ? "فهرست دعوت‌ها برای شما قابل مشاهده نیست (دسترسی «مدیریت تیم» لازم است)؛ بقیهٔ این صفحه کامل بارگذاری شده است."
+          : errorMessage(code),
+      );
     }
     setLoading(false);
-  }, []);
+  }, [canManage]);
 
   useEffect(() => {
     void load();
@@ -213,6 +324,89 @@ export function TeamManager({
     () => new Map(locations.map((location) => [location.id, location.name])),
     [locations],
   );
+
+  /** The roster after the search box and the status filter — what the cards render. */
+  const visibleMembers = useMemo(() => {
+    const needle = memberSearch.trim().toLowerCase();
+    return members.filter((member) => {
+      if (memberStatus && member.status !== memberStatus) return false;
+      if (!needle) return true;
+      return [
+        member.fullName,
+        member.email ?? "",
+        member.phone ?? "",
+        roleLabel(member.role),
+        member.customRoleName ?? "",
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle);
+    });
+  }, [members, memberSearch, memberStatus]);
+  const memberStatuses = useMemo(
+    () => [...new Set(members.map((member) => member.status))],
+    [members],
+  );
+
+  /**
+   * Open the «connect an existing file» dialog.
+   *
+   * The candidates are this business's Employee files that no account holds yet — the
+   * only set that *can* be linked, since a taken one answers `employee_link_taken`. The
+   * projection gives us what we need and nothing more (a nameless file cannot exist).
+   */
+  async function openFileLink(member: Member) {
+    setFileLinkTarget(member);
+    setFileLinkChoice("");
+    setFileLinkError("");
+    setFileLinkOptions([]);
+    const res = await api<{
+      error?: string;
+      parties?: { id: string; displayName: string; employeeUserId?: string | null; accountingCode?: string | null }[];
+    }>("/api/parties?role=Employee&includeInactive=1&pageSize=200");
+    if (!res.ok) {
+      setFileLinkError(errorMessage(res.data.error));
+      return;
+    }
+    setFileLinkOptions(
+      (res.data.parties ?? [])
+        .filter((party) => !party.employeeUserId)
+        .map((party) => ({
+          value: party.id,
+          label: party.accountingCode ? `${party.displayName} — ${party.accountingCode}` : party.displayName,
+        })),
+    );
+  }
+
+  /**
+   * Attach the chosen file to this member.
+   *
+   * One write, and the server decides: the link is validated against the business and
+   * the one-file-per-membership rule, the change is audited, and the file's shared
+   * fields are brought over from the account by the route's own sync call. The roster is
+   * re-read afterwards, so the card shows the state the server actually holds rather
+   * than the one this dialog hoped for.
+   */
+  async function submitFileLink() {
+    if (!fileLinkTarget || !fileLinkChoice) return;
+    setFileLinkBusy(true);
+    setFileLinkError("");
+    const res = await api<{ error?: string; fieldErrors?: Record<string, string> }>(
+      `/api/parties/${encodeURIComponent(fileLinkChoice)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ roles: ["Employee"], employeeUserId: fileLinkTarget.id }),
+      },
+    );
+    setFileLinkBusy(false);
+    if (!res.ok) {
+      const fieldError = Object.values(res.data.fieldErrors ?? {})[0];
+      setFileLinkError(errorMessage(fieldError ?? res.data.error));
+      return;
+    }
+    setFileLinkTarget(null);
+    await load();
+  }
 
   /** Issue #854 (P2.26) — the only paths that send these mutations. */
   async function executeSuspend(member: Member) {
@@ -235,25 +429,6 @@ export function TeamManager({
   }
 
   if (loading) return <LoadingSkeleton rows={3} />;
-  const isOwner = role === "owner";
-  /**
-   * Issue #854 (P2.1 / P2.4) — two different questions.
-   *
-   * `canManage` is membership administration: roles, branches, suspension,
-   * credentials, invitations. `canManagePermissions` is the narrower capability
-   * of handing out *capabilities*, and it is deliberately not implied by the
-   * first: a manager who runs the floor may add a cashier without being able to
-   * grant `ledger.post`. The server enforces both (`membership-authority.ts`,
-   * `requirePermission(PERMISSIONS.teamPermissionsManage)`); this is the screen
-   * agreeing with it instead of offering controls that come back 403.
-   *
-   * `permissions` is optional because the personnel directory is also mounted
-   * from surfaces that do not carry it; a missing list means "not granted",
-   * which renders read-only rather than assuming authority.
-   */
-  const granted = permissions ?? [];
-  const canManagePermissions = isOwner || granted.includes(PERMISSIONS.teamPermissionsManage);
-  const canManage = isOwner || granted.includes(PERMISSIONS.teamManage);
 
   return (
     <div className="space-y-6">
@@ -290,7 +465,56 @@ export function TeamManager({
           {members.length === 0 ? (
             <InfoBox>هنوز عضوی برای این کسب‌وکار ثبت نشده است.</InfoBox>
           ) : null}
-          {members.map((member) => (
+          {/* The filters appear only once there is something to filter — a search box
+              over an empty roster is furniture. */}
+          {members.length > 1 ? (
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="min-w-48 flex-1">
+                <label className="sr-only" htmlFor="team-member-search">
+                  جست‌وجوی عضو
+                </label>
+                <input
+                  id="team-member-search"
+                  type="search"
+                  className={inputClass}
+                  value={memberSearch}
+                  onChange={(event) => setMemberSearch(event.target.value)}
+                  placeholder="جست‌وجوی نام، ایمیل، موبایل یا نقش…"
+                />
+              </div>
+              <div className="w-48">
+                <Field label="وضعیت">
+                  <SearchableSelect
+                    value={memberStatus}
+                    onChange={setMemberStatus}
+                    options={[
+                      { value: "", label: "همهٔ وضعیت‌ها" },
+                      ...memberStatuses.map((status) => ({
+                        value: status,
+                        label: MEMBER_STATUS_LABELS[status],
+                      })),
+                    ]}
+                  />
+                </Field>
+              </div>
+              {memberSearch || memberStatus ? (
+                <SecondaryButton
+                  onClick={() => {
+                    setMemberSearch("");
+                    setMemberStatus("");
+                  }}
+                >
+                  پاک‌کردن فیلترها
+                </SecondaryButton>
+              ) : null}
+            </div>
+          ) : null}
+          {members.length > 0 && visibleMembers.length === 0 ? (
+            <InfoBox>
+              عضوی با این فیلتر پیدا نشد. فیلترها را پاک کنید یا نام دیگری را جست‌وجو کنید.
+            </InfoBox>
+          ) : null}
+          {visibleMembers.map((member) => (
             <div key={member.id} className="rounded-xl border border-border/80 p-3 sm:p-4 transition-colors hover:bg-muted/60 dark:hover:bg-muted/50">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -301,7 +525,7 @@ export function TeamManager({
                     )}
                     {member.status !== "active" && (
                       <span className="ms-2 rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
-                        {({ invited: "دعوت‌شده", suspended: "تعلیق‌شده", locked: "قفل‌شده", inactive: "غیرفعال", offboarded: "قطع همکاری" } as const)[member.status]}
+                        {MEMBER_STATUS_LABELS[member.status]}
                       </span>
                     )}
                   </p>
@@ -318,6 +542,40 @@ export function TeamManager({
                           : ` · شعبه‌های انتخابی: ${member.locationIds
                               .map((id) => locationName.get(id) ?? "—")
                               .join("، ") || "هیچ‌کدام"}`}
+                  </p>
+                  {/*
+                    Issue #947 (TEAM-F04/F05) — the guarantee is either true or
+                    visibly owed. The person's file is the accounting half of their
+                    employment: payroll and مساعده post against it, and until this
+                    line existed nothing on the Team screen said whether it was
+                    there. A file that could not be written is stated with the
+                    reason and the attempt count, and the read that produced this
+                    roster already retried it once (`GET /api/team`), so a visible
+                    «در انتظار» means the last attempt also failed.
+                  */}
+                  <p className="mt-1 text-xs">
+                    {member.personnelFileId ? (
+                      <span className="text-muted-foreground">
+                        پروندهٔ پرسنلی: ثبت‌شده
+                      </span>
+                    ) : member.personnelFileDrift ? (
+                      <span className="text-amber-700 dark:text-amber-300">
+                        پروندهٔ پرسنلی: در انتظار ساخت
+                        {(() => {
+                          const drift = personnelDrift.find((row) => row.userId === member.id);
+                          if (!drift) return null;
+                          return ` (${drift.reason === "identity_stale" ? "شناسهٔ ناهمخوان" : "پروندهٔ ناقص"}${
+                            drift.attempts > 1 ? `، ${toPersianDigits(String(drift.attempts))} تلاش` : ""
+                          })`;
+                        })()}
+                        {" — "}
+                        {canManage
+                          ? "با تغییر بعدی همین عضو یا اجرای همگام‌سازی پرونده‌ها ترمیم می‌شود."
+                          : "به‌زودی خودکار ترمیم می‌شود."}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">پروندهٔ پرسنلی: ندارد</span>
+                    )}
                   </p>
                   <p className="mt-1 text-xs">
                     {member.phone ? (
@@ -338,6 +596,17 @@ export function TeamManager({
                 </div>
                 <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap">
                   {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton onClick={() => setEditing(member)}>ویرایش</SecondaryButton> : null}
+                  {/*
+                    Issue #947 (TEAM-F07) — the other half of the identity story: a
+                    standalone personnel file (created in the party directory, no login)
+                    can be connected to an account deliberately, instead of the owner
+                    deleting it and re-creating the person through onboarding.
+                  */}
+                  {(canManage && !member.personnelFileId && (isOwner || member.role !== "owner")) ? (
+                    <SecondaryButton onClick={() => void openFileLink(member)}>
+                      اتصال پروندهٔ پرسنلی
+                    </SecondaryButton>
+                  ) : null}
                   {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton onClick={() => setPhoneEditing(member)}>
                     شمارهٔ موبایل
                   </SecondaryButton> : null}
@@ -434,7 +703,7 @@ export function TeamManager({
         onChanged={load}
         onError={setError}
       />
-      {canManage ? <AddStaffSection onChanged={load} onError={setError} /> : null}
+      {canManage ? <AddStaffSection locations={locations} onChanged={load} onError={setError} /> : null}
 
       {/*
         Personnel as parties (scope `team`): a staff member is a counterparty for
@@ -452,6 +721,18 @@ export function TeamManager({
       {canViewParties(role, permissions) ? (
         <div>
           <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-300">پروندهٔ کارکنان</p>
+          {/*
+            Issue #947 (TEAM-F07) — this door creates *only* the accounting record.
+            Said out loud here rather than left to be discovered: a file created here has
+            no login, and the guaranteed direction is the one above (an account creates
+            its file), so connecting an existing file to an account is a deliberate step
+            rather than a side effect of saving this form.
+          */}
+          <p className="mb-2 text-xs text-muted-foreground">
+            این بخش فقط پروندهٔ حسابداری و تماس کارکنان را می‌سازد و ویرایش می‌کند — بدون حساب
+            کاربری و بدون دسترسی ورود. برای کارمندی که با رمز عددی وارد می‌شود، از «ایجاد حساب
+            کارمند با رمز عددی» بالای همین صفحه استفاده کنید.
+          </p>
           <PartiesSection scope={partyScopeFor("team")} role={role} permissions={permissions} />
         </div>
       ) : null}
@@ -494,6 +775,55 @@ export function TeamManager({
           if (pendingOffboard) void executeOffboard(pendingOffboard);
         }}
       />
+
+      {/*
+        Issue #947 (TEAM-F07) — the controlled link flow.
+
+        A dialog rather than a checkbox on the editor: linking is a one-way identity
+        decision (one file per member, audited, and the file's name/mobile/email start
+        following the account), so it names the file, says what will change, and is the
+        only place that writes `employeeUserId` from this screen.
+      */}
+      <Dialog open={fileLinkTarget !== null} onOpenChange={(next) => (next ? null : setFileLinkTarget(null))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {fileLinkTarget ? `اتصال پروندهٔ پرسنلی به «${fileLinkTarget.fullName}»` : ""}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              پرونده‌ای که انتخاب می‌کنید به این حساب متصل می‌شود و از این پس نام، موبایل و ایمیل آن از
+              حساب کاربری می‌آید. سایر اطلاعات پرونده (نشانی، کد ملی، یادداشت‌ها و اطلاعات حسابداری) دست‌نخورده
+              می‌ماند.
+            </p>
+            {fileLinkOptions.length > 0 ? (
+              <Field label="پروندهٔ بدون حساب کاربری">
+                <SearchableSelect
+                  value={fileLinkChoice}
+                  onChange={setFileLinkChoice}
+                  options={fileLinkOptions}
+                />
+              </Field>
+            ) : (
+              <InfoBox>
+                پروندهٔ پرسنلی بدون حساب کاربری در این کسب‌وکار پیدا نشد. اگر کارمند را از همین صفحه بسازید،
+                پرونده‌اش خودکار ایجاد می‌شود.
+              </InfoBox>
+            )}
+            <ErrorBox>{fileLinkError}</ErrorBox>
+          </div>
+          <DialogFooter>
+            <SecondaryButton onClick={() => setFileLinkTarget(null)}>انصراف</SecondaryButton>
+            <PrimaryButton
+              onClick={() => void submitFileLink()}
+              disabled={fileLinkBusy || !fileLinkChoice}
+            >
+              اتصال پرونده
+            </PrimaryButton>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Issue #854 (pass 4, gap 4) — the rehire ceremony. */}
       <RehireDialog
@@ -753,7 +1083,7 @@ function RehireDialog({
  * per-permission overrides.
  *
  * The name edit doubles as the repair path for the personnel file: the route
- * keeps the party record named after the member (see `ensureEmployeeParty`),
+ * keeps the party record named after the member (see `personnel-file.ts`),
  * so «علی رضایی» in the list above and «علی رضایی» in the payroll file stay
  * one person.
  */
@@ -1241,7 +1571,9 @@ function CredentialsEditorDialog({
         {isPinMember ? (
           <Field
             label={`رمز عددی جدید (${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم)`}
-            hint="در هر شعبه باید یکتا باشد."
+            /* Issue #947 (TEAM-F03) — same wrong claim as the add form's; the PIN is
+               unique across the business, not per branch. */
+            hint="در کل کسب‌وکار یکتاست؛ نمی‌توان آن را برای دو عضو به کار برد."
           >
             <input
               className={`${inputClass} w-48 text-center tracking-[0.25em]`}
@@ -1608,9 +1940,11 @@ function InviteSection({
 }
 
 function AddStaffSection({
+  locations,
   onChanged,
   onError,
 }: {
+  locations: TeamLocation[];
   onChanged: () => Promise<void>;
   onError: (message: string) => void;
 }) {
@@ -1621,6 +1955,32 @@ function AddStaffSection({
   // first OTP proves it (mirrors PhoneEditorDialog above).
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * Issue #947 (TEAM-F03) — the branch policy is a field on this form now.
+   *
+   * It always was a field on the *server* (`locationScope`, migration 0170), and
+   * this form never sent it. `createMembership` then fell back — `ELSE 'all'` in
+   * the INSERT — so every PIN member created from this screen silently got every
+   * branch of the business, with no `user_locations` row to show it: a cashier
+   * hired for one till held branch-wide access, and the owner who wanted to
+   * restrict them had to notice afterwards and edit the member. The default below
+   * is deliberately *not* a hidden constant: with one branch there is nothing to
+   * decide (the two answers are the same), and with more than one the form starts
+   * undecided and the button waits.
+   */
+  const activeLocations = locations.filter((location) => location.isActive);
+  const [locationScope, setLocationScope] = useState<string>(
+    activeLocations.length <= 1 ? "all" : "",
+  );
+  const [branchIds, setBranchIds] = useState<string[]>([]);
+  const [defaultLocationId, setDefaultLocationId] = useState("");
+
+  /** The policy is complete when the chosen scope has what it needs. */
+  const scopeComplete =
+    locationScope === "all" ||
+    locationScope === "none" ||
+    (locationScope === "selected" && branchIds.length > 0) ||
+    (locationScope === "home" && Boolean(defaultLocationId));
 
   /**
    * Switching the role empties the PIN and the phone: a PIN is per-role
@@ -1642,7 +2002,17 @@ function AddStaffSection({
     onError("");
     const res = await api<{ error?: string }>("/api/team", {
       method: "POST",
-      body: JSON.stringify({ role, fullName, pin, phone: phone.trim() || undefined }),
+      body: JSON.stringify({
+        role,
+        fullName,
+        pin,
+        phone: phone.trim() || undefined,
+        // Sent explicitly, always: the server refuses to guess (F03), and an
+        // omitted policy is the very bug this form had.
+        locationScope,
+        locationIds: locationScope === "selected" ? branchIds : [],
+        defaultLocationId: locationScope === "home" ? defaultLocationId : null,
+      }),
     });
     setBusy(false);
     if (!res.ok) {
@@ -1652,6 +2022,8 @@ function AddStaffSection({
     setFullName("");
     setPin("");
     setPhone("");
+    setBranchIds([]);
+    setDefaultLocationId("");
     await onChanged();
   }
 
@@ -1660,10 +2032,21 @@ function AddStaffSection({
       title={
         <div>
           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">پرسنل صندوق و آشپزخانه</p>
-          <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">افزودن کارکنان صندوق و آشپزخانه</h2>
+          <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">
+            ایجاد حساب کارمند با رمز عددی
+          </h2>
         </div>
       }
-      description="این کارکنان با رمز عددی روی دستگاه مشترک وارد می‌شوند و ایمیل ندارند."
+      /*
+       * Issue #947 (TEAM-F07) — the heading says what the door *creates*.
+       *
+       * «افزودن کارکنان صندوق و آشپزخانه» sat next to the personnel directory below,
+       * which also has an «افزودن» button, and the two do different things: this one
+       * makes an account with a PIN login *and* the personnel file behind it, while the
+       * directory creates only the accounting record. An owner who wanted «just a file»
+       * landed here, and one who wanted a login created a file with no door.
+       */
+      description="یک حساب کاربری با ورود رمز عددی روی دستگاه مشترک می‌سازد (بدون ایمیل)، و پروندهٔ پرسنلی متناظر را هم ایجاد می‌کند."
     >
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Field label="نام">
@@ -1678,7 +2061,14 @@ function AddStaffSection({
         </Field>
         <Field
           label={`رمز عددی (${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم)`}
-          hint="در هر شعبه باید یکتا باشد."
+          /*
+           * Issue #947 (TEAM-F03) — the old hint claimed the PIN was unique per
+           * branch, which is the opposite of the rule: `isPinTaken` compares across
+           * the business and the keyed blind index enforces it business-wide. An
+           * owner who read it could reasonably reuse a PIN in a second branch and
+           * meet a `pin_taken` refusal with no idea why.
+           */
+          hint="در کل کسب‌وکار یکتاست؛ نمی‌توان آن را برای دو عضو به کار برد."
         >
           <input
             className={inputClass}
@@ -1703,11 +2093,80 @@ function AddStaffSection({
           />
         </Field>
       </div>
+      {/* Issue #947 (TEAM-F03) — the visible branch policy. Same vocabulary and
+          controls as the invitation form above, so «دسترسی شعبه» means one thing
+          on this screen. */}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <Field
+          label="دسترسی شعبه"
+          hint={
+            activeLocations.length <= 1
+              ? "این کسب‌وکار یک شعبه دارد؛ تفاوتی میان گزینه‌ها نیست."
+              : "این عضو در کدام شعبه‌ها کار می‌کند؟ تا وقتی انتخاب نکنید، عضو ساخته نمی‌شود."
+          }
+        >
+          <SearchableSelect
+            value={locationScope}
+            onChange={(value) => {
+              setLocationScope(value);
+              if (value !== "selected") setBranchIds([]);
+              if (value !== "home") setDefaultLocationId("");
+            }}
+            options={[
+              ...(locationScope === "" ? [{ value: "", label: "— انتخاب کنید —" }] : []),
+              { value: "all", label: "همهٔ شعبه‌ها" },
+              { value: "selected", label: "شعبه‌های انتخابی" },
+              { value: "home", label: "فقط شعبهٔ اصلی" },
+              { value: "none", label: "بدون دسترسی شعبه" },
+            ]}
+          />
+        </Field>
+        {locationScope === "home" ? (
+          <Field label="شعبهٔ اصلی" hint="تنها شعبه‌ای که این عضو به آن دسترسی دارد.">
+            <SearchableSelect
+              value={defaultLocationId}
+              onChange={setDefaultLocationId}
+              options={[
+                { value: "", label: "— انتخاب نشده —" },
+                ...activeLocations.map((location) => ({ value: location.id, label: location.name })),
+              ]}
+            />
+          </Field>
+        ) : null}
+      </div>
+      {locationScope === "selected" ? (
+        <Field label="شعبه‌ها" hint="فقط شعبه‌های انتخاب‌شده در دسترس خواهند بود.">
+          {activeLocations.length === 0 ? (
+            <p className="text-xs text-muted-foreground">شعبهٔ فعالی ثبت نشده است.</p>
+          ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {activeLocations.map((location) => (
+                <label key={location.id} className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={branchIds.includes(location.id)}
+                    onCheckedChange={(checked) =>
+                      setBranchIds((current) =>
+                        checked === true
+                          ? [...current, location.id]
+                          : current.filter((id) => id !== location.id),
+                      )
+                    }
+                  />
+                  <span>{location.name}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </Field>
+      ) : null}
       <div className="mt-4">
         {/* The same shape rule the backend gates on (pin-policy.ts) — the
             button says no before the request leaves, instead of answering
             with a 400 after it does. */}
-        <PrimaryButton onClick={add} disabled={busy || !fullName.trim() || !isValidPin(pin)}>
+        <PrimaryButton
+          onClick={add}
+          disabled={busy || !fullName.trim() || !isValidPin(pin) || !scopeComplete}
+        >
           افزودن
         </PrimaryButton>
       </div>
