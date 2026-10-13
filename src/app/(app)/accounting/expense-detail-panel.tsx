@@ -26,7 +26,6 @@ import { StatusBadge } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { OverlayDialog, fmtJalali } from "./ledger-ui";
-import { useOverlayEscape } from "./use-overlay-escape";
 import type { Runner } from "./accounting-manager";
 import { EXPENSE_STATUS_LABELS, type ExpenseJournalLine, type ExpenseRow, type ExpenseStatus } from "./expense-shared";
 
@@ -56,8 +55,6 @@ export function ExpenseDetailPanel({
   const [reversalDate, setReversalDate] = useState("");
   const [reversalMemo, setReversalMemo] = useState("");
   const [reversalError, setReversalError] = useState("");
-
-  useOverlayEscape(onClose);
 
   const isReversal = detail.status === "reversal";
   const isReversed = detail.status === "reversed";

@@ -141,6 +141,29 @@ const SCREENS = [
   { id: "accounting-receipts-dark", path: "/accounting/receipts", theme: "dark" },
   { id: "accounting-receipts-mobile", path: "/accounting/receipts", theme: "light", viewport: { width: 390, height: 844 } },
   { id: "accounting-receipts-mobile-dark", path: "/accounting/receipts", theme: "dark", viewport: { width: 390, height: 844 } },
+  /*
+   * The cheque register: the one place a cheque's lifecycle is read. The
+   * seeded lifecycle fixture (scripts/seed-visual-fixture.ts) gives it one row
+   * per state the register draws differently — in collection, endorsed to a
+   * supplier, returned, returned-and-replaced, cleared, and an issued payable.
+   * Light and dark both, because the status pills and the returned-cheque
+   * callout are the parts a token mistake would hide. `anchor` frames the
+   * register table itself: the returned, restored and replacement rows are
+   * the relationships the screen exists to show, and a frame above the table
+   * photographs none of them.
+   */
+  {
+    id: "accounting-cheques",
+    path: "/accounting/cheques",
+    theme: "light",
+    anchor: "table",
+  },
+  {
+    id: "accounting-cheques-dark",
+    path: "/accounting/cheques",
+    theme: "dark",
+    anchor: "table",
+  },
   // — CRM —
   { id: "crm-overview", path: "/crm/overview", theme: "light" },
   { id: "crm-deals", path: "/crm/deals", theme: "light" },
