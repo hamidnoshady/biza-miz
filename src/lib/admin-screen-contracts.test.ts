@@ -170,8 +170,23 @@ describe("multi-business selection is one shared step (P1.19)", () => {
   });
 
   it("returns before the success path, so a selection answer is never read as a login", () => {
-    // Order matters: `capture` must be checked before the destination redirect.
-    expect(ADMIN_LOGIN).toMatch(/if \(res\.ok && capture\(data\)\) return;/);
+    /*
+     * Order matters: `capture` must be checked before the destination redirect.
+     *
+     * The admin door now reads its response through the shared
+     * `useLoginRequest` outcome, so the guard is `ok` rather than `res.ok`.
+     * Asserting the position of the guard rather than only its spelling keeps
+     * the property this test exists for — that the selection branch returns
+     * first — instead of pinning a variable name.
+     */
+    expect(ADMIN_LOGIN).toMatch(/if \(ok && capture\(data\)\) return;/);
+
+    const captureGuard = ADMIN_LOGIN.indexOf("if (ok && capture(data)) return;");
+    const successGate = ADMIN_LOGIN.indexOf("if (ok && data.user && data.business) {");
+    expect(captureGuard).toBeGreaterThan(-1);
+    expect(successGate).toBeGreaterThan(-1);
+    expect(captureGuard).toBeLessThan(successGate);
+
     expect(PHONE_OTP_STEP).toMatch(/if \(capture\(data\)\) return;/);
   });
 

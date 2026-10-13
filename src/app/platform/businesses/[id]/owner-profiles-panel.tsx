@@ -189,6 +189,10 @@ function ProfileCard({
       {mfa.method === null ? (
         <p className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-900 dark:text-amber-100">
           ورود دومرحله‌ای برای این حساب فعال نشده است.
+          <span className="mt-1 block text-muted-foreground">
+            این حساب مالک کسب‌وکار (فضای مشتری) است و جدا از ورود دومرحلهٔ مدیران پلتفرم است؛ وضعیت آن
+            نشانهٔ خطای ورود مدیران سکو نیست.
+          </span>
         </p>
       ) : mfa.phoneE164 && !mfa.confirmedAt ? (
         <p className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-900 dark:text-amber-100">

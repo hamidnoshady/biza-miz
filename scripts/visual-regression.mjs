@@ -8,7 +8,8 @@
  * Determinism is the whole game here; a flaky snapshot gets ignored, and an
  * ignored check is not a check. So:
  *
- *  - one viewport (1440×900, DPR 1) and one timezone (Asia/Tehran), set on the
+ *  - one desktop viewport (1440×900, DPR 1), a 390×844 mobile viewport where a
+ *    screen claims one, and one timezone (Asia/Tehran), set on the
  *    browser context rather than inherited from the machine;
  *  - `prefers-reduced-motion: reduce`, which the app already honours globally —
  *    this parks every transition, skeleton shimmer and staggered entry at its
@@ -62,6 +63,16 @@ const UPDATE = process.argv.includes("--update");
 const MAX_DIFF_RATIO = 0.005;
 
 /**
+ * The browser's "now", frozen. A screen that counts days against today (the
+ * cheque register's «۱۸۸ روز گذشته» badges) otherwise renders a different
+ * number every day, and a baseline recorded on Monday fails on Thursday with
+ * nobody's code changed. The fixture's own dates are fixed (see
+ * scripts/seed-visual-fixture.ts), so the clock that reads them is too.
+ * Only `Date` is pinned; timers keep running, so loading still settles.
+ */
+const VISUAL_NOW = new Date("2026-10-10T08:30:00.000Z");
+
+/**
  * Per-channel colour tolerance for one pixel. CI's pinned Chromium is stable,
  * but GitHub runner font libraries still move edge antialiasing by more than
  * the old 12/255 threshold; 64 keeps glyph-edge noise out while black-vs-white
@@ -90,7 +101,9 @@ const EXPECTED_CHROMIUM_VERSION = "141.0.7390.37";
  * canonical example of a shared pattern rather than because it is pretty.
  *
  * `theme` covers the language's two surfaces; `state` names a non-default
- * interaction worth freezing (an empty list, a focused control).
+ * interaction worth freezing (an empty list, a focused control). `viewport`
+ * overrides the default 1440×900 window for the mobile form of a screen —
+ * same DPR 1, so the comparison stays pixel-honest.
  */
 const SCREENS = [
   // — Accounting — the reference trial balance: table hierarchy + status pill.
@@ -125,6 +138,42 @@ const SCREENS = [
     anchor: "table",
   },
   { id: "accounting-receivables", path: "/accounting/receivables", theme: "light" },
+  /*
+   * The «دریافت و پرداخت» register: filter chips, search, the voucher table
+   * with its method/account column and status pill, and the ثبت action. The
+   * fixture holds one fully-reversed receipt (net-zero in every aggregation,
+   * so no other baseline moves), which is what makes the باطل‌شده status —
+   * the register's whole reason to keep reversed vouchers visible — appear.
+   * Mobile is a first-class layout here (stacked cards, full-width actions),
+   * so it gets its own baselines in both themes.
+   */
+  { id: "accounting-receipts", path: "/accounting/receipts", theme: "light" },
+  { id: "accounting-receipts-dark", path: "/accounting/receipts", theme: "dark" },
+  { id: "accounting-receipts-mobile", path: "/accounting/receipts", theme: "light", viewport: { width: 390, height: 844 } },
+  { id: "accounting-receipts-mobile-dark", path: "/accounting/receipts", theme: "dark", viewport: { width: 390, height: 844 } },
+  /*
+   * The cheque register: the one place a cheque's lifecycle is read. The
+   * seeded lifecycle fixture (scripts/seed-visual-fixture.ts) gives it one row
+   * per state the register draws differently — in collection, endorsed to a
+   * supplier, returned, returned-and-replaced, cleared, and an issued payable.
+   * Light and dark both, because the status pills and the returned-cheque
+   * callout are the parts a token mistake would hide. `anchor` frames the
+   * register table itself: the returned, restored and replacement rows are
+   * the relationships the screen exists to show, and a frame above the table
+   * photographs none of them.
+   */
+  {
+    id: "accounting-cheques",
+    path: "/accounting/cheques",
+    theme: "light",
+    anchor: "table",
+  },
+  {
+    id: "accounting-cheques-dark",
+    path: "/accounting/cheques",
+    theme: "dark",
+    anchor: "table",
+  },
   // — CRM —
   { id: "crm-overview", path: "/crm/overview", theme: "light" },
   { id: "crm-deals", path: "/crm/deals", theme: "light" },
@@ -284,6 +333,7 @@ async function main() {
   for (const screen of screens) {
     const context = await browser.newContext({
       ...contextOptions,
+      viewport: screen.viewport ?? contextOptions.viewport,
       storageState,
       colorScheme: screen.theme,
     });
@@ -297,6 +347,7 @@ async function main() {
       (theme) => window.localStorage.setItem("theme", theme),
       screen.theme,
     );
+    await context.clock.setFixedTime(VISUAL_NOW);
     const page = await context.newPage();
     // NOT `networkidle`: this app holds an open WebSocket for live sync, so
     // the network is never idle and every navigation would time out. Wait for

@@ -31,6 +31,7 @@ function routeKey(file: string): string {
 
 /** Routes that are deliberately session-less, and why. Anything else must guard. */
 const PUBLIC_ROUTES: Record<string, string> = {
+  "integrations/tax-invoices/webhook/[businessId]": "TSP server ingress authenticated by tenant-bound, timestamped HMAC-SHA256 over bounded raw bytes; replay writes one append-only event, no session",
   "auth/login": "credential exchange — necessarily runs without a session",
   "auth/pin-login": "credential exchange — necessarily runs without a session",
   "auth/pin-login/roster":
@@ -61,6 +62,14 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "credential exchange (Phase 42) — checks the six-digit code carried by the " +
     "phone_pending token and only then mints the session, necessarily while the " +
     "caller still has none",
+  // Issue #885 L04 — the login chooser asks what this install can do before it
+  // offers offline access. No session exists when the chooser renders. It
+  // answers the deployment profile and phone-OTP enforceability and nothing
+  // else: no secrets, no member names, no counts, and a host that resolves to
+  // no business gets the same neutral shape as one that does.
+  "auth/login-capabilities":
+    "read-only capability probe for the login chooser (issue #885) — answers deployment " +
+    "profile and phone-OTP enforceability, no credentials and no directory disclosure",
   "auth/webauthn/login/options":
     "credential exchange (Phase 20 Wave 3) — step 1 of a biometric login, necessarily runs " +
     "without a session, the same as auth/pin-login",
@@ -108,6 +117,14 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/password-reset":
     "user-controlled password reset / recovery exchange (Issue #809) — the single-use hashed " +
     "token in the link is the credential before the account holder sets a new password",
+  // Issue #885 L10. Public because the caller is by definition someone who
+  // cannot sign in. It carries no credential, so the safety comes from what
+  // it does rather than what it checks: it never says whether an address
+  // exists (one 200 and one body for every outcome), it is rate-limited per
+  // address, and the link it mints goes only to the address on file.
+  "auth/password-reset/request":
+    "forgotten-password initiation — pre-session by definition; non-enumerating single-shape " +
+    "response, per-address rate limit, and delivery only to the address on file",
   "auth/company-handoff": "one-use platform-company staff handoff; token is the credential before the tenant cookie exists",
   "website/leads": "public form intake authenticated by a hashed, site-scoped bearer credential with durable rate limiting and idempotency",
   "auth/impersonate-handoff":
@@ -317,6 +334,16 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/phone/self":
     "verifies or changes the caller's own login phone — the session's own sub is the " +
     "authorization, and no other member's number is reachable",
+  // Issue #885 — the caller's own seven-day trusted devices. Listed and revoked
+  // strictly by `session.sub` / `session.businessId`, never by a request field,
+  // so the same ownership shape as auth/phone/self applies: there is no form of
+  // request that reads or clears another member's trust. The write additionally
+  // requires a recent authentication, because revoking trust is a security
+  // action. An owner revoking somebody else's trust is an administrative act
+  // and belongs behind team.manage on the team screen, not here.
+  "auth/trusted-devices":
+    "lists and revokes only the caller's own trusted devices — the session's own sub is the " +
+    "authorization, and no other member's trust is reachable",
   // AI Hub Wave 1 (issue #141) — a conversation is visible only to the member
   // who started it (actor_user_id), not by role, so ai-conversations.ts's own
   // ownership filter is the authorization, the same shape as auth/businesses.

@@ -31,6 +31,19 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   gold_buy_back: "خرید طلا از مشتری",
   gold_account_manual: "تعدیل حساب طلا",
   watch_sale: "فروش ساعت",
+  // Issue #839 — the automotive trade. `automotive_vehicle` is the shared
+  // source for the events that move the unit itself (acquisition, state
+  // changes, transfers and the sale's own entries): one car, one document
+  // series, so the journal does not grow a code per transition.
+  automotive_vehicle: "خودرو",
+  automotive_sale: "فروش خودرو",
+  automotive_vehicle_sale: "فروش خودرو",
+  automotive_vehicle_media: "رسانهٔ پروندهٔ خودرو",
+  automotive_vehicle_cost: "هزینهٔ خودرو",
+  automotive_vehicle_cost_void: "ابطال هزینهٔ خودرو",
+  automotive_vehicle_transfer: "انتقال خودرو بین شعب",
+  automotive_reservation_deposit: "بیعانهٔ رزرو خودرو",
+  automotive_reservation_deposit_refund: "بازگشت بیعانهٔ رزرو خودرو",
   custom_order_ticket: "سفارش ساخت",
   repair_ticket: "تعمیرات",
   serial_transfer: "انتقال دستگاه بین شعب",
@@ -38,6 +51,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   layaway_payment: "قسط پیش‌فروش",
   consignment_payout: "تسویهٔ امانی",
   customer_return: "مرجوعی مشتری",
+  serial_return: "مرجوعی کالای سریالی",
   woocommerce_order: "سفارش ووکامرس",
   woocommerce_refund: "بازپرداخت ووکامرس",
   cms_store_order: "سفارش فروشگاه سایت",
@@ -82,6 +96,12 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   payroll_advance_void: "ابطال مساعده",
   payroll_engine_accrual: "حقوق و دستمزد (موتور قانونی)",
   payroll_engine_payment: "پرداخت حقوق (موتور قانونی)",
+  // Commission settlement: a payout and the reversal of one (Growth → commission runs).
+  commission_payout: "پرداخت پورسانت",
+  commission_payout_reversal: "ابطال پرداخت پورسانت",
+  // A run line carried over from an earlier run stores this code as its source.
+  // No journal entry carries it; it is named here like every other stored code.
+  carry_forward: "مانده پورسانت دورهٔ قبل",
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
   fixed_asset_disposal: "واگذاری دارایی ثابت",
   fixed_asset_acquisition: "خرید دارایی ثابت",
@@ -98,6 +118,11 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   manual_adjustment: "تعدیل دستی",
   opening: "تراز افتتاحیه",
   closing: "بستن سال مالی",
+
+  // حسابداری چندارزی (issue #863) — the foreign-currency documents
+  multicurrency: "سند ارزی",
+  fx_settlement: "تسویه ارزی",
+  fx_revaluation: "تجدید ارزیابی ارز",
 
   // شرکت پلتفرم — the internal company's own accounting, posted from the
   // platform billing outbox (migration 0193). Subscription revenue and wallet

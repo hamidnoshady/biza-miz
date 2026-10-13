@@ -70,6 +70,7 @@ export default function PlatformAiModesPage() {
   return (
     <div className="space-y-4">
       <AiConsoleNav />
+      <h1 className="text-xl font-bold">حالت‌های اجرا</h1>
       <InfoBox>
         سه حالت کاربرپسند و نامشاپ لایت‌ال‌ال‌ام هرکدام. مسیریابی، جایگزینی، تلاش مجدد و سقف هزینه کار لایت‌ال‌ال‌ام
         است؛ اینجا فقط انتخاب می‌شود که هر حالت کدام نامشاپ را می‌خواهد. خالی گذاشتن یک نامشاپ یعنی «مدل پیش‌فرض

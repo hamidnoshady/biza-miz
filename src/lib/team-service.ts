@@ -146,7 +146,7 @@ function toMember(row: MemberRow): TeamMember {
 export async function listMembers(businessId: string): Promise<TeamMember[]> {
   const { rows } = await query<MemberRow>(
     `SELECT u.id, u.role, u.custom_role_id, tr.name custom_role_name,
-            CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END custom_role_permissions,
+            CASE WHEN u.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END custom_role_permissions,
             u.full_name, u.email, u.is_active,
             u.membership_status, u.location_scope,
             (u.pin_hash IS NOT NULL OR EXISTS (
@@ -1088,6 +1088,20 @@ export async function removeMembership(
         WHERE employee_id = $1 AND business_id = $2 AND revoked_at IS NULL`,
       [userId, businessId],
     );
+    // Issue #885 — offboarding invalidates the seven-day device trust too.
+    //
+    // It has to happen here and not by chasing `platform_user_id`: the
+    // statement above sets that column to NULL, so a later
+    // `revokeTrustedDevicesForPlatformUser` would find nothing and a browser
+    // that still held a trust cookie could keep skipping OTP and MFA for a
+    // membership that no longer exists. Same transaction as the session
+    // revocation, for the same reason.
+    await client.query(
+      `UPDATE trusted_devices
+          SET revoked_at = now(), revoked_reason = 'member_offboarded'
+        WHERE business_id = $2 AND user_id = $1 AND revoked_at IS NULL`,
+      [userId, businessId],
+    );
     // Phase 20 Wave 5 — a removed member's shift (if left open) would
     // otherwise stay open forever now that nothing else about their access
     // is still live.
@@ -1608,6 +1622,7 @@ export async function setPin(
           AND credential_type = 'pin' AND status = 'active'`,
       [userId, businessId],
     );
+
     /**
      * The unique index on `(business_id, pin_blind_index)` is the real
      * guarantee (issue #854 P2.13): `isPinTaken` above answers the friendly
@@ -1629,6 +1644,25 @@ export async function setPin(
       }
       throw err;
     }
+
+    // Issue #885, gap 6 — rotating the PIN invalidates the seven-day device
+    // trust. That trust was earned by proving *this* credential set on that
+    // device, so a rotation is exactly the "somebody else now knows the
+    // secret" case: a browser still holding the cookie must not keep skipping
+    // the OTP and MFA challenges on the strength of a PIN that no longer
+    // exists. Same transaction as the rotation, so a failed change rolls the
+    // revocation back with it.
+    //
+    // A member's own voluntary password change is deliberately *not* here —
+    // see the note in password-reset.ts. This is a third party changing the
+    // credential on the member's behalf.
+    await client.query(
+      `UPDATE trusted_devices
+          SET revoked_at = now(), revoked_reason = 'pin_rotated'
+        WHERE business_id = $2 AND user_id = $1 AND revoked_at IS NULL`,
+      [userId, businessId],
+    );
+
     // Once a canonical PIN exists, erase any compatibility copy.
     await client.query(
       "UPDATE users SET pin_hash = NULL, updated_at = now() WHERE id = $1 AND business_id = $2",

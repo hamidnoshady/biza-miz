@@ -90,7 +90,18 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "name", label: "نام شعبه (الفبا)" },
 ];
 
-export function BranchOverviewSection({ canExplain = false }: { canExplain?: boolean }) {
+export function BranchOverviewSection({
+  canExplain = false,
+  canExport = false,
+}: {
+  canExplain?: boolean;
+  /**
+   * `reports.export` (issue #819). The branch-comparison file is also gated by
+   * `reports.business_wide` server-side — `canExport` only decides whether the
+   * buttons are drawn, not whether the file is allowed.
+   */
+  canExport?: boolean;
+}) {
   const money = useMoney();
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
@@ -746,14 +757,16 @@ export function BranchOverviewSection({ canExplain = false }: { canExplain?: boo
       {/* Export & AI Actions */}
       <SectionCard title="خروجی و تحلیل هوشمند">
         <div className="flex flex-wrap items-center gap-2">
-          <ExportButtons
-            request={{
-              title: "گزارش مقایسه عملکرد شعب",
-              kind: "business_overview",
-              dateFrom,
-              dateTo,
-            }}
-          />
+          {canExport ? (
+            <ExportButtons
+              request={{
+                title: "گزارش مقایسه عملکرد شعب",
+                kind: "business_overview",
+                dateFrom,
+                dateTo,
+              }}
+            />
+          ) : null}
 
           {canExplain ? (
             <Button

@@ -15,7 +15,8 @@ import {
   verifyEmployeePhoneOtp,
   verifyPhonePendingToken,
 } from "@/lib/phone-otp";
-import { phoneDerivedSubject, redeemOtpChallenge } from "@/lib/otp-challenge";
+import { normalizeOtpCode, phoneDerivedSubject, redeemOtpChallenge } from "@/lib/otp-challenge";
+import { boundedString } from "@/lib/login-contract";
 import {
   distinctSecondFactorMethods,
   enrolmentRequirement,
@@ -25,6 +26,13 @@ import {
   shouldChallengeMfaOnLogin,
 } from "@/lib/mfa";
 import { getMfaPolicy } from "@/lib/mfa-policy";
+import {
+  issueTrustedDevice,
+  readTrustedDeviceToken,
+  TRUSTED_DEVICE_COOKIE,
+  trustedDeviceCookieOptions,
+  verifyTrustedDevice,
+} from "@/lib/trusted-device";
 import {
   filterActiveMfaEnrolments,
   getAccountMfaEnrolments,
@@ -57,7 +65,7 @@ interface MemberRow extends Record<string, unknown> {
  * as both primary and second factor) before minting the tenant session.
  */
 export async function POST(request: NextRequest) {
-  let body: { code?: string; deviceToken?: string; businessId?: string };
+  let body: { code?: string; deviceToken?: string; businessId?: string; trustDevice?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -71,7 +79,23 @@ export async function POST(request: NextRequest) {
   const payload = await verifyPhonePendingToken(bearer);
   if (!payload) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const code = body.code ? body.code.trim() : "";
+  /*
+   * Issue #885 L11 — canonicalise *before* the shape check, not after.
+   *
+   * A bare `/^\d{6}$/` test on the raw input rejects Persian and Arabic-Indic
+   * digits, which is what a member of a Persian-first product actually types:
+   * they read «۱۲۳۴۵۶» off the SMS and key it in, and were told the code was
+   * invalid. `normalizeOtpCode` folds the digits first and then applies the
+   * same six-digit rule, so the gate is no stricter — it just stops rejecting
+   * the digits this product's users type.
+   */
+  const code = normalizeOtpCode(body.code) ?? "";
+  /**
+   * Issue #885 L14 — the device token names a row. Bound it here, at the
+   * boundary, rather than letting an arbitrary JSON value through to a row
+   * lookup: over the bound it is dropped, not forwarded.
+   */
+  const deviceToken = boundedString(body.deviceToken, { max: 256, required: false });
 
   /**
    * Issue #854 (P1.19) — step three of a multi-business login: the member has
@@ -114,8 +138,12 @@ export async function POST(request: NextRequest) {
       }
       return completePhoneLogin(member, {
         attachPhone: null,
-        deviceToken: body.deviceToken,
+        deviceToken: deviceToken ?? undefined,
         userAgent: request.headers.get("user-agent"),
+        // The multi-business path spends an already-proven code, so the trust
+        // choice travels with the request exactly as it does on the direct one.
+        wantsTrust: body.trustDevice === true,
+        trustedDeviceToken: readTrustedDeviceToken(request),
       });
     });
   }
@@ -245,8 +273,10 @@ export async function POST(request: NextRequest) {
        * explicitly names, so a body field cannot redirect the write.
        */
       attachPhone: payload.mayAttachPhone ? (payload.phone ?? null) : null,
-      deviceToken: body.deviceToken,
+      deviceToken: deviceToken ?? undefined,
       userAgent: request.headers.get("user-agent"),
+      wantsTrust: body.trustDevice === true,
+      trustedDeviceToken: readTrustedDeviceToken(request),
     });
   });
 }
@@ -291,8 +321,21 @@ export async function POST(request: NextRequest) {
      */
 async function completePhoneLogin(
   member: MemberRow,
-  options: { attachPhone: string | null; deviceToken?: string; userAgent: string | null },
+  options: {
+    attachPhone: string | null;
+    deviceToken?: string;
+    userAgent: string | null;
+    /** The member ticked «اعتماد به این دستگاه برای ۷ روز» on this request. */
+    wantsTrust?: boolean;
+    /** The trusted-device cookie the browser arrived with, if any. */
+    trustedDeviceToken?: string | null;
+  },
 ): Promise<NextResponse> {
+    // Issue #885, gap 3 — set only when a due MFA challenge was waived because
+    // this device already held trust. Load-bearing below: trust is earned by
+    // *completing* every factor, never by being exempted from one.
+    let mfaWaivedByTrust = false;
+
     const stamp = () =>
       stampPhoneVerified({
         businessId: member.business_id,
@@ -336,13 +379,39 @@ async function completePhoneLogin(
           role: member.role,
         });
 
-        if (
-          shouldChallengeMfaOnLogin({
-            hasConfirmedEnrolment: activeEnrolments.length > 0,
-            appliesToRole: requiresMfa,
-            requirement: req,
-          })
-        ) {
+        const challengeDue = shouldChallengeMfaOnLogin({
+          hasConfirmedEnrolment: activeEnrolments.length > 0,
+          appliesToRole: requiresMfa,
+          requirement: req,
+        });
+
+        /*
+         * Issue #885, gap 3 — a device this member already trusted skips the
+         * *routine* second-factor challenge, and only that.
+         *
+         * What this deliberately does not do:
+         *  - it does not substitute for the primary factor. The OTP was
+         *    redeemed above, before this line, so possession of the number is
+         *    already proven;
+         *  - it does not satisfy the distinct-factor rule. A waived challenge
+         *    is not a completed second factor, so nothing downstream may count
+         *    it as one;
+         *  - it does not cover step-up for sensitive actions, which is a
+         *    separate `requireRecentAuth` check on the routes that need it.
+         *
+         * Scoped to this business and this membership, and consulted only when
+         * a challenge is actually due — otherwise it is a query for nothing.
+         */
+        const deviceTrust = challengeDue
+          ? await verifyTrustedDevice({
+              businessId: member.business_id,
+              userId: member.id,
+              token: options.trustedDeviceToken ?? null,
+            })
+          : null;
+        mfaWaivedByTrust = challengeDue && deviceTrust?.trusted === true;
+
+        if (challengeDue && !mfaWaivedByTrust) {
           const mfaToken = await signMfaPendingToken({
             sub: member.platform_user_id,
             method: distinctMethods[0] ?? null,
@@ -370,6 +439,13 @@ async function completePhoneLogin(
             mfaMethod: distinctMethods[0] ?? null,
             availableMethods: distinctMethods,
             primaryAuth: "phone_otp",
+            /*
+             * Issue #885 — the ceremony is not over, so no trust is granted
+             * here. The choice is echoed back so the MFA step can carry the
+             * member's intent forward and register it only if that last factor
+             * actually completes.
+             */
+            ...(options.wantsTrust ? { trustOffered: true } : {}),
           });
         }
 
@@ -418,5 +494,36 @@ async function completePhoneLogin(
       ...(graceNotice ?? {}),
     });
     res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+
+    /*
+     * Issue #885 — the seven-day device trust the member asked for.
+     *
+     * Reached only here, at the end of a ceremony in which every required
+     * factor actually passed. Two guards are load-bearing:
+     *
+     *  - `!mfaWaivedByTrust`: trust is earned by *completing* every factor,
+     *    not by being exempted from one. If a waived MFA could re-mint trust,
+     *    a device would extend its own window indefinitely on ordinary logins
+     *    and the seven-day expiry would never bite.
+     *  - the `.catch`: the login itself is already complete and must not fail
+     *    because a convenience row could not be written.
+     */
+    if (options.wantsTrust && !mfaWaivedByTrust) {
+      const trust = await issueTrustedDevice({
+        businessId: member.business_id,
+        userId: member.id,
+        platformUserId: member.platform_user_id,
+        deviceToken: options.deviceToken,
+        deviceLabel,
+        factorSummary: "phone_otp",
+      }).catch((err) => {
+        console.error("Trusted-device registration failed", err);
+        return null;
+      });
+      if (trust) {
+        res.cookies.set(TRUSTED_DEVICE_COOKIE, trust.token, trustedDeviceCookieOptions());
+      }
+    }
+
     return res;
 }

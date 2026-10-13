@@ -814,6 +814,7 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
         `SELECT a.employee_id, sum(a.amount)::text AS net, array_agg(a.id) AS ids
            FROM commission_accruals a LEFT JOIN journal_entries je ON je.id = a.entry_id
           WHERE a.business_id = $1 AND a.payroll_run_id IS NULL AND a.payroll_engine_run_id IS NULL
+            AND a.settlement_run_id IS NULL
             AND COALESCE(je.entry_date, a.created_at::date) <= $2::date AND a.employee_id = ANY($3::uuid[])
           GROUP BY a.employee_id HAVING sum(a.amount) > 0`,
         [params.businessId, run.accrual_date, covered.map((e) => e.user_id)],

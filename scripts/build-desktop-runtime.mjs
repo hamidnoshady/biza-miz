@@ -21,6 +21,7 @@ const standaloneDir = path.join(nextDir, "standalone");
 const outDir = path.join(root, ".desktop-runtime");
 const require = createRequire(import.meta.url);
 const { nodeFileTrace } = require("next/dist/compiled/@vercel/nft");
+const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.cjs");
 
 function required(relativePath, explanation) {
   const absolute = path.join(root, relativePath);
@@ -52,6 +53,12 @@ async function compile(entryPoint, outfile, extraDefine = {}) {
     target: "node24",
     sourcemap: false,
     legalComments: "none",
+    // Whitespace and syntax only, never identifier renaming: the bundle is an
+    // unattended server whose error names and stack shapes are read in support,
+    // so it stays readable while losing the formatting bytes (about 3.4 MiB of
+    // the staged runtime, measured 2026-10-10).
+    minifyWhitespace: true,
+    minifySyntax: true,
     // Imported CLI modules contain direct-execution guards. In CJS output an
     // unbound import.meta.url becomes undefined and fileURLToPath throws before
     // our compiled entry can call main(). A stable non-entry URL keeps every
@@ -137,6 +144,8 @@ async function main() {
   // Next's node-file-traced server dependency graph. This contains only the
   // runtime node_modules files reached by production routes, not root deps.
   await cp(standaloneDir, outDir, { recursive: true });
+  const removedTraceMetadata = await stripNextTraceMetadata(outDir);
+  console.log(`Removed ${removedTraceMetadata} build-only Next.js trace manifests from the desktop runtime`);
   await mkdir(path.join(outDir, ".next"), { recursive: true });
   await cp(path.join(nextDir, "static"), path.join(outDir, ".next", "static"), { recursive: true });
   await cp(path.join(root, "public"), path.join(outDir, "public"), { recursive: true });
@@ -162,6 +171,40 @@ async function main() {
   // a future release. Static/server output is retained; only rebuildable cache
   // is forbidden.
   await rm(path.join(outDir, ".next", "cache"), { recursive: true, force: true });
+
+  /*
+   * Drop the node-file-trace manifests. `*.nft.json` is the bundler's record of
+   * which files each entrypoint reached — it is what *produced* the traced
+   * node_modules tree staged above, and once that tree exists the manifest has
+   * no reader. Nothing in Next's runtime server loads it (`start-server.js`,
+   * `next-server.js` and `next.js` never mention it); only `next/dist/build/*`
+   * does, and this runtime never runs a build. Neither this repository nor the
+   * Electron shell references the files.
+   *
+   * Unlike the dev-package strip below this is a recursive walk on purpose: the
+   * manifests sit next to every traced entrypoint, deep inside `.next/server`
+   * and the staged `node_modules`. The suffix is unambiguous — `.nft.json` is
+   * only ever emitted by the tracer — so a recursive match cannot reach a
+   * production file the way a recursive package glob could.
+   *
+   * At the time of writing this is ~1,070 files and ~11 MiB, which is the
+   * difference between the staged runtime fitting its pre-package budget and
+   * the installed payload fitting its own. It removes dead weight rather than
+   * raising either limit.
+   */
+  const { readdir: readdirForTrace } = await import("node:fs/promises");
+  let traceManifestsRemoved = 0;
+  async function removeTraceManifests(current) {
+    for (const entry of await readdirForTrace(current, { withFileTypes: true })) {
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) await removeTraceManifests(absolute);
+      else if (entry.name.endsWith(".nft.json")) {
+        await rm(absolute, { force: true });
+        traceManifestsRemoved += 1;
+      }
+    }
+  }
+  await removeTraceManifests(outDir);
 
   const binDir = path.join(outDir, "bin");
   await mkdir(binDir, { recursive: true });

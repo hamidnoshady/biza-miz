@@ -103,10 +103,13 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM accounts");
   await db.query("DELETE FROM businesses");
+  await db.query("COMMIT");
 
   const bizRow = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Trial Balance Co', $1) RETURNING id",

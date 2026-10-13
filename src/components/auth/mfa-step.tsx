@@ -275,10 +275,26 @@ export function MfaStep({
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
+        status?: string;
         error?: string;
         recoveryCodes?: string[];
       };
       if (!res.ok) {
+        setError(mfaErrorMessage(data.error, res.status));
+        setCode("");
+        return;
+      }
+      // Issue #885, gap 5 — a 200 is not a verification.
+      //
+      // `res.json().catch(() => ({}))` deliberately swallows a malformed body
+      // so a proxy error page cannot throw out of the submit handler, but that
+      // means `data` can legitimately be `{}`. Treating "the request
+      // succeeded" as "the factor was accepted" would then hand the session
+      // over on an empty object, an HTML error page that happened to return
+      // 200, or a truncated response. Only the route's explicit verdict
+      // counts, and anything else is reported as a failure the member can
+      // retry rather than a silent pass.
+      if (data.status !== "verified") {
         setError(mfaErrorMessage(data.error, res.status));
         setCode("");
         return;
@@ -328,7 +344,7 @@ export function MfaStep({
               : "برای این حساب هنوز روش دومرحله‌ای ثبت نشده و مهلت فعال‌سازی تمام شده است. یکی از دو روش زیر را انتخاب کنید."}
           </p>
         </div>
-        {error ? <p className={theme.error}>{error}</p> : null}
+        {error ? <p role="alert" className={theme.error}>{error}</p> : null}
         <button
           type="button"
           disabled={busy}
@@ -389,7 +405,7 @@ export function MfaStep({
             کد یک‌بارمصرف هر بار به این شماره پیامک می‌شود.
           </p>
         </div>
-        {error ? <p className={theme.error}>{error}</p> : null}
+        {error ? <p role="alert" className={theme.error}>{error}</p> : null}
         <input
           dir="ltr"
           inputMode="tel"
@@ -487,7 +503,7 @@ export function MfaStep({
         <h2 className={theme.heading}>
           {recoveryMode ? "کد بازیابی" : "کد تأیید دومرحله‌ای"}
         </h2>
-        <p className={theme.muted}>
+        <p id="mfa-code-hint" className={theme.muted}>
           {recoveryMode
             ? "یکی از کدهای بازیابی که هنگام فعال‌سازی ذخیره کرده‌اید را وارد کنید. هر کد فقط یک بار کار می‌کند."
             : method === "sms_otp"
@@ -499,7 +515,7 @@ export function MfaStep({
       </div>
 
       {notice && !error ? <p className={theme.notice}>{notice}</p> : null}
-      {error ? <p className={theme.error}>{error}</p> : null}
+      {error ? <p role="alert" className={theme.error}>{error}</p> : null}
 
       <input
         dir="ltr"
@@ -516,6 +532,8 @@ export function MfaStep({
           setCode(recoveryMode ? e.target.value : normalizeSecurityDigits(e.target.value, 6))
         }
         placeholder={recoveryMode ? "ABCDE-FGHJK" : "------"}
+        aria-label={recoveryMode ? "کد بازیابی" : "کد تأیید ۶ رقمی"}
+        aria-describedby="mfa-code-hint"
         className={theme.input}
       />
 

@@ -142,13 +142,13 @@ describe("families migrated off role-only gating stay migrated", () => {
     }
   });
 
-  it("gates every ledger route on an accounting, finance or payroll capability", () => {
+  it("gates every ledger route on an accounting, finance, payroll or taxpayer capability", () => {
     const routes = family("ledger/");
     expect(routes.length).toBeGreaterThan(35);
     for (const relative of routes) {
       const source = read(relative);
       expect(source, relative).toMatch(
-        /PERMISSIONS\.(ledger(View|Post|Approve|ClosePeriod|Propose)|accountsEdit|finance\w+|payroll(View|Manage))/,
+        /PERMISSIONS\.(ledger(View|Post|Approve|ClosePeriod|Propose)|accountsEdit|finance\w+|payroll(View|Manage)|tax(View|Prepare|Send|Inquiry|Amend|Cancel|ManageSettings|Export))/,
       );
       expect(source, relative).not.toMatch(/requireRole\(/);
     }

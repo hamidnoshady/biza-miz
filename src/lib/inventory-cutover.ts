@@ -404,6 +404,7 @@ export async function applyInventoryCutover(
        VALUES($1,$2,$4,0),($1,$3,0,$4)`,
       [reconciliationJournalId, accountMap.get(debitCode), accountMap.get(creditCode), amount],
     );
+    await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
   }
   await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [inventoryEventId]);
   await client.query(

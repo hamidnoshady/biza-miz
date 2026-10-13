@@ -694,11 +694,17 @@ function ArticleEditor({
                 />
               </Field>
 
-              <Field
-                label="بخش‌هایی که این راهنما آموزش می‌دهد"
-                hint="آیکون «آموزش» همان بخش به این راهنما پیوند می‌خورد."
-              >
-                <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">
+              {/* A plain labelled group, not <Field>: Field wraps its children in a
+                  <label>, which gave every chip the whole group text as its name (F26). */}
+              <div className="mb-4">
+                <span id="kb-sections-label" className="mb-1 block text-sm font-medium text-foreground">
+                  بخش‌هایی که این راهنما آموزش می‌دهد
+                </span>
+                <div
+                  role="group"
+                  aria-labelledby="kb-sections-label"
+                  className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2"
+                >
                   {KNOWLEDGE_SECTIONS.map((s) => {
                     const on = sectionKeys.includes(s.key);
                     return (
@@ -719,8 +725,28 @@ function ArticleEditor({
                       </button>
                     );
                   })}
+                  {/* Keys stored on articles that the catalogue no longer defines (e.g. the
+                      legacy `overview`). They stay visible and removable here instead of being
+                      silently kept or dropped; the owner decides what to migrate (F26). */}
+                  {sectionKeys
+                    .filter((key) => !KNOWLEDGE_SECTIONS.some((s) => s.key === key))
+                    .map((key) => (
+                      <button
+                        key={`legacy-${key}`}
+                        type="button"
+                        aria-pressed="true"
+                        title="این کلید در فهرست بخش‌ها تعریف نشده است"
+                        onClick={() => setSectionKeys((prev) => prev.filter((k) => k !== key))}
+                        className="rounded-full border border-amber-400/60 bg-amber-500/15 px-2.5 py-1 text-[11px] text-amber-800 dark:text-amber-200"
+                      >
+                        بخش نامعتبر: {key} ×
+                      </button>
+                    ))}
                 </div>
-              </Field>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  آیکون «آموزش» همان بخش به این راهنما پیوند می‌خورد.
+                </span>
+              </div>
 
               <Field label="برچسب‌ها">
                 <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">

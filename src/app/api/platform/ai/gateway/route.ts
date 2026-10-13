@@ -9,7 +9,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAiRuntimeReadiness, type AiRuntimeReadiness } from "@/lib/ai-config";
 import { platformCan } from "@/lib/platform-admin";
 import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
-import { query, withoutTenantScope } from "@/lib/db";
+import {
+  listAiGatewayFleetPage,
+  listAiGatewayLocationPage,
+  type FleetQueryRow,
+  type LocationQueryRow,
+} from "@/lib/platform-ai-gateway-pagination";
 import { decorateAiConfigWithState } from "@/lib/ai-runtime";
 import {
   BusinessLocationMismatchError,
@@ -38,14 +43,6 @@ import {
   type AiGatewayInput,
 } from "@/lib/ai-gateway";
 
-/** The fleet-table status filter/vocabulary (issue #748 P1-6). */
-type FleetStatus =
-  | "ready"
-  | "missing_key"
-  | "key_sync_error"
-  | "entitlement_disabled"
-  | "gateway_unavailable";
-
 const FLEET_STATUS_FILTERS = new Set([
   "all",
   "ready",
@@ -66,6 +63,24 @@ const GATEWAY_LEVEL_REASONS = new Set([
   "invalid_max_output_tokens",
   "configuration_load_failed",
 ]);
+
+const MAX_PAGINATION_INT = 2_147_483_647;
+const MAX_SEARCH_LENGTH = 100;
+
+/**
+ * Keep values passed to PostgreSQL's integer casts finite and bounded. A zero
+ * or missing value retains the route's historical default; negative values
+ * become the first page, and oversized finite values are clamped before they
+ * reach `$n::int`. Non-finite values are invalid input and use the default.
+ */
+function paginationInteger(raw: string | null, fallback: number, maximum: number): number {
+  if (raw === null) return fallback;
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return fallback;
+  const integer = Math.trunc(numeric);
+  if (integer === 0) return fallback;
+  return Math.min(maximum, Math.max(1, integer));
+}
 
 /** Technical LiteLLM gateway status, models, readiness and virtual keys. */
 export const GET = withPlatformScope(async (request: NextRequest) => {
@@ -93,13 +108,13 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
   }
 
   const params = request.nextUrl.searchParams;
-  const rawSearch = (params.get("search") ?? "").trim();
+  const rawSearch = (params.get("search") ?? "").trim().slice(0, MAX_SEARCH_LENGTH);
   const escapedSearch = rawSearch.replace(/[!%_]/g, "!$&");
   const searchPattern = escapedSearch ? `%${escapedSearch}%` : "";
   const statusRaw = params.get("status") ?? "all";
   const statusFilter = FLEET_STATUS_FILTERS.has(statusRaw) ? statusRaw : "all";
-  const pageSize = Math.min(100, Math.max(1, Math.trunc(Number(params.get("pageSize")) || 20)));
-  const requestedPage = Math.max(1, Math.trunc(Number(params.get("page")) || 1));
+  const pageSize = paginationInteger(params.get("pageSize"), 20, 100);
+  const requestedPage = paginationInteger(params.get("page"), 1, MAX_PAGINATION_INT);
   const focusBusinessId = params.get("businessId")?.trim() || "";
   const focusLocationId = params.get("locationId")?.trim() || "";
 
@@ -113,101 +128,20 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
       !(platformReadiness.reason === "missing_runtime_credential" && gateway.virtualKeysEnabled),
   );
 
-  type FleetQueryRow = {
-    total: number | string;
-    total_pages: number | string;
-    page: number | string;
-    business_id: string | null;
-    business_name: string | null;
-    ai_entitled: boolean | null;
-    business_has_key: boolean | null;
-    has_branch_override: boolean | null;
-    has_sync_error: boolean | null;
-    has_branch_sync_error: boolean | null;
-    fleet_status: FleetStatus | null;
-    is_focused: boolean | null;
-  };
-
   // Entitlement, branch-override presence, and sync status are aggregated in
   // one DB query. Search, status filtering, count and pagination happen before
   // rows leave Postgres; a focused business is appended separately so its
   // details remain accessible even when outside the current fleet page/filter.
-  const fleetQuery = await withoutTenantScope("platform", () =>
-    query<FleetQueryRow>(
-      `WITH gateway_state AS (
-         SELECT business_id,
-                bool_or(location_id IS NULL AND NULLIF(btrim(virtual_key_ciphertext), '') IS NOT NULL) AS business_has_key,
-                bool_or(location_id IS NOT NULL) AS has_branch_override,
-                bool_or(NULLIF(btrim(sync_error), '') IS NOT NULL) AS has_sync_error,
-                bool_or(location_id IS NOT NULL AND NULLIF(btrim(sync_error), '') IS NOT NULL) AS has_branch_sync_error
-           FROM ai_business_gateway
-          GROUP BY business_id
-       ), fleet AS (
-         SELECT b.id::text AS business_id,
-                b.name AS business_name,
-                COALESCE(bf.enabled, ff.default_enabled, false) AS ai_entitled,
-                COALESCE(gs.business_has_key, false) AS business_has_key,
-                COALESCE(gs.has_branch_override, false) AS has_branch_override,
-                COALESCE(gs.has_sync_error, false) AS has_sync_error,
-                COALESCE(gs.has_branch_sync_error, false) AS has_branch_sync_error,
-                CASE
-                  WHEN NOT COALESCE(bf.enabled, ff.default_enabled, false) THEN 'entitlement_disabled'
-                  WHEN COALESCE(gs.has_sync_error, false) THEN 'key_sync_error'
-                  WHEN $1::boolean AND NOT COALESCE(gs.business_has_key, false) THEN 'missing_key'
-                  WHEN $2::boolean OR (NOT $1::boolean AND NOT $3::boolean) THEN 'gateway_unavailable'
-                  ELSE 'ready'
-                END AS fleet_status
-           FROM businesses b
-           LEFT JOIN feature_flags ff ON ff.key = 'ai_assistant'
-           LEFT JOIN business_features bf ON bf.business_id = b.id AND bf.flag_key = ff.key
-           LEFT JOIN gateway_state gs ON gs.business_id = b.id
-          WHERE b.status <> 'archived'
-       ), filtered AS (
-         SELECT * FROM fleet f
-          WHERE ($4::text = '' OR f.business_name ILIKE $4::text ESCAPE '!')
-            AND (
-              $5::text = 'all'
-              OR ($5::text = 'branch_override' AND f.has_branch_override)
-              OR ($5::text <> 'branch_override' AND f.fleet_status = $5::text)
-            )
-       ), totals AS (
-         SELECT count(*)::int AS total FROM filtered
-       ), page_info AS (
-         SELECT total,
-                GREATEST(1, CEIL(total::numeric / $7::numeric)::int) AS total_pages,
-                LEAST($8::int, GREATEST(1, CEIL(total::numeric / $7::numeric)::int)) AS page
-           FROM totals
-       ), page_rows AS (
-         SELECT f.* FROM filtered f CROSS JOIN page_info p
-          ORDER BY f.business_name, f.business_id
-          LIMIT $7::int OFFSET ((p.page - 1) * $7::int)
-       ), visible AS (
-         SELECT p.*, false AS is_focused FROM page_rows p
-         UNION ALL
-         SELECT f.*, true AS is_focused FROM fleet f
-          WHERE f.business_id = $6::text
-            AND $6::text <> ''
-            AND NOT EXISTS (SELECT 1 FROM page_rows p WHERE p.business_id = f.business_id)
-       )
-       SELECT p.total, p.total_pages, p.page,
-              v.business_id, v.business_name, v.ai_entitled,
-              v.business_has_key, v.has_branch_override, v.has_sync_error,
-              v.has_branch_sync_error, v.fleet_status, v.is_focused
-         FROM page_info p
-         LEFT JOIN visible v ON true
-        ORDER BY v.business_name NULLS LAST, v.business_id`,
-      [
-        gateway.virtualKeysEnabled,
-        gatewayUnavailable,
-        Boolean(gateway.masterKey),
-        searchPattern,
-        statusFilter,
-        focusBusinessId,
-        pageSize,
-        requestedPage,
-      ],
-    ),
-  );
+  const fleetQuery = await listAiGatewayFleetPage({
+    gatewayVirtualKeysEnabled: gateway.virtualKeysEnabled,
+    gatewayUnavailable,
+    masterKeyConfigured: Boolean(gateway.masterKey),
+    searchPattern,
+    statusFilter,
+    focusBusinessId,
+    pageSize,
+    requestedPage,
+  });
 
   const firstFleetRow = fleetQuery.rows[0];
   const pagination = {
@@ -221,60 +155,23 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
       Boolean(row.business_id && row.business_name !== null && row.ai_entitled !== null),
   );
   const visibleBusinessIds = fleetRows.map((row) => row.business_id);
-  const locationSearch = (params.get("locationSearch") ?? "").trim();
-  const locationPageSize = Math.min(100, Math.max(1, Math.trunc(Number(params.get("locationPageSize")) || 50)));
-  const requestedLocationPage = Math.max(1, Math.trunc(Number(params.get("locationPage")) || 1));
+  const locationSearch = (params.get("locationSearch") ?? "").trim().slice(0, MAX_SEARCH_LENGTH);
+  const locationPageSize = paginationInteger(params.get("locationPageSize"), 50, 100);
+  const requestedLocationPage = paginationInteger(params.get("locationPage"), 1, MAX_PAGINATION_INT);
   const locationPattern = locationSearch
     ? `%${locationSearch.replace(/[!%_]/g, "!$&")}%`
     : "";
 
-  type LocationQueryRow = {
-    total: number | string;
-    total_pages: number | string;
-    page: number | string;
-    id: string | null;
-    business_id: string | null;
-    name: string | null;
-  };
   let responseLocations: { id: string; businessId: string; name: string }[] = [];
   let locationPagination = { page: 1, pageSize: locationPageSize, total: 0, totalPages: 1 };
   if (focusBusinessId && visibleBusinessIds.includes(focusBusinessId)) {
-    const locationQuery = await withoutTenantScope("platform", () =>
-      query<LocationQueryRow>(
-        `WITH target_business AS (
-           SELECT id FROM businesses WHERE id::text = $1::text AND status <> 'archived'
-         ), all_locations AS (
-           SELECT l.id::text AS id, l.business_id::text AS business_id, l.name
-             FROM locations l JOIN target_business b ON b.id = l.business_id
-         ), filtered_locations AS (
-           SELECT * FROM all_locations
-            WHERE ($2::text = '' OR name ILIKE $2::text ESCAPE '!')
-         ), totals AS (
-           SELECT count(*)::int AS total FROM filtered_locations
-         ), page_info AS (
-           SELECT total,
-                  GREATEST(1, CEIL(total::numeric / $4::numeric)::int) AS total_pages,
-                  LEAST($5::int, GREATEST(1, CEIL(total::numeric / $4::numeric)::int)) AS page
-             FROM totals
-         ), page_rows AS (
-           SELECT f.* FROM filtered_locations f CROSS JOIN page_info p
-            ORDER BY f.name, f.id
-            LIMIT $4::int OFFSET ((p.page - 1) * $4::int)
-         ), visible AS (
-           SELECT * FROM page_rows
-           UNION ALL
-           SELECT l.* FROM all_locations l
-            WHERE l.id = $3::text AND $3::text <> ''
-              AND NOT EXISTS (SELECT 1 FROM page_rows p WHERE p.id = l.id)
-         )
-         SELECT p.total, p.total_pages, p.page,
-                v.id, v.business_id, v.name
-           FROM page_info p
-           LEFT JOIN visible v ON true
-          ORDER BY v.name NULLS LAST, v.id`,
-        [focusBusinessId, locationPattern, focusLocationId, locationPageSize, requestedLocationPage],
-      ),
-    );
+    const locationQuery = await listAiGatewayLocationPage({
+      businessId: focusBusinessId,
+      searchPattern: locationPattern,
+      focusLocationId,
+      pageSize: locationPageSize,
+      requestedPage: requestedLocationPage,
+    });
     const firstLocationRow = locationQuery.rows[0];
     locationPagination = {
       page: Number(firstLocationRow?.page ?? 1),

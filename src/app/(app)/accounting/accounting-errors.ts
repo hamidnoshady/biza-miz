@@ -45,6 +45,7 @@ export function errorMessage(code: string | undefined): string {
     // not a real calendar date) — the A/R and A/P routes reject rather than
     // guessing what was meant.
     invalid_date: "تاریخ واردشده معتبر نیست.",
+    invalid_memo: "شرح واردشده معتبر نیست.",
     // Phase 16 — AP subledger
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
@@ -80,8 +81,9 @@ export function errorMessage(code: string | undefined): string {
     journal_line_not_found: "سند انتخاب‌شده معتبر نیست.",
     journal_line_already_reconciled: "این سند در یک تطبیق قفل‌شدهٔ دیگر ثبت شده و دوباره قابل تطبیق نیست.",
     balance_mismatch: "مانده محاسبه‌شده با مانده صورتحساب برابر نیست.",
-    fiscal_period_locked: "دوره مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد.",
-    fiscal_period_soft_closed: "دوره مالی این تاریخ بسته‌ی موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند.",
+    fiscal_period_locked: "دوره مالی این تاریخ قفل شده و ثبت یا ویرایش سند در آن ممکن نیست.",
+    fiscal_period_soft_closed: "دوره مالی این تاریخ بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است.",
+    fiscal_period_not_defined: "این تاریخ در هیچ دورهٔ مالیِ تعریف‌شده‌ای قرار نمی‌گیرد. در حسابداری، بخش «سال‌ها و دوره‌های مالی»، سال شمسیِ مربوط را تعریف کنید؛ تا آن زمان ثبت سند پذیرفته نمی‌شود.",
     // Phase 16 — manual journal workflow
     draft_not_found: "پیش‌نویس پیدا نشد.",
     entry_not_found: "سند پیدا نشد.",
@@ -118,6 +120,10 @@ export function errorMessage(code: string | undefined): string {
     account_has_postings: "این حساب سند خورده و قابل حذف نیست؛ می‌توانید آن را غیرفعال کنید.",
     account_has_draft_postings: "این حساب در یک پیش‌نویس استفاده شده و قابل حذف نیست.",
     account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
+    parent_has_active_children: "نمی‌توان حسابی را که زیرمجموعهٔ فعال دارد بایگانی کرد؛ ابتدا زیرمجموعه‌ها را بایگانی یا جابه‌جا کنید.",
+    ancestor_archived: "نمی‌توان این حساب را فعال کرد؛ یکی از حساب‌های والد در زنجیره هنوز بایگانی است.",
+    parent_type_mismatch: "نوع حساب زیرمجموعه باید با نوع شاخهٔ والد یکسان باشد.",
+    parent_archived: "نمی‌توان حساب را زیر یک حساب بایگانی‌شده ایجاد یا جابه‌جا کرد.",
     // Fiscal years and periods (fiscal-periods-service.ts)
     invalid_year: "سال شمسی نامعتبر است.",
     fiscal_year_exists: "این سال مالی قبلاً تعریف شده است.",
@@ -134,6 +140,30 @@ export function errorMessage(code: string | undefined): string {
     location_not_found: "شعبه انتخاب‌شده معتبر نیست.",
     reason_required: "ذکر دلیل الزامی است.",
     reason_too_long: "دلیل واردشده بیش از حد طولانی است.",
+    // Multicurrency (issue #863) — rates, documents, settlements, revaluation.
+    rate_not_configured: "برای این ارز نرخی ثبت نشده است.",
+    rate_not_found: "نرخ یافت نشد.",
+    rate_voided: "این نرخ باطل شده است.",
+    rate_already_recorded: "برای این لحظه پیش‌تر نرخ ثبت شده است.",
+    rate_currency_mismatch: "نرخ انتخاب‌شده مربوط به ارز دیگری است.",
+    base_currency_locked: "با سابقهٔ اسناد ارزی، ارز پایه قابل تغییر نیست.",
+    base_currency_not_a_transaction_currency: "ارز پایه نمی‌تواند ارز معامله باشد.",
+    currency_not_found: "ارز یافت نشد.",
+    currency_inactive: "این ارز در فهرست جهانی غیرفعال است.",
+    currency_not_allowed: "این ارز برای کسب‌وکار شما فعال نشده است.",
+    rate_already_voided: "این نرخ پیش‌تر باطل شده است.",
+    currency_precision_locked: "دقت این ارز با سابقهٔ ثبت قفل شده است.",
+    insufficient_open_balance: "مبلغ بیش از ماندهٔ باز این طرف حساب است.",
+    duplicate_entry_reference: "هر سند فقط یک‌بار در اقلام تسویه می‌آید.",
+    entry_has_active_settlements: "ابتدا تسویه‌های فعال این سند را برگشت بزنید.",
+    account_currency_mismatch: "این حساب با ارز سند هم‌خوانی ندارد.",
+    fx_residual_unexplained: "اختلاف سمت پایه با سیاست گرد کردن توضیح داده نمی‌شود؛ سطر سود/زیان تسعیر را بازبینی کنید.",
+    foreign_unbalanced: "مجموع بدهکار و بستانکار ارزی باید برابر باشد.",
+    idempotency_payload_mismatch: "این کلید همگام‌سازی پیش‌تر برای درخواست دیگری استفاده شده است.",
+    nothing_to_settle: "چیزی برای تسویه وجود ندارد.",
+    invalid_party: "طرف حساب معتبر نیست.",
+    no_foreign_lines: "حداقل یک سطر ارزی لازم است.",
+    neither_foreign_nor_base: "هر سطر باید ارزی یا پایه باشد.",
   };
   // The fixed-asset register's domain errors come from the one canonical
   // dictionary (fixed-assets-errors.ts); everything else is this screen's own

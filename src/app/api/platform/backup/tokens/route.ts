@@ -7,6 +7,7 @@ import {
   listPlatformBackupTokens,
 } from "@/lib/platform-backup-service";
 import { generateSyncToken } from "@/lib/sync-token";
+import { requireRecentAuth } from "@/lib/recent-auth";
 
 /**
  * The credentials other servers present to this one's `/api/peer/backup/*`
@@ -39,6 +40,8 @@ export const GET = withPlatformScope(async () => {
 export const POST = withPlatformScope(async (request: NextRequest) => {
   const { session, error } = await requirePlatformCapability("backup.share");
   if (error) return error;
+  const recentError = requireRecentAuth(session);
+  if (recentError) return recentError;
 
   let body: Record<string, unknown>;
   try {

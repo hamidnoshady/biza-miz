@@ -85,17 +85,32 @@ export async function upsertMappingOnClient(
   );
 }
 
+const LOCAL_ID_FOR_REMOTE_SQL = `SELECT local_id FROM integration_mappings
+      WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3 AND remote_id = $4`;
+
 export async function localIdForRemote(
   businessId: string,
   connectionId: string,
   entityType: MappingEntityType,
   remoteId: string,
 ): Promise<string | null> {
-  const { rows } = await query<{ local_id: string }>(
-    `SELECT local_id FROM integration_mappings
-      WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3 AND remote_id = $4`,
-    [businessId, connectionId, entityType, remoteId],
-  );
+  const { rows } = await query<{ local_id: string }>(LOCAL_ID_FOR_REMOTE_SQL, [businessId, connectionId, entityType, remoteId]);
+  return rows[0]?.local_id ?? null;
+}
+
+/**
+ * The same lookup, on the caller's transaction. A mapping written earlier in
+ * that transaction is invisible to the pool, so a writer that links and then
+ * resolves inside one transaction must use this form.
+ */
+export async function localIdForRemoteOnClient(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  entityType: MappingEntityType,
+  remoteId: string,
+): Promise<string | null> {
+  const { rows } = await client.query<{ local_id: string }>(LOCAL_ID_FOR_REMOTE_SQL, [businessId, connectionId, entityType, remoteId]);
   return rows[0]?.local_id ?? null;
 }
 

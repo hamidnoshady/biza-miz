@@ -53,6 +53,7 @@ describe("evaluateFiscalReadiness", () => {
     expect(r.canClose).toBe(true);
     const notice = fiscalReadinessNotice(r)!;
     expect(notice.lines[0]).toContain("سال مالی ۱۴۰۵");
+    expect(notice.lines[0]).toContain("ثبت سند با این تاریخ تا تعریف سال مالیِ مربوط ممکن نیست");
     expect(notice.lines.join(" ")).not.toContain("2026");
   });
 

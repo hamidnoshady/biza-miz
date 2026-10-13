@@ -1,17 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { computeBranchOverviewMetrics } from "@/lib/reports";
-import { reportsTabsForRole } from "./reports-nav";
+import { reportsTabsForCapabilities } from "./reports-nav";
+import { reportCapabilities } from "@/lib/report-permissions";
+import { PERMISSIONS, effectivePermissions } from "@/lib/permissions";
 
 describe("Branch Overview Reports Tab & Navigation", () => {
-  it("includes the branches tab only for the owner role", () => {
-    const ownerTabs = reportsTabsForRole("owner");
-    expect(ownerTabs.some((t) => t.key === "branches")).toBe(true);
+  it("includes the branches tab only for a member holding the business-wide capability", () => {
+    // The tab used to be filtered by a hard-coded role list on the *screen*
+    // while the route behind it was guarded by reports.view (issue #819). Both
+    // now read the same capability.
+    const owner = reportCapabilities(effectivePermissions("owner", {}));
+    expect(reportsTabsForCapabilities(owner).some((t) => t.key === "branches")).toBe(true);
 
-    const managerTabs = reportsTabsForRole("manager");
-    expect(managerTabs.some((t) => t.key === "branches")).toBe(false);
+    for (const role of ["admin", "manager", "accountant"] as const) {
+      const capabilities = reportCapabilities(effectivePermissions(role, {}));
+      expect(capabilities.canViewBusinessWide, role).toBe(false);
+      expect(reportsTabsForCapabilities(capabilities).some((t) => t.key === "branches")).toBe(false);
+    }
+  });
 
-    const accountantTabs = reportsTabsForRole("accountant");
-    expect(accountantTabs.some((t) => t.key === "branches")).toBe(false);
+  it("stays closed to a per-member grant, because the capability is owner-reserved", () => {
+    const granted = reportCapabilities(
+      effectivePermissions("manager", { granted: [PERMISSIONS.reportsBusinessWide] }),
+    );
+    expect(granted.canViewBusinessWide).toBe(false);
+    expect(reportsTabsForCapabilities(granted).some((t) => t.key === "branches")).toBe(false);
   });
 });
 

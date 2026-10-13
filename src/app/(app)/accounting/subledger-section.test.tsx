@@ -431,8 +431,12 @@ describe("paging request ownership", () => {
     const newList = deferred();
     const newPage = deferred();
     let listRequests = 0;
-    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === "POST") return Promise.resolve(respond({}));
+      // The settle dialog names its cash account, so opening it loads the
+      // account choices — that request is not the list pipeline's and must
+      // neither consume its count nor steal its deferred answers.
+      if (!url.includes(RECEIVABLES_SIDE.listEndpoint)) return Promise.resolve(respond({ accounts: [] }));
       listRequests += 1;
       if (listRequests === 1) return Promise.resolve(respond(balancePage([{ id: ALI, name: "Ali", balance: 100 }], 3)));
       if (listRequests === 2) return oldPage.promise;
@@ -467,7 +471,7 @@ describe("paging request ownership", () => {
     await act(async () => newPage.resolve(respond({ ...balancePage([{ id: ENTRY, name: "New next", balance: 80 }], 3), nextOffset: 2 })));
     expect(screen.getAllByText("New next")).toHaveLength(2);
     expect((screen.getByRole("button", { name: "نمایش موارد بیشتر" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(String(fetchMock.mock.calls.filter(([, init]) => init?.method !== "POST")[3][0])).toContain("offset=1");
+    expect(String(fetchMock.mock.calls.filter(([url, init]) => init?.method !== "POST" && String(url).includes(RECEIVABLES_SIDE.listEndpoint))[3][0])).toContain("offset=1");
   });
 
   it("advances by the server window even if live reordering repeats a row", async () => {
@@ -501,5 +505,88 @@ describe("subledger presentation contracts", () => {
     expect(within(dialog).queryByText("2025-04-01")).toBeNull();
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("the receivables settle dialog (issue #829: one settlement form)", () => {
+  it("keeps its preselected party and balance, and posts the A/R payload through the shared form", async () => {
+    const posts: { url: string; body: Record<string, unknown> }[] = [];
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+        return respond({ receipt: { id: "new-1" } });
+      }
+      return respond(balancePage([{ id: ALI, name: "علی رضایی", balance: 1500000 }]));
+    });
+    render(
+      <MoneyProvider unit="rial">
+        <SubledgerSection side={RECEIVABLES_SIDE} canSettle />
+      </MoneyProvider>,
+    );
+
+    fireEvent.click((await screen.findAllByRole("button", { name: RECEIVABLES_SIDE.settle.actionLabel }))[0]);
+    expect(await screen.findByText(`${RECEIVABLES_SIDE.settle.titlePrefix}علی رضایی`)).not.toBeNull();
+    expect(screen.queryByText("مانده فعلی:")).not.toBeNull();
+    expect(screen.queryByText(RECEIVABLES_SIDE.settle.methodLabel)).not.toBeNull();
+    expect(screen.queryByText(RECEIVABLES_SIDE.settle.dateLabel)).not.toBeNull();
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: RECEIVABLES_SIDE.settle.submitLabel }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0].url).toBe("/api/ledger/ar/receipts");
+    expect(posts[0].body).toMatchObject({ customerId: ALI, amount: 1500000, method: "cash" });
+    expect(typeof posts[0].body.idempotencyKey).toBe("string");
+  });
+});
+
+describe("the payables settle dialog (issue #829: one settlement form)", () => {
+  it("keeps its preselected supplier and balance, and posts the A/P-not-A/R payload through the shared form", async () => {
+    const posts: { url: string; body: Record<string, unknown> }[] = [];
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+        return respond({ payment: { id: "new-1" } });
+      }
+      return respond({
+        suppliers: [{ supplierId: SARA, supplierName: "پخش آسمان", supplierPhone: null, supplierPartyId: null, locationName: null, balance: 2000000 }],
+        total: 1,
+        summary: { ...summary(), payableTotal: 2000000 },
+      });
+    });
+    render(
+      <MoneyProvider unit="rial">
+        <SubledgerSection side={PAYABLES_SIDE} canSettle />
+      </MoneyProvider>,
+    );
+
+    fireEvent.click((await screen.findAllByRole("button", { name: PAYABLES_SIDE.settle.actionLabel }))[0]);
+    expect(await screen.findByText(`${PAYABLES_SIDE.settle.titlePrefix}پخش آسمان`)).not.toBeNull();
+    expect(screen.queryByText("مانده فعلی:")).not.toBeNull();
+    expect(screen.queryByText(PAYABLES_SIDE.settle.methodLabel)).not.toBeNull();
+    expect(screen.queryByText(PAYABLES_SIDE.settle.dateLabel)).not.toBeNull();
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: PAYABLES_SIDE.settle.submitLabel }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0].url).toBe("/api/ledger/ap/payments");
+    expect(posts[0].body).toMatchObject({ supplierId: SARA, amount: 2000000, method: "cash" });
+    expect(typeof posts[0].body.clientRequestId).toBe("string");
+    expect("idempotencyKey" in posts[0].body).toBe(false);
+  });
+});
+
+describe("payables capability gating (issue #829)", () => {
+  it("shows payables but no settle action without the payables capability", async () => {
+    fetchMock.mockImplementation(async () =>
+      respond({
+        suppliers: [{ supplierId: SARA, supplierName: "پخش آسمان", supplierPhone: null, supplierPartyId: null, locationName: null, balance: 2000000 }],
+        total: 1,
+        summary: { ...summary(), payableTotal: 2000000 },
+      }),
+    );
+    render(<SubledgerSection side={PAYABLES_SIDE} canSettle={false} />);
+
+    await screen.findAllByText("پخش آسمان");
+    expect(screen.queryByRole("button", { name: PAYABLES_SIDE.settle.actionLabel })).toBeNull();
   });
 });
