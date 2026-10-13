@@ -133,9 +133,16 @@ async function importCsv(page, csvText, filename, fiscalYearLabel, effectiveDate
 
 // ---------------------------------------------------------------------------
 // Provisioning — the seeded business has a login, not a chart.
+//
+// The opening set needs cash, A/R, A/P and an equity account; the year's P&L
+// needs any revenue and any expense account; the close posts the result to the
+// well-known retained-earnings code, so the chart must carry it. The industry
+// templates differ in their P&L numbering (food service books revenue in 4000,
+// not 7000), so the base codes are required by code and the P&L accounts are
+// discovered by type.
 // ---------------------------------------------------------------------------
 
-const REQUIRED_CODES = ["1100", "1200", "2100", "3800", "3900", "7000", "8000"];
+const REQUIRED_CODES = ["1100", "1200", "2100", "3800", "3900"];
 
 /** Provisions the industry template through the setup route, like the cheques script. */
 async function ensureChartOfAccounts(page) {
@@ -183,9 +190,9 @@ async function ensureFixtures(provisioning, businessId) {
 async function setUnit(provisioning, businessId, unit) {
   await provisioning.query(
     `INSERT INTO settings (business_id, location_id, key, value)
-     VALUES ($1, NULL, 'business.prefs', jsonb_build_object('currencyDisplay', $2))
+     VALUES ($1, NULL, 'business.prefs', jsonb_build_object('currencyDisplay', $2::text))
      ON CONFLICT (business_id, location_id, key)
-     DO UPDATE SET value = settings.value || jsonb_build_object('currencyDisplay', $2)`,
+     DO UPDATE SET value = settings.value || jsonb_build_object('currencyDisplay', $2::text)`,
     [businessId, unit],
   );
 }
@@ -229,10 +236,17 @@ async function run() {
   try {
     await login(context);
     await ensureChartOfAccounts(page);
-    const accounts = await apiJson(page, "GET", "/api/ledger/accounts?all=1");
-    const acct = Object.fromEntries((accounts.accounts ?? []).map((a) => [a.code, a.id]));
+    const accountsList = (await apiJson(page, "GET", "/api/ledger/accounts?all=1")).accounts ?? [];
+    const acct = Object.fromEntries(accountsList.map((a) => [a.code, a.id]));
     for (const code of REQUIRED_CODES) {
       if (!acct[code]) throw new Error(`account ${code} missing after provisioning`);
+    }
+    // Posting requires leaf accounts; the section parents (e.g. revenue
+    // 4000) exist in every template but cannot receive journal lines.
+    const revenueAccount = accountsList.find((a) => a.type === "revenue" && !a.hasChildren);
+    const expenseAccount = accountsList.find((a) => a.type === "expense" && !a.hasChildren);
+    if (!revenueAccount || !expenseAccount) {
+      throw new Error("the chart has no postable (leaf) revenue or expense account to run the year's P&L on");
     }
     const { customerOne, supplierOne } = await ensureFixtures(provisioning, businessId);
 
@@ -287,28 +301,32 @@ async function run() {
       "1100,,1000000,,",
       "3900,,,1000000,",
     ].join("\n");
+    // The file-import line contract is numeric Rial (with a safe-integer
+    // guard in parseOpeningImportFile); the preview's totals are decimal
+    // strings. Compare the line amount as a string so the check rides
+    // whichever of the two shapes the response carries.
     const asToman = await importCsv(page, csv, "opening-e2e.csv", YEAR.label1404, YEAR.inside1404);
     check(
       "toman import reads 1,000,000 toman as 10,000,000 Rial",
-      asToman.valid === true && asToman.lines?.[0]?.debit === "10000000",
+      asToman.valid === true && String(asToman.lines?.find((l) => l.accountId === acct["1100"])?.debit) === "10000000",
       JSON.stringify(asToman.problems ?? asToman.lines ?? []),
     );
     await setUnit(provisioning, businessId, "rial");
     const asRial = await importCsv(page, csv, "opening-e2e.csv", YEAR.label1404, YEAR.inside1404);
     check(
       "rial import reads the same file 1:1",
-      asRial.valid === true && asRial.lines?.[0]?.debit === "1000000",
+      asRial.valid === true && String(asRial.lines?.find((l) => l.accountId === acct["1100"])?.debit) === "1000000",
       JSON.stringify(asRial.problems ?? asRial.lines ?? []),
     );
 
     // 3 — the year's activity, then the close the trigger guards.
     await manualEntry(page, "2025-06-15", "هزینه E2E", [
-      { accountId: acct["8000"], debit: PNL.expense, credit: 0 },
+      { accountId: expenseAccount.id, debit: PNL.expense, credit: 0 },
       { accountId: acct["1100"], debit: 0, credit: PNL.expense },
     ]);
     await manualEntry(page, "2025-07-15", "فروش E2E", [
       { accountId: acct["1100"], debit: PNL.revenue, credit: 0 },
-      { accountId: acct["7000"], debit: 0, credit: PNL.revenue },
+      { accountId: revenueAccount.id, debit: 0, credit: PNL.revenue },
     ]);
     check("the year's P&L is posted", true);
 
