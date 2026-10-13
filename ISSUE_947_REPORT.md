@@ -1,6 +1,6 @@
 # Issue #947 — Team section consolidation: report
 
-**Branch** `arena/ce58f373-biza-miz` · **head** `PENDING_SHA` · **baseline** `0c4a77c`
+**Branch** `arena/ce58f373-biza-miz` · **head** `19daecd` (the report itself is its child commit) · **baseline** `0c4a77c`
 (clone of `main`; the issue's audit baseline `35cb0cd` is not in this clone's history, so
 every finding was re-verified against the working tree rather than the issue's line
 links).
