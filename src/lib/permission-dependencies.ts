@@ -58,6 +58,12 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "finance.assets_manage": ["ledger.view"],
   "payroll.manage": ["payroll.view"],
   "reports.export": ["reports.view"],
+  // The reporting stack (issue #819): each key implies the read key, and
+  // nothing else. Export is how data leaves the building; business-wide is
+  // owner-reserved; dashboard defaults are a role-level act.
+  "reports.manage": ["reports.view"],
+  "reports.business_wide": ["reports.view"],
+  "reports.dashboard_defaults.manage": ["reports.view"],
 
   // Taxpayer invoicing: viewing the register requires ledger visibility; every
   // consequential operation also inherits the tax register read capability.

@@ -11,11 +11,14 @@ import {
   REPORT_VIEWS,
   reportShape,
   reportViewsFor,
+  isReportViewAvailableForIndustry,
   STANDARD_REPORTS,
   standardReportsFor,
   validateReportConfig,
+  validateReportConfigForIndustry,
   type ReportConfig,
 } from "./reports";
+import { branchScope, BUSINESS_WIDE_SCOPE } from "./report-scope";
 
 const BIZ = "biz-1";
 
@@ -155,6 +158,60 @@ describe("validateReportConfig", () => {
     expect(validateReportConfig(config)).toEqual([]);
   });
 
+  it("rejects unsupported sort and visualization values rather than silently normalizing them", () => {
+    const base: ReportConfig = {
+      view: "v_sales_by_day",
+      metric: "total",
+      aggregation: "sum",
+      dimension: "day",
+    };
+    expect(validateReportConfig({ ...base, sort: { by: "sql; drop table" as never, dir: "desc" } })).toContain(
+      "ترتیب گزارش نامعتبر است.",
+    );
+    expect(validateReportConfig({ ...base, sort: { by: "metric", dir: "sideways" as never } })).toContain(
+      "ترتیب گزارش نامعتبر است.",
+    );
+    expect(validateReportConfig({ ...base, visualization: "scatter" as never })).toContain(
+      "نوع نمایش گزارش نامعتبر است.",
+    );
+  });
+
+  it("rejects ISO-shaped dates that are not real calendar dates", () => {
+    const base: ReportConfig = {
+      view: "v_sales_by_day",
+      metric: "total",
+      aggregation: "sum",
+      dimension: "day",
+    };
+    expect(validateReportConfig({ ...base, filters: { dateFrom: "2026-02-30" } })).toContain("تاریخ شروع نامعتبر است.");
+    expect(validateReportConfig({ ...base, filters: { dateTo: "2026-13-01" } })).toContain("تاریخ پایان نامعتبر است.");
+  });
+
+  it("rejects malformed filter containers and non-string equality values", () => {
+    const base: ReportConfig = {
+      view: "v_sales_by_day",
+      metric: "total",
+      aggregation: "sum",
+      dimension: "day",
+    };
+    expect(validateReportConfig({ ...base, filters: [] as never })).toContain("فیلترهای گزارش نامعتبر هستند.");
+    expect(validateReportConfig({ ...base, filters: { equals: { status: 3 } as never } })).toContain(
+      "مقدار فیلتر «status» نامعتبر است.",
+    );
+    expect(validateReportConfig(null as never)).toContain("پیکربندی گزارش نامعتبر است.");
+  });
+
+  it("rejects a Top-N limit above the engine's bounded maximum", () => {
+    const config: ReportConfig = {
+      view: "v_sales_by_day",
+      metric: "total",
+      aggregation: "sum",
+      dimension: "day",
+      limit: 1_001,
+    };
+    expect(validateReportConfig(config)).toContain("محدودیت تعداد ردیف باید عدد صحیح بین ۱ و 1000 باشد.");
+  });
+
   it("rejects a non-positive limit", () => {
     const config: ReportConfig = {
       view: "v_sales_by_day",
@@ -168,9 +225,26 @@ describe("validateReportConfig", () => {
 });
 
 describe("buildReportQuery", () => {
+  it("refuses a missing scope rather than running over every branch (issue #819)", () => {
+    const config: ReportConfig = { view: "v_sales_by_day", metric: "total", aggregation: "sum", dimension: "day" };
+    // The bypass the audit found was exactly this call shape: a caller that
+    // never resolved a branch. A untyped caller must fail loudly.
+    expect(() => buildReportQuery(config, BIZ, undefined as never)).toThrow(/missing_report_scope/);
+    expect(() => buildReportQuery(config, BIZ, {} as never)).toThrow(/missing_report_scope/);
+  });
+
+  it("omits the branch predicate only for the explicitly authorized consolidated scope", () => {
+    const config: ReportConfig = { view: "v_sales_by_day", metric: "total", aggregation: "sum", dimension: "day" };
+    const wide = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
+    expect(wide.sql).not.toContain("location_id");
+    const branch = buildReportQuery(config, BIZ, branchScope("branch-a"));
+    expect(branch.sql).toContain("location_id = $2");
+    expect(branch.params).toContain("branch-a");
+  });
+
   it("throws for an invalid config instead of building SQL", () => {
     const config = { view: "nope", metric: "x", aggregation: "sum", dimension: "y" } as ReportConfig;
-    expect(() => buildReportQuery(config, BIZ)).toThrow();
+    expect(() => buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE)).toThrow();
   });
 
   it("builds a day-bucketed sum query with businessId bound as $1", () => {
@@ -180,7 +254,7 @@ describe("buildReportQuery", () => {
       aggregation: "sum",
       dimension: "day",
     };
-    const { sql, params } = buildReportQuery(config, BIZ);
+    const { sql, params } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(params[0]).toBe(BIZ);
     expect(sql).toContain("FROM v_sales_by_day");
     expect(sql).toContain("business_id = $1");
@@ -197,7 +271,7 @@ describe("buildReportQuery", () => {
       dimension: "day",
       filters: { dateFrom: "2026-01-01", dateTo: "2026-01-31" },
     };
-    const { sql, params } = buildReportQuery(config, BIZ, "location-1");
+    const { sql, params } = buildReportQuery(config, BIZ, branchScope("location-1"));
     expect(params).toEqual([BIZ, "location-1", "2026-01-01", "2026-01-31"]);
     expect(sql).toContain("business_id = $1");
     expect(sql).toContain("location_id = $2");
@@ -212,7 +286,7 @@ describe("buildReportQuery", () => {
       aggregation: "sum",
       dimension: "item",
     };
-    const { sql } = buildReportQuery(config, BIZ);
+    const { sql } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("item_name AS dim");
     expect(sql).toContain("GROUP BY menu_item_id, item_name");
   });
@@ -226,7 +300,7 @@ describe("buildReportQuery", () => {
       filters: { equals: { group: "grp-1" } },
     };
     expect(validateReportConfig(config)).toEqual([]);
-    const { sql, params } = buildReportQuery(config, BIZ);
+    const { sql, params } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("FROM v_modifier_performance");
     expect(sql).toContain("modifier_name AS dim");
     expect(sql).toContain("GROUP BY modifier_id, modifier_name");
@@ -242,7 +316,7 @@ describe("buildReportQuery", () => {
       aggregation: "count",
       dimension: "day",
     };
-    const { sql } = buildReportQuery(config, BIZ);
+    const { sql } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("count(*) AS value");
   });
 
@@ -254,7 +328,7 @@ describe("buildReportQuery", () => {
       dimension: "supplier",
     };
     expect(validateReportConfig(config)).toEqual([]);
-    const { sql } = buildReportQuery(config, BIZ);
+    const { sql } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("count(DISTINCT purchase_id) AS value");
     expect(sql).toContain("GROUP BY supplier_id, supplier_name");
   });
@@ -268,7 +342,7 @@ describe("buildReportQuery", () => {
       filters: { dateFrom: "2026-01-01", equals: { status: "received" } },
     };
     expect(validateReportConfig(config)).toEqual([]);
-    const { sql, params } = buildReportQuery(config, BIZ);
+    const { sql, params } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("FROM v_purchase_summary");
     expect(sql).toContain("sum(cost) AS value");
     expect(sql).toContain("purchase_date >= $2");
@@ -284,7 +358,7 @@ describe("buildReportQuery", () => {
       dimension: "category",
     };
     expect(validateReportConfig(config)).toEqual([]);
-    const { sql } = buildReportQuery(config, BIZ);
+    const { sql } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("FROM v_expense_summary");
     expect(sql).toContain("account_name AS dim");
     expect(sql).toContain("GROUP BY account_id, account_code, account_name");
@@ -311,7 +385,7 @@ describe("buildReportQuery", () => {
       dimension: "supplier",
     };
     expect(validateReportConfig(config).length).toBeGreaterThan(0);
-    expect(() => buildReportQuery(config, BIZ)).toThrow(/invalid_report_config/);
+    expect(() => buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE)).toThrow(/invalid_report_config/);
   });
 
   it("binds date-range filters as parameters, in order, after businessId", () => {
@@ -322,7 +396,7 @@ describe("buildReportQuery", () => {
       dimension: "day",
       filters: { dateFrom: "2026-01-01", dateTo: "2026-01-31" },
     };
-    const { sql, params } = buildReportQuery(config, BIZ);
+    const { sql, params } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(params).toEqual([BIZ, "2026-01-01", "2026-01-31"]);
     expect(sql).toContain("sale_date >= $2");
     expect(sql).toContain("sale_date <= $3");
@@ -336,7 +410,7 @@ describe("buildReportQuery", () => {
       dimension: "day",
       filters: { equals: { account_code: "5100" } },
     };
-    const { sql, params } = buildReportQuery(config, BIZ);
+    const { sql, params } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("account_code = $2");
     expect(params).toEqual([BIZ, "5100"]);
   });
@@ -350,7 +424,7 @@ describe("buildReportQuery", () => {
       sort: { by: "metric", dir: "desc" },
       limit: 10,
     };
-    const { sql, params } = buildReportQuery(config, BIZ);
+    const { sql, params } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("ORDER BY value DESC");
     expect(sql).toContain("LIMIT $2");
     expect(params).toEqual([BIZ, 10]);
@@ -363,7 +437,7 @@ describe("buildReportQuery", () => {
       aggregation: "sum",
       dimension: "day",
     };
-    const { sql } = buildReportQuery(config, BIZ);
+    const { sql } = buildReportQuery(config, BIZ, BUSINESS_WIDE_SCOPE);
     expect(sql).toContain("ORDER BY dim ASC");
   });
 });
@@ -587,6 +661,24 @@ describe("reportViewsFor", () => {
         );
       }
     }
+  });
+
+  it("rejects a structurally valid but cross-trade config at request boundaries", () => {
+    const view = REPORT_VIEWS.v_menu_item_performance;
+    const metric = view.metrics[0];
+    const config: ReportConfig = {
+      view: "v_menu_item_performance",
+      metric: metric.key,
+      aggregation: metric.aggregations[0],
+      dimension: view.dimensions[0].key,
+    };
+    expect(validateReportConfig(config)).toEqual([]);
+    expect(isReportViewAvailableForIndustry(config.view, "food_service")).toBe(true);
+    expect(isReportViewAvailableForIndustry(config.view, "jewelry")).toBe(false);
+    expect(validateReportConfigForIndustry(config, "food_service")).toEqual([]);
+    expect(validateReportConfigForIndustry(config, "jewelry")).toContain(
+      "منبع داده برای صنف فعلی کسب‌وکار در دسترس نیست.",
+    );
   });
 
   it("falls back to food service for an unreadable industry", () => {

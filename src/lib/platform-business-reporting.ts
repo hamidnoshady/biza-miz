@@ -18,6 +18,7 @@ import {
   REPORT_VIEWS, previousPeriodRange, type ReportConfig,
 } from "./reports";
 import { getBusinessOverview, getProfitAndLoss, runCustomReportQuery } from "./reports-service";
+import { branchScope, BUSINESS_WIDE_SCOPE, type ReportScope } from "./report-scope";
 import { runStandardReport } from "./standard-report-service";
 import { crmOverview } from "./crm-overview";
 import { growthOverview } from "./growth-overview";
@@ -103,7 +104,19 @@ export async function platformReportSection(context: Context, section: string) {
       // Fixed small set, not an eager execution of the report catalog or remote services.
       const [sales, accountingPanel, activity] = await Promise.all([
         accounting ? panel(() => getBusinessOverview(businessId, options)) : null,
-        accounting ? panel(() => getProfitAndLoss(businessId, options, options.locationId)) : null,
+        // The platform console reads a tenant's books as the platform: an
+        // operator either picked a branch (`options.locationId`) or is looking at
+        // the whole business. Both are written out here rather than passed as an
+        // optional id (issue #819).
+        accounting
+          ? panel(() =>
+              getProfitAndLoss(
+                businessId,
+                options,
+                options.locationId ? branchScope(options.locationId) : BUSINESS_WIDE_SCOPE,
+              ),
+            )
+          : null,
         panel(() => businessUsage(businessId)),
       ]);
       return { sales, accounting: accountingPanel, activity };
@@ -188,23 +201,44 @@ export async function platformStandardReport(context: Context, key: string) {
     const current = { ...config, limit: Math.min(config.limit ?? 1000, 1000), filters: {
       ...config.filters, ...(dated ? { dateFrom: options.dateFrom, dateTo: options.dateTo } : {}),
     } };
-    const rows = await runCustomReportQuery(businessId, current, options.locationId);
+    // The platform console chooses a branch explicitly (`options.locationId`,
+    // parsed off its own wire with a strict schema) or reads the whole business
+    // — an authorized operator asks for one or the other; there is no default
+    // in between (issue #819).
+    const rows = await runCustomReportQuery(businessId, current, platformScope(options.locationId));
     const previous = options.compare && dated && options.dateFrom && options.dateTo
       ? await runCustomReportQuery(businessId, { ...current, filters: {
         ...current.filters, ...previousPeriodRange(options.dateFrom, options.dateTo),
-      } }, options.locationId) : null;
+      } }, platformScope(options.locationId)) : null;
     return { rows, previous };
   }
   const shape = reportShape(def);
   if (!["rows", "profit_and_loss", "balance_sheet", "cash_flow", "food_cost_variance", "consignor_statements"].includes(shape) && !options.locationId)
     throw new PlatformReportError("location_required");
-  const result = await runStandardReport(businessId, industry, def, { ...options, detailPage: options.page ?? 1 });
+  const result = await runStandardReport(businessId, industry, def, {
+    ...options,
+    scope: platformScope(options.locationId),
+    detailPage: options.page ?? 1,
+  });
   if ("pagination" in result) return result;
   return result.report ? pageReportDetails(result.report as unknown as Record<string, unknown>, options.page) : result;
+}
+
+/**
+ * The platform console's scope: a branch when the operator named one, the whole
+ * business otherwise.
+ *
+ * Written as a function rather than an inline conditional so that "no branch"
+ * is a *decision* a reader can see, matching the reporting surface's own rule
+ * (issue #819) — the platform console is authorized by `platformCan(...)`, not
+ * by a tenant branch assignment, so both forms are legitimate there.
+ */
+export function platformScope(locationId: string | undefined): ReportScope {
+  return locationId ? branchScope(locationId) : BUSINESS_WIDE_SCOPE;
 }
 
 export async function platformCustomReport(context: Context, config: ReportConfig) {
   if (!context.accounting || !reportViewsFor(context.industry).some(({ key }) => key === config.view))
     throw new PlatformReportError("not_found", 404);
-  return { rows: await runCustomReportQuery(context.businessId, config, context.options.locationId) };
+  return { rows: await runCustomReportQuery(context.businessId, config, platformScope(context.options.locationId)) };
 }

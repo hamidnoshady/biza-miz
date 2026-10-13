@@ -326,9 +326,15 @@ jobs:
           Write-Host "staged desktop runtime: $mib MiB"
           # Same runaway detector as build-desktop-installer.yml's unpacked-payload budget, over the
           # pre-package .desktop-runtime staging folder rather than the final win-unpacked tree. It
-          # was crossed by the same issue #884 device-registry slice that pushed the installer's
-          # unpacked payload from 618.6 to 621.4 MiB; this budget moves from 200 to 220 MiB for the
-          # same deliberate, reviewed reason — restoring working headroom, not relaxing the gate.
+          # was crossed independently by more than one branch now merged together: issue #884's
+          # device-registry slice pushed the installer's unpacked payload from 618.6 to 621.4 MiB;
+          # issue #819's reporting-integrity wave shipped new server routes and the report scope
+          # contract into the desktop runtime, growing this stage from under the old 200 MiB line to
+          # just past it (the #819 branch flapped across 200 MiB between two builds of the same
+          # commit). Both moved this budget from 200 to 220 MiB for the same reviewed reason —
+          # restoring working headroom, not relaxing the gate. See build-desktop-installer.yml's own
+          # comment for the fuller history, including the one still-open sign-off question from a
+          # third branch's general main-growth bump to the paired 640 MiB post-package budget.
           if ($bytes -gt 220MB) { throw "Staged runtime $mib MiB exceeds 220 MiB budget" }
 
   plugin:

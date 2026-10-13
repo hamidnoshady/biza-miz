@@ -4,6 +4,7 @@ import { Client } from "pg";
 import { beforeAll, afterAll, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { runMigrations } from "../scripts/migrate";
+import { branchScope, BUSINESS_WIDE_SCOPE } from "../src/lib/report-scope";
 import { createAppRole } from "../scripts/create-app-role";
 import { INDUSTRIES } from "../src/lib/industries";
 import { pageReportDetails } from "../src/lib/report-detail-page";
@@ -162,10 +163,14 @@ describe("tenant-scoped platform reporting", () => {
       const sales = await read(t.id, "standard", "", "daily_sales_summary");
       expect(sales.rows.reduce((n: number, r: { value: string }) => n + Number(r.value), 0)).toBe(t.count * 100000);
       const tenant = await import("../src/lib/reports-service");
-      expect(sales.rows).toEqual(JSON.parse(JSON.stringify(await db.withTenant(t.id, () => tenant.runCustomReportQuery(t.id, catalog.reports.find((r: { key: string }) => r.key === "daily_sales_summary").config)))));
+      expect(sales.rows).toEqual(JSON.parse(JSON.stringify(await db.withTenant(t.id, () => tenant.runCustomReportQuery(t.id, catalog.reports.find((r: { key: string }) => r.key === "daily_sales_summary").config, branchScope(t.locationId))))));
       const pnl = await read(t.id, "standard", "", "profit_and_loss");
       expect(pnl.report.totalRevenue).toBe(t.count * 100000);
-      expect(pnl.report).toEqual(await db.withTenant(t.id, () => tenant.getProfitAndLoss(t.id)));
+      // The platform console reads the tenant's books as the platform, so this
+      // is the consolidated scope — stated, not omitted (issue #819).
+      expect(pnl.report).toEqual(
+        await db.withTenant(t.id, () => tenant.getProfitAndLoss(t.id, {}, BUSINESS_WIDE_SCOPE)),
+      );
       const branches = await read(t.id, "branches");
       expect(branches.consolidated.orderCount).toBe(t.count);
       expect(branches.branches).toHaveLength(1);
@@ -286,12 +291,12 @@ describe("tenant-scoped platform reporting", () => {
           const current = { ...config, limit: Math.min(config.limit ?? 1000, 1000), filters: {
             ...config.filters, ...(dated ? { dateFrom: options.dateFrom, dateTo: options.dateTo } : {}),
           } };
-          return { rows: await tenant.runCustomReportQuery(t.id, current, t.locationId),
+          return { rows: await tenant.runCustomReportQuery(t.id, current, branchScope(t.locationId)),
             previous: dated ? await tenant.runCustomReportQuery(t.id, { ...current, filters: {
               ...current.filters, ...previousPeriodRange(options.dateFrom, options.dateTo),
-            } }, t.locationId) : null };
+            } }, branchScope(t.locationId)) : null };
         }
-        const result = await runStandardReport(t.id, industry, def, options);
+        const result = await runStandardReport(t.id, industry, def, { ...options, scope: branchScope(t.locationId) });
         return result.report ? pageReportDetails(result.report as unknown as Record<string, unknown>) : result;
       });
       expect(actual, `${industry}/${def.key}`).toEqual(JSON.parse(JSON.stringify(expected)));
@@ -320,7 +325,7 @@ describe("tenant-scoped platform reporting", () => {
       for (const [t, count] of [[first, 121], [second, 73]] as const) {
         await owner.query("UPDATE businesses SET industry=$2 WHERE id=$1", [t.id, industry]);
         const def = standardReportsFor(industry).find((r) => r.key === key)!;
-        const result = await db.withTenant(t.id, () => runStandardReport(t.id, industry, def, { locationId: t.locationId }));
+        const result = await db.withTenant(t.id, () => runStandardReport(t.id, industry, def, { scope: branchScope(t.locationId) }));
         const full = JSON.parse(JSON.stringify(result.report));
         expect(full[collection], key).toHaveLength(count);
         const rows = [];
