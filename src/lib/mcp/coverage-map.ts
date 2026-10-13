@@ -251,7 +251,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Inventory",
     entity: "Stock items & stock levels",
     routes: ["inventory/items", "inventory/stock-levels", "inventory", "inventory/low-stock", "inventory/location-items"],
-    ops: { listDetail: ["get_stock_valuation", "forecast_demand"], create: ["inventory.adjustment.propose"] },
+    ops: {
+      listDetail: ["get_stock_valuation", "forecast_demand"],
+      create: ["inventory.adjustment.propose", "inventory.item.save"],
+      update: ["inventory.item.save"],
+      lifecycle: ["inventory.item.delete"],
+      bulk: ["barcode.bulkMint"],
+    },
+    note: "batch BG: item masters close the row; the delete mirrors the screen's reference check (a referenced item deactivates instead, deactivated:true comes back); the stock reads and adjustment-propose lanes were already covered, and the bulk column the bare inventory prefix pulls in (inventory/barcodes/bulk) rides barcode.bulkMint like the barcodes row",
     test: "integration/stock.integration.test.ts",
   },
   {

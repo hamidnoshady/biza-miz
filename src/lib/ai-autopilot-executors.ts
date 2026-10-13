@@ -5371,6 +5371,133 @@ const rollupLocationSetActive: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true } };
 };
 
+// ── Issue #883 package 2, batch BG — stock-item masters ─────────────────────
+async function inventoryOwnedItemLocation(ctx: AutopilotExecutorContext, id: string) {
+  const location = await settingsActiveLocation(ctx);
+  if (!location) return null;
+  const { rows } = await query<{ id: string }>("SELECT id FROM inventory_items WHERE id = $1 AND location_id = $2", [id, location.id]);
+  return rows[0] ? location : null;
+}
+const inventoryItemSave: AutopilotExecutor = async (ctx) => {
+  const body = ctx.payload;
+  const id = str(body.id);
+  if (!id) {
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const unit = typeof body.unit === "string" ? body.unit.trim() : "";
+    if (!name || !unit) return fail("missing_fields");
+    if (
+      (body.sku !== undefined && body.sku !== null && typeof body.sku !== "string") ||
+      (body.purchaseUnit !== undefined && body.purchaseUnit !== null && typeof body.purchaseUnit !== "string")
+    ) {
+      return fail("bad_request");
+    }
+    const reorderLevel = body.reorderLevel === undefined || body.reorderLevel === null ? null : Number(body.reorderLevel);
+    if (reorderLevel !== null && (!Number.isFinite(reorderLevel) || reorderLevel < 0)) {
+      return fail("invalid_reorder_level");
+    }
+    const purchaseUnitFactor = body.purchaseUnitFactor === undefined ? 1 : Number(body.purchaseUnitFactor);
+    if (!Number.isFinite(purchaseUnitFactor) || purchaseUnitFactor <= 0) {
+      return fail("invalid_purchase_unit_factor");
+    }
+    const location = await settingsActiveLocation(ctx);
+    if (!location) return fail("no_location");
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO inventory_items (location_id, name, sku, unit, reorder_level, purchase_unit, purchase_unit_factor)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [
+        location.id,
+        name,
+        typeof body.sku === "string" ? body.sku.trim() || null : null,
+        unit,
+        reorderLevel,
+        typeof body.purchaseUnit === "string" ? body.purchaseUnit.trim() || null : null,
+        purchaseUnitFactor,
+      ],
+    );
+    return { ok: true, result: { ok: true, id: rows[0].id } };
+  }
+
+  const location = await inventoryOwnedItemLocation(ctx, id);
+  if (!location) return fail("item_not_found");
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+  const setField = (col: string, val: unknown) => {
+    fields.push(`${col} = $${++i}`);
+    values.push(val);
+  };
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string") return fail("bad_request");
+    const name = body.name.trim();
+    if (!name) return fail("missing_fields");
+    setField("name", name);
+  }
+  if (body.unit !== undefined) {
+    if (typeof body.unit !== "string") return fail("bad_request");
+    const unit = body.unit.trim();
+    if (!unit) return fail("missing_fields");
+    setField("unit", unit);
+  }
+  if (body.sku !== undefined) {
+    if (body.sku !== null && typeof body.sku !== "string") return fail("bad_request");
+    setField("sku", body.sku?.trim() || null);
+  }
+  if (body.reorderLevel !== undefined) {
+    const reorderLevel = body.reorderLevel === null ? null : Number(body.reorderLevel);
+    if (reorderLevel !== null && (!Number.isFinite(reorderLevel) || reorderLevel < 0)) {
+      return fail("invalid_reorder_level");
+    }
+    setField("reorder_level", reorderLevel);
+  }
+  if (body.purchaseUnit !== undefined) {
+    if (body.purchaseUnit !== null && typeof body.purchaseUnit !== "string") return fail("bad_request");
+    setField("purchase_unit", body.purchaseUnit?.trim() || null);
+  }
+  if (body.purchaseUnitFactor !== undefined) {
+    const factor = Number(body.purchaseUnitFactor);
+    if (!Number.isFinite(factor) || factor <= 0) {
+      return fail("invalid_purchase_unit_factor");
+    }
+    setField("purchase_unit_factor", factor);
+  }
+  if (body.isActive !== undefined) {
+    if (typeof body.isActive !== "boolean") return fail("bad_request");
+    setField("is_active", body.isActive);
+  }
+  if (body.imageMediaId !== undefined) {
+    if (body.imageMediaId) {
+      const { rows: media } = await query(
+        "SELECT id FROM media_assets WHERE id = $1 AND kind = 'image'",
+        [body.imageMediaId],
+      );
+      if (media.length === 0) return fail("bad_request");
+    }
+    setField("image_media_id", body.imageMediaId || null);
+  }
+  if (fields.length === 0) return fail("bad_request");
+  await query(`UPDATE inventory_items SET ${fields.join(", ")} WHERE id = $1`, [id, ...values]);
+  return { ok: true, result: { ok: true } };
+};
+const inventoryItemDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const location = await inventoryOwnedItemLocation(ctx, id);
+  if (!location) return fail("item_not_found");
+  const { rows: refs } = await query(
+    `SELECT 1 FROM menu_item_ingredients WHERE inventory_item_id = $1
+     UNION ALL SELECT 1 FROM modifier_ingredients WHERE inventory_item_id = $1
+     UNION ALL SELECT 1 FROM stock_movements WHERE inventory_item_id = $1
+     LIMIT 1`,
+    [id],
+  );
+  if (refs.length > 0) {
+    await query("UPDATE inventory_items SET is_active = false WHERE id = $1", [id]);
+    return { ok: true, result: { ok: true, deactivated: true } };
+  }
+  await query("DELETE FROM inventory_items WHERE id = $1", [id]);
+  return { ok: true, result: { ok: true, deactivated: false } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -7623,6 +7750,8 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   businessDayConfigSave,
   rollupPush,
   rollupLocationSetActive,
+  inventoryItemSave,
+  inventoryItemDelete,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

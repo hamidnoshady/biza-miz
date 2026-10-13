@@ -5,7 +5,7 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **275 write verbs**
+visible only to connections consented for every branch) and **277 write verbs**
 (**74** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -285,6 +285,8 @@ visible only to connections consented for every branch) and **275 write verbs**
 | `write_business_day_config_save` | `businessDay.config.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_rollup_push` | `rollup.push` | workspace | low | connection write_mode | `rollup.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_rollup_location_set_active` | `rollup.location.setActive` | workspace | low | connection write_mode | `rollup.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_inventory_item_save` | `inventory.item.save` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_inventory_item_delete` | `inventory.item.delete` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

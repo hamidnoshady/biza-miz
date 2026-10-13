@@ -429,6 +429,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "businessDay.config.save": PERMISSIONS.settingsManage,
   "rollup.push": PERMISSIONS.rollupManage,
   "rollup.location.setActive": PERMISSIONS.rollupManage,
+  "inventory.item.save": PERMISSIONS.inventoryAdjust,
+  "inventory.item.delete": PERMISSIONS.inventoryAdjust,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

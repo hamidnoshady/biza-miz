@@ -461,6 +461,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "businessDay.config.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "rollup.push", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "rollup.location.setActive", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  // Batch BG — item masters sit on the create side of the ledger fence; the
+  // ledger-posting waste/write-down lanes are separately high-risk.
+  { actionType: "inventory.item.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "inventory.item.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

@@ -580,6 +580,10 @@ export type ActionType =
   | "businessDay.config.save"
   | "rollup.push"
   | "rollup.location.setActive"
+  // Batch BG — stock-item masters. Delete mirrors the screen: a referenced
+  // item is deactivated instead, exactly like the route does.
+  | "inventory.item.save"
+  | "inventory.item.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -747,6 +751,8 @@ export type AutopilotExecutorKey =
   | "businessDayConfigSave"
   | "rollupPush"
   | "rollupLocationSetActive"
+  | "inventoryItemSave"
+  | "inventoryItemDelete"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2681,6 +2687,22 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "فعال/خاموش‌کردن مکان rollup",
     payloadHint: '{ id: string, isActive: bool }',
     executor: "rollupLocationSetActive",
+  },
+  "inventory.item.save": {
+    type: "inventory.item.save",
+    endpoint: "/api/inventory/items",
+    method: "POST",
+    label: "ساخت/ویرایش قلم انبار (ورودی raw برای هر فرد قابل‌نادیده‌است) — با id ویرایش (PATCH)",
+    payloadHint: '{ id?: string, name?: string, unit?: string, sku?: string|null, reorderLevel?: number|null, purchaseUnit?: string|null, purchaseUnitFactor?: number, isActive?: bool, imageMediaId?: string|null } — ساخت: name+unit لازم',
+    executor: "inventoryItemSave",
+  },
+  "inventory.item.delete": {
+    type: "inventory.item.delete",
+    endpoint: "/api/inventory/items/{id}",
+    method: "DELETE",
+    label: "حذف قلم انبار — قلمِ ارجاع‌داده‌شده غیرفعال می‌شود (deactivated: true)",
+    payloadHint: '{ id: string }',
+    executor: "inventoryItemDelete",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
