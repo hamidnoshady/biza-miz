@@ -10,6 +10,7 @@ import {
   PrimaryButton,
   SecondaryButton,
   api,
+  errorMessage,
   inputClass,
 } from "@/app/dashboard/ui";
 import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
@@ -172,6 +173,8 @@ export function ProfileSection({
           router.refresh();
         }}
       />
+
+      <SelfNativeDevicesCard />
     </div>
   );
 }
@@ -493,6 +496,172 @@ function SelfSessionsCard({
               خروج از همهٔ کسب‌وکارها
             </SecondaryButton>
           </div>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+interface SelfNativeDevice {
+  id: string;
+  appEnvironment: "development" | "staging" | "production";
+  appVersionName: string;
+  registeredAt: string;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+}
+
+function nativeEnvironmentLabel(env: SelfNativeDevice["appEnvironment"]): string {
+  if (env === "production") return "نسخهٔ اصلی";
+  if (env === "staging") return "نسخهٔ آزمایشی";
+  return "نسخهٔ توسعه";
+}
+
+/**
+ * Issue #884 — the caller's own registered Android app installations (owner
+ * decision #1, ISSUE_884_PLAN.md: "a plain member manages only their own
+ * devices"). This is `/settings/profile`'s exact reason to exist — the one
+ * settings surface every role can open — because the business-wide
+ * equivalent (every member's installations, revoke-as-admin) sits behind
+ * `native_devices.manage` in the "دستگاه‌های ثبت‌شده" settings tab, which a
+ * plain member never sees.
+ *
+ * Revoking here only ever reaches the caller's own row
+ * (`/api/native-devices/self/[id]`, scoped server-side to `session.sub`) —
+ * never another member's installation, even on a shared device. Revocation
+ * ends that installation's authenticated access from its next request
+ * onward; it cannot reach the phone itself if it is offline (the same
+ * documented limitation as the admin side).
+ */
+function SelfNativeDevicesCard() {
+  const [devices, setDevices] = useState<SelfNativeDevice[] | null>(null);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+  const [pendingRevoke, setPendingRevoke] = useState<SelfNativeDevice | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    const { ok, data } = await api<{ devices?: SelfNativeDevice[] }>("/api/native-devices/self");
+    if (ok) {
+      setDevices(data.devices ?? []);
+    } else {
+      setError("دریافت فهرست نصب‌های اپ اندروید ممکن نشد.");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const activeDevices = (devices ?? []).filter((device) => !device.revokedAt);
+  const revokedDevices = (devices ?? []).filter((device) => device.revokedAt);
+
+  async function revoke() {
+    if (!pendingRevoke) return;
+    const device = pendingRevoke;
+    setRevokingId(device.id);
+    setError("");
+    setNotice("");
+    const { ok, data } = await api<{ error?: string }>(`/api/native-devices/self/${device.id}`, {
+      method: "DELETE",
+    });
+    setRevokingId(null);
+    if (!ok) {
+      setError(errorMessage(data.error));
+      return;
+    }
+    setPendingRevoke(null);
+    setNotice("ثبت این نصب لغو شد. از درخواست بعدی، دسترسی آن به کسب‌وکار قطع می‌شود.");
+    await load();
+  }
+
+  // Native app installs are optional (a member may never have opened the
+  // Android app), so an empty list here is not shown as a problem — unlike
+  // the sessions card above, which always has at least the current session.
+  if (devices !== null && devices.length === 0) return null;
+
+  return (
+    <SectionCard
+      title="نصب‌های اپ اندروید"
+      description="دستگاه‌هایی که با همین حساب وارد اپ اندروید شده‌اند. لغو ثبت، دسترسی آن نصب را از درخواست بعدی‌اش قطع می‌کند؛ اگر دستگاه آفلاین باشد، این کار تا اتصال دوبارهٔ آن اعمال نمی‌شود."
+    >
+      <ErrorBox>{error}</ErrorBox>
+      {notice ? <InfoBox>{notice}</InfoBox> : null}
+
+      {devices === null ? (
+        <LoadingSkeleton rows={1} />
+      ) : (
+        <div className="space-y-4">
+          {activeDevices.length > 0 ? (
+            <div className="divide-y divide-border rounded-xl border border-border">
+              {activeDevices.map((device) => (
+                <div
+                  key={device.id}
+                  className="flex flex-wrap items-center justify-between gap-3 p-3 text-xs"
+                >
+                  <div>
+                    <p className="font-semibold text-foreground">
+                      اپ اندروید — نسخهٔ {toPersianDigits(device.appVersionName)}
+                      {device.appEnvironment !== "production" ? (
+                        <span className="ms-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-700 dark:text-amber-300">
+                          {nativeEnvironmentLabel(device.appEnvironment)}
+                        </span>
+                      ) : null}
+                    </p>
+                    <p className="mt-1 text-muted-foreground">
+                      ثبت: {formatJalali(device.registeredAt, { withTime: true })} · آخرین فعالیت:{" "}
+                      {device.lastSeenAt ? formatJalali(device.lastSeenAt, { withTime: true }) : "—"}
+                    </p>
+                  </div>
+                  <SecondaryButton
+                    onClick={() => {
+                      setError("");
+                      setNotice("");
+                      setPendingRevoke(device);
+                    }}
+                    disabled={revokingId === device.id}
+                  >
+                    لغو ثبت
+                  </SecondaryButton>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {pendingRevoke ? (
+            <div className="space-y-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+              <p className="text-sm font-semibold text-foreground">لغو ثبت این نصب؟</p>
+              <p className="text-xs text-muted-foreground">
+                این نصب دیگر نمی‌تواند به کسب‌وکار دسترسی داشته باشد. برای استفادهٔ دوباره، یک مدیر
+                مجاز باید آن را فعال کند و سپس دوباره وارد شوید.
+              </p>
+              <div className="flex gap-2">
+                <PrimaryButton onClick={() => void revoke()} disabled={Boolean(revokingId)}>
+                  {revokingId ? "در حال لغو…" : "تأیید و لغو ثبت"}
+                </PrimaryButton>
+                <SecondaryButton onClick={() => setPendingRevoke(null)} disabled={Boolean(revokingId)}>
+                  انصراف
+                </SecondaryButton>
+              </div>
+            </div>
+          ) : null}
+
+          {revokedDevices.length > 0 ? (
+            <details className="rounded-xl border border-border">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">
+                سابقهٔ نصب‌های لغوشده ({toPersianDigits(String(revokedDevices.length))})
+              </summary>
+              <div className="divide-y divide-border border-t border-border">
+                {revokedDevices.map((device) => (
+                  <div key={device.id} className="p-3 text-xs opacity-70">
+                    اپ اندروید — نسخهٔ {toPersianDigits(device.appVersionName)} · ثبت:{" "}
+                    {formatJalali(device.registeredAt, { withTime: true })} · لغو:{" "}
+                    {device.revokedAt ? formatJalali(device.revokedAt, { withTime: true }) : "—"}
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : null}
         </div>
       )}
     </SectionCard>

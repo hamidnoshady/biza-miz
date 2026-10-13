@@ -20,10 +20,11 @@ In scope (done or in progress on this branch):
 - the runtime documentation (`docs/android-runtime.md`)
 - **the device registry (Phase 6 below)**: a tenant-scoped table and RLS policy, self- and
   admin-service API routes, live revocation enforcement in `getSession()`, the `device.identity`
-  bridge command (bridge version 2), and the registration client mounted in `WorkspaceShell`
+  bridge command (bridge version 2), the registration client mounted in `WorkspaceShell`, and a
+  Settings UI for both self-service (`/settings/profile`) and admin (`native_devices.manage`,
+  inside the "دستگاه‌های ثبت‌شده" tab) revocation/reactivation
 
-Deferred (listed as follow-up work below): the device-registry admin/self-service UI (the API and
-enforcement are done; there is no Settings screen yet), the mobile shell redesign, the list/card
+Deferred (listed as follow-up work below): the mobile shell redesign, the list/card
 representations, biometric re-authentication, push, background sync, the scanner, camera, share
 and file flows, printers, CRM Caller ID and post-call CRM, feature flags, and store promotion
 from a candidate.
@@ -154,8 +155,34 @@ What is here:
       against the real schema and RLS, the same pattern as `device-binding.integration.test.ts`);
       unit tests for the bridge contract, the runtime store's `request()`, the registrar
       component, the Kotlin router and `BridgeContractTest`'s drift check
-- [ ] A Settings UI to see/revoke devices (self and admin) — the API and enforcement exist;
-      the screen does not. Follow-up.
+- [x] A Settings UI to see/revoke devices (self and admin):
+      - Self-service: `SelfNativeDevicesCard` in `src/app/(app)/settings/profile/profile-section.tsx`
+        ("نصب‌های اپ اندروید"), mounted on `/settings/profile` — the one settings URL every role
+        can open (owner decision #1's "a plain member manages only their own devices" needs a home
+        a member without `settingsManage` can actually reach; the admin tab below cannot be it).
+        Calls `GET`/`DELETE /api/native-devices/self*`, renders nothing when the member has never
+        registered an installation, shows revoked history collapsed the same way `device-settings.tsx`
+        does for login-picker terminals.
+      - Admin: `NativeDeviceManagementSettings` in
+        `src/app/(app)/settings/native-device-management-settings.tsx`, mounted inside the existing
+        "دستگاه‌های ثبت‌شده" tab below the unrelated login-picker terminal registry (`DeviceSettings`)
+        — a different table, a different security relationship, its own card rather than merged into
+        that list. Renders nothing for a member who lacks `native_devices.manage` (server-side
+        `requirePermission` is the real gate; this just avoids showing controls that would 403) —
+        `isOwner || permissions.includes(nativeDevicesManage)`, the same pattern `team-manager.tsx`
+        uses for its own permission-gated controls. Calls `GET /api/native-devices`,
+        `DELETE /api/native-devices/[id]` (revoke), `POST /api/native-devices/[id]/reactivate`.
+      - Tests: `native-device-management-settings.test.tsx` (6 tests — renders nothing without the
+        permission and makes no network call; renders for an owner and for a granted non-owner;
+        revokes through the admin route and shows the row move to revoked history; reactivates a
+        revoked row through the admin route; shows an empty state with no installations). The
+        self-service card follows this file's own established convention of not unit-testing each
+        internal helper card individually (`SelfPasswordCard`, `SelfPinCard`, `SelfSessionsCard`
+        have none either) — its contract is the same API already covered by
+        `integration/native-device-registry.integration.test.ts`.
+      - Verified: `npx tsc --noEmit` clean, `npm run lint` clean, full `npm test` — 832 files /
+        10,790 unit tests passed (one unrelated `cloud-pane.test.tsx` failure under full-suite load
+        was confirmed a parallel-run flake — passes in isolation, and that file was not touched).
 - [ ] Revoking a push-notification token (`notifications_devices`, a separate web-push table) when
       a native device is revoked — out of scope until the FCM slice exists.
 - [ ] Device-on-a-list verification on a real signed build — the sandbox cannot run Gradle.
@@ -178,7 +205,7 @@ this slice and is listed under follow-up work.
 | 8 | Mobile/TWA UI uses a real app shell | Deferred | The shell redesign (top bar, `Home \| Sales \| + \| CRM \| More`) is a separate slice. The existing bottom bar is unchanged. |
 | 9 | All major platform modules remain accessible on Android | Partial | The TWA opens the full web platform, so nothing is hidden. Verify on a device. |
 | 10 | Major lists/tables have mobile-native card/row representations | Deferred | Existing design-system rules are unchanged and remain authoritative. |
-| 11 | Device registration and revocation work | Partial | `native_app_devices`, registration/list/revoke/reactivate APIs, live enforcement in `checkNativeDevice`, and the `device.identity` bridge command are all in (Phase 6). No Settings UI to see/revoke a device yet, and not verified on a signed device build. |
+| 11 | Device registration and revocation work | Partial | `native_app_devices`, registration/list/revoke/reactivate APIs, live enforcement in `checkNativeDevice`, the `device.identity` bridge command, and a self-/admin-service Settings UI are all in (Phase 6). Not verified on a signed device build. |
 | 12 | Biometric re-authentication works | Deferred | Capability key `biometric` is reserved; no implementation. |
 | 13 | Push notifications deep-link correctly | Deferred | No FCM in this slice. |
 | 14 | Background native sync without a second business datastore | Deferred | No native storage was added. |
@@ -729,3 +756,10 @@ Phase 6 hardening pass, added on top of the above:
 revoke/reactivate bump `session_generation`), `src/app/api/native-devices/route.ts` (binds the
 session on a `device_revoked` failure, not only on success),
 `integration/native-device-registry.integration.test.ts` (3 new tests).
+
+Settings UI pass, added on top of the above:
+`src/app/(app)/settings/native-device-management-settings.tsx` (business-wide admin card, gated on
+`native_devices.manage`) and its test. Changed: `src/app/(app)/settings/settings-manager.tsx`
+(mounts it inside the existing "devices" tab, below `DeviceSettings`),
+`src/app/(app)/settings/profile/profile-section.tsx` (`SelfNativeDevicesCard`, mounted on
+`/settings/profile` — the self-service half, reachable by every role, unlike the admin tab).
