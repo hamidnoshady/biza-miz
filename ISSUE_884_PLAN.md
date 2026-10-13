@@ -616,6 +616,28 @@ means PR #890 should be re-checked for mergeability again right before it is act
 the same treatment (merge both sides' narratives honestly, never silently re-bump a budget number
 to force green) should be applied if a fourth conflict appears.
 
+**CI on this merge commit (`f29bf706`, pushed as `2010bab1` with the doc update), confirmed on
+GitHub directly:** 17 of 18 required jobs passed — `API guard and permission tests` (34s), `ESLint`
+(2m15s), `Windows print connector` (15s), `WordPress plugin` (26s), `android development debug`
+(2m35s), `data transfer engine (real database)` (2m1s), `design checks` (35s), `desktop shell`
+(3m37s), `media E2E tests` (4m46s), `packaged Windows end-to-end` (16m33s — confirms the merged
+640/220 MiB budgets still hold), `production build` (5m41s), `production container` (8m53s),
+`type check` (2m29s), `unit tests` (5m24s), `web native bridge tests` (27s), `which shippables
+changed` (7s), `integration tests (real database)` (36m5s — longer than the second merge's 29m10s,
+consistent with #819's added `reporting-integrity.integration.test.ts` and other new DB tests).
+Only `visual regression` failed again; its annotations
+(`accounting-cheques-dark.png` 4.26%, `accounting-cheques.png` 6.23%,
+`accounting-chart-of-accounts.png` 4.08%, identical bounds) were re-checked directly against the
+GitHub check-run annotations and are byte-for-byte the same pre-existing failure as before — not a
+new regression, baseline left untouched.
+
+**`main` moved yet again immediately after this CI run finished** (`0c4a77ce` → `862488a1`,
+11 more commits including a large "Automotive business type" wave, issue #839/#858). This is now
+the fourth time `main` has advanced enough to risk a new conflict within this single work session.
+Given that pattern, work paused here to flag the tradeoff to the user — continuing to chase `main`
+indefinitely versus accepting the current green, freshly-merged state (`2010bab1`) as the point for
+human/CI re-verification at actual merge time — rather than silently starting a fourth merge cycle.
+
 ## Files
 
 
