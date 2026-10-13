@@ -452,8 +452,8 @@ async function main() {
       recorded.push(screen.id);
       if (screen.id.startsWith("accounting-cheques")) {
         const b64 = actual.toString("base64");
-        for (let i = 0; i < b64.length; i += 4000) console.log(`VRDUMP ${screen.id} ${i / 4000} ${b64.slice(i, i + 4000)}`);
-        console.log(`VRDUMP ${screen.id} END ${b64.length}`);
+        const kind = screen.id.endsWith("dark") ? "warning" : "notice";
+        for (let i = 0; i < b64.length; i += 50000) console.log(`::${kind} title=VRDUMP ${screen.id} ${i / 50000}::${b64.slice(i, i + 50000)}`);
       }
       continue;
     }
