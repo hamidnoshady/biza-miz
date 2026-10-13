@@ -131,6 +131,10 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   { name: "list_cosmetic_items", kind: "read", app: "pos", branchPolicy: "pinned", module: "cosmetics" },
   { name: "list_cosmetic_brands", kind: "read", app: "pos", branchPolicy: "pinned", module: "cosmetics" },
   { name: "list_accessory_items", kind: "read", app: "pos", branchPolicy: "pinned", module: "accessories" },
+  // Batch AO read — one trade-goods board read for all three verticals (the
+  // routes are one shared implementation bound per industry URL namespace);
+  // the industry arg must equal the business's industry.
+  { name: "list_trade_goods_items", kind: "read", app: "pos", branchPolicy: "pinned" },
   // Batch G — inventory readings and the suppliers directory.
   { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
@@ -532,6 +536,17 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "accessories.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "accessories.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "accessories.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AO — trade-goods lanes. Ordinary retail sales only; all mode/low
+  // like the stock-room/sell screens they mirror.
+  { actionType: "wholesale.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "wholesale.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "wholesale.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "tools_fittings.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "tools_fittings.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "tools_fittings.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "haberdashery.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "haberdashery.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "haberdashery.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

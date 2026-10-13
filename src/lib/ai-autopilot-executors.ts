@@ -52,6 +52,12 @@ import {
 } from "./accessories-service";
 import type { MatrixAxis } from "./variant-matrix";
 import type { SettlementMethod } from "./ledger";
+import {
+  sellTradeGoodsUnits,
+  receiveTradeGoodsStock,
+  setTradeGoodsUnitPrice,
+} from "./trade-goods-service";
+import type { TradeGoodsIndustry } from "./trade-goods";
 import { validateWeightAttributes } from "./gold";
 import { markAsConsigned, createConsignor, payConsignor } from "./consignment-service";
 import { recordItemEvent } from "./item-audit-service";
@@ -3015,6 +3021,65 @@ const accessoriesItemSell: AutopilotExecutor = async (ctx) => {
   }
 };
 
+// ── Issue #883 package 2, batch AO — trade-goods verticals ───────────────
+// wholesale / tools_fittings / haberdashery share one route implementation
+// (trade-goods-routes.ts), so they share one executor family: item-create is
+// the same two-shape builder as the cosmetics/accessories lanes, stock-update
+// adds the opening-cost branch, and the sell factory brands its sale with
+// the trade — exactly the routes' transaction and error envelopes.
+const tradeGoodsSellExecutor = (trade: TradeGoodsIndustry): AutopilotExecutor => async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  const paymentMethod = str(ctx.payload.paymentMethod) as SettlementMethod | null;
+  if (paymentMethod !== "cash" && paymentMethod !== "bank" && paymentMethod !== "credit") {
+    return fail("invalid_payment_method");
+  }
+  const vatPercent = Number(ctx.payload.vatPercent ?? 0);
+  if (!Number.isFinite(vatPercent)) return { ok: false, result: { error: "bad_request" }, errorCode: "bad_request" };
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await sellTradeGoodsUnits(client, {
+      trade,
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      itemId: id,
+      quantity: str(ctx.payload.quantity) ?? "1",
+      unitPrice: ctx.payload.unitPrice != null ? Number(ctx.payload.unitPrice) : undefined,
+      discount: Number(ctx.payload.discount ?? 0),
+      vatPercent,
+      paymentMethod,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if (err instanceof MissingLedgerAccountError) {
+      return { ok: false, result: { error: "ledger_account_missing", code: err.code }, errorCode: "ledger_account_missing" };
+    }
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  } finally {
+    client.release();
+  }
+};
+const tradeGoodsStockExecutor = (): AutopilotExecutor =>
+  stockUpdateExecutor({ receive: receiveTradeGoodsStock, setPrice: setTradeGoodsUnitPrice, withInitialCost: true });
+const wholesaleItemCreate: AutopilotExecutor = createVariantItem;
+const wholesaleItemSell = tradeGoodsSellExecutor("wholesale");
+const wholesaleStockUpdate = tradeGoodsStockExecutor();
+const toolsFittingsItemCreate: AutopilotExecutor = createVariantItem;
+const toolsFittingsItemSell = tradeGoodsSellExecutor("tools_fittings");
+const toolsFittingsStockUpdate = tradeGoodsStockExecutor();
+const haberdasheryItemCreate: AutopilotExecutor = createVariantItem;
+const haberdasheryItemSell = tradeGoodsSellExecutor("haberdashery");
+const haberdasheryStockUpdate = tradeGoodsStockExecutor();
+
 // ── Issue #883 package 2, batch AL2 — jewelry money lanes ────────────────
 // Every verb mirrors its route 1:1: same client transaction, same ledger
 // error convention (MissingLedgerAccountError → ledger_account_missing),
@@ -4746,6 +4811,15 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   accessoriesItemCreate,
   accessoriesItemSell,
   accessoriesStockUpdate,
+  wholesaleItemCreate,
+  wholesaleItemSell,
+  wholesaleStockUpdate,
+  toolsFittingsItemCreate,
+  toolsFittingsItemSell,
+  toolsFittingsStockUpdate,
+  haberdasheryItemCreate,
+  haberdasheryItemSell,
+  haberdasheryStockUpdate,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

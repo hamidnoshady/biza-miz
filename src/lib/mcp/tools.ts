@@ -166,6 +166,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_cosmetic_items: "Cosmetics board of the pinned branch — families & variants with stock, price and batch state (cosmetics businesses only).",
   list_cosmetic_brands: "Cosmetic brands registered in the pinned branch — name, country, product line.",
   list_accessory_items: "Accessories board of the pinned branch — families & variants with attributes, stock and pricing (accessories businesses only).",
+  list_trade_goods_items: "Trade-goods board (wholesale / tools_fittings / haberdashery) of the pinned branch — industry arg must equal the business's industry.",
   list_stock_counts: "One branch's stock counts, newest first — lines, shortage/surplus value.",
   get_stock_count: "One stock count's line-level detail.",
   list_suppliers: "The business's suppliers, paginated — same service the directory screen uses.",
@@ -338,6 +339,76 @@ const id = (description: string) => ({ type: "string", description });
  *     and a person clicks publish.
  */
 const WRITE_TOOL_SPECS: WriteToolSpec[] = [
+  // Batch AO — the three trade-goods verticals share one route implementation
+  // (trade-goods-routes.ts), so their nine tool specs are one builder too.
+  ...(["wholesale", "tools_fittings", "haberdashery"] as const).flatMap((trade) => {
+    const label = trade === "wholesale" ? "عمده" : trade === "tools_fittings" ? "ابزار و یراق" : "خرازی";
+    const snake = trade === "tools_fittings" ? "tools_fittings" : trade;
+    return [
+      {
+        name: `write_${snake}_item_create`,
+        actionType: `${trade}.item.create`,
+        english: `${trade} trade board: create a product family (no parentItemId) or one variant under a family — shared trade-goods contract.`,
+        destructive: false,
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "نام کالا (اجباری)" },
+            sku: { type: "string" },
+            parentItemId: id("خانوادهٔ کالا — خالی = ساخت خانوادهٔ جدید"),
+            attributes: {
+              type: "array",
+              description: "فقط همراه parentItemId",
+              items: {
+                type: "object",
+                properties: { name: { type: "string" }, value: { type: "string" } },
+                required: ["name", "value"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["name"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: `write_${snake}_item_sell`,
+        actionType: `${trade}.item.sell`,
+        english: `Sell units of one ${trade} variant — revenue, COGS and stock decrement in one transaction (ledger errors surface as ledger_account_missing).`,
+        destructive: true,
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: id("تنوع کالا"),
+            quantity: { type: "string", description: 'تعداد — پیش‌فرض "1"' },
+            unitPrice: { type: "number", description: "قیمت فروش هر واحد (ریال) — خالی = قیمت قفسه" },
+            discount: { type: "number", description: "تخفیف (ریال) — پیش‌فرض 0" },
+            vatPercent: { type: "number", description: "درصد مالیات ارزش‌افزوده — پیش‌فرض 0" },
+            paymentMethod: { type: "string", enum: ["cash", "bank", "credit"] },
+          },
+          required: ["id", "paymentMethod"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: `write_${snake}_stock_update`,
+        actionType: `${trade}.stock.update`,
+        english: `Receive stock and/or set the shelf price of one ${trade} (${label}) item — a purchase price without quantity only sets the opening cost while stock is zero.`,
+        destructive: false,
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: id("کالا"),
+            quantity: { type: "string", description: "تعداد ورودی — خالی = بدون ورود" },
+            unitCost: { type: "number", description: "بهای واحد همراه quantity، یا قیمت خرید اولیه وقتی موجودی صفر است" },
+            unitPrice: { type: "number", description: "قیمت قفسه — جداگانه قابل‌ثبت" },
+          },
+          required: ["id"],
+          additionalProperties: false,
+        },
+      },
+    ] satisfies WriteToolSpec[];
+  }),
   {
     name: "write_menu_item_price",
     actionType: "menu.item.priceUpdate",

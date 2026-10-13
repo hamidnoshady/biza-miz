@@ -904,6 +904,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Verticals",
     entity: "Haberdashery (models, measurements, work orders)",
     routes: ["haberdashery"],
+    ops: {
+      listDetail: ["list_trade_goods_items"],
+      create: ["haberdashery.item.create", "haberdashery.stock.update"],
+      lifecycle: ["haberdashery.item.sell"],
+    },
+    note: "AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only",
     test: "integration/haberdashery.integration.test.ts",
   },
   {
@@ -911,6 +917,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Verticals",
     entity: "Tools & fittings (rentals, deposits, reports)",
     routes: ["tools-fittings"],
+    ops: {
+      listDetail: ["list_trade_goods_items"],
+      create: ["tools_fittings.item.create", "tools_fittings.stock.update"],
+      lifecycle: ["tools_fittings.item.sell"],
+    },
+    note: "AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only",
     test: "integration/tools-fittings.integration.test.ts",
   },
   {
@@ -938,6 +950,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Verticals",
     entity: "Wholesale (files, payments, reports)",
     routes: ["wholesale"],
+    ops: {
+      listDetail: ["list_trade_goods_items"],
+      create: ["wholesale.item.create", "wholesale.stock.update"],
+      lifecycle: ["wholesale.item.sell"],
+    },
+    note: "AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only",
     test: "integration/wholesale.integration.test.ts",
   },
 ];

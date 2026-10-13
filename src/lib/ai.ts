@@ -424,6 +424,19 @@ export type ActionType =
   | "accessories.item.create"
   | "accessories.item.sell"
   | "accessories.stock.update"
+  // Batch AO — the three trade-goods verticals (wholesale / tools_fittings /
+  // haberdashery). One shared route implementation in trade-goods-routes.ts,
+  // one shared executor family: item.create/stock.update ride inventoryAdjust,
+  // item.sell rides ordersCreate — exactly the route guards.
+  | "wholesale.item.create"
+  | "wholesale.item.sell"
+  | "wholesale.stock.update"
+  | "tools_fittings.item.create"
+  | "tools_fittings.item.sell"
+  | "tools_fittings.stock.update"
+  | "haberdashery.item.create"
+  | "haberdashery.item.sell"
+  | "haberdashery.stock.update"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -492,6 +505,15 @@ export type AutopilotExecutorKey =
   | "accessoriesItemCreate"
   | "accessoriesItemSell"
   | "accessoriesStockUpdate"
+  | "wholesaleItemCreate"
+  | "wholesaleItemSell"
+  | "wholesaleStockUpdate"
+  | "toolsFittingsItemCreate"
+  | "toolsFittingsItemSell"
+  | "toolsFittingsStockUpdate"
+  | "haberdasheryItemCreate"
+  | "haberdasheryItemSell"
+  | "haberdasheryStockUpdate"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1637,6 +1659,78 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "ورود موجودی و/یا قیمت قفسهٔ قلم لوازم‌جانبی — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
     payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
     executor: "accessoriesStockUpdate",
+  },
+  "wholesale.item.create": {
+    type: "wholesale.item.create",
+    endpoint: "/api/wholesale/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع کالای عمده — برد فروشگاه عمده‌فروشی",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "wholesaleItemCreate",
+  },
+  "wholesale.item.sell": {
+    type: "wholesale.item.sell",
+    endpoint: "/api/wholesale/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع عمده — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "wholesaleItemSell",
+  },
+  "wholesale.stock.update": {
+    type: "wholesale.stock.update",
+    endpoint: "/api/wholesale/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم عمده — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "wholesaleStockUpdate",
+  },
+  "tools_fittings.item.create": {
+    type: "tools_fittings.item.create",
+    endpoint: "/api/tools-fittings/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع ابزار و یراق — برد فروشگاه ابزار",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "toolsFittingsItemCreate",
+  },
+  "tools_fittings.item.sell": {
+    type: "tools_fittings.item.sell",
+    endpoint: "/api/tools-fittings/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع ابزار/یراق — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "toolsFittingsItemSell",
+  },
+  "tools_fittings.stock.update": {
+    type: "tools_fittings.stock.update",
+    endpoint: "/api/tools-fittings/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم ابزار/یراق — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "toolsFittingsStockUpdate",
+  },
+  "haberdashery.item.create": {
+    type: "haberdashery.item.create",
+    endpoint: "/api/haberdashery/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع خرازی — برد فروشگاه خرازی",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "haberdasheryItemCreate",
+  },
+  "haberdashery.item.sell": {
+    type: "haberdashery.item.sell",
+    endpoint: "/api/haberdashery/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع خرازی — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "haberdasheryItemSell",
+  },
+  "haberdashery.stock.update": {
+    type: "haberdashery.stock.update",
+    endpoint: "/api/haberdashery/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم خرازی — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "haberdasheryStockUpdate",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
@@ -4220,6 +4314,26 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           parameters: {
             type: "object",
             properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_trade_goods_items",
+          description:
+            "برد کالای عمده/ابزار/خرازی شعبهٔ جاری — industry یکی از wholesale|tools_fittings|haberdashery.",
+          parameters: {
+            type: "object",
+            properties: {
+              industry: {
+                type: "string",
+                enum: ["wholesale", "tools_fittings", "haberdashery"],
+                description: "صنعت موردنظر — فقط برای همان صنعت فعال است",
+              },
+            },
+            required: ["industry"],
             additionalProperties: false,
           },
         },

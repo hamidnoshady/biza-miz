@@ -63,6 +63,8 @@ import { listWeightItems } from "./items-service";
 import { listCosmeticBoard } from "./cosmetics-service";
 import { listBrands } from "./item-brands-service";
 import { listVariantBoard } from "./accessories-service";
+import { listVariantBoard as listTradeGoodsBoard } from "./trade-goods-service";
+import { isTradeGoodsIndustry } from "./trade-goods";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
@@ -1735,6 +1737,21 @@ export async function runReadTool(
       if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
       if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
       const board = await listVariantBoard(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
+    }
+    // Issue #883 package 2, batch AO — one trade-goods board read bound to the
+    // business's own industry (the routes do the same binding per namespace).
+    case "list_trade_goods_items": {
+      const requested = String(args.industry ?? "");
+      if (!isTradeGoodsIndustry(requested)) return { ok: false, data: { error: "invalid_arguments" } };
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== requested) {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای همین صنعت (عمده/ابزار/خرازی) در دسترس است." } };
+      }
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const board = await listTradeGoodsBoard(pinned.locationId);
       return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
     }
     // Issue #883 package 2, batch AI — paired devices.

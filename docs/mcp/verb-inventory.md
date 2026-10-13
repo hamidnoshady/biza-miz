@@ -4,8 +4,8 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **132 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **176 write verbs**
+Current surface: **133 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **185 write verbs**
 (**61** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -55,6 +55,7 @@ visible only to connections consented for every branch) and **176 write verbs**
 | `list_cosmetic_items` | pos | pinned (cosmetics businesses only) | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cosmetic_brands` | pos | pinned (cosmetics businesses only) | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_accessory_items` | pos | pinned (accessories businesses only) | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_trade_goods_items` | pos | pinned | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_stock_counts` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_stock_count` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_suppliers` | pos | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -318,6 +319,15 @@ visible only to connections consented for every branch) and **176 write verbs**
 | `write_accessories_item_create` | `accessories.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_accessories_item_sell` | `accessories.item.sell` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_accessories_stock_update` | `accessories.stock.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wholesale_item_create` | `wholesale.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wholesale_item_sell` | `wholesale.item.sell` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wholesale_stock_update` | `wholesale.stock.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_tools_fittings_item_create` | `tools_fittings.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_tools_fittings_item_sell` | `tools_fittings.item.sell` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_tools_fittings_stock_update` | `tools_fittings.stock.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_haberdashery_item_create` | `haberdashery.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_haberdashery_item_sell` | `haberdashery.item.sell` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_haberdashery_stock_update` | `haberdashery.stock.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_open` | `table.session.open` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_update` | `table.session.update` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

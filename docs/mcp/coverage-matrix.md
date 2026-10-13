@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (31)
+### Tenant (28)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -44,9 +44,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
 - **misc.invoices** (Sales · Sales invoices & voids) — partial
-- **vertical_haberdashery** (Verticals · Haberdashery (models, measurements, work orders)) — MCP gap
-- **vertical_tools** (Verticals · Tools & fittings (rentals, deposits, reports)) — MCP gap
-- **vertical_wholesale** (Verticals · Wholesale (files, payments, reports)) — MCP gap
 
 ### Platform (17)
 - **platform.biz-directory** (Platform — Tenants · Business directory (search, identity, usage, reports)) — partial
@@ -71,7 +68,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 41 · partial: 26 · MCP gap: 5 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 44 · partial: 26 · MCP gap: 2 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -150,11 +147,11 @@ Counts — covered: 41 · partial: 26 · MCP gap: 5 · backend gap: 0 · n/a (in
 | Cross-cutting | tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata<br>_credential exchange surface — never an AI-callable verb_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
 | Verticals | Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)<br>_AL1 catalog + AL2 money lanes + AM directory close-out: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory is create-only in the UI too (no PATCH/DELETE routes exist), so the MCP surface matches it exactly_ | list_jewelry_items | jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add | jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay | jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode; step-up (always approve) | list_jewelry_items, jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add, jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay, jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | integration/jewelry.integration.test.ts | covered |
 | Verticals | Cosmetics (rot management, suppliers, reports)<br>_AN closes the write surface except expired-batch write-offs: those destroy value deliberately and stay in-app like inventory.waste.log (no MCP verb anywhere for value-destructive writedowns)_ | get_near_expiry_items, list_cosmetic_brands, list_cosmetic_items | cosmetics.batch.receive, cosmetics.brand.create, cosmetics.item.create, cosmetics.matrix.create | cosmetics.profile.update, cosmetics.stock.update, cosmetics.tester.open | — | — | inventory.adjust, inventory.view, reports.view | connection mode | get_near_expiry_items, list_cosmetic_brands, list_cosmetic_items, cosmetics.batch.receive, cosmetics.brand.create, cosmetics.item.create, cosmetics.matrix.create, cosmetics.profile.update, cosmetics.stock.update, cosmetics.tester.open | integration/cosmetics.integration.test.ts | covered |
-| Verticals | Haberdashery (models, measurements, work orders) | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, orders.create, reports.view | — | — | integration/haberdashery.integration.test.ts | MCP gap |
-| Verticals | Tools & fittings (rentals, deposits, reports) | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, orders.create, reports.view | — | — | integration/tools-fittings.integration.test.ts | MCP gap |
+| Verticals | Haberdashery (models, measurements, work orders)<br>_AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only_ | list_trade_goods_items | haberdashery.item.create, haberdashery.stock.update | — | haberdashery.item.sell | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode | list_trade_goods_items, haberdashery.item.create, haberdashery.stock.update, haberdashery.item.sell | integration/haberdashery.integration.test.ts | covered |
+| Verticals | Tools & fittings (rentals, deposits, reports)<br>_AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only_ | list_trade_goods_items | tools_fittings.item.create, tools_fittings.stock.update | — | tools_fittings.item.sell | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode | list_trade_goods_items, tools_fittings.item.create, tools_fittings.stock.update, tools_fittings.item.sell | integration/tools-fittings.integration.test.ts | covered |
 | Verticals | Accessories (mobile/PC sale & repair)<br>_AN close-out: sale rides ordersCreate like checkout and mirrors the MissingLedgerAccountError envelope; specialized variant-sales report route stays report-surface only (no MCP analytics reads)_ | list_accessory_items | accessories.item.create, accessories.stock.update | — | accessories.item.sell | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode | list_accessory_items, accessories.item.create, accessories.stock.update, accessories.item.sell | integration/accessories.integration.test.ts | covered |
 | Verticals | Merchandising (displays, perishables) | (route only) | (route only) | — | — | — | inventory.adjust, inventory.view | — | — | — | n/a (infra) |
-| Verticals | Wholesale (files, payments, reports) | (route only) | (route only) | — | (route only) | — | inventory.adjust, inventory.view, orders.create, reports.view | — | — | integration/wholesale.integration.test.ts | MCP gap |
+| Verticals | Wholesale (files, payments, reports)<br>_AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only_ | list_trade_goods_items | wholesale.item.create, wholesale.stock.update | — | wholesale.item.sell | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode | list_trade_goods_items, wholesale.item.create, wholesale.stock.update, wholesale.item.sell | integration/wholesale.integration.test.ts | covered |
 
 ## Platform realm (pospmcp_) — Superadmin
 

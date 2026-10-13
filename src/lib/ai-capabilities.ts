@@ -82,6 +82,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_cosmetic_items: PERMISSIONS.inventoryView,
   list_cosmetic_brands: PERMISSIONS.inventoryView,
   list_accessory_items: PERMISSIONS.inventoryView,
+  // Batch AO read — trade-goods board, same inventory gate as its GET routes.
+  list_trade_goods_items: PERMISSIONS.inventoryView,
   get_backup_status: PERMISSIONS.backupManage,
   get_gift_card_status: PERMISSIONS.giftCardsView,
   // Batch G reads — inventory.view on counts (the screen's GET gate), the
@@ -298,6 +300,17 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   // The sale lane is gated like the sell screen, not the stock room.
   "accessories.item.sell": PERMISSIONS.ordersCreate,
   "accessories.stock.update": PERMISSIONS.inventoryAdjust,
+  // Batch AO — the trade-goods write guards, copied from trade-goods-routes.ts
+  // callers: stock lanes inventoryAdjust, the sale lanes ordersCreate.
+  "wholesale.item.create": PERMISSIONS.inventoryAdjust,
+  "wholesale.stock.update": PERMISSIONS.inventoryAdjust,
+  "wholesale.item.sell": PERMISSIONS.ordersCreate,
+  "tools_fittings.item.create": PERMISSIONS.inventoryAdjust,
+  "tools_fittings.stock.update": PERMISSIONS.inventoryAdjust,
+  "tools_fittings.item.sell": PERMISSIONS.ordersCreate,
+  "haberdashery.item.create": PERMISSIONS.inventoryAdjust,
+  "haberdashery.stock.update": PERMISSIONS.inventoryAdjust,
+  "haberdashery.item.sell": PERMISSIONS.ordersCreate,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,
