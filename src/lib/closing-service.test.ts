@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { closeFiscalYear } from "./closing-service";
+import { calculateClosingLines, closeFiscalYear } from "./closing-service";
 import * as db from "./db";
 import { PoolClient } from "pg";
 
@@ -8,6 +8,54 @@ vi.mock("./db", () => ({
 }));
 
 describe("closing-service", () => {
+  describe("calculateClosingLines", () => {
+    it("closes balances above Number.MAX_SAFE_INTEGER without losing a Rial", () => {
+      const calculated = calculateClosingLines([
+        {
+          account_id: "revenue-account",
+          account_type: "revenue",
+          debit: "0",
+          credit: "9007199254740993",
+        },
+        {
+          account_id: "expense-account",
+          account_type: "expense",
+          debit: "2",
+          credit: "0",
+        },
+      ]);
+
+      expect(calculated.netIncome).toBe(9007199254740991n);
+      expect(calculated.lines).toEqual([
+        { accountId: "revenue-account", debit: "9007199254740993", credit: "0" },
+        { accountId: "expense-account", debit: "0", credit: "2" },
+      ]);
+    });
+
+    it("keeps an exact loss signed and closes debit-normal accounts in the right direction", () => {
+      const calculated = calculateClosingLines([
+        {
+          account_id: "revenue-account",
+          account_type: "revenue",
+          debit: "5",
+          credit: "0",
+        },
+        {
+          account_id: "expense-account",
+          account_type: "expense",
+          debit: "9007199254740993",
+          credit: "0",
+        },
+      ]);
+
+      expect(calculated.netIncome).toBe(-9007199254740998n);
+      expect(calculated.lines).toEqual([
+        { accountId: "revenue-account", debit: "0", credit: "5" },
+        { accountId: "expense-account", debit: "0", credit: "9007199254740993" },
+      ]);
+    });
+  });
+
   describe("closeFiscalYear", () => {
     let mockClient: any;
 

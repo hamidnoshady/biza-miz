@@ -15,15 +15,26 @@ describe("auditActionLabel", () => {
   });
 
   it("labels the account change-history actions (issue #160 §7.5)", () => {
+    expect(auditActionLabel("account.created")).toBe("ایجاد حساب");
     expect(auditActionLabel("account.renamed")).toBe("تغییر نام حساب");
     expect(auditActionLabel("account.reparented")).toBe("جابه‌جایی حساب در ساختار");
     expect(auditActionLabel("account.archived")).toBe("بایگانی حساب");
     expect(auditActionLabel("account.reactivated")).toBe("بازگردانی حساب از بایگانی");
+    expect(auditActionLabel("account.contra_changed")).toBe("تغییر وضعیت حساب کاهنده");
+    expect(auditActionLabel("account.deleted")).toBe("حذف حساب");
   });
 
   it("labels the settings writers, whose rows the audit tab renders", () => {
     expect(auditActionLabel("settings.business.update")).toBe("تغییر اطلاعات کسب‌وکار");
     expect(auditActionLabel("settings.mfa_policy.update")).toBe("تغییر سیاست ورود دومرحله‌ای");
+  });
+
+  it("labels fiscal-year and fiscal-period lifecycle events", () => {
+    expect(auditActionLabel("fiscal_year.created")).toBe("تعریف سال مالی");
+    expect(auditActionLabel("fiscal_period.soft_closed")).toBe("بستن موقت دورهٔ مالی");
+    expect(auditActionLabel("fiscal_period.locked")).toBe("قفل‌کردن دورهٔ مالی");
+    expect(auditActionLabel("fiscal_period.reopened")).toBe("بازگشایی دورهٔ مالی");
+    expect(auditActionLabel("fiscal_year.closed")).toBe("بستن نهایی سال مالی");
   });
 });
 
@@ -42,6 +53,16 @@ describe("auditEntityLabel", () => {
 
   it("labels the account entity (issue #160 §7.5)", () => {
     expect(auditEntityLabel("account")).toBe("حساب");
+  });
+
+  it("labels fiscal-year and fiscal-period entities", () => {
+    expect(auditEntityLabel("fiscal_year")).toBe("سال مالی");
+    expect(auditEntityLabel("fiscal_period")).toBe("دورهٔ مالی");
+  });
+
+  it("labels commission settlement entities", () => {
+    expect(auditEntityLabel("commission_run")).toBe("دورهٔ تسویه پورسانت");
+    expect(auditEntityLabel("commission_payout")).toBe("پرداخت پورسانت");
   });
 });
 

@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
       const members = await client.query<MemberRow>(
         `SELECT u.id,u.role,u.custom_role_id,u.permissions,u.membership_revision,u.is_active,u.membership_status,u.location_scope,u.location_id,
                 coalesce(ARRAY(SELECT ul.location_id FROM user_locations ul WHERE ul.user_id=u.id),'{}') location_ids,
-                CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END custom_permissions
+                CASE WHEN u.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END custom_permissions
            FROM users u
            LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id
           WHERE u.business_id=$1 AND u.id=ANY($2::uuid[]) FOR UPDATE OF u`,

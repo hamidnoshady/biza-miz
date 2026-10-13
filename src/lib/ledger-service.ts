@@ -113,6 +113,10 @@ export async function postExactJournalEntry(
       [rows[0].id, line.accountId, line.debit, line.credit],
     );
   }
+  // The DB line trigger grants insertion into a soft-closed period only while
+  // this freshly-created entry is being assembled. Do not let later statements
+  // in the same outer transaction reuse that construction marker.
+  await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
   return rows[0].id;
 }
 
@@ -958,6 +962,9 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
       l.credit,
     ]);
   }
+  // A soft-close construction token is single-use at the entry boundary, not
+  // a continuing authorization to append lines later in this transaction.
+  await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
   return entryId;
 }
 

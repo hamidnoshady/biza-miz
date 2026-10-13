@@ -20,6 +20,7 @@ type Context = { params: Promise<{ id: string }> };
 const FISCAL_LOCK_STATUS: Record<string, number> = {
   fiscal_period_locked: 409,
   fiscal_period_soft_closed: 409,
+  fiscal_period_not_defined: 409,
 };
 
 /**

@@ -105,11 +105,14 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM expenses");
   await db.query("DELETE FROM media_assets");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM businesses");
+  await db.query("COMMIT");
 
   const bizRow = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Expense Co', $1) RETURNING id",
@@ -637,8 +640,10 @@ describe("reverseExpense (issue #832 §1)", () => {
     );
     expect(untouched[0].reversed_at).toBeNull();
 
-    // A default-dated reversal lands on the business's today, which is open: a
-    // correction is never held hostage by a closed historical period.
+    // The correction's default date is today's Shamsi date. Define that year
+    // too, so the new post is covered rather than relying on legacy posting.
+    const { todayJalali } = await import("../src/lib/jalali");
+    await fiscalService.createFiscalYear(biz.id, todayJalali().jy);
     const reversal = await expenseService.reverseExpense({ businessId: biz.id, expenseId: original.id, actorId: user.id });
     expect(reversal.expenseDate).not.toBe("2025-04-15");
     const { todayIsoDate } = await import("../src/lib/jalali");

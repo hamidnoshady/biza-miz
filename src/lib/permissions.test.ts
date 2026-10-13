@@ -102,6 +102,19 @@ describe("role presets", () => {
     ).toBe(false);
   });
 
+  it("makes fiscal-period authority readable without duplicating the implication", () => {
+    const manager = effectivePermissions("manager", { granted: [PERMISSIONS.ledgerClosePeriod] });
+    expect(manager.has(PERMISSIONS.ledgerClosePeriod)).toBe(true);
+    expect(manager.has(PERMISSIONS.ledgerView)).toBe(true);
+
+    const revoked = effectivePermissions("manager", {
+      granted: [PERMISSIONS.ledgerClosePeriod],
+      revoked: [PERMISSIONS.ledgerView],
+    });
+    expect(revoked.has(PERMISSIONS.ledgerView)).toBe(false);
+    expect(revoked.has(PERMISSIONS.ledgerClosePeriod)).toBe(false);
+  });
+
   it("does not let any non-owner role manage the team by default", () => {
     for (const role of ["manager", "accountant", "cashier", "waiter", "kitchen"] as const) {
       expect(hasPermission(role, null, PERMISSIONS.teamManage)).toBe(false);

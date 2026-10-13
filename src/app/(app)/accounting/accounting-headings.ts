@@ -24,7 +24,10 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
   entries: { description: "همهٔ اسناد ثبت‌شده به ترتیب تاریخ، با منبع هر سند و امکان برگشت." },
   manual: { description: "ثبت سند دستی دوطرفه، با پیش‌نویس و تأیید پیش از ورود به دفتر." },
   expenses: { description: "ثبت هزینه‌های جاری کسب‌وکار و حساب پرداخت آن‌ها." },
-  "fiscal-periods": { description: "سال‌ها و ماه‌های مالی، و بستن یا قفل کردن دوره‌ها." },
+  "fiscal-periods": {
+    title: "سال‌ها و دوره‌های مالی",
+    description: "تعریف سال شمسی، بررسی وضعیت دوازده دورهٔ ماهانه و کنترل مجازِ بستن، قفل‌کردن یا بازگشایی دوره‌ها.",
+  },
   directory: {
     title: "اشخاص",
     description:

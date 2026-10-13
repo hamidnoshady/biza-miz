@@ -349,9 +349,11 @@ function errorMessage(code: string | undefined): string {
     invalid_supplier_return: "اطلاعات برگشت به تأمین‌کننده کامل نیست.",
     // Codes the receive/return journal posting can surface from
     // fiscal-periods.ts when the entry date falls in a closed period.
-    fiscal_period_locked: "دورهٔ مالی این تاریخ بسته شده و ثبت سند در آن ممکن نیست.",
+    fiscal_period_locked: "دورهٔ مالی این تاریخ قفل شده و ثبت سند در آن ممکن نیست.",
     fiscal_period_soft_closed:
-      "دورهٔ مالی این تاریخ نیمه‌بسته است؛ فقط مالک یا حسابدار می‌تواند در آن سند ثبت کند.",
+      "دورهٔ مالی این تاریخ بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است.",
+    fiscal_period_not_defined:
+      "این تاریخ در هیچ دورهٔ مالیِ تعریف‌شده‌ای قرار نمی‌گیرد. در حسابداری، بخش «سال‌ها و دوره‌های مالی»، سال شمسیِ مربوط را تعریف کنید؛ تا آن زمان ثبت سند پذیرفته نمی‌شود.",
     received_purchase_not_found: "خرید دریافت‌شده پیدا نشد.",
     supplier_return_purchase_item_not_found:
       "قلم انتخاب‌شده متعلق به این خرید نیست.",
