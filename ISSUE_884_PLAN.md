@@ -667,6 +667,28 @@ mergeable status and CI must be re-checked immediately before any real merge or 
 re-syncs with `main` should happen at that time rather than being chased indefinitely in this
 session.
 
+**CI on this merge commit (`26c53286`), confirmed on GitHub directly:** 17 of 18 required jobs
+passed — `API guard and permission tests` (36s), `ESLint` (2m38s), `Windows print connector` (18s),
+`WordPress plugin` (24s), `android development debug` (2m43s), `data transfer engine (real
+database)` (1m26s), `design checks` (29s), `desktop shell` (6m23s), `media E2E tests` (5m46s),
+`packaged Windows end-to-end` (14m12s — budgets hold), `production build` (5m36s), `production
+container` (8m0s), `type check` (2m39s), `unit tests` (5m38s), `web native bridge tests` (29s),
+`which shippables changed` (8s), `integration tests (real database)` (45m35s — continuing to grow
+with the automotive wave's new DB tests). Only `visual regression` failed again, but this time with
+a *different* baseline drift than the prior three runs: only 2 files this time
+(`accounting-cheques-dark.png` 0.52%, `accounting-cheques.png` 0.65%, down from 3 files/4–6%
+before) — confirmed byte-for-byte identical, by its check-run annotations, to the failure already
+present on `main` itself at commit `376b618b` (the automotive-wave commit this merge pulled in),
+which was re-verified directly via `gh run list --branch main` → `gh run view --json jobs` →
+annotations. So `main`'s own visual baseline has drifted again between the second/third merges and
+this one, but it remains a pre-existing flake on `main`, not a regression from this branch, at
+every point checked.
+
+`main` did not move again immediately after this CI run (still at `862488a1` as of the final
+check), and PR #890 reports `mergeable: MERGEABLE` / `mergeStateStatus: UNSTABLE` (the latter
+driven only by the known pre-existing `visual regression` failure). This is a reasonable point to
+stop the merge-chasing loop and hand off for human/CI re-verification at actual merge time.
+
 ## Files
 
 
