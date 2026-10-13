@@ -847,7 +847,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       update: ["report.saved.update"],
       lifecycle: ["report.saved.delete"],
     },
-    note: "XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes); dashboard-widget layout save stays UI-only",
+    status: "route-only (by design)",
+    note: "the bulk column is the POST /reports/export lane — XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes, so no MCP verb can ever fill it honestly); dashboard-widget layout save stays UI-only",
     test: "integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report",
   },
   {

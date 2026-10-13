@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (12)
+### Tenant (11)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
@@ -26,7 +26,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **workspace.aec** (Workspace · AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement)) — partial
 - **config.settings** (Business config · Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms)) — partial
 - **config.integrations** (Business config · Integration connections & syncs (Holoo etc.)) — partial
-- **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
 
 ### Platform (17)
@@ -52,7 +51,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 55 · partial: 12 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 5
+Counts — covered: 55 · partial: 11 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 6
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -120,7 +119,7 @@ Counts — covered: 55 · partial: 12 · MCP gap: 0 · backend gap: 0 · n/a (in
 | Business config | Onboarding wizard routes<br>_first-run wizard flow — UI-only; nothing to operate once a business exists_ | (route only) | (route only) | — | (route only) | (route only) | settings.manage | — | — | — | n/a (infra) |
 | Media | Media assets, folders, collections, AI transforms | get_media_asset, list_media_assets, list_media_collections, list_media_folders | media.collection.create | media.asset.set_collection, media.collection.rename | media.asset.restore, media.asset.trash, media.collection.delete | — | inventory.view, ledger.view, media.manage, media.view, menu.view, parties.view | connection mode | get_media_asset, list_media_assets, list_media_collections, list_media_folders, media.collection.create, media.asset.set_collection, media.collection.rename, media.asset.restore, media.asset.trash, media.collection.delete | integration/media-library.integration.test.ts | covered |
 | Knowledge base | Knowledge articles & search<br>_authoring (articles/categories/tags) lives under the platform console by design — the tenant exposes the help it reads, not the help it writes_ | list_kb_catalogue, search_kb_articles | — | — | — | — | — | — | list_kb_catalogue, search_kb_articles | src/lib/knowledge.test.ts | covered |
-| Reports | Reports (standard, saved, export, query, drill-down, views)<br>_XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes); dashboard-widget layout save stays UI-only_ | list_reports, list_saved_reports, run_report | report.saved.create | report.saved.update | report.saved.delete | (route only) | ledger.view, reports.export, reports.view | connection mode | list_reports, list_saved_reports, run_report, report.saved.create, report.saved.update, report.saved.delete | integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report | partial |
+| Reports | Reports (standard, saved, export, query, drill-down, views)<br>_the bulk column is the POST /reports/export lane — XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes, so no MCP verb can ever fill it honestly); dashboard-widget layout save stays UI-only_ | list_reports, list_saved_reports, run_report | report.saved.create | report.saved.update | report.saved.delete | (route only) | ledger.view, reports.export, reports.view | connection mode | list_reports, list_saved_reports, run_report, report.saved.create, report.saved.update, report.saved.delete | integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report | route-only (by design) |
 | Cross-cutting | Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup<br>_small surfaces; the audit-log read mirrors the screen's validation contract (invalid cursors and filters are refused, never silently paged)_ | describe_app, get_setup_state, list_audit_log | (route only) | (route only) | (route only) | — | commission.manage, commission.view, delivery.configure, delivery.manage, inventory.adjust, inventory.view, ledger.close_period, ledger.view | — | describe_app, get_setup_state, list_audit_log | integration/auth-account-security.integration.test.ts | partial |
 | Cross-cutting | Support tickets (tenant side) | (route only) | (route only) | (route only) | (route only) | — | — | — | — | — | n/a (infra) |
 | Products (retail) | Product items, attributes, barcode templates<br>_products/items create waits for the checkout-input normaliser (tax, barcode-conflict shape) to move out of the route body — same extraction gate as pos.orders; item reads ride list_inventory_items_ | list_barcode_templates, list_product_attributes | barcode.template.create, product.attribute.create | product.attribute.update | barcode.template.delete, product.attribute.delete | — | menu.edit, menu.view | connection mode; step-up (always approve) | list_barcode_templates, list_product_attributes, barcode.template.create, product.attribute.create, product.attribute.update, barcode.template.delete, product.attribute.delete | integration/generic-items.integration.test.ts | covered |
