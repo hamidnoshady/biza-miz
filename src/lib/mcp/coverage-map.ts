@@ -581,10 +581,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["integrations/wp-manager"],
     ops: {
       listDetail: ["list_wp_queue", "get_wp_queue_summary", "get_wp_overview"],
+      create: ["wp.post.save", "wp.media.create"],
       bulk: ["wp.queue.retry", "wp.queue.retry_all_failed", "wp.queue.flush"],
+      lifecycle: ["wp.content.sync"],
     },
-    status: undefined,
-    note: "content/queue reads ride list_website_* plus these manager views; retry/flush only re-pend events the shop already approved or wake the drainer early — connection resolution follows the screens (single active shop implicit, several need connectionId)",
+    note: "batch BE: content sync mirrors the integrations syncs; post save and media create keep the routes' plugin-capability rules (post_upsert / media_create refused honestly past an older plugin), the outbox coalescing keys and the operation-id idempotency; retry/flush only re-pend events the shop already approved or wake the drainer early — connection resolution follows the screens",
+    test: "integration/website-sync.integration.test.ts",
   },
 
   // ============================ Projects (My Workspace) ============================

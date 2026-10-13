@@ -5,7 +5,7 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **261 write verbs**
+visible only to connections consented for every branch) and **264 write verbs**
 (**74** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -271,6 +271,9 @@ visible only to connections consented for every branch) and **261 write verbs**
 | `write_website_post_delete` | `website.post.delete` | website | high | always approval queue (step-up) | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_website_media_update` | `website.media.update` | website | low | connection write_mode | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_website_media_delete` | `website.media.delete` | website | high | always approval queue (step-up) | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wp_content_sync` | `wp.content.sync` | website | low | connection write_mode | `woocommerce.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wp_post_save` | `wp.post.save` | website | low | connection write_mode | `woocommerce.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_wp_media_create` | `wp.media.create` | website | low | connection write_mode | `woocommerce.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

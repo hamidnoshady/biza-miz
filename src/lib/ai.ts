@@ -558,6 +558,12 @@ export type ActionType =
   | "website.post.delete"
   | "website.media.update"
   | "website.media.delete"
+  // Batch BE — the WooCommerce manager's own lanes. Content sync mirrors the
+  // integrations syncs; post save and media create keep the route's
+  // plugin-capability and outbox rules exactly.
+  | "wp.content.sync"
+  | "wp.post.save"
+  | "wp.media.create"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -711,6 +717,9 @@ export type AutopilotExecutorKey =
   | "websitePostDelete"
   | "websiteMediaUpdate"
   | "websiteMediaDelete"
+  | "wpContentSync"
+  | "wpPostSave"
+  | "wpMediaCreate"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2533,6 +2542,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "حذف رسانه — force=true خطای media_in_use را نادیده می‌گیرد؛ تأیید صریح لازم",
     payloadHint: '{ id: string, force?: bool }',
     executor: "websiteMediaDelete",
+  },
+  "wp.content.sync": {
+    type: "wp.content.sync",
+    endpoint: "/api/integrations/wp-manager/content",
+    method: "POST",
+    label: "سینک محتوای وردپرس — plugin=صف، REST=هم‌خط؛ فقط اتصال WooCommerceِ غیرمتوقف",
+    payloadHint: '{ connectionId: string }',
+    executor: "wpContentSync",
+  },
+  "wp.post.save": {
+    type: "wp.post.save",
+    endpoint: "/api/integrations/wp-manager/content/posts",
+    method: "POST",
+    label: "ساخت/ویرایش نوشته یا برگه — id عددی=ویرایش؛ plugin=صف با قاعدهٔ capability، REST=هم‌خط",
+    payloadHint: '{ connectionId: string, post_type: "post"|"page", id?: string, title?: string, content?: string, excerpt?: string, slug?: string, status?: "publish"|"draft"|"pending"|"private"|"future" }',
+    executor: "wpPostSave",
+  },
+  "wp.media.create": {
+    type: "wp.media.create",
+    endpoint: "/api/integrations/wp-manager/media",
+    method: "POST",
+    label: "افزودن رسانه با URL — فقط در حالت plugin و با capability؛ idempotency از operationId می‌آید",
+    payloadHint: '{ connectionId: string, url: string, title?: string }',
+    executor: "wpMediaCreate",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

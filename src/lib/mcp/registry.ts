@@ -444,6 +444,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "website.post.delete", kind: "write", app: "website", risk: "high", approval: "always_approve" },
   { actionType: "website.media.update", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "website.media.delete", kind: "write", app: "website", risk: "high", approval: "always_approve" },
+  // Batch BE — the WooCommerce manager; same lane class as the other
+  // integration syncs and content saves.
+  { actionType: "wp.content.sync", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "wp.post.save", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "wp.media.create", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

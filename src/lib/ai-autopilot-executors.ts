@@ -172,6 +172,10 @@ import { enqueuePluginExport } from "./integrations/plugin-service";
 import { enqueueContentExport, syncWpContentRest } from "./integrations/wp-content-service";
 import { enqueueExport } from "./integrations/woo-ops-service";
 import { drainOutbox, refreshOutboxForConnection } from "./integrations/outbox-service";
+import { writeIntegrationAudit } from "./integrations/audit";
+import { pluginSupportsJobType } from "./integrations/plugin-capabilities";
+import { upsertWpContent, type WpContentPayload } from "./integrations/wp-content-service";
+import { parseWpMediaCreateInput } from "./integrations/wp-media";
 import { saveWebsiteSetup, type WebsiteSetupPatch } from "./website/setup-service";
 import { saveOwnerThemeSettings } from "./cms/owner-bridge";
 import { cmsPurgeCdn } from "./cms/website-service";
@@ -5076,6 +5080,151 @@ const websiteMediaDelete: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { deleted: true } };
 };
 
+// ── Issue #883 package 2, batch BE — the WooCommerce manager ────────────────
+const wpContentSync: AutopilotExecutor = async (ctx) => {
+  const connectionId = str(ctx.payload.connectionId);
+  if (!connectionId) return fail("missing_connection");
+  const connection = await getConnection(ctx.businessId, connectionId);
+  if (!connection || connection.provider !== "woocommerce") return fail("not_found");
+  if (connection.status === "paused") return fail("connection_paused");
+  if (connection.link_mode === "plugin") {
+    await enqueueContentExport(ctx.businessId, connectionId);
+    return { ok: true, result: { ok: true, queued: true } };
+  }
+  try {
+    const client = wooClientFor(connection);
+    const outcome = await syncWpContentRest(connection, client);
+    return { ok: true, result: { ok: true, ...outcome } };
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+};
+const WP_CONTENT_FIELDS = ["title", "content", "excerpt", "slug", "status"] as const;
+const WP_ALLOWED_STATUS = ["publish", "draft", "pending", "private", "future"] as const;
+const WP_FIELD_LIMITS: Partial<Record<(typeof WP_CONTENT_FIELDS)[number], number>> = {
+  title: 500,
+  slug: 200,
+  excerpt: 20_000,
+  content: 1_500_000,
+};
+const wpPostSave: AutopilotExecutor = async (ctx) => {
+  const connectionId = str(ctx.payload.connectionId);
+  if (!connectionId) return fail("missing_connection");
+  if (ctx.payload.post_type !== "post" && ctx.payload.post_type !== "page") {
+    return fail("invalid_content_type");
+  }
+  const postType = ctx.payload.post_type;
+  const remoteId = ctx.payload.id === undefined ? undefined : String(ctx.payload.id).trim();
+  const numericRemoteId = remoteId === undefined ? undefined : Number(remoteId);
+  if (remoteId !== undefined && (!/^[1-9]\d*$/.test(remoteId) || !Number.isSafeInteger(numericRemoteId) || (numericRemoteId ?? 0) <= 0)) {
+    return fail("invalid_id");
+  }
+  const body = ctx.payload as unknown as Record<string, unknown>;
+  const patch: Record<string, string> = {};
+  for (const field of WP_CONTENT_FIELDS) {
+    if (body[field] === undefined) continue;
+    if (typeof body[field] !== "string") return fail("invalid_field");
+    const value = body[field] as string;
+    const limit = WP_FIELD_LIMITS[field];
+    if (limit && value.length > limit) return fail(`${field}_too_long`);
+    patch[field] = value;
+  }
+  if (patch.status && !(WP_ALLOWED_STATUS as readonly string[]).includes(patch.status)) {
+    return fail("invalid_status");
+  }
+  if (Object.keys(patch).length === 0) return fail("empty_patch");
+  if (!remoteId && !patch.title?.trim()) return fail("title_required");
+  if (patch.title !== undefined && !patch.title.trim()) return fail("title_required");
+
+  const connection = await getConnection(ctx.businessId, connectionId);
+  if (!connection || connection.provider !== "woocommerce") return fail("not_found");
+  if (connection.status === "paused") return fail("connection_paused");
+
+  if (connection.link_mode === "plugin") {
+    // Same stranded-job rule as the route: queueing post_upsert past an older
+    // plugin leaves a row nothing ever picks up — refuse honestly.
+    if (!pluginSupportsJobType(connection.plugin_capabilities, "post_upsert")) {
+      return fail("plugin_content_unsupported");
+    }
+    const outboxRemoteId = remoteId ?? `new-${randomUUID()}`;
+    const operationId = remoteId ? null : `wp-post:${connectionId}:${outboxRemoteId}`;
+    const jobPayload = { ...patch, post_type: postType, ...(remoteId ? { id: remoteId } : {}), ...(operationId ? { __operationId: operationId } : {}) };
+    await query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
+       VALUES ($1, $2, 'post_upsert', $3, $4::jsonb, $5)
+       ON CONFLICT (connection_id, entity_type, remote_id)
+       DO UPDATE SET payload = EXCLUDED.payload, operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id), status = 'pending', attempts = 0,
+                     next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()`,
+      [ctx.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
+    );
+    await writeIntegrationAudit({
+      businessId: ctx.businessId,
+      connectionId,
+      action: "content.post_upsert_queued",
+      entityType: "post_upsert",
+      remoteId: outboxRemoteId,
+    });
+    return { ok: true, result: { ok: true, queued: true } };
+  }
+
+  try {
+    const client = wooClientFor(connection);
+    const wpEndpoint = postType === "page" ? "pages" : "posts";
+    const result = await client.wpUpsertPost(wpEndpoint, patch, numericRemoteId);
+    const savedId = String(result.id ?? numericRemoteId ?? "");
+    if (!/^[1-9]\d*$/.test(savedId)) throw new Error("invalid_wordpress_response");
+    const resultPayload = {
+      ...result,
+      type: typeof result.type === "string" ? result.type : postType,
+      id: savedId,
+    } as WpContentPayload;
+    await upsertWpContent(connection, resultPayload);
+    await writeIntegrationAudit({
+      businessId: ctx.businessId,
+      connectionId,
+      action: "content.post_saved",
+      entityType: postType,
+      remoteId: savedId,
+    });
+    return { ok: true, result: { ok: true, queued: false, remoteId: savedId } };
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+};
+const wpMediaCreate: AutopilotExecutor = async (ctx) => {
+  const connectionId = str(ctx.payload.connectionId);
+  if (!connectionId) return fail("missing_connection");
+  const parsed = parseWpMediaCreateInput(ctx.payload as unknown as Record<string, unknown>);
+  if (!parsed.ok) return fail(parsed.error);
+  const connection = await getConnection(ctx.businessId, connectionId);
+  if (!connection || connection.provider !== "woocommerce") return fail("not_found");
+  if (connection.status === "paused") return fail("connection_paused");
+  if (connection.link_mode !== "plugin") return fail("media_rest_unsupported");
+  if (!pluginSupportsJobType(connection.plugin_capabilities, "media_create")) {
+    return fail("plugin_media_unsupported");
+  }
+  const outboxRemoteId = `new-${randomUUID()}`;
+  const operationId = `wp-media:${connectionId}:${outboxRemoteId}`;
+  const jobPayload = {
+    url: parsed.input.url,
+    ...(parsed.input.title ? { title: parsed.input.title } : {}),
+    __operationId: operationId,
+  };
+  await query(
+    `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
+     VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
+    [ctx.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
+  );
+  await writeIntegrationAudit({
+    businessId: ctx.businessId,
+    connectionId,
+    action: "content.media_create_queued",
+    entityType: "media_create",
+    remoteId: outboxRemoteId,
+  });
+  return { ok: true, result: { ok: true, queued: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -7314,6 +7463,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   websitePostDelete,
   websiteMediaUpdate,
   websiteMediaDelete,
+  wpContentSync,
+  wpPostSave,
+  wpMediaCreate,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,
