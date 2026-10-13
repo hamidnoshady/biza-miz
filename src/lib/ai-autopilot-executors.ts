@@ -205,7 +205,28 @@ import {
   type QuickUpdateTarget,
 } from "./price-lists-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
-import { createWorkspaceProject, updateWorkspaceProject, createWorkspaceTask, updateWorkspaceTask, WorkspaceError } from "./workspace";
+import {
+  createWorkspaceProject,
+  updateWorkspaceProject,
+  createWorkspaceTask,
+  updateWorkspaceTask,
+  requireProjectCapability,
+  setMember,
+  removeMember,
+  addPhase,
+  applyTemplate,
+  listTemplates,
+  listPhases,
+  getWorkspaceProject,
+  createContract,
+  getContract,
+  updateContract,
+  deleteContract,
+  transitionContract,
+  resolveWorkspaceSubject,
+  WorkspaceError,
+  type ContractInput,
+} from "./workspace";
 import { workspaceAccessFlags } from "./workspace-shared";
 import { effectivePermissions, parseOverrides } from "./permissions";
 import type { Role } from "./auth-edge";
@@ -3107,6 +3128,148 @@ const haberdasheryItemCreate: AutopilotExecutor = createVariantItem;
 const haberdasheryItemSell = tradeGoodsSellExecutor("haberdashery");
 const haberdasheryStockUpdate = tradeGoodsStockExecutor();
 
+// ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
+// Every lane mirrors its route: the workspace engine key is the MCP
+// capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
+// project/subject second half the routes do, on the authorizing user's
+// rebuilt access flags. WorkspaceError codes pass through verbatim.
+const projectMemberSet: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId) ?? str(ctx.payload.id);
+  const userId = str(ctx.payload.userId);
+  if (!projectId || !userId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await requireProjectCapability(owner, projectId, "manage");
+    const members = await setMember(owner, projectId, userId, str(ctx.payload.role) ?? "viewer");
+    return { ok: true, result: { members } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+const projectMemberRemove: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId) ?? str(ctx.payload.id);
+  const userId = str(ctx.payload.userId);
+  if (!projectId || !userId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await requireProjectCapability(owner, projectId, "manage");
+    const members = await removeMember(owner, projectId, userId);
+    return { ok: true, result: { members } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+const projectPhaseCreate: AutopilotExecutor = async (ctx) => {
+  const projectId = str(ctx.payload.projectId) ?? str(ctx.payload.id);
+  if (!projectId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await requireProjectCapability(owner, projectId, "manage");
+    const templateKey = str(ctx.payload.templateKey);
+    if (templateKey) {
+      const templates = await listTemplates(ctx.businessId);
+      const template = templates.find((t) => t.key === templateKey);
+      if (!template) return fail("template_not_found");
+      const project = await getWorkspaceProject(ctx.businessId, projectId);
+      const mode = ctx.payload.mode === "replace" ? "replace" : "merge";
+      const dryRun = ctx.payload.dryRun === true;
+      const plan = await applyTemplate(owner, projectId, template, project?.startDate ?? null, { mode, dryRun });
+      if (dryRun) return { ok: true, result: { plan } };
+      return { ok: true, result: { phases: await listPhases(projectId), plan } };
+    }
+    const phases = await addPhase(owner, projectId, {
+      name: String(ctx.payload.name ?? ""),
+      startDate: ctx.payload.startDate,
+      endDate: ctx.payload.endDate,
+    });
+    return { ok: true, result: { phases } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+function contractInputFrom(payload: Record<string, unknown>, forCreate: boolean): { id?: string } & ContractInput {
+  const out: { id?: string } & ContractInput = {};
+  for (const key of [
+    "title",
+    "contractType",
+    "projectId",
+    "partyId",
+    "valueRial",
+    "startDate",
+    "endDate",
+    "status",
+    "reminderDays",
+    "notes",
+  ] as const) {
+    if (payload[key] !== undefined) (out as Record<string, unknown>)[key] = payload[key];
+  }
+  if (forCreate && out.title === undefined) out.title = "";
+  return out;
+}
+const contractCreate: AutopilotExecutor = async (ctx) => {
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    const { id: _id, ...input } = contractInputFrom(ctx.payload, true);
+    const contract = await createContract(owner, input);
+    return { ok: true, result: { contract } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+const contractUpdate: AutopilotExecutor = async (ctx) => {
+  const contractId = str(ctx.payload.contractId) ?? str(ctx.payload.id);
+  if (!contractId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await resolveWorkspaceSubject(owner, "contract", contractId, "edit");
+    const { id: _id, ...input } = contractInputFrom(ctx.payload, false);
+    const contract = await updateContract(owner, contractId, input);
+    return { ok: true, result: { contract } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+const contractDelete: AutopilotExecutor = async (ctx) => {
+  const contractId = str(ctx.payload.contractId) ?? str(ctx.payload.id);
+  if (!contractId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await resolveWorkspaceSubject(owner, "contract", contractId, "edit");
+    const deleted = await deleteContract(owner.businessId, contractId);
+    return { ok: true, result: { deleted } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+const contractLifecycle: AutopilotExecutor = async (ctx) => {
+  const contractId = str(ctx.payload.contractId) ?? str(ctx.payload.id);
+  if (!contractId) return fail("missing_fields");
+  const owner = await workspaceOwnerFor(ctx);
+  if (!owner) return fail("member_not_found");
+  try {
+    await resolveWorkspaceSubject(owner, "contract", contractId, "edit");
+    const contract = await transitionContract(owner, contractId, String(ctx.payload.action ?? ""), {
+      endDate: ctx.payload.endDate,
+    });
+    return { ok: true, result: { contract } };
+  } catch (err) {
+    if (err instanceof WorkspaceError) return fail(err.code);
+    throw err;
+  }
+};
+
 // ── Issue #883 package 2, batch AP — data-transfer config lanes ──────────
 // Mirrors /api/data/* including the two-key rule: the MCP capability already
 // enforces the engine key (data.export / data.import); the executor re-runs
@@ -5135,6 +5298,13 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   dataTemplateUpdate,
   dataTemplateDelete,
   dataImportRun,
+  projectMemberSet,
+  projectMemberRemove,
+  projectPhaseCreate,
+  contractCreate,
+  contractUpdate,
+  contractDelete,
+  contractLifecycle,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

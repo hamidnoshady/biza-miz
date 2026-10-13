@@ -449,6 +449,16 @@ export type ActionType =
   | "data.template.update"
   | "data.template.delete"
   | "data.import.run"
+  // Batch AQ — workspace projects close-out (members & phases) + contracts
+  // full lifecycle. Contract.delete is a business-record delete → always
+  // approve; everything else is mode/low per the config/record rules.
+  | "project.member.set"
+  | "project.member.remove"
+  | "project.phase.create"
+  | "contract.create"
+  | "contract.update"
+  | "contract.delete"
+  | "contract.lifecycle"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -534,6 +544,13 @@ export type AutopilotExecutorKey =
   | "dataTemplateUpdate"
   | "dataTemplateDelete"
   | "dataImportRun"
+  | "projectMemberSet"
+  | "projectMemberRemove"
+  | "projectPhaseCreate"
+  | "contractCreate"
+  | "contractUpdate"
+  | "contractDelete"
+  | "contractLifecycle"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1815,6 +1832,62 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "اجرای یا تلاش‌مجدد درون‌ریزی — ردیف‌های فایلِ ازپیش‌بارگذاری‌شده انبوهانه در دادهٔ تنانت نوشته می‌شوند؛ هر بار تأیید انسان",
     payloadHint: '{ id: string, action?: "run"|"retry"="run" }',
     executor: "dataImportRun",
+  },
+  "project.member.set": {
+    type: "project.member.set",
+    endpoint: "/api/workspace/projects/{id}/members",
+    method: "POST",
+    label: "افزودن/تغییر نقش عضو پروژه — upsert همان‌قدری که فرم اعضا انجام می‌دهد",
+    payloadHint: '{ id: string, userId: string, role?: "owner"|"manager"|"editor"|"viewer"="viewer" }',
+    executor: "projectMemberSet",
+  },
+  "project.member.remove": {
+    type: "project.member.remove",
+    endpoint: "/api/workspace/projects/{id}/members",
+    method: "DELETE",
+    label: "حذف عضو از پروژه — آخرین مالک هرگز حذف نمی‌شود (قفل‌شدن پروژه ممنوع)",
+    payloadHint: '{ id: string, userId: string }',
+    executor: "projectMemberRemove",
+  },
+  "project.phase.create": {
+    type: "project.phase.create",
+    endpoint: "/api/workspace/projects/{id}/phases",
+    method: "POST",
+    label: "افزودن فاز به پروژه، یا اعمال قالب فازها (merge پیش‌فرض؛ dryRun فقط پیش‌نمایش)",
+    payloadHint: '{ id: string, name?: string, startDate?: string, endDate?: string, templateKey?: string, mode?: "merge"|"replace", dryRun?: bool }',
+    executor: "projectPhaseCreate",
+  },
+  "contract.create": {
+    type: "contract.create",
+    endpoint: "/api/workspace/contracts",
+    method: "POST",
+    label: "ثبت قرارداد جدید — عنوان، نوع، مبلغ (ریال)، بازه، یادآوری",
+    payloadHint: '{ title: string, contractType?: string="other", projectId?: string|null, partyId?: string|null, valueRial?: number, startDate?: string, endDate?: string, status?: string="draft", reminderDays?: int, notes?: string }',
+    executor: "contractCreate",
+  },
+  "contract.update": {
+    type: "contract.update",
+    endpoint: "/api/workspace/contracts/{id}",
+    method: "PATCH",
+    label: "ویرایش قرارداد — فیلدهای نامشخص دست‌نخورده می‌مانند",
+    payloadHint: '{ id: string, title?: string, contractType?: string, valueRial?: number, startDate?: string, endDate?: string, status?: string, reminderDays?: int, notes?: string }',
+    executor: "contractUpdate",
+  },
+  "contract.delete": {
+    type: "contract.delete",
+    endpoint: "/api/workspace/contracts/{id}",
+    method: "DELETE",
+    label: "حذف قرارداد — رکورد تجاری محو می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "contractDelete",
+  },
+  "contract.lifecycle": {
+    type: "contract.lifecycle",
+    endpoint: "/api/workspace/contracts/{id}/lifecycle",
+    method: "POST",
+    label: "گذر چرخهٔ قرارداد — تکمیل/فسخ/تمدید/تجدید (endDate برای تمدید و تجدید)",
+    payloadHint: '{ id: string, action: "complete"|"terminate"|"extend"|"renew", endDate?: string }',
+    executor: "contractLifecycle",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
@@ -4359,6 +4432,20 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           parameters: {
             type: "object",
             properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_contract",
+          description:
+            "جزئیات یک قرارداد — وضعیت، مبلغ، بازه، میزان قابلیت گذر چرخه برای کاربر جاری.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "شناسهٔ قرارداد" } },
+            required: ["id"],
             additionalProperties: false,
           },
         },

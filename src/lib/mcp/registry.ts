@@ -261,6 +261,7 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
 
   // ---- Workspace / AEC (project desk is business-scoped, never branch-scoped) ----
   { name: "get_workspace_project_status", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "get_workspace_contract", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_workspace_tasks", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_expiring_contracts", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   { name: "list_workspace_approvals", kind: "read", app: "workspace", branchPolicy: "agnostic" },
@@ -349,6 +350,16 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // both ask for explicit approval.
   { actionType: "project.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "project.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  // Batch AQ — members & phases close the projects row; contracts close out.
+  // A contract delete destroys a business record, so it steps up on every
+  // call; lifecycle transitions are ordinary updates.
+  { actionType: "project.member.set", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "project.member.remove", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "project.phase.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "contract.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "contract.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "contract.delete", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
+  { actionType: "contract.lifecycle", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

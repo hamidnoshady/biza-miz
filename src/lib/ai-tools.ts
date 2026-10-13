@@ -89,7 +89,7 @@ import { getRetailInvoiceDetail } from "./retail-invoice/read-service";
 import { toLatinDigits } from "./digits";
 import { listMediaAssets, getMediaAsset } from "./media-service";
 import { listSavedReports } from "./reports-service";
-import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject, listDocuments, getDocument, listDocumentVersions } from "./workspace";
+import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject, listDocuments, getDocument, listDocumentVersions, getContract, WorkspaceError } from "./workspace";
 import { listDeals, listCases } from "./crm-service";
 import { listInventoryTransfers } from "./transfer-service";
 import { listPriceLists, listPriceEntries } from "./price-lists-service";
@@ -1984,6 +1984,26 @@ export async function runReadTool(
         { includeArchived: args.includeArchived === true, limit, offset },
       );
       return { ok: true, data: { count: projects.length, projects } };
+    }
+    // Issue #883 package 2, batch AQ — one contract's detail. The subject-view
+    // gate is re-run from the actor's own access flags, exactly the route's
+    // resolveWorkspaceSubject dance (not-found hides the contract's existence).
+    case "get_workspace_contract": {
+      const contractId = String(args.id ?? args.contractId ?? "").trim();
+      if (!contractId) return { ok: false, data: { error: "invalid_arguments" } };
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      try {
+        await resolveWorkspaceSubject(owner, "contract", contractId, "view");
+      } catch (err) {
+        if (err instanceof WorkspaceError) return { ok: false, data: { error: err.code } };
+        throw err;
+      }
+      const contract = await getContract(businessId, contractId);
+      if (!contract) return { ok: false, data: { error: "contract_not_found" } };
+      const canTransition = await resolveWorkspaceSubject(owner, "contract", contractId, "edit")
+        .then(() => true)
+        .catch(() => false);
+      return { ok: true, data: { contract, canTransition } };
     }
     // Issue #883 package 2, batch I — knowledge centre + media library reads.
     // Issue #883 package 2, batch O — the site's pages & media library.

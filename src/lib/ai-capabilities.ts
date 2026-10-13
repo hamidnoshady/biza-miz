@@ -93,6 +93,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_import_job: PERMISSIONS.dataImport,
   list_data_schedules: PERMISSIONS.dataExport,
   list_data_templates: PERMISSIONS.dataExport,
+  // Batch AQ read — contract detail, same gate as its GET route.
+  get_workspace_contract: PERMISSIONS.workspaceView,
   get_backup_status: PERMISSIONS.backupManage,
   get_gift_card_status: PERMISSIONS.giftCardsView,
   // Batch G reads — inventory.view on counts (the screen's GET gate), the
@@ -331,6 +333,14 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "data.template.update": PERMISSIONS.dataExport,
   "data.template.delete": PERMISSIONS.dataExport,
   "data.import.run": PERMISSIONS.dataImport,
+  // Batch AQ — workspace lanes, each behind the route's own engine key.
+  "project.member.set": PERMISSIONS.workspaceManage,
+  "project.member.remove": PERMISSIONS.workspaceManage,
+  "project.phase.create": PERMISSIONS.workspaceManage,
+  "contract.create": PERMISSIONS.workspaceContractsManage,
+  "contract.update": PERMISSIONS.workspaceContractsManage,
+  "contract.delete": PERMISSIONS.workspaceContractsManage,
+  "contract.lifecycle": PERMISSIONS.workspaceContractsManage,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,

@@ -556,9 +556,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       // Batch H (#883): project CRUD through the workspace service with the
       // owner's access flags rebuilt for the authorizing user.
       listDetail: ["get_workspace_project_status", "list_workspace_projects"],
-      create: ["project.create"],
+      create: ["project.create", "project.member.set", "project.phase.create"],
       update: ["project.update"],
+      lifecycle: ["project.member.remove"],
     },
+    note: "AQ close-out: member/phase lanes re-run requireProjectCapability exactly like their routes; last-owner removal is refused in service",
     test: "integration/workspace.integration.test.ts",
   },
   {
@@ -595,7 +597,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Workspace",
     entity: "Contracts & lifecycle",
     routes: ["workspace/contracts"],
-    ops: { listDetail: ["list_expiring_contracts"] },
+    ops: {
+      listDetail: ["list_expiring_contracts", "get_workspace_contract"],
+      create: ["contract.create"],
+      update: ["contract.update", "contract.lifecycle"],
+      lifecycle: ["contract.delete"],
+    },
+    note: "AQ close-out: every lane re-runs resolveWorkspaceSubject(contract, id, edit) on the authorizing user's rebuilt flags; delete is a business-record erasure so it steps up on every call",
     test: "integration/workspace.integration.test.ts",
   },
   {
