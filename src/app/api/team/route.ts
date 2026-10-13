@@ -8,7 +8,6 @@ import {
   TeamError,
   createMembership,
   isPhoneTaken,
-  isPinTaken,
   listMembers,
 } from "@/lib/team-service";
 import {
@@ -163,11 +162,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (isPinRole(role)) {
     pin = body.pin ? toLatinDigits(String(body.pin)) : "";
     if (!isValidPin(pin)) return NextResponse.json({ error: "invalid_pin" }, { status: 400 });
-    // PINs are bcrypt-hashed, so uniqueness can't be a constraint — it's
-    // checked here, across the business (not, as before Phase 12, the world).
-    if (await isPinTaken(session.businessId, pin)) {
-      return NextResponse.json({ error: "pin_taken" }, { status: 409 });
-    }
   }
 
   // Phase 42 — the login phone, optional but recommended: it is what every

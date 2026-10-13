@@ -120,21 +120,6 @@ async function codeMatches(code: string, storedHex: string): Promise<boolean> {
   return offered.length === stored.length && timingSafeEqual(offered, stored);
 }
 
-/**
- * The keyed blind index for PIN uniqueness (#854 P2.13).
- *
- * Business-scoped so the same four digits in two businesses are two different
- * values, and keyed so a database read cannot enumerate the PIN space. It is
- * **not** a password hash and is never a substitute for `secret_hash` — bcrypt
- * still authenticates; this only answers "is this PIN free in this business?".
- */
-export async function pinBlindIndex(businessId: string, pin: string): Promise<string> {
-  const secret = await getRealmSecret("platform");
-  return createHmac("sha256", secret)
-    .update(`${businessId}:${pin}`)
-    .digest("hex");
-}
-
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------

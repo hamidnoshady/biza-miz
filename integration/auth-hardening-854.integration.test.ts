@@ -434,8 +434,8 @@ describe("Issue #854 — P1.7 self-service PIN rotation needs the current PIN", 
   });
 });
 
-describe("Issue #854 — P2.13 PIN uniqueness is a constraint, and it is per business", () => {
-  it("refuses a duplicate PIN inside one business and allows the same digits in another", async () => {
+describe("A PIN is a personal secret, never checked against other members (migration 0221)", () => {
+  it("accepts the same digits for two members of one business and of another", async () => {
     const alpha = await seedBusiness("Alpha");
     const beta = await seedBusiness("Beta");
 
@@ -452,21 +452,26 @@ describe("Issue #854 — P2.13 PIN uniqueness is a constraint, and it is per bus
     );
     expect(cashierA.userId).toBeTruthy();
 
-    await expect(
-      dbLib.withTenant(alpha.businessId, () =>
-        team.createMembership({
-          businessId: alpha.businessId,
-          role: "waiter",
-          fullName: "Waiter A",
-          pin: "2468",
-          defaultLocationId: alpha.locationId,
-          actorId: alpha.ownerId,
-          reason: "تست: دلیل تغییر دسترسی ثبت شد",
-        }),
-      ),
-    ).rejects.toThrow("pin_taken");
+    // Refusing this would tell whoever chose it what Cashier A's PIN is.
+    const waiterA = await dbLib.withTenant(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Waiter A",
+        pin: "2468",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    expect(waiterA.userId).toBeTruthy();
+    expect(waiterA.userId).not.toBe(cashierA.userId);
 
-    // Same digits in the other business are fine: the index is (business, pin).
+    // Changing a PIN to a colleague's digits is not refused either.
+    await dbLib.withTenant(alpha.businessId, () =>
+      team.setPin(alpha.businessId, waiterA.userId, "2468", alpha.ownerId),
+    );
+
     const waiterB = await dbLib.withTenant(beta.businessId, () =>
       team.createMembership({
         businessId: beta.businessId,
@@ -974,11 +979,11 @@ describe("Issue #854 — P0.6 the staff door never lets a privileged account ski
     expect((await deployment.readDeploymentProfile(seeded.businessId)).profile).toBe("local");
   }
 
-  function pinLogin(businessId: string, pin: string) {
+  function pinLogin(businessId: string, employeeId: string, pin: string) {
     return pinLoginRoute.POST(
       new NextRequest("http://localhost/api/auth/pin-login", {
         method: "POST",
-        body: JSON.stringify({ pin, businessId }),
+        body: JSON.stringify({ pin, employeeId, businessId }),
         headers: { "content-type": "application/json" },
       }),
     );
@@ -994,7 +999,7 @@ describe("Issue #854 — P0.6 the staff door never lets a privileged account ski
       team.setPin(seeded.businessId, seeded.ownerId, "4821", seeded.ownerId),
     );
 
-    const response = await pinLogin(seeded.businessId, "4821");
+    const response = await pinLogin(seeded.businessId, seeded.ownerId, "4821");
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: "mfa_required" });
 
@@ -1046,7 +1051,7 @@ describe("Issue #854 — P0.6 the staff door never lets a privileged account ski
       team.setPin(seeded.businessId, manager.rows[0].id, "9153", seeded.ownerId),
     );
 
-    const response = await pinLogin(seeded.businessId, "9153");
+    const response = await pinLogin(seeded.businessId, manager.rows[0].id, "9153");
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: "mfa_required" });
   });
@@ -1063,7 +1068,7 @@ describe("Issue #854 — P0.6 the staff door never lets a privileged account ski
       team.setPin(seeded.businessId, cashier.rows[0].id, "7734", seeded.ownerId),
     );
 
-    const response = await pinLogin(seeded.businessId, "7734");
+    const response = await pinLogin(seeded.businessId, cashier.rows[0].id, "7734");
     // The gate is not a blanket refusal: a member the policy does not cover
     // and who holds no factor signs in at the till as before.
     expect(response.status).toBe(200);

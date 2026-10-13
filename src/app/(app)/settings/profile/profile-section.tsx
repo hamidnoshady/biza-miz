@@ -832,7 +832,6 @@ const PIN_ERROR_MESSAGES: Record<string, string> = {
   current_pin_required: "برای تغییر رمز عددی، ابتدا رمز عددی فعلی را وارد کنید.",
   pin_missing: "رمز عددی جدید را وارد کنید.",
   pin_confirmation_mismatch: "تکرار رمز عددی جدید یکسان نیست.",
-  pin_taken: "این رمز عددی برای عضو دیگری ثبت شده است؛ رمز دیگری انتخاب کنید.",
   pin_unchanged: "رمز عددی جدید باید با رمز فعلی متفاوت باشد.",
   account_locked: "حساب موقتاً قفل شده است؛ کمی بعد دوباره تلاش کنید.",
   recent_auth_required: RECENT_AUTH_MESSAGE,
