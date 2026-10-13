@@ -762,6 +762,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Devices & printing config, pairing",
     routes: ["devices", "printing", "payment-methods"],
+    status: "route-only (by design)",
     ops: {
       listDetail: ["list_devices"],
       update: ["device.rename"],
