@@ -148,7 +148,7 @@ remains the only ledger truth.
 - `POST /api/ledger/opening-balances/[id]/submit | approve | post | reverse`
 - `POST /api/ledger/opening-balances/import` (preview, no persist)
 - `GET /api/ledger/opening-balances/[id]/export` (csv/xlsx — the opening report)
-- `POST /api/ledger/carry-forward` (generate proposal, idempotent)
+- `POST /api/ledger/opening-balances/carry-forward` (generate proposal, idempotent)
 - `GET /api/ledger/vouchers` (register by number/date/source + export)
 - `GET /api/ledger/vouchers/gaps`
 - `GET|POST /api/ledger/vouchers/renumber-log`

@@ -47,6 +47,8 @@ import {
   Th,
 } from "@/app/dashboard/data-table";
 import type { AccountRow } from "./accounting-manager";
+import { createPortal } from "react-dom";
+import printStyles from "./opening-balances-print.module.css";
 
 const rials = new Intl.NumberFormat("fa-IR");
 
@@ -220,6 +222,32 @@ export function OpeningBalancesSection({
   const [notice, setNotice] = useState("");
   const [mutation, setMutation] = useState<string | null>(null);
   const [reconciliation, setReconciliation] = useState<Reconciliation | null>(null);
+
+  // The print sheet is portalled onto <body>; there is no body to portal onto
+  // during the server render, and on screen the sheet stays display:none.
+  const [portalReady, setPortalReady] = useState(false);
+  useEffect(() => {
+    setPortalReady(true);
+  }, []);
+  const [printData, setPrintData] = useState<{
+    set: OpeningSet;
+    lines: OpeningLine[];
+    reconciliation: Reconciliation | null;
+  } | null>(null);
+  const [printing, setPrinting] = useState(false);
+
+  useEffect(() => {
+    if (!printData) return;
+    // Let the portal paint before the dialog opens, then hand over to the
+    // browser's print/PDF and clear the sheet when it closes.
+    const timer = window.setTimeout(() => window.print(), 60);
+    const clear = () => setPrintData(null);
+    window.addEventListener("afterprint", clear);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("afterprint", clear);
+    };
+  }, [printData]);
 
   // Carry-forward card
   const [fromYearId, setFromYearId] = useState("");
@@ -545,6 +573,34 @@ export function OpeningBalancesSection({
     setReconciliation(data);
   }
 
+  // The opening-balance report: the set with its lines, and — for a
+  // carry-forward set — the prior-close vs next-open reconciliation that
+  // stands behind it. If the reconciliation has not been loaded yet, the
+  // print fetches it, so the paper carries both reports, not one.
+  async function printSet() {
+    if (!detail || printing) return;
+    setPrinting(true);
+    setError("");
+    try {
+      let report = reconciliation;
+      if (detail.set.source === "carry_forward" && !report) {
+        const { ok, data } = await api<Reconciliation & { error?: string }>(
+          `/api/ledger/opening-balances/${detail.set.id}/reconciliation`,
+        );
+        if (!ok) {
+          setError(errorMessage(data.error));
+          return;
+        }
+        report = data;
+      }
+      setPrintData({ set: detail.set, lines: detail.lines, reconciliation: report });
+    } catch {
+      setError(errorMessage("request_failed"));
+    } finally {
+      setPrinting(false);
+    }
+  }
+
   const selected = detail?.set ?? null;
   const fromYear = years?.find((y) => y.id === fromYearId) ?? null;
   const toYear = years?.find((y) => y.id === toYearId) ?? null;
@@ -716,6 +772,15 @@ export function OpeningBalancesSection({
               ) : null}
               <Button type="button" variant="outline" size="sm" disabled={isMutating} onClick={() => void exportSet("csv")}>
                 خروجی CSV
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isMutating || detail === null || printing}
+                onClick={() => void printSet()}
+              >
+                {printing ? "در حال تهیه…" : "چاپ / PDF"}
               </Button>
             </div>
           }
@@ -1044,6 +1109,113 @@ export function OpeningBalancesSection({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {portalReady && printData
+        ? createPortal(
+          <div id="print-sheet-root" className={printStyles.sheet} aria-hidden="true">
+            <header>
+              <h1>ترازات افتتاحیه — سال مالی {toPersianDigits(printData.set.fiscalYearLabel)}</h1>
+              <p>
+                {STATUS_LABELS[printData.set.status]} — {SOURCE_LABELS[printData.set.source] ?? printData.set.source}
+                {printData.set.source === "carry_forward"
+                  ? " (انتقال از سال قبل)"
+                  : ""}
+              </p>
+              <p>تاریخ مؤثر: {formatJalali(printData.set.effectiveDate)}</p>
+              <p>
+                جمع بدهکار: {toPersianDigits(rials.format(Number(printData.set.totalDebit)))} — جمع بستانکار:{" "}
+                {toPersianDigits(rials.format(Number(printData.set.totalCredit)))}
+              </p>
+              <p>تاریخ تولید: {toPersianDigits(formatJalali(new Date(), { withMonthName: true }))}</p>
+            </header>
+            <table>
+              <thead>
+                <tr>
+                  <th>حساب</th>
+                  <th>مشخصه</th>
+                  <th>توضیح</th>
+                  <th>بدهکار</th>
+                  <th>بستانکار</th>
+                </tr>
+              </thead>
+              <tbody>
+                {printData.lines.map((line) => (
+                  <tr key={line.id}>
+                    <td>
+                      <span dir="ltr">{line.accountCode}</span> — {line.accountName}
+                    </td>
+                    <td>{line.partyName ? `${line.partyType ?? ""} ${line.partyName}`.trim() : line.reference ?? "—"}</td>
+                    <td>{line.sourceNote ?? "—"}</td>
+                    <td className={printStyles.num}>
+                      {line.debit === "0" ? "—" : toPersianDigits(rials.format(Number(line.debit)))}
+                    </td>
+                    <td className={printStyles.num}>
+                      {line.credit === "0" ? "—" : toPersianDigits(rials.format(Number(line.credit)))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th colSpan={3}>جمع</th>
+                  <td className={printStyles.num}>
+                    {toPersianDigits(rials.format(Number(printData.set.totalDebit)))}
+                  </td>
+                  <td className={printStyles.num}>
+                    {toPersianDigits(rials.format(Number(printData.set.totalCredit)))}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+
+            {printData.reconciliation ? (
+              <>
+                <h2 className={printStyles.block}>
+                  تطبیق با تراز پایانی سال قبل {printData.reconciliation.matched ? "— هم‌خوان" : "— مغایرت دارد"}
+                </h2>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>حساب / طرف</th>
+                      <th>مطلوب — بدهکار</th>
+                      <th>مطلوب — بستانکار</th>
+                      <th>فعلي — بدهکار</th>
+                      <th>فعلي — بستانکار</th>
+                      <th>اختلاف</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {printData.reconciliation.rows.map((row) => (
+                      <tr key={row.key}>
+                        <td>{row.label}</td>
+                        <td className={printStyles.num}>
+                          {row.expectedDebit === "0" ? "—" : toPersianDigits(rials.format(Number(row.expectedDebit)))}
+                        </td>
+                        <td className={printStyles.num}>
+                          {row.expectedCredit === "0" ? "—" : toPersianDigits(rials.format(Number(row.expectedCredit)))}
+                        </td>
+                        <td className={printStyles.num}>
+                          {row.actualDebit === "0" ? "—" : toPersianDigits(rials.format(Number(row.actualDebit)))}
+                        </td>
+                        <td className={printStyles.num}>
+                          {row.actualCredit === "0" ? "—" : toPersianDigits(rials.format(Number(row.actualCredit)))}
+                        </td>
+                        <td className={printStyles.num}>
+                          {row.difference === "0" ? "—" : toPersianDigits(rials.format(Number(row.difference)))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {printData.reconciliation.notes.length > 0 ? (
+                  <p>{printData.reconciliation.notes.join(" ")}</p>
+                ) : null}
+              </>
+            ) : null}
+          </div>,
+          document.body,
+        )
+        : null}
     </section>
   );
 }

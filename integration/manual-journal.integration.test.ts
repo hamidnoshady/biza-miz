@@ -154,6 +154,47 @@ describe("createDraft", () => {
     expect(listed.drafts[0].lines).toHaveLength(2);
   });
 
+  it("stores the optional reference number trimmed, and lists it back", async () => {
+    // Issue #867 — the document's own number from the system it came from:
+    // advisory metadata on the draft until approval carries it to the entry.
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: null,
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+      voucherReference: "  F-1403-887  ",
+    });
+    const { rows } = await db.query<{ voucher_reference: string }>(
+      "SELECT voucher_reference FROM journal_entry_drafts WHERE id = $1",
+      [draft.id],
+    );
+    expect(rows[0].voucher_reference).toBe("F-1403-887");
+
+    const listed = await manualJournal.listDrafts(biz.id);
+    expect(listed.drafts[0].voucherReference).toBe("F-1403-887");
+  });
+
+  it("refuses a reference the entry's column would reject, before any row is written", async () => {
+    for (const voucherReference of ["has space", "با فاصله", "x".repeat(65)]) {
+      await expect(
+        manualJournal.createDraft({
+          businessId: biz.id,
+          locationId: null,
+          memo: "Rent",
+          lines: balancedLines(),
+          createdBy: user.id,
+          voucherReference,
+        }),
+      ).rejects.toMatchObject({ message: "voucher_reference_invalid" });
+    }
+    const { rows } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM journal_entry_drafts WHERE business_id = $1",
+      [biz.id],
+    );
+    expect(rows[0].n).toBe("0");
+  });
+
   it("rejects an unbalanced draft", async () => {
     await expect(
       manualJournal.createDraft({
@@ -428,6 +469,36 @@ describe("approveDraft", () => {
       { account_id: acct.expense, debit: "100000", credit: "0" },
       { account_id: acct.cash, debit: "0", credit: "100000" },
     ]);
+  });
+
+  it("carries the reference number onto the posted entry, apart from its sequence number", async () => {
+    // Issue #867 — the reference is the document's *original* number; the
+    // entry's fiscal-year voucher number stays the sequence's own.
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: null,
+      entryDate: "2025-04-15",
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+      voucherReference: "F-1403-887",
+    });
+
+    const { entryId } = await manualJournal.approveDraft({
+      businessId: biz.id,
+      locationId: null,
+      draftId: draft.id,
+      actorId: user.id,
+    });
+
+    const { rows } = await db.query<{ voucher_reference: string | null; voucher_number: string | null }>(
+      "SELECT voucher_reference, voucher_number FROM journal_entries WHERE id = $1",
+      [entryId],
+    );
+    expect(rows[0].voucher_reference).toBe("F-1403-887");
+    // The manual book's own sequence number — never the reference.
+    expect(rows[0].voucher_number).toMatch(/^MJ-\d{4}-\d{6}$/);
+    expect(rows[0].voucher_number).not.toContain("887-");
   });
 
   it("posts the approved document to the draft's branch, not the approver's current branch", async () => {

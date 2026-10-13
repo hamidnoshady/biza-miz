@@ -80,6 +80,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       lines: parsed.value.lines,
       createdBy: session.sub,
       idempotencyKey: parsed.value.idempotencyKey,
+      // Issue #867 — the optional reference number the form carried; the
+      // parser already refused anything the entry's column would reject.
+      voucherReference: parsed.value.voucherReference,
     });
     // A retry that hit the idempotency key is still a success — the draft the
     // caller asked for exists — but it is not a *new* resource, so it answers

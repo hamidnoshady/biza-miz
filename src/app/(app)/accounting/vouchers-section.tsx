@@ -11,6 +11,7 @@
  * source set that never touch the journal detail.
  */
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Dialog,
   DialogContent,
@@ -20,12 +21,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import printStyles from "./vouchers-print.module.css";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import {
   VOUCHER_DOCUMENT_TYPES,
   VOUCHER_DOCUMENT_TYPE_SPECS,
   voucherNumberDisplay,
+  voucherNumberFor,
   type VoucherDocumentType,
 } from "@/lib/voucher-numbering";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
@@ -196,6 +199,13 @@ export function VouchersSection({
   const [mutation, setMutation] = useState<string | null>(null);
   const isMutating = busy || mutation !== null;
 
+  // The print sheet is portalled onto <body>; there is no body to portal onto
+  // during the server render, and on screen the sheet stays display:none.
+  const [portalReady, setPortalReady] = useState(false);
+  useEffect(() => {
+    setPortalReady(true);
+  }, []);
+
   // ----------------------------------------------------------------- renumber
   const [renumberTarget, setRenumberTarget] = useState<RegisterRow | null>(null);
   const [newSequence, setNewSequence] = useState("");
@@ -346,6 +356,64 @@ export function VouchersSection({
     }
   }
 
+  // ------------------------------------------------------------ print/PDF —
+  // The sheet is the *complete* filtered register (the export's rule), not
+  // just the pages loaded on screen, so printing walks the keyset to the end
+  // — capped, with the sheet saying when it stopped.
+  const PRINT_CAP = 2000;
+  const [printData, setPrintData] = useState<{
+    rows: RegisterRow[];
+    total: number;
+    truncated: boolean;
+  } | null>(null);
+  const [printing, setPrinting] = useState(false);
+
+  useEffect(() => {
+    if (!printData) return;
+    // Let the portal paint before the dialog opens, then hand over to the
+    // browser's print/PDF and clear the sheet when it closes.
+    const timer = window.setTimeout(() => window.print(), 60);
+    const clear = () => setPrintData(null);
+    window.addEventListener("afterprint", clear);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("afterprint", clear);
+    };
+  }, [printData]);
+
+  async function printRegister() {
+    if (printing) return;
+    setPrinting(true);
+    setError("");
+    try {
+      const rows: RegisterRow[] = [];
+      let total = 0;
+      let cursor: RegisterPage["nextCursor"] = null;
+      for (let page = 0; page < 40 && rows.length < PRINT_CAP; page++) {
+        const params = new URLSearchParams();
+        filterParams(params);
+        params.set("limit", "50");
+        if (cursor) params.set("cursor", JSON.stringify(cursor));
+        const res = await fetch(`/api/ledger/vouchers?${params}`);
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setError(errorMessage(data.error));
+          return;
+        }
+        const data: RegisterPage = await res.json();
+        total = data.total;
+        rows.push(...data.rows);
+        cursor = data.nextCursor;
+        if (!cursor) break;
+      }
+      setPrintData({ rows: rows.slice(0, PRINT_CAP), total, truncated: rows.length >= PRINT_CAP && cursor !== null });
+    } catch {
+      setError(errorMessage("request_failed"));
+    } finally {
+      setPrinting(false);
+    }
+  }
+
   async function loadGapReport() {
     setError("");
     setGapReport(null);
@@ -451,6 +519,15 @@ export function VouchersSection({
     });
   }
 
+  // What the register's print sheet answers for: the filters it was read with.
+  const registerFilterLabel = useMemo(() => {
+    const parts: string[] = [];
+    if (book !== "all") parts.push(VOUCHER_DOCUMENT_TYPE_SPECS[book].label);
+    if (from || to) parts.push(`${from ? formatJalali(from) : "آغاز"} تا ${to ? formatJalali(to) : "اکنون"}`);
+    if (search.trim()) parts.push(`جست‌وجو: «${search.trim()}»`);
+    return parts.length ? parts.join(" — ") : "همهٔ اسناد ثبت‌شده";
+  }, [book, from, to, search]);
+
   const summaryScopeLabel = useMemo(() => {
     if (!summaryDetail) return "";
     const parts: string[] = [];
@@ -499,6 +576,15 @@ export function VouchersSection({
               onClick={() => void exportRegister("xlsx")}
             >
               {exporting === "xlsx" ? "در حال تهیه…" : "خروجی اکسل"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isMutating || !rows || rows.length === 0 || printing}
+              onClick={() => void printRegister()}
+            >
+              {printing ? "در حال تهیه…" : "چاپ / PDF"}
             </Button>
           </div>
         }
@@ -905,6 +991,126 @@ export function VouchersSection({
           </DialogContent>
         ) : null}
       </Dialog>
+
+      {portalReady && printData
+        ? createPortal(
+          <div id="print-sheet-root" className={printStyles.sheet} aria-hidden="true">
+            <header>
+              <h1>دفتر اسناد</h1>
+              <p>{registerFilterLabel} — {toPersianDigits(String(printData.total))} سند در مجموع</p>
+              <p>تاریخ تولید: {toPersianDigits(formatJalali(new Date(), { withMonthName: true }))}</p>
+              {printData.truncated ? (
+                <p>
+                  {toPersianDigits(String(printData.rows.length))} ردیف اول چاپ شد؛ برای کل، خروجی CSV یا اکسل بگیرید.
+                </p>
+              ) : null}
+            </header>
+            <table>
+              <thead>
+                <tr>
+                  <th>شماره سند</th>
+                  <th>دفتر</th>
+                  <th>تاریخ</th>
+                  <th>منبع</th>
+                  <th>شرح</th>
+                  <th>بدهکار</th>
+                  <th>بستانکار</th>
+                  <th>مرجع</th>
+                </tr>
+              </thead>
+              <tbody>
+                {printData.rows.map((row) => (
+                  <tr key={row.id}>
+                    <td className={printStyles.num} dir="ltr">
+                      {voucherNumberDisplay(row)}
+                    </td>
+                    <td>{VOUCHER_DOCUMENT_TYPE_SPECS[row.documentType].label}</td>
+                    <td>{formatJalali(row.entryDate)}</td>
+                    <td>{row.sourceType ? ledgerSourceLabel(row.sourceType) : "—"}</td>
+                    <td>{row.memo ?? ""}</td>
+                    <td className={printStyles.num}>{toPersianDigits(rials.format(Number(row.totalDebit)))}</td>
+                    <td className={printStyles.num}>{toPersianDigits(rials.format(Number(row.totalCredit)))}</td>
+                    <td className={printStyles.num}>{row.voucherReference ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {gapReport ? (
+              <>
+                <h2>
+                  گزارش شکاف شماره‌گذاری — {VOUCHER_DOCUMENT_TYPE_SPECS[gapReport.documentType].label}{" "}
+                  {toPersianDigits(gapReport.fiscalYearLabel)}
+                </h2>
+                <p>
+                  {toPersianDigits(String(gapReport.presentCount))} شماره در کار — بیشترین شماره{" "}
+                  {toPersianDigits(String(gapReport.maxSequenceNo))} —{" "}
+                  {gapReport.gapCount === 0
+                    ? "بدون شکاف"
+                    : `${toPersianDigits(String(gapReport.gapCount))} شماره جا افتاده`}
+                  {gapReport.missingTruncated ? " (فهرست ناپدیده‌ها بریده شده)" : ""}
+                </p>
+                {gapReport.missing.length > 0 ? (
+                  <p>
+                    شماره‌های ناپدیده:{" "}
+                    {gapReport.missing
+                      .map((n) => voucherNumberFor(gapReport.documentType, gapReport.fiscalYearLabel, n))
+                      .join("، ")}
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+
+            {summaryDetail ? (
+              <>
+                <h2>
+                  سند خلاصه {summaryDetail.voucherNumber} — {summaryDetail.label}
+                </h2>
+                <p>
+                  {summaryScopeLabel || "دامنه مشخص‌شده"} — {toPersianDigits(String(summaryDetail.entryCount))} سند
+                  پایه
+                </p>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>شماره سند پایه</th>
+                      <th>تاریخ</th>
+                      <th>منبع</th>
+                      <th>بدهکار</th>
+                      <th>بستانکار</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summaryDetail.sources.map((source) => (
+                      <tr key={source.journalEntryId}>
+                        <td className={printStyles.num} dir="ltr">
+                          {source.entryVoucherNumber ?? "—"}
+                        </td>
+                        <td>{formatJalali(source.entryDate)}</td>
+                        <td>{source.sourceType ? ledgerSourceLabel(source.sourceType) : "—"}</td>
+                        <td className={printStyles.num}>{toPersianDigits(rials.format(Number(source.totalDebit)))}</td>
+                        <td className={printStyles.num}>{toPersianDigits(rials.format(Number(source.totalCredit)))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <th colSpan={3}>جمع</th>
+                      <td className={printStyles.num}>
+                        {toPersianDigits(rials.format(Number(summaryDetail.totalDebit)))}
+                      </td>
+                      <td className={printStyles.num}>
+                        {toPersianDigits(rials.format(Number(summaryDetail.totalCredit)))}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </>
+            ) : null}
+          </div>,
+          document.body,
+        )
+        : null}
     </section>
   );
 }

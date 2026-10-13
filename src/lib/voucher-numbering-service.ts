@@ -13,7 +13,13 @@
  *    feature, deterministic in journal order and idempotent;
  *  - **renumber** — the privileged, audited change of an existing number
  *    (`ledger.approve` at the route; the 0217 trigger + `voucher_renumber_log`
- *    at the database);
+ *    at the database). Note the log records *changes of numbers that already
+ *    exist*: first assignments — the posting path and the backfill — take a
+ *    `NULL` number without the flag and deliberately write no log row, so a
+ *    migration-scale backfill does not drown the trail renumbers exist to
+ *    show (0217's column comment speaks of a backfill row with a NULL
+ *    `previous_number`; the implementation is the trigger's NULL-allowance,
+ *    which is what this layer relies on);
  *  - **summary vouchers** — aggregation documents over a defined source set,
  *    traced through `summary_voucher_sources`, never posting a second truth.
  */
@@ -166,6 +172,22 @@ interface UnnumberedEntryRow extends Record<string, unknown> {
  * Idempotent: a second run finds nothing to do. Runs in its own transaction
  * so a crash never leaves half a business numbered and the counter out of
  * step with the entries.
+ *
+ * Race-safe against live postings: each (year, book) group **reserves its
+ * whole range atomically** — one `voucher_sequences` upsert that adds the
+ * group's size to the counter and hands back the starting point. A posting
+ * that allocates from the same counter blocks on that row lock until the
+ * backfill commits, then takes the next free number — the two can never
+ * hand out the same sequence. (A first, unlocked read of the counter would
+ * let a concurrent posting slip in between the read and the write and take
+ * a number the backfill also reserved: a unique violation and a 500 on the
+ * register, only a cosmetic problem in the one window where unnumbered
+ * legacy entries still exist, but a 500 is a 500.)
+ *
+ * If two backfills race instead, the loser's group updates match nothing —
+ * the `voucher_number IS NULL` guard — and its reserved range becomes the
+ * gaps the gap report already knows how to name (a torn page keeps its
+ * number); no entry is ever numbered twice.
  */
 export async function backfillVoucherNumbers(businessId: string): Promise<{ backfilled: number }> {
   const client = await getPool().connect();
@@ -184,76 +206,79 @@ export async function backfillVoucherNumbers(businessId: string): Promise<{ back
       return { backfilled: 0 };
     }
 
-    // The counter state per (label, type), continued from whatever exists.
-    const { rows: counterRows } = await client.query<SequenceRow & { fiscal_year_label: string; document_type: string }>(
-      `SELECT fiscal_year_label, document_type, last_number::text AS last_number
-         FROM voucher_sequences WHERE business_id = $1`,
-      [businessId],
-    );
-    const counters = new Map<string, { label: string; type: VoucherDocumentType; last: bigint; fiscalYearId: string | null }>();
-    for (const row of counterRows) {
-      counters.set(`${row.fiscal_year_label}|${row.document_type}`, {
-        label: row.fiscal_year_label,
-        type: row.document_type as VoucherDocumentType,
-        last: BigInt(row.last_number),
-        fiscalYearId: null,
-      });
-    }
-
-    const assignments: { id: string; number: string; seq: number }[] = [];
+    // The groups, in journal order: (fiscal year, book) -> the entries it
+    // numbers. The fiscal-year link is resolved once per label, the same way
+    // the posting path does it.
+    const groups = new Map<
+      string,
+      { label: string; type: VoucherDocumentType; fiscalYearId: string | null; entries: UnnumberedEntryRow[] }
+    >();
     for (const entry of rows) {
       const label = fiscalYearLabelForIsoDate(entry.entry_date);
       if (!label) throw new Error("voucher_numbering: entry date outside the supported range");
       const type = documentTypeForSourceType(entry.source_type);
       const key = `${label}|${type}`;
-      let counter = counters.get(key);
-      if (!counter) {
-        counter = { label, type, last: 0n, fiscalYearId: await fiscalYearIdForLabel(client, businessId, label) };
-        counters.set(key, counter);
-      }
-      counter.last += 1n;
-      assignments.push({
-        id: entry.id,
-        number: voucherNumberFor(type, label, Number(counter.last)),
-        seq: Number(counter.last),
-      });
+      const group = groups.get(key) ?? { label, type, fiscalYearId: null, entries: [] };
+      group.entries.push(entry);
+      groups.set(key, group);
+    }
+    for (const group of groups.values()) {
+      group.fiscalYearId = await fiscalYearIdForLabel(client, businessId, group.label);
     }
 
-    // One statement per 500 rows, then the counters. The casts matter: the
-    // extended protocol has no way to infer a type for $n inside VALUES, so
-    // every column gets its type spelled out.
-    for (let i = 0; i < assignments.length; i += 500) {
-      const batch = assignments.slice(i, i + 500);
-      const values = batch
-        .map((a, idx) => `('${a.id}'::uuid, $${idx * 2 + 2}::text, $${idx * 2 + 3}::int8)`)
-        .join(", ");
-      const params: unknown[] = [businessId];
-      for (const a of batch) params.push(a.number, a.seq);
-      await client.query(
-        `UPDATE journal_entries je
-            SET voucher_number = v.number,
-                voucher_sequence_no = v.seq,
-                voucher_assigned_at = now()
-          FROM (VALUES ${values}) AS v(id, number, seq)
-         WHERE je.id = v.id AND je.business_id = $1`,
-        params,
+    let backfilled = 0;
+    for (const group of groups.values()) {
+      const size = group.entries.length;
+
+      // The atomic reservation: the upsert locks the counter row (or creates
+      // it), advances it by the group's size in one statement, and hands back
+      // where the group's range starts. See the docblock for why this is the
+      // synchronisation point with `allocateVoucherSequence`.
+      const { rows: reserved } = await client.query<{ lo: string }>(
+        `WITH s AS (
+           INSERT INTO voucher_sequences (business_id, fiscal_year_id, fiscal_year_label, document_type, last_number)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (business_id, fiscal_year_label, document_type)
+           DO UPDATE SET last_number = voucher_sequences.last_number + $5,
+                         fiscal_year_id = COALESCE(voucher_sequences.fiscal_year_id, $2),
+                         updated_at = now()
+           RETURNING last_number - $5 AS lo
+         )
+         SELECT lo::text AS lo FROM s`,
+        [businessId, group.fiscalYearId, group.label, group.type, size],
       );
-    }
-    for (const counter of counters.values()) {
-      if (counter.last === 0n) continue;
-      await client.query(
-        `INSERT INTO voucher_sequences (business_id, fiscal_year_id, fiscal_year_label, document_type, last_number)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (business_id, fiscal_year_label, document_type)
-         DO UPDATE SET last_number = GREATEST(voucher_sequences.last_number, EXCLUDED.last_number),
-                       fiscal_year_id = COALESCE(voucher_sequences.fiscal_year_id, EXCLUDED.fiscal_year_id),
-                       updated_at = now()`,
-        [businessId, counter.fiscalYearId, counter.label, counter.type, counter.last],
-      );
+      const start = BigInt(reserved[0].lo);
+
+      // One statement per 500 rows. The casts matter: the extended protocol
+      // has no way to infer a type for $n inside VALUES, so every column gets
+      // its type spelled out. `voucher_number IS NULL` is the lost-race guard
+      // from the docblock — it must be there for the update to be safe under
+      // a concurrent backfill, not merely because it is tidy.
+      for (let i = 0; i < group.entries.length; i += 500) {
+        const batch = group.entries.slice(i, i + 500);
+        const values = batch
+          .map((e, idx) => `('${e.id}'::uuid, $${idx * 2 + 2}::text, $${idx * 2 + 3}::int8)`)
+          .join(", ");
+        const params: unknown[] = [businessId];
+        batch.forEach((e, idx) => {
+          const seq = Number(start + BigInt(i + idx) + 1n);
+          params.push(voucherNumberFor(group.type, group.label, seq), seq);
+        });
+        const result = await client.query(
+          `UPDATE journal_entries je
+              SET voucher_number = v.number,
+                  voucher_sequence_no = v.seq,
+                  voucher_assigned_at = now()
+            FROM (VALUES ${values}) AS v(id, number, seq)
+           WHERE je.id = v.id AND je.business_id = $1 AND je.voucher_number IS NULL`,
+          params,
+        );
+        backfilled += result.rowCount ?? 0;
+      }
     }
 
     await client.query("COMMIT");
-    return { backfilled: assignments.length };
+    return { backfilled };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
