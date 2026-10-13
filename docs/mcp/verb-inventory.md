@@ -4,9 +4,9 @@
 > Regenerate with `npx tsx scripts/write-mcp-verb-inventory.mts` after changing
 > the registry; the registry test fails while this file and the registry drift.
 
-Current surface: **133 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **185 write verbs**
-(**61** high-risk, forced through the approval queue even on `apply`-mode connections).
+Current surface: **140 read verbs** (**25** business-wide aggregates —
+visible only to connections consented for every branch) and **193 write verbs**
+(**62** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -56,6 +56,13 @@ visible only to connections consented for every branch) and **185 write verbs**
 | `list_cosmetic_brands` | pos | pinned (cosmetics businesses only) | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_accessory_items` | pos | pinned (accessories businesses only) | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_trade_goods_items` | pos | pinned | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_data_entities` | workspace | agnostic | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_export_jobs` | workspace | agnostic | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_export_job` | workspace | agnostic | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_import_jobs` | workspace | agnostic | `data.import` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_import_job` | workspace | agnostic | `data.import` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_data_schedules` | workspace | agnostic | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_data_templates` | workspace | agnostic | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_stock_counts` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_stock_count` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_suppliers` | pos | agnostic | `parties.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -328,6 +335,14 @@ visible only to connections consented for every branch) and **185 write verbs**
 | `write_haberdashery_item_create` | `haberdashery.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_haberdashery_item_sell` | `haberdashery.item.sell` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_haberdashery_stock_update` | `haberdashery.stock.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_schedule_create` | `data.schedule.create` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_schedule_update` | `data.schedule.update` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_schedule_run` | `data.schedule.run` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_schedule_delete` | `data.schedule.delete` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_template_create` | `data.template.create` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_template_update` | `data.template.update` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_template_delete` | `data.template.delete` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_data_import_run` | `data.import.run` | workspace | high | always approval queue (step-up) | `data.import` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_open` | `table.session.open` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_table_session_update` | `table.session.update` | pos | low | connection write_mode | `tables.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_media_collection_rename` | `media.collection.rename` | workspace | low | connection write_mode | `media.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

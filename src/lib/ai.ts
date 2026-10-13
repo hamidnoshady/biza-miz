@@ -437,6 +437,18 @@ export type ActionType =
   | "haberdashery.item.create"
   | "haberdashery.item.sell"
   | "haberdashery.stock.update"
+  // Batch AP — data-transfer config. Schedules and templates are plain
+  // config records (mode/low, template deletes included per the standing
+  // rule). data.import.run queues a mass write of tenant rows from a prior
+  // uploaded file, so it is the only step-up lane down here.
+  | "data.schedule.create"
+  | "data.schedule.update"
+  | "data.schedule.run"
+  | "data.schedule.delete"
+  | "data.template.create"
+  | "data.template.update"
+  | "data.template.delete"
+  | "data.import.run"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -514,6 +526,14 @@ export type AutopilotExecutorKey =
   | "haberdasheryItemCreate"
   | "haberdasheryItemSell"
   | "haberdasheryStockUpdate"
+  | "dataScheduleCreate"
+  | "dataScheduleUpdate"
+  | "dataScheduleRun"
+  | "dataScheduleDelete"
+  | "dataTemplateCreate"
+  | "dataTemplateUpdate"
+  | "dataTemplateDelete"
+  | "dataImportRun"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1731,6 +1751,70 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "ورود موجودی و/یا قیمت قفسهٔ قلم خرازی — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
     payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
     executor: "haberdasheryStockUpdate",
+  },
+  "data.schedule.create": {
+    type: "data.schedule.create",
+    endpoint: "/api/data/schedules",
+    method: "POST",
+    label: "برنامهٔ خروجیِ دوره‌ای داده — موجودیت + فرمت + بسامد (روزانه/هفتگی/ماهانه)؛ ایمیل نهایت یکی از دو مسیر تحویل",
+    payloadHint: '{ entity: string, name: string, format?: "csv"|"xlsx"|"pdf"|"json"="xlsx", frequency?: "daily"|"weekly"|"monthly"="daily", hourLocal?: int=7, weekday?: int|null, dayOfMonth?: int|null, fields?: string[], filters?: object, deliverEmail?: string, deliverStore?: bool=true, locationId?: string }',
+    executor: "dataScheduleCreate",
+  },
+  "data.schedule.update": {
+    type: "data.schedule.update",
+    endpoint: "/api/data/schedules/{id}",
+    method: "PATCH",
+    label: "ویرایش برنامهٔ خروجی دوره‌ای — فیلدهای نامشخص دست‌نخورده می‌مانند؛ isActive برای خاموش/روشن",
+    payloadHint: '{ id: string, name?: string, format?: string, frequency?: string, hourLocal?: int, weekday?: int|null, dayOfMonth?: int|null, fields?: string[], filters?: object, deliverEmail?: string, deliverStore?: bool, isActive?: bool }',
+    executor: "dataScheduleUpdate",
+  },
+  "data.schedule.run": {
+    type: "data.schedule.run",
+    endpoint: "/api/data/schedules/{id}",
+    method: "POST",
+    label: "اجرای دستی یک برنامهٔ خروجی — دقیقاً همان مسیری که زمان‌بند می‌رود",
+    payloadHint: '{ id: string }',
+    executor: "dataScheduleRun",
+  },
+  "data.schedule.delete": {
+    type: "data.schedule.delete",
+    endpoint: "/api/data/schedules/{id}",
+    method: "DELETE",
+    label: "حذف برنامهٔ خروجی دوره‌ای — رکورد پیکربندی است، نه دادهٔ تجاری",
+    payloadHint: '{ id: string }',
+    executor: "dataScheduleDelete",
+  },
+  "data.template.create": {
+    type: "data.template.create",
+    endpoint: "/api/data/templates",
+    method: "POST",
+    label: "قالب خروجی/نگاشت ورودی جدید — kind تعیین‌کنندهٔ نوع است (export یا mapping)",
+    payloadHint: '{ kind?: "export"|"mapping"="mapping", entity: string, name: string, description?: string, format?: string, fields?: string[], filters?: object, mapping?: {columns:[…]}, options?: object }',
+    executor: "dataTemplateCreate",
+  },
+  "data.template.update": {
+    type: "data.template.update",
+    endpoint: "/api/data/templates/{id}",
+    method: "PATCH",
+    label: "ویرایش قالب داده — نام/شرح/ستون‌ها/فرمت یا نگاشت، بسته به kind",
+    payloadHint: '{ id: string, kind?: "export"|"mapping"="mapping", name?: string, description?: string, format?: string, fields?: string[], filters?: object, mapping?: {columns:[…]}, options?: object }',
+    executor: "dataTemplateUpdate",
+  },
+  "data.template.delete": {
+    type: "data.template.delete",
+    endpoint: "/api/data/templates/{id}",
+    method: "DELETE",
+    label: "حذف قالب داده — رکورد پیکربندی است، نه دادهٔ تجاری",
+    payloadHint: '{ id: string, kind?: "export"|"mapping"="mapping" }',
+    executor: "dataTemplateDelete",
+  },
+  "data.import.run": {
+    type: "data.import.run",
+    endpoint: "/api/data/imports/{id}",
+    method: "POST",
+    label: "اجرای یا تلاش‌مجدد درون‌ریزی — ردیف‌های فایلِ ازپیش‌بارگذاری‌شده انبوهانه در دادهٔ تنانت نوشته می‌شوند؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, action?: "run"|"retry"="run" }',
+    executor: "dataImportRun",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
@@ -4334,6 +4418,97 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               },
             },
             required: ["industry"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_data_entities",
+          description:
+            "موجودیت‌های قابل انتقال داده برای این صنعت — کلید، ماژول، فیلدها و فیلدهای پیش‌فرض خروجی؛ متناظر صفحهٔ انتقال داده.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_export_jobs",
+          description:
+            "کارهای خروجی دادهٔ تنانت — اخیرترین‌ها اول؛ entityKey اختیاری برای فیلتر.",
+          parameters: {
+            type: "object",
+            properties: { entityKey: { type: "string", description: "کلید موجودیت — از list_data_entities" } },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_export_job",
+          description: "جزئیات یک کار خروجی بر اساس شناسه — وضعیت، فیلدها، تعداد ردیف.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "شناسهٔ کار خروجی" } },
+            required: ["id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_import_jobs",
+          description: "کارهای درون‌ریزی دادهٔ تنانت — اخیرترین‌ها اول؛ entityKey اختیاری برای فیلتر.",
+          parameters: {
+            type: "object",
+            properties: { entityKey: { type: "string", description: "کلید موجودیت — از list_data_entities" } },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_import_job",
+          description: "جزئیات یک کار درون‌ریزی — وضعیت، شمار ردیف‌ها و خطاها.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "شناسهٔ کار درون‌ریزی" } },
+            required: ["id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_data_schedules",
+          description: "برنامه‌های خروجی دوره‌ای داده — موجودیت، بسامد، اجرای بعدی، وضعیت فعال‌بودن.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_data_templates",
+          description: "قالب‌های انتقال داده — kind=export قالب‌های خروجی، kind=mapping قالب‌های نگاشت ورودی.",
+          parameters: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["export", "mapping"], description: "پیش‌فرض mapping" },
+              entity: { type: "string", description: "کلید موجودیت — اختیاری برای فیلتر" },
+            },
             additionalProperties: false,
           },
         },

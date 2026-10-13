@@ -65,6 +65,12 @@ import { listBrands } from "./item-brands-service";
 import { listVariantBoard } from "./accessories-service";
 import { listVariantBoard as listTradeGoodsBoard } from "./trade-goods-service";
 import { isTradeGoodsIndustry } from "./trade-goods";
+import { listExportJobs, getExportJob } from "./data-transfer/export-service";
+import { listImportJobs, getImportJob } from "./data-transfer/import-service";
+import { listScheduledExports } from "./data-transfer/schedule-service";
+import { listExportTemplates, listMappingTemplates } from "./data-transfer/templates-service";
+import { findEntity, entitiesForIndustry, defaultExportFields, isImportable } from "./data-transfer/registry";
+import { DATA_MODULE_LABELS } from "./data-transfer/types";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
@@ -139,6 +145,7 @@ import { isFeatureEnabled } from "./features";
 import { INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile, labelFor as industryLabelFor } from "./industry-profile";
 import { canUseAiTool, SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
+import { PERMISSIONS } from "./permissions";
 import type { Permission } from "./permissions";
 
 export interface ToolResult {
@@ -1753,6 +1760,81 @@ export async function runReadTool(
       if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
       const board = await listTradeGoodsBoard(pinned.locationId);
       return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
+    }
+    // Issue #883 package 2, batch AP — data-transfer reads. The engine key is
+    // the MCP capability; the entity's own key (the route's second key) is
+    // re-checked here from the caller's effective permission set, and provider
+    // (Holoo) jobs stay hidden unless the caller may see integrations.
+    case "list_data_entities": {
+      const granted = permissions ?? null;
+      const industry = await getBusinessIndustry(businessId);
+      const mayImport = granted ? granted.has(PERMISSIONS.dataImport) : true;
+      const entities = entitiesForIndustry(industry)
+        .filter((entity) => !granted || granted.has(entity.exportPermission))
+        .map((entity) => ({
+          key: entity.key,
+          module: entity.module,
+          moduleLabel: DATA_MODULE_LABELS[entity.module],
+          label: entity.label,
+          locationScoped: entity.locationScoped === true,
+          canExport: true,
+          canImport:
+            mayImport && isImportable(entity) && Boolean(entity.importPermission && (!granted || granted.has(entity.importPermission))),
+          defaultExportFields: defaultExportFields(entity),
+        }));
+      return { ok: true, data: { entities, canImport: mayImport } };
+    }
+    case "list_export_jobs": {
+      const entityKey = String(args.entityKey ?? "").trim() || undefined;
+      if (entityKey && !findEntity(entityKey)) return { ok: false, data: { error: "unknown_entity" } };
+      const mayIntegrations = !permissions || permissions.has(PERMISSIONS.integrationsView);
+      const jobs = (await listExportJobs(businessId, { entityKey })).filter(
+        (job) => mayIntegrations || !job.providerMetadata,
+      );
+      return { ok: true, data: { count: jobs.length, jobs } };
+    }
+    case "get_export_job": {
+      const id = String(args.id ?? "").trim();
+      if (!id) return { ok: false, data: { error: "invalid_arguments" } };
+      const job = await getExportJob(businessId, id);
+      if (!job) return { ok: false, data: { error: "job_not_found" } };
+      if (job.providerMetadata && permissions && !permissions.has(PERMISSIONS.integrationsView)) {
+        return { ok: false, data: { error: "job_not_found" } };
+      }
+      const entity = findEntity(job.entityKey);
+      if (entity?.exportPermission && permissions && !permissions.has(entity.exportPermission)) {
+        return { ok: false, data: { error: "forbidden", requires: entity.exportPermission } };
+      }
+      return { ok: true, data: { job } };
+    }
+    case "list_import_jobs": {
+      const entityKey = String(args.entityKey ?? "").trim() || undefined;
+      if (entityKey && !findEntity(entityKey)) return { ok: false, data: { error: "unknown_entity" } };
+      const jobs = await listImportJobs(businessId, { entityKey });
+      return { ok: true, data: { count: jobs.length, jobs } };
+    }
+    case "get_import_job": {
+      const id = String(args.id ?? "").trim();
+      if (!id) return { ok: false, data: { error: "invalid_arguments" } };
+      const job = await getImportJob(businessId, id);
+      if (!job) return { ok: false, data: { error: "job_not_found" } };
+      const entity = findEntity(job.entityKey);
+      if (entity?.importPermission && permissions && !permissions.has(entity.importPermission)) {
+        return { ok: false, data: { error: "forbidden", requires: entity.importPermission } };
+      }
+      return { ok: true, data: { job } };
+    }
+    case "list_data_schedules": {
+      const schedules = await listScheduledExports(businessId);
+      return { ok: true, data: { count: schedules.length, schedules } };
+    }
+    case "list_data_templates": {
+      const kind = String(args.kind ?? "") === "export" ? "export" : "mapping";
+      const entityKey = String(args.entity ?? "").trim() || undefined;
+      if (entityKey && !findEntity(entityKey)) return { ok: false, data: { error: "unknown_entity" } };
+      const templates =
+        kind === "export" ? await listExportTemplates(businessId, entityKey) : await listMappingTemplates(businessId, entityKey);
+      return { ok: true, data: { templates, kind } };
     }
     // Issue #883 package 2, batch AI — paired devices.
     case "list_devices": {

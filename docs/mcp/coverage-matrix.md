@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (28)
+### Tenant (27)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **pos.kitchen-floor** (POS · Kitchen display / floor / waiter queues) — partial
 - **pos.reservations** (POS · Reservations) — partial
@@ -38,7 +38,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **config.team** (Business config · Staff, roles & permissions, invitations, credentials, site access) — partial
 - **config.integrations** (Business config · Integration connections & syncs (Holoo etc.)) — partial
 - **config.ai** (Business config · AI config, automations, coworker jobs/templates/review, widgets, memory, conversations, research) — partial
-- **config.data** (Business config · Data transfer: entities, exports, imports, schedules, templates, Holoo provider) — MCP gap
 - **config.billing** (Business config · Tenant billing (plans/packages, wallet, payments)) — MCP gap
 - **config.devices** (Business config · Devices & printing config, pairing) — partial
 - **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
@@ -68,7 +67,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 44 · partial: 26 · MCP gap: 2 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
+Counts — covered: 45 · partial: 26 · MCP gap: 1 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -129,7 +128,7 @@ Counts — covered: 44 · partial: 26 · MCP gap: 2 · backend gap: 0 · n/a (in
 | Business config | Integration connections & syncs (Holoo etc.) | describe_app | (route only) | (route only) | (route only) | — | integrations.manage, integrations.view | — | describe_app | integration/connections.integration.test.ts | partial |
 | Business config | WooCommerce webhooks / WordPress event bridges / connections management planes (API keys, desktop, MCP, website)<br>_inbound webhooks and the token-management planes of the API connector families (the panel hosts the UI); the MCP management plane itself is expressly out of scope_ | (route only) | (route only) | (route only) | (route only) | — | integrations.manage, integrations.view, mcp.manage | — | — | — | n/a (infra) |
 | Business config | AI config, automations, coworker jobs/templates/review, widgets, memory, conversations, research | get_setup_state, list_coworker_jobs | (route only) | (route only) | (route only) | — | ai.automations.manage, ai.manage, ai.usage.view, ai.use, finance.expenses_manage, settings.manage | — | get_setup_state, list_coworker_jobs | integration/ai-autopilot.integration.test.ts | partial |
-| Business config | Data transfer: entities, exports, imports, schedules, templates, Holoo provider | (route only) | (route only) | (route only) | (route only) | (route only) | data.export, data.import, integrations.view | — | — | integration/data-transfer.integration.test.ts | MCP gap |
+| Business config | Data transfer: entities, exports, imports, schedules, templates, Holoo provider<br>_AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch_ | get_export_job, get_import_job, list_data_entities, list_data_schedules, list_data_templates, list_export_jobs, list_import_jobs | data.schedule.create, data.template.create | data.schedule.run, data.schedule.update, data.template.update | data.schedule.delete, data.template.delete | data.import.run | data.export, data.import, integrations.view | connection mode; step-up (always approve) | get_export_job, get_import_job, list_data_entities, list_data_schedules, list_data_templates, list_export_jobs, list_import_jobs, data.schedule.create, data.template.create, data.schedule.run, data.schedule.update, data.template.update, data.schedule.delete, data.template.delete, data.import.run | integration/data-transfer.integration.test.ts | covered |
 | Business config | Backup & restore (tenant scope)<br>_run-now charges the wallet when the plan prices the feature (the route's own billing gate, reclaimed by the verb); restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lane stays route-only_ | get_backup_status | backup.run_now | backup.config.set | backup.restore.apply | — | backup.configure, backup.export, backup.manage, backup.restore | connection mode; step-up (always approve) | get_backup_status, backup.run_now, backup.config.set, backup.restore.apply | integration/backup.integration.test.ts | covered |
 | Business config | Tenant billing (plans/packages, wallet, payments)<br>_tenant billing lanes (initiate payment → gateway redirect → verify) are browser-bound: the gateway returns a redirect the user's browser must follow, and verifyPayment expects the PSP callback params — no chat-side verb can complete the dance; wallet top-up/purchase design note stands (route-owned), see billing-service fulfilPurchasedPayment_ | (route only) | (route only) | — | (route only) | — | billing.manage, billing.view | — | — | integration/billing.integration.test.ts | MCP gap |
 | Business config | Devices & printing config, pairing<br>_device PAIRING stays route-only by design: the POST returns a plaintext device token exactly once, meant for the calling browser's local storage — a chat-initiated pair would mint an orphaned credential; printing jobs/test lanes drive physical printers on a branch's own runtime (route-owned); payment-method edits are Owner-side POS settings rides_ | list_devices | (route only) | device.rename | device.revoke | — | orders.amend_closed, payments.refund, payments.take, printing.execute, settings.manage | connection mode; step-up (always approve) | list_devices, device.rename, device.revoke | integration/printing.integration.test.ts | partial |

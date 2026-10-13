@@ -58,6 +58,33 @@ import {
   setTradeGoodsUnitPrice,
 } from "./trade-goods-service";
 import type { TradeGoodsIndustry } from "./trade-goods";
+import { findEntity } from "./data-transfer/registry";
+import type { EntityDefinition, ExportFormat } from "./data-transfer/types";
+import {
+  listScheduledExports,
+  createScheduledExport,
+  updateScheduledExport,
+  deleteScheduledExport,
+  runScheduledExport,
+  ScheduleError,
+  type SaveScheduleInput,
+} from "./data-transfer/schedule-service";
+import {
+  getExportTemplate,
+  createExportTemplate,
+  updateExportTemplate,
+  deleteExportTemplate,
+  getMappingTemplate,
+  createMappingTemplate,
+  updateMappingTemplate,
+  deleteMappingTemplate,
+  TemplateError,
+} from "./data-transfer/templates-service";
+import { getExportJob, ExportError } from "./data-transfer/export-service";
+import { getImportJob, queueImportJob, retryFailedRows, ImportError } from "./data-transfer/import-service";
+import { memberAccessFor, type MemberAccess } from "./member-access";
+import { PERMISSIONS } from "./permissions";
+import type { SessionPayload } from "./auth";
 import { validateWeightAttributes } from "./gold";
 import { markAsConsigned, createConsignor, payConsignor } from "./consignment-service";
 import { recordItemEvent } from "./item-audit-service";
@@ -3080,6 +3107,286 @@ const haberdasheryItemCreate: AutopilotExecutor = createVariantItem;
 const haberdasheryItemSell = tradeGoodsSellExecutor("haberdashery");
 const haberdasheryStockUpdate = tradeGoodsStockExecutor();
 
+// ── Issue #883 package 2, batch AP — data-transfer config lanes ──────────
+// Mirrors /api/data/* including the two-key rule: the MCP capability already
+// enforces the engine key (data.export / data.import); the executor re-runs
+// the caller's effective membership for the entity's own key — the exact
+// second half of entityAccess in the route guard. Service errors boil down to
+// the same { error: code } envelope handleDataError produces, and like it we
+// rethrow anything that is not one of the four engine errors.
+async function dataMemberAccess(ctx: AutopilotExecutorContext): Promise<MemberAccess | null> {
+  if (!ctx.authorizedByUserId) return null;
+  return memberAccessFor({
+    sub: ctx.authorizedByUserId,
+    businessId: ctx.businessId,
+    locationId: null,
+  } as SessionPayload);
+}
+function dataEngineError(err: unknown): AutopilotExecutionResult | null {
+  if (err instanceof ImportError || err instanceof ExportError || err instanceof TemplateError || err instanceof ScheduleError) {
+    return { ok: false, result: { error: err.code }, errorCode: err.code };
+  }
+  return null;
+}
+async function dataEntityGate(
+  ctx: AutopilotExecutorContext,
+  entityKeyRaw: unknown,
+  direction: "import" | "export",
+): Promise<{ entity: EntityDefinition } | AutopilotExecutionResult> {
+  const entity = findEntity(typeof entityKeyRaw === "string" && entityKeyRaw.length > 0 ? entityKeyRaw : null);
+  if (!entity) return fail("unknown_entity");
+  const required = direction === "import" ? entity.importPermission : entity.exportPermission;
+  if (!required) return fail("entity_not_importable");
+  const access = await dataMemberAccess(ctx);
+  if (!access?.isActive || !access.permissions.has(required)) {
+    return { ok: false, result: { error: "forbidden", requires: required }, errorCode: "forbidden" };
+  }
+  return { entity };
+}
+const DATA_FORMATS = ["csv", "xlsx", "pdf", "json"] as const;
+const DATA_FREQUENCIES = ["daily", "weekly", "monthly"] as const;
+const dataStringList = (raw: unknown): string[] | undefined =>
+  Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : undefined;
+const dataFiltersFrom = (raw: unknown): Record<string, unknown> | undefined =>
+  raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : undefined;
+const dataScheduleCreate: AutopilotExecutor = async (ctx) => {
+  const gate = await dataEntityGate(ctx, ctx.payload.entity, "export");
+  if (!("entity" in gate)) return gate;
+  const { entity } = gate;
+  const format = (DATA_FORMATS as readonly string[]).includes(String(ctx.payload.format))
+    ? (String(ctx.payload.format) as SaveScheduleInput["format"])
+    : "xlsx";
+  const frequency = (DATA_FREQUENCIES as readonly string[]).includes(String(ctx.payload.frequency))
+    ? (String(ctx.payload.frequency) as SaveScheduleInput["frequency"])
+    : "daily";
+  let locationId: string | null = null;
+  if (entity.locationScoped) {
+    const branch = await verticalLocation(ctx);
+    if ("ok" in branch) return branch;
+    locationId = branch.locationId;
+  }
+  try {
+    const schedule = await createScheduledExport({
+      businessId: ctx.businessId,
+      locationId,
+      entityKey: entity.key,
+      name: String(ctx.payload.name ?? ""),
+      format,
+      frequency,
+      hourLocal: typeof ctx.payload.hourLocal === "number" ? ctx.payload.hourLocal : 7,
+      weekday: typeof ctx.payload.weekday === "number" ? ctx.payload.weekday : null,
+      dayOfMonth: typeof ctx.payload.dayOfMonth === "number" ? ctx.payload.dayOfMonth : null,
+      fields: dataStringList(ctx.payload.fields) ?? [],
+      filters: dataFiltersFrom(ctx.payload.filters) ?? {},
+      deliverEmail: typeof ctx.payload.deliverEmail === "string" ? ctx.payload.deliverEmail : "",
+      deliverStore: ctx.payload.deliverStore !== false,
+      actorUserId: ctx.authorizedByUserId,
+    });
+    return { ok: true, result: { schedule } };
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+async function dataScheduleOwned(
+  ctx: AutopilotExecutorContext,
+): Promise<
+  | { ok: false; error: AutopilotExecutionResult }
+  | { ok: true; existing: Awaited<ReturnType<typeof listScheduledExports>>[number]; entity: EntityDefinition }
+> {
+  const id = str(ctx.payload.id);
+  if (!id) return { ok: false, error: fail("missing_fields") };
+  // Exactly the route's loader: schedule-service exposes no single-get, so
+  // the route builds it from the listing — same here.
+  const schedules = await listScheduledExports(ctx.businessId);
+  const existing = schedules.find((schedule) => schedule.id === id) ?? null;
+  if (!existing) return { ok: false, error: fail("schedule_not_found") };
+  const gate = await dataEntityGate(ctx, existing.entityKey, "export");
+  if (!("entity" in gate)) return { ok: false, error: gate };
+  return { ok: true, existing, entity: gate.entity };
+}
+const dataScheduleUpdate: AutopilotExecutor = async (ctx) => {
+  const owned = await dataScheduleOwned(ctx);
+  if (!owned.ok) return owned.error;
+  try {
+    const schedule = await updateScheduledExport(ctx.businessId, owned.existing.id, {
+      name: typeof ctx.payload.name === "string" ? ctx.payload.name : undefined,
+      format: typeof ctx.payload.format === "string" ? (ctx.payload.format as SaveScheduleInput["format"]) : undefined,
+      frequency: typeof ctx.payload.frequency === "string" ? (ctx.payload.frequency as SaveScheduleInput["frequency"]) : undefined,
+      hourLocal: typeof ctx.payload.hourLocal === "number" ? ctx.payload.hourLocal : undefined,
+      weekday: typeof ctx.payload.weekday === "number" ? ctx.payload.weekday : undefined,
+      dayOfMonth: typeof ctx.payload.dayOfMonth === "number" ? ctx.payload.dayOfMonth : undefined,
+      fields: dataStringList(ctx.payload.fields),
+      filters: dataFiltersFrom(ctx.payload.filters),
+      deliverEmail: typeof ctx.payload.deliverEmail === "string" ? ctx.payload.deliverEmail : undefined,
+      deliverStore: typeof ctx.payload.deliverStore === "boolean" ? ctx.payload.deliverStore : undefined,
+      isActive: typeof ctx.payload.isActive === "boolean" ? ctx.payload.isActive : undefined,
+    });
+    return { ok: true, result: { schedule } };
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+const dataScheduleRun: AutopilotExecutor = async (ctx) => {
+  const owned = await dataScheduleOwned(ctx);
+  if (!owned.ok) return owned.error;
+  try {
+    const result = await runScheduledExport(ctx.businessId, owned.existing.id);
+    return { ok: true, result: { ...(result as Record<string, unknown>) } };
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+const dataScheduleDelete: AutopilotExecutor = async (ctx) => {
+  const owned = await dataScheduleOwned(ctx);
+  if (!owned.ok) return owned.error;
+  try {
+    const ok = await deleteScheduledExport(ctx.businessId, owned.existing.id);
+    return { ok: true, result: { ok } };
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+const dataTemplateKind = (payload: Record<string, unknown>): "export" | "mapping" =>
+  payload.kind === "export" ? "export" : "mapping";
+async function dataTemplateEngineGate(ctx: AutopilotExecutorContext, kind: "export" | "mapping"): Promise<AutopilotExecutionResult | null> {
+  // The route picks its engine key from the kind; the MCP capability can only
+  // hold the looser one, so the executor re-runs the kind-matching engine key.
+  const required = kind === "export" ? PERMISSIONS.dataExport : PERMISSIONS.dataImport;
+  const access = await dataMemberAccess(ctx);
+  if (!access?.isActive || !access.permissions.has(required)) {
+    return { ok: false, result: { error: "forbidden" }, errorCode: "forbidden" };
+  }
+  return null;
+}
+const dataTemplateCreate: AutopilotExecutor = async (ctx) => {
+  const kind = dataTemplateKind(ctx.payload);
+  const engineError = await dataTemplateEngineGate(ctx, kind);
+  if (engineError) return engineError;
+  const gate = await dataEntityGate(ctx, ctx.payload.entity, kind === "export" ? "export" : "import");
+  if (!("entity" in gate)) return gate;
+  try {
+    const base = {
+      businessId: ctx.businessId,
+      entityKey: gate.entity.key,
+      name: String(ctx.payload.name ?? ""),
+      description: typeof ctx.payload.description === "string" ? ctx.payload.description : "",
+      actorUserId: ctx.authorizedByUserId,
+    };
+    if (kind === "export") {
+      const template = await createExportTemplate({
+        ...base,
+        format: typeof ctx.payload.format === "string" ? (ctx.payload.format as ExportFormat) : "xlsx",
+        fields: dataStringList(ctx.payload.fields) ?? [],
+        filters: dataFiltersFrom(ctx.payload.filters) ?? {},
+      });
+      return { ok: true, result: { template } };
+    }
+    const template = await createMappingTemplate({
+      ...base,
+      mapping: (ctx.payload.mapping as Parameters<typeof createMappingTemplate>[0]["mapping"]) ?? { columns: [] },
+      options: (ctx.payload.options as Parameters<typeof createMappingTemplate>[0]["options"]) ?? {},
+    });
+    return { ok: true, result: { template } };
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+async function dataTemplateOwned(
+  ctx: AutopilotExecutorContext,
+  kind: "export" | "mapping",
+): Promise<{ ok: false; error: AutopilotExecutionResult } | { ok: true; existing: { id: string } }> {
+  const id = str(ctx.payload.id);
+  if (!id) return { ok: false, error: fail("missing_fields") };
+  const existing =
+    kind === "export" ? await getExportTemplate(ctx.businessId, id) : await getMappingTemplate(ctx.businessId, id);
+  if (!existing) return { ok: false, error: fail("template_not_found") };
+  const gate = await dataEntityGate(ctx, existing.entityKey, kind === "export" ? "export" : "import");
+  if (!("entity" in gate)) return { ok: false, error: gate };
+  return { ok: true, existing };
+}
+const dataTemplateUpdate: AutopilotExecutor = async (ctx) => {
+  const kind = dataTemplateKind(ctx.payload);
+  const engineError = await dataTemplateEngineGate(ctx, kind);
+  if (engineError) return engineError;
+  const owned = await dataTemplateOwned(ctx, kind);
+  if (!owned.ok) return owned.error;
+  try {
+    if (kind === "export") {
+      const template = await updateExportTemplate(ctx.businessId, owned.existing.id, {
+        name: typeof ctx.payload.name === "string" ? ctx.payload.name : undefined,
+        description: typeof ctx.payload.description === "string" ? ctx.payload.description : undefined,
+        format: typeof ctx.payload.format === "string" ? (ctx.payload.format as ExportFormat) : undefined,
+        fields: dataStringList(ctx.payload.fields),
+        filters: dataFiltersFrom(ctx.payload.filters),
+      });
+      return { ok: true, result: { template } };
+    }
+    const template = await updateMappingTemplate(ctx.businessId, owned.existing.id, {
+      name: typeof ctx.payload.name === "string" ? ctx.payload.name : undefined,
+      description: typeof ctx.payload.description === "string" ? ctx.payload.description : undefined,
+      mapping: (ctx.payload.mapping as Parameters<typeof updateMappingTemplate>[2]["mapping"]) ?? undefined,
+      options: (ctx.payload.options as Parameters<typeof updateMappingTemplate>[2]["options"]) ?? undefined,
+    });
+    return { ok: true, result: { template } };
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+const dataTemplateDelete: AutopilotExecutor = async (ctx) => {
+  const kind = dataTemplateKind(ctx.payload);
+  const engineError = await dataTemplateEngineGate(ctx, kind);
+  if (engineError) return engineError;
+  const owned = await dataTemplateOwned(ctx, kind);
+  if (!owned.ok) return owned.error;
+  try {
+    const ok =
+      kind === "export"
+        ? await deleteExportTemplate(ctx.businessId, owned.existing.id)
+        : await deleteMappingTemplate(ctx.businessId, owned.existing.id);
+    return { ok: true, result: { ok } };
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+const dataImportRun: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const job = await getImportJob(ctx.businessId, id);
+  if (!job) return fail("job_not_found");
+  const gate = await dataEntityGate(ctx, job.entityKey, "import");
+  if (!("entity" in gate)) return gate;
+  const action = str(ctx.payload.action) ?? "run";
+  try {
+    if (action === "retry") {
+      const retryJob = await retryFailedRows(ctx.businessId, id);
+      return { ok: true, result: { job: retryJob } };
+    }
+    if (action === "run") {
+      const queuedJob = await queueImportJob(ctx.businessId, id);
+      return { ok: true, result: { job: queuedJob } };
+    }
+    return fail("unknown_action");
+  } catch (err) {
+    const mapped = dataEngineError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
+};
+
 // ── Issue #883 package 2, batch AL2 — jewelry money lanes ────────────────
 // Every verb mirrors its route 1:1: same client transaction, same ledger
 // error convention (MissingLedgerAccountError → ledger_account_missing),
@@ -4820,6 +5127,14 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   haberdasheryItemCreate,
   haberdasheryItemSell,
   haberdasheryStockUpdate,
+  dataScheduleCreate,
+  dataScheduleUpdate,
+  dataScheduleRun,
+  dataScheduleDelete,
+  dataTemplateCreate,
+  dataTemplateUpdate,
+  dataTemplateDelete,
+  dataImportRun,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

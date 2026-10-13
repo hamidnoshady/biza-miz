@@ -699,6 +699,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Data transfer: entities, exports, imports, schedules, templates, Holoo provider",
     routes: ["data"],
+    ops: {
+      listDetail: ["list_data_entities", "list_export_jobs", "get_export_job", "list_import_jobs", "get_import_job", "list_data_schedules", "list_data_templates"],
+      create: ["data.schedule.create", "data.template.create"],
+      update: ["data.schedule.update", "data.template.update", "data.schedule.run"],
+      lifecycle: ["data.schedule.delete", "data.template.delete"],
+      bulk: ["data.import.run"],
+    },
+    note: "AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch",
     test: "integration/data-transfer.integration.test.ts",
   },
   {

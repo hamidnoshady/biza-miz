@@ -135,6 +135,15 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // routes are one shared implementation bound per industry URL namespace);
   // the industry arg must equal the business's industry.
   { name: "list_trade_goods_items", kind: "read", app: "pos", branchPolicy: "pinned" },
+  // Batch AP reads — data-transfer engine. Job/schedule listings are business
+  // records; entityKey filter optional on the job lists.
+  { name: "list_data_entities", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_export_jobs", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "get_export_job", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_import_jobs", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "get_import_job", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_data_schedules", kind: "read", app: "workspace", branchPolicy: "agnostic" },
+  { name: "list_data_templates", kind: "read", app: "workspace", branchPolicy: "agnostic" },
   // Batch G — inventory readings and the suppliers directory.
   { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
@@ -547,6 +556,17 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "haberdashery.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "haberdashery.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "haberdashery.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AP — data-transfer config records are mode/low like every config
+  // lane (template/schedule deletes included). Import run/retry is a mass
+  // write of tenant rows from a staged file → forced approval every time.
+  { actionType: "data.schedule.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "data.schedule.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "data.schedule.run", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "data.schedule.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "data.template.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "data.template.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "data.template.delete", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "data.import.run", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

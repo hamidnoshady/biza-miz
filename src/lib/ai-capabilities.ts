@@ -84,6 +84,15 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_accessory_items: PERMISSIONS.inventoryView,
   // Batch AO read — trade-goods board, same inventory gate as its GET routes.
   list_trade_goods_items: PERMISSIONS.inventoryView,
+  // Batch AP reads — the data-transfer screens' own gates, engine key copied
+  // from each route's dataOwner().
+  list_data_entities: PERMISSIONS.dataExport,
+  list_export_jobs: PERMISSIONS.dataExport,
+  get_export_job: PERMISSIONS.dataExport,
+  list_import_jobs: PERMISSIONS.dataImport,
+  get_import_job: PERMISSIONS.dataImport,
+  list_data_schedules: PERMISSIONS.dataExport,
+  list_data_templates: PERMISSIONS.dataExport,
   get_backup_status: PERMISSIONS.backupManage,
   get_gift_card_status: PERMISSIONS.giftCardsView,
   // Batch G reads — inventory.view on counts (the screen's GET gate), the
@@ -311,6 +320,17 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "haberdashery.item.create": PERMISSIONS.inventoryAdjust,
   "haberdashery.stock.update": PERMISSIONS.inventoryAdjust,
   "haberdashery.item.sell": PERMISSIONS.ordersCreate,
+  // Batch AP — data-transfer writes. The engine key is copied from the
+  // routes' dataOwner(); the executor additionally re-enforces the route's
+  // second key (the entity's own permission + the mapping kind's engine).
+  "data.schedule.create": PERMISSIONS.dataExport,
+  "data.schedule.update": PERMISSIONS.dataExport,
+  "data.schedule.run": PERMISSIONS.dataExport,
+  "data.schedule.delete": PERMISSIONS.dataExport,
+  "data.template.create": PERMISSIONS.dataExport,
+  "data.template.update": PERMISSIONS.dataExport,
+  "data.template.delete": PERMISSIONS.dataExport,
+  "data.import.run": PERMISSIONS.dataImport,
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,
