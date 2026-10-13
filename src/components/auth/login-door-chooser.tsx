@@ -15,10 +15,11 @@
  * already enforce who may sign in there server-side); it is the missing
  * front door. "Offline Local Login" is not a fourth credential system: this
  * install's staff PIN door (`pin-login/roster`, `pin-login`) already works
- * with no Internet connection whenever the local server itself is reachable
- * — the card exists so a user who does not know that can find the same
- * button under the label that matches what they are trying to do, and lands
- * on the identical flow with a note explaining why it needs no Internet.
+ * with no Internet connection whenever the local server itself is reachable.
+ * Issue #948 P1-4 — the separate card is shown **only on a full Local-only
+ * installation**; on Cloud and Hybrid it was a misleading duplicate of the
+ * staff form (and Hybrid PIN login works offline without it), so those
+ * deployments get the two doors only.
  */
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -87,29 +88,32 @@ export function useLoginCapabilities(): LoginCapabilities | null {
 }
 
 /**
- * Issue #885 L04 — the three cards, worded for what this install can do.
+ * Issue #885 L04 / issue #948 P1-4 — the cards, worded and *shown* for what
+ * this install is.
  *
- * The offline card is the one that changes. It claims «نیازی به اینترنت
- * ندارد» only when the server answering the page is a local one; on a hosted
- * origin the claim was untrue and pressing the card only mounted the same
- * same-origin staff form. On a local server the claim is kept — accurate about
- * the server being talked to — with the phone-verification prerequisite stated
- * when the policy actually enforces one, so a member does not discover at the
- * keypad that an offline login still needs a fresh SMS after their seven-day
- * window closes.
+ * Issue #948's product requirement is exact: the separate «ورود آفلاین
+ * (محلی)» choice appears **only on a full Local-only installation**
+ * (`deploymentProfile === "local"` *and* the server answering this page is a
+ * local one). Cloud and Hybrid show the same two doors — staff and
+ * manager/owner — because the offline card there was a misleading duplicate:
+ * it mapped to the identical staff PIN form, and in Hybrid it implied the
+ * local PIN door needs this card to work offline (it does not — Hybrid PIN
+ * login works with no Internet regardless of what the chooser shows).
+ *
+ * While the capability probe is in flight or has failed, this fails closed:
+ * two cards, no flash of an option the install may not support.
  */
 function doorOptions(capabilities: LoginCapabilities | null): DoorOption[] {
-  // Issue #885, gap 8. This used to read `deploymentProfile === "local" ||
-  // "hybrid"`, which is a fact about the *business* and therefore identical on
-  // every origin serving it: a business paired to the cloud stores `hybrid`,
-  // so the hosted login page claimed Internet-free login about itself. Whether
-  // offline login works is a fact about the server answering the page, so the
-  // promise is keyed on that. A missing probe stays false — no claim we cannot
-  // back up.
-  const localInstall = capabilities?.localServer === true;
+  // Issue #885, gap 8 — `localServer` (the deployment *role* of the process
+  // answering this page) is what makes «نیازی به اینترنت ندارد» a true
+  // statement about the server being talked to. Issue #948 additionally
+  // requires the *business* to be a Local-only install: a Hybrid site's local
+  // server is still a local server, but its chooser keeps two doors.
+  const localOnlyInstall =
+    capabilities?.deploymentProfile === "local" && capabilities?.localServer === true;
   const phoneEnforced = capabilities?.phoneOtpEnforcement === "enforced";
 
-  return [
+  const doors: DoorOption[] = [
     {
       choice: "staff",
       storedDoor: "staff",
@@ -132,38 +136,27 @@ function doorOptions(capabilities: LoginCapabilities | null): DoorOption[] {
       // is not an owner. Naming the mechanism instead of the outcome.
       points: ["ایمیل و رمز عبور", "دسترسی مطابق نقش و مجوزهای شما"],
     },
-    localInstall
-      ? {
-          choice: "offline",
-          storedDoor: "staff",
-          href: null,
-          icon: WifiOffIcon,
-          title: "ورود آفلاین (محلی)",
-          description: "همان ورود کارکنان، برای وقتی این دستگاه یا شعبه به اینترنت وصل نیست.",
-          points: phoneEnforced
-            ? [
-                "روی سرور محلی همین شبکه کار می‌کند",
-                "پس از پایان مهلت ۷ روزه، یک‌بار تأیید پیامکی لازم است",
-              ]
-            : ["نیازی به اینترنت ندارد", "روی سرور محلی همین شبکه کار می‌کند"],
-        }
-      : {
-          choice: "offline",
-          storedDoor: "staff",
-          href: null,
-          icon: WifiOffIcon,
-          title: "ورود آفلاین (محلی)",
-          // Truthful on a cloud origin: this install is reached over the
-          // Internet, so offline login is a property of the local app, not of
-          // this page. Saying so beats a button that cannot do what it says.
-          description:
-            "ورود بدون اینترنت روی نسخهٔ محلی/سایت کسب‌وکار ممکن است، نه روی این نشانی ابری.",
-          points: [
-            "برای ورود آفلاین از اپلیکیشن محلی همان شعبه استفاده کنید",
-            "این نشانی به اینترنت نیاز دارد",
-          ],
-        },
   ];
+  if (localOnlyInstall) {
+    doors.push({
+      choice: "offline",
+      storedDoor: "staff",
+      href: null,
+      icon: WifiOffIcon,
+      title: "ورود آفلاین (محلی)",
+      // On a Local-only install the staff PIN door *is* the offline door; the
+      // card exists so a user who does not know that can find it under the
+      // label matching what they are trying to do.
+      description: "همان ورود کارکنان، برای وقتی این دستگاه یا شعبه به اینترنت وصل نیست.",
+      points: phoneEnforced
+        ? [
+            "روی سرور محلی همین شبکه کار می‌کند",
+            "پس از پایان مهلت ۷ روزه، یک‌بار تأیید پیامکی لازم است",
+          ]
+        : ["نیازی به اینترنت ندارد", "روی سرور محلی همین شبکه کار می‌کند"],
+    });
+  }
+  return doors;
 }
 
 /**
@@ -206,7 +199,9 @@ export function LoginDoorChooser({
         <p className="text-sm text-muted-foreground">نوع ورود خود را انتخاب کنید</p>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      {/* Two doors on Cloud/Hybrid (and while the probe is still unknown);
+          three only on a full Local-only install — issue #948 P1-4. */}
+      <div className={`grid gap-3 ${options.length >= 3 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
         {options.map((option) => {
           const Icon = option.icon;
           return (

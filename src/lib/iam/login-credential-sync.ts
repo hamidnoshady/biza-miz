@@ -85,6 +85,19 @@ export interface CredentialSyncResult {
   pinMembersUsable: number;
   pinMembersMissing: number;
   missingIdentityBindings: number;
+  /**
+   * Issue #948 P0-1 — identity bindings the payload named that are *still*
+   * wrong or missing after this pass, plus identity email conflicts left for
+   * review. Zero is the only value that may read green: "credential data
+   * synced" and "identity correctly bound" are measured separately.
+   */
+  identityMismatches: number;
+  /** Wrong/missing bindings this pass actually repaired (transient evidence). */
+  identityBindingsRepaired: number;
+  /** Pre-v2 local identity UUIDs migrated onto the canonical cloud ID. */
+  identitiesRekeyed: number;
+  /** Which identity contract the payload spoke; null before the first pass. */
+  identityContract: "canonical" | "legacy" | null;
   /** True when this pass wrote or relinked at least one credential. */
   changed: boolean;
   gap: PinCredentialGap;
@@ -219,10 +232,14 @@ export async function readCredentialSyncState(
     pin_members_missing: number;
     pins_revoked: number;
     missing_identity_bindings: number;
+    identity_mismatches: number;
+    identity_rekeys: number;
+    identity_contract: string | null;
     converged_at: Date | null;
   }>(
     `SELECT status,last_attempt_at,last_success_at,last_error,credentials_received,pins_received,pins_applied,pins_revoked,
-            identities_applied,pin_members_expected,pin_members_usable,pin_members_missing,missing_identity_bindings,converged_at
+            identities_applied,pin_members_expected,pin_members_usable,pin_members_missing,missing_identity_bindings,
+            identity_mismatches,identity_rekeys,identity_contract,converged_at
        FROM iam_login_credential_sync_state
       WHERE business_id=$1 AND site_device_id=$2`,
     [businessId, siteDeviceId],
@@ -243,6 +260,9 @@ export async function readCredentialSyncState(
     pinMembersUsable: row.pin_members_usable,
     pinMembersMissing: row.pin_members_missing,
     missingIdentityBindings: row.missing_identity_bindings,
+    identityMismatches: row.identity_mismatches,
+    identityRekeys: row.identity_rekeys,
+    identityContract: row.identity_contract === "canonical" || row.identity_contract === "legacy" ? row.identity_contract : null,
     convergedAt: row.converged_at?.toISOString() ?? null,
   };
 }
@@ -278,30 +298,35 @@ interface CredentialStateWrite {
   /** Issue #850: staff PINs the cloud removed and this pass revoked locally. */
   pinsRevoked?: number;
   identitiesApplied?: number;
+  /** Issue #948: bindings repaired + email conflicts observed this pass. */
+  identityMismatches?: number;
+  identitiesRekeyed?: number;
+  identityContract?: "canonical" | "legacy" | null;
   gap: PinCredentialGap;
   missingIdentityBindings: number;
 }
 
 async function recordCredentialState(businessId: string, siteDeviceId: string, write: CredentialStateWrite): Promise<void> {
-  const healthy = write.status === "healthy";
   await query(
     `INSERT INTO iam_login_credential_sync_state
        (business_id,site_device_id,status,last_attempt_at,last_success_at,last_error,credentials_received,pins_received,
         pins_applied,pins_revoked,identities_applied,pin_members_expected,pin_members_usable,pin_members_missing,
-        missing_identity_bindings,converged_at)
-     VALUES ($1,$2,$3,now(),CASE WHEN $3='healthy' THEN now() END,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+        missing_identity_bindings,identity_mismatches,identity_rekeys,identity_contract,converged_at)
+     VALUES ($1,$2,$3,now(),CASE WHEN $3='healthy' THEN now() END,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
              CASE WHEN $3='healthy' THEN now() END)
      ON CONFLICT (business_id,site_device_id) DO UPDATE SET
        status=$3,last_attempt_at=now(),last_error=$4,
        last_success_at=CASE WHEN $3='healthy' THEN now() ELSE iam_login_credential_sync_state.last_success_at END,
        credentials_received=$5,pins_received=$6,pins_applied=$7,pins_revoked=$8,identities_applied=$9,
        pin_members_expected=$10,pin_members_usable=$11,pin_members_missing=$12,missing_identity_bindings=$13,
+       identity_mismatches=$14,identity_rekeys=$15,identity_contract=$16,
        converged_at=CASE WHEN $3='healthy' THEN now() ELSE iam_login_credential_sync_state.converged_at END`,
     [
       businessId, siteDeviceId, write.status, write.error,
       write.credentialsReceived ?? 0, write.pinsReceived ?? 0, write.pinsApplied ?? 0, write.pinsRevoked ?? 0,
       write.identitiesApplied ?? 0,
       write.gap.expected, write.gap.usable, write.gap.missing, write.missingIdentityBindings,
+      write.identityMismatches ?? 0, write.identitiesRekeyed ?? 0, write.identityContract ?? null,
     ],
   );
 }
@@ -350,6 +375,10 @@ async function fail(
     pinMembersUsable: gap.usable,
     pinMembersMissing: gap.missing,
     missingIdentityBindings,
+    identityMismatches: 0,
+    identityBindingsRepaired: 0,
+    identitiesRekeyed: 0,
+    identityContract: null,
     changed: false,
     gap,
   };
@@ -359,11 +388,13 @@ async function fail(
  * One full pass of the login-credential plane.
  *
  * Statuses recorded:
- *  - `healthy` — payload fetched, validated and applied, and every active
- *    PIN-role member can sign in locally;
+ *  - `healthy` — payload fetched, validated and applied, every active
+ *    PIN-role member can sign in locally, and every password-role member is
+ *    bound to the cloud's canonical global identity (issue #948);
  *  - `degraded` — any non-404 HTTP failure, invalid payload, apply failure, a
- *    failed spent-code report, or a remaining PIN gap. This is the state that
- *    must stop the connection UI from claiming full health;
+ *    failed spent-code report, a remaining PIN gap, or a remaining identity
+ *    binding. This is the state that must stop the connection UI from
+ *    claiming full health;
  *  - `unsupported_legacy_cloud` — the cloud genuinely has no credential
  *    endpoint (404). Supported for backward compatibility, never green;
  *  - `pending` — configuration exists but the first pass has not run.
@@ -394,6 +425,10 @@ export async function syncHybridLoginCredentials(
         pinMembersUsable: 0,
         pinMembersMissing: 0,
         missingIdentityBindings: 0,
+        identityMismatches: 0,
+        identityBindingsRepaired: 0,
+        identitiesRekeyed: 0,
+        identityContract: null,
         changed: false,
         gap: { ...EMPTY_GAP },
       };
@@ -481,9 +516,17 @@ export async function syncHybridLoginCredentials(
     }
 
     let identitiesApplied = 0;
+    let identityMismatches = 0;
+    let identityBindingsRepaired = 0;
+    let identitiesRekeyed = 0;
     try {
-      const changed = await applyLoginCredentials(businessId, credentials);
-      identitiesApplied = changed ? credentials.length : 0;
+      const applied = await applyLoginCredentials(businessId, credentials);
+      identitiesApplied = applied.identitiesApplied;
+      // What remains wrong after the pass is the health signal; what was
+      // repaired is transient evidence, reported but not a failure.
+      identityMismatches = applied.bindingsStillBroken + applied.identityEmailConflicts;
+      identityBindingsRepaired = applied.bindingsRepaired;
+      identitiesRekeyed = applied.identitiesRekeyed;
       context.identitiesApplied = identitiesApplied;
     } catch (error) {
       return fail(context, "degraded", `login_credential_apply_failed: ${errorText(error)}`);
@@ -494,18 +537,22 @@ export async function syncHybridLoginCredentials(
     // A credential pass that fetched and applied cleanly can still leave a
     // roster gap: a membership created after the cloud built its PIN list, or
     // a local-only PIN-role member. That is exactly the owner-only symptom and
-    // it is degraded, not healthy.
-    const status: CredentialSyncStatus = gap.missing > 0 ? "degraded" : "healthy";
-    // `last_error` records a *failure*. How many password-role members still
-    // lack a replicated global identity is a diagnostic, reported in its own
-    // column and in `HybridIdentityStatus.missingIdentityBindings` — writing it
-    // into `last_error` made a healthy pass look like it had failed, and the
-    // connection panel cannot tell the two apart from that column alone.
+    // it is degraded, not healthy. The same holds for a membership the payload
+    // named a global identity for that is still not bound to it (issue #948):
+    // matching hashes are "credential data synced", not "identity correctly
+    // bound". (A password-role member the cloud has *no* identity for — a
+    // PIN-eligible manager — is legitimate and is not in the payload at all.)
+    const status: CredentialSyncStatus = gap.missing > 0 || identityMismatches > 0 ? "degraded" : "healthy";
+    // `last_error` records a *failure*; the remaining counts live in their own
+    // columns and in `HybridIdentityStatus` — writing them into `last_error`
+    // made a healthy pass look like it had failed.
     const error = !reportedSpentCodes
       ? "spent_recovery_codes_not_reported"
       : gap.missing > 0
         ? `pin_credentials_missing:${gap.missing}`
-        : null;
+        : identityMismatches > 0
+          ? `identity_binding_mismatch:${identityMismatches}`
+          : null;
     await recordCredentialState(businessId, siteDeviceId, {
       status,
       error,
@@ -514,6 +561,9 @@ export async function syncHybridLoginCredentials(
       pinsApplied,
       pinsRevoked,
       identitiesApplied,
+      identityMismatches,
+      identitiesRekeyed,
+      identityContract: validated.identityContract,
       gap,
       missingIdentityBindings,
     });
@@ -532,6 +582,10 @@ export async function syncHybridLoginCredentials(
       pinMembersUsable: gap.usable,
       pinMembersMissing: gap.missing,
       missingIdentityBindings,
+      identityMismatches,
+      identityBindingsRepaired,
+      identitiesRekeyed,
+      identityContract: validated.identityContract,
       changed: pinsApplied > 0 || pinsRevoked > 0 || identitiesApplied > 0,
       gap,
     };
@@ -573,13 +627,19 @@ export async function readHybridIdentityStatus(
       membershipCounts(businessId),
     ]);
     const missingIdentityBindings = Math.max(0, memberships.passwordRoles - memberships.linkedIdentities);
-    // The live gap is passed into the resolver, so a member created after the
-    // last credential pass cannot be outvoted by a stored "healthy" record.
+    // The live gap and the last pass's remaining binding mismatches feed the
+    // resolver: a member created after the last credential pass cannot be
+    // outvoted by a stored "healthy" record, and a payload-named identity that
+    // is still unbound (issue #948 `identity_not_synced`) is degraded, never
+    // green. The crude `missingIdentityBindings` (any password-role member
+    // without a link) is a diagnostic only — a PIN-eligible manager the cloud
+    // has no identity for is legitimate and must not false-degrade.
     const health = hybridIdentityHealth({
       configured: true,
       identity: identity?.state ?? null,
       credentials: credentials?.status ?? null,
       pinMembersMissing: pinGap.missing,
+      identityBindingsMissing: credentials?.identityMismatches ?? 0,
     });
     return { configured: true, siteDeviceId, identity, credentials, pinGap, memberships, missingIdentityBindings, ...health };
   });

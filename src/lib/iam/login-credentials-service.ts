@@ -9,6 +9,7 @@ import { lockMembership, lockMemberships } from "../membership-lock";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
 import {
   loginCredentialsFingerprint,
+  planIdentityBinding,
   planPinRemoval,
   planPinReplication,
   type LocalPinState,
@@ -54,6 +55,11 @@ export async function buildLoginCredentials(businessId: string): Promise<Replica
       }
       credentials.push({
         membershipId: person.membership_id,
+        // Issue #948 P0-1 — the canonical global identity ID (contract v2).
+        // `platform_users.id` is the same value on both replicas after the
+        // site binds by it, which is exactly what the cloud-login readiness
+        // check compares.
+        platformUserId: person.platform_user_id,
         email: person.email,
         fullName: person.full_name,
         passwordHash: person.password_hash,
@@ -100,31 +106,107 @@ export async function recordSpentRecoveryCodes(businessId: string, spent: readon
   ));
 }
 
+/** What one `applyLoginCredentials()` pass changed — issue #948 diagnostics. */
+export interface LoginCredentialApplyResult {
+  /** True when this pass wrote at least one credential row or binding. */
+  changed: boolean;
+  /** Memberships whose password/MFA/recovery material was rewritten. */
+  identitiesApplied: number;
+  /** Memberships relinked onto the identity the cloud named (wrong/missing link). */
+  bindingsRepaired: number;
+  /**
+   * Memberships the payload names a global identity for that are *still* not
+   * bound to it after the pass — the measure that must never be reported
+   * green. (Deliberately not "every password-role member without a link": a
+   * PIN-eligible manager the cloud has no identity for is legitimate and is
+   * not in the payload at all.)
+   */
+  bindingsStillBroken: number;
+  /** Pre-v2 local UUIDs migrated onto the canonical cloud identity ID. */
+  identitiesRekeyed: number;
+  /**
+   * Rows left untouched because updating the email would collide with a
+   * different row. Reported, never resolved destructively.
+   */
+  identityEmailConflicts: number;
+}
+
 /**
  * Site: make each member's local identity equal the cloud's. Writes
  * platform_users under the documented "identity" bypass — the same narrow
  * write a password reset makes, reached only through a membership row this
  * business owns. Compared against the site's *current* rows, so a local
  * change (a reset, a direct edit) is put back rather than silently diverging.
- * Returns false when the two already agree.
+ *
+ * Issue #948 P0-1 — the identity *binding* is part of that equality. Each
+ * membership is bound to the cloud's canonical global identity ID
+ * (`planIdentityBinding`): an existing row with that exact ID is updated; a
+ * pre-v2 row found by its unique email is re-keyed onto the canonical ID with
+ * every reference moved (password, MFA, recovery codes, token version and
+ * revocation semantics preserved); otherwise the row is created under the
+ * canonical ID — the site never mints a fresh local UUID for an identity the
+ * cloud named. A legacy payload without IDs keeps the v1 email/link rules.
+ * The fingerprint covers the identity ID, so a wrongly-bound membership can no
+ * longer look converged and skip repair.
  */
 export async function applyLoginCredentials(
   businessId: string,
   credentials: readonly ReplicatedLoginCredential[],
-): Promise<boolean> {
+): Promise<LoginCredentialApplyResult> {
   const wanted = new Set(credentials.map((c) => c.membershipId));
   const local = (await buildLoginCredentials(businessId)).filter((c) => wanted.has(c.membershipId));
-  if (loginCredentialsFingerprint(local) === loginCredentialsFingerprint(credentials)) return false;
+  // A legacy cloud names no identity IDs; compare against a local build masked
+  // the same way, or every sync would rewrite perfectly converged rows.
+  const legacyPayload = !credentials.some((c) => c.platformUserId != null);
+  const comparableLocal = legacyPayload
+    ? local.map((c) => ({ ...c, platformUserId: undefined }))
+    : local;
+  const result: LoginCredentialApplyResult = {
+    changed: false, identitiesApplied: 0, bindingsRepaired: 0, bindingsStillBroken: 0,
+    identitiesRekeyed: 0, identityEmailConflicts: 0,
+  };
+  if (loginCredentialsFingerprint(comparableLocal) === loginCredentialsFingerprint(credentials)) {
+    // Converged — and for a canonical payload the fingerprint covers the
+    // identity ID, so converged *means* correctly bound. A legacy payload
+    // cannot verify bindings and keeps v1 behaviour.
+    result.bindingsStillBroken = 0;
+    return result;
+  }
 
   const members = await query<{ id: string; platform_user_id: string | null }>(
     `SELECT id, platform_user_id FROM users WHERE business_id = $1 AND id = ANY($2::uuid[])`,
     [businessId, credentials.map((c) => c.membershipId)],
   );
   const linked = new Map(members.rows.map((row) => [row.id, row.platform_user_id]));
+  // `platform_users.email` is UNIQUE, so an email match names at most one row
+  // — the same global person (or a duplicate nobody else's membership may own).
+  const identityRows = await query<{ id: string; email: string }>(
+    `SELECT id, email FROM platform_users
+      WHERE id = ANY($1::uuid[]) OR email = ANY($2::citext[])`,
+    [
+      credentials.map((c) => c.platformUserId).filter((id): id is string => typeof id === "string"),
+      credentials.map((c) => c.email.trim().toLowerCase()),
+    ],
+  );
+  const idExists = new Set(identityRows.rows.map((row) => row.id.toLowerCase()));
+  const byEmail = new Map(identityRows.rows.map((row) => [row.email.trim().toLowerCase(), row.id]));
+  // What each membership the payload speaks for *should* end up linked to.
+  // Verified after the loop — "credential data synced" and "identity correctly
+  // bound" are separate claims (issue #948).
+  const expectedLinks = new Map<string, string>();
 
   for (const credential of credentials) {
     // Not replicated yet (the IAM snapshot creates memberships); next tick.
     if (!linked.has(credential.membershipId)) continue;
+    const email = credential.email.trim().toLowerCase();
+    const plan = planIdentityBinding({
+      platformUserId: credential.platformUserId ?? null,
+      linkedPlatformUserId: linked.get(credential.membershipId) ?? null,
+      canonicalRowExists: typeof credential.platformUserId === "string"
+        && idExists.has(credential.platformUserId.toLowerCase()),
+      emailRowId: byEmail.get(email) ?? null,
+    });
+    if (plan.platformUserId) expectedLinks.set(credential.membershipId, plan.platformUserId.toLowerCase());
     const mfa = await Promise.all(credential.mfa.map(async (m) => ({
       ...m,
       encrypted: m.totpSecret ? await encryptTotpSecret(m.totpSecret) : null,
@@ -137,38 +219,90 @@ export async function applyLoginCredentials(
         // link, so it takes the same advisory lock the login-path invariant
         // relies on — before reading any state it decides about.
         await lockMembership(client, businessId, credential.membershipId);
-        const email = credential.email.trim().toLowerCase();
-        const existing = await client.query<{ id: string; password_hash: string }>(
-          `SELECT id, password_hash FROM platform_users WHERE id = $1 OR email = $2
-            ORDER BY (id = $1) DESC LIMIT 1`,
-          [linked.get(credential.membershipId) ?? "00000000-0000-0000-0000-000000000000", email],
-        );
-        let platformUserId = existing.rows[0]?.id;
         const incomingTokenVersion = credential.tokenVersion ?? 1;
-        if (platformUserId) {
-          // A changed password or bumped cloud token_version ends the sessions the old one opened.
-          await client.query(
-            `UPDATE platform_users SET email = $2, full_name = $3, password_hash = $4, is_active = $5,
-                    token_version = GREATEST(
-                      token_version + CASE WHEN password_hash IS DISTINCT FROM $4 THEN 1 ELSE 0 END,
-                      $6
-                    ),
-                    updated_at = now()
-              WHERE id = $1`,
-            [platformUserId, email, credential.fullName, credential.passwordHash, credential.isActive, incomingTokenVersion],
-          );
-        } else {
+        let platformUserId: string;
+        let writeFields = true;
+        if (plan.rekeyFrom) {
+          // Same person under a pre-v2 local UUID. Move every reference to the
+          // canonical ID before re-keying the row itself, so nothing points at
+          // a deleted identity and no credential material is copied or lost.
+          // Sessions that minted the old ID fail the token-version check until
+          // the member signs in again — the fail-closed direction.
+          const old = plan.rekeyFrom;
+          const to = plan.platformUserId as string;
+          await client.query(`UPDATE users SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE owner_activations SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE install_pairing_codes SET issued_by = $2 WHERE issued_by = $1`, [old, to]);
+          await client.query(`UPDATE trusted_devices SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          for (const table of ["mfa_enrolments", "mfa_challenges", "mfa_recovery_codes", "mfa_grace_periods", "auth_password_resets"]) {
+            await client.query(
+              `UPDATE ${table} SET subject_id = $2 WHERE subject_realm = 'platform_user' AND subject_id = $1`,
+              [old, to],
+            );
+          }
+          await client.query(`UPDATE platform_users SET id = $2 WHERE id = $1`, [old, to]);
+          platformUserId = to;
+          result.identitiesRekeyed += 1;
+        } else if (plan.insert) {
           const inserted = await client.query<{ id: string }>(
-            `INSERT INTO platform_users (email, password_hash, full_name, is_active, token_version)
-             VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-            [email, credential.passwordHash, credential.fullName, credential.isActive, incomingTokenVersion],
+            `INSERT INTO platform_users (id, email, password_hash, full_name, is_active, token_version)
+             VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6) RETURNING id`,
+            [plan.platformUserId, email, credential.passwordHash, credential.fullName, credential.isActive, incomingTokenVersion],
           );
           platformUserId = inserted.rows[0].id;
+          writeFields = false;
+        } else {
+          platformUserId = plan.platformUserId as string;
         }
-        await client.query(
-          `UPDATE users SET platform_user_id = $3 WHERE business_id = $1 AND id = $2`,
+        if (writeFields) {
+          // The cloud payload is authoritative for the row's fields. An email
+          // that now belongs to a *different* row (unique) is left for a
+          // human: moving it here would silently merge two identities.
+          const clash = await client.query<{ id: string }>(
+            `SELECT id FROM platform_users WHERE email = $1 AND id <> $2`,
+            [email, platformUserId],
+          );
+          const writeEmail = clash.rows.length === 0;
+          if (!writeEmail) result.identityEmailConflicts += 1;
+          // A changed password or bumped cloud token_version ends the sessions the old one opened.
+          // The GREATEST token-version dance is identical in both variants;
+          // only the `email = ...` clause differs (a stale conflicting email
+          // is reported, never stolen from the row that holds it).
+          const [sql, params] = writeEmail
+            ? [
+                `UPDATE platform_users SET email = $2, full_name = $3, password_hash = $4, is_active = $5,
+                        token_version = GREATEST(
+                          token_version + CASE WHEN password_hash IS DISTINCT FROM $4 THEN 1 ELSE 0 END,
+                          $6
+                        ),
+                        updated_at = now()
+                  WHERE id = $1`,
+                [platformUserId, email, credential.fullName, credential.passwordHash, credential.isActive, incomingTokenVersion],
+              ]
+            : [
+                `UPDATE platform_users SET full_name = $2, password_hash = $3, is_active = $4,
+                        token_version = GREATEST(
+                          token_version + CASE WHEN password_hash IS DISTINCT FROM $3 THEN 1 ELSE 0 END,
+                          $5
+                        ),
+                        updated_at = now()
+                  WHERE id = $1`,
+                [platformUserId, credential.fullName, credential.passwordHash, credential.isActive, incomingTokenVersion],
+              ];
+          await client.query(sql, params);
+        }
+        result.changed = true;
+        // Bind (or re-bind) the membership to the identity the cloud named —
+        // this is what repairs a wrong link even when every hash matches.
+        const relinked = await client.query(
+          `UPDATE users SET platform_user_id = $3
+            WHERE business_id = $1 AND id = $2 AND platform_user_id IS DISTINCT FROM $3`,
           [businessId, credential.membershipId, platformUserId],
         );
+        if (relinked.rowCount) {
+          result.bindingsRepaired += relinked.rowCount;
+          result.changed = true;
+        }
 
         await client.query(
           `DELETE FROM mfa_enrolments WHERE subject_realm = 'platform_user' AND subject_id = $1`,
@@ -209,8 +343,24 @@ export async function applyLoginCredentials(
         client.release();
       }
     });
+    result.identitiesApplied += 1;
   }
-  return true;
+  result.changed = result.changed || result.identitiesApplied > 0;
+  // Post-pass verification: every membership the payload named must now be
+  // linked to exactly the identity it named. What remains broken is the
+  // "identity not correctly bound" count — never masked by converged hashes.
+  if (expectedLinks.size > 0) {
+    const bound = await query<{ id: string; platform_user_id: string | null }>(
+      `SELECT id, platform_user_id FROM users WHERE business_id = $1 AND id = ANY($2::uuid[])`,
+      [businessId, [...expectedLinks.keys()]],
+    );
+    for (const row of bound.rows) {
+      const expected = expectedLinks.get(row.id);
+      const actual = row.platform_user_id?.toLowerCase() ?? null;
+      if (expected !== actual) result.bindingsStillBroken += 1;
+    }
+  }
+  return result;
 }
 
 const ACTIVE_PIN = `LEFT JOIN LATERAL (

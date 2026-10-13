@@ -32,6 +32,20 @@ function isLoginDoor(value: unknown): value is LoginDoor {
   return value === "admin" || value === "staff";
 }
 
+/**
+ * Issue #948 P1-4 — the remembered choice, with old values resolved.
+ *
+ * The chooser briefly offered «ورود آفلاین (محلی)» as its own card (removed
+ * from Cloud/Hybrid as a duplicate of the staff door). A browser that
+ * remembered that choice must land on the *staff* door — the same flow it
+ * always mounted — never on a re-shown chooser or a dead option.
+ */
+function normalizeStoredDoor(value: unknown): LoginDoor | null {
+  if (isLoginDoor(value)) return value;
+  if (value === "offline") return "staff";
+  return null;
+}
+
 /** The last door this browser chose, if it asked to be remembered. Never throws. */
 export function readRememberedLoginDoor(): LoginDoor | null {
   if (typeof window === "undefined") return null;
@@ -39,7 +53,8 @@ export function readRememberedLoginDoor(): LoginDoor | null {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredChoice>;
-    if (parsed.remember === true && isLoginDoor(parsed.door)) return parsed.door;
+    const door = normalizeStoredDoor(parsed.door);
+    if (parsed.remember === true && door) return door;
     return null;
   } catch {
     return null;
