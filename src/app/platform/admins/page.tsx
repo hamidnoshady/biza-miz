@@ -4,6 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { PLATFORM_ROLE_LABELS, type PlatformAdminRole } from "@/lib/platform-admin";
 import {
+  platformAdminContractMessage,
+  type PlatformAdminCreateRequest,
+  type PlatformAdminUpdateRequest,
+} from "@/lib/platform-admin-contract";
+import {
   Button,
   Card,
   EmptyState,
@@ -36,15 +41,23 @@ const ROLE_DESCRIPTIONS: Record<PlatformAdminRole, string> = {
   support: "جست‌وجوی کسب‌وکارها و ورود کمکی زمان‌دار.",
 };
 
-function adminErrorMessage(code: string | undefined): string {
-  const map: Record<string, string> = {
-    email_exists: "این ایمیل قبلاً برای مدیر دیگری ثبت شده است.",
-    last_platform_owner: "نمی‌توان آخرین مالک فعال سکو را غیرفعال کرد یا نقش او را تغییر داد.",
-    cannot_deactivate_self: "نمی‌توانید حساب خودتان را غیرفعال کنید.",
-    recent_auth_required: "برای انجام این عملیات حساس، ابتدا هویت خود را مجدداً تأیید کنید.",
-    invalid_role: "نقش انتخاب‌شده معتبر نیست.",
-  };
-  return (code && map[code]) || errorMessage(code);
+type PendingMutation =
+  | { kind: "create"; body: PlatformAdminCreateRequest }
+  | { kind: "change"; body: PlatformAdminUpdateRequest };
+
+const LAST_OWNER_HINT =
+  "این تنها مالک فعال سکو است؛ برای تعلیق یا تغییر نقش، ابتدا مالک فعال دیگری تعیین کنید.";
+
+function successNotice(mutation: PendingMutation): string {
+  if (mutation.kind === "create") return "مدیر جدید سکو با موفقیت ایجاد شد.";
+  switch (mutation.body.action) {
+    case "revoke_sessions":
+      return "تمام نشست‌های فعال و ورودهای کمکی این مدیر بلافاصله باطل شدند.";
+    case "reset_password":
+      return "لینک یک‌بارمصرف بازیابی رمز عبور برای این مدیر صادر شد.";
+    default:
+      return "تغییرات با موفقیت ذخیره شد.";
+  }
 }
 
 export default function AdminsPage() {
@@ -57,16 +70,15 @@ export default function AdminsPage() {
   const [createEmail, setCreateEmail] = useState("");
   const [createName, setCreateName] = useState("");
   const [createRole, setCreateRole] = useState<PlatformAdminRole>("support");
-  const [createPassword, setCreatePassword] = useState("");
 
   const [stepUpOpen, setStepUpOpen] = useState(false);
   const [stepUpPassword, setStepUpPassword] = useState("");
-  const [pendingAction, setPendingAction] = useState<Record<string, unknown> | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingMutation | null>(null);
 
   const load = useCallback(async () => {
     const { ok, data } = await api<{ admins: Admin[]; error?: string }>("/api/platform/admins");
     if (!ok) {
-      setError(adminErrorMessage(data.error));
+      setError(platformAdminContractMessage(data.error));
       setAdmins([]);
       return;
     }
@@ -77,58 +89,59 @@ export default function AdminsPage() {
     void load();
   }, [load]);
 
-  async function mutate(body: Record<string, unknown>): Promise<boolean> {
+  /**
+   * Every administrator mutation goes through here. Creation is POST; every
+   * change to an existing administrator is PATCH with a typed `action`. A
+   * stale session answers 403 `recent_auth_required`; the step-up prompt then
+   * replays exactly this request after re-verification.
+   */
+  async function mutate(mutation: PendingMutation): Promise<boolean> {
     setBusy(true);
     setError(null);
     setNotice(null);
     setIssuedResetUrl(null);
+    const method = mutation.kind === "create" ? "POST" : "PATCH";
     const { ok, status, data } = await api<{
       ok?: boolean;
       error?: string;
       resetUrl?: string | null;
     }>("/api/platform/admins", {
-      method: "POST",
-      body: JSON.stringify(body),
+      method,
+      body: JSON.stringify(mutation.body),
     });
     setBusy(false);
     if (!ok) {
       if (status === 403 && data.error === "recent_auth_required") {
-        setPendingAction(body);
+        setPendingAction(mutation);
         setStepUpOpen(true);
         return false;
       }
-      setError(adminErrorMessage(data.error));
+      setError(platformAdminContractMessage(data.error));
       return false;
     }
     if (data.resetUrl) {
       setIssuedResetUrl(data.resetUrl);
     }
-    if (body.action === "create") {
-      setNotice("مدیر جدید سکو با موفقیت ایجاد شد.");
-    } else if (body.action === "revoke_sessions") {
-      setNotice("تمام نشست‌های فعال و ورودهای کمکی این مدیر بلافاصله باطل شدند.");
-    } else if (body.action === "send_password_reset") {
-      setNotice("لینک یک‌بارمصرف بازیابی رمز عبور برای این مدیر صادر شد.");
-    } else {
-      setNotice("تغییرات با موفقیت ذخیره شد.");
-    }
+    setNotice(successNotice(mutation));
     await load();
     return true;
   }
 
+  function changeAdmin(body: PlatformAdminUpdateRequest) {
+    void mutate({ kind: "change", body });
+  }
+
   async function submitCreate(e: React.FormEvent) {
     e.preventDefault();
-    const ok = await mutate({
-      action: "create",
+    const body: PlatformAdminCreateRequest = {
       email: createEmail.trim().toLowerCase(),
       fullName: createName.trim(),
       role: createRole,
-      password: createPassword || undefined,
-    });
+    };
+    const ok = await mutate({ kind: "create", body });
     if (ok) {
       setCreateEmail("");
       setCreateName("");
-      setCreatePassword("");
     }
   }
 
@@ -224,7 +237,7 @@ export default function AdminsPage() {
 
       <Card title="افزودن مدیر جدید سکو">
         <p className="mb-4 text-xs text-muted-foreground">
-          در صورت خالی گذاشتن رمز اولیه، لینک یک‌بارمصرف فعال‌سازی صادر می‌شود تا خود اپراتور رمز عبورش را تعیین کند.
+          پس از ایجاد مدیر، یک لینک یک‌بارمصرف دعوت صادر می‌شود تا خود اپراتور رمز عبورش را تعیین کند. رمز عبور هیچ‌کس دیگری را نمی‌بینید یا تعیین نمی‌کنید.
         </p>
         <form onSubmit={submitCreate} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="نام و نام خانوادگی">
@@ -257,17 +270,6 @@ export default function AdminsPage() {
                 </option>
               ))}
             </select>
-          </Field>
-          <Field label="رمز عبور اولیه (اختیاری)">
-            <input
-              type="password"
-              dir="ltr"
-              minLength={8}
-              placeholder="خالی = صدور لینک دعوت"
-              value={createPassword}
-              onChange={(e) => setCreatePassword(e.target.value)}
-              className={inputClass}
-            />
           </Field>
           <div className="flex justify-end sm:col-span-2 lg:col-span-4">
             <Button
@@ -319,7 +321,14 @@ export default function AdminsPage() {
               </tr>
             </thead>
             <tbody>
-              {admins.map((a) => (
+              {admins.map((a) => {
+                // Mirrors the server rule (audit F27): the only active owner cannot be
+                // suspended or demoted. Shown before submission, not as a 409 afterwards.
+                const lastActiveOwner =
+                  a.role === "owner" &&
+                  a.isActive &&
+                  admins.filter((o) => o.role === "owner" && o.isActive).length <= 1;
+                return (
                 <tr key={a.id} className="border-t border-border">
                   <td className="px-4 py-3 font-medium text-foreground">{a.fullName}</td>
                   <td className="px-4 py-3 font-mono text-xs text-muted-foreground" dir="ltr">
@@ -328,12 +337,15 @@ export default function AdminsPage() {
                   <td className="px-4 py-3">
                     <select
                       value={a.role}
-                      disabled={busy}
+                      disabled={busy || lastActiveOwner}
+                      title={lastActiveOwner ? LAST_OWNER_HINT : undefined}
+                      aria-describedby={lastActiveOwner ? `last-owner-${a.id}` : undefined}
+                      aria-label={`نقش ${a.fullName}`}
                       onChange={(e) =>
-                        void mutate({
+                        changeAdmin({
                           action: "update",
-                          id: a.id,
-                          role: e.target.value,
+                          adminId: a.id,
+                          role: e.target.value as PlatformAdminRole,
                         })
                       }
                       className={selectClass}
@@ -344,6 +356,11 @@ export default function AdminsPage() {
                         </option>
                       ))}
                     </select>
+                    {lastActiveOwner ? (
+                      <p id={`last-owner-${a.id}`} className="mt-1 max-w-[16rem] text-xs text-amber-700 dark:text-amber-300">
+                        {LAST_OWNER_HINT}
+                      </p>
+                    ) : null}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -373,11 +390,12 @@ export default function AdminsPage() {
                     <div className="flex flex-wrap gap-1.5">
                       <Button
                         variant="ghost"
-                        disabled={busy}
+                        disabled={busy || (a.isActive && lastActiveOwner)}
+                        title={a.isActive && lastActiveOwner ? LAST_OWNER_HINT : undefined}
                         onClick={() =>
-                          void mutate({
+                          changeAdmin({
                             action: "update",
-                            id: a.id,
+                            adminId: a.id,
                             isActive: !a.isActive,
                           })
                         }
@@ -388,9 +406,9 @@ export default function AdminsPage() {
                         variant="ghost"
                         disabled={busy}
                         onClick={() =>
-                          void mutate({
+                          changeAdmin({
                             action: "revoke_sessions",
-                            id: a.id,
+                            adminId: a.id,
                           })
                         }
                       >
@@ -400,9 +418,9 @@ export default function AdminsPage() {
                         variant="ghost"
                         disabled={busy}
                         onClick={() =>
-                          void mutate({
-                            action: "send_password_reset",
-                            id: a.id,
+                          changeAdmin({
+                            action: "reset_password",
+                            adminId: a.id,
                           })
                         }
                       >
@@ -411,7 +429,8 @@ export default function AdminsPage() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
