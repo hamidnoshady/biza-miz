@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **255 write verbs**
-(**71** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **261 write verbs**
+(**74** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -265,6 +265,12 @@ visible only to connections consented for every branch) and **255 write verbs**
 | `write_website_setup_save` | `website.setup.save` | website | low | connection write_mode | `cms.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_website_design_theme_save` | `website.design.theme.save` | website | low | connection write_mode | `cms.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_website_cdn_purge` | `website.cdn.purge` | website | low | connection write_mode | `cms.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_website_product_create` | `website.product.create` | website | low | connection write_mode | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_website_product_update` | `website.product.update` | website | low | connection write_mode | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_website_product_delete` | `website.product.delete` | website | high | always approval queue (step-up) | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_website_post_delete` | `website.post.delete` | website | high | always approval queue (step-up) | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_website_media_update` | `website.media.update` | website | low | connection write_mode | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_website_media_delete` | `website.media.delete` | website | high | always approval queue (step-up) | `cms.content_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

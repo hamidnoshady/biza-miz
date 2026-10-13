@@ -514,9 +514,11 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["cms/website/posts", "cms/website/products", "cms/website/catalog"],
     ops: {
       listDetail: ["list_website_posts", "list_website_products"],
-      create: ["website.post.draft"],
-      update: ["website.post.update", "website.product.upsert"],
+      create: ["website.post.draft", "website.product.create"],
+      update: ["website.post.update", "website.product.upsert", "website.product.update"],
+      lifecycle: ["website.product.delete", "website.post.delete"],
     },
+    note: "batch BD: the content-record verbs close the row; the deletes step up (public-surface data records) and the publish buttons stay off-MCP per the standing rule in tools.ts",
     test: "integration/website.integration.test.ts",
   },
   {
@@ -542,9 +544,10 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     ops: {
       listDetail: ["list_website_posts", "list_cms_pages", "list_cms_media"],
       create: ["website.post.draft"],
-      update: ["website.post.update"],
+      update: ["website.post.update", "website.media.update"],
+      lifecycle: ["website.media.delete"],
     },
-    note: "page publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope",
+    note: "batch BD: alt-text edit and media delete close the row (media delete steps up; force/ in-use envelope kept). Page/draft publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope",
     test: "integration/website-sync.integration.test.ts",
   },
   {

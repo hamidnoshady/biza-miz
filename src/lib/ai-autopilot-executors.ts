@@ -176,6 +176,14 @@ import { saveWebsiteSetup, type WebsiteSetupPatch } from "./website/setup-servic
 import { saveOwnerThemeSettings } from "./cms/owner-bridge";
 import { cmsPurgeCdn } from "./cms/website-service";
 import {
+  createCmsProduct,
+  updateCmsProduct,
+  deleteCmsProduct,
+  deleteCmsPost,
+  updateCmsMediaAlt,
+  deleteCmsMedia,
+} from "./cms/website-service";
+import {
   decryptReservationPhones,
   encryptReservationPhone,
   lockTableForReservationWrite,
@@ -4998,6 +5006,76 @@ const websiteCdnPurge: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true } };
 };
 
+// ── Issue #883 package 2, batch BD — the CMS content-record verbs ───────────
+const websiteProductCreate: AutopilotExecutor = async (ctx) => {
+  const result = await createCmsProduct(ctx.businessId, {
+    title: typeof ctx.payload.title === "string" ? ctx.payload.title : "",
+    price: typeof ctx.payload.price === "number" ? ctx.payload.price : NaN,
+    summary: typeof ctx.payload.summary === "string" ? ctx.payload.summary : undefined,
+    image: typeof ctx.payload.image === "string" ? ctx.payload.image : undefined,
+    sku: typeof ctx.payload.sku === "string" ? ctx.payload.sku : undefined,
+    trackInventory: typeof ctx.payload.trackInventory === "boolean" ? ctx.payload.trackInventory : undefined,
+    inventory: typeof ctx.payload.inventory === "number" ? ctx.payload.inventory : undefined,
+    compareAtPrice: typeof ctx.payload.compareAtPrice === "number" ? ctx.payload.compareAtPrice : undefined,
+  });
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { product: result.data } };
+};
+const websiteProductUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const result = await updateCmsProduct(ctx.businessId, id, {
+    ...(typeof ctx.payload.title === "string" ? { title: ctx.payload.title } : {}),
+    ...(typeof ctx.payload.price === "number" ? { price: ctx.payload.price } : {}),
+    ...(typeof ctx.payload.summary === "string" ? { summary: ctx.payload.summary } : {}),
+    ...(typeof ctx.payload.image === "string" ? { image: ctx.payload.image } : {}),
+    ...(typeof ctx.payload.sku === "string" ? { sku: ctx.payload.sku } : {}),
+    ...(typeof ctx.payload.trackInventory === "boolean" ? { trackInventory: ctx.payload.trackInventory } : {}),
+    ...(typeof ctx.payload.inventory === "number" ? { inventory: ctx.payload.inventory } : {}),
+    ...(typeof ctx.payload.compareAtPrice === "number" ? { compareAtPrice: ctx.payload.compareAtPrice } : {}),
+  });
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { product: result.data } };
+};
+const websiteProductDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const result = await deleteCmsProduct(ctx.businessId, id);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { deleted: true } };
+};
+const websitePostDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const result = await deleteCmsPost(ctx.businessId, id);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { deleted: true } };
+};
+const websiteMediaUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id || typeof ctx.payload.alt !== "string") return fail("bad_request");
+  const result = await updateCmsMediaAlt(ctx.businessId, id, ctx.payload.alt);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { media: result.data } };
+};
+const websiteMediaDelete: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id);
+  if (!id) return fail("missing_fields");
+  const force = ctx.payload.force === true;
+  const result = await deleteCmsMedia(ctx.businessId, id);
+  if (!result.ok) {
+    if (!force && result.error === "cms_error") {
+      return {
+        ok: false,
+        result: { error: "media_in_use", message: "این فایل ممکن است در صفحه یا محصولی استفاده شده باشد." },
+        errorCode: "media_in_use",
+      };
+    }
+    return fail(result.error);
+  }
+  return { ok: true, result: { deleted: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -7230,6 +7308,12 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   websiteSetupSave,
   websiteDesignThemeSave,
   websiteCdnPurge,
+  websiteProductCreate,
+  websiteProductUpdate,
+  websiteProductDelete,
+  websitePostDelete,
+  websiteMediaUpdate,
+  websiteMediaDelete,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

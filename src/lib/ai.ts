@@ -548,6 +548,16 @@ export type ActionType =
   | "website.setup.save"
   | "website.design.theme.save"
   | "website.cdn.purge"
+  // Batch BD — the CMS content-record verbs. Creates/edits are mode/low;
+  // deleting a storefront product/post/asset is a data-record delete on a
+  // public surface, so those three step up. Publishes and media upload
+  // stay route-only by documented design.
+  | "website.product.create"
+  | "website.product.update"
+  | "website.product.delete"
+  | "website.post.delete"
+  | "website.media.update"
+  | "website.media.delete"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -695,6 +705,12 @@ export type AutopilotExecutorKey =
   | "websiteSetupSave"
   | "websiteDesignThemeSave"
   | "websiteCdnPurge"
+  | "websiteProductCreate"
+  | "websiteProductUpdate"
+  | "websiteProductDelete"
+  | "websitePostDelete"
+  | "websiteMediaUpdate"
+  | "websiteMediaDelete"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2469,6 +2485,54 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "پاک‌سازی CDN — بدون urls یعنی همه؛ not_connected/شکست upstream با همان خطاها برمی‌گردد",
     payloadHint: '{ urls?: string[] }',
     executor: "websiteCdnPurge",
+  },
+  "website.product.create": {
+    type: "website.product.create",
+    endpoint: "/api/cms/website/products",
+    method: "POST",
+    label: "ساخت محصول روی سایت متصل — price به واحد ریال مثبت",
+    payloadHint: '{ title: string, price: number, summary?: string, image?: string, sku?: string, trackInventory?: bool, inventory?: number, compareAtPrice?: number }',
+    executor: "websiteProductCreate",
+  },
+  "website.product.update": {
+    type: "website.product.update",
+    endpoint: "/api/cms/website/products/{id}",
+    method: "PATCH",
+    label: "ویرایش محصول سایت — فقط فیلدهای رسیده",
+    payloadHint: '{ id: string, title?: string, price?: number, summary?: string, image?: string, sku?: string, trackInventory?: bool, inventory?: number, compareAtPrice?: number }',
+    executor: "websiteProductUpdate",
+  },
+  "website.product.delete": {
+    type: "website.product.delete",
+    endpoint: "/api/cms/website/products/{id}",
+    method: "DELETE",
+    label: "حذف محصول از سایت — رکورد عمومی، تأیید صریح لازم",
+    payloadHint: '{ id: string }',
+    executor: "websiteProductDelete",
+  },
+  "website.post.delete": {
+    type: "website.post.delete",
+    endpoint: "/api/cms/website/posts/{id}",
+    method: "DELETE",
+    label: "حذف نوشتهٔ منتشرشده — رکورد عمومی، تأیید صریح لازم",
+    payloadHint: '{ id: string }',
+    executor: "websitePostDelete",
+  },
+  "website.media.update": {
+    type: "website.media.update",
+    endpoint: "/api/cms/website/media/{id}",
+    method: "PATCH",
+    label: "متن جایگزین (alt) رسانه — ناگفته‌ها بدون تغییر",
+    payloadHint: '{ id: string, alt: string }',
+    executor: "websiteMediaUpdate",
+  },
+  "website.media.delete": {
+    type: "website.media.delete",
+    endpoint: "/api/cms/website/media/{id}?force=1",
+    method: "DELETE",
+    label: "حذف رسانه — force=true خطای media_in_use را نادیده می‌گیرد؛ تأیید صریح لازم",
+    payloadHint: '{ id: string, force?: bool }',
+    executor: "websiteMediaDelete",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

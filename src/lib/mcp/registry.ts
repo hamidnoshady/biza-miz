@@ -437,6 +437,13 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "website.setup.save", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "website.design.theme.save", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "website.cdn.purge", kind: "write", app: "website", risk: "low", approval: "mode" },
+  // Batch BD — content-record verbs: saves mode/low, public-surface deletes step up.
+  { actionType: "website.product.create", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "website.product.update", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "website.product.delete", kind: "write", app: "website", risk: "high", approval: "always_approve" },
+  { actionType: "website.post.delete", kind: "write", app: "website", risk: "high", approval: "always_approve" },
+  { actionType: "website.media.update", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "website.media.delete", kind: "write", app: "website", risk: "high", approval: "always_approve" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
