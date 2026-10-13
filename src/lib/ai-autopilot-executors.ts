@@ -158,6 +158,21 @@ import { builtInTemplate } from "./print-template";
 import { getPrintTemplate, loadRoutablePrinters } from "./printing/plan";
 import { isDocType, printerAcceptsDocument } from "./printing/routing";
 import {
+  testConnection,
+  wooClientFor,
+} from "./integrations/connections-service";
+import { testHolooConnection } from "./integrations/holoo/connection-service";
+import { isHoloo } from "./integrations/provider-registry";
+import {
+  syncProducts,
+  syncOrders,
+  syncCustomers,
+} from "./integrations/sync-service";
+import { enqueuePluginExport } from "./integrations/plugin-service";
+import { enqueueContentExport, syncWpContentRest } from "./integrations/wp-content-service";
+import { enqueueExport } from "./integrations/woo-ops-service";
+import { drainOutbox, refreshOutboxForConnection } from "./integrations/outbox-service";
+import {
   decryptReservationPhones,
   encryptReservationPhone,
   lockTableForReservationWrite,
@@ -4834,6 +4849,119 @@ const settingsPrintRulesSave: AutopilotExecutor = async (ctx) => {
   }
 };
 
+// ── Issue #883 package 2, batch BB — the verb-shaped integration lanes ──────
+// Connection provisioning/migration never maps onto MCP: those payloads carry
+// SQL credentials, link tokens and desktop keys (config.data's provider row
+// carries the same design note). What follows is the operational half the
+// routes expose as plain buttons.
+const integrationsSyncProducts: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.connectionId);
+  if (!id) return fail("missing_fields");
+  const connection = await getConnection(ctx.businessId, id);
+  if (!connection || connection.provider !== "woocommerce") return fail("not_found");
+  if (!connection.sync_products) return fail("sync_products_disabled");
+  if (connection.status === "paused") return fail("connection_paused");
+  if (connection.link_mode === "plugin") {
+    await enqueuePluginExport(ctx.businessId, id, "catalogue_export");
+    await enqueueContentExport(ctx.businessId, id);
+    return { ok: true, result: { ok: true, queued: true } };
+  }
+  try {
+    const outcome = await syncProducts(ctx.businessId, id);
+    try {
+      await syncWpContentRest(connection, wooClientFor(connection));
+    } catch (err) {
+      return { ok: true, result: { ok: true, ...outcome, contentError: (err as Error).message } };
+    }
+    return { ok: true, result: { ok: true, ...outcome } };
+  } catch (err) {
+    if ((err as Error).message === "not_found") return fail("not_found");
+    return fail((err as Error).message);
+  }
+};
+const integrationsSyncOrders: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.connectionId);
+  if (!id) return fail("missing_fields");
+  const connection = await getConnection(ctx.businessId, id);
+  if (!connection || connection.provider !== "woocommerce") return fail("not_found");
+  if (!connection.sync_orders) return fail("sync_orders_disabled");
+  if (connection.status === "paused") return fail("connection_paused");
+  let sinceDays: number | undefined;
+  if (typeof ctx.payload.sinceDays === "number" && Number.isFinite(ctx.payload.sinceDays)) {
+    sinceDays = Math.min(365, Math.max(1, Math.round(ctx.payload.sinceDays)));
+  }
+  if (connection.link_mode === "plugin") {
+    await enqueueExport(ctx.businessId, id, "orders_export", sinceDays === undefined ? {} : { sinceDays });
+    return { ok: true, result: { ok: true, queued: true } };
+  }
+  try {
+    const outcome = await syncOrders(ctx.businessId, id, sinceDays === undefined ? {} : { sinceDays });
+    return { ok: true, result: { ok: true, ...outcome } };
+  } catch (err) {
+    if ((err as Error).message === "not_found") return fail("not_found");
+    return fail((err as Error).message);
+  }
+};
+const integrationsSyncCustomers: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.connectionId);
+  if (!id) return fail("missing_fields");
+  const connection = await getConnection(ctx.businessId, id);
+  if (!connection || connection.provider !== "woocommerce") return fail("not_found");
+  if (!connection.sync_customers) return fail("sync_customers_disabled");
+  if (connection.status === "paused") return fail("connection_paused");
+  if (connection.link_mode === "plugin") {
+    await enqueuePluginExport(ctx.businessId, id, "customer_export");
+    return { ok: true, result: { ok: true, queued: true } };
+  }
+  try {
+    const outcome = await syncCustomers(ctx.businessId, id);
+    return { ok: true, result: { ok: true, ...outcome } };
+  } catch (err) {
+    if ((err as Error).message === "not_found") return fail("not_found");
+    return fail((err as Error).message);
+  }
+};
+const integrationsSyncInventory: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.connectionId);
+  if (!id) return fail("missing_fields");
+  const connection = await getConnection(ctx.businessId, id);
+  if (!connection) return fail("not_found");
+  try {
+    await refreshOutboxForConnection(connection);
+    if (connection.link_mode === "plugin") {
+      return { ok: true, result: { ok: true, queued: true } };
+    }
+    await drainOutbox(connection);
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+};
+const integrationsConnectionTest: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.connectionId);
+  if (!id) return fail("missing_fields");
+  const connection = await getConnection(ctx.businessId, id);
+  if (!connection) return fail("not_found");
+  if (isHoloo(connection)) {
+    const result = await testHolooConnection(ctx.businessId, id);
+    if (!result.ok) return fail(result.error ?? "integration_test_failed");
+    return {
+      ok: true,
+      result: {
+        ok: true,
+        version: result.version,
+        fingerprint: result.fingerprint,
+        profile: result.profile ?? null,
+        diagnostics: result.diagnostics ?? [],
+        migrationReady: Boolean(result.profile),
+      },
+    };
+  }
+  const result = await testConnection(ctx.businessId, id);
+  if (!result.ok) return fail(result.error ?? "integration_test_failed");
+  return { ok: true, result: { ok: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -7058,6 +7186,11 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   printTemplateSave,
   printTemplateDelete,
   settingsPrintRulesSave,
+  integrationsSyncProducts,
+  integrationsSyncOrders,
+  integrationsSyncCustomers,
+  integrationsSyncInventory,
+  integrationsConnectionTest,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

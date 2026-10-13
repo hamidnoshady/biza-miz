@@ -533,6 +533,16 @@ export type ActionType =
   | "printTemplate.save"
   | "printTemplate.delete"
   | "settings.printRules.save"
+  // Batch BB — the verb-shaped integration lanes. Each mirrors its POST route:
+  // the provider/toggle/paused guards, plugin-mode queuing vs REST inline
+  // runs, and the 502-shaped upstream envelopes. Connection provisioning
+  // (credentials, link tokens, migration cutovers) stays screen-only by
+  // design — those payloads carry secrets, not business state.
+  | "integrations.sync.products"
+  | "integrations.sync.orders"
+  | "integrations.sync.customers"
+  | "integrations.sync.inventory"
+  | "integrations.connection.test"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -672,6 +682,11 @@ export type AutopilotExecutorKey =
   | "printTemplateSave"
   | "printTemplateDelete"
   | "settingsPrintRulesSave"
+  | "integrationsSyncProducts"
+  | "integrationsSyncOrders"
+  | "integrationsSyncCustomers"
+  | "integrationsSyncInventory"
+  | "integrationsConnectionTest"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2382,6 +2397,46 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "قانون چاپ هر سند — قالب (builtin یا ذخیره) + چاپگر/پشتیبان سازگار؛ fallback ≠ primary",
     payloadHint: '{ documentType: string, templateId?: string, templateKey?: string, printerId?: string, fallbackPrinterId?: string }',
     executor: "settingsPrintRulesSave",
+  },
+  "integrations.sync.products": {
+    type: "integrations.sync.products",
+    endpoint: "/api/integrations/connections/{id}/sync/products",
+    method: "POST",
+    label: "سینک کاتالوگ + محتوای WP — plugin=صف؛ REST=هم‌خط؛ خطای محتوا sync ناموفق نمی‌کند",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsSyncProducts",
+  },
+  "integrations.sync.orders": {
+    type: "integrations.sync.orders",
+    endpoint: "/api/integrations/connections/{id}/sync/orders",
+    method: "POST",
+    label: "سینک سفارش‌های WooCommerce — sinceDays بیشینه ۳۶۵، پیش‌فرض نگاه‌به‌عقب خود اتصال",
+    payloadHint: '{ connectionId: string, sinceDays?: int (۱ تا ۳۶۵) }',
+    executor: "integrationsSyncOrders",
+  },
+  "integrations.sync.customers": {
+    type: "integrations.sync.customers",
+    endpoint: "/api/integrations/connections/{id}/sync/customers",
+    method: "POST",
+    label: "سینک مشتریان — فقط اتصال WooCommerce",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsSyncCustomers",
+  },
+  "integrations.sync.inventory": {
+    type: "integrations.sync.inventory",
+    endpoint: "/api/integrations/connections/{id}/sync/inventory",
+    method: "POST",
+    label: "سینک موجودی — نوسازی outbox + تخلیهٔ صف در حالت REST",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsSyncInventory",
+  },
+  "integrations.connection.test": {
+    type: "integrations.connection.test",
+    endpoint: "/api/integrations/connections/{id}/test",
+    method: "POST",
+    label: "تست اتصال — نسخه/اثرانگشت/پروفایل Holoo یا ok ساده؛ خطای upstream خطای ۵۰۲ است",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsConnectionTest",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

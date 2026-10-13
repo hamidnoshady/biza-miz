@@ -730,7 +730,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Integration connections & syncs (Holoo etc.)",
     routes: ["integrations/connections", "integrations/overview"],
-    ops: { listDetail: ["describe_app"] },
+    status: "route-only (by design)",
+    ops: {
+      listDetail: ["describe_app"],
+      lifecycle: ["integrations.sync.products", "integrations.sync.orders", "integrations.sync.customers", "integrations.sync.inventory", "integrations.connection.test"],
+    },
+    note: "batch BB: the row splits in two — the operational half (syncs + connection test) is live and mirrors the routes' provider/toggle/paused guards plus plugin-queue vs REST-inline behaviour; provisioning stays route-only by design because connection creation, link tokens, companion/direct-sql keys, migration cutovers and WooCommerce's inbound store-webhook payloads carry SQL/API credentials, not business state — same tier as config.data's provider lanes and growth's integrations settings",
     test: "integration/connections.integration.test.ts",
   },
   {

@@ -5,7 +5,7 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **247 write verbs**
+visible only to connections consented for every branch) and **252 write verbs**
 (**71** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -257,6 +257,11 @@ visible only to connections consented for every branch) and **247 write verbs**
 | `write_print_template_save` | `printTemplate.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_print_template_delete` | `printTemplate.delete` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_settings_print_rules_save` | `settings.printRules.save` | pos | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_integrations_sync_products` | `integrations.sync.products` | workspace | low | connection write_mode | `integrations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_integrations_sync_orders` | `integrations.sync.orders` | workspace | low | connection write_mode | `integrations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_integrations_sync_customers` | `integrations.sync.customers` | workspace | low | connection write_mode | `integrations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_integrations_sync_inventory` | `integrations.sync.inventory` | workspace | low | connection write_mode | `integrations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_integrations_connection_test` | `integrations.connection.test` | workspace | low | connection write_mode | `integrations.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_create` | `task.create` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_update` | `task.update` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_task_status` | `task.status` | workspace | low | connection write_mode | `workspace.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

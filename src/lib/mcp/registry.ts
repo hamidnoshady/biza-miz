@@ -424,6 +424,14 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "printTemplate.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "printTemplate.delete", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "settings.printRules.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch BB — the syncs re-enqueue/refresh what the scheduled runs do anyway;
+  // a test never writes. Plugin mode queues, REST runs inline — both sides of
+  // the route's own contract.
+  { actionType: "integrations.sync.products", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "integrations.sync.orders", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "integrations.sync.customers", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "integrations.sync.inventory", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  { actionType: "integrations.connection.test", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },
