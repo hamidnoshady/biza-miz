@@ -15,7 +15,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (13)
+### Tenant (12)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
@@ -25,7 +25,6 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 - **cms.woocommerce** (Website / CMS · WooCommerce manager (posts, queue, syncs)) — partial
 - **workspace.aec** (Workspace · AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement)) — partial
 - **config.settings** (Business config · Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms)) — partial
-- **config.team** (Business config · Staff, roles & permissions, invitations, credentials, site access) — partial
 - **config.integrations** (Business config · Integration connections & syncs (Holoo etc.)) — partial
 - **reports.reports** (Reports · Reports (standard, saved, export, query, drill-down, views)) — partial
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
@@ -53,7 +52,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 55 · partial: 13 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 4
+Counts — covered: 55 · partial: 12 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 5
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -109,7 +108,7 @@ Counts — covered: 55 · partial: 13 · MCP gap: 0 · backend gap: 0 · n/a (in
 | Workspace | Approvals | list_workspace_approvals | workspace.approval.request | — | workspace.approval.decide | — | workspace.approve, workspace.manage, workspace.view | connection mode; step-up (always approve) | list_workspace_approvals, workspace.approval.request, workspace.approval.decide | integration/workspace.integration.test.ts | covered |
 | Workspace | AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement) | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | (route only) | (route only) | (route only) | — | settings.manage, workspace.approve, workspace.documents_issue, workspace.manage, workspace.view | — | get_aec_project_financial_health, get_boq_variance, get_latest_drawing_revision, list_change_orders, list_delayed_project_activities, list_payment_certificates, list_pending_rfis, list_pending_submittals, list_procurement_delays, list_project_commercial_risks, list_site_issues, list_upcoming_milestones | — | partial |
 | Business config | Business profile & settings (accounts, pricing, tax, logo, MFA policy, print rules/templates/printers, payment methods, online platforms) | get_setup_state | (route only) | (route only) | (route only) | — | accounts.edit, settings.manage | — | get_setup_state | integration/business-settings.integration.test.ts | partial |
-| Business config | Staff, roles & permissions, invitations, credentials, site access | list_team_members | (route only) | (route only) | (route only) | — | team.manage, team.permissions_manage, team.view | — | list_team_members | integration/team.integration.test.ts | partial |
+| Business config | Staff, roles & permissions, invitations, credentials, site access | list_team_members | (route only) | (route only) | (route only) | — | team.manage, team.permissions_manage, team.view | — | list_team_members | integration/team.integration.test.ts | route-only (by design) |
 | Business config | Branches & locations | get_branch_comparison, list_branches | branch.create | branch.update | branch.lifecycle | — | locations.manage | connection mode; step-up (always approve) | get_branch_comparison, list_branches, branch.create, branch.update, branch.lifecycle | integration/branch-management.integration.test.ts | covered |
 | Business config | Integration connections & syncs (Holoo etc.) | describe_app | (route only) | (route only) | (route only) | — | integrations.manage, integrations.view | — | describe_app | integration/connections.integration.test.ts | partial |
 | Business config | WooCommerce webhooks / WordPress event bridges / connections management planes (API keys, desktop, MCP, website)<br>_inbound webhooks and the token-management planes of the API connector families (the panel hosts the UI); the MCP management plane itself is expressly out of scope_ | (route only) | (route only) | (route only) | (route only) | — | integrations.manage, integrations.view, mcp.manage | — | — | — | n/a (infra) |

@@ -683,9 +683,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Staff, roles & permissions, invitations, credentials, site access",
     routes: ["team", "staff"],
+    status: "route-only (by design)",
     // Reads landed with batch E (#883); membership create/role/permission
-    // writes stay screen-owned for now — access/identity writes carry a
-    // step-up policy beyond the approval queue (see the batch's commit note).
+    // writes stay screen-owned — access/identity writes carry a step-up
+    // policy beyond the approval queue: granting permissions through a chat
+    // conversation is an identity-handoff the connection's own approval can
+    // never verify. Same tier as config.billing and config.devices.
     ops: { listDetail: ["list_team_members"] },
     test: "integration/team.integration.test.ts",
   },
