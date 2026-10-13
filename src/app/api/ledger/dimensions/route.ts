@@ -37,38 +37,49 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const idsParam = params.get("ids");
   const postable = params.get("postable") !== "0" && params.get("postable") !== "false";
   const limitParam = Number(params.get("limit"));
-  const limit = Number.isInteger(limitParam) && limitParam > 0 ? limitParam : 20;
+  const searchLimit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, 50) : 20;
+  const offsetParam = Number(params.get("offset"));
+  const offset = Number.isInteger(offsetParam) && offsetParam >= 0 ? offsetParam : 0;
+  const pageLimit =
+    !q && Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : undefined;
 
-  // Selected-ID resolution: a picker holding a value outside the initial capped
-  // list must still be able to display the saved label. The response merges
-  // these with search results so a single round trip is enough.
   const selectedIds = idsParam
     ? idsParam.split(",").map((s) => s.trim()).filter(Boolean)
     : [];
 
-  const [settings, hits, selected] = await Promise.all([
+  const listResult = q
+    ? null
+    : await listDimensionValues(session.businessId, {
+        kind,
+        includeArchived,
+        limit: pageLimit,
+        offset,
+      });
+
+  const [settings, searchHits, selected] = await Promise.all([
     listDimensionSettings(session.businessId),
     q
-      ? searchDimensionValues(session.businessId, { q, kind, postable, limit })
-      : listDimensionValues(session.businessId, { kind, includeArchived }).then((r) => r.values),
+      ? searchDimensionValues(session.businessId, { q, kind, postable, limit: searchLimit })
+      : Promise.resolve([]),
     selectedIds.length > 0 ? getDimensionValuesByIds(session.businessId, selectedIds) : Promise.resolve([]),
   ]);
 
-  // Merge selected + hits deduped by id, preserving server order for hits.
+  const hits = listResult ? listResult.values : searchHits;
   const merged = new Map<string, (typeof selected)[number]>();
   for (const v of selected) merged.set(v.id, v);
   for (const v of hits) merged.set(v.id, v);
   const values = [...merged.values()];
 
-  // Truncation flag: a search response is never truncated (it has its own
-  // small LIMIT). The full-catalogue response reports truncation as before.
   const fullList = !q;
   return NextResponse.json({
     settings,
     values,
-    truncated: fullList ? hits.length >= DIMENSION_VALUE_LIST_CAP : false,
-    truncatedAt: fullList && hits.length >= DIMENSION_VALUE_LIST_CAP ? DIMENSION_VALUE_LIST_CAP : null,
+    truncated: fullList ? Boolean(listResult?.truncated) : false,
+    truncatedAt: fullList && listResult?.truncated ? (pageLimit ?? DIMENSION_VALUE_LIST_CAP) : null,
     totalLoaded: values.length,
+    total: listResult?.total ?? values.length,
+    offset: fullList ? offset : 0,
+    limit: fullList ? pageLimit ?? DIMENSION_VALUE_LIST_CAP : searchLimit,
   });
 });
 

@@ -230,34 +230,55 @@ export async function listDimensionValuesUncapped(
 
 export interface DimensionValueList {
   values: DimensionValueRecord[];
-  /** True when more rows exist than the cap returned; pickers should warn. */
+  /** True when more rows exist beyond this page. */
   truncated: boolean;
-  /** Total rows the filter matches (cap + the one extra used to detect truncation). */
+  /** Lower-bound count: offset + kept + hasMore?1:0 (no COUNT(*) for hot-list perf). */
   total: number;
 }
 
+export interface ListDimensionValuesOptions {
+  kind?: DimensionKind;
+  includeArchived?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Hard scan cap on offset+limit for management-list pagination. The UI is not
+ * an export tool; anything beyond this needs a narrower filter or the search
+ * endpoint. This bounds the index walk on (business_id, kind, is_active, code).
+ */
+export const DIMENSION_VALUE_LIST_MAX_SCAN = 5_000;
+
 export async function listDimensionValues(
   businessId: string,
-  options: { kind?: DimensionKind; includeArchived?: boolean } = {},
+  options: ListDimensionValuesOptions = {},
 ): Promise<DimensionValueList> {
-  // Ask for CAP+1 rows so we can tell whether the result was cut off without a
-  // separate COUNT(*) — COUNT(*) on a hot table costs an extra scan.
-  const limit = DIMENSION_VALUE_LIST_CAP + 1;
+  const rawLimit = options.limit;
+  const limit =
+    Number.isInteger(rawLimit) && (rawLimit ?? 0) > 0 && (rawLimit ?? 0) <= DIMENSION_VALUE_LIST_CAP
+      ? (rawLimit as number)
+      : DIMENSION_VALUE_LIST_CAP;
+  const rawOffset = options.offset;
+  const offset = Number.isInteger(rawOffset) && (rawOffset ?? 0) >= 0
+    ? Math.min(rawOffset as number, DIMENSION_VALUE_LIST_MAX_SCAN - limit)
+    : 0;
+  const fetchLimit = Math.min(limit + 1, DIMENSION_VALUE_LIST_MAX_SCAN);
   const { rows } = await query<ValueRow>(
     `${VALUE_SELECT}
       WHERE v.business_id = $1
         AND ($2::text IS NULL OR v.kind = $2::text)
         AND ($3::boolean OR v.is_active)
       ORDER BY v.kind, v.code
-      LIMIT ${limit}`,
+      LIMIT ${fetchLimit} OFFSET ${offset}`,
     [businessId, options.kind ?? null, options.includeArchived ?? false],
   );
-  const truncated = rows.length > DIMENSION_VALUE_LIST_CAP;
-  const kept = truncated ? rows.slice(0, DIMENSION_VALUE_LIST_CAP) : rows;
+  const hasMore = rows.length > limit;
+  const kept = hasMore ? rows.slice(0, limit) : rows;
   return {
     values: kept.map(toValue),
-    truncated,
-    total: rows.length,
+    truncated: hasMore || offset + kept.length >= DIMENSION_VALUE_LIST_MAX_SCAN,
+    total: offset + kept.length + (hasMore ? 1 : 0),
   };
 }
 

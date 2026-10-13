@@ -69,9 +69,9 @@ describe("GET /api/ledger/dimensions", () => {
 
   it("hides archived values unless asked for", async () => {
     await GET(get());
-    expect(dims.listDimensionValues).toHaveBeenLastCalledWith("business-1", { kind: undefined, includeArchived: false });
+    expect(dims.listDimensionValues).toHaveBeenLastCalledWith("business-1", { kind: undefined, includeArchived: false, limit: undefined, offset: 0 });
     await GET(get("?includeArchived=1&kind=cost_center"));
-    expect(dims.listDimensionValues).toHaveBeenLastCalledWith("business-1", { kind: "cost_center", includeArchived: true });
+    expect(dims.listDimensionValues).toHaveBeenLastCalledWith("business-1", { kind: "cost_center", includeArchived: true, limit: undefined, offset: 0 });
   });
 });
 
