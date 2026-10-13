@@ -37,7 +37,7 @@ function validPermissions(values:unknown):string[]{
 async function origin(businessId:string){const p=(await readDeploymentProfile(businessId)).profile;if(p==="hybrid")throw new TenantRoleError("cloud_confirmation_required",409);return p==="local"?"local" as const:"cloud" as const;}
 async function assertDelegable(client:{query:PoolClient["query"]},businessId:string,actorId:string,permissions:string[]){
   const {rows}=await client.query<{role:Role;permissions:unknown;custom_permissions:string[]|null}>(`SELECT u.role,u.permissions,
-    CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END custom_permissions FROM users u
+    CASE WHEN u.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END custom_permissions FROM users u
     LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id WHERE u.business_id=$1 AND u.id=$2 AND u.is_active`,[businessId,actorId]);
   const actor=rows[0];if(!actor)throw new TenantRoleError("actor_inactive",403);
   const held=effectivePermissions(actor.role,parseOverrides(actor.permissions),actor.custom_permissions);

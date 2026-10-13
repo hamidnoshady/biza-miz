@@ -24,6 +24,13 @@ describe("paymentFailureFor", () => {
     });
   });
 
+  it("names an uncovered date after fiscal controls are adopted", () => {
+    expect(paymentFailureFor(new Error("fiscal_period_not_defined"))).toEqual({
+      error: "fiscal_period_not_defined",
+      status: 409,
+    });
+  });
+
   it("names an ingredient requirement driven negative by an addon", () => {
     expect(paymentFailureFor(new Error("negative_ingredient_requirement"))).toEqual({
       error: "negative_ingredient_requirement",
