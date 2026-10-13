@@ -543,6 +543,11 @@ export type ActionType =
   | "integrations.sync.customers"
   | "integrations.sync.inventory"
   | "integrations.connection.test"
+  // Batch BC — the CMS ops that carry no secrets and no publish actions:
+  // the setup step answers, the theme design tokens, and the CDN purge.
+  | "website.setup.save"
+  | "website.design.theme.save"
+  | "website.cdn.purge"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -687,6 +692,9 @@ export type AutopilotExecutorKey =
   | "integrationsSyncCustomers"
   | "integrationsSyncInventory"
   | "integrationsConnectionTest"
+  | "websiteSetupSave"
+  | "websiteDesignThemeSave"
+  | "websiteCdnPurge"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -2437,6 +2445,30 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "تست اتصال — نسخه/اثرانگشت/پروفایل Holoo یا ok ساده؛ خطای upstream خطای ۵۰۲ است",
     payloadHint: '{ connectionId: string }',
     executor: "integrationsConnectionTest",
+  },
+  "website.setup.save": {
+    type: "website.setup.save",
+    endpoint: "/api/cms/website/setup",
+    method: "PATCH",
+    label: "ذخیرهٔ پاسخ مرحلهٔ راه‌اندازی وب — فیلدهای مرحله‌به‌مرحله؛ بعد از built خطای already_built",
+    payloadHint: '{ domain?: string, domainMode?: string, domainYears?: number, cdnProvider?: string, cdnStatus?: string, cdnNote?: string|null, siteType?: string, siteName?: string, planKey?: string|null }',
+    executor: "websiteSetupSave",
+  },
+  "website.design.theme.save": {
+    type: "website.design.theme.save",
+    endpoint: "/api/cms/website/design/theme-settings",
+    method: "POST",
+    label: "ذخیرهٔ design tokenها — values تنظیم می‌کند، clear این کلیدها را پاک می‌کند",
+    payloadHint: '{ values?: Record<string,string>, clear?: string[] }',
+    executor: "websiteDesignThemeSave",
+  },
+  "website.cdn.purge": {
+    type: "website.cdn.purge",
+    endpoint: "/api/cms/website/cdn/purge",
+    method: "POST",
+    label: "پاک‌سازی CDN — بدون urls یعنی همه؛ not_connected/شکست upstream با همان خطاها برمی‌گردد",
+    payloadHint: '{ urls?: string[] }',
+    executor: "websiteCdnPurge",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",

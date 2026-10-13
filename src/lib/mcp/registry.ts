@@ -432,6 +432,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "integrations.sync.customers", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "integrations.sync.inventory", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "integrations.connection.test", kind: "write", app: "workspace", risk: "low", approval: "mode" },
+  // Batch BC — setup answers and design tokens are plain config saves; a CDN
+  // purge is a safe no-side-effect revalidation.
+  { actionType: "website.setup.save", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "website.design.theme.save", kind: "write", app: "website", risk: "low", approval: "mode" },
+  { actionType: "website.cdn.purge", kind: "write", app: "website", risk: "low", approval: "mode" },
   { actionType: "task.create", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.update", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "task.status", kind: "write", app: "workspace", risk: "low", approval: "mode" },

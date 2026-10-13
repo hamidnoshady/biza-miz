@@ -3094,6 +3094,52 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
+    name: "write_website_setup_save",
+    actionType: "website.setup.save",
+    english: "Save a setup step's answer — domain, CDN, plan and site fields; refused once built.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: { type: "string" },
+        domainMode: { type: "string" },
+        domainYears: { type: "number" },
+        cdnProvider: { type: "string" },
+        cdnStatus: { type: "string" },
+        cdnNote: { type: ["string", "null"] },
+        siteType: { type: "string" },
+        siteName: { type: "string" },
+        planKey: { type: ["string", "null"] },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_website_design_theme_save",
+    actionType: "website.design.theme.save",
+    english: "Save design tokens — values set, clear removes those keys.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        values: { type: "object", description: "کلید=مقدارِ design token" },
+        clear: { type: "array", items: { type: "string" }, description: "کلیدهای پاک‌شونده" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "write_website_cdn_purge",
+    actionType: "website.cdn.purge",
+    english: "Purge the CDN — no urls means purge everything, the common case.",
+    destructive: false,
+    inputSchema: {
+      type: "object",
+      properties: { urls: { type: "array", items: { type: "string" } } },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "write_jewelry_item_sell",
     actionType: "jewelry.item.sell",
     english: "Sell a weighted gold item — real sale document with making-charge/profit/VAT and settlement; always asks a human first.",

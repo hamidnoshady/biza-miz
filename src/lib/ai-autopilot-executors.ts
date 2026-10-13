@@ -172,6 +172,9 @@ import { enqueuePluginExport } from "./integrations/plugin-service";
 import { enqueueContentExport, syncWpContentRest } from "./integrations/wp-content-service";
 import { enqueueExport } from "./integrations/woo-ops-service";
 import { drainOutbox, refreshOutboxForConnection } from "./integrations/outbox-service";
+import { saveWebsiteSetup, type WebsiteSetupPatch } from "./website/setup-service";
+import { saveOwnerThemeSettings } from "./cms/owner-bridge";
+import { cmsPurgeCdn } from "./cms/website-service";
 import {
   decryptReservationPhones,
   encryptReservationPhone,
@@ -4962,6 +4965,39 @@ const integrationsConnectionTest: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true } };
 };
 
+// ── Issue #883 package 2, batch BC — the secretless CMS ops ─────────────────
+const websiteSetupSave: AutopilotExecutor = async (ctx) => {
+  const patch = copyIfDefined({}, ctx.payload, [
+    "domain", "domainMode", "domainYears", "cdnProvider", "cdnStatus", "cdnNote",
+    "siteType", "siteName", "planKey",
+  ]) as unknown as WebsiteSetupPatch;
+  const result = await saveWebsiteSetup(ctx.businessId, patch);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { setup: result.data } };
+};
+const websiteDesignThemeSave: AutopilotExecutor = async (ctx) => {
+  const result = await saveOwnerThemeSettings(ctx.businessId, {
+    values:
+      ctx.payload.values && typeof ctx.payload.values === "object" && !Array.isArray(ctx.payload.values)
+        ? (ctx.payload.values as Record<string, string>)
+        : undefined,
+    clear: Array.isArray(ctx.payload.clear)
+      ? ctx.payload.clear.filter((v): v is string => typeof v === "string")
+      : undefined,
+  });
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { settings: result.data } };
+};
+const websiteCdnPurge: AutopilotExecutor = async (ctx) => {
+  const urls =
+    Array.isArray(ctx.payload.urls) && ctx.payload.urls.every((url) => typeof url === "string")
+      ? (ctx.payload.urls as string[])
+      : undefined;
+  const result = await cmsPurgeCdn(ctx.businessId, urls);
+  if (!result.ok) return fail(result.error);
+  return { ok: true, result: { ok: true } };
+};
+
 // ── Issue #883 package 2, batch AQ — workspace projects close + contracts ─
 // Every lane mirrors its route: the workspace engine key is the MCP
 // capability; requireProjectCapability/resolveWorkspaceSubject re-runs the
@@ -7191,6 +7227,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   integrationsSyncCustomers,
   integrationsSyncInventory,
   integrationsConnectionTest,
+  websiteSetupSave,
+  websiteDesignThemeSave,
+  websiteCdnPurge,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,

@@ -15,13 +15,11 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (9)
+### Tenant (7)
 - **pos.orders** (POS · Orders (open, amend, pay, refund/returns)) — partial
 - **inventory.items** (Inventory · Stock items & stock levels) — partial
 - **cms.posts-products** (Website / CMS · Posts & products (publish, update)) — partial
 - **cms.drafts-pages-media** (Website / CMS · Drafts, pages, website media) — partial
-- **cms.setup-design-domain** (Website / CMS · Connection, setup/build, design, domain/DNS, CDN) — partial
-- **cms.orders** (Website / CMS · Website orders) — partial
 - **cms.woocommerce** (Website / CMS · WooCommerce manager (posts, queue, syncs)) — partial
 - **workspace.aec** (Workspace · AEC registers (RFIs, change orders, payment certificates, submittals, site issues, procurement)) — partial
 - **misc.audit-orders** (Cross-cutting · Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup) — partial
@@ -49,7 +47,7 @@ Route files scanned: **881**. Rows: tenant **80**, platform **19**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 56 · partial: 9 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 7
+Counts — covered: 57 · partial: 7 · MCP gap: 0 · backend gap: 0 · n/a (infra): 7 · duplicate surface: 1 · route-only (by design): 8
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -95,8 +93,8 @@ Counts — covered: 56 · partial: 9 · MCP gap: 0 · backend gap: 0 · n/a (inf
 | Website / CMS | Website overview & state | get_website_status | — | — | — | — | cms.view | — | get_website_status | integration/website.integration.test.ts | covered |
 | Website / CMS | Order events, revalidate, public website connector endpoints (leads, managers, billing) | (route only) | (route only) | — | (route only) | — | billing.manage, website.view | — | — | — | n/a (infra) |
 | Website / CMS | Drafts, pages, website media<br>_page publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope_ | list_cms_media, list_cms_pages, list_website_posts | website.post.draft | website.post.update | (route only) | — | cms.content_manage, cms.publish, cms.view | connection mode | list_cms_media, list_cms_pages, list_website_posts, website.post.draft, website.post.update | integration/website-sync.integration.test.ts | partial |
-| Website / CMS | Connection, setup/build, design, domain/DNS, CDN<br>_credential paths (connect/disconnect keys, sync-switch toggles) and the domain PURCHASE flow stay route-only: secrets never cross the chat channel and buying a domain is wallet spend — see issue #883 package 2 follow-ups_ | get_website_cdn, get_website_dns, get_website_status | (route only) | website.domain.set | (route only) | — | cms.configure, cms.view | connection mode | get_website_cdn, get_website_dns, get_website_status, website.domain.set | integration/website-sync.integration.test.ts | partial |
-| Website / CMS | Website orders<br>_orders are read on the connected site itself — this lane owns only the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock_ | — | — | (route only) | website.order.status | — | cms.content_manage | step-up (always approve) | website.order.status | integration/website-sync.integration.test.ts | partial |
+| Website / CMS | Connection, setup/build, design, domain/DNS, CDN<br>_batch BC: the secretless ops are live (setup answers, theme tokens, CDN purge). Credential paths (connect/disconnect keys, sync-switch toggles), the domain PURCHASE flow (wallet spend), and the publish-family buttons (site build/deploy, page-publish) stay route-only: secrets never cross the chat channel and publishing a public surface stays a human-confirmed action off-MCP, the same rule website.post.publish documents in tools.ts_ | get_website_cdn, get_website_dns, get_website_status | website.design.theme.save | website.domain.set, website.setup.save | website.cdn.purge | — | cms.configure, cms.view | connection mode | get_website_cdn, get_website_dns, get_website_status, website.design.theme.save, website.domain.set, website.setup.save, website.cdn.purge | integration/website-sync.integration.test.ts | route-only (by design) |
+| Website / CMS | Website orders<br>_orders are read on the connected site itself — this lane owns only the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock_ | — | — | website.order.status | — | — | cms.content_manage | step-up (always approve) | website.order.status | integration/website-sync.integration.test.ts | covered |
 | Website / CMS | WooCommerce manager (posts, queue, syncs)<br>_content/queue reads ride list_website_* plus these manager views; retry/flush only re-pend events the shop already approved or wake the drainer early — connection resolution follows the screens (single active shop implicit, several need connectionId)_ | get_wp_overview, get_wp_queue_summary, list_wp_queue | (route only) | — | (route only) | wp.queue.flush, wp.queue.retry, wp.queue.retry_all_failed | woocommerce.manage, woocommerce.sync, woocommerce.view | connection mode | get_wp_overview, get_wp_queue_summary, list_wp_queue, wp.queue.flush, wp.queue.retry, wp.queue.retry_all_failed | — | partial |
 | Workspace | Projects, members, phases<br>_AQ close-out: member/phase lanes re-run requireProjectCapability exactly like their routes; last-owner removal is refused in service_ | get_workspace_project_status, list_workspace_projects | project.create, project.member.set, project.phase.create | project.update | project.member.remove | — | workspace.manage, workspace.view | connection mode | get_workspace_project_status, list_workspace_projects, project.create, project.member.set, project.phase.create, project.update, project.member.remove | integration/workspace.integration.test.ts | covered |
 | Workspace | Tasks, checklist, dependencies | list_workspace_tasks | task.create | task.update | task.status | — | workspace.manage, workspace.view | connection mode | list_workspace_tasks, task.create, task.update, task.status | integration/workspace.integration.test.ts | covered |
