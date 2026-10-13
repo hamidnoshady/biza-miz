@@ -51,7 +51,7 @@ export interface CoverageEntity {
    *  - `"duplicate surface"` — legacy alias routes already covered elsewhere.
    * Absent ⇒ status is derived from the ops columns.
    */
-  status?: "backend gap" | "n/a (infra)" | "duplicate surface";
+  status?: "backend gap" | "n/a (infra)" | "duplicate surface" | "route-only (by design)";
 }
 
 /**
@@ -456,6 +456,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Growth",
     entity: "Growth overview, settings, campaign audience, accounting",
     routes: ["growth"],
+    status: "route-only (by design)",
     ops: { listDetail: ["list_message_templates", "list_message_campaigns"], lifecycle: ["messaging.campaign.pause", "messaging.campaign.resume", "messaging.campaign.launch"] },
     note: "growth settings screen (channels, tariffs, attribution windows) stays route-only — Twilio/SMS sender configuration is credential-shaped and never crosses the chat channel; campaign draft creation is proposal-only by design (see growth.messaging)",
     test: "integration/crm.integration.test.ts",
@@ -752,6 +753,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Business config",
     entity: "Tenant billing (plans/packages, wallet, payments)",
     routes: ["billing"],
+    status: "route-only (by design)",
     note: "tenant billing lanes (initiate payment → gateway redirect → verify) are browser-bound: the gateway returns a redirect the user's browser must follow, and verifyPayment expects the PSP callback params — no chat-side verb can complete the dance; wallet top-up/purchase design note stands (route-owned), see billing-service fulfilPurchasedPayment",
     test: "integration/billing.integration.test.ts",
   },
@@ -869,6 +871,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Sales",
     entity: "Sales invoices & voids",
     routes: ["sales"],
+    status: "route-only (by design)",
     ops: {
       listDetail: ["list_sales_invoices", "get_sales_invoice"],
       lifecycle: ["sales.invoice.void"],

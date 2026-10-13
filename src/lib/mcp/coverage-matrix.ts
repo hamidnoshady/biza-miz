@@ -94,7 +94,7 @@ interface DerivedRow {
   /** op column -> MCP verbs (empty = route only) */
   ops: Record<OpKey, string[]>;
   columnsPresent: Column[];
-  status: "covered" | "partial" | "MCP gap" | "backend gap" | "n/a (infra)" | "duplicate surface";
+  status: "covered" | "partial" | "MCP gap" | "backend gap" | "n/a (infra)" | "duplicate surface" | "route-only (by design)";
   approval: string;
   perms: string[];
 }
@@ -185,7 +185,7 @@ function cell(row: DerivedRow, column: Column): string {
 function statusCounts(rows: DerivedRow[]): string {
   const counts = new Map<string, number>();
   for (const r of rows) counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
-  const order = ["covered", "partial", "MCP gap", "backend gap", "n/a (infra)", "duplicate surface"];
+  const order = ["covered", "partial", "MCP gap", "backend gap", "n/a (infra)", "duplicate surface", "route-only (by design)"];
   return order.map((s) => `${s}: ${counts.get(s) ?? 0}`).join(" · ");
 }
 
