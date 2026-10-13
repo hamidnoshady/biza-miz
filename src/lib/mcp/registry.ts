@@ -45,7 +45,7 @@ export interface McpReadRegistryEntry {
   app: McpApp;
   branchPolicy: McpBranchPolicy;
   /** The tool runs only for certain trades (refuses politely otherwise). */
-  module?: "cosmetics" | "aec";
+  module?: "cosmetics" | "accessories" | "aec";
 }
 
 export interface McpWriteRegistryEntry {
@@ -126,6 +126,11 @@ export const MCP_READ_REGISTRY: readonly McpReadRegistryEntry[] = [
   // Batch AM read — jewelry weight items, scoped to the pinned branch exactly
   // like the vertical_jewelry items table (listWeightItems(locationId)).
   { name: "list_jewelry_items", kind: "read", app: "pos", branchPolicy: "pinned" },
+  // Batch AN reads — the cosmetics board/brand directory and the accessories
+  // board, all location-scoped like their routes' resolveActiveLocation.
+  { name: "list_cosmetic_items", kind: "read", app: "pos", branchPolicy: "pinned", module: "cosmetics" },
+  { name: "list_cosmetic_brands", kind: "read", app: "pos", branchPolicy: "pinned", module: "cosmetics" },
+  { name: "list_accessory_items", kind: "read", app: "pos", branchPolicy: "pinned", module: "accessories" },
   // Batch G — inventory readings and the suppliers directory.
   { name: "list_stock_counts", kind: "read", app: "pos", branchPolicy: "agnostic" },
   { name: "get_stock_count", kind: "read", app: "pos", branchPolicy: "agnostic" },
@@ -514,6 +519,19 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch AM — consignor directory creation is a plain record insert (no
   // ledger movement), so it follows the low-risk mode rule like catalog CRUD.
   { actionType: "jewelry.consignor.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Batch AN — cosmetics & accessories lanes. No money moves on any of these
+  // except the accessory sale, which is an ordinary retail checkout; all stay
+  // mode/low like the stock-room screens they mirror.
+  { actionType: "cosmetics.brand.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "cosmetics.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "cosmetics.batch.receive", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "cosmetics.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "cosmetics.tester.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "cosmetics.profile.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "cosmetics.matrix.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "accessories.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "accessories.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "accessories.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "table.session.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "media.collection.rename", kind: "write", app: "workspace", risk: "low", approval: "mode" },

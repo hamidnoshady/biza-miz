@@ -891,7 +891,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Verticals",
     entity: "Cosmetics (rot management, suppliers, reports)",
     routes: ["cosmetics"],
-    ops: { listDetail: ["get_near_expiry_items"] },
+    ops: {
+      listDetail: ["get_near_expiry_items", "list_cosmetic_items", "list_cosmetic_brands"],
+      create: ["cosmetics.brand.create", "cosmetics.item.create", "cosmetics.matrix.create", "cosmetics.batch.receive"],
+      update: ["cosmetics.stock.update", "cosmetics.profile.update", "cosmetics.tester.open"],
+    },
+    note: "AN closes the write surface except expired-batch write-offs: those destroy value deliberately and stay in-app like inventory.waste.log (no MCP verb anywhere for value-destructive writedowns)",
     test: "integration/cosmetics.integration.test.ts",
   },
   {
@@ -913,6 +918,12 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Verticals",
     entity: "Accessories (mobile/PC sale & repair)",
     routes: ["accessories"],
+    ops: {
+      listDetail: ["list_accessory_items"],
+      create: ["accessories.item.create", "accessories.stock.update"],
+      lifecycle: ["accessories.item.sell"],
+    },
+    note: "AN close-out: sale rides ordersCreate like checkout and mirrors the MissingLedgerAccountError envelope; specialized variant-sales report route stays report-surface only (no MCP analytics reads)",
     test: "integration/accessories.integration.test.ts",
   },
   {

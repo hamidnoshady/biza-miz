@@ -60,6 +60,9 @@ import { listMembers } from "./team-service";
 import { getBackupHealth, listBackupRuns } from "./backup-service";
 import { listDevices, findActiveDeviceId } from "./device-service";
 import { listWeightItems } from "./items-service";
+import { listCosmeticBoard } from "./cosmetics-service";
+import { listBrands } from "./item-brands-service";
+import { listVariantBoard } from "./accessories-service";
 import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
 import { listStockCounts, getStockCountDetail } from "./stock-count-service";
 import { listWorkspaceProjects } from "./workspace";
@@ -1697,6 +1700,42 @@ export async function runReadTool(
       if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
       const items = await listWeightItems(pinned.locationId);
       return { ok: true, data: { locationId: pinned.locationId, count: items.length, items } };
+    }
+    // Issue #883 package 2, batch AN — cosmetics board & brand directory plus
+    // the accessories board; all pinned-branch, same polite industry refusal
+    // as get_near_expiry_items.
+    case "list_cosmetic_items": {
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== "cosmetics") {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای آرایشی و بهداشتی در دسترس است." } };
+      }
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const board = await listCosmeticBoard(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
+    }
+    case "list_cosmetic_brands": {
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== "cosmetics") {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای آرایشی و بهداشتی در دسترس است." } };
+      }
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const brands = await listBrands(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: brands.length, brands } };
+    }
+    case "list_accessory_items": {
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== "accessories") {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای لوازم‌جانبی در دسترس است." } };
+      }
+      const pinned = await pinnedLocation(businessId, args, mcpScope);
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const board = await listVariantBoard(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
     }
     // Issue #883 package 2, batch AI — paired devices.
     case "list_devices": {

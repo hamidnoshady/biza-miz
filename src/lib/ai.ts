@@ -411,6 +411,19 @@ export type ActionType =
   // Batch AM — consignor directory close-out: creation only (the UI has no
   // PATCH/DELETE on /jewelry/consignors either).
   | "jewelry.consignor.create"
+  // Batch AN — cosmetics & accessories verticals. Plain catalog/stock moves
+  // behind inventoryAdjust; the one accessory sale rides ordersCreate exactly
+  // like checkout (route gate), still mode/low like every retail sale.
+  | "cosmetics.brand.create"
+  | "cosmetics.item.create"
+  | "cosmetics.batch.receive"
+  | "cosmetics.stock.update"
+  | "cosmetics.tester.open"
+  | "cosmetics.profile.update"
+  | "cosmetics.matrix.create"
+  | "accessories.item.create"
+  | "accessories.item.sell"
+  | "accessories.stock.update"
   // Batch L — inventory transfers & warehouse documents. Contract copied from
   // the routes: transfers ride the four client-tx services in
   // transfer-service (idempotency-key required, exactly like the screen); the
@@ -469,6 +482,16 @@ export type AutopilotExecutorKey =
   | "jewelryConsignorPayout"
   | "jewelryPriceRecord"
   | "jewelryConsignorCreate"
+  | "cosmeticsBrandCreate"
+  | "cosmeticsItemCreate"
+  | "cosmeticsBatchReceive"
+  | "cosmeticsStockUpdate"
+  | "cosmeticsTesterOpen"
+  | "cosmeticsProfileUpdate"
+  | "cosmeticsMatrixCreate"
+  | "accessoriesItemCreate"
+  | "accessoriesItemSell"
+  | "accessoriesStockUpdate"
   | "jewelryItemCreate"
   | "jewelryItemUpdate"
   | "jewelryStoneAdd"
@@ -1534,6 +1557,86 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "ثبت امانت‌دار جدید — نام (+ تلفن و یادداشت اختیاری)؛ مثل فرم دیرکتوری امانت‌داران",
     payloadHint: '{ name: string, phone?: string|null, notes?: string|null }',
     executor: "jewelryConsignorCreate",
+  },
+  "cosmetics.brand.create": {
+    type: "cosmetics.brand.create",
+    endpoint: "/api/cosmetics/brands",
+    method: "POST",
+    label: "ثبت برند آرایشی جدید در شعبهٔ جاری — نام اجباری، کشور و خط محصول اختیاری",
+    payloadHint: '{ name: string, country?: string|null, productLine?: string|null }',
+    executor: "cosmeticsBrandCreate",
+  },
+  "cosmetics.item.create": {
+    type: "cosmetics.item.create",
+    endpoint: "/api/cosmetics/items",
+    method: "POST",
+    label: "ایجاد خانوادهٔ کالا یا یک تنوع آرایشی — بدون parentItemId خانواده ساخته می‌شود",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "cosmeticsItemCreate",
+  },
+  "cosmetics.batch.receive": {
+    type: "cosmetics.batch.receive",
+    endpoint: "/api/cosmetics/items/{id}/batches",
+    method: "POST",
+    label: "ورود بچ (لات) برای کالای بچ‌محور — شماره بچ، تعداد، بهای واحد؛ بچ تکراری با موجودی ادغام می‌شود",
+    payloadHint: '{ id: string, batchNumber: string, quantity: string, unitCost: int≥0, expiryDate?: string|null, supplierReference?: string|null }',
+    executor: "cosmeticsBatchReceive",
+  },
+  "cosmetics.stock.update": {
+    type: "cosmetics.stock.update",
+    endpoint: "/api/cosmetics/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت‌گذاری قفسهٔ یک قلم آرایشی — مثل فرم ورود کالا",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "cosmeticsStockUpdate",
+  },
+  "cosmetics.tester.open": {
+    type: "cosmetics.tester.open",
+    endpoint: "/api/cosmetics/items/{id}/tester",
+    method: "POST",
+    label: "بازکردن تستر — یک واحد قابل‌فروش از موجودی کم و به تستر اختصاص می‌یابد (FEFO روی بچ‌ها)",
+    payloadHint: '{ id: string }',
+    executor: "cosmeticsTesterOpen",
+  },
+  "cosmetics.profile.update": {
+    type: "cosmetics.profile.update",
+    endpoint: "/api/cosmetics/items/{id}/profile",
+    method: "POST",
+    label: "به‌روزرسانی پروفایل قلم آرایشی — برند، کد IRC، پروانه بهداشت، ثبت اصالت، تگ‌ها",
+    payloadHint: '{ id: string, brandId?: string|null, ircCode?: string|null, healthPermit?: string|null, authenticityRegistration?: string|null, tags?: string[] }',
+    executor: "cosmeticsProfileUpdate",
+  },
+  "cosmetics.matrix.create": {
+    type: "cosmetics.matrix.create",
+    endpoint: "/api/cosmetics/matrix",
+    method: "POST",
+    label: "ساخت ماتریس تنوع — یک خانواده + همهٔ ترکیب‌های دو محور (مثل رنگ × حجم) یکجا",
+    payloadHint: '{ parentName: string, parentSku?: string|null, axisA: {name, values[]}, axisB: {name, values[]} }',
+    executor: "cosmeticsMatrixCreate",
+  },
+  "accessories.item.create": {
+    type: "accessories.item.create",
+    endpoint: "/api/accessories/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع کالای لوازم‌جانبی — مثل برد فروشگاه موبایل/کامپیوتر",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "accessoriesItemCreate",
+  },
+  "accessories.item.sell": {
+    type: "accessories.item.sell",
+    endpoint: "/api/accessories/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع لوازم‌جانبی — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "accessoriesItemSell",
+  },
+  "accessories.stock.update": {
+    type: "accessories.stock.update",
+    endpoint: "/api/accessories/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم لوازم‌جانبی — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "accessoriesStockUpdate",
   },
   "jewelry.item.create": {
     type: "jewelry.item.create",
@@ -4075,6 +4178,45 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           name: "list_jewelry_items",
           description:
             "قلم‌های طلای وزنی تنانت در شعبهٔ جاری — نام، عیار، وزن و موجودی؛ متناظر جدول اقلام در بخش طلا.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_cosmetic_items",
+          description:
+            "برد اقلام آرایشی شعبهٔ جاری — خانواده‌ها و تنوع‌ها با موجودی/قیمت/وضعیت بچ؛ فقط برای کسب‌وکارهای آرایشی.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_cosmetic_brands",
+          description:
+            "برندهای آرایشی ثبت‌شده در شعبهٔ جاری — نام، کشور، خط محصول؛ فقط برای کسب‌وکارهای آرایشی.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_accessory_items",
+          description:
+            "برد فروشگاه لوازم‌جانبی شعبهٔ جاری — خانواده‌ها و تنوع‌ها با صفات، موجودی و قیمت؛ فقط کسب‌وکارهای لوازم‌جانبی.",
           parameters: {
             type: "object",
             properties: {},

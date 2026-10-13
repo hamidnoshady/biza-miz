@@ -33,7 +33,25 @@ import { decideEstimateApproval } from "./aec-boq-service";
 import { decideCertificateApproval, decideVariationApproval } from "./aec-commercial-service";
 import { decideCommitmentApproval, decideMaterialRequestApproval } from "./aec-procurement-service";
 import { decideSubmittalApproval } from "./aec-rfi-service";
-import { createItem, getItem, setWeightAttributes, getWeightAttributes, addStone, removeStone } from "./items-service";
+import { createItem, createVariantChild, getItem, setWeightAttributes, getWeightAttributes, addStone, removeStone } from "./items-service";
+import { validateVariantAttributes, type VariantAttributeInput } from "./items";
+import { createBrand, updateItemProfile, type ItemProfileInput } from "./item-brands-service";
+import {
+  receiveBatch as receiveCosmeticBatch,
+  openTester as openCosmeticTester,
+  createVariantMatrix as createCosmeticMatrix,
+  receiveStock as receiveCosmeticStock,
+  setUnitPrice as setCosmeticUnitPrice,
+} from "./cosmetics-service";
+import {
+  sellAccessoryUnits,
+  receiveStock as receiveAccessoryStock,
+  setUnitPrice as setAccessoryUnitPrice,
+  setInitialUnitCost,
+  type ItemStock,
+} from "./accessories-service";
+import type { MatrixAxis } from "./variant-matrix";
+import type { SettlementMethod } from "./ledger";
 import { validateWeightAttributes } from "./gold";
 import { markAsConsigned, createConsignor, payConsignor } from "./consignment-service";
 import { recordItemEvent } from "./item-audit-service";
@@ -2708,6 +2726,295 @@ const jewelryConsignorCreate: AutopilotExecutor = async (ctx) => {
   }
 };
 
+// ── Issue #883 package 2, batch AN — cosmetics & accessories lanes ───────
+// Same discipline as AL1/AL2: every executor mirrors its route 1:1 — the
+// same validation order, the same client transaction where the route has
+// one, the same error envelope, the same item-audit events.
+async function verticalLocation(ctx: AutopilotExecutorContext): Promise<{ locationId: string } | AutopilotExecutionResult> {
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("no_location");
+  return { locationId: branch.locationId };
+}
+function variantAttributesFrom(payload: unknown): VariantAttributeInput[] | null {
+  if (payload == null) return [];
+  if (!Array.isArray(payload)) return null;
+  const attrs: VariantAttributeInput[] = [];
+  for (const entry of payload) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const name = (entry as Record<string, unknown>).name;
+    const value = (entry as Record<string, unknown>).value;
+    if (typeof name !== "string" || typeof value !== "string") return null;
+    attrs.push({ name, value });
+  }
+  return attrs;
+}
+/** Shared by cosmetics.item.create and accessories.item.create — the two routes are byte-identical in contract. */
+async function createVariantItem(ctx: AutopilotExecutorContext): Promise<AutopilotExecutionResult> {
+  const name = str(ctx.payload.name);
+  if (!name) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const sku = str(ctx.payload.sku) ?? null;
+  const parentItemId = str(ctx.payload.parentItemId);
+  if (!parentItemId) {
+    const item = await createItem({ locationId: branch.locationId, name, sku, kind: "variant_parent" });
+    return { ok: true, result: { ok: true, item } };
+  }
+  const parent = await getItem(parentItemId);
+  if (!parent || parent.locationId !== branch.locationId || parent.kind !== "variant_parent") {
+    return fail("item_not_found");
+  }
+  const attributes = variantAttributesFrom(ctx.payload.attributes);
+  if (!attributes) return { ok: false, result: { error: "bad_request" }, errorCode: "bad_request" };
+  const attributeErrors = validateVariantAttributes(attributes);
+  if (attributeErrors.length > 0) {
+    return { ok: false, result: { error: "invalid_attributes", message: attributeErrors.join("؛ ") }, errorCode: "invalid_attributes" };
+  }
+  const item = await createVariantChild(parent.id, branch.locationId, name, sku, attributes);
+  return { ok: true, result: { ok: true, item } };
+}
+const cosmeticsBrandCreate: AutopilotExecutor = async (ctx) => {
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  try {
+    const brand = await createBrand(branch.locationId, {
+      name: str(ctx.payload.name) ?? "",
+      country: str(ctx.payload.country),
+      productLine: str(ctx.payload.productLine),
+    });
+    return { ok: true, result: { ok: true, brand } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+const cosmeticsItemCreate: AutopilotExecutor = async (ctx) => createVariantItem(ctx);
+const cosmeticsBatchReceive: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const batch = await receiveCosmeticBatch(client, {
+      itemId: id,
+      batchNumber: str(ctx.payload.batchNumber) ?? "",
+      expiryDate: str(ctx.payload.expiryDate),
+      quantity: str(ctx.payload.quantity) ?? "0",
+      unitCost: Number(ctx.payload.unitCost ?? 0),
+      supplierReference: str(ctx.payload.supplierReference),
+    });
+    // The route records the audit event on the pool (not the tx client) —
+    // mirrored deliberately so behaviour matches byte-for-byte.
+    await recordItemEvent({
+      businessId: ctx.businessId,
+      locationId: item.locationId,
+      itemId: id,
+      eventType: "item.batch_received",
+      payload: {
+        batchNumber: batch.batchNumber,
+        expiryDate: batch.expiryDate,
+        quantity: batch.quantity,
+        unitCost: batch.unitCost,
+      },
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, batch } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  } finally {
+    client.release();
+  }
+};
+/** Shared by cosmetics.stock.update and accessories.stock.update — same shape, only the accessory lane adds the opening-cost branch. */
+const stockUpdateExecutor = (opts: {
+  receive: (itemId: string, input: { quantity: string; unitCost: number }) => Promise<ItemStock>;
+  setPrice: (itemId: string, unitPrice: number) => Promise<unknown>;
+  withInitialCost?: boolean;
+}): AutopilotExecutor => async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  try {
+    const hasUnitPrice = ctx.payload.unitPrice != null;
+    const hasQuantity = ctx.payload.quantity != null;
+    if (hasUnitPrice) {
+      await opts.setPrice(id, Number(ctx.payload.unitPrice));
+      await recordItemEvent({
+        businessId: ctx.businessId,
+        locationId: item.locationId,
+        itemId: id,
+        eventType: "item.price_changed",
+        payload: { unitPrice: Number(ctx.payload.unitPrice) },
+        createdBy: ctx.authorizedByUserId,
+      });
+    }
+    const stock = hasQuantity
+      ? await opts.receive(id, { quantity: String(ctx.payload.quantity), unitCost: Number(ctx.payload.unitCost ?? 0) })
+      : null;
+    if (opts.withInitialCost && !hasQuantity && ctx.payload.unitCost != null) {
+      await setInitialUnitCost(id, Number(ctx.payload.unitCost));
+    }
+    if (stock) {
+      await recordItemEvent({
+        businessId: ctx.businessId,
+        locationId: item.locationId,
+        itemId: id,
+        eventType: "item.stock_received",
+        payload: {
+          quantity: String(ctx.payload.quantity),
+          unitCost: Number(ctx.payload.unitCost ?? 0),
+          quantityOnHand: stock.quantity,
+          averageUnitCost: stock.unitCost,
+        },
+        createdBy: ctx.authorizedByUserId,
+      });
+    }
+    return { ok: true, result: { ok: true, stock } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+const cosmeticsStockUpdate = stockUpdateExecutor({ receive: receiveCosmeticStock, setPrice: setCosmeticUnitPrice });
+const accessoriesStockUpdate = stockUpdateExecutor({
+  receive: receiveAccessoryStock,
+  setPrice: setAccessoryUnitPrice,
+  withInitialCost: true,
+});
+const cosmeticsTesterOpen: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await openCosmeticTester(client, {
+      businessId: ctx.businessId,
+      locationId: item.locationId,
+      itemId: id,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return { ok: false, result: { error: "tester_failed", message: (err as Error).message }, errorCode: "tester_failed" };
+  } finally {
+    client.release();
+  }
+};
+const cosmeticsProfileUpdate: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  const tags = Array.isArray(ctx.payload.tags) ? ctx.payload.tags.filter((t): t is string => typeof t === "string") : [];
+  const profile: ItemProfileInput = {
+    brandId: str(ctx.payload.brandId),
+    ircCode: str(ctx.payload.ircCode),
+    healthPermit: str(ctx.payload.healthPermit),
+    authenticityRegistration: str(ctx.payload.authenticityRegistration),
+    tags,
+  };
+  try {
+    await updateItemProfile(id, profile);
+    await recordItemEvent({
+      businessId: ctx.businessId,
+      locationId: item.locationId,
+      itemId: id,
+      eventType: "item.profile_changed",
+      payload: {
+        brandId: profile.brandId ?? null,
+        ircCode: profile.ircCode ?? null,
+        healthPermit: profile.healthPermit ?? null,
+        authenticityRegistration: profile.authenticityRegistration ?? null,
+        tags,
+      },
+      createdBy: ctx.authorizedByUserId,
+    });
+    return { ok: true, result: { ok: true } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+const cosmeticsMatrixCreate: AutopilotExecutor = async (ctx) => {
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const axisOf = (raw: unknown): MatrixAxis => {
+    const o = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+    return {
+      name: typeof o.name === "string" ? o.name : "",
+      values: Array.isArray(o.values) ? o.values.filter((v): v is string => typeof v === "string") : [],
+    };
+  };
+  try {
+    const result = await createCosmeticMatrix({
+      locationId: branch.locationId,
+      parentName: str(ctx.payload.parentName) ?? "",
+      parentSku: str(ctx.payload.parentSku),
+      axisA: axisOf(ctx.payload.axisA),
+      axisB: axisOf(ctx.payload.axisB),
+    });
+    return { ok: true, result: { ok: true, ...result } };
+  } catch (err) {
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  }
+};
+const accessoriesItemCreate: AutopilotExecutor = async (ctx) => createVariantItem(ctx);
+const accessoriesItemSell: AutopilotExecutor = async (ctx) => {
+  const id = str(ctx.payload.id) ?? str(ctx.payload.itemId);
+  if (!id) return fail("missing_fields");
+  const branch = await verticalLocation(ctx);
+  if ("ok" in branch) return branch;
+  const item = await getItem(id);
+  if (!item || item.locationId !== branch.locationId) return fail("item_not_found");
+  const paymentMethod = str(ctx.payload.paymentMethod) as SettlementMethod | null;
+  if (paymentMethod !== "cash" && paymentMethod !== "bank" && paymentMethod !== "credit") {
+    return fail("invalid_payment_method");
+  }
+  const vatPercent = Number(ctx.payload.vatPercent ?? 0);
+  if (!Number.isFinite(vatPercent)) return { ok: false, result: { error: "bad_request" }, errorCode: "bad_request" };
+  if (!ctx.authorizedByUserId) return fail("unauthenticated");
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await sellAccessoryUnits(client, {
+      businessId: ctx.businessId,
+      locationId: branch.locationId,
+      itemId: id,
+      quantity: str(ctx.payload.quantity) ?? "1",
+      unitPrice: ctx.payload.unitPrice != null ? Number(ctx.payload.unitPrice) : undefined,
+      discount: Number(ctx.payload.discount ?? 0),
+      vatPercent,
+      paymentMethod,
+      createdBy: ctx.authorizedByUserId,
+    });
+    await client.query("COMMIT");
+    return { ok: true, result: { ok: true, ...(result as object) } };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if (err instanceof MissingLedgerAccountError) {
+      return { ok: false, result: { error: "ledger_account_missing", code: err.code }, errorCode: "ledger_account_missing" };
+    }
+    return { ok: false, result: { error: "validation_failed", message: (err as Error).message }, errorCode: "validation_failed" };
+  } finally {
+    client.release();
+  }
+};
+
 // ── Issue #883 package 2, batch AL2 — jewelry money lanes ────────────────
 // Every verb mirrors its route 1:1: same client transaction, same ledger
 // error convention (MissingLedgerAccountError → ledger_account_missing),
@@ -4429,6 +4736,16 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   jewelryConsignorPayout,
   jewelryPriceRecord,
   jewelryConsignorCreate,
+  cosmeticsBrandCreate,
+  cosmeticsItemCreate,
+  cosmeticsBatchReceive,
+  cosmeticsStockUpdate,
+  cosmeticsTesterOpen,
+  cosmeticsProfileUpdate,
+  cosmeticsMatrixCreate,
+  accessoriesItemCreate,
+  accessoriesItemSell,
+  accessoriesStockUpdate,
   jewelryItemCreate,
   jewelryItemUpdate,
   jewelryStoneAdd,
