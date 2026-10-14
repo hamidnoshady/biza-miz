@@ -258,11 +258,10 @@ export async function listCredentials(
 
 /**
  * Issue #854 cleanup — `issueCredential` lived here: a second PIN-writing
- * path that hashed with plain bcrypt and never wrote the blind index the
- * unique-PIN constraint (P2.13) depends on. A full audit found it no callers
- * — no route, job, script, dynamic import or test ever invoked it, and the
- * live doors (`setPin`, cloud PIN replication) all write through the
- * indexed path — so it is removed rather than left as a way around the
+ * path that hashed with plain bcrypt outside `setPin`. A full audit found it
+ * no callers — no route, job, script, dynamic import or test ever invoked
+ * it, and the live doors (`setPin`, cloud PIN replication) all write through
+ * one path — so it is removed rather than left as a way around the
  * one-source-of-truth rule.
  */
 export async function revokeCredential(

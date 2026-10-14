@@ -38,4 +38,12 @@ describe("tenant navigation architecture", () => {
     expect(websiteNavSource).toContain("<AppSectionNav<WebsiteNavKey>");
     expect(websiteNavSource).not.toContain("function CollapsibleNavGroup");
   });
+
+  it("gives the ledger workspace row the same ownership rule as the app sidebar", () => {
+    // «فضای کار حسابداری» is one link whose bottom-bar tab must stay lit on
+    // the tool routes its workspace page owns — the same rule the app's own
+    // row follows — while generic matching stays in the shared route matcher.
+    expect(sidebarSource).toContain('accountingSectionHref("ledger") && isLedgerWorkspacePathname(pathname)');
+    expect(sidebarSource).toContain("return navHrefIsActive(pathname, href, search);");
+  });
 });

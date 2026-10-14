@@ -5,6 +5,7 @@ import {
   CLOUD_EMBED_UA_TOKEN,
   cloudPageUrl,
   cloudThemeScript,
+  isCloudAuthLanding,
   isCloudEmbedUserAgent,
   mirroredPath,
 } from "./cloud-embed";
@@ -99,5 +100,25 @@ describe("cloudThemeScript", () => {
     expect(cloudThemeScript("system")).toBeNull();
     expect(cloudThemeScript(undefined)).toBeNull();
     expect(cloudThemeScript('dark");alert(1);("')).toBeNull();
+  });
+});
+
+describe("isCloudAuthLanding (issue #948)", () => {
+  const cloudUrl = "https://cafe.example.com";
+
+  it("recognises the cloud's sign-in surfaces on the cloud origin", () => {
+    expect(isCloudAuthLanding("https://cafe.example.com/login", cloudUrl)).toBe(true);
+    expect(isCloudAuthLanding("https://cafe.example.com/login?next=%2Fcrm", cloudUrl)).toBe(true);
+    expect(isCloudAuthLanding("https://cafe.example.com/admin", cloudUrl)).toBe(true);
+    expect(isCloudAuthLanding("https://cafe.example.com/desktop-login", cloudUrl)).toBe(true);
+  });
+
+  it("does not fire for real screens, other origins, or junk", () => {
+    expect(isCloudAuthLanding("https://cafe.example.com/crm/overview", cloudUrl)).toBe(false);
+    // A screen merely named near a prefix is not the login door.
+    expect(isCloudAuthLanding("https://cafe.example.com/login-history", cloudUrl)).toBe(false);
+    expect(isCloudAuthLanding("https://evil.example.com/login", cloudUrl)).toBe(false);
+    expect(isCloudAuthLanding("not a url", cloudUrl)).toBe(false);
+    expect(isCloudAuthLanding("https://cafe.example.com/login", null)).toBe(false);
   });
 });

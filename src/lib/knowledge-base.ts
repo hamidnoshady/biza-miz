@@ -76,6 +76,144 @@ export const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   { key: "cosmetics", label: "آرایشی و بهداشتی", route: ACCOUNTING_WORKSPACE_HREFS.cosmetics },
 ];
 
+/**
+ * Page-specific help targets used by the article editor. The old
+ * KNOWLEDGE_SECTIONS remain as fallbacks for existing published guides and
+ * external help URLs; a page assignment always wins when present.
+ *
+ * Each entry is a real destination with a KnowledgeHelpButton (including
+ * pages served by the shared CRM/Growth/CMS/WordPress and ledger shells).
+ * Keys are stored in knowledge_articles.section_keys without a migration.
+ */
+export interface KnowledgePage {
+  key: string;
+  route: string;
+  label: string;
+  group: string;
+}
+
+function pageGroup(group: string, pages: readonly (readonly [route: string, label: string])[]): KnowledgePage[] {
+  return pages.map(([route, label]) => ({ key: `page:${route}`, route, label, group }));
+}
+
+export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
+  ...pageGroup("فروش و عملیات", [
+    ["/accounting/pos", "صندوق فروش"],
+    ["/accounting/orders", "سفارش‌ها"],
+    ["/accounting/inventory", "انبار"],
+    ["/accounting/reports", "گزارش‌های کسب‌وکار"],
+    ["/accounting/reservations", "رزروها"],
+    ["/accounting/delivery", "ارسال و پیک"],
+    ["/accounting/floor", "نقشهٔ سالن"],
+    ["/accounting/kitchen", "آشپزخانه"],
+    ["/accounting/waiter", "میزهای من"],
+    ["/accounting/jewelry", "طلا و جواهر"],
+    ["/accounting/watch", "ساعت"],
+    ["/accounting/cosmetics", "آرایشی و بهداشتی"],
+    ["/accounting/products", "محصولات"],
+    ["/accounting/products/new", "افزودن محصول"],
+    ["/accounting/products/prices", "به‌روزرسانی قیمت‌ها"],
+    ["/accounting/products/attributes", "ویژگی‌های محصول"],
+    ["/accounting/products/reports", "گزارش‌های کالا"],
+    ["/accounting/products/barcode-templates", "الگوهای بارکد"],
+  ]),
+  ...pageGroup("حسابداری", [
+    ["/accounting/overview", "داشبورد حسابداری"],
+    ["/accounting/ledger", "فضای کار حسابداری"],
+    ["/accounting/trial-balance", "تراز آزمایشی"],
+    ["/accounting/entries", "دفتر روزنامه"],
+    ["/accounting/manual", "ثبت سند دستی"],
+    ["/accounting/expenses", "هزینه‌ها"],
+    ["/accounting/fiscal-periods", "دوره‌های مالی"],
+    ["/accounting/directory", "اشخاص"],
+    ["/accounting/receivables", "حساب‌های دریافتنی"],
+    ["/accounting/payables", "حساب‌های پرداختنی"],
+    ["/accounting/receipts", "دریافت و پرداخت"],
+    ["/accounting/installments", "اقساط"],
+    ["/accounting/cheques", "چک‌ها"],
+    ["/accounting/reconciliation", "تطبیق بانکی"],
+    ["/accounting/multicurrency", "ارز و تسعیر"],
+    ["/accounting/chart-of-accounts", "سرفصل حساب‌ها"],
+    ["/accounting/payroll", "حقوق و دستمزد"],
+    ["/accounting/vat", "گزارش مالیات"],
+    ["/accounting/tax-invoices", "صورتحساب مؤدیان"],
+    ["/accounting/fixed-assets", "دارایی‌های ثابت"],
+    ["/accounting/financial-reports", "گزارش‌های مالی"],
+    ["/accounting/growth", "رشد در حسابداری"],
+    ["/accounting/settings", "تنظیمات حسابداری"],
+  ]),
+  ...pageGroup("ارتباط با مشتری (CRM)", [
+    ["/crm/overview", "میز کار CRM"],
+    ["/crm/directory", "مشتریان CRM"],
+    ["/crm/persons", "پروندهٔ شخص"],
+    ["/crm/deals", "فرصت‌ها"],
+    ["/crm/leads", "سرنخ‌ها"],
+    ["/crm/activities", "کارها و پیگیری‌ها"],
+    ["/crm/cases", "تیکت‌های خدمات"],
+    ["/crm/segments", "بخش‌بندی مشتری"],
+    ["/crm/consent", "رضایت ارتباط"],
+    ["/crm/quality", "کیفیت داده"],
+    ["/crm/audit", "سابقهٔ تصمیم‌ها"],
+    ["/crm/settings", "تنظیمات CRM"],
+  ]),
+  ...pageGroup("رشد و بازاریابی", [
+    ["/growth/overview", "میز کار رشد"],
+    ["/growth/customers", "مخاطبان"],
+    ["/growth/campaigns", "کمپین‌ها"],
+    ["/growth/messaging", "پیام‌رسانی"],
+    ["/growth/gift-cards", "کارت هدیه"],
+    ["/growth/loyalty", "وفاداری و اعتبار"],
+    ["/growth/commission", "پورسانت فروشندگان"],
+    ["/growth/settings", "تنظیمات رشد"],
+  ]),
+  ...pageGroup("وب‌سایت و اشوبه CMS", [
+    ["/websites/overview", "میز کار وب‌سایت‌ها"],
+    ["/websites/cms", "میز کار سایت اشوبه"],
+    ["/websites/cms/setup", "ساخت سایت"],
+    ["/websites/cms/pages", "صفحه‌های سایت"],
+    ["/websites/cms/posts", "نوشته‌های سایت"],
+    ["/websites/cms/media", "رسانه‌های سایت"],
+    ["/websites/cms/products", "محصولات سایت"],
+    ["/websites/cms/orders", "سفارش‌های سایت"],
+    ["/websites/cms/design", "طراحی و پوسته"],
+    ["/websites/cms/domain", "دامنه و DNS"],
+    ["/websites/cms/settings", "تنظیمات سایت"],
+    ["/websites/cms/billing", "اشتراک سایت"],
+  ]),
+  ...pageGroup("وردپرس و ووکامرس", [
+    ["/websites/wp", "میز کار وردپرس"],
+    ["/websites/wp/products", "محصولات وردپرس"],
+    ["/websites/wp/orders", "سفارش‌های وردپرس"],
+    ["/websites/wp/customers", "مشتریان وردپرس"],
+    ["/websites/wp/taxonomies", "دسته‌ها و ویژگی‌های وردپرس"],
+    ["/websites/wp/content", "محتوای وردپرس"],
+    ["/websites/wp/media", "رسانه‌های وردپرس"],
+    ["/websites/wp/queue", "صف و رویدادهای وردپرس"],
+  ]),
+  ...pageGroup("میز کار من", [
+    ["/workspace", "میز کار من"],
+    ["/workspace/projects", "پروندهٔ پروژه"],
+  ]),
+  ...pageGroup("تنظیمات پلتفرم", [
+    ["/settings", "تنظیمات"],
+    ["/settings/connections", "اتصال‌های فنی"],
+  ]),
+];
+
+/** Page-level match: longer (more specific) route beats its parent section. */
+export function knowledgePageForPathname(pathname: string): KnowledgePage | undefined {
+  let best: KnowledgePage | undefined;
+  for (const page of KNOWLEDGE_PAGES) {
+    if (pathname !== page.route && !pathname.startsWith(`${page.route}/`)) continue;
+    if (!best || page.route.length > best.route.length) best = page;
+  }
+  return best;
+}
+
+export function knowledgePage(key: string): KnowledgePage | undefined {
+  return KNOWLEDGE_PAGES.find((page) => page.key === key);
+}
+
 /** The catalogue entry for a key, or undefined for a key the code does not know. */
 export function knowledgeSection(key: string): KnowledgeSection | undefined {
   return KNOWLEDGE_SECTIONS.find((s) => s.key === key);

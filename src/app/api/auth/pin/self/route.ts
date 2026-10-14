@@ -154,7 +154,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     if (err instanceof TeamError) {
       /**
        * `TeamError.message` is already a code from the shared vocabulary
-       * (`pin_taken`, `login_managed_by_cloud`, …); translating it here keeps
+       * (`current_pin_required`, `login_managed_by_cloud`, …); translating it here keeps
        * the route's body identical to every other credential route's.
        */
       return NextResponse.json(

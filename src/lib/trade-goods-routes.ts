@@ -29,7 +29,7 @@ import {
 } from "./trade-goods-service";
 import { tradeGoodsEventPrefix, type TradeGoodsIndustry } from "./trade-goods";
 
-export type RoleGuard = () => Promise<{ session: SessionPayload; error: null } | { session: null; error: NextResponse }>;
+type RoleGuard = () => Promise<{ session: SessionPayload; error: null } | { session: null; error: NextResponse }>;
 
 const PAYMENT_METHODS: SettlementMethod[] = ["cash", "bank", "credit"];
 

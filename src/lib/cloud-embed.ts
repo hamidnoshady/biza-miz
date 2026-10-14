@@ -51,6 +51,28 @@ export function cloudPageUrl(cloudUrl: string | null, pathAndQuery: string): str
 /** Cloud pages the desktop's address must not copy: signing in happens on the cloud, not here. */
 const UNMIRRORED_PREFIXES = ["/login", "/desktop-login", "/api"];
 
+/** The cloud's own sign-in surfaces — where a guest lands when its session is missing. */
+const CLOUD_AUTH_PREFIXES = ["/login", "/admin", "/desktop-login"];
+
+/**
+ * Issue #948 P0-3 — did the embedded guest land on the cloud's own sign-in
+ * page (no cloud session in the `persist:cloud` partition)? That is "cloud
+ * sign-in required" — an explicit auth action, not an internet outage and not
+ * something to leave the pane looping through. Deliberately separate from
+ * `mirroredPath`, which intentionally returns null for these paths (the
+ * desktop's address must never copy a login URL).
+ */
+export function isCloudAuthLanding(guestUrl: string, cloudUrl: string | null): boolean {
+  if (!cloudUrl) return false;
+  try {
+    const url = new URL(guestUrl);
+    if (url.origin !== new URL(cloudUrl).origin) return false;
+    return CLOUD_AUTH_PREFIXES.some((prefix) => url.pathname === prefix || url.pathname.startsWith(`${prefix}/`));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Where the desktop's own address should move when the embedded cloud page
  * navigates (so the menu highlights the right entry), or null to leave it.

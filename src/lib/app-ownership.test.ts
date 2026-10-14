@@ -23,7 +23,12 @@ import {
   appPrefixForPathname,
   isPlatformSettingsPathname,
 } from "./app-routes";
-import { ACCOUNTING_NAV_GROUPS, ACCOUNTING_SECTIONS } from "@/app/(app)/accounting/accounting-nav";
+import { ACCOUNTING_SECTIONS } from "@/app/(app)/accounting/accounting-nav";
+import {
+  accountingWorkspaceGroups,
+  LEDGER_WORKSPACE_SECTION_KEYS,
+} from "@/app/(app)/accounting/accounting-workspace";
+import { roleBasePermissions } from "@/lib/permissions";
 import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
 import { CRM_NAV_ITEMS } from "@/app/(app)/crm/crm-nav";
 import { CRM_SECTION_KEYS, crmSectionHref } from "@/app/(app)/crm/crm-routes";
@@ -101,11 +106,29 @@ describe("each app's menu stays inside its own app", () => {
   });
 });
 
-describe("Accounting's sidebar groups", () => {
-  it("gives every section exactly one group, so none can vanish from the menu", () => {
-    const grouped = ACCOUNTING_NAV_GROUPS.flatMap((group) => group.keys);
-    expect([...grouped].sort()).toEqual(ACCOUNTING_SECTIONS.map((s) => s.key).sort());
-    expect(new Set(grouped).size).toBe(grouped.length);
+describe("Accounting's menu and workspace", () => {
+  it("gives every section exactly one home: a menu row, or a tool on the ledger workspace page", () => {
+    // The guard reads the menu the owner actually gets, not a second list of
+    // groups, so a section that vanishes from the sidebar and is not a ledger
+    // tool fails here rather than quietly disappearing.
+    const groups = accountingWorkspaceGroups({
+      permissions: new Set(roleBasePermissions("owner")),
+      navItems: [],
+    });
+    // A section's home is its own canonical row. Deep links to a view of the
+    // same section (the people group's «مشتریان» and «تأمین‌کنندگان») are not
+    // second homes, so they are not counted.
+    const canonicalRows = groups.flatMap((group) =>
+      group.entries.flatMap((entry) =>
+        entry.section && entry.href === accountingSectionHref(entry.section) ? [entry.section] : [],
+      ),
+    );
+    const ledgerTools = new Set<string>(LEDGER_WORKSPACE_SECTION_KEYS);
+    for (const { key } of ACCOUNTING_SECTIONS) {
+      const homes =
+        canonicalRows.filter((section) => section === key).length + (ledgerTools.has(key) ? 1 : 0);
+      expect(homes, `«${key}» must have exactly one home`).toBe(1);
+    }
   });
 });
 

@@ -1022,7 +1022,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "misc.sync-infra",
     module: "Cross-cutting",
     entity: "server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs",
-    routes: ["server-sync", "sync", "peer", "pairing", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "notifications/inbox", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
+    routes: ["server-sync", "sync", "peer", "pairing", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
     status: "n/a (infra)",
   },
   {
@@ -1032,6 +1032,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["auth", "well-known"],
     status: "n/a (infra)",
     note: "credential exchange surface — never an AI-callable verb",
+  },
+  {
+    id: "misc.cms-embed",
+    module: "Cross-cutting",
+    entity: "CMS edit-modal sign-in (one-time CMS admin address for the iframe)",
+    routes: ["cms/website/embed"],
+    status: "n/a (infra)",
+    note: "mints a browser sign-in for a human editor; an AI client has no iframe to open",
   },
 
   // ============================ Vertical modules ============================

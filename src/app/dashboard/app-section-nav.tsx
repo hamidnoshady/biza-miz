@@ -210,7 +210,7 @@ export function AppSectionNav<K extends string>({
                         aria-current={active ? "page" : undefined}
                       >
                         <Icon aria-hidden="true" className="size-5 shrink-0" />
-                        <span className="min-w-0 flex-1 py-1.5 text-start group-data-[state=collapsed]/sidebar:hidden">
+                        <span className="min-w-0 flex-1 py-1.5 text-start group-data-[state=collapsed]/sidebar:sr-only">
                           <span className="block truncate">{item.label}</span>
                           {/*
                             The help line is a second line, so it needs room to

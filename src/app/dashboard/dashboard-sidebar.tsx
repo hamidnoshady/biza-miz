@@ -7,7 +7,6 @@ import {
   CalendarDaysIcon,
   CalculatorIcon,
   CheckIcon,
-  CircleIcon,
   ContactIcon,
   FolderIcon,
   GlobeIcon,
@@ -35,9 +34,12 @@ import {
   ACCOUNTING_WORKSPACE_HREFS,
   DASHBOARD_HOME,
   isWorkspacePathname,
+  navHrefIsActive,
   WORKSPACE_MODULE_HOME,
   workspaceSectionHref,
 } from "@/lib/app-routes";
+import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
+import { isLedgerWorkspacePathname } from "@/app/(app)/accounting/accounting-workspace";
 import { bestNavMatch, flattenNav } from "@/lib/nav-tree";
 import { appForModule, resolveAccessibleAppLanding, type AppKey } from "@/lib/apps";
 import type { AppAvailabilityState } from "@/lib/app-availability";
@@ -48,7 +50,7 @@ import {
 } from "@/app/(app)/workspace/workspace-app-nav";
 import { AppStateBadge } from "./app-availability-gate";
 import { CreditBadge } from "./credit-badge";
-import { NAV_ICONS } from "./sidebar-nav-icons";
+import { navIconFor } from "./sidebar-nav-icons";
 import {
   APP_NAV_BUTTON_CLASS,
   NAV_LABEL_CLASS,
@@ -202,29 +204,17 @@ interface SidebarProps {
 }
 
 /**
- * Whether a nav href is the current location.
- *
- * A bare href (no `?`) is a section's home and is active on its whole path
- * prefix, the way the flat nav always behaved — so a group's parent link stays
- * lit on every one of its query-string tabs. A `?tab=` href is a *named* sub-
- * section: it matches only that tab (other query params, like a `party=` deep
- * link, are ignored so the «مشتریان» entry stays lit on one customer's file).
+ * Whether a nav href is the current location — the generic route rule
+ * (`navHrefIsActive`) plus the one row that owns extra paths: «فضای کار حسابداری»
+ * is a single link whose workspace page also owns its tools' flat routes, so a
+ * pinned bottom-bar tab stays lit while the member works inside the tools the
+ * workspace launched. This is the same rule the app's own sidebar row follows
+ * (`isLedgerWorkspacePathname`), so the row never lights on sales, inventory,
+ * directory or the dashboard — only its landing and its own tools.
  */
 function isActive(pathname: string, href: string, search?: ReadonlyURLSearchParams | null): boolean {
-  // Platform and Workspace homes are exact destinations; a prefix match would
-  // make Home active throughout another workspace.
-  if (href === DASHBOARD_HOME || href === WORKSPACE_MODULE_HOME) return pathname === href;
-  if (href === workspaceSectionHref("overview")) {
-    return pathname === WORKSPACE_MODULE_HOME || pathname === href;
-  }
-  const q = href.indexOf("?");
-  if (q >= 0) {
-    const hrefPath = href.slice(0, q);
-    if (pathname !== hrefPath) return false;
-    const hrefTab = new URLSearchParams(href.slice(q + 1)).get("tab");
-    return (search?.get("tab") ?? null) === hrefTab;
-  }
-  return pathname === href || pathname.startsWith(`${href}/`);
+  if (href === accountingSectionHref("ledger") && isLedgerWorkspacePathname(pathname)) return true;
+  return navHrefIsActive(pathname, href, search);
 }
 
 /**
@@ -467,7 +457,7 @@ function BottomNavSettings({
         </DialogHeader>
         <ul className="space-y-1">
           {options.map((item) => {
-            const Icon = NAV_ICONS[item.href] ?? CircleIcon;
+            const Icon = navIconFor(item.href, item.iconKey);
             const picked = draft.includes(item.href);
             const blocked = !picked && full;
             return (
@@ -729,7 +719,7 @@ function MobileDashboardHeader({
  * that slot was a second door to the same room — and it cost the bar a fifth of
  * its width for a control nobody was looking for down there.
  */
-function MobileBottomNavigation({
+export function MobileBottomNavigation({
   navItems,
   pathname,
   hrefs,
@@ -762,7 +752,7 @@ function MobileBottomNavigation({
       aria-label="ناوبری اصلی"
     >
       {primaryItems.map((item) => {
-        const Icon = NAV_ICONS[item.href] ?? CircleIcon;
+        const Icon = navIconFor(item.href, item.iconKey);
         const active = item.href === activeHref;
         return (
           <Link

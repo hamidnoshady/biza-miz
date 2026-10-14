@@ -3,11 +3,11 @@ import {
   ACCOUNTING_DOOR_PERMISSION,
   ACCOUNTING_SECTIONS,
   accountingSectionsFor,
-  canOpenAccountingApp,
   canOpenLedger,
   canViewAccountingSection,
 } from "./accounting-nav";
 import { roleBasePermissions } from "@/lib/permissions";
+import { canOpenApp } from "@/lib/apps";
 import type { Role } from "@/lib/auth";
 import {
   ACCOUNTING_SECTION_KEYS,
@@ -80,6 +80,9 @@ describe("accountingSectionsFor", () => {
     expect(keys).toContain("trial-balance");
     expect(keys).toContain("directory");
     expect(keys).toContain("dashboard");
+    // The workspace door itself is ledger-gated, not payroll-gated: a manager
+    // opens «فضای کار حسابداری» and every tool it lists except payroll.
+    expect(keys).toContain("ledger");
   });
 
   it("keeps operational staff out of ledger sections", () => {
@@ -93,10 +96,10 @@ describe("accountingSectionsFor", () => {
 
   it("separates opening the operational app from opening the ledger", () => {
     for (const role of ["cashier", "waiter", "kitchen"] as const) {
-      expect(canOpenAccountingApp(of(role)), role).toBe(true);
+      expect(canOpenApp("accounting", of(role)), role).toBe(true);
       expect(canOpenLedger(of(role)), role).toBe(false);
     }
-    expect(canOpenAccountingApp(of("none"))).toBe(false);
+    expect(canOpenApp("accounting", of("none"))).toBe(false);
   });
 
   it("opens the ledger to everyone holding its door capability", () => {

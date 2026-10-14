@@ -27,12 +27,16 @@ export const BACK_TO_WORKSPACE_BUTTON_CLASS =
   "min-h-12 rounded-xl border border-border bg-muted/50 font-bold text-foreground shadow-[0_1px_2px_rgb(41_37_36/0.035)] hover:border-amber-300/70 hover:bg-amber-50 hover:text-amber-700 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/15 dark:hover:text-amber-300";
 
 /**
- * The label + optional help line inside a nav button. Hidden when the desktop
- * rail is collapsed to icons, so a menu never has to remember the incantation —
- * an app nav that forgot it (the website menu did) let its labels spill out of
- * the 4rem rail.
+ * The label inside a nav button. At the 4rem icon rail the label is visually
+ * hidden with `sr-only`, not `display:none`: the link's accessible name is its
+ * text content, so a `hidden` label left every collapsed row (including
+ * «فضای کار حسابداری») nameless for a screen reader. The row's tooltip shows
+ * the words on hover and focus. Using one shared class also means a menu never
+ * has to remember the incantation — an app nav that forgot it (the website
+ * menu did) let its labels spill out of the 4rem rail.
  */
-export const NAV_LABEL_CLASS = "min-w-0 flex-1 truncate text-start group-data-[state=collapsed]/sidebar:hidden";
+export const NAV_LABEL_CLASS =
+  "min-w-0 flex-1 truncate text-start group-data-[state=collapsed]/sidebar:sr-only";
 
 /**
  * One skin for the stacked controls in the sidebar footer — شیفت، قفل صفحه و

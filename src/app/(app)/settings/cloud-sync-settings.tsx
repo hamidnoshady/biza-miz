@@ -53,6 +53,10 @@ export function CloudSyncSettings() {
       missingIdentityBindings: number;
       /** Issue #850: staff PINs the cloud removed; the last pass revoked them here. */
       pinsRevoked?: number;
+      /** Issue #948 — binding evidence, separate from "hashes match". */
+      identityMismatches?: number;
+      identitiesRekeyed?: number;
+      identityContract?: string | null;
     } | null;
     overallIdentity?: string;
   };
@@ -149,7 +153,11 @@ export function CloudSyncSettings() {
                       : "")
                   : "وضعیت رمز کارکنان دریافت نشده"
               }
-              healthy={credentials?.state === "healthy" && credentials.pinMembersMissing === 0}
+              healthy={
+                credentials?.state === "healthy"
+                && credentials.pinMembersMissing === 0
+                && (credentials.missingIdentityBindings ?? 0) === 0
+              }
             />
             <IdentityRow
               icon={DatabaseIcon}
@@ -163,6 +171,21 @@ export function CloudSyncSettings() {
             <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
               {`${credentials.pinMembersMissing.toLocaleString("fa-IR")} حساب پین‌دار (صندوق‌دار، گارسون، آشپزخانه) هنوز روی این دستگاه قابل ورود نیست.`}
               {credentials.lastError ? <span title={credentials.lastError}> — آخرین خطا ثبت شده است.</span> : null}
+            </p>
+          ) : null}
+          {credentials && credentials.missingIdentityBindings > 0 ? (
+            <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+              {`${credentials.missingIdentityBindings.toLocaleString("fa-IR")} حساب مدیریتی/کارشناسی هنوز هویت جهانی متصل ندارند؛ «ورود با حساب ابری» فقط برای اعضایی ممکن است که هویتشان همگام شده باشد.`}
+            </p>
+          ) : null}
+          {(credentials?.identityMismatches ?? 0) > 0 ? (
+            <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+              {`${(credentials?.identityMismatches ?? 0).toLocaleString("fa-IR")} پیوند هویت پس از آخرین همگام‌سازی هنوز درست نیست (یا تداخل ایمیل دارد). «همگام‌سازی دوباره» را بزنید؛ در صورت تداوم، پشتیبانی باید بررسی کند.`}
+            </p>
+          ) : null}
+          {(credentials?.identitiesRekeyed ?? 0) > 0 ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              {`آخرین همگام‌سازی ${(credentials?.identitiesRekeyed ?? 0).toLocaleString("fa-IR")} هویت قدیمی را به شناسهٔ جهانی ابر منتقل کرد.`}
             </p>
           ) : null}
           {repairMessage ? <p className="mt-3 text-xs text-muted-foreground">{repairMessage}</p> : null}

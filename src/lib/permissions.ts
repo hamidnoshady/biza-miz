@@ -348,6 +348,18 @@ export const PERMISSIONS = {
   // connections — a machine credential with continuous read (and optional
   // write) reach over a whole branch — is owner-only, exactly like api.manage.
   mcpManage: "mcp.manage",
+  /**
+   * Issue #884 — seeing and revoking every Android installation registered
+   * to the business, not only one's own. Not owner-only: a business that
+   * wants a delegated security admin to run this without owning the tenant
+   * grants this one key, the same "system-role presets plus per-member
+   * overrides" shape every other capability in this file has. The `admin`
+   * preset holds it automatically (every non-owner-only permission); no
+   * other preset does, because unlike the CRM/workspace splits above this is
+   * a brand-new capability, not one a role already had before the key
+   * existed.
+   */
+  nativeDevicesManage: "native_devices.manage",
 
   // Website, growth and integration applications
   websiteView: "website.view",

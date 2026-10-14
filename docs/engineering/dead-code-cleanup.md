@@ -343,3 +343,75 @@ business's AI budget. Both fixed; `ai-permission-matrix.test.ts` now pins it.
 `crm-deal-handoff.ts` remain documented deliberate retentions in
 `module-reachability.test.ts`. Issue #812 did not touch them and did not make
 them reachable.
+
+## 10. Navigation cleanup (PR #888, the one-link accounting workspace)
+
+Removed after a grep sweep of `src`, `integration`, `scripts`, `electron`,
+`docs`, `AGENTS.md`, `CLAUDE.md` and `README.md` on the integrated tree
+(`main` @ `b8b66b2` merged in). Each row had no production importer, and the
+test that exercised it was either deleted with it or rewritten against the
+surviving code.
+
+| Removed | Where it lived | Evidence it is dead or superseded |
+| --- | --- | --- |
+| `ACCOUNTING_NAV_GROUPS` | `(app)/accounting/accounting-nav.ts` | No production consumer on `main` or the branch. Its only readers were tests. The ledger arrangement now lives in `LEDGER_WORKSPACE_SUBGROUPS`, and the «every section has a home» guard runs against the real menu. |
+| `canOpenAccountingApp` | `(app)/accounting/accounting-nav.ts` | Zero callers. The app door is `ACCOUNTING_DOOR_PERMISSION` through `accountingSectionsFor`. |
+| Local `SettingsSlug` type | `(app)/accounting/accounting-nav.ts` | Zero references. Settings slugs are owned by `src/lib/settings-routes.ts`. |
+| `LEDGER_WORKSPACE_ICON_KEY` | `(app)/accounting/accounting-workspace.ts` | Zero references. The glyph comes from `navIconFor` / `ACCOUNTING_SECTION_ICONS`. |
+| Hand-written `LEDGER_WORKSPACE_SECTION_KEYS` array | `(app)/accounting/accounting-workspace.ts` | Replaced by a derivation from `LEDGER_WORKSPACE_SUBGROUPS`, so the tool set cannot be listed twice. |
+| `use-open-nav-groups.ts` and its test | `dashboard/` | The disclosure hook. The ledger row no longer has a disclosure. |
+| `NavCollapsibleGroup`, `NAV_COLLAPSIBLE_GROUP_TOGGLE_CLASS`, `NAV_SUBGROUP_LABEL_CLASS`, `WorkspaceNavSubGroup` | `dashboard/sidebar-nav-group.tsx`, `(app)/accounting/accounting-app-nav.tsx` | Only the disclosure used them. `sidebar-nav-group.tsx` is now entries-only. |
+| Duplicate `LEDGER_WORKSPACE_LABEL` | `(app)/accounting/accounting-workspace.ts` | One definition remains, in `accounting-nav.ts`. |
+| Per-surface icon tables | sidebar, bottom bar, pin picker | Replaced by the single `navIconFor` map. A test fails if a section's glyph is missing. |
+| `isKnownSettingsSlug` | `src/lib/settings-routes.ts` | No production caller. It only combined `settingsTabForSlug` and `isPlatformSettingsPage`, and the settings page calls those two directly. Its three assertions were removed with it; the two functions it combined keep their own assertions. |
+
+**Kept on purpose** (inspected, not removed):
+
+- `unassignedModules` (`src/lib/apps.ts`) and `modulesForApp`: exported for
+  `apps.test.ts`, which enforces that every module belongs to exactly one app.
+  Deleting them would delete that invariant, not dead code.
+- `isCanonicalAppPathname` (`src/lib/app-routes.ts`): test-only, and the
+  documented reason that no redirect loop can exist (see §2 above).
+- `APP_SHELL_NAV` (`src/app/dashboard/app-shell-nav.ts`): live. Read by
+  `appShellNavFor`, which the dashboard sidebar calls.
+- `LEDGER_WORKSPACE_LABEL` (`accounting-nav.ts`): live. Read by the sidebar and
+  by the workspace tests.
+- `ACCOUNTING_SECTIONS` `ledger` and `settings` entries, the `ar`/`ap` legacy
+  keys, and the `/dashboard/ledger?tab=` compatibility redirects: all are live
+  routes or compatibility URLs.
+
+The `export` keyword was also dropped from three symbols that only their own file used: `SectionGroup` (`dashboard/section-nav.tsx`), `NavEntries` (`dashboard/sidebar-nav-group.tsx`) and `RoleGuard` (`lib/trade-goods-routes.ts`). The code is kept. A repository-wide grep found no importer of any of the three, and `tsc --noEmit` must still pass without them exported.
+
+**Session 6 re-audit (after the `main` @ `b8b66b2` integration).** Every export in the
+38 `src`/`integration`/`scripts` files this PR touches was checked against a
+repository-wide reference sweep (`src`, `integration`, `scripts`, `electron`,
+`server.ts`, `middleware.ts`, `next.config.*`). Outcomes:
+
+- `EntryActiveTest`, `NAV_GROUP_LABEL_CLASS`, `NAV_GROUP_RULE_CLASS` (`dashboard/sidebar-nav-group.tsx`)
+  and `LedgerWorkspaceToolGroup` (`(app)/accounting/accounting-workspace.ts`) were exported
+  only for use inside their own file. The `export` keyword is dropped; the code is kept.
+- Left as they are, and not part of this PR's diff: `AppRoutePrefix` (`src/lib/app-routes.ts`)
+  and `PlatformSettingsPage` (`src/lib/settings-routes.ts`). Both are `main` code used inside
+  their own files. They are candidates for a later pass, not removals made here.
+- The collapsed-rail label class is changed from `group-data-[state=collapsed]/sidebar:hidden`
+  to `:sr-only` (`NAV_LABEL_CLASS`, and the same span in `dashboard/app-section-nav.tsx`). This is
+  an accessibility fix, not removal: `display:none` took every collapsed link out of the
+  accessible tree. `src/app/dashboard/sidebar-nav-label.test.ts` compiles the class with
+  Tailwind and asserts the visually-hidden rule.
+
+**Session 6, integration with `main` @ `b606ad9f`.** Three navigation files and four
+data-layer files conflicted with `main`'s #824 (chart of accounts) and #866 (taxpayer
+invoices) work. Resolution, by file:
+
+- `accounts-service.ts`, `api/ledger/accounts/route.ts`, `chart-of-accounts-section.tsx`,
+  `data-transfer/entities/accounting.ts`: this branch had no change of its own in any of
+  them relative to `b8b66b2`, so `main`'s version is taken whole.
+- `accounting-headings.ts`: both sides kept. `main`'s `chart-of-accounts` title and
+  description and its `tax-invoices` heading are taken, and this branch's `ledger`
+  workspace-landing heading is kept.
+- `accounting-nav.ts`: the `ACCOUNTING_NAV_GROUPS` block stays deleted (see §10 above).
+  `main`'s `tax-invoices` section entry is kept.
+- `accounting-workspace.ts`: the derived `LEDGER_WORKSPACE_SECTION_KEYS` stays. The hand list
+  `main` added is dropped, and `tax-invoices` is in the `ledger-periods` division, as `main`
+  intended. The workspace pin in `accounting-workspace.test.ts` moves from sixteen to
+  seventeen tools, and a new test asserts the `tax.view` gate on the page and the menu.

@@ -43,8 +43,8 @@ describe("SidebarProvider", () => {
   });
 
   test("the desktop rail reports its expanded/collapsed state, which every label hides against", () => {
-    // `group-data-[state=collapsed]/sidebar:hidden` is how a menu hides its
-    // labels at 4rem. If the aside ever stopped publishing the state, every
+    // `group-data-[state=collapsed]/sidebar:sr-only` is how a menu hides its
+    // labels at 4rem while keeping them as accessible names. If the aside ever stopped publishing the state, every
     // label in every app menu would spill out of the rail at once.
     expect(renderToStaticMarkup(menu(false))).toContain('data-state="collapsed"');
     expect(renderToStaticMarkup(menu(true))).toContain('data-state="expanded"');

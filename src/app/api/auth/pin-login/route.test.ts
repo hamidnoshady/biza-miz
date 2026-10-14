@@ -26,7 +26,7 @@ import { NextRequest } from "next/server";
 type AnyFn = ReturnType<typeof vi.fn>;
 
 const USER = {
-  id: "user-1",
+  id: "00000000-0000-4000-8000-000000000001",
   business_id: "biz-1",
   business_slug: "alpha",
   business_subdomain: "alpha",
@@ -193,5 +193,24 @@ describe("PIN login — device trust decides the routine challenge (gap 4)", () 
     expect(res.status).toBe(401);
     expect(mocks.verifyTrustedDevice).not.toHaveBeenCalled();
     expect(issuedSession(res)).toBe(false);
+  });
+});
+
+describe("PIN login — the member is named, the PIN is never an identifier", () => {
+  it("refuses a PIN without an employee instead of scanning every member's PIN", async () => {
+    const res = await POST(postPin({ employeeId: undefined }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("employee_required");
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.bcryptCompare).not.toHaveBeenCalled();
+  });
+
+  it("checks the PIN against the named member only", async () => {
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, reason: "trusted" });
+    await POST(postPin());
+    const [sql, params] = mocks.query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("AND u.id = $1");
+    expect(params).toEqual([USER.id]);
+    expect(mocks.bcryptCompare).toHaveBeenCalledTimes(1);
   });
 });

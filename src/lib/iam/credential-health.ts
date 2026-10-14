@@ -36,6 +36,19 @@ export interface CredentialSyncSnapshot {
   pinMembersUsable: number;
   pinMembersMissing: number;
   missingIdentityBindings: number;
+  /**
+   * Issue #948 P0-1 — identity bindings the payload named that are *still*
+   * wrong/missing after the last pass, plus identity email conflicts left for
+   * review. This is the "identity correctly bound" measure: zero is the only
+   * value that may read green. Separate from `missingIdentityBindings` (the
+   * crude count of password-role members without any link, which includes
+   * legitimate PIN-only managers the cloud has no identity for).
+   */
+  identityMismatches: number;
+  /** Pre-v2 local identity UUIDs migrated onto the canonical cloud ID. */
+  identityRekeys: number;
+  /** Which contract the last payload spoke: canonical v2 or legacy v1. */
+  identityContract: "canonical" | "legacy" | null;
   convergedAt: string | null;
 }
 
@@ -70,6 +83,16 @@ export interface HybridIdentityHealthInput {
   credentials: CredentialSyncStatus | null;
   /** Active PIN-role memberships with no usable local PIN, as last measured. */
   pinMembersMissing?: number;
+  /**
+   * Issue #948 P1-6 — identity bindings the cloud's payload named that are
+   * not in place (wrong or missing `users.platform_user_id` link, or an
+   * unresolved identity email conflict). Credential hashes can all match
+   * while this is non-zero; "healthy" must never be reported then, or
+   * `identity_not_synced` is invisible until someone tries cloud login.
+   * Deliberately *not* "every password-role member without a link": a
+   * PIN-eligible manager the cloud has no identity for is legitimate.
+   */
+  identityBindingsMissing?: number;
 }
 
 export interface HybridIdentityHealthResult {
@@ -110,6 +133,9 @@ export function credentialSyncNeedsAttention(status: CredentialSyncStatus | null
  *  - active PIN-role members without a usable local PIN are degraded even if
  *    the last credential fetch itself succeeded (e.g. a membership created
  *    after the last credential pass);
+ *  - password-role members not bound to the cloud's global identity are
+ *    degraded even when every credential hash matches (issue #948: matching
+ *    hashes are "credential data synced", not "identity correctly bound");
  *  - only then does membership health decide.
  */
 export function hybridIdentityHealth(input: HybridIdentityHealthInput): HybridIdentityHealthResult {
@@ -117,6 +143,7 @@ export function hybridIdentityHealth(input: HybridIdentityHealthInput): HybridId
     return { overall: "not_configured", degradedBy: null, reason: null };
   }
   const missingPinMembers = Math.max(0, input.pinMembersMissing ?? 0);
+  const missingBindings = Math.max(0, input.identityBindingsMissing ?? 0);
   if (input.identity === null || input.credentials === null) {
     return { overall: "degraded", degradedBy: input.identity === null ? "identity" : "credentials", reason: "state_unavailable" };
   }
@@ -131,6 +158,9 @@ export function hybridIdentityHealth(input: HybridIdentityHealthInput): HybridId
   }
   if (missingPinMembers > 0) {
     return { overall: "degraded", degradedBy: "credentials", reason: `pin_credentials_missing:${missingPinMembers}` };
+  }
+  if (missingBindings > 0) {
+    return { overall: "degraded", degradedBy: "credentials", reason: `identity_bindings_missing:${missingBindings}` };
   }
   if (input.identity !== "healthy") {
     return { overall: "degraded", degradedBy: "identity", reason: `identity_${input.identity}` };

@@ -26,6 +26,9 @@ import {
   isPlatformSettingsPathname,
   isWorkspacePathname,
   legacyRedirectTarget,
+  navHrefIsActive,
+  workspaceSectionHref,
+  WORKSPACE_MODULE_HOME,
 } from "./app-routes";
 
 describe("canonical routes", () => {
@@ -365,5 +368,44 @@ describe("isCanonicalAppPathname", () => {
     expect(isCanonicalAppPathname("/dashboard")).toBe(false);
     expect(isCanonicalAppPathname("/dashboard/orders")).toBe(false);
     expect(isCanonicalAppPathname("/login")).toBe(false);
+  });
+});
+
+describe("navHrefIsActive — the shell's generic row-matching rule", () => {
+  // These are the exact semantics the sidebar's local matcher always had,
+  // lifted here so the rule is unit-testable and shared. The one row that owns
+  // extra paths (the ledger workspace row) layers that on top in
+  // `dashboard-sidebar.tsx`; this matcher stays generic.
+  it("keeps the platform and workspace homes as exact destinations", () => {
+    expect(navHrefIsActive("/dashboard", DASHBOARD_HOME)).toBe(true);
+    expect(navHrefIsActive("/dashboard/orders", DASHBOARD_HOME)).toBe(false);
+    expect(navHrefIsActive(WORKSPACE_MODULE_HOME, WORKSPACE_MODULE_HOME)).toBe(true);
+    expect(navHrefIsActive("/workspace/projects/42", WORKSPACE_MODULE_HOME)).toBe(false);
+  });
+
+  it("treats the workspace overview alias as the home page only", () => {
+    const href = workspaceSectionHref("overview");
+    expect(navHrefIsActive("/workspace", href)).toBe(true);
+    expect(navHrefIsActive("/workspace/overview", href)).toBe(true);
+    expect(navHrefIsActive("/workspace/orders", href)).toBe(false);
+  });
+
+  it("matches a bare href on its whole path prefix", () => {
+    expect(navHrefIsActive("/accounting/trial-balance", "/accounting/trial-balance")).toBe(true);
+    // detail routes under a section stay lit on their section
+    expect(navHrefIsActive("/workspace/projects/42/tasks", "/workspace/projects")).toBe(true);
+    // but a sibling never does — the row is not a prefix of unrelated pages
+    expect(navHrefIsActive("/accounting/trial-balance", "/accounting/ledger")).toBe(false);
+    expect(navHrefIsActive("/accounting/overview", "/accounting/ledger")).toBe(false);
+  });
+
+  it("matches a ?tab= href only on that named tab", () => {
+    const search = (tab: string | null) => ({ get: (name: string) => (name === "tab" ? tab : null) });
+    expect(navHrefIsActive("/settings", "/settings?tab=security", search("security"))).toBe(true);
+    // other query params are ignored, so a deep link keeps its row lit
+    expect(navHrefIsActive("/accounting/directory", "/accounting/directory?tab=customers", search("customers"))).toBe(true);
+    expect(navHrefIsActive("/accounting/directory", "/accounting/directory?tab=customers", search("vendors"))).toBe(false);
+    // the tab href never matches the section home
+    expect(navHrefIsActive("/settings", "/settings?tab=security", search(null))).toBe(false);
   });
 });
