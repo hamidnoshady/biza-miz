@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import {
   cspMode,
   generateNonce,
+  cmsFrameSources,
   contentSecurityPolicy,
   staticSecurityHeaders,
 } from "./security-headers";
@@ -64,6 +65,30 @@ describe("security-headers", () => {
 
     process.env.NEXT_PUBLIC_PRINT_CONNECTOR_URL = "https://attacker.example";
     expect(contentSecurityPolicy("test-nonce", { https: true })).not.toContain("attacker.example");
+  });
+
+  it("frames only the configured CMS origins, and nothing malformed", () => {
+    expect(
+      cmsFrameSources({
+        ESHOBE_CMS_URL: "https://cms.example.com/some/path",
+        CMS_EMBED_ORIGINS: "https://cms2.example.com, javascript:alert(1), not a url, ftp://x.example, https://cms.example.com",
+      }),
+    ).toEqual(["https://cms.example.com", "https://cms2.example.com"]);
+    expect(cmsFrameSources({})).toEqual([]);
+
+    const prev = process.env.ESHOBE_CMS_URL;
+    process.env.ESHOBE_CMS_URL = "https://cms.example.com";
+    try {
+      const csp = contentSecurityPolicy("test-nonce", { https: true });
+      expect(csp).toContain("frame-src 'self' https://cms.example.com");
+      // Still no wildcard framing, and the dashboard itself stays unframeable.
+      expect(csp).not.toMatch(/frame-src[^;]*\*/);
+      expect(csp).toContain("frame-ancestors 'none'");
+    } finally {
+      if (prev === undefined) delete process.env.ESHOBE_CMS_URL;
+      else process.env.ESHOBE_CMS_URL = prev;
+    }
+    expect(contentSecurityPolicy("test-nonce", { https: true })).toContain("frame-src 'self';");
   });
 
   it("staticSecurityHeaders respects https parameter", () => {
