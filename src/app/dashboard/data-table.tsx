@@ -225,3 +225,208 @@ export function DataTableFoot({ children, className }: { children: ReactNode; cl
     </tfoot>
   );
 }
+
+/**
+ * A table, declared once as data, that renders as a table on a wide screen and
+ * as a labelled list of cards on a phone — issue #884 acceptance criterion
+ * #10 ("major lists/tables have mobile-native card/row representations").
+ *
+ * This was `ReportTable` (`src/app/dashboard/reports/report-table.tsx`),
+ * which the reports screens had already converged on after the same table
+ * got hand-copied — once per screen, with the desktop grid and the phone
+ * cards drifting apart each time (see that file's own history). Promoting it
+ * here makes it the one definition for *every* module, not just reports:
+ * `ReportTable` is now a thin wrapper over this component so its existing
+ * callers are unaffected, and any other screen with a `DataTable` it wants a
+ * phone view for can use this instead, without copying the table by hand.
+ *
+ * A column says how to render a cell and how it should align; that single
+ * declaration drives both the desktop `<table>` and the phone `<ul>` of
+ * cards, so a column can never appear in one and not the other (short of the
+ * deliberate `desktopOnly` escape hatch, for a column that only makes sense
+ * beside others, e.g. a running balance).
+ */
+export interface DataCardTableColumn<Row> {
+  key: string;
+  header: ReactNode;
+  /** The cell's content. Return a string/number for text, or a node for chips and buttons. */
+  cell: (row: Row) => ReactNode;
+  /**
+   * `end` for money and counts (a number column reads right-aligned even in an
+   * RTL table, which is why this says `end`/`start` and never left/right).
+   */
+  align?: "start" | "end";
+  /** Rendered in a lighter weight — codes, dates, secondary detail. */
+  muted?: boolean;
+  /** Numbers get tabular figures so columns line up digit for digit. */
+  numeric?: boolean;
+  /** Kept out of the phone cards: a column that only makes sense beside others. */
+  desktopOnly?: boolean;
+}
+
+export interface DataCardTableFooterCell {
+  key: string;
+  content: ReactNode;
+  align?: "start" | "end";
+  numeric?: boolean;
+  /**
+   * What to call this figure on a phone, where the footer is a summary card
+   * with no column headers above it to inherit a name from. The first cell is
+   * the row's own label and needs none.
+   */
+  label?: string;
+}
+
+export interface DataCardTableProps<Row> {
+  columns: readonly DataCardTableColumn<Row>[];
+  rows: readonly Row[];
+  /** Stable key per row; falls back to the row index. */
+  rowKey?: (row: Row, index: number) => string;
+  /** Names the table for a screen reader. */
+  caption: string;
+  /** Shown in place of the rows when there are none. */
+  empty?: ReactNode;
+  /** A totals row — rendered as a `<tfoot>` on desktop and a summary card on a phone. */
+  footer?: readonly DataCardTableFooterCell[];
+  /** The card's title on a phone, when the first column is not self-explanatory. */
+  cardTitle?: (row: Row) => ReactNode;
+  className?: string;
+  /**
+   * The breakpoint the table switches to cards below. Defaults to `sm`
+   * (horizontally scrollable tables tolerate a narrow tablet; a phone gets
+   * cards). Pass `"lg"` for a table wide enough that it still cramps on a
+   * small tablet (many columns, e.g. a CRM customer roster).
+   */
+  breakpoint?: "sm" | "md" | "lg";
+}
+
+const DATA_CARD_TABLE_EMPTY_TEXT = "داده‌ای یافت نشد.";
+
+const BREAKPOINT_CLASSES: Record<
+  NonNullable<DataCardTableProps<unknown>["breakpoint"]>,
+  { table: string; cards: string }
+> = {
+  sm: { table: "hidden sm:block", cards: "sm:hidden" },
+  md: { table: "hidden md:block", cards: "md:hidden" },
+  lg: { table: "hidden lg:block", cards: "lg:hidden" },
+};
+
+export function DataCardTable<Row>({
+  columns,
+  rows,
+  rowKey,
+  caption,
+  empty = DATA_CARD_TABLE_EMPTY_TEXT,
+  footer,
+  cardTitle,
+  className,
+  breakpoint = "sm",
+}: DataCardTableProps<Row>) {
+  const cardColumns = columns.filter((column) => !column.desktopOnly);
+  const { table: tableVisibility, cards: cardsVisibility } = BREAKPOINT_CLASSES[breakpoint];
+
+  return (
+    <div className={cn("min-w-0", className)}>
+      {/* Wide screen: one scrollable grid. */}
+      <DataTable caption={caption} frame={false} className={tableVisibility} tableClassName="min-w-full">
+        <DataTableHead>
+          {columns.map((column) => (
+            <Th key={column.key} numeric={column.align === "end"}>
+              {column.header}
+            </Th>
+          ))}
+        </DataTableHead>
+        <DataTableBody>
+          {rows.map((row, index) => (
+            <DataTableRow key={rowKey?.(row, index) ?? index}>
+              {columns.map((column) => (
+                <Td
+                  key={column.key}
+                  numeric={column.align === "end"}
+                  muted={column.muted}
+                  className={cn(column.numeric && "tabular-nums")}
+                >
+                  {column.cell(row)}
+                </Td>
+              ))}
+            </DataTableRow>
+          ))}
+          {rows.length === 0 ? (
+            <DataTableRow>
+              <Td colSpan={columns.length} muted className="py-10 text-center">
+                {empty}
+              </Td>
+            </DataTableRow>
+          ) : null}
+        </DataTableBody>
+        {footer && rows.length > 0 ? (
+          <DataTableFoot>
+            <tr>
+              {footer.map((cell) => (
+                <Td key={cell.key} numeric={cell.align === "end"} className={cn(cell.numeric && "tabular-nums")}>
+                  {cell.content}
+                </Td>
+              ))}
+            </tr>
+          </DataTableFoot>
+        ) : null}
+      </DataTable>
+
+      {/* Phone: the same columns as a labelled card, so nothing is hidden by width alone. */}
+      <ul className={cn("divide-y divide-border", cardsVisibility)}>
+        {rows.map((row, index) => {
+          // The first column is always this card's heading — either an
+          // explicit cardTitle or the column's own cell — so it never also
+          // appears as the first body row; rendering it twice was the old
+          // `title ? cardColumns : …slice(1)` mistake this replaced.
+          const title = cardTitle?.(row);
+          const bodyColumns = cardColumns.slice(1);
+          return (
+            <li key={rowKey?.(row, index) ?? index} className="px-4 py-4">
+              {/* A `<div>`, not a `<p>`: the title source is a column's own cell
+                  renderer, which — unlike a report's plain-text first column —
+                  can be a whole block (name, organisation, phone stacked), and
+                  a block element nested in a `<p>` is invalid HTML. */}
+              <div className="min-w-0 break-words font-semibold text-foreground">
+                {title ?? cardColumns[0]?.cell(row)}
+              </div>
+              <dl className="mt-2 grid gap-1.5">
+                {bodyColumns.map((column) => (
+                  <div key={column.key} className="flex items-baseline justify-between gap-3">
+                    <dt className="shrink-0 text-xs text-muted-foreground">{column.header}</dt>
+                    <dd
+                      className={cn(
+                        "min-w-0 break-words text-end text-sm text-foreground",
+                        column.numeric && "tabular-nums",
+                      )}
+                    >
+                      {column.cell(row)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </li>
+          );
+        })}
+        {rows.length === 0 ? (
+          <li className="px-4 py-10 text-center text-sm text-muted-foreground">{empty}</li>
+        ) : null}
+        {footer && rows.length > 0 ? (
+          <li className="bg-muted/60 px-4 py-3 dark:bg-muted">
+            <p className="font-semibold text-foreground">{footer[0]?.content}</p>
+            <dl className="mt-2 grid gap-1.5">
+              {footer.slice(1).map((cell) => (
+                <div key={cell.key} className="flex items-baseline justify-between gap-3">
+                  <dt className="text-xs text-muted-foreground">{cell.label ?? cell.key}</dt>
+                  <dd className={cn("text-sm font-semibold text-foreground", cell.numeric && "tabular-nums")}>
+                    {cell.content}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </li>
+        ) : null}
+      </ul>
+    </div>
+  );
+}

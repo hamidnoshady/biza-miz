@@ -7,7 +7,14 @@ import type { AccountingSectionKey } from "./accounting-routes";
  * Multicurrency (issue #863) needs it for the same reason: the foreign
  * document's line pickers, the settlement account, and the statement report
  * all choose from the chart — without the load their pickers sit empty.
+ * Opening balances (issue #867) needs it for its line editor's account picker.
  */
 export function accountingSectionNeedsAccountList(section: AccountingSectionKey): boolean {
-  return section === "manual" || section === "expenses" || section === "fixed-assets" || section === "multicurrency";
+  return (
+    section === "manual" ||
+    section === "expenses" ||
+    section === "fixed-assets" ||
+    section === "multicurrency" ||
+    section === "opening-balances"
+  );
 }

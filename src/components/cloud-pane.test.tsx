@@ -45,8 +45,13 @@ describe("CloudPane", () => {
     guest.executeJavaScript = executeJavaScript;
     guest.getURL = () => "https://cafe.example.com/reports";
 
-    guest.dispatchEvent(new Event("dom-ready"));
-    expect(executeJavaScript).toHaveBeenLastCalledWith(cloudThemeScript("dark"));
+    // The pane becomes `embedded` asynchronously (outside act), so the webview can
+    // be in the DOM a tick before the passive effect that listens for dom-ready
+    // has run. Fire dom-ready until that listener answers, instead of racing it.
+    await waitFor(() => {
+      guest.dispatchEvent(new Event("dom-ready"));
+      expect(executeJavaScript).toHaveBeenLastCalledWith(cloudThemeScript("dark"));
+    });
 
     theme.resolvedTheme = "light";
     rerender(<CloudPane pathAndQuery="/reports" cloudUrl="https://cafe.example.com" />);
@@ -69,6 +74,30 @@ describe("CloudPane", () => {
     const { container } = render(<CloudPane pathAndQuery="/crm/overview" cloudUrl="https://cafe.example.com" />);
     expect(await screen.findByText("این بخش به اینترنت نیاز دارد")).toBeTruthy();
     expect(container.querySelector("webview")).toBeNull();
+    expect(screen.getByText("بازگشت به صندوق").closest("a")?.getAttribute("href")).toBe("/accounting/pos");
+  });
+
+  it("asks for cloud sign-in explicitly when the guest lands on the cloud login page (issue #948)", async () => {
+    desktop();
+    const { container } = render(<CloudPane pathAndQuery="/crm/overview" cloudUrl="https://cafe.example.com" />);
+    await waitFor(() => expect(container.querySelector("webview")).not.toBeNull());
+    const guest = container.querySelector("webview")!;
+    // The partition holds no cloud session, so the guest was redirected to the
+    // cloud's own login. That must read as «cloud sign-in required» with an
+    // explicit action — never an uncontrolled login-loop in the pane, and
+    // never an "internet is down" claim.
+    guest.dispatchEvent(
+      Object.assign(new Event("did-navigate"), {
+        url: "https://cafe.example.com/login?next=%2Fcrm%2Foverview",
+        isMainFrame: true,
+      }),
+    );
+    expect(await screen.findByText(/باید وارد حساب ابری شوید/)).toBeTruthy();
+    expect(container.querySelector("webview")).toBeNull();
+    expect(screen.getByText("ورود با حساب ابری")).toBeTruthy();
+    expect(screen.queryByText("این بخش به اینترنت نیاز دارد")).toBeNull();
+    // Safe actions: start the one-use cloud handoff, retry, or go back to the till.
+    expect(screen.getByText("تلاش دوباره")).toBeTruthy();
     expect(screen.getByText("بازگشت به صندوق").closest("a")?.getAttribute("href")).toBe("/accounting/pos");
   });
 

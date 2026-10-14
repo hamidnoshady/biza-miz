@@ -8,6 +8,7 @@ import { createExportJob, listExportJobs } from "@/lib/data-transfer/export-serv
 import { getExportTemplate } from "@/lib/data-transfer/templates-service";
 import type { ExportFormat } from "@/lib/data-transfer/types";
 import { partyReadAudienceForPermissions } from "@/lib/personnel-access";
+import { decideExportDownload } from "@/lib/data-transfer/export-audience";
 import {
   dataOwner,
   entityAccess,
@@ -39,6 +40,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     }
     const jobs = await listExportJobs(owner.businessId, { entityKey });
     const member = await memberAccessFor(owner.session);
+    const access = {
+      partyAudience: partyReadAudienceForPermissions(member?.permissions),
+      permissions: member?.permissions ?? new Set<string>(),
+    };
     const visibleJobs = [];
     for (const job of jobs) {
       if (job.providerMetadata?.provider === "holoo") {
@@ -49,7 +54,23 @@ export const GET = withTenantScope(async (request: NextRequest) => {
           : await checkHolooExportScopePermissions(owner, job.providerMetadata.selectedScopes);
         if (!scopeAccess.ok) continue;
       }
-      visibleJobs.push(job);
+      /*
+       * Issue #947 — the row says whether *this* member may still download it, decided
+       * by the same function the download itself calls, so the screen never offers a
+       * button whose answer is a 403. The history still lists the file: who exported
+       * what, when and how many rows is the audit record, and hiding it would hide the
+       * fact that somebody produced a wider file.
+       */
+      const decision = decideExportDownload(
+        { partyAudience: job.partyAudience, domainKeys: job.domainKeys },
+        access,
+      );
+      visibleJobs.push({
+        ...job,
+        download: decision.allowed
+          ? { allowed: true as const }
+          : { allowed: false as const, requires: decision.requires, reason: decision.reason },
+      });
     }
     return NextResponse.json({ jobs: visibleJobs });
   } catch (err) {

@@ -129,6 +129,31 @@ function fileIdentity(file: { displayName: string; phone: string | null; email: 
 }
 
 /**
+ * Is the file out of line with the membership that owns it?
+ *
+ * One function, because two readers ask this question and they must not answer it
+ * differently: the projection (`reconcile`, below) decides whether to write, and the
+ * inventory (`listPersonnelFileDebts`) decides whether to *report* — a report that
+ * disagreed with the writer would either invent work or hide it. Both spellings it
+ * compares are the app's canonical ones (`fileIdentity` normalizes the phone), which is
+ * what keeps a legacy row from looking permanently stale.
+ *
+ * The email direction is deliberate and mirrored from the projection: a membership with
+ * no email is not an instruction to clear the file's, so it is not a staleness either.
+ */
+function personnelFileIsStale(
+  file: { displayName: string; phone: string | null; email: string | null },
+  identity: MembershipIdentity,
+): boolean {
+  const current = fileIdentity(file);
+  return (
+    current.displayName !== identity.displayName ||
+    current.phone !== identity.phone ||
+    (identity.email !== null && current.email !== identity.email)
+  );
+}
+
+/**
  * Records (or refreshes) the open drift row for one member.
  *
  * The partial unique index makes this the one open episode per member: a second
@@ -207,12 +232,7 @@ export async function ensurePersonnelFileForMembership(
     file: NonNullable<Awaited<ReturnType<typeof getPartyByEmployee>>>,
     identity: MembershipIdentity,
   ): Promise<PersonnelFileSyncResult> {
-    const current = fileIdentity(file);
-    const stale =
-      current.displayName !== identity.displayName ||
-      current.phone !== identity.phone ||
-      (identity.email !== null && current.email !== identity.email);
-    if (!stale) {
+    if (!personnelFileIsStale(file, identity)) {
       // A file that already agrees closes any open episode: the previous attempt may
       // have failed *after* writing, and a row left open would keep asking for a
       // repair that is not needed.
@@ -295,6 +315,101 @@ export async function ensurePersonnelFileForMembership(
     }
     return { ok: false, fileId: null, reason, error: code };
   }
+}
+
+export interface PersonnelFileDebt {
+  userId: string;
+  fullName: string;
+  /** The linked file, or null when the member has none. */
+  fileId: string | null;
+  reason: PersonnelFileDriftReason;
+  /** Whether `personnel_file_drift` already records this debt (it may not). */
+  recorded: boolean;
+}
+
+/**
+ * **The independent inventory** (issue #947, TEAM-F05).
+ *
+ * Which memberships are owed a personnel file — computed from `users` and `parties`
+ * themselves, never from `personnel_file_drift`. That independence is the entire point:
+ * a drift row is *bookkeeping about* a debt, and bookkeeping can be lost (a process that
+ * died between the membership commit and the record, a writer that never recorded one,
+ * an operator who cleaned the table). The debt is the difference between the two records
+ * the platform actually has, and this reads it there.
+ *
+ * Three things follow from that, and each of them is load-bearing:
+ *
+ *   - **Missing and stale are both found.** A member with no file is `file_missing`; a
+ *     member whose file does not carry their canonical name, phone or email is
+ *     `identity_stale`. The comparison is `personnelFileIsStale`, the same function the
+ *     projection writes by, so the inventory cannot demand a repair the projection would
+ *     not make (or miss one it would).
+ *   - **A clean drift table is not evidence of a healthy one.** A member whose obligation
+ *     row was never written (or was resolved by an operator) still appears here as long as
+ *     the data disagrees.
+ *   - **`recorded: false` is the alarm, not a footnote.** It means the write path lost the
+ *     obligation — the exact failure 0223's trigger now prevents for new memberships, and
+ *     the reason `npm run personnel:reconcile` works from this list rather than from the
+ *     table.
+ *
+ * Cost: one canonical party read per member that *has* a file. Deliberately not a leaner
+ * projection of its own — a second reader of the encrypted phone column would be a second
+ * opinion about a personnel file, which is what the whole finding was about.
+ */
+export async function listPersonnelFileDebts(businessId: string): Promise<PersonnelFileDebt[]> {
+  const { rows } = await query<{
+    user_id: string;
+    full_name: string;
+    file_id: string | null;
+    recorded: boolean;
+  }>(
+    `SELECT u.id AS user_id, u.full_name,
+            (SELECT p.id FROM parties p
+              WHERE p.business_id = u.business_id AND p.employee_user_id = u.id) AS file_id,
+            EXISTS (
+              SELECT 1 FROM personnel_file_drift d
+               WHERE d.business_id = u.business_id AND d.user_id = u.id AND d.resolved_at IS NULL
+            ) AS recorded
+       FROM users u
+      WHERE u.business_id = $1
+      ORDER BY u.created_at`,
+    [businessId],
+  );
+
+  const debts: PersonnelFileDebt[] = [];
+  for (const row of rows) {
+    // No file, or a membership the projection also refuses to guess about: a nameless
+    // member owes a file that cannot be written (nothing is invented for it, so it stays
+    // owed), and a member with no file owes one outright. Both are the same debt here —
+    // «this member has nothing» — even though only one of them is recordable.
+    if (!row.file_id || !(row.full_name ?? "").trim()) {
+      debts.push({
+        userId: row.user_id,
+        fullName: row.full_name,
+        fileId: null,
+        reason: "file_missing",
+        recorded: row.recorded,
+      });
+      continue;
+    }
+
+    // The file through the canonical door, and the membership through the same reader the
+    // projection uses, so this comparison sees exactly what a write would.
+    const [file, canonical] = await Promise.all([
+      getPartyByEmployee(businessId, row.user_id),
+      canonicalIdentity(businessId, row.user_id),
+    ]);
+    if (file && canonical && personnelFileIsStale(file, canonical)) {
+      debts.push({
+        userId: row.user_id,
+        fullName: row.full_name,
+        fileId: file.id,
+        reason: "identity_stale",
+        recorded: row.recorded,
+      });
+    }
+  }
+  return debts;
 }
 
 export interface PersonnelFileDriftRow {

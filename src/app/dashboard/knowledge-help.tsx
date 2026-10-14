@@ -32,7 +32,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { knowledgeSection, sectionForPathname } from "@/lib/knowledge-base";
+import { knowledgePageForPathname, knowledgeSection, sectionForPathname } from "@/lib/knowledge-base";
 import { api } from "./ui";
 
 interface KnowledgeEntry {
@@ -58,18 +58,23 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
     ? knowledgeSection(section)
     : sectionForPathname(pathname ?? "");
   const resolvedKey = resolved?.key;
+  const page = knowledgePageForPathname(pathname ?? "");
+  const pageKey = page?.key;
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<EntryState>({ status: "idle" });
   const [frameLoaded, setFrameLoaded] = useState(false);
 
   const fetchEntry = useCallback(async () => {
-    if (!resolvedKey) return;
+    if (!resolvedKey && !pageKey) return;
     setState({ status: "loading" });
     try {
+      const params = new URLSearchParams();
+      if (resolvedKey) params.set("section", resolvedKey);
+      if (pageKey) params.set("page", pageKey);
       const { ok, data } = await api<{
         entry: KnowledgeEntry | null;
         guide?: KnowledgeGuide | null;
-      }>(`/api/knowledge?section=${encodeURIComponent(resolvedKey)}`);
+      }>(`/api/knowledge?${params.toString()}`);
       if (!ok) {
         setState({ status: "error" });
         return;
@@ -78,16 +83,16 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
     } catch {
       setState({ status: "error" });
     }
-  }, [resolvedKey]);
+  }, [resolvedKey, pageKey]);
 
   useEffect(() => {
     setState({ status: "idle" });
     setFrameLoaded(false);
-  }, [resolvedKey]);
+  }, [resolvedKey, pageKey]);
 
-  if (!resolved) return null;
+  if (!resolved && !page) return null;
 
-  const label = resolved.label;
+  const label = page?.label ?? resolved?.label ?? "";
 
   function openModal() {
     setFrameLoaded(false);

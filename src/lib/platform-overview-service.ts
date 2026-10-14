@@ -34,12 +34,15 @@ export interface OverviewAlert {
 
 export interface PlatformOverview {
   businesses: {
+    /** Customer businesses only — the same scope as the Businesses directory. */
     total: number;
     active: number;
     suspended: number;
     archived: number;
-    /** Businesses created in the last 30 days. */
+    /** Customer businesses created in the last 30 days. */
     newLast30d: number;
+    /** Internal-company workspaces, reported separately (audit F09). */
+    internalCompany: number;
   };
   support: { open: number; urgentOpen: number; unassignedOpen: number };
   bugReports: { new: number; total: number };
@@ -89,6 +92,7 @@ export async function getPlatformOverview(migrations: MigrationStatus): Promise<
         biz_suspended: string;
         biz_archived: string;
         biz_new_30d: string;
+        biz_internal: string;
         support_open: string;
         support_urgent: string;
         support_unassigned: string;
@@ -98,11 +102,12 @@ export async function getPlatformOverview(migrations: MigrationStatus): Promise<
         pay_failed_7d: string;
       }>(
         `SELECT
-           (SELECT count(*) FROM businesses) AS biz_total,
-           (SELECT count(*) FROM businesses WHERE status = 'active') AS biz_active,
-           (SELECT count(*) FROM businesses WHERE status = 'suspended') AS biz_suspended,
-           (SELECT count(*) FROM businesses WHERE status = 'archived') AS biz_archived,
-           (SELECT count(*) FROM businesses WHERE created_at >= now() - interval '30 days') AS biz_new_30d,
+           (SELECT count(*) FROM businesses WHERE ownership_kind = 'customer') AS biz_total,
+           (SELECT count(*) FROM businesses WHERE ownership_kind = 'customer' AND status = 'active') AS biz_active,
+           (SELECT count(*) FROM businesses WHERE ownership_kind = 'customer' AND status = 'suspended') AS biz_suspended,
+           (SELECT count(*) FROM businesses WHERE ownership_kind = 'customer' AND status = 'archived') AS biz_archived,
+           (SELECT count(*) FROM businesses WHERE ownership_kind = 'customer' AND created_at >= now() - interval '30 days') AS biz_new_30d,
+           (SELECT count(*) FROM businesses WHERE ownership_kind = 'platform_internal') AS biz_internal,
            (SELECT count(*) FROM support_tickets WHERE status IN ('open','in_progress','waiting_customer')) AS support_open,
            (SELECT count(*) FROM support_tickets WHERE status IN ('open','in_progress','waiting_customer') AND priority = 'urgent') AS support_urgent,
            (SELECT count(*) FROM support_tickets WHERE status IN ('open','in_progress','waiting_customer') AND assigned_admin_id IS NULL) AS support_unassigned,
@@ -214,7 +219,7 @@ export async function getPlatformOverview(migrations: MigrationStatus): Promise<
     alerts.push({
       level: "warning",
       title: `${support.urgentOpen} تیکت فوری باز`,
-      href: "/platform/support",
+      href: "/platform/support?priority=urgent&queue=open",
     });
   }
   if (bugReports.new > 0) {
@@ -233,6 +238,7 @@ export async function getPlatformOverview(migrations: MigrationStatus): Promise<
       suspended: Number(c?.biz_suspended ?? 0),
       archived: Number(c?.biz_archived ?? 0),
       newLast30d: Number(c?.biz_new_30d ?? 0),
+      internalCompany: Number(c?.biz_internal ?? 0),
     },
     support,
     bugReports,

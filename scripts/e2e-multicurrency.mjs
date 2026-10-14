@@ -441,8 +441,15 @@ async function main() {
   // A cashier (no ledger.view) cannot open the workspace. PIN login through
   // the same API the staff roster uses (as e2e-media.mjs does).
   const cashierContext = await browser.newContext(contextOptions);
+  // The door names the member before the PIN, so pick the seeded Cashier from
+  // the same roster the login screen shows.
+  const roster = await cashierContext.request.get(
+    `${BASE_URL}/api/auth/pin-login/roster?businessSlug=${encodeURIComponent(BUSINESS_SLUG)}`,
+    { headers: { Origin: BASE_URL } },
+  );
+  const cashier = ((await roster.json().catch(() => ({}))).employees ?? []).find((e) => e.role === "cashier");
   const pinLogin = await cashierContext.request.post(`${BASE_URL}/api/auth/pin-login`, {
-    data: { pin: CASHIER_PIN, businessSlug: BUSINESS_SLUG },
+    data: { pin: CASHIER_PIN, employeeId: cashier?.id, businessSlug: BUSINESS_SLUG },
     headers: { Origin: BASE_URL },
   });
   if (!pinLogin.ok()) throw new Error(`cashier PIN login failed (${pinLogin.status()}): ${await pinLogin.text()}`);

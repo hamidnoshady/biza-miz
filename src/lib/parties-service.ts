@@ -1701,12 +1701,26 @@ export async function updateCustomer(
   businessId: string,
   id: string,
   input: { name?: string; phone?: string | null; address?: string | null; notes?: string | null } & PartyInput,
+  /**
+   * Issue #947 (item 2) — the audience of the actor this write belongs to, for the
+   * callers that are not a browser request: a queue worker, an automation, a scheduled
+   * job. `notes` and `address` are two of the fields `team.view` withholds on a staff
+   * file, so an async writer that names its actor must be held to that actor's audience
+   * exactly as the route is. Omitted means the service's own default (the internal full
+   * audience), which is what a caller with no member behind it gets.
+   */
+  options: { actorId?: string | null; audience?: PartyReadAudience } = {},
 ): Promise<Party | null> {
-  return updateParty(businessId, id, {
-    ...input,
-    displayName: input.name,
-    address: input.address,
-  });
+  return updateParty(
+    businessId,
+    id,
+    {
+      ...input,
+      displayName: input.name,
+      address: input.address,
+    },
+    options,
+  );
 }
 
 /**

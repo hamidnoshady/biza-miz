@@ -22,10 +22,13 @@ import {
 import { accountingSectionsFor } from "./accounting-nav";
 import { accountingSectionNeedsAccountList } from "./accounting-manager-policy";
 import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
+import { LedgerWorkspaceSection } from "./ledger-workspace-section";
 import { TrialBalanceSection } from "./trial-balance-section";
 import { EntriesSection } from "./entries-section";
+import { VouchersSection } from "./vouchers-section";
 import { ManualEntrySection } from "./manual-entry-section";
 import { FiscalPeriodsSection } from "./fiscal-periods-section";
+import { OpeningBalancesSection } from "./opening-balances-section";
 import { ArSection } from "./ar-section";
 import { ApSection } from "./ap-section";
 import { ReceiptsPaymentsSection } from "./receipts-payments-section";
@@ -35,7 +38,7 @@ import { ReconciliationSection } from "./reconciliation-section";
 import { ChartOfAccountsSection } from "./chart-of-accounts-section";
 import { canEditChartOfAccounts } from "@/lib/coa-tree";
 import { ExpenseSection } from "./expense-section";
-import { PayrollSection } from "./payroll-section";
+import { PayrollWorkspace } from "./payroll-workspace";
 import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
@@ -356,6 +359,7 @@ export function AccountingManager({
   const body = (
     <>
       {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
+      {section === "ledger" ? <LedgerWorkspaceSection permissions={permissionSet} /> : null}
           {section === "trial-balance" ? (
             <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} />
           ) : null}
@@ -374,6 +378,20 @@ export function AccountingManager({
               accounts={accounts ?? []}
               canApprove={canApproveLedger}
               onRefresh={() => setRefreshKey((key) => key + 1)}
+            />
+          ) : null}
+          {section === "vouchers" ? (
+            /*
+             * The register itself opens on the app's door; renumbering a
+             * voucher is `ledger.approve`, the same decision permission that
+             * approves a manual journal — so the «شماره‌گذاری دوباره» control
+             * follows `canApproveLedger` exactly like «برگشت سند» does on the
+             * journal screen.
+             */
+            <VouchersSection
+              busy={busy}
+              refreshKey={refreshKey}
+              canApprove={canApproveLedger}
             />
           ) : null}
           {section === "manual" ? (
@@ -399,6 +417,21 @@ export function AccountingManager({
           ) : null}
           {section === "fiscal-periods" ? (
             <FiscalPeriodsSection canManage={permissions.includes(PERMISSIONS.ledgerClosePeriod)} />
+          ) : null}
+          {section === "opening-balances" ? (
+            /*
+             * The set's line editor picks accounts from the chart this
+             * workspace already loaded (the same list «ثبت سند دستی» gets).
+             * draft/review/submit is `ledger.post`; approve/post/reverse is
+             * `ledger.approve` — the same split the manual journal uses.
+             */
+            <OpeningBalancesSection
+              accounts={accounts ?? []}
+              busy={busy}
+              run={run}
+              refreshKey={refreshKey}
+              canApprove={canApproveLedger}
+            />
           ) : null}
           {section === "directory" ? (
             <PartiesSection
@@ -437,7 +470,7 @@ export function AccountingManager({
             <ChartOfAccountsSection busy={busy} run={run} canEdit={canEditAccounts} />
           ) : null}
           {section === "payroll" ? (
-            <PayrollSection
+            <PayrollWorkspace
               busy={busy}
               run={run}
               refreshKey={refreshKey}

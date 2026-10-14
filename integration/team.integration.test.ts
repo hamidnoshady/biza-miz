@@ -176,9 +176,10 @@ describe("membership creation always produces a usable login", () => {
     expect(await bcrypt.compare("4816", rows[0].pin_hash)).toBe(true);
   });
 
-  it("scopes PIN uniqueness to the business, so two businesses may share a PIN", async () => {
-    for (const business of [alpha, beta]) {
-      await asBusiness(business.businessId, () =>
+  it("lets two members share a PIN, in one business and across businesses", async () => {
+    const created: string[] = [];
+    for (const business of [alpha, alpha, beta]) {
+      const { userId } = await asBusiness(business.businessId, () =>
         team.createMembership({
           businessId: business.businessId,
           role: "waiter",
@@ -189,12 +190,9 @@ describe("membership creation always produces a usable login", () => {
           reason: "تست: دلیل تغییر دسترسی ثبت شد",
         }),
       );
+      created.push(userId);
     }
-
-    await asBusiness(alpha.businessId, async () => {
-      expect(await team.isPinTaken(alpha.businessId, "2468")).toBe(true);
-      expect(await team.isPinTaken(alpha.businessId, "1357")).toBe(false);
-    });
+    expect(new Set(created).size).toBe(3);
   });
 });
 
@@ -1668,8 +1666,8 @@ describe("the rehire ceremony (issue #854 pass 4)", () => {
         reason: "تست: استخدام صندوق‌دار برای آزمون بازگشت",
       }),
     );
-    const before = await db.query<{ id: string; secret_hash: string; pin_blind_index: string | null }>(
-      `SELECT id, secret_hash, pin_blind_index FROM employee_credentials
+    const before = await db.query<{ id: string; secret_hash: string }>(
+      `SELECT id, secret_hash FROM employee_credentials
         WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
       [userId, alpha.businessId],
     );
@@ -1688,8 +1686,8 @@ describe("the rehire ceremony (issue #854 pass 4)", () => {
       }),
     );
 
-    const after = await db.query<{ id: string; status: string; secret_hash: string; pin_blind_index: string | null; revoked_at: string | null }>(
-      `SELECT id, status, secret_hash, pin_blind_index, revoked_at FROM employee_credentials
+    const after = await db.query<{ id: string; status: string; secret_hash: string; revoked_at: string | null }>(
+      `SELECT id, status, secret_hash, revoked_at FROM employee_credentials
         WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin'`,
       [userId, alpha.businessId],
     );
@@ -1698,7 +1696,6 @@ describe("the rehire ceremony (issue #854 pass 4)", () => {
       id: before.rows[0].id,
       status: "active",
       secret_hash: before.rows[0].secret_hash,
-      pin_blind_index: before.rows[0].pin_blind_index,
       revoked_at: null,
     });
   });
@@ -1729,17 +1726,16 @@ describe("the rehire ceremony (issue #854 pass 4)", () => {
       }),
     );
 
-    const active = await db.query<{ secret_hash: string; pin_blind_index: string | null }>(
-      `SELECT secret_hash, pin_blind_index FROM employee_credentials
+    const active = await db.query<{ secret_hash: string }>(
+      `SELECT secret_hash FROM employee_credentials
         WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
       [userId, alpha.businessId],
     );
     expect(active.rowCount).toBe(1);
     expect(await bcrypt.compare("8817", active.rows[0].secret_hash)).toBe(true);
-    expect(active.rows[0].pin_blind_index).not.toBeNull();
   });
 
-  it("refuses to restore a PIN somebody else took meanwhile, and accepts a fresh one", async () => {
+  it("restores a PIN even when another member chose the same digits meanwhile", async () => {
     const { userId } = await asBusiness(alpha.businessId, () =>
       team.createMembership({
         businessId: alpha.businessId,
@@ -1748,13 +1744,12 @@ describe("the rehire ceremony (issue #854 pass 4)", () => {
         pin: "4041",
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
-        reason: "تست: صندوق‌دار اول برای آزمون تداخل رمز",
+        reason: "تست: صندوق‌دار اول برای آزمون رمز مشترک",
       }),
     );
     await asBusiness(alpha.businessId, () =>
       team.removeMembership(alpha.businessId, userId, alpha.ownerId),
     );
-    // The PIN is free while its owner is offboarded.
     await asBusiness(alpha.businessId, () =>
       team.createMembership({
         businessId: alpha.businessId,
@@ -1763,38 +1758,28 @@ describe("the rehire ceremony (issue #854 pass 4)", () => {
         pin: "4041",
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
-        reason: "تست: صندوق‌دار دوم همان رمز را می‌گیرد",
+        reason: "تست: صندوق‌دار دوم همان رقم‌ها را انتخاب می‌کند",
       }),
     );
 
-    await expect(
-      asBusiness(alpha.businessId, () =>
-        team.rehireMembership({
-          businessId: alpha.businessId,
-          userId,
-          actorId: alpha.ownerId,
-          locationScope: "all",
-          reason: "تست: بازگشت صندوق‌دار اول بدون رمز تازه",
-        }),
-      ),
-    ).rejects.toMatchObject({ message: "pin_taken", status: 409 });
-
+    // A PIN is never compared with a colleague's, so the restore succeeds
+    // and nothing about the second cashier's PIN is revealed.
     await asBusiness(alpha.businessId, () =>
       team.rehireMembership({
         businessId: alpha.businessId,
         userId,
         actorId: alpha.ownerId,
         locationScope: "all",
-        pin: "7788",
-        reason: "تست: بازگشت صندوق‌دار اول با رمز تازه",
+        reason: "تست: بازگشت صندوق‌دار اول بدون رمز تازه",
       }),
     );
-    const active = await db.query(
-      `SELECT 1 FROM employee_credentials
+    const active = await db.query<{ secret_hash: string }>(
+      `SELECT secret_hash FROM employee_credentials
         WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
       [userId, alpha.businessId],
     );
     expect(active.rowCount).toBe(1);
+    expect(await bcrypt.compare("4041", active.rows[0].secret_hash)).toBe(true);
   });
 
   it("refuses a doorless rehire when nothing can be restored, then accepts a fresh PIN", async () => {

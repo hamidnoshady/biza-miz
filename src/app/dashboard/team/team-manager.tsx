@@ -91,10 +91,12 @@ interface Member {
   overrides: { granted?: string[]; revoked?: string[] };
   effectivePermissions: string[];
   /**
-   * Issue #947 (TEAM-F04/F05) — the personnel file this membership owns, and
-   * whether it is still owed. `null` with `personnelFileDrift` false means the
-   * member has no file and nothing is outstanding (an offboarded member whose file
-   * was archived, or a membership the guarantee could not be asked about yet).
+   * Issue #947 (TEAM-F04/F05) — the personnel file this membership owns, and whether
+   * the platform still owes them one. `null` with `personnelFileDrift` false cannot
+   * happen: the roster's flag includes «the file is missing», so a chip-less member is
+   * one whose file is present and in line. The render below keeps a branch for the
+   * impossible pair anyway — the invariant lives in SQL, and TypeScript cannot see it —
+   * and it is the honest fallback if that query ever changes.
    */
   personnelFileId: string | null;
   personnelFileDrift: boolean;
@@ -560,7 +562,14 @@ export function TeamManager({
                       </span>
                     ) : member.personnelFileDrift ? (
                       <span className="text-amber-700 dark:text-amber-300">
-                        پروندهٔ پرسنلی: در انتظار ساخت
+                        {/* «در انتظار ساخت» was wrong for half the cases the flag now
+                            covers: a member whose file exists but no longer carries
+                            their name or phone owes a *sync*, not a creation — and the
+                            roster cannot tell them apart from the record alone (issue
+                            #947, F05: the flag is the debt, which may have no row). */}
+                        {personnelDrift.find((row) => row.userId === member.id)?.reason === "identity_stale"
+                          ? "پروندهٔ پرسنلی: نیازمند همگام‌سازی"
+                          : "پروندهٔ پرسنلی: در انتظار ساخت"}
                         {(() => {
                           const drift = personnelDrift.find((row) => row.userId === member.id);
                           if (!drift) return null;
@@ -853,7 +862,6 @@ const REHIRE_ERROR_MESSAGES: Record<string, string> = {
   identity_not_found: "هویت ورود این عضو در سطح سامانه حذف شده است؛ با پشتیبانی تماس بگیرید.",
   already_a_member: "هویت ورود این عضو همین حالا به عضوی دیگر در این کسب‌وکار متصل است.",
   pin_required: "برای این نقش، رمز عددی فعالی برای بازیابی وجود ندارد؛ رمز عددی تازه‌ای تعیین کنید.",
-  pin_taken: "این رمز عددی در این کسب‌وکار استفاده شده است؛ رمز دیگری انتخاب کنید.",
   invalid_pin: `رمز عددی باید ${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم باشد.`,
   custom_role_not_found: "نقش سفارشی ذخیره‌شدهٔ این عضو دیگر فعال نیست؛ ابتدا نقش او را مشخص کنید.",
   selected_locations_required: "شعبه‌های این عضو را انتخاب کنید.",
@@ -1571,9 +1579,10 @@ function CredentialsEditorDialog({
         {isPinMember ? (
           <Field
             label={`رمز عددی جدید (${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم)`}
-            /* Issue #947 (TEAM-F03) — same wrong claim as the add form's; the PIN is
-               unique across the business, not per branch. */
-            hint="در کل کسب‌وکار یکتاست؛ نمی‌توان آن را برای دو عضو به کار برد."
+            /* Issue #947 (TEAM-F03) — same wrong claim as the add form's, corrected the
+               same way: since #953 a PIN is a personal secret, not an identifier, so
+               nothing here may promise it is unique. */
+            hint="رمز شخصی همین عضو است؛ در فهرست ورود با نام او پیدا می‌شود."
           >
             <input
               className={`${inputClass} w-48 text-center tracking-[0.25em]`}
@@ -2062,13 +2071,13 @@ function AddStaffSection({
         <Field
           label={`رمز عددی (${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم)`}
           /*
-           * Issue #947 (TEAM-F03) — the old hint claimed the PIN was unique per
-           * branch, which is the opposite of the rule: `isPinTaken` compares across
-           * the business and the keyed blind index enforces it business-wide. An
-           * owner who read it could reasonably reuse a PIN in a second branch and
-           * meet a `pin_taken` refusal with no idea why.
+           * Issue #947 (TEAM-F03) opened this hint because it claimed the PIN was
+           * unique per *branch* while the door matched it business-wide. Main has since
+           * removed uniqueness altogether (migration 0221, #953): the PIN door names
+           * the member, so a PIN is a personal secret two members may happen to share,
+           * and a hint promising uniqueness would be as wrong as the old one.
            */
-          hint="در کل کسب‌وکار یکتاست؛ نمی‌توان آن را برای دو عضو به کار برد."
+          hint="رمز شخصی همین عضو است؛ در فهرست ورود با نام او پیدا می‌شود."
         >
           <input
             className={inputClass}

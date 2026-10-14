@@ -919,3 +919,16 @@ describe("platformBackupAlert", () => {
     expect(platformBackupAlert(config({ enabled: true }), base)).toEqual({ level: "ok", reason: "ok" });
   });
 });
+
+describe("encryption is never silently downgraded (audit F03)", () => {
+  it("reports requested-but-unkeyed encryption as not effective, with a refusal warning", () => {
+    const masked = maskPlatformBackupConfig(config({ passphrase: "", encryptLocal: true }), {});
+    expect(masked.effectiveEncryption).toBe(false);
+    expect(masked.warnings.join(" ")).toMatch(/refused/i);
+  });
+
+  it("reports encryption as effective only when it is requested and keyed", () => {
+    expect(maskPlatformBackupConfig(config({ passphrase: "long-enough", encryptLocal: true }), {}).effectiveEncryption).toBe(true);
+    expect(maskPlatformBackupConfig(config({ passphrase: "long-enough", encryptLocal: false }), {}).effectiveEncryption).toBe(false);
+  });
+});

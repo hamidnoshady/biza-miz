@@ -34,6 +34,17 @@ describe("hybridIdentityHealth", () => {
     });
   });
 
+  it("is degraded while a password-role member is not bound to its cloud identity (issue #948)", () => {
+    // Credential hashes may all match ("credential data synced") while the
+    // owner's global identity link is missing ("identity not correctly
+    // bound") — the state behind `identity_not_synced`. Never green.
+    expect(hybridIdentityHealth({ ...base, identityBindingsMissing: 1 })).toMatchObject({
+      overall: "degraded", degradedBy: "credentials", reason: "identity_bindings_missing:1",
+    });
+    expect(hybridIdentityHealth({ ...base, identityBindingsMissing: 0 })).toMatchObject({ overall: "healthy" });
+    expect(hybridIdentityHealth(base)).toMatchObject({ overall: "healthy" });
+  });
+
   it("never calls a legacy cloud fully healthy", () => {
     expect(hybridIdentityHealth({ ...base, credentials: "unsupported_legacy_cloud" })).toMatchObject({
       overall: "limited", degradedBy: "credentials",

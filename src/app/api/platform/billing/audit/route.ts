@@ -41,6 +41,7 @@ const BILLING_AUDIT_ACTIONS = [
   "manual_payment.rejected",
   "wallet.adjusted",
   "refund.created",
+  "billing.spend_policy.updated",
 ] as const;
 
 export const GET = withPlatformScope(async (req: Request) => {

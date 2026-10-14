@@ -9,8 +9,10 @@ import {
   swapHostLabel,
 } from "@/lib/host";
 import { resolveBusinessByLabel } from "@/lib/host-resolution";
-import { endedSupportSessionClaims } from "@/lib/auth";
+import { endedSupportSessionClaims, getSession } from "@/lib/auth";
+import { safeLoginNextPath } from "@/lib/login-contract";
 import { SupportSessionEnded } from "@/app/dashboard/support-session-banner";
+import { SignedInNotice } from "@/components/auth/signed-in-notice";
 import LoginForm from "./login-form";
 
 // The alias resolution above reads the request's Host header, so this route
@@ -28,7 +30,11 @@ export const dynamic = "force-dynamic";
  * page. Forwarding here costs the canonical host nothing and makes a renamed
  * host behave the same way its bookmarked deep links already do.
  */
-export default async function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   if (hostRoutingEnabled()) {
     const rootDomain = configuredRootDomain();
     const headerList = await headers();
@@ -50,5 +56,39 @@ export default async function LoginPage() {
   const endedSupport = await endedSupportSessionClaims();
   if (endedSupport) return <SupportSessionEnded grantId={endedSupport.imp.grantId} />;
 
-  return <LoginForm />;
+  // Issue #948 P0-2/P0-3 — a valid current session does not belong on the
+  // login page: it is redirected into the app (honouring a validated `next`),
+  // so nobody re-enters credentials on top of a live session or mistakes the
+  // door for the app. Two deliberate exceptions keep the page honest:
+  //  - `?changeAccount=1` — the explicit account switch: the form is shown
+  //    and the previous session is revoked first (see SignedInNotice);
+  //  - `?cloudLogin=<reason>` — a failed «ورود با حساب ابری» hand-off must
+  //    surface its error here even when a (weaker) session is still live, and
+  //    the signed-in strip offers the switch instead of hiding the failure.
+  const search = await searchParams;
+  const changeAccount = search.changeAccount === "1" || search.changeAccount === "true";
+  const cloudLoginReason = typeof search.cloudLogin === "string" && search.cloudLogin ? search.cloudLogin : null;
+  const next = safeLoginNextPath(typeof search.next === "string" ? search.next : null, "/dashboard");
+  const session = await getSession();
+  if (session && !changeAccount && !cloudLoginReason) {
+    redirect(next);
+  }
+
+  return (
+    <>
+      {session ? (
+        <div className="fixed inset-x-0 top-4 z-50 flex justify-center px-4">
+          <div className="w-full max-w-sm">
+            <SignedInNotice
+              fullName={session.fullName}
+              role={session.role}
+              switchMode={changeAccount}
+              next={next}
+            />
+          </div>
+        </div>
+      ) : null}
+      <LoginForm />
+    </>
+  );
 }

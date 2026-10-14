@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { isFeatureEnabled } from "@/lib/features";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { listBranches } from "@/lib/branch-service";
 import { originFromHeaders } from "@/lib/desktop-link-service";
 import { ALL_MCP_SCOPES } from "@/lib/mcp/scopes";
 import {
@@ -27,22 +28,33 @@ import {
  * connections and using existing ones.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error, membership } = await requirePermission(PERMISSIONS.integrationsView);
   if (error) return error;
 
   const enabled = await isFeatureEnabled(session.businessId, "api_platform");
-  const [connections, pending] = enabled
+  const [connections, pending, branches, currentLocation] = enabled
     ? await Promise.all([
         listMcpConnections(session.businessId),
         listMcpPendingActions(session.businessId),
+        listBranches(session.businessId),
+        resolveActiveLocation(session),
       ])
-    : [[], []];
+    : [[], [], [], null];
 
   return NextResponse.json({
     enabled,
     connections,
     pending,
     scopes: ALL_MCP_SCOPES,
+    // Issue #883 §1 — the branch vocabulary the grants editor shows (names
+    // only), so the safe default can pin the current branch and the owner can
+    // widen deliberately.
+    branches: branches.filter((b) => b.isActive).map((b) => ({ id: b.id, name: b.name })),
+    currentBranchId: currentLocation?.id ?? null,
+    // Issue #883 P0-4 — minting, narrowing, revoking, consenting and approving
+    // are owner-only. The panel renders read-only without this flag rather
+    // than surfacing the refusal one click too late.
+    canManage: membership.permissions.has(PERMISSIONS.mcpManage),
     // The address a client must be pointed at is *this request's own origin* —
     // the same "ask the host" rule Phase 23 states for login and Phase 28 for
     // desktop pairing. Deriving it from PLATFORM_BASE_URL would hand a
@@ -56,6 +68,9 @@ interface CreateBody {
   scopes?: unknown;
   writeMode?: unknown;
   expiresInDays?: number | null;
+  /** Issue #883 §1 — explicit app/branch grants. The panel always builds it;
+   * a direct API caller must send it too (no schema-free empty document). */
+  grants?: unknown;
 }
 
 /**
@@ -64,7 +79,10 @@ interface CreateBody {
  * The token is in this response body and nowhere else, ever again.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  // Owner-only (issue #883 P0-4): a static MCP token is a machine credential
+  // with continuous — potentially write — reach, so it joins api.manage's rule
+  // rather than the delegatable integrations.manage the route previously used.
+  const { session, error } = await requirePermission(PERMISSIONS.mcpManage);
   if (error) return error;
 
   if (!(await isFeatureEnabled(session.businessId, "api_platform"))) {
@@ -90,6 +108,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     scopes: body.scopes,
     writeMode: body.writeMode,
     expiresInDays: body.expiresInDays ?? null,
+    grants: body.grants,
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
 

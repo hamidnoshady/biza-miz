@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
 import { clientIpFrom } from "@/lib/rate-limit";
+import { requireRecentAuth } from "@/lib/recent-auth";
 import { PLATFORM_RESTORE_CONFIRM_PHRASE, resolveRestorePlan } from "@/lib/platform-backup";
 import {
   getPlatformBackupConfig,
@@ -49,6 +50,13 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const guard = await requirePlatformCapability(wantsApply ? "backup.restore" : "backup.verify");
   if (guard.error) return guard.error;
   const { session } = guard;
+  // Destructive restore is custody of every tenant's data: it needs a fresh
+  // proof of identity, not just the capability (audit F07). Verification is
+  // non-destructive and keeps its normal session requirements.
+  if (wantsApply) {
+    const recentError = requireRecentAuth(session);
+    if (recentError) return recentError;
+  }
 
   const config = await getPlatformBackupConfig();
   // The set of artifact names this server can vouch for. For a cloud source the

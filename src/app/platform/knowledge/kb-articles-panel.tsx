@@ -6,7 +6,7 @@
  * Filters (search, category, status, section, tag) drive GET
  * /api/platform/knowledge/articles; the editor modal carries every field of
  * an article — title, slug (auto-suggested), category, tags, the dashboard
- * sections it teaches, video and cover URLs, ordering, status — plus the
+ * pages it teaches, video and cover URLs, ordering, status — plus the
  * markdown body with a tiny insertion toolbar and a live preview rendered by
  * the exact KbMarkdown members read (theme-aware `auto` tone), so what the
  * operator writes is what «مرکز آموزش» shows in either selected theme.
@@ -21,7 +21,7 @@ import {
   SearchIcon,
   Trash2Icon,
 } from "lucide-react";
-import { KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
+import { KNOWLEDGE_PAGES, KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
 import { suggestKbSlug } from "@/lib/knowledge";
 import { KbMarkdown } from "@/components/knowledge/kb-markdown";
 import {
@@ -55,6 +55,14 @@ const EMPTY_FILTERS: Filters = {
   section: "",
   tagId: "",
 };
+
+const PAGE_GROUPS = [...new Set(KNOWLEDGE_PAGES.map((page) => page.group))];
+
+function assignmentLabel(key: string): string {
+  return KNOWLEDGE_PAGES.find((page) => page.key === key)?.label ??
+    KNOWLEDGE_SECTIONS.find((section) => section.key === key)?.label ??
+    key;
+}
 
 export function ArticlesPanel({
   categories,
@@ -209,14 +217,21 @@ export function ArticlesPanel({
           value={filters.section}
           onChange={(e) => setFilter({ section: e.target.value })}
           className={`${selectClass} w-auto`}
-          aria-label="بخش برنامه"
+          aria-label="صفحهٔ راهنما"
         >
-          <option value="">همهٔ بخش‌ها</option>
-          {KNOWLEDGE_SECTIONS.map((s) => (
-            <option key={s.key} value={s.key}>
-              {s.label}
-            </option>
+          <option value="">همهٔ صفحه‌ها</option>
+          {PAGE_GROUPS.map((group) => (
+            <optgroup key={group} label={group}>
+              {KNOWLEDGE_PAGES.filter((page) => page.group === group).map((page) => (
+                <option key={page.key} value={page.key}>{page.label}</option>
+              ))}
+            </optgroup>
           ))}
+          <optgroup label="اتصال‌های قدیمی">
+            {KNOWLEDGE_SECTIONS.map((section) => (
+              <option key={section.key} value={section.key}>{section.label}</option>
+            ))}
+          </optgroup>
         </select>
         <select
           value={filters.tagId}
@@ -258,7 +273,7 @@ export function ArticlesPanel({
               <tr>
                 <th className="px-4 py-3 text-start font-medium">راهنما</th>
                 <th className="px-4 py-3 text-start font-medium">دسته</th>
-                <th className="px-4 py-3 text-start font-medium">بخش‌ها</th>
+                <th className="px-4 py-3 text-start font-medium">صفحه‌ها</th>
                 <th className="px-4 py-3 text-start font-medium">وضعیت</th>
                 <th className="px-4 py-3 text-start font-medium">
                   به‌روزرسانی
@@ -285,7 +300,7 @@ export function ArticlesPanel({
                       className="mt-0.5 truncate text-[11px] text-muted-foreground"
                       dir="rtl"
                     >
-                      /dashboard/knowledge/a/{row.slug}
+                      /knowledge/a/{row.slug}
                     </p>
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">
@@ -293,13 +308,7 @@ export function ArticlesPanel({
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">
                     {row.sectionKeys.length
-                      ? row.sectionKeys
-                          .map(
-                            (k) =>
-                              KNOWLEDGE_SECTIONS.find((s) => s.key === k)
-                                ?.label ?? k,
-                          )
-                          .join("، ")
+                      ? row.sectionKeys.map(assignmentLabel).join("، ")
                       : "—"}
                   </td>
                   <td className="px-4 py-3">
@@ -467,6 +476,16 @@ function ArticleEditor({
   const [sectionKeys, setSectionKeys] = useState<string[]>(
     article?.sectionKeys ?? [],
   );
+  const [pageQuery, setPageQuery] = useState("");
+  const visiblePages = KNOWLEDGE_PAGES.filter((page) =>
+    `${page.label} ${page.route} ${page.group}`
+      .toLocaleLowerCase("fa")
+      .includes(pageQuery.trim().toLocaleLowerCase("fa")),
+  );
+  // Old section assignments still work as a fallback; preserve them when editing.
+  const legacyKeys = sectionKeys.filter((key) =>
+    KNOWLEDGE_SECTIONS.some((section) => section.key === key),
+  );
   const [tagIds, setTagIds] = useState<string[]>(article?.tagIds ?? []);
   const [videoUrl, setVideoUrl] = useState(article?.videoUrl ?? "");
   const [coverImageUrl, setCoverImageUrl] = useState(
@@ -568,7 +587,7 @@ function ArticleEditor({
             {article ? `ویرایش «${article.title}»` : "راهنمای جدید"}
           </h3>
           <span className="me-auto text-[11px] text-muted-foreground" dir="ltr">
-            /dashboard/knowledge/a/{effectiveSlug}
+            /knowledge/a/{effectiveSlug}
           </span>
           <Button
             variant="ghost"
@@ -694,33 +713,83 @@ function ArticleEditor({
                 />
               </Field>
 
-              <Field
-                label="بخش‌هایی که این راهنما آموزش می‌دهد"
-                hint="آیکون «آموزش» همان بخش به این راهنما پیوند می‌خورد."
-              >
-                <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">
-                  {KNOWLEDGE_SECTIONS.map((s) => {
-                    const on = sectionKeys.includes(s.key);
-                    return (
-                      <button
-                        key={s.key}
-                        type="button"
-                        aria-pressed={on}
-                        onClick={() =>
-                          setSectionKeys((prev) => toggleList(prev, s.key))
-                        }
-                        className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
-                          on
-                            ? "border-sky-400/50 bg-sky-500/20 text-sky-800 dark:text-sky-200"
-                            : "border-border bg-muted text-muted-foreground hover:text-foreground"
-                        }`}
-                      >
-                        {s.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </Field>
+              {/* A plain labelled group, not <Field>: Field wraps its children in a
+                   <label>, which gave every chip the whole group text as its name (F26). */}
+               <div className="mb-4" role="group" aria-labelledby="kb-sections-label">
+                 <span id="kb-sections-label" className="mb-1 block text-sm font-medium text-foreground">
+                   نمایش راهنما در صفحه‌ها
+                 </span>
+                 <span className="mb-2 block text-xs text-muted-foreground">
+                   از صفحه‌هایی که دکمهٔ «آموزش» دارند انتخاب کنید. یک راهنما می‌تواند چند مقصد داشته باشد.
+                 </span>
+                 <input
+                   type="search"
+                   value={pageQuery}
+                   onChange={(e) => setPageQuery(e.target.value)}
+                   className={`${inputClass} mb-2`}
+                   placeholder="جست‌وجوی نام یا مسیر صفحه…"
+                   aria-label="جست‌وجوی صفحه‌های دارای آموزش"
+                 />
+                 <div className="max-h-52 space-y-3 overflow-y-auto rounded-lg border border-border p-2">
+                   {PAGE_GROUPS.map((group) => {
+                     const pages = visiblePages.filter((page) => page.group === group);
+                     if (!pages.length) return null;
+                     return (
+                       <div key={group}>
+                         <p className="mb-1 text-xs font-semibold text-foreground/70">{group}</p>
+                         <div className="flex flex-wrap gap-1.5">
+                           {pages.map((page) => {
+                             const on = sectionKeys.includes(page.key);
+                             return (
+                               <button
+                                 key={page.key}
+                                 type="button"
+                                 aria-pressed={on}
+                                 aria-label={`${page.label} — ${page.route}`}
+                                 title={page.route}
+                                 onClick={() => setSectionKeys((prev) => toggleList(prev, page.key))}
+                                 className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                   on
+                                     ? "border-sky-400/50 bg-sky-500/20 text-sky-800 dark:text-sky-200"
+                                     : "border-border bg-muted text-muted-foreground hover:text-foreground"
+                                 }`}
+                               >
+                                 {page.label}
+                               </button>
+                             );
+                           })}
+                         </div>
+                       </div>
+                     );
+                   })}
+                   {visiblePages.length === 0 ? (
+                     <p className="text-xs text-muted-foreground">صفحه‌ای با این عبارت پیدا نشد.</p>
+                   ) : null}
+                 </div>
+                 <p className="mt-1.5 text-xs text-muted-foreground">
+                   {sectionKeys.filter((key) => KNOWLEDGE_PAGES.some((page) => page.key === key)).length} صفحه انتخاب شده
+                 </p>
+                 {legacyKeys.length > 0 ? (
+                   <div className="mt-2 rounded-lg border border-dashed border-border p-2">
+                     <p className="mb-2 text-xs text-muted-foreground">
+                       اتصال‌های قدیمی حفظ شده‌اند؛ در صورت نیاز برای حذف روی آن‌ها بزنید:
+                     </p>
+                     <div className="flex flex-wrap gap-1.5">
+                       {legacyKeys.map((key) => (
+                         <button
+                           key={key}
+                           type="button"
+                           aria-pressed="true"
+                           onClick={() => setSectionKeys((prev) => prev.filter((value) => value !== key))}
+                           className="rounded-full border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-xs text-foreground"
+                         >
+                           {assignmentLabel(key)} ×
+                         </button>
+                       ))}
+                     </div>
+                   </div>
+                 ) : null}
+               </div>
 
               <Field label="برچسب‌ها">
                 <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">

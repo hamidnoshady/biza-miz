@@ -20,6 +20,8 @@
  * the single import path every caller already uses.
  */
 import type { ComponentType, ReactNode } from "react";
+import Link from "next/link";
+import { ArrowUpRightIcon } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { cardClass, overlayPanelClass, popoverPanelClass } from "./page-chrome-styles";
@@ -152,6 +154,53 @@ export function SectionCard({
         </div>
       ) : null}
     </section>
+  );
+}
+
+/**
+ * A link that is a destination, not a control — the card an index page lists
+ * its screens on («گزارش‌های مالی»'s report cards, «فضای کار حسابداری»'s tool
+ * grid, the platform-settings links). The hover/focus skins were previously
+ * spelled out per index; written once here so every destination card in the
+ * product is the same card (docs/design-system.md §Colour roles — amber is the
+ * selection wash, teal is not a hover).
+ */
+export function DestinationCard({
+  href,
+  title,
+  description,
+  icon: Icon,
+  external,
+}: {
+  href: string;
+  title: ReactNode;
+  description?: ReactNode;
+  /** The destination's own glyph; omitted where a bare title reads better. */
+  icon?: ComponentType<{ "aria-hidden"?: boolean | "true"; className?: string }>;
+  /** True when the link leaves the current area — said out loud on the card. */
+  external?: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      className={`${cardClass} flex min-w-0 gap-3 p-4 transition-colors hover:border-amber-300/70 hover:bg-amber-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10 dark:focus-visible:ring-amber-400/45`}
+    >
+      {Icon ? (
+        <Icon aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-amber-700 dark:text-amber-300" />
+      ) : null}
+      <span className="min-w-0">
+        <span className="flex min-w-0 items-center gap-1 font-semibold text-foreground">
+          <span className="min-w-0 break-words">{title}</span>
+          {/* ↗ mirrors to ↖ in RTL — an anticlockwise quarter turn. Clockwise gave ↘. */}
+          {external ? (
+            <ArrowUpRightIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground rtl:-rotate-90" />
+          ) : null}
+        </span>
+        {description ? (
+          <span className="mt-1 block text-sm leading-6 text-muted-foreground">{description}</span>
+        ) : null}
+      </span>
+    </Link>
   );
 }
 

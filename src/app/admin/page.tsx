@@ -9,6 +9,9 @@ import {
   swapHostLabel,
 } from "@/lib/host";
 import { resolveBusinessByLabel } from "@/lib/host-resolution";
+import { getSession } from "@/lib/auth";
+import { safeLoginNextPath } from "@/lib/login-contract";
+import { SignedInNotice } from "@/components/auth/signed-in-notice";
 import AdminLoginForm from "./admin-login-form";
 
 // The alias resolution below reads the request's Host header, so this route
@@ -25,7 +28,11 @@ export const dynamic = "force-dynamic";
  * *old* host is forwarded to the current host's `/admin`, because a session
  * minted on a renamed host can never stick.
  */
-export default async function AdminLoginPage() {
+export default async function AdminLoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   if (hostRoutingEnabled()) {
     const rootDomain = configuredRootDomain();
     const headerList = await headers();
@@ -41,5 +48,34 @@ export default async function AdminLoginPage() {
     }
   }
 
-  return <AdminLoginForm />;
+  // Issue #948 P0-2/P0-3 — same rule as /login: a live session is redirected
+  // into the app (honouring a validated `next`) instead of stacking a second
+  // sign-in on top of it. `?changeAccount=1` keeps the door open and revokes
+  // the previous session first, so switching from a cashier session to an
+  // owner login never leaves the old session behind.
+  const search = await searchParams;
+  const changeAccount = search.changeAccount === "1" || search.changeAccount === "true";
+  const next = safeLoginNextPath(typeof search.next === "string" ? search.next : null, "/dashboard");
+  const session = await getSession();
+  if (session && !changeAccount) {
+    redirect(next);
+  }
+
+  return (
+    <>
+      {session ? (
+        <div className="fixed inset-x-0 top-4 z-50 flex justify-center px-4">
+          <div className="w-full max-w-sm">
+            <SignedInNotice
+              fullName={session.fullName}
+              role={session.role}
+              switchMode={changeAccount}
+              next={next}
+            />
+          </div>
+        </div>
+      ) : null}
+      <AdminLoginForm />
+    </>
+  );
 }

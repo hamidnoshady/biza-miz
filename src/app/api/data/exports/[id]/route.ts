@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
+import { memberAccessFor } from "@/lib/member-access";
+import { partyReadAudienceForPermissions } from "@/lib/personnel-access";
 import { getExportContent, getExportJob } from "@/lib/data-transfer/export-service";
 import { getConnection } from "@/lib/integrations/connections-service";
 import { isHoloo } from "@/lib/integrations/provider-registry";
@@ -20,6 +22,14 @@ import {
  * `EXPORT_RETENTION_DAYS`); once pruned, the history row survives — who
  * exported what, when, how many rows — and this answers 410 rather than
  * pretending the file is still there.
+ *
+ * Issue #947 — «is the file still there» is not the only question. The bytes were
+ * produced under a *sensitivity* (the party halves a member could read, the provider
+ * scopes they held), and both can change between the production and this request, so the
+ * download re-checks them against the member asking now. A file produced under a wider
+ * audience is refused (`export_requires_regeneration`, 403, with `requires`) rather than
+ * redacted: a rendered workbook cannot be narrowed field by field, and the member who is
+ * entitled to the data regenerates it from the export screen under current permissions.
  */
 export const GET = withTenantScope(
   async (_request: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
@@ -51,7 +61,21 @@ export const GET = withTenantScope(
         if (entityError) return entityError;
       }
 
-      const content = await getExportContent(owner.businessId, id);
+      /*
+       * Read through `memberAccessFor`, the product's one copy of «what may this member
+       * do», exactly as `entityAccess` above does — the token's copy lags a revocation
+       * and this decides whether privileged bytes leave the building.
+       */
+      const access = await memberAccessFor(owner.session);
+      if (!access?.isActive) {
+        // A suspended or offboarded membership is not an exporter, whatever the token
+        // still says. Same refusal shape as a missing key.
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      const content = await getExportContent(owner.businessId, id, {
+        partyAudience: partyReadAudienceForPermissions(access.permissions),
+        permissions: access.permissions,
+      });
       if (!content) return NextResponse.json({ error: "content_expired" }, { status: 410 });
       return fileResponse(content.body, content.contentType, content.fileName);
     } catch (err) {

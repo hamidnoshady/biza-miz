@@ -348,6 +348,7 @@ const ELIGIBLE_ACCRUALS_SQL = `
     LEFT JOIN orders o ON o.id = oi.order_id
    WHERE a.business_id = $1
      AND a.payroll_run_id IS NULL AND a.settlement_run_id IS NULL
+     AND a.payroll_engine_run_id IS NULL -- issue #865: not reserved by the statutory payroll engine
      AND a.amount <> 0
      AND COALESCE(je.entry_date, a.created_at::date) <= $2::date
      AND ($3::uuid IS NULL OR je.location_id = $3::uuid)
@@ -1375,7 +1376,7 @@ export async function calculateCommissionRun(
       const claimed = await client.query(
         `UPDATE commission_accruals SET settlement_run_id = $1
           WHERE business_id = $2 AND id = ANY($3::uuid[])
-            AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
+            AND payroll_run_id IS NULL AND settlement_run_id IS NULL AND payroll_engine_run_id IS NULL`,
         [runId, businessId, plan.accrualIds],
       );
       if (claimed.rowCount !== plan.accrualIds.length) {

@@ -3,22 +3,11 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool } from "@/lib/db";
 import { positiveQuantityText } from "@/lib/inventory-exact";
-import { createInventoryTransfer } from "@/lib/transfer-service";
+import { createInventoryTransfer, listInventoryTransfers } from "@/lib/transfer-service";
 
 export const GET = withTenantScope(async () => {
  const {session,error}=await requirePermission(PERMISSIONS.inventoryView); if(error)return error;
- const pool = getPool();
- const { rows: transfers } = await pool.query(
-  `SELECT t.id, t.status::text AS status, t.note, t.created_at,
-          t.shipped_at, t.received_at, t.cancelled_at,
-          sl.name AS source_location_name, dl.name AS destination_location_name,
-          (SELECT COUNT(*)::int FROM inventory_transfer_lines tl WHERE tl.transfer_id=t.id) AS line_count
-   FROM inventory_transfers t
-   JOIN locations sl ON sl.id = t.source_location_id
-   JOIN locations dl ON dl.id = t.destination_location_id
-   WHERE t.business_id = $1
-   ORDER BY t.created_at DESC LIMIT 100`,
-  [session.businessId]);
+ const transfers = await listInventoryTransfers(session.businessId);
  return NextResponse.json({ transfers });
 });
 

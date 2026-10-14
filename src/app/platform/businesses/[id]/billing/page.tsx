@@ -663,24 +663,40 @@ function SubscriptionTab({
               </div>
               <div className="flex justify-between gap-2">
                 <dt className="text-muted-foreground">تمدید خودکار</dt>
-                <dd>
+                <dd className="flex items-center gap-2">
+                  {/* The current stored state is shown as a badge; the button names the
+                      action it performs (audit F15). The two never share one label. */}
+                  <span
+                    className={
+                      sub.autoRenew
+                        ? "rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-700 dark:text-emerald-300"
+                        : "rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+                    }
+                  >
+                    {sub.autoRenew ? "فعال" : "غیرفعال"}
+                  </span>
                   {canManageSubscription ? (
                     <button
                       type="button"
                       className="rounded-lg border border-border px-2 py-0.5 text-xs hover:bg-muted"
                       disabled={busy === "subscription"}
+                      aria-label={sub.autoRenew ? "غیرفعال کردن تمدید خودکار" : "فعال کردن تمدید خودکار"}
                       onClick={() =>
                         void onSubscriptionAction(
                           { action: "set_auto_renew", autoRenew: !sub.autoRenew },
-                          sub.autoRenew ? "تمدید خودکار خاموش شد." : "تمدید خودکار روشن شد.",
+                          sub.autoRenew ? "تمدید خودکار غیرفعال شد." : "تمدید خودکار فعال شد.",
                         )
                       }
                     >
-                      {busy === "subscription" ? <Loader2Icon className="inline size-3 animate-spin" /> : sub.autoRenew ? "خاموش" : "روشن"}
+                      {busy === "subscription" ? (
+                        <Loader2Icon className="inline size-3 animate-spin" />
+                      ) : sub.autoRenew ? (
+                        "غیرفعال کردن"
+                      ) : (
+                        "فعال کردن"
+                      )}
                     </button>
-                  ) : (
-                    (sub.autoRenew ? "روشن" : "خاموش")
-                  )}
+                  ) : null}
                 </dd>
               </div>
             </dl>

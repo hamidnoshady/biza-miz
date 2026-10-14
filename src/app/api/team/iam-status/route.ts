@@ -85,6 +85,12 @@ export const GET = withTenantScope(async () => {
           // never a credential.
           missingPinMembers: health.pinGap.missingMembers,
           missingIdentityBindings: health.missingIdentityBindings,
+          // Issue #948 — binding evidence, separate from "hashes match":
+          // what the last pass repaired/re-keyed, and which contract the
+          // cloud's payload spoke.
+          identityMismatches: health.credentials?.identityMismatches ?? 0,
+          identitiesRekeyed: health.credentials?.identityRekeys ?? 0,
+          identityContract: health.credentials?.identityContract ?? null,
           convergedAt: health.credentials?.convergedAt ?? null,
         }
       : { state: "not_configured" },
@@ -125,12 +131,24 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const identitySyncOk = await runIamSync(businessId);
   const credentialSync = await syncHybridLoginCredentials(businessId, { config });
   const health = await readHybridIdentityStatus(businessId, { config });
-  const ok = identitySyncOk && health.overall === "healthy" && health.pinGap.missing === 0;
+  // Issue #948 P1-6 — "healthy" after a repair means the canonical global
+  // identity mapping is in place, not merely that credential hashes match or
+  // the staff PIN gap is zero. `overall === "healthy"` already refuses to be
+  // green while bindings the payload named are unbound; the explicit gates
+  // stay here so a caller can tell which one failed.
+  const identityMismatches = health.credentials?.identityMismatches ?? 0;
+  const ok = identitySyncOk
+    && health.overall === "healthy"
+    && health.pinGap.missing === 0
+    && identityMismatches === 0;
   return NextResponse.json(
     {
       ok,
       identitySyncOk,
-      credentialsConverged: health.pinGap.missing === 0 && health.credentials?.status !== "degraded",
+      credentialsConverged:
+        health.pinGap.missing === 0
+        && identityMismatches === 0
+        && health.credentials?.status !== "degraded",
       overall: health.overall,
       degradedBy: health.degradedBy,
       reason: health.reason,
@@ -144,6 +162,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         pinMembersUsable: credentialSync.pinMembersUsable,
         pinMembersMissing: credentialSync.pinMembersMissing,
         missingIdentityBindings: credentialSync.missingIdentityBindings,
+        identityMismatches: credentialSync.identityMismatches,
+        identitiesRekeyed: credentialSync.identitiesRekeyed,
+        identityContract: credentialSync.identityContract,
       },
     },
     { status: ok ? 200 : 503 },

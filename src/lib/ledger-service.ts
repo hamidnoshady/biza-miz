@@ -23,6 +23,7 @@ import {
 } from "./ledger";
 import type { Rial } from "./money";
 import { rialBigInt, type RialText } from "./inventory-exact";
+import { assignVoucherNumber } from "./voucher-numbering-service";
 
 /**
  * Thrown when an auto-posting event needs a well-known account (by Chart of
@@ -89,11 +90,11 @@ export async function postExactJournalEntry(
   }
   if (debit !== credit) throw new Error("unbalanced_journal_entry");
 
-  const { rows } = await client.query<{ id: string }>(
+  const { rows } = await client.query<{ id: string; entry_date: string }>(
     `INSERT INTO journal_entries
        (business_id,location_id,entry_date,memo,source_type,source_id,created_by,posting_kind,inventory_event_id,project_id)
      VALUES($1,$2,COALESCE($3,CURRENT_DATE),$4,$5,$6,$7,$8,$9,$10)
-     RETURNING id`,
+     RETURNING id, entry_date::text AS entry_date`,
     [
       input.businessId,
       input.locationId,
@@ -113,6 +114,18 @@ export async function postExactJournalEntry(
       [rows[0].id, line.accountId, line.debit, line.credit],
     );
   }
+  // Issue #867 — the document's number is part of its identity: assigned in
+  // this same transaction from the stored entry_date, so an entry and its
+  // voucher number commit together (and a posting that cannot be numbered
+  // rolls back with the rest). The voucher columns are outside the fiscal
+  // trigger's column set, so numbering does not extend the construction grant.
+  await assignVoucherNumber(client, {
+    businessId: input.businessId,
+    entryId: rows[0].id,
+    entryDate: rows[0].entry_date,
+    sourceType: input.sourceType,
+    voucherReference: input.voucherReference ?? null,
+  });
   // The DB line trigger grants insertion into a soft-closed period only while
   // this freshly-created entry is being assembled. Do not let later statements
   // in the same outer transaction reuse that construction marker.
@@ -928,6 +941,12 @@ export interface PostJournalEntryInput {
   inventoryEventId?: string | null;
   /** Optional operating dimension. The caller must establish tenant affinity. */
   projectId?: string | null;
+  /**
+   * Issue #867 — the accountant's own reference number for the document (what
+   * it was called in the system it came from). Advisory metadata on the entry,
+   * never part of the fiscal-year sequence; `undefined` posts without one.
+   */
+  voucherReference?: string | null;
 }
 
 /**
@@ -948,9 +967,10 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
     throw new Error("unbalanced_journal_entry");
   }
 
-  const { rows } = await client.query<{ id: string }>(
+  const { rows } = await client.query<{ id: string; entry_date: string }>(
     `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id, created_by, posting_kind, inventory_event_id, project_id)
-     VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+     VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, $10)
+     RETURNING id, entry_date::text AS entry_date`,
     [input.businessId, input.locationId, input.entryDate ?? null, input.memo, input.sourceType, input.sourceId, input.createdBy, input.postingKind ?? null, input.inventoryEventId ?? null, input.projectId ?? null],
   );
   const entryId = rows[0].id;
@@ -962,6 +982,16 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
       l.credit,
     ]);
   }
+  // Issue #867 — see postExactJournalEntry: the number commits with the entry.
+  // The voucher columns are outside the fiscal trigger's column set, so
+  // numbering does not extend the construction grant.
+  await assignVoucherNumber(client, {
+    businessId: input.businessId,
+    entryId,
+    entryDate: rows[0].entry_date,
+    sourceType: input.sourceType,
+    voucherReference: input.voucherReference ?? null,
+  });
   // A soft-close construction token is single-use at the entry boundary, not
   // a continuing authorization to append lines later in this transaction.
   await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");

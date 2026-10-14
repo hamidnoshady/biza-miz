@@ -224,8 +224,11 @@ beforeEach(async () => {
   businessId = biz.rows[0].id;
 
   const locations = await db.query<{ id: string; name: string }>(
-    `INSERT INTO locations (business_id, name, timezone)
-     VALUES ($1, 'Main', $2), ($1, 'Other', $2)
+    // One statement gives both rows the same created_at, and the "primary
+    // branch" is the oldest one; Other is dated a minute later so Main wins the
+    // pick every run instead of whichever row the planner returns first.
+    `INSERT INTO locations (business_id, name, timezone, created_at)
+     VALUES ($1, 'Main', $2, now()), ($1, 'Other', $2, now() + interval '1 minute')
      RETURNING id, name`,
     [businessId, TEHRAN],
   );

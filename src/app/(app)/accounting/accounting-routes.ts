@@ -22,11 +22,23 @@ export const ACCOUNTING_HOME = "/accounting/overview";
 
 export const ACCOUNTING_SECTION_KEYS = [
   "dashboard",
+  // «فضای کار حسابداری» — the ledger workspace's own landing page at
+  // `/accounting/ledger`: one ordinary menu link whose page lists every
+  // permitted ledger tool by the accountant's own divisions. It is a section
+  // like the rest (one route, one gate, one heading), not a disclosure in the
+  // sidebar and not a second copy of the tools themselves.
+  "ledger",
   "trial-balance",
   "entries",
+  // «دفتر اسناد» — the stable fiscal-year voucher number of every posted
+  // document (issue #867), beside the journal it numbers.
+  "vouchers",
   "manual",
   "expenses",
   "fiscal-periods",
+  // «ترازات افتتاحیه» — the accountant's opening-balance workspace, beside
+  // the fiscal years it opens (issue #867).
+  "opening-balances",
   // The platform's one people directory — the shared «اشخاص» record with the
   // ledger's columns (accounting code, tax, balance).
   //

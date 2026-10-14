@@ -225,6 +225,7 @@ can reconcile is worse than saying the platform cannot sell that TLD yet.
 | `DELETE /api/cms/website/posts/[id]` | Delete a post. |
 | `POST /api/cms/website/products`, `PATCH`/`DELETE /api/cms/website/products/[id]` | Create/edit/delete a product. Same draft-only rule. |
 | `GET /api/cms/website/pages` | The site's pages, drafts included. Read-only: the CMS refuses a page write from a site key. |
+| `POST /api/cms/website/embed` | `{ collection: "posts"\|"pages", id? }` → `{ url }`. A one-time CMS address for the «ویرایش» modal (see «Editing in a modal» below). Needs `cms.content_manage`; `canPublish` comes from the session's `cms.publish`, never the body. |
 | `POST /api/cms/website/{drafts,pages,products}/[id]/publish` | Publish one draft. The site key cannot publish, so this goes through the platform-key owner bridge (`POST /api/platform/sites/:id/publish` on the CMS), behind `cms.publish` — always a person's click. |
 | `PATCH /api/cms/website/domain` | Move the connected site to a new domain (`updateSiteDomain` → CMS `PATCH /api/site/domain`, site-key only). Resets `domainVerified` server-side and updates the stored `site_domain`; the DNS checklist has to be re-run and the CMS-side box re-ticked. |
 | `PATCH /api/cms/website/orders/[id]` | Move an order status; the CMS settles stock & snapshot. |
@@ -237,7 +238,25 @@ can reconcile is worse than saying the platform cannot sell that TLD yet.
 | `GET /api/website/managers` | Which of the app's two managers this business has — what the sidebar and the app home are built from. |
 | `GET`/`POST /api/website/billing` | Plan, subscription and charges; start/change a plan, pay the current period, stop auto-renewal. |
 
-Pages are listed and published from this app but never written — the block-based page builder is a CMS-admin surface, deliberately not duplicated here (and the CMS refuses a page write from a site key). A new site is created only by the wizard's `setup/build` (provision → connect → subscribe); there is no second provisioning route that could create a site nothing bills for. «مدیریت محتوا در CMS» keeps that door open for anything this screen doesn't cover (page layout, media, nav, forms, publishing).
+Pages are listed and published from this app but never *written through the API* — the block-based page builder is a CMS-admin surface, deliberately not duplicated here (and the CMS refuses a page write from a site key). The «صفحه‌ها» and «نوشته‌ها» sections reach it by showing the CMS's own page in a modal (next section) rather than rebuilding it. A new site is created only by the wizard's `setup/build` (provision → connect → subscribe); there is no second provisioning route that could create a site nothing bills for. «مدیریت محتوا در CMS» keeps that door open for anything this screen doesn't cover (page layout, media, nav, forms, publishing).
+
+### Editing in a modal
+
+«نوشتهٔ جدید», «ویرایش نوشته», «صفحهٔ جدید» and «ویرایش صفحه» open the CMS's own admin document in a near-full-screen modal (`CmsEmbedDialog`, `cms-sections.tsx`) — the same block builder, media library and translations an operator would use, without a sidebar and without signing in to the CMS.
+
+1. The browser asks this app: `POST /api/cms/website/embed {collection, id?}` (`cms.content_manage`).
+2. This app's server asks the CMS with the **platform key**: `POST /api/platform/sites/:id/embed-session {collection, id?, canPublish}` (`createOwnerEmbedSession`, `src/lib/cms/owner-bridge.ts`). `canPublish` is this member's `cms.publish`.
+3. The CMS returns a one-time URL on its own origin (`…/api/embed/enter?code=…`, 60 seconds, single use). This app refuses a URL on any other origin and passes it to the iframe.
+4. The iframe spends it; the CMS signs in a per-site service user whose tenant role is `editor` (drafts; edits autosave) or `owner` (Publish visible), and lands on the document. Closing the modal reloads the list.
+
+Setup, both sides:
+
+- **CMS:** `ADMIN_EMBED_ORIGINS=https://pos.eshobe.com` (build-time; repository variable of the same name for the image build). Without it the admin only frames itself, and the modal stays blank.
+- **This app:** `ESHOBE_CMS_URL` (or `CMS_EMBED_ORIGINS` when the CMS address was saved in the console instead) feeds `frame-src` in the CSP (`cmsFrameSources`, `src/lib/security-headers.ts`). Under `CSP_MODE=enforce` a missing entry is a blank frame.
+- Serve both apps from one registrable domain (`pos.…` / `cms.…`). Cross-site framing works only where third-party cookies do (Chromium and Firefox, with `Partitioned` cookies); Safari blocks them.
+- Deploy the CMS first. Against a CMS without the route the modal says «نسخهٔ CMS از این اتصال پشتیبانی نمی‌کند».
+
+The CMS credential never reaches the browser, and the browser holds the one-time URL only. The old in-app post form (Markdown textarea and hero-image upload) is gone: the CMS page replaces it, including media upload, which a site key could not do (§6, open gap).
 
 ### DNS checklist + live preview
 

@@ -63,13 +63,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
      * empty.
      */
     const member = await memberAccessFor(owner.session);
+    const audience = partyReadAudienceForPermissions(member?.permissions);
     const exported = await buildHolooWorkbookExport({
       businessId: owner.businessId,
       connectionId,
       locationId,
       currencyUnit: settings.currencyUnit,
       scopes,
-      audience: partyReadAudienceForPermissions(member?.permissions),
+      audience,
     });
     const fileName = `holoo-${HOLOO_DATA_TRANSFER_PROFILE.profileKey}-${todayStamp()}.xlsx`;
     const metadata = {
@@ -94,6 +95,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       actorUserId: owner.actorUserId,
       actorName: owner.actorName,
       providerMetadata: metadata,
+      partyAudience: audience,
+      /*
+       * Issue #947 — the file records the keys it was actually checked against, and they
+       * come from the *successful* `checkHolooExportScopePermissions` call above rather
+       * than from a second reading of the contract: a re-check at download time has to
+       * ask about exactly what was verified at production time, no more and no less.
+       */
+      domainKeys: permission.required,
     });
     const warningHeader = exported.skippedMultiRolePersons ? String(exported.skippedMultiRolePersons) : "0";
     return fileResponse(exported.body, XLSX_CONTENT_TYPE, fileName, {

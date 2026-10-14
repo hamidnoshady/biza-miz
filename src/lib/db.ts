@@ -396,6 +396,13 @@ export async function withTenantTransaction<T>(
  *     the same timing constraint `checkImpersonation`'s `activeGrant` lookup
  *     already has, just for a PIN login's session record instead of an
  *     impersonation grant.
+ *   - **native-device-auth** — re-checking a `native_app_devices` row (issue
+ *     #884) is still active, from `getSession()`, which runs this check
+ *     before `enterTenantScope` has been called for the request — the same
+ *     timing constraint `checkEmployeeSession`'s `employee_sessions` lookup
+ *     already has, just for an Android installation's device-binding claim
+ *     instead of a PIN login's session record;
+ *
  *   - **pairing-redeem** — resolving a one-time desktop pairing code to the
  *     business it was issued for (and reading that business's configuration to
  *     build the snapshot) happens before any tenant has been chosen, the same
@@ -457,6 +464,40 @@ export async function withTenantTransaction<T>(
  */
 export async function withoutTenantScope<T>(reason: string, fn: () => Promise<T>): Promise<T> {
   return runInTenantScope({ kind: "bypass", reason }, fn);
+}
+
+/**
+ * `withoutTenantScope` for multi-statement platform writes that must commit or
+ * roll back together, or that lock rows (`FOR UPDATE`, advisory locks).
+ *
+ * Same contract as `withTenantTransaction`: ambient `query()` is pinned to one
+ * client inside `BEGIN`/`COMMIT`, a throw rolls everything back, and the
+ * bypass reason is recorded exactly as `withoutTenantScope` records it. Use it
+ * only where the platform scope is already justified; it is not a way around
+ * tenant isolation.
+ */
+export async function withoutTenantScopeTransaction<T>(
+  reason: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withoutTenantScope(reason, async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await runPinned(client, fn);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Intentionally ignored: the original error explains the failure.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
 }
 
 /**

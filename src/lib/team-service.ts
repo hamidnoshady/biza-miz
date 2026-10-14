@@ -44,7 +44,6 @@ import {
   revokePlatformUserSessions,
   validatePasswordStrength,
 } from "./password-reset";
-import { pinBlindIndex } from "./otp-challenge";
 import { loginCredentialModelForRole } from "./roles";
 import { resolveMembershipBranchPolicy, type LocationScope } from "./location-access";
 import {
@@ -185,15 +184,24 @@ export async function listMembers(businessId: string): Promise<TeamMember[]> {
               (SELECT array_agg(ul.location_id) FROM user_locations ul WHERE ul.user_id = u.id),
               '{}'
             ) AS location_ids,
-            -- Issue #947 (TEAM-F07): the membership's personnel file and its open
-            -- drift episode, resolved in this one read so the roster can show the
-            -- three states (file present / owed / none) without a second request
+            -- Issue #947 (TEAM-F07): the membership's personnel file and whether the
+            -- platform owes them one, resolved in this one read so the roster can show
+            -- the three states (file present / owed / none) without a second request
             -- per member. Both tables are tenant-scoped, so RLS confines the join.
             (SELECT p.id FROM parties p
               WHERE p.business_id = u.business_id AND p.employee_user_id = u.id) AS personnel_file_id,
-            EXISTS (
-              SELECT 1 FROM personnel_file_drift d
-               WHERE d.business_id = u.business_id AND d.user_id = u.id AND d.resolved_at IS NULL
+            -- Issue #947 (TEAM-F05): «owed» is the *debt*, not the record of it. A
+            -- member with no file owes one whether or not the drift table says so
+            -- (bookkeeping can be lost; the data cannot), so the flag is the union of
+            -- the two answers — the roster must not report «فایلی موجود است» for a
+            -- member whose file is exactly what is missing.
+            (
+              (SELECT p.id FROM parties p
+                WHERE p.business_id = u.business_id AND p.employee_user_id = u.id) IS NULL
+              OR EXISTS (
+                SELECT 1 FROM personnel_file_drift d
+                 WHERE d.business_id = u.business_id AND d.user_id = u.id AND d.resolved_at IS NULL
+              )
             ) AS personnel_file_drift
        FROM users u
        LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id
@@ -473,13 +481,6 @@ export async function createMembership(
       input.locationScope ?? (!namesBranchPolicy && input.role !== "owner" ? customRoleDefaultScope : null);
 
     const pinHash = input.pin ? await bcrypt.hash(input.pin, BCRYPT_COST) : null;
-    /**
-     * Issue #854 (P2.13): the keyed blind index that backs the unique PIN
-     * constraint, written on the same statement as the credential itself.
-     * Without it a concurrent `isPinTaken` check and insert can both pass;
-     * with it the database refuses the second writer.
-     */
-    const pinIndex = input.pin ? await pinBlindIndex(input.businessId, input.pin) : null;
 
     // Branch ids come from a request body; nothing downstream re-checks they
     // belong to this business, so this is where a foreign id stops.
@@ -579,28 +580,16 @@ export async function createMembership(
          ON CONFLICT (id) DO NOTHING`,
         [userId, input.businessId],
       );
-      /**
-       * Issue #854 (P2.13): the unique index on
-       * `(business_id, pin_blind_index)` is the real guarantee — `isPinTaken`
-       * above answers the friendly case, and this answers the racing one. The
-       * conflict must surface as the same `pin_taken` refusal every other PIN
-       * surface produces, or the caller sees a raw Postgres error name instead
-       * of a sentence about the PIN they just chose.
-       */
-      try {
-        await client.query(
-          `INSERT INTO employee_credentials
-             (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
-           VALUES ($1, $2, 'pin', $3, $4)`,
-          [userId, input.businessId, pinHash, pinIndex],
-        );
-      } catch (err) {
-        if ((err as { code?: string }).code === "23505") {
-          await client.query("ROLLBACK");
-          throw new TeamError("pin_taken", 409);
-        }
-        throw err;
-      }
+      // A PIN is never checked against other members' PINs: two people may
+      // choose the same digits, and refusing one would tell them what a
+      // colleague's PIN is (migration 0221). The door always names the member
+      // first, so the PIN only ever has to match that one member's hash.
+      await client.query(
+        `INSERT INTO employee_credentials
+           (employee_id, business_id, credential_type, secret_hash)
+         VALUES ($1, $2, 'pin', $3)`,
+        [userId, input.businessId, pinHash],
+      );
     }
 
     if (locations.locationIds.length > 0) {
@@ -683,38 +672,6 @@ export async function createMembership(
   } finally {
     client.release();
   }
-}
-
-/**
- * Whether a 4-digit PIN is already in use within a business.
- *
- * PINs are bcrypt-hashed, so this can't be a unique index — every candidate
- * has to be compared against every active PIN in the business. Scoped to the
- * business (not, as before Phase 12, to the whole table).
- */
-export async function isPinTaken(
-  businessId: string,
-  pin: string,
-  exceptUserId?: string,
-): Promise<boolean> {
-  const { rows } = await query<{ id: string; pin_hash: string }>(
-    `SELECT u.id, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
-       FROM users u
-       LEFT JOIN LATERAL (
-         SELECT secret_hash FROM employee_credentials
-          WHERE employee_id = u.id AND business_id = u.business_id
-            AND credential_type = 'pin' AND status = 'active'
-          ORDER BY created_at DESC LIMIT 1
-       ) ec ON true
-      WHERE u.business_id = $1 AND u.is_active
-        AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL`,
-    [businessId],
-  );
-  for (const row of rows) {
-    if (row.id === exceptUserId) continue;
-    if (await bcrypt.compare(pin, row.pin_hash)) return true;
-  }
-  return false;
 }
 
 /**
@@ -1544,7 +1501,7 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
 
     /**
      * The PIN half. With a fresh PIN named, the rehire provisions it the way
-     * a creation does (shape check, uniqueness, blind index). Otherwise the
+     * a creation does (shape check, then hash). Otherwise the
      * credential active at offboarding is restored — offboarding revoked it,
      * it was never deleted, and reviving it is a single row flip under the
      * same lock. Nothing to restore and nothing offered: refuse, because an
@@ -1557,31 +1514,18 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
           await client.query("ROLLBACK");
           throw new TeamError("invalid_pin", 400);
         }
-        if (await isPinTaken(input.businessId, pin, input.userId)) {
-          await client.query("ROLLBACK");
-          throw new TeamError("pin_taken", 409);
-        }
         const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
-        const pinIndex = await pinBlindIndex(input.businessId, pin);
         await client.query(
           `INSERT INTO employees (id, business_id) VALUES ($1, $2)
            ON CONFLICT (id) DO NOTHING`,
           [input.userId, input.businessId],
         );
-        try {
-          await client.query(
-            `INSERT INTO employee_credentials
-               (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
-             VALUES ($1, $2, 'pin', $3, $4)`,
-            [input.userId, input.businessId, pinHash, pinIndex],
-          );
-        } catch (err) {
-          if ((err as { code?: string }).code === "23505") {
-            await client.query("ROLLBACK");
-            throw new TeamError("pin_taken", 409);
-          }
-          throw err;
-        }
+        await client.query(
+          `INSERT INTO employee_credentials
+             (employee_id, business_id, credential_type, secret_hash)
+           VALUES ($1, $2, 'pin', $3)`,
+          [input.userId, input.businessId, pinHash],
+        );
       } else {
         const { rows: restorable } = await client.query<{ id: string }>(
           `SELECT id FROM employee_credentials
@@ -1595,23 +1539,12 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
           await client.query("ROLLBACK");
           throw new TeamError("pin_required", 409);
         }
-        try {
-          await client.query(
-            `UPDATE employee_credentials
-                SET status = 'active', revoked_at = NULL
-              WHERE id = $1 AND business_id = $2`,
-            [restorable[0].id, input.businessId],
-          );
-        } catch (err) {
-          // The blind index is unique among *active* PINs business-wide: if
-          // somebody else now holds that PIN, the restore collides — surface
-          // the same refusal a fresh PIN would, so the caller can name one.
-          if ((err as { code?: string }).code === "23505") {
-            await client.query("ROLLBACK");
-            throw new TeamError("pin_taken", 409);
-          }
-          throw err;
-        }
+        await client.query(
+          `UPDATE employee_credentials
+              SET status = 'active', revoked_at = NULL
+            WHERE id = $1 AND business_id = $2`,
+          [restorable[0].id, input.businessId],
+        );
       }
     }
 
@@ -1765,10 +1698,7 @@ export async function setPin(
     throw new TeamError("current_pin_required", 403);
   }
 
-  if (await isPinTaken(businessId, pin, userId)) throw new TeamError("pin_taken", 409);
-
   const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
-  const blindIndex = await pinBlindIndex(businessId, pin);
 
   const client = await getPool().connect();
   try {
@@ -1788,33 +1718,21 @@ export async function setPin(
     );
     await client.query(
       `UPDATE employee_credentials
-          SET status = 'revoked', revoked_at = now(), pin_blind_index = NULL
+          SET status = 'revoked', revoked_at = now()
         WHERE employee_id = $1 AND business_id = $2
           AND credential_type = 'pin' AND status = 'active'`,
       [userId, businessId],
     );
 
-    /**
-     * The unique index on `(business_id, pin_blind_index)` is the real
-     * guarantee (issue #854 P2.13): `isPinTaken` above answers the friendly
-     * case, and this answers the racing one. A conflict is translated to the
-     * same `pin_taken` refusal the pre-check produces, so the caller sees one
-     * answer whichever path caught it.
-     */
-    try {
-      await client.query(
-        `INSERT INTO employee_credentials
-           (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
-         VALUES ($1, $2, 'pin', $3, $4)`,
-        [userId, businessId, pinHash, blindIndex],
-      );
-    } catch (err) {
-      if ((err as { code?: string }).code === "23505") {
-        await client.query("ROLLBACK");
-        throw new TeamError("pin_taken", 409);
-      }
-      throw err;
-    }
+    // No uniqueness check against other members (migration 0221): the door
+    // names the member before the PIN, so a shared PIN is never ambiguous and
+    // a refusal would only reveal a colleague's PIN.
+    await client.query(
+      `INSERT INTO employee_credentials
+         (employee_id, business_id, credential_type, secret_hash)
+       VALUES ($1, $2, 'pin', $3)`,
+      [userId, businessId, pinHash],
+    );
 
     // Issue #885, gap 6 — rotating the PIN invalidates the seven-day device
     // trust. That trust was earned by proving *this* credential set on that

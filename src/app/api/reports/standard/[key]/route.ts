@@ -56,6 +56,14 @@ export const GET = withTenantScope(async (request: NextRequest, context: { param
   const def = standardReportsFor(industry).find((r) => r.key === key);
   if (!def) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
+  if (["vehicle_stock_valuation", "vehicle_sales_profitability"].includes(key)) {
+    const costAccess = await requirePermission(PERMISSIONS.vehiclesCostView);
+    if (costAccess.error) return costAccess.error;
+  } else if (key === "vehicle_reservations") {
+    const vehicleAccess = await requirePermission(PERMISSIONS.vehiclesView);
+    if (vehicleAccess.error) return vehicleAccess.error;
+  }
+
   const { searchParams } = new URL(request.url);
   const dateFrom = searchParams.get("dateFrom") ?? undefined;
   const dateTo = searchParams.get("dateTo") ?? undefined;

@@ -17,16 +17,32 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
     description:
       "میز کار حسابداری — نمای مالی کسب‌وکار، اشخاص و دسترسی به همهٔ بخش‌های کاری از منوی کناری.",
   },
+  // The workspace landing itself. Its title is deliberately the menu's own
+  // words («فضای کار حسابداری», from `ACCOUNTING_SECTIONS`) — this is the one
+  // page that *is* the workspace, so the rule below ("a section never wears
+  // the generic workspace name") turns around here on purpose.
+  ledger: {
+    description:
+      "همهٔ ابزارهای دفترداری در یک‌جا — دفتر و اسناد، دریافتنی و پرداختنی، وجوه و هزینه، دوره، مالیات و حقوق.",
+  },
   "trial-balance": {
     title: "تراز آزمایشی",
     description: "ماندهٔ افتتاحیه، گردش و ماندهٔ پایان دورهٔ انتخاب‌شده؛ توازن حساب‌ها و سلامت اسناد را جداگانه بررسی کنید.",
   },
   entries: { description: "همهٔ اسناد ثبت‌شده به ترتیب تاریخ، با منبع هر سند و امکان برگشت." },
+  vouchers: {
+    description:
+      "شمارهٔ سندِ پایدار هر سند در سال مالی — دفتر اسناد، شماره‌های جا افتاده، شماره‌گذاری دوبارهٔ با مجوز و سند خلاصه.",
+  },
   manual: { description: "ثبت سند دستی دوطرفه، با پیش‌نویس و تأیید پیش از ورود به دفتر." },
   expenses: { description: "ثبت هزینه‌های جاری کسب‌وکار و حساب پرداخت آن‌ها." },
   "fiscal-periods": {
     title: "سال‌ها و دوره‌های مالی",
     description: "تعریف سال شمسی، بررسی وضعیت دوازده دورهٔ ماهانه و کنترل مجازِ بستن، قفل‌کردن یا بازگشایی دوره‌ها.",
+  },
+  "opening-balances": {
+    description:
+      "ترازات افتتاحیهٔ هر سال مالی — ثبت دستی، در‌آوردن و انتقال از سال قبل، تطبیق دقیق و ثبت پس از بازبینی.",
   },
   directory: {
     title: "اشخاص",

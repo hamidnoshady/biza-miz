@@ -19,9 +19,22 @@ import { mcpIssuer } from "@/lib/mcp/origin";
  * has any credential. It discloses nothing but URLs that are already implied by
  * the hostname.
  */
-export async function GET(request: NextRequest) {
+export async function GET(
+  request: NextRequest,
+  context: { params: Promise<{ path?: string[] }> },
+) {
   const issuer = mcpIssuer(request.headers, request.nextUrl.protocol);
-  const response = NextResponse.json(protectedResourceMetadata(issuer));
+  // RFC 9728 §3.1 — the path-inserted form answers for `/api/mcp` equally
+  // (one document, whatever path names it), but the platform realm is
+  // deliberately not a protected resource: a console-only `pospmcp_` flow
+  // with no OAuth handshake should answer no — 404 — instead of lying.
+  const { path } = await context.params;
+  const inserted = path?.length ? `/${path.join("/")}` : "/api/mcp";
+  const document = protectedResourceMetadata(issuer, inserted);
+  if (!document) {
+    return NextResponse.json({ error: "resource_not_served" }, { status: 404 });
+  }
+  const response = NextResponse.json(document);
   response.headers.set("Access-Control-Allow-Origin", "*");
   response.headers.set("Cache-Control", "public, max-age=3600");
   return response;

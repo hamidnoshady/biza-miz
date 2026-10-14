@@ -338,7 +338,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_role: "نقش انتخاب‌شده معتبر نیست.",
     invalid_email: "ایمیل معتبر نیست.",
     invalid_pin: "رمز عددی باید ۴ تا ۱۲ رقم باشد.",
-    pin_taken: "این رمز عددی قبلاً برای عضو دیگری ثبت شده است.",
     // Phase 42 — the member's login phone
     invalid_phone: "شمارهٔ موبایل معتبر نیست. نمونه: ۰۹۱۲۱۲۳۴۵۶۷",
     phone_taken: "این شمارهٔ موبایل قبلاً برای عضو دیگری ثبت شده است.",

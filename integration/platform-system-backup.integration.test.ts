@@ -522,15 +522,23 @@ describe("the peer HTTP surface", () => {
   let downloadRoute: typeof import("../src/app/api/peer/backup/download/route");
   let token = "";
   let artifact = "";
+  let plainArtifact = "";
   let bytes: Buffer;
 
   beforeAll(async () => {
     manifestRoute = await import("../src/app/api/peer/backup/manifest/route");
     downloadRoute = await import("../src/app/api/peer/backup/download/route");
+    // A plaintext artifact exists on disk for the operator, but peers must never
+    // receive it (audit F03). The peer-facing artifact is therefore encrypted.
     await setConfig({ servingEnabled: true, encryptLocal: false, passphrase: "", localRetention: 5 });
+    const plain = await svc.runPlatformLocalBackup("manual", null);
+    if (plain.status !== "ok") throw new Error("no plaintext artifact to refuse");
+    plainArtifact = plain.artifact;
+    await setConfig({ encryptLocal: true, passphrase: "correct horse battery" });
     const run = await svc.runPlatformLocalBackup("manual", null);
     if (run.status !== "ok") throw new Error("no artifact to serve");
     artifact = run.artifact;
+    expect(artifact.endsWith(".enc")).toBe(true);
     bytes = await fs.readFile(path.join(svc.platformBackupDir(), artifact));
     const created = await svc.createPlatformBackupToken({
       label: "http test peer",
@@ -574,6 +582,13 @@ describe("the peer HTTP surface", () => {
     const listed = body.artifacts.find((a) => a.artifact === artifact)!;
     expect(listed.sha256).toBe(sha(bytes));
     expect(listed.sizeBytes).toBe(bytes.length);
+  });
+
+  it("never streams a plaintext artifact, even one the peer names exactly", async () => {
+    const res = await get("download", `?artifact=${plainArtifact}`);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).not.toContain("POSSTUB1");
   });
 
   it("streams the artifact with the checksum and length a peer verifies", async () => {

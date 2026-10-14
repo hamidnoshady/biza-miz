@@ -22,6 +22,7 @@ import {
   PartyValidationError,
 } from "../../parties-service";
 import { phoneE164 } from "../../phone";
+import type { PartyRole } from "../../parties";
 import { postgresDateToIso } from "../../jalali";
 import { FULL_PARTY_AUDIENCE, restrictPartyColumnsForAudience } from "../../personnel-access";
 import {
@@ -66,7 +67,7 @@ async function findParty(
   rule: string | null,
   values: Record<string, unknown>,
   roles: readonly string[],
-): Promise<{ id: string; name: string } | null> {
+): Promise<{ id: string; name: string; roles: string[] } | null> {
   const roleClause = roles.length > 0 ? "AND p.roles && $2::text[]" : "";
   const roleParam = roles.length > 0 ? [roles] : [];
 
@@ -74,8 +75,8 @@ async function findParty(
     const raw = text(values.phone);
     if (!raw) return null;
     const e164 = phoneE164(raw) ?? raw;
-    const { rows } = await query<{ id: string; name: string }>(
-      `SELECT p.id, p.name FROM parties p
+    const { rows } = await query<{ id: string; name: string; roles: string[] }>(
+      `SELECT p.id, p.name, p.roles FROM parties p
         WHERE p.business_id = $1 ${roleClause}
           AND p.merged_into_id IS NULL
           AND (p.phone_e164 = $${roleParam.length + 2} OR p.phone = $${roleParam.length + 3})
@@ -88,8 +89,8 @@ async function findParty(
   const byEmail = async () => {
     const email = text(values.email)?.toLowerCase();
     if (!email) return null;
-    const { rows } = await query<{ id: string; name: string }>(
-      `SELECT p.id, p.name FROM parties p
+    const { rows } = await query<{ id: string; name: string; roles: string[] }>(
+      `SELECT p.id, p.name, p.roles FROM parties p
         WHERE p.business_id = $1 ${roleClause}
           AND p.merged_into_id IS NULL AND lower(p.email) = $${roleParam.length + 2}
         LIMIT 1`,
@@ -101,8 +102,8 @@ async function findParty(
   const byNationalId = async () => {
     const nationalId = text(values.nationalId);
     if (!nationalId) return null;
-    const { rows } = await query<{ id: string; name: string }>(
-      `SELECT p.id, p.name FROM parties p
+    const { rows } = await query<{ id: string; name: string; roles: string[] }>(
+      `SELECT p.id, p.name, p.roles FROM parties p
         WHERE p.business_id = $1 ${roleClause}
           AND p.merged_into_id IS NULL AND p.national_id = $${roleParam.length + 2}
         LIMIT 1`,
@@ -114,8 +115,8 @@ async function findParty(
   const byEconomicCode = async () => {
     const code = text(values.economicCode);
     if (!code) return null;
-    const { rows } = await query<{ id: string; name: string }>(
-      `SELECT p.id, p.name FROM parties p
+    const { rows } = await query<{ id: string; name: string; roles: string[] }>(
+      `SELECT p.id, p.name, p.roles FROM parties p
         WHERE p.business_id = $1 ${roleClause}
           AND p.merged_into_id IS NULL AND p.economic_code = $${roleParam.length + 2}
         LIMIT 1`,
@@ -127,8 +128,8 @@ async function findParty(
   const byName = async () => {
     const name = text(values.name);
     if (!name) return null;
-    const { rows } = await query<{ id: string; name: string }>(
-      `SELECT p.id, p.name FROM parties p
+    const { rows } = await query<{ id: string; name: string; roles: string[] }>(
+      `SELECT p.id, p.name, p.roles FROM parties p
         WHERE p.business_id = $1 ${roleClause}
           AND p.merged_into_id IS NULL AND lower(btrim(p.name)) = lower(btrim($${roleParam.length + 2}))
         LIMIT 1`,
@@ -330,6 +331,51 @@ async function writeParty(
     };
   }
 
+  /*
+   * Issue #947 (item 2) — what this matched row already *is*.
+   *
+   * A customer list is a list of customers, and the row it matches may be a person who is
+   * also a member of staff: `parties.roles` is a set (migration 0148) precisely because
+   * one person holds several. Writing `roles: ["Customer"]` over such a row *demoted* a
+   * colleague's personnel file to a plain customer — the file, its link and its HR fields
+   * survived, but the app stopped classifying them as staff, which is the difference
+   * between «a person in the directory» and «a person the Team screen owns».
+   *
+   * So the customer role is *added* to what the row holds, and the primary role (the one
+   * that decides the accounting-code prefix) is left alone when it is already one of the
+   * roles the row keeps. A fresh row is a customer, exactly as before.
+   */
+  const existingRoles = existing?.roles ?? [];
+  const keepsEmployee = existingRoles.includes("employee");
+  const rolesToWrite = existing ? [...new Set([...existingRoles, "customer"])] : ["Customer"];
+
+  /*
+   * The personnel half of a matched *staff* row, when the importing member cannot read it.
+   *
+   * `restrictPartyWriteToAudience` — the same function `PUT /api/parties/[id]` passes its
+   * audience to — keeps the stored values for every path the audience denies, so the file
+   * cannot be overwritten by a CSV whose author never saw it. The import is a bulk write
+   * with a *new* value in the cell, so a silent keep would be a lie in the other
+   * direction: the operator would believe the column they filled in landed. The row is
+   * therefore updated, the protected fields stay as they were, and the outcome carries a
+   * warning naming what was kept — which is what the engine's `warnings` channel exists
+   * for, and what the run's report shows.
+   */
+  const audienceDeniesPersonnel =
+    keepsEmployee && context.partyAudience !== undefined && !context.partyAudience.personnel;
+  const withheld: string[] = [];
+  if (audienceDeniesPersonnel) {
+    const attempted: [string, unknown][] = [
+      ["کد ملی", values.nationalId],
+      ["کد اقتصادی", values.economicCode],
+      ["نشانی", values.address],
+      ["یادداشت‌ها", values.notes],
+    ];
+    for (const [label, value] of attempted) {
+      if (text(value)) withheld.push(label);
+    }
+  }
+
   // Deliberately no consent field anywhere in this input. A spreadsheet of
   // names is not permission to text those people: consent is a legal record
   // with a source and a timestamp, and a CSV cell is not that.
@@ -337,8 +383,15 @@ async function writeParty(
     displayName: text(values.name) ?? "",
     firstName: text(values.firstName),
     lastName: text(values.lastName),
-    role: "Customer",
-    roles: ["Customer"],
+    /*
+     * The caller's `role` is named only for a row this import *creates*. On a merge the
+     * service derives the primary itself (`primaryPartyRole`: the caller's role when it is
+     * in the set, otherwise the canonical order) — which is the rule the form, the API and
+     * the ledger code-prefix all read. Naming one here would be a second opinion about
+     * which role a mixed row leads with, invented from a CSV column that does not exist.
+     */
+    ...(existing ? {} : { role: "Customer" as PartyRole }),
+    roles: rolesToWrite,
     personType,
     phone: text(values.phone),
     email: text(values.email),
@@ -357,7 +410,18 @@ async function writeParty(
 
   try {
     if (existing && options.duplicateStrategy === "update") {
-      await updateParty(context.businessId, existing.id, input);
+      await updateParty(context.businessId, existing.id, input, {
+        actorId: context.actorUserId,
+        // Absent for a caller with no member behind it (a script, a migration): the
+        // service's own default is the full audience, which is the pre-existing
+        // behaviour for those callers and never a widening for a real member.
+        ...(context.partyAudience ? { audience: context.partyAudience } : {}),
+      });
+      if (withheld.length > 0) {
+        warnings.push(
+          `پروندهٔ «${existing.name}» حساب کارکنان دارد؛ ${withheld.join("، ")} دست‌نخورده ماند و از این فایل نوشته نشد.`,
+        );
+      }
       return { status: "updated", id: existing.id, warnings };
     }
     const party = await createParty(context.businessId, input, {

@@ -147,11 +147,16 @@ describe("the branch policy is chosen, not inferred (issue #947, TEAM-F03)", () 
     expect(TEAM_SERVICE).toContain("resolveMembershipBranchPolicy");
   });
 
-  it("does not claim the PIN is unique per branch", () => {
-    // `isPinTaken` compares across the business and the keyed blind index enforces
-    // it business-wide; the old hint said the opposite.
+  it("does not claim a PIN is unique, in either direction", () => {
+    /*
+     * The old hint said «per branch» while the door matched business-wide; main then
+     * removed uniqueness entirely (migration 0221, #953 — the uniqueness index leaked
+     * one member's PIN to whoever tried to reuse it). So neither claim is true now, and
+     * a hint that promises uniqueness would make a shared digit look like an error.
+     */
     expect(TEAM_MANAGER).not.toContain("در هر شعبه باید یکتا باشد");
-    expect(TEAM_MANAGER).toContain("در کل کسب‌وکار یکتاست");
+    expect(TEAM_MANAGER).not.toContain("در کل کسب‌وکار یکتاست");
+    expect(TEAM_MANAGER).toContain("رمز شخصی همین عضو است");
   });
 });
 

@@ -36,6 +36,7 @@ describe("trusted system read wrapper", () => {
       undefined,
       SYSTEM_AI_READ_PERMISSIONS,
       undefined,
+      undefined,
     );
   });
 
@@ -49,6 +50,7 @@ describe("trusted system read wrapper", () => {
       "user-1",
       permissions,
       "location-1",
+      undefined,
     );
     expect(mocks.runReadTool).toHaveBeenCalledWith(
       "run_report",
@@ -58,6 +60,7 @@ describe("trusted system read wrapper", () => {
       "user-1",
       permissions,
       "location-1",
+      undefined,
     );
   });
 });

@@ -31,6 +31,7 @@ import { DashboardMain } from "./dashboard-main";
 import { AppAvailabilityGate } from "./app-availability-gate";
 import { DeploymentCapabilityGate } from "./deployment-capability-gate";
 import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
+import { NativeDeviceRegistrar } from "@/components/native/native-device-registrar";
 import { OfflineQueueProvider } from "./offline-queue";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
@@ -153,6 +154,15 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     { label: "انبار", module: "inventory", href: ACCOUNTING_WORKSPACE_HREFS.inventory, roles: ["owner", "manager"], flag: "inventory" },
     { label: INDUSTRY_LABELS.jewelry, module: "jewelry", href: "/accounting/jewelry", roles: ["owner", "manager"] },
     { label: INDUSTRY_LABELS.watch, module: "watch", href: "/accounting/watch", roles: ["owner", "manager"] },
+    // Issue #839 — the automotive manager. Same shape as the two above: one
+    // trade-titled entry that the module gate (and therefore the industry
+    // profile) removes entirely for every other business.
+    {
+      label: INDUSTRY_LABELS.automotive,
+      module: "automotive",
+      href: ACCOUNTING_WORKSPACE_HREFS.automotive,
+      roles: ["owner", "manager"],
+    },
     // Phase 42 — the retail trade-goods trades manage their catalogue in the
     // shared products workspace: a collapsible sidebar group — افزودن محصول،
     // لیست محصولات، لیست قیمت، ویژگی محصول، الگوی بارکد وزنی and the trade's
@@ -179,10 +189,14 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       ? [{ label: INDUSTRY_LABELS.cosmetics, module: "cosmetics" as const, href: ACCOUNTING_WORKSPACE_HREFS.cosmetics, roles: ["owner", "manager"] }]
       : []),
     // The «حسابداری» sub-menu — the Accounting app's sections, each a real
-    // route under the app's own prefix (`/accounting/…`), drawn as a
-    // collapsible sidebar group (the same shape «محصولات» uses) with the app's
-    // dashboard as its first entry. The parent keeps its href so the section is
-    // still one tap away and still pinnable to the bottom bar; the app's old
+    // route under the app's own prefix (`/accounting/…`). This tree is the
+    // href *registry* the flattened-nav consumers read (the mobile header's
+    // page title, the bottom bar's picker and pin filter, the app launcher's
+    // landing resolver); the app's own sidebar is composed in
+    // `accounting-workspace.ts` and draws «فضای کار حسابداری» as ONE ordinary
+    // link to its workspace page (`/accounting/ledger`), not as a disclosure
+    // over these rows. The parent keeps its href so the overview is still one
+    // tap away and still pinnable to the bottom bar; the app's old
     // `/dashboard/ledger?tab=…` addresses forward to these routes.
     {
       label: "حسابداری",
@@ -454,6 +468,14 @@ export async function WorkspaceShell({
   return (
     <LockProvider fullName={session.fullName}>
       <MoneyProvider unit={currencyDisplay}>
+        {/*
+          Issue #884 — registers this Android installation once the native
+          bridge connects. Mounted here, not in the root layout, because by
+          this point a session and a business are both already known; the
+          root layout also wraps the public/marketing pages, which have
+          neither (see the component's own header comment).
+        */}
+        <NativeDeviceRegistrar />
         <OfflineQueueProvider>
         <BugReportProvider>
         {/*

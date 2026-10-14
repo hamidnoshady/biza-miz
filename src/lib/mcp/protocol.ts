@@ -110,13 +110,21 @@ export function parseMessage(value: unknown): ParsedMessage {
 }
 
 /**
+ * The most messages one POST may batch. Real MCP clients send a handful;
+ * anything past this is a load attempt, not a conversation, and dispatching it
+ * would multiply per-message reads (and writes) by however many the sender
+ * felt like (issue #883 P1-9).
+ */
+export const MAX_BATCH_MESSAGES = 20;
+
+/**
  * A body is either one message or a batch of them. Returns null for a batch
  * that is empty, which JSON-RPC calls an Invalid Request rather than "nothing
- * to do".
+ * to do" — and for one over the batch cap, for the same reason.
  */
 export function parseBody(body: unknown): { batch: boolean; messages: ParsedMessage[] } | null {
   if (Array.isArray(body)) {
-    if (body.length === 0) return null;
+    if (body.length === 0 || body.length > MAX_BATCH_MESSAGES) return null;
     return { batch: true, messages: body.map(parseMessage) };
   }
   return { batch: false, messages: [parseMessage(body)] };
