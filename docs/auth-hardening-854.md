@@ -286,7 +286,12 @@ at, and its own record is the Team section of the manual plus
 
 - **P2.5 (canonical identity)** — the propagation door is no longer a per-route call. One
   idempotent operation owns it and records a durable debt (`personnel_file_drift`) when it
-  cannot complete; a failure is never swallowed.
+  cannot complete; a failure is never swallowed. Migration `0223_personnel_file_obligation`
+  moved the *obligation* into the membership's own transaction (a trigger on `users`), so a
+  committed membership can no longer be file-less without a recorded reason, and
+  `listPersonnelFileDebts` (`users` × `parties`) is the inventory the sweep reads — the
+  drift table is bookkeeping about a debt, not the evidence of one. The seams this shares
+  with the floor audit (#916) are written down in `docs/issue-947-integration-contracts.md`.
 - **P2.7 (personnel subsection)** — unchanged: the subsection still mounts only behind
   `canViewParties`. What #947 added is the *field* projection behind it: `parties.view`
   opens the directory, and the sensitive half of an Employee file (identity numbers,
