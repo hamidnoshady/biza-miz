@@ -52,6 +52,7 @@ let dbLib: typeof import("../src/lib/db");
 let provisioning: typeof import("../src/lib/business-provisioning");
 let aec: typeof import("../src/lib/aec-service");
 let rfi: typeof import("../src/lib/aec-rfi-service");
+let scans: typeof import("../src/lib/notification-scans");
 let workspace: typeof import("../src/lib/workspace");
 let crm: typeof import("../src/lib/crm-service");
 
@@ -85,6 +86,7 @@ beforeAll(async () => {
   provisioning = await import("../src/lib/business-provisioning");
   aec = await import("../src/lib/aec-service");
   rfi = await import("../src/lib/aec-rfi-service");
+  scans = await import("../src/lib/notification-scans");
   workspace = await import("../src/lib/workspace");
   crm = await import("../src/lib/crm-service");
 
@@ -768,6 +770,84 @@ describe("the submittal log (issue #799 §11)", () => {
       });
       expect(created.status).toBe("draft");
     });
+  });
+});
+
+describe("AEC overdue scan capability isolation", () => {
+  it("skips disabled site, document, procurement and commercial reads while keeping RFIs and dedupe alive", async () => {
+    const enabledRfiBusiness = await provisionBusiness("architecture_construction");
+    const { projectId, detail } = await seedRfi(enabledRfiBusiness.owner, "پروژهٔ QA خاموش", {
+      dueDate: "2020-01-01",
+    });
+    await dbLib.withTenant(enabledRfiBusiness.businessId, () =>
+      rfi.applyRfiAction(enabledRfiBusiness.owner, detail.id, "open"),
+    );
+    await dbLib.withTenant(enabledRfiBusiness.businessId, () =>
+      aec.saveBusinessAecProfile(enabledRfiBusiness.owner, {
+        operatingProfile: "contractor",
+        capabilityOverrides: { qa_qc: false },
+      }),
+    );
+
+    // QA/QC is disabled, but the RFI register remains enabled. The scan must
+    // not call pendingSiteIssues as a hard dependency for the other registers.
+    const first = await dbLib.withTenant(enabledRfiBusiness.businessId, () =>
+      scans.scanOverdueAecRegisters(enabledRfiBusiness.businessId),
+    );
+    expect(first).toBeGreaterThan(0);
+    const { rows: rfiEvents } = await db.query<{ event_key: string; payload: { rfiId?: string } }>(
+      `SELECT event_key, payload FROM notification_events
+        WHERE business_id = $1 AND payload->>'rfiId' = $2`,
+      [enabledRfiBusiness.businessId, detail.id],
+    );
+    expect(rfiEvents.map((row) => row.event_key)).toContain("aec.rfi_overdue");
+
+    // A second tick sees the same fact but recordNotification's business-date
+    // key prevents a duplicate notification.
+    await dbLib.withTenant(enabledRfiBusiness.businessId, () =>
+      scans.scanOverdueAecRegisters(enabledRfiBusiness.businessId),
+    );
+    const { rows: deduped } = await db.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM notification_events
+        WHERE business_id = $1 AND event_key = 'aec.rfi_overdue' AND payload->>'rfiId' = $2`,
+      [enabledRfiBusiness.businessId, detail.id],
+    );
+    expect(deduped[0].count).toBe(1);
+
+    // A second profile turns off every optional AEC package. Its RFI still
+    // works, while document-control, procurement, commercial and QA/QC reads
+    // all become expected capability skips rather than scan failures.
+    const disabledBusiness = await provisionBusiness("architecture_construction");
+    const disabledRfi = await seedRfi(disabledBusiness.owner, "پروژهٔ همه خاموش", {
+      dueDate: "2020-01-01",
+    });
+    await dbLib.withTenant(disabledBusiness.businessId, () =>
+      rfi.applyRfiAction(disabledBusiness.owner, disabledRfi.detail.id, "open"),
+    );
+    await dbLib.withTenant(disabledBusiness.businessId, () =>
+      aec.saveBusinessAecProfile(disabledBusiness.owner, {
+        operatingProfile: "individual",
+        capabilityOverrides: {
+          qa_qc: false,
+          document_control: false,
+          procurement: false,
+          progress_claims: false,
+          financials: false,
+        },
+      }),
+    );
+    const disabledScan = await dbLib.withTenant(disabledBusiness.businessId, () =>
+      scans.scanOverdueAecRegisters(disabledBusiness.businessId),
+    );
+    expect(disabledScan).toBeGreaterThan(0);
+    const { rows: disabledEvents } = await db.query<{ event_key: string }>(
+      `SELECT event_key FROM notification_events
+        WHERE business_id = $1 AND payload->>'rfiId' = $2`,
+      [disabledBusiness.businessId, disabledRfi.detail.id],
+    );
+    expect(disabledEvents.map((row) => row.event_key)).toContain("aec.rfi_overdue");
+
+    expect(projectId).toBeTruthy();
   });
 });
 

@@ -58,8 +58,15 @@ function KpiTile({ label, value, hint }: { label: string; value: string; hint?: 
 export function GrowthAccountingView() {
   const money = useMoney();
   const [data, setData] = useState<GrowthAccountingData | null>(null);
-  const [projectCosts, setProjectCosts] = useState<ProjectCostRow[]>([]);
-  const [campaignRoi, setCampaignRoi] = useState<CampaignRoiRow[]>([]);
+  /*
+   * `null` means "not readable", which is not the same as "empty" (issue #819).
+   * Both reports are consolidated and need `reports.business_wide`; a member
+   * without it is refused, and painting «پروژهٔ فعالی با هزینهٔ کمپین ندارید» on
+   * top of that refusal states as fact something the member was never shown.
+   * So the cards are drawn from what actually arrived.
+   */
+  const [projectCosts, setProjectCosts] = useState<ProjectCostRow[] | null>(null);
+  const [campaignRoi, setCampaignRoi] = useState<CampaignRoiRow[] | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
@@ -70,11 +77,11 @@ export function GrowthAccountingView() {
       })
       .catch(() => setError("بارگذاری داده‌های رشد ناموفق بود."));
     api<{ rows: ProjectCostRow[] }>("/api/reports/project-costs")
-      .then(({ ok, data: body }) => { if (ok) setProjectCosts(body.rows); })
-      .catch(() => undefined);
+      .then(({ ok, data: body }) => setProjectCosts(ok ? (body.rows ?? []) : null))
+      .catch(() => setProjectCosts(null));
     api<{ rows: CampaignRoiRow[] }>("/api/reports/message-campaign-roi")
-      .then(({ ok, data: body }) => { if (ok) setCampaignRoi(body.rows); })
-      .catch(() => undefined);
+      .then(({ ok, data: body }) => setCampaignRoi(ok ? (body.rows ?? []) : null))
+      .catch(() => setCampaignRoi(null));
   }, []);
   useEffect(load, [load]);
 
@@ -147,13 +154,17 @@ export function GrowthAccountingView() {
         </div>
       </SectionCard>
 
+      {projectCosts === null ? null : (
       <SectionCard title="هزینهٔ پروژه‌ها" description="خرج هر پروژه از اسناد هزینهٔ قطعیِ کمپین پیام بازسازی می‌شود؛ کمپین بدون سند هزینه، خرج ثبت‌شده ندارد.">
         {projectCosts.length === 0 ? <p className="text-sm text-muted-foreground">پروژهٔ فعالی با هزینهٔ کمپین ندارید.</p> : <ul className="divide-y divide-border/80 text-sm">{projectCosts.map((project) => <li key={project.projectId} className="flex flex-wrap items-center justify-between gap-2 py-2.5"><div><b>{project.name}</b><p className="text-xs text-muted-foreground">{project.ownerName ?? "بدون مالک"} · {formatPersianNumber(project.campaigns)} کمپین · {project.status === "active" ? "فعال" : project.status === "paused" ? "متوقف" : "تکمیل‌شده"}</p></div><div className="text-left"><b>{money.format(project.spentRial)}</b><p className="text-xs text-muted-foreground">{project.remainingBudgetRial === null ? "بدون بودجه" : `مانده ${money.format(project.remainingBudgetRial)}`}</p></div></li>)}</ul>}
       </SectionCard>
+      )}
 
+      {campaignRoi === null ? null : (
       <SectionCard title="بازدهِ قابل‌انتساب کمپین پیام" description="فقط سفارش‌هایی شمرده می‌شوند که پروموشن اختصاصیِ همان کمپین را پس از شروع آن اعمال کرده‌اند. بدون پروموشن اختصاصی، هیچ فروشی حدس زده نمی‌شود.">
         {campaignRoi.length === 0 ? <p className="text-sm text-muted-foreground">هنوز کمپینی با پروموشن اختصاصی برای گزارش بازده ثبت نشده است.</p> : <ul className="divide-y divide-border/80 text-sm">{campaignRoi.map((row) => <li key={row.campaignId} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><b>{row.campaignName}</b><p className="mt-1 text-xs text-muted-foreground">پروموشن: {row.promotionName} · {formatPersianNumber(row.attributableSales)} فروشِ ثبت‌شده · {formatPersianNumber(row.sentCount)} ارسال</p></div><div className="text-left"><b>{row.roiPercent === null ? "در انتظار ثبت هزینه" : `${formatPersianNumber(row.roiPercent)}٪ بازده`}</b><p className="text-xs text-muted-foreground">فروش {money.format(row.attributableRevenueRial)} · هزینه {money.format(row.spentRial)} · تخفیف {money.format(row.discountRial)}</p></div></li>)}</ul>}
       </SectionCard>
+      )}
 
       {data.commission && data.commission.top.length > 0 ? (
         <SectionCard title="برترین فروشندگان" description="پورسانت انباشته در ۳۰ روز گذشته">

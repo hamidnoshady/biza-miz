@@ -71,6 +71,7 @@ export const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   { key: "commission", label: "پورسانت فروشندگان", route: "/growth/commission" },
   { key: "jewelry", label: "طلا و جواهر", route: "/accounting/jewelry" },
   { key: "watch", label: "ساعت", route: "/accounting/watch" },
+  { key: "automotive", label: "خودرو و نمایشگاه اتومبیل", route: "/accounting/automotive" },
   { key: "accessories", label: "اکسسوری", route: ACCOUNTING_WORKSPACE_HREFS.products },
   { key: "cosmetics", label: "آرایشی و بهداشتی", route: ACCOUNTING_WORKSPACE_HREFS.cosmetics },
 ];

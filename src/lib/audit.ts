@@ -59,6 +59,11 @@ const ACTION_LABELS: Record<string, string> = {
   "account.reactivated": "بازگردانی حساب از بایگانی",
   "account.contra_changed": "تغییر وضعیت حساب کاهنده",
   "account.deleted": "حذف حساب",
+  "fiscal_year.created": "تعریف سال مالی",
+  "fiscal_period.soft_closed": "بستن موقت دورهٔ مالی",
+  "fiscal_period.locked": "قفل‌کردن دورهٔ مالی",
+  "fiscal_period.reopened": "بازگشایی دورهٔ مالی",
+  "fiscal_year.closed": "بستن نهایی سال مالی",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -69,8 +74,12 @@ const ENTITY_LABELS: Record<string, string> = {
   order: "سفارش",
   location: "شعبه",
   account: "حساب",
+  fiscal_year: "سال مالی",
+  fiscal_period: "دورهٔ مالی",
   settings: "تنظیمات",
   menu_item: "آیتم منو",
+  commission_run: "دورهٔ تسویه پورسانت",
+  commission_payout: "پرداخت پورسانت",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

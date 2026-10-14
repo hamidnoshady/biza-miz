@@ -632,6 +632,106 @@ describe("team reads stay inside the business", () => {
   });
 });
 
+/**
+ * Issue #885, gap 6 — the seven-day device trust must not outlive the
+ * credential it was earned with.
+ *
+ * Trust is read by digest with no session in play, so nothing else about a
+ * membership going stale takes it back. Both of these are third-party changes
+ * to the credential itself: an owner rotating a member's PIN is the "somebody
+ * else now knows the secret" case, and offboarding removes the membership
+ * entirely. In both, a browser still holding the cookie must stop skipping the
+ * OTP and MFA challenges immediately.
+ */
+describe("device trust does not outlive the credential (issue #885 gap 6)", () => {
+  /** A live trust row for `userId`, the shape issueTrustedDevice writes. */
+  async function seedTrust(businessId: string, userId: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO trusted_devices
+         (business_id, user_id, token_hash, trusted_at, expires_at, last_seen_at)
+       VALUES ($1, $2, encode(sha256(gen_random_uuid()::text::bytea), 'hex'),
+               now(), now() + interval '7 days', now())
+       RETURNING id`,
+      [businessId, userId],
+    );
+    return rows[0].id;
+  }
+
+  it("revokes device trust when an owner rotates the member's PIN", async () => {
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Trust Cashier",
+        pin: "4816",
+        actorId: alpha.ownerId,
+      }),
+    );
+    const trustId = await seedTrust(alpha.businessId, userId);
+
+    await asBusiness(alpha.businessId, () =>
+      team.setPin(alpha.businessId, userId, "2468", alpha.ownerId),
+    );
+
+    const { rows } = await db.query<{ revoked_at: Date | null; revoked_reason: string | null }>(
+      `SELECT revoked_at, revoked_reason FROM trusted_devices WHERE id = $1`,
+      [trustId],
+    );
+    expect(rows[0].revoked_at).not.toBeNull();
+    expect(rows[0].revoked_reason).toBe("pin_rotated");
+  });
+
+  it("revokes device trust when the membership is offboarded", async () => {
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Offboard Cashier",
+        pin: "9182",
+        actorId: alpha.ownerId,
+      }),
+    );
+    const trustId = await seedTrust(alpha.businessId, userId);
+
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    const { rows } = await db.query<{ revoked_at: Date | null; revoked_reason: string | null }>(
+      `SELECT revoked_at, revoked_reason FROM trusted_devices WHERE id = $1`,
+      [trustId],
+    );
+    expect(rows[0].revoked_at).not.toBeNull();
+    expect(rows[0].revoked_reason).toBe("member_offboarded");
+  });
+
+  it("leaves another business's trust alone", async () => {
+    // The revocation is scoped to the tenant being acted on. A digest found
+    // globally must not let one business's credential change reach into
+    // another's rows.
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Scoped Cashier",
+        pin: "5309",
+        actorId: alpha.ownerId,
+      }),
+    );
+    const otherTrust = await seedTrust(beta.businessId, userId);
+
+    await asBusiness(alpha.businessId, () =>
+      team.setPin(alpha.businessId, userId, "7391", alpha.ownerId),
+    );
+
+    const { rows } = await db.query<{ revoked_at: Date | null }>(
+      `SELECT revoked_at FROM trusted_devices WHERE id = $1`,
+      [otherTrust],
+    );
+    expect(rows[0].revoked_at).toBeNull();
+  });
+});
+
 describe("custom role assignment revisioning", () => {
   it("increments membership revision exactly once when assigning a custom role", async () => {
     const { rows: roles } = await db.query<{ id: string }>(

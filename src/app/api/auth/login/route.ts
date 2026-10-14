@@ -31,6 +31,8 @@ import {
   shouldChallengeMfaOnLogin,
 } from "@/lib/mfa";
 import { getMfaPolicy } from "@/lib/mfa-policy";
+import { boundedString, loginEmailOrNull, uuidOrNull } from "@/lib/login-contract";
+import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
 
 interface PlatformUserRow extends Record<string, unknown> {
   id: string;
@@ -81,14 +83,26 @@ async function loginHostBusinessId(
 }
 
 export async function POST(request: NextRequest) {
-  let body: { email?: string; password?: string; businessId?: string };
+  let body: { email?: unknown; password?: unknown; businessId?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const { email, password } = body;
+  // Issue #885 L14 — bounded runtime validation before anything reaches a
+  // database or bcrypt. The old shape checked truthiness and then called
+  // `email.trim()` and `bcrypt.compare(password, …)`, so a truthy non-string
+  // (`{"email": 1, "password": []}` — trivial to produce from a form encoder
+  // or a hand-rolled client) reached string and crypto methods and threw a 500
+  // instead of answering 400.
+  //
+  // The password ceiling is bcrypt's own: the algorithm only considers the
+  // first 72 bytes, so an over-long value must be refused rather than silently
+  // truncated into a different credential than the one the user typed.
+  const email = loginEmailOrNull(body.email);
+  const password = boundedString(body.password, { max: 72, trim: false });
+  const businessId = uuidOrNull(body.businessId);
   if (!email || !password) {
     return NextResponse.json({ error: "missing_credentials" }, { status: 400 });
   }
@@ -99,7 +113,8 @@ export async function POST(request: NextRequest) {
   }
 
   return withoutTenantScope("login", async () => {
-    const normalizedEmail = email.trim().toLowerCase();
+    // Already canonical: `loginEmailOrNull` trimmed and lower-cased it.
+    const normalizedEmail = email;
     const { rows } = await query<PlatformUserRow>(
       `SELECT id, full_name, password_hash, is_active, token_version FROM platform_users WHERE email = $1`,
       [normalizedEmail],
@@ -156,8 +171,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "no_business_membership" }, { status: 403 });
     }
 
-    const chosen = body.businessId
-      ? usable.find((m) => m.businessId === body.businessId)
+    const chosen = businessId
+      ? usable.find((m) => m.businessId === businessId)
       : usable.length === 1
         ? usable[0]
         : undefined;
@@ -209,13 +224,34 @@ export async function POST(request: NextRequest) {
 
       const req = enrolmentRequirement(mfaState);
 
-      if (
-        shouldChallengeMfaOnLogin({
-          hasConfirmedEnrolment: activeEnrolments.length > 0,
-          appliesToRole: requiresMfa,
-          requirement: req,
-        })
-      ) {
+      // Issue #885 — the seven-day trusted-device exemption.
+      //
+      // The password was just proven above, so this waives only the *second*
+      // factor: an approved primary credential was presented on every login,
+      // and the membership, business and global identity were all re-read
+      // fresh before this point. A device that completed a full verification
+      // (password plus this MFA) and was explicitly trusted inside the last
+      // seven days is not asked for the second factor again.
+      //
+      // Scoped to this business and this membership, so the same account on a
+      // different tenant, or a different account on this device, is a miss and
+      // falls through to the challenge below. Only consulted when a challenge
+      // is actually due — on a device with no MFA requirement there is nothing
+      // to waive and no query to spend.
+      const challengeDue = shouldChallengeMfaOnLogin({
+        hasConfirmedEnrolment: activeEnrolments.length > 0,
+        appliesToRole: requiresMfa,
+        requirement: req,
+      });
+      const deviceTrust = challengeDue
+        ? await verifyTrustedDevice({
+            businessId: chosen.businessId,
+            userId: chosen.userId,
+            token: readTrustedDeviceToken(request),
+          })
+        : null;
+
+      if (challengeDue && deviceTrust?.trusted !== true) {
         const mfaToken = await signMfaPendingToken({
           sub: usableIdentity.id,
           method: primaryEnrolment ? primaryEnrolment.method : null,

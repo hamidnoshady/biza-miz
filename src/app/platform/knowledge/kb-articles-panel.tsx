@@ -713,10 +713,15 @@ function ArticleEditor({
                 />
               </Field>
 
-              <Field
-                 label="نمایش راهنما در صفحه‌ها"
-                 hint="از صفحه‌هایی که دکمهٔ «آموزش» دارند انتخاب کنید. یک راهنما می‌تواند چند مقصد داشته باشد."
-               >
+              {/* A plain labelled group, not <Field>: Field wraps its children in a
+                   <label>, which gave every chip the whole group text as its name (F26). */}
+               <div className="mb-4" role="group" aria-labelledby="kb-sections-label">
+                 <span id="kb-sections-label" className="mb-1 block text-sm font-medium text-foreground">
+                   نمایش راهنما در صفحه‌ها
+                 </span>
+                 <span className="mb-2 block text-xs text-muted-foreground">
+                   از صفحه‌هایی که دکمهٔ «آموزش» دارند انتخاب کنید. یک راهنما می‌تواند چند مقصد داشته باشد.
+                 </span>
                  <input
                    type="search"
                    value={pageQuery}
@@ -784,7 +789,7 @@ function ArticleEditor({
                      </div>
                    </div>
                  ) : null}
-               </Field>
+               </div>
 
               <Field label="برچسب‌ها">
                 <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">

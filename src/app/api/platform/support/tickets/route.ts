@@ -19,6 +19,8 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
 
   const sp = request.nextUrl.searchParams;
   const assignedToMe = sp.get("assignedToMe") === "true";
+  const openOnly = sp.get("queue") === "open";
+  const unassigned = sp.get("unassigned") === "true";
 
   const [list, stats, assignableAdmins] = await Promise.all([
     querySupportTickets({
@@ -29,6 +31,8 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
       businessId: sp.get("businessId") ?? "",
       assignedToMe,
       adminId: assignedToMe ? session.padmin : "",
+      openOnly,
+      unassigned,
       page: Number(sp.get("page")) || 1,
       pageSize: Number(sp.get("pageSize")) || 40,
     }),

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requireMember } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getMediaAssetUsage, getMediaConfig, isMediaStorageReady, readMediaObject } from "@/lib/media-service";
+import { getMediaAssetUsage, getMediaConfig, isMediaStorageReady, mediaAssetUsedByVehicleInLocations, readMediaObject } from "@/lib/media-service";
 import { readMirroredMediaObject } from "@/lib/media-mirror";
+import { branchAccessForSession } from "@/lib/automotive-access";
 
 /**
  * The object's bytes, served through the app: the browser never talks to the
@@ -73,7 +74,14 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
       (usage.expenses.length > 0 && membership.permissions.has(PERMISSIONS.ledgerView)) ||
       (usage.purchases.length > 0 && membership.permissions.has(PERMISSIONS.inventoryView)) ||
       (usage.parties.length > 0 && membership.permissions.has(PERMISSIONS.partiesView));
-    if (!authorizedByUsage) {
+    const canViewVehicles = membership.permissions.has(PERMISSIONS.vehiclesView);
+    const authorizedByVehicle = canViewVehicles
+      ? await (async () => {
+          const branchAccess = await branchAccessForSession(session);
+          return mediaAssetUsedByVehicleInLocations(id, session.businessId, branchAccess.allowedLocationIds);
+        })()
+      : false;
+    if (!authorizedByUsage && !authorizedByVehicle) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
   }

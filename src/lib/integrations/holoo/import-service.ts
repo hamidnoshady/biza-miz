@@ -221,26 +221,46 @@ async function applyOpeningInventory(
       const inventoryAccount = byCode.get(WELL_KNOWN_CODES.inventory);
       const openingEquity = byCode.get(WELL_KNOWN_CODES.openingEquity);
       if (!inventoryAccount || !openingEquity) throw new Error("opening_accounts_missing");
-      await client.query(
-        `INSERT INTO journal_entries
-           (business_id, location_id, entry_date, memo, source_type, source_id, created_by, posting_kind, inventory_event_id)
-         VALUES ($1, $2, CURRENT_DATE, 'موجودی افتتاحیه از هلو', 'opening_inventory', $3, $4, 'inventory', $3)
-         ON CONFLICT (business_id, source_type, source_id, posting_kind) WHERE source_id IS NOT NULL AND posting_kind IS NOT NULL DO NOTHING`,
-        [businessId, locationId, eventId, createdBy],
-      );
-      const { rows: entryRows } = await client.query<{ id: string }>(
+      // Treat a retry as a read, never as permission to rewrite an existing
+      // posted journal. A fresh entry gets its lines exactly once; conflicts
+      // (including concurrent retries) keep the original lines immutable.
+      const { rows: existingEntries } = await client.query<{ id: string }>(
         `SELECT id FROM journal_entries
-          WHERE business_id = $1 AND source_type = 'opening_inventory' AND source_id = $2 AND posting_kind = 'inventory'`,
+          WHERE business_id = $1 AND source_type = 'opening_inventory' AND source_id = $2 AND posting_kind = 'inventory'
+          FOR UPDATE`,
         [businessId, eventId],
       );
-      const entryId = entryRows[0]?.id;
-      if (entryId) {
-        await client.query(`DELETE FROM journal_lines WHERE entry_id = $1`, [entryId]);
+      let entryId = existingEntries[0]?.id;
+      let createdEntry = false;
+      if (!entryId) {
+        const { rows: insertedEntries } = await client.query<{ id: string }>(
+          `INSERT INTO journal_entries
+             (business_id, location_id, entry_date, memo, source_type, source_id, created_by, posting_kind, inventory_event_id)
+           VALUES ($1, $2, CURRENT_DATE, 'موجودی افتتاحیه از هلو', 'opening_inventory', $3, $4, 'inventory', $3)
+           ON CONFLICT (business_id, source_type, source_id, posting_kind)
+             WHERE source_id IS NOT NULL AND posting_kind IS NOT NULL DO NOTHING
+           RETURNING id`,
+          [businessId, locationId, eventId, createdBy],
+        );
+        entryId = insertedEntries[0]?.id;
+        createdEntry = Boolean(entryId);
+        if (!entryId) {
+          const { rows: racedEntries } = await client.query<{ id: string }>(
+            `SELECT id FROM journal_entries
+              WHERE business_id = $1 AND source_type = 'opening_inventory' AND source_id = $2 AND posting_kind = 'inventory'
+              FOR UPDATE`,
+            [businessId, eventId],
+          );
+          entryId = racedEntries[0]?.id;
+        }
+      }
+      if (createdEntry && entryId) {
         await client.query(
           `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
            VALUES ($1, $2, $3, 0), ($1, $4, 0, $3)`,
           [entryId, inventoryAccount, totalValue.toString(), openingEquity],
         );
+        await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
       }
     }
     // A zero-value opening event has no journal lines to post, but the stock

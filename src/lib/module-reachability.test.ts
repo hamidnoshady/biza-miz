@@ -77,14 +77,6 @@ const REACHABLE_BY_OTHER_MEANS: Record<string, string> = {
   "lib/ai-platform-tools.ts":
     "executor for the platform-support tools ai.ts declares; removing it alone would orphan those declarations",
 
-  // The pinned-report widget grid. Nothing mounts it since `/dashboard`
-  // became the assistant chat, but the other half of the feature is still
-  // live: «سنجاق به داشبورد» (reports/pin-button.tsx) writes to
-  // /api/dashboard/widgets, and getDashboardWidgets still serves them.
-  // Deleting the renderer would make a working, reachable control write to
-  // nothing forever — a product decision, not a cleanup one.
-  "app/dashboard/dashboard-grid.tsx":
-    "renderer half of the still-live pinned-widget feature (pin-button.tsx + /api/dashboard/widgets)",
 };
 
 function walk(dir: string, out: string[] = []): string[] {

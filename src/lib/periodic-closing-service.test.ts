@@ -73,6 +73,7 @@ function respondWith(script: Script) {
     if (sql.includes("SELECT code, id FROM accounts")) return ACCOUNTS;
     if (sql.includes("INSERT INTO journal_entries")) return [{ id: "entry-1" }];
     if (sql.includes("INSERT INTO journal_lines")) return [];
+    if (sql.includes("SELECT set_config('app.fiscal_constructing_entry_id'")) return [];
     if (sql.includes("UPDATE periodic_closings SET journal_entry_id")) return [];
     return undefined;
   };

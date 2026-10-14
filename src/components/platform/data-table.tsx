@@ -2,11 +2,14 @@
 
 import * as React from "react";
 import {
+  AlertTriangleIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
   ChevronUpIcon,
   ChevronsUpDownIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -70,8 +73,16 @@ export interface DataTableProps<T> {
   sortKey?: string;
   sortDir?: SortDirection;
   onSort?: (key: string, dir: SortDirection) => void;
-  /** Renders the mobile card title (first line). Defaults to first column. */
+  /**
+   * Renders the mobile card title (first line). When omitted, the first
+   * column is rendered once as the card title (the identifying record name).
+   */
   mobileTitle?: (row: T) => React.ReactNode;
+  /**
+   * Accessible name prefix for the keyboard details control on each row,
+   * e.g. "جزئیات کسب‌وکار". Defaults to "جزئیات".
+   */
+  detailsLabel?: string;
   className?: string;
   minWidthClass?: string;
 }
@@ -101,14 +112,17 @@ export function PlatformDataTable<T>({
   sortDir,
   onSort,
   mobileTitle,
+  detailsLabel = "جزئیات",
   className,
   minWidthClass = "min-w-[720px]",
 }: DataTableProps<T>) {
-  const mobileColumns = React.useMemo(() => {
-    return columns.filter((c) =>
-      mobileTitle ? true : c.key !== columns[0].key ? true : false,
-    );
-  }, [columns, mobileTitle]);
+  // Every column stays in the mobile list. Without an explicit mobileTitle the
+  // first column is rendered once, as the card title (see the map below); the
+  // previous filter removed it before that fallback could run, hiding names.
+  const mobileColumns = columns;
+  const hasActionsCell = Boolean(rowActions || onRowClick);
+  // Background refresh failure: rows stay visible, the failure is announced.
+  const staleWithRows = Boolean(error) && rows !== null && rows.length > 0;
 
   const showInitialLoading = loading && (rows === null || rows.length === 0);
 
@@ -160,6 +174,26 @@ export function PlatformDataTable<T>({
 
   return (
     <div className={className} aria-busy={loading ? "true" : undefined}>
+      {staleWithRows ? (
+        <div
+          role="alert"
+          className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-foreground"
+        >
+          <span className="flex items-center gap-2">
+            <AlertTriangleIcon className="size-4 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
+            <span>
+              به‌روزرسانی فهرست ناموفق بود؛ داده‌های نمایش‌داده‌شده ممکن است قدیمی باشند.
+              {error ? <span className="text-muted-foreground"> ({error})</span> : null}
+            </span>
+          </span>
+          {onRetry ? (
+            <Button variant="outline" size="sm" onClick={onRetry}>
+              تلاش دوباره
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Desktop table */}
       <div className="hidden overflow-x-auto rounded-xl ring-1 ring-foreground/10 md:block">
         <Table className={minWidthClass}>
@@ -206,7 +240,7 @@ export function PlatformDataTable<T>({
                   )}
                 </TableHead>
               ))}
-              {rowActions ? (
+              {hasActionsCell ? (
                 <TableHead className="w-10" aria-label="عملیات" />
               ) : null}
             </TableRow>
@@ -229,12 +263,20 @@ export function PlatformDataTable<T>({
                     {col.cell(row)}
                   </TableCell>
                 ))}
-                {rowActions ? (
+                {hasActionsCell ? (
                   <TableCell
                     className="text-end"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {rowActions(row)}
+                    <div className="flex items-center justify-end gap-1">
+                      {onRowClick ? (
+                        <DetailsButton
+                          label={detailsLabel}
+                          onClick={() => onRowClick(row)}
+                        />
+                      ) : null}
+                      {rowActions ? rowActions(row) : null}
+                    </div>
                   </TableCell>
                 ) : null}
               </TableRow>
@@ -249,24 +291,13 @@ export function PlatformDataTable<T>({
           <div
             key={rowKey(row)}
             onClick={onRowClick ? () => onRowClick(row) : undefined}
-            role={onRowClick ? "button" : undefined}
-            tabIndex={onRowClick ? 0 : undefined}
-            onKeyDown={
-              onRowClick
-                ? (e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onRowClick(row);
-                    }
-                  }
-                : undefined
-            }
             className={cn(
               "rounded-xl bg-card p-3 ring-1 ring-foreground/10",
-              onRowClick &&
-                "cursor-pointer transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              onRowClick && "cursor-pointer transition-colors hover:bg-muted/40",
             )}
           >
+            {/* The card itself is not interactive; the details control and the
+                row actions are sibling buttons so no interactive roles nest. */}
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0 flex-1 space-y-1.5">
                 {mobileTitle ? (
@@ -302,9 +333,18 @@ export function PlatformDataTable<T>({
                   );
                 })}
               </div>
-              {rowActions ? (
-                <div onClick={(e) => e.stopPropagation()} className="shrink-0">
-                  {rowActions(row)}
+              {hasActionsCell ? (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="flex shrink-0 items-center gap-1"
+                >
+                  {onRowClick ? (
+                    <DetailsButton
+                      label={detailsLabel}
+                      onClick={() => onRowClick(row)}
+                    />
+                  ) : null}
+                  {rowActions ? rowActions(row) : null}
                 </div>
               ) : null}
             </div>
@@ -312,5 +352,34 @@ export function PlatformDataTable<T>({
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * The keyboard-reachable detail control for a clickable row. Mouse users can
+ * still click the row; keyboard and screen-reader users get a named button
+ * instead of an unreachable `onClick` on a `<tr>`.
+ */
+function DetailsButton({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      aria-label={label}
+      title={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+    >
+      <ChevronLeftIcon className="size-4" aria-hidden="true" />
+    </Button>
   );
 }

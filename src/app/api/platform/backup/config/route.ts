@@ -6,6 +6,7 @@ import {
   getPlatformBackupConfigMasked,
   savePlatformBackupConfig,
 } from "@/lib/platform-backup-service";
+import { requireRecentAuth } from "@/lib/recent-auth";
 
 /**
  * The console's whole-system backup settings (migration 0132).
@@ -34,6 +35,8 @@ export const GET = withPlatformScope(async () => {
 export const PUT = withPlatformScope(async (request: NextRequest) => {
   const { session, error } = await requirePlatformCapability("backup.configure");
   if (error) return error;
+  const recentError = requireRecentAuth(session);
+  if (recentError) return recentError;
 
   let body: unknown;
   try {

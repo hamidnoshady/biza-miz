@@ -149,11 +149,37 @@ export default function CmsLogsPage() {
   if (loading) return <SkeletonRows label="در حال خواندن پایش سایت‌ساز" rows={8} />;
 
   if (config?.enabled === false) {
+    // Shipper counters survive a missing collector (audit F23): when events were
+    // produced but could not be stored, say so — "not configured" alone hides
+    // that the site is generating logs that go nowhere. Counters are process-local
+    // and are not proof of current shipping, so they are labelled as such.
+    const shipper = config.shipper;
+    const produced = (shipper?.enqueued ?? 0) > 0 || (shipper?.dropped ?? 0) > 0;
     return (
-      <EmptyState
-        hint="متغیرهای OPENOBSERVE_URL و اعتبارنامه‌های آن روی این سرور تنظیم نشده‌اند. راهنمای نصب در docs/openobserve.md است؛ تا آن زمان رویدادهای سایت‌ساز جایی ذخیره نمی‌شوند."
-        title="جمع‌کنندهٔ لاگ پیکربندی نشده است"
-      />
+      <div className="space-y-4">
+        <EmptyState
+          hint="متغیرهای OPENOBSERVE_URL و اعتبارنامه‌های آن روی این سرور تنظیم نشده‌اند. راهنمای نصب در docs/openobserve.md است؛ تا آن زمان رویدادهای سایت‌ساز جایی ذخیره نمی‌شوند."
+          title={
+            produced
+              ? "ارسال رویداد فعال است اما جمع‌کننده در دسترس نیست"
+              : "جمع‌کنندهٔ لاگ پیکربندی نشده است"
+          }
+        />
+        {produced ? (
+          <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 p-3 text-sm">
+            <p>
+              از آخرین راه‌اندازی این فرایند: {formatPersianNumber(shipper?.enqueued ?? 0)} رویداد صف شده،{" "}
+              {formatPersianNumber(shipper?.dropped ?? 0)} رویداد حذف شده، {formatPersianNumber(shipper?.sent ?? 0)} رویداد ارسال شده.
+            </p>
+            {shipper?.lastError ? (
+              <p className="mt-1 text-xs text-muted-foreground">آخرین خطا: {shipper.lastError}</p>
+            ) : null}
+            <p className="mt-1 text-xs text-muted-foreground">
+              این شمارش‌ها مربوط به همین فرایند است و نشان نمی‌دهد ارسال هم‌اکنون برقرار است.
+            </p>
+          </div>
+        ) : null}
+      </div>
     );
   }
 

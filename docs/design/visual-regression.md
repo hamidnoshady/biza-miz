@@ -100,6 +100,12 @@ clears the measured noise ceiling without approaching the structural floor; see
 the comment on `MAX_DIFF_RATIO`. A failure between 0.3% and 0.5% deserves its
 diff image opened before assuming either way.)
 
+One screen pair has its own ceiling: the cheque register (`accounting-cheques`
+and `accounting-cheques-dark`) allows 1%, by the owner's decision on
+2026-10-13. Its frame is almost all small RTL table text, and CI measured 0.65%
+and 0.52% there on identical content. A screen opts in with `maxDiffRatio` on
+its entry in `SCREENS`; prefer that over raising the global limit.
+
 ## Reviewing a failure — read this before touching a baseline
 
 When the job fails it writes `docs/design/visual/__diff__/<id>.actual.png` and
@@ -132,8 +138,12 @@ selector matches nothing, rather than silently recording the unscrolled frame.
 ## Adding a screen
 
 Add an entry to `SCREENS` in `scripts/visual-regression.mjs`, run
-`npm run test:visual` once to record it, look at the resulting PNG, and commit
-it with the change. Prefer screens that are the canonical example of a shared
+`node scripts/visual-regression.mjs --update` once to record it, look at the
+resulting PNG, and commit it **together with the entry**. The harness refuses
+to run a screen that has no committed baseline: it used to record one on the
+spot and count that as a pass, which on CI — where the file is discarded with
+the runner — meant a green job for a screen it had never compared. An entry
+without its PNG is a gate that exists only in the list. Prefer screens that are the canonical example of a shared
 pattern over screens that merely look good. Keep the list short: this check is
 valuable in proportion to how seriously each failure is taken, and a
 fifty-screen suite trains people to skim.

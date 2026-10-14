@@ -62,6 +62,7 @@ describe("built-in role presets", () => {
       "billing.manage", "billing.view",
       "campaigns.manage", "campaigns.view",
       "cms.configure", "cms.content_manage", "cms.publish", "cms.view",
+      "commission.calculate",
       "commission.manage", "commission.view",
       "crm.configure", "crm.consent_manage", "crm.delete", "crm.export", "crm.manage", "crm.merge", "crm.view",
       "data.export", "data.import",
@@ -84,12 +85,15 @@ describe("built-in role presets", () => {
       "payments.refund", "payments.take",
       "printing.execute",
       "purchases.manage",
-      "reports.export", "reports.view",
+      "reports.dashboard_defaults.manage", "reports.export", "reports.manage", "reports.view",
       "reservations.manage", "reservations.view",
       "settings.manage",
       "store_credit.issue", "store_credit.payout",
       "tables.edit", "tables.manage",
       "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
+      "vehicles.archive", "vehicles.cost_edit", "vehicles.cost_view", "vehicles.create",
+      "vehicles.edit", "vehicles.expense_record", "vehicles.override_min_price", "vehicles.price_edit",
+      "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.transfer", "vehicles.view",
       "website.manage", "website.settings_manage", "website.view",
       "woocommerce.configure", "woocommerce.manage", "woocommerce.sync", "woocommerce.view",
       "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.documents_issue", "workspace.manage", "workspace.view",
@@ -100,7 +104,7 @@ describe("built-in role presets", () => {
     expect(effective("accountant")).toEqual([
       "accounts.edit",
       "ai.usage.view", "ai.use",
-      "commission.view",
+      "commission.approve", "commission.calculate", "commission.payout", "commission.reverse", "commission.view",
       "data.export", "data.import",
       "finance.assets_manage", "finance.cheques_manage", "finance.expenses_manage",
       "finance.installments_manage", "finance.payables_manage",
@@ -111,8 +115,9 @@ describe("built-in role presets", () => {
       "menu.view",
       "parties.manage", "parties.view",
       "payroll.manage", "payroll.view",
-      "reports.export", "reports.view",
+      "reports.export", "reports.manage", "reports.view",
       "tax.amend", "tax.cancel", "tax.export", "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
+      "vehicles.cost_view", "vehicles.view",
       "workspace.view",
     ]);
   });
@@ -132,6 +137,7 @@ describe("built-in role presets", () => {
       "printing.execute",
       "reservations.manage", "reservations.view",
       "tables.manage",
+      "vehicles.sell", "vehicles.view",
       "workspace.manage", "workspace.view",
     ]);
   });
@@ -193,6 +199,12 @@ describe("privilege boundaries that must not drift", () => {
       for (const key of [PERMISSIONS.taxView, PERMISSIONS.taxPrepare, PERMISSIONS.taxSend]) {
         expect(hasPermission(role, {}, key), `${role} ${key}`).toBe(false);
       }
+    }
+  });
+
+  it("keeps consolidated cross-branch reporting out of every non-owner preset (issue #819)", () => {
+    for (const role of ROLES) {
+      expect(hasPermission(role, {}, PERMISSIONS.reportsBusinessWide)).toBe(role === "owner");
     }
   });
 

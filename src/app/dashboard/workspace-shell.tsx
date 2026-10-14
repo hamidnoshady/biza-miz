@@ -12,6 +12,7 @@ import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes"
 import { ACCOUNTING_WORKSPACE_HREFS, PLATFORM_BILLING_HREF, PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
 import { settingsTabHref } from "@/lib/settings-routes";
 import { REPORTS_TABS, reportsTabHref } from "./reports/reports-nav";
+import { REPORT_CAPABILITY_PERMISSIONS } from "@/lib/report-permissions";
 import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures, isLockableFeature } from "@/lib/features";
@@ -152,6 +153,15 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     { label: "انبار", module: "inventory", href: ACCOUNTING_WORKSPACE_HREFS.inventory, roles: ["owner", "manager"], flag: "inventory" },
     { label: INDUSTRY_LABELS.jewelry, module: "jewelry", href: "/accounting/jewelry", roles: ["owner", "manager"] },
     { label: INDUSTRY_LABELS.watch, module: "watch", href: "/accounting/watch", roles: ["owner", "manager"] },
+    // Issue #839 — the automotive manager. Same shape as the two above: one
+    // trade-titled entry that the module gate (and therefore the industry
+    // profile) removes entirely for every other business.
+    {
+      label: INDUSTRY_LABELS.automotive,
+      module: "automotive",
+      href: ACCOUNTING_WORKSPACE_HREFS.automotive,
+      roles: ["owner", "manager"],
+    },
     // Phase 42 — the retail trade-goods trades manage their catalogue in the
     // shared products workspace: a collapsible sidebar group — افزودن محصول،
     // لیست محصولات، لیست قیمت، ویژگی محصول، الگوی بارکد وزنی and the trade's
@@ -221,17 +231,25 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       href: "/media",
       roles: ["owner", "manager"],
     },
+    // Issue #819 — the reports door and its tabs are gated by the *reporting
+    // capabilities*, not by a role list: the entry's old
+    // `roles: ["owner","manager","accountant"]` both hid «گزارش‌ها» from an
+    // admin who holds `reports.view` and, because the `roles` field is only
+    // consulted for the industry catalogue modules, did not actually restrict
+    // the children — «مقایسهٔ شعب» rendered for anyone with `reports.view`
+    // while the branch-comparison API claimed to be owner-only. Each child now
+    // names the same permission its route enforces.
     {
       label: "گزارش‌ها",
       module: "reports",
       href: ACCOUNTING_WORKSPACE_HREFS.reports,
-      roles: ["owner", "manager", "accountant"],
+      requiredAnyPermission: [REPORT_CAPABILITY_PERMISSIONS.canViewReports],
       flag: "reporting",
       children: REPORTS_TABS.map((tab) => ({
         label: tab.label,
         module: "reports" as const,
         href: reportsTabHref(tab.key),
-        roles: tab.roles ?? ["owner", "manager", "accountant"],
+        requiredAnyPermission: [REPORT_CAPABILITY_PERMISSIONS[tab.capability]],
       })),
     },
     // The assistant itself is not an entry: it IS the dashboard (`/dashboard`
