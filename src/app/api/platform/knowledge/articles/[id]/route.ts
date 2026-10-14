@@ -5,7 +5,7 @@ import {
   withPlatformScope,
   platformAudit,
 } from "@/lib/platform-auth";
-import { KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
+import { KNOWLEDGE_PAGES, KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
 import {
   adminDeleteKbArticle,
   adminGetKbArticle,
@@ -18,7 +18,7 @@ interface Ctx {
   params: Promise<{ id: string }>;
 }
 
-const KNOWN_SECTION_KEYS = new Set(KNOWLEDGE_SECTIONS.map((s) => s.key));
+const KNOWN_SECTION_KEYS = new Set([...KNOWLEDGE_SECTIONS.map((s) => s.key), ...KNOWLEDGE_PAGES.map((p) => p.key)]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** One article's full record for the editor. */
