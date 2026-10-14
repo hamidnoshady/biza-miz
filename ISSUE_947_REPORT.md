@@ -411,6 +411,7 @@ suite is run on the push).
 | Workflow | Run | Result |
 |---|---|---|
 | `test.yml` | **38626207933** (`11dd6aa3`, the code head) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅ (the seven new rendered tests included), `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116066571641`: `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Record visual baselines (manual, opt-in)` **skipped**, `Upload diffs` **skipped**), `design checks` ✅, **`integration tests (real database)` ✅**, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
+| `test.yml` | **38650641404** (the documentation commit `adc646b`) | **✅ completed success — the same 11 jobs, all green**: the delta is `ISSUE_947_REPORT.md` alone, so the suite ran over an identical code tree (`11dd6aa3`) |
 | `test.yml` | 38618945936 (`a2f78cf0`) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅, `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116041317692`: `Build` ✅, `Start the production server` ✅, `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Publish visual regression summary` ✅; `Record visual baselines (manual, opt-in)` and `Upload diffs` **skipped** — the first is the opt-in recording step, the second is skipped precisely because there were no diffs), `design checks` ✅, `integration tests (real database)` ✅, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
 | `test.yml` | 38617346093 (`7a3e1cb5`) | **cancelled by the next push**, not a failure: 8 of its 10 jobs had already passed (`type check`, `unit tests`, `ESLint`, `API guard`, **`visual regression`**, `design checks`, `production build`, `data transfer engine`); `integration tests (real database)` was cancelled mid-flight and the aggregate `all checks passed` therefore failed. Not counted as a red check. |
 | `android-build` | 38617346091 (`7a3e1cb5`) | ✅ success |
@@ -419,9 +420,14 @@ suite is run on the push).
 | `android-build` / `build-desktop-installer` / `verify-shippables` | — (`a2f78cf0`, `11dd6aa3`) | **did not trigger**, and their path filters are why: the delta of those two heads is documentation, `scripts/seed.ts`, and one `*.test.tsx` — and test files are explicitly excluded from the shipped paths (`electron/package.json` ships `electron/*.js`; the Android job watches `android/**` and `src/lib/native/**`; both shell workflows exclude `src/**/*.test.*`). The three passed at `7a3e1cb5`, whose shipped inputs are identical to these heads'. |
 
 Two pushes in this round were cancelled by a newer push rather than finishing — `7a3e1cb5`
-(`38617346093`) and the report-only `9099d2a9` (`38625981773`) — which is how the branch's
-`concurrency` group behaves; neither is counted as a red check, and the head that matters
-has its own completed run above.
+(`38617346093`), the report-only `9099d2a9` (`38625981773`), and `092e2ca` (`38650552700`)
+— which is how the branch's `concurrency` group behaves; none is counted as a red check,
+and every head that matters has its own completed run above.
+
+Every push to this branch runs `test.yml` (the workflow's own `on:` comment says why), so a
+documentation-only commit after this one is verified by the same suite over the same code
+tree — the code head stays `11dd6aa3` and no `src/**`, migration, script or test file changes
+in these commits.
 
 The run that failed on this branch is the one at the **pre-integration** head `0723b53`
 (`38452006386`), and its failure is the item-5 finding:
