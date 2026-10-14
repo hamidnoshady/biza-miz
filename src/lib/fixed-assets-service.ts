@@ -35,6 +35,8 @@
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { accountIdsByCode, postExactMirrorEntry, postJournalEntry } from "./ledger-service";
+import { parseLineDimensions, type LineDimensions } from "./accounting-dimensions";
+import { AccountingDimensionError, assertDimensionsPostable, dimensionColumnValues } from "./accounting-dimensions-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { businessToday } from "./business-day-service";
 import { isValidIsoDate } from "./jalali";
@@ -120,6 +122,11 @@ export interface FixedAsset {
   disposalJournalEntryId?: string | null;
   disposalReason?: string | null;
   archivedAt?: string | null;
+  /** Default accounting dimensions carried on acquisition, depreciation and disposal entries (issue #868). */
+  costCenterId?: string | null;
+  profitCenterId?: string | null;
+  departmentId?: string | null;
+  detailDimensionId?: string | null;
   /** Derived, never stored: the live entries consumed the depreciable base. */
   fullyDepreciated?: boolean;
 }
@@ -202,6 +209,10 @@ interface FixedAssetRow extends Record<string, unknown> {
   disposal_journal_entry_id: string | null;
   disposal_reason: string | null;
   archived_at: string | null;
+  cost_center_id: string | null;
+  profit_center_id: string | null;
+  department_id: string | null;
+  detail_dimension_id: string | null;
 }
 
 // One SELECT of the register with every dimension the page, the filters and
@@ -234,7 +245,8 @@ const FIXED_ASSET_SELECT = `
          fa.disposal_proceeds::text AS disposal_proceeds, fa.disposal_journal_entry_id,
          fa.disposal_reason, fa.archived_at::text AS archived_at,
          COALESCE(live.accumulated, 0)::text AS accumulated_depreciation,
-         COALESCE(live.periods, 0)::int AS depreciation_count${FIXED_ASSET_FROM}`;
+         COALESCE(live.periods, 0)::int AS depreciation_count,
+         fa.cost_center_id, fa.profit_center_id, fa.department_id, fa.detail_dimension_id${FIXED_ASSET_FROM}`;
 
 function toFixedAsset(r: FixedAssetRow): FixedAsset {
   const cost = Number(r.cost);
@@ -274,6 +286,10 @@ function toFixedAsset(r: FixedAssetRow): FixedAsset {
     disposalJournalEntryId: r.disposal_journal_entry_id ?? null,
     disposalReason: r.disposal_reason ?? null,
     archivedAt: r.archived_at ?? null,
+    costCenterId: (r.cost_center_id as string | null) ?? null,
+    profitCenterId: (r.profit_center_id as string | null) ?? null,
+    departmentId: (r.department_id as string | null) ?? null,
+    detailDimensionId: (r.detail_dimension_id as string | null) ?? null,
     fullyDepreciated: accumulatedDepreciation >= cost - salvageValue,
   };
 }
@@ -766,6 +782,8 @@ export async function createFixedAsset(params: {
   purchaseReference?: string | null;
   notes?: string | null;
   assetAccountId?: string | null;
+  /** Default accounting dimensions carried on every automatic posting this asset produces (acquisition, depreciation, disposal). */
+  dimensions?: LineDimensions | null;
 }): Promise<FixedAsset> {
   const errors = validateFixedAsset(params);
   if (errors.length > 0) throw new FixedAssetError(errors.join(" "));
@@ -802,10 +820,28 @@ export async function createFixedAsset(params: {
     throw new FixedAssetError("idempotency_key_too_long");
   }
 
+  // Issue #868: validate the default dimensions before acquiring a client, so
+  // malformed input refuses without leaking a pooled connection.
+  const parsedDimensions = parseLineDimensions(params.dimensions);
+  if (!parsedDimensions.ok) throw new AccountingDimensionError("invalid_dimension");
+  const assetDimensions: LineDimensions = parsedDimensions.value;
+  const dimCols = dimensionColumnValues(assetDimensions);
+
   const client = await getPool().connect();
   let id: string;
   try {
     await client.query("BEGIN");
+    // Verify the default dimensions are postable on the in-service date at the
+    // asset's branch. The asset row itself carries them for history, and every
+    // automatic posting (acquisition/depreciation/disposal) re-uses them.
+    if (Object.keys(assetDimensions).length > 0) {
+      await assertDimensionsPostable(client, {
+        businessId: params.businessId,
+        locationId: params.locationId,
+        entryDate: params.inServiceDate?.trim() || params.acquisitionDate,
+        lines: [{ dimensions: assetDimensions }],
+      });
+    }
     if (idempotencyKey) {
       const { rows: existing } = await client.query<{ id: string }>(
         `SELECT id FROM fixed_assets WHERE business_id = $1 AND idempotency_key = $2`,
@@ -846,8 +882,9 @@ export async function createFixedAsset(params: {
          (business_id, location_id, name, acquisition_date, in_service_date, cost, salvage_value,
           useful_life_months, acquisition_source, acquisition_entry_id, created_by,
           code, category, serial_number, vendor_party_id, custodian_party_id,
-          purchase_reference, notes, asset_account_id, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+          purchase_reference, notes, asset_account_id, idempotency_key,
+          cost_center_id, profit_center_id, department_id, detail_dimension_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
        RETURNING id`,
       [
         params.businessId,
@@ -870,6 +907,10 @@ export async function createFixedAsset(params: {
         notes,
         params.assetAccountId ?? null,
         idempotencyKey,
+        dimCols.cost_center_id,
+        dimCols.profit_center_id,
+        dimCols.department_id,
+        dimCols.detail_dimension_id,
       ],
     );
     id = rows[0].id;
@@ -889,6 +930,9 @@ export async function createFixedAsset(params: {
       );
       const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.fixedAssets]);
       const debitAccountId = params.assetAccountId ?? accounts.get(WELL_KNOWN_CODES.fixedAssets)!;
+      // The asset leg (debit to fixed assets) carries the asset's default
+      // dimensions; the settlement leg (credit to cash/bank/payable) does not —
+      // settlement accounts hold cash, not costs.
       const acquisitionEntryId = await postJournalEntry(client, {
         businessId: params.businessId,
         locationId: params.locationId,
@@ -899,7 +943,7 @@ export async function createFixedAsset(params: {
         postingKind: "acquisition",
         createdBy: params.createdBy,
         lines: [
-          { accountId: debitAccountId, debit: params.cost, credit: 0 },
+          { accountId: debitAccountId, debit: params.cost, credit: 0, dimensions: assetDimensions },
           { accountId: params.acquisition.sourceAccountId, debit: 0, credit: params.cost },
         ],
       });
@@ -1068,12 +1112,14 @@ export async function setFixedAssetAcquisition(params: {
   fixedAssetId: string;
   acquisitionSource: string;
   acquisitionEntryId?: string | null;
+  client?: PoolClient;
 }): Promise<FixedAsset> {
   const link = normaliseAcquisitionLink(params.acquisitionSource, params.acquisitionEntryId);
   if (!isUuid(params.fixedAssetId)) throw new FixedAssetError("fixed_asset_not_found", 404);
-  const client = await getPool().connect();
+  const ownClient = !params.client;
+  const client = params.client ?? (await getPool().connect());
   try {
-    await client.query("BEGIN");
+    if (ownClient) await client.query("BEGIN");
     const { rows } = await client.query<{ cost: string; status: FixedAssetStatus; archived_at: string | null }>(
       `SELECT cost::text AS cost, status, archived_at::text FROM fixed_assets WHERE business_id = $1 AND id = $2 FOR UPDATE`,
       [params.businessId, params.fixedAssetId],
@@ -1088,6 +1134,96 @@ export async function setFixedAssetAcquisition(params: {
       `UPDATE fixed_assets SET acquisition_source = $3, acquisition_entry_id = $4 WHERE business_id = $1 AND id = $2`,
       [params.businessId, params.fixedAssetId, link.source, link.entryId],
     );
+    if (ownClient) await client.query("COMMIT");
+  } catch (err) {
+    if (ownClient) await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    if (ownClient) client.release();
+  }
+  if (ownClient) {
+    return (await getFixedAssetWithDepreciation(params.businessId, params.fixedAssetId)).fixedAsset;
+  }
+  // Caller owns the transaction and will read back at commit time.
+  return null as unknown as FixedAsset;
+}
+
+/**
+ * Atomic metadata update (issue #868): default dimensions AND/OR acquisition
+ * link, under one lock and one transaction. Both are metadata; neither posts
+ * anything. Dimensions are validated against today/branch. Default-dimension
+ * changes apply prospectively (already-posted history is not rewritten).
+ */
+export async function updateFixedAsset(params: {
+  businessId: string;
+  fixedAssetId: string;
+  acquisitionSource?: string;
+  acquisitionEntryId?: string | null;
+  setAcquisition?: boolean;
+  dimensions?: LineDimensions | null;
+  setDimensions?: boolean;
+}): Promise<FixedAsset> {
+  if (!isUuid(params.fixedAssetId)) throw new FixedAssetError("fixed_asset_not_found", 404);
+  let parsedDims: LineDimensions = {};
+  if (params.setDimensions) {
+    const parsed = parseLineDimensions(params.dimensions);
+    if (!parsed.ok) throw new AccountingDimensionError("invalid_dimension");
+    parsedDims = parsed.value;
+  }
+  const dimCols = dimensionColumnValues(parsedDims);
+  const link = params.setAcquisition
+    ? normaliseAcquisitionLink(String(params.acquisitionSource ?? ""), params.acquisitionEntryId ?? null)
+    : null;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const asset = await lockAsset(client, params.businessId, params.fixedAssetId);
+    if (asset.status === "disposed") throw new FixedAssetError("asset_disposed", 409);
+    if (asset.archivedAt) throw new FixedAssetError("asset_archived", 409);
+    if (params.setDimensions && Object.keys(parsedDims).length > 0) {
+      const today = await businessToday(params.businessId);
+      await assertDimensionsPostable(client, {
+        businessId: params.businessId,
+        locationId: asset.locationId,
+        entryDate: today,
+        lines: [{ dimensions: parsedDims }],
+      });
+    }
+    const sets: string[] = [];
+    const args: unknown[] = [params.businessId, params.fixedAssetId];
+    if (params.setDimensions) {
+      sets.push(
+        "cost_center_id = $3",
+        "profit_center_id = $4",
+        "department_id = $5",
+        "detail_dimension_id = $6",
+      );
+      args.push(dimCols.cost_center_id, dimCols.profit_center_id, dimCols.department_id, dimCols.detail_dimension_id);
+    }
+    if (params.setAcquisition && link) {
+      const offset = args.length + 1;
+      if (link.entryId) {
+        const { rows: costRows } = await client.query<{ cost: string }>(
+          `SELECT cost::text AS cost FROM fixed_assets WHERE business_id = $1 AND id = $2`,
+          [params.businessId, params.fixedAssetId],
+        );
+        await assertAcquisitionEntryCovers(
+          client,
+          params.businessId,
+          link.entryId,
+          Number(costRows[0].cost),
+          params.fixedAssetId,
+        );
+      }
+      sets.push(`acquisition_source = $${offset}`, `acquisition_entry_id = $${offset + 1}`);
+      args.push(link.source, link.entryId);
+    }
+    if (sets.length > 0) {
+      await client.query(
+        `UPDATE fixed_assets SET ${sets.join(", ")} WHERE business_id = $1 AND id = $2`,
+        args,
+      );
+    }
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -1098,6 +1234,30 @@ export async function setFixedAssetAcquisition(params: {
   return (await getFixedAssetWithDepreciation(params.businessId, params.fixedAssetId)).fixedAsset;
 }
 
+/**
+ * Updates an asset's DEFAULT dimension attribution (issue #868). Prospective
+ * only: existing acquisition/depreciation/disposal entries are NOT rewritten
+ * because they are already posted history. Future automatic postings
+ * (depreciation from the next open month onward, disposal) use the new
+ * defaults. The change is validated with `assertDimensionsPostable` at the
+ * asset's current branch against today's date (a default is a forward-looking
+ * attribute; a historical posting already carries what it carried).
+ *
+ * Permissions: `financeAssetsManage`, same as every other asset mutation.
+ * @deprecated Use `updateFixedAsset` (atomic with acquisition link) when both fields may change in one request.
+ */
+export async function updateFixedAssetDimensions(params: {
+  businessId: string;
+  fixedAssetId: string;
+  dimensions: LineDimensions | null | undefined;
+}): Promise<FixedAsset> {
+  return updateFixedAsset({
+    businessId: params.businessId,
+    fixedAssetId: params.fixedAssetId,
+    dimensions: params.dimensions,
+    setDimensions: true,
+  });
+}
 export interface AcquisitionCandidate {
   entryId: string;
   entryDate: string;
@@ -1243,6 +1403,20 @@ interface LockedAsset {
   status: FixedAssetStatus;
   archivedAt: string | null;
   assetAccountId: string | null;
+  /** Default dimensions carried on automatic postings (issue #868). */
+  costCenterId: string | null;
+  profitCenterId: string | null;
+  departmentId: string | null;
+  detailDimensionId: string | null;
+}
+
+function lockedAssetDimensions(a: LockedAsset): LineDimensions {
+  const d: LineDimensions = {};
+  if (a.costCenterId) d.cost_center = a.costCenterId;
+  if (a.profitCenterId) d.profit_center = a.profitCenterId;
+  if (a.departmentId) d.department = a.departmentId;
+  if (a.detailDimensionId) d.detail = a.detailDimensionId;
+  return d;
 }
 
 async function lockAsset(client: PoolClient, businessId: string, fixedAssetId: string): Promise<LockedAsset> {
@@ -1260,11 +1434,16 @@ async function lockAsset(client: PoolClient, businessId: string, fixedAssetId: s
     status: FixedAssetStatus;
     archived_at: string | null;
     asset_account_id: string | null;
+    cost_center_id: string | null;
+    profit_center_id: string | null;
+    department_id: string | null;
+    detail_dimension_id: string | null;
   }>(
     `SELECT id, name, location_id, cost::text AS cost, salvage_value::text AS salvage_value,
             useful_life_months,
             COALESCE(in_service_date, acquisition_date)::text AS in_service_date,
-            status, archived_at::text AS archived_at, asset_account_id
+            status, archived_at::text AS archived_at, asset_account_id,
+            cost_center_id, profit_center_id, department_id, detail_dimension_id
        FROM fixed_assets WHERE business_id = $1 AND id = $2 FOR UPDATE`,
     [businessId, fixedAssetId],
   );
@@ -1281,6 +1460,10 @@ async function lockAsset(client: PoolClient, businessId: string, fixedAssetId: s
     status: r.status,
     archivedAt: r.archived_at,
     assetAccountId: r.asset_account_id,
+    costCenterId: r.cost_center_id,
+    profitCenterId: r.profit_center_id,
+    departmentId: r.department_id,
+    detailDimensionId: r.detail_dimension_id,
   };
 }
 
@@ -1550,6 +1733,10 @@ export async function postDepreciation(params: {
       WELL_KNOWN_CODES.depreciationExpense,
       WELL_KNOWN_CODES.accumulatedDepreciation,
     ]);
+    // Depreciation expense carries the asset's dimensions; accumulated
+    // depreciation (contra-asset) does not — mirrors the acquisition rule that
+    // contra/settlement legs are un-attributed.
+    const assetDims = lockedAssetDimensions(asset);
     const journalEntryId = await postJournalEntry(client, {
       businessId: params.businessId,
       locationId: postingLocationId,
@@ -1560,7 +1747,12 @@ export async function postDepreciation(params: {
       postingKind: "depreciation",
       createdBy: params.createdBy,
       lines: [
-        { accountId: accounts.get(WELL_KNOWN_CODES.depreciationExpense)!, debit: plan.amount, credit: 0 },
+        {
+          accountId: accounts.get(WELL_KNOWN_CODES.depreciationExpense)!,
+          debit: plan.amount,
+          credit: 0,
+          dimensions: assetDims,
+        },
         { accountId: accounts.get(WELL_KNOWN_CODES.accumulatedDepreciation)!, debit: 0, credit: plan.amount },
       ],
     });
@@ -1797,8 +1989,15 @@ export async function disposeFixedAsset(params: {
       proceedsAccountId = params.proceedsAccountId!;
     }
 
-    const lines: { accountId: string; debit: number; credit: number }[] = [
-      { accountId: costAccountId, debit: 0, credit: asset.cost },
+    // Disposal attribution rule (issue #868):
+    //   * asset cost credit         -> carries dimensions (cost leaves the books)
+    //   * accumulated dep'n debit   -> no dimensions (contra-asset, mirrors its
+    //                                  undimensioned credit side on every depreciation)
+    //   * proceeds debit            -> no dimensions (settlement / cash / receivable)
+    //   * loss debit / gain credit  -> carries dimensions (P&L impact)
+    const assetDims = lockedAssetDimensions(asset);
+    const lines: { accountId: string; debit: number; credit: number; dimensions?: LineDimensions }[] = [
+      { accountId: costAccountId, debit: 0, credit: asset.cost, dimensions: assetDims },
     ];
     if (live.accumulated > 0) {
       lines.push({
@@ -1811,10 +2010,20 @@ export async function disposeFixedAsset(params: {
       lines.push({ accountId: proceedsAccountId, debit: proceeds, credit: 0 });
     }
     if (outcome.loss > 0) {
-      lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.lossOnAssetSale)!, debit: outcome.loss, credit: 0 });
+      lines.push({
+        accountId: accounts.get(WELL_KNOWN_CODES.lossOnAssetSale)!,
+        debit: outcome.loss,
+        credit: 0,
+        dimensions: assetDims,
+      });
     }
     if (outcome.gain > 0) {
-      lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.gainOnAssetSale)!, debit: 0, credit: outcome.gain });
+      lines.push({
+        accountId: accounts.get(WELL_KNOWN_CODES.gainOnAssetSale)!,
+        debit: 0,
+        credit: outcome.gain,
+        dimensions: assetDims,
+      });
     }
 
     const memo =

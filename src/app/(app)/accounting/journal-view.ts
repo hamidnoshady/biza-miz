@@ -25,6 +25,8 @@ import {
 } from "@/lib/journal-filters";
 import { formatPersianNumber } from "@/lib/digits";
 import type { MoneyUnit } from "@/lib/money";
+import { DIMENSION_KINDS, type DimensionKind } from "@/lib/accounting-dimensions";
+import { JOURNAL_DIMENSION_PARAMS } from "@/lib/journal-filters";
 
 /** The journal document as the screen receives it from `/api/ledger/entries`. */
 export interface JournalLineView {
@@ -35,6 +37,8 @@ export interface JournalLineView {
   /** Exact Rial as a decimal string — never converted through `Number`. */
   debit: string;
   credit: string;
+  /** Issue #868 — the line's attributions, labelled by the server. Absent from older payloads. */
+  dimensions?: { kind: DimensionKind; valueId: string; code: string; name: string; isActive: boolean }[];
 }
 
 export interface JournalEntryView {
@@ -109,6 +113,11 @@ export interface JournalFilterState {
   account: string;
   creator: string;
   project: string;
+  /**
+   * Issue #868 — the dimension values to match, one per kind, all on one line.
+   * Keyed by the kind's own name; the URL names come from `JOURNAL_DIMENSION_PARAMS`.
+   */
+  dimensions: Partial<Record<DimensionKind, string>>;
   reversal: JournalReversalState;
   kind: JournalEntryKind;
   /** Exact Rial decimal strings — the screen converts from the business's display unit at the input boundary. */
@@ -131,6 +140,7 @@ export const EMPTY_JOURNAL_FILTERS: JournalFilterState = {
   account: "",
   creator: "",
   project: "",
+  dimensions: {},
   reversal: "any",
   kind: "any",
   amountMin: "",
@@ -146,6 +156,11 @@ function oneOf<T extends readonly string[]>(value: string | null, allowed: T, fa
 /** The filter state a URL describes. Unknown or malformed values fall back to «همه» rather than erroring. */
 export function journalFiltersFromParams(params: URLSearchParams): JournalFilterState {
   const text = (key: string) => (params.get(key) ?? "").trim();
+  const dimensions: Partial<Record<DimensionKind, string>> = {};
+  for (const kind of DIMENSION_KINDS) {
+    const value = text(JOURNAL_DIMENSION_PARAMS[kind]);
+    if (value) dimensions[kind] = value;
+  }
   return {
     dateFrom: text("dateFrom"),
     dateTo: text("dateTo"),
@@ -155,6 +170,7 @@ export function journalFiltersFromParams(params: URLSearchParams): JournalFilter
     account: text("account"),
     creator: text("creator"),
     project: text("project"),
+    dimensions,
     reversal: oneOf(params.get("reversal"), JOURNAL_REVERSAL_STATES, "any"),
     kind: oneOf(params.get("kind"), JOURNAL_ENTRY_KINDS, "any"),
     amountMin: text("amountMin"),
@@ -178,6 +194,10 @@ export function journalFilterParams(state: JournalFilterState): URLSearchParams 
   if (state.account) params.set("account", state.account);
   if (state.creator) params.set("creator", state.creator);
   if (state.project) params.set("project", state.project);
+  for (const kind of DIMENSION_KINDS) {
+    const value = state.dimensions[kind];
+    if (value) params.set(JOURNAL_DIMENSION_PARAMS[kind], value);
+  }
   if (state.reversal && state.reversal !== "any") params.set("reversal", state.reversal);
   if (state.kind && state.kind !== "any") params.set("kind", state.kind);
   if (state.amountMin) params.set("amountMin", state.amountMin);

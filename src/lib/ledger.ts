@@ -5,11 +5,18 @@
  * ids, inserting journal_entries/journal_lines) lives in ledger-service.ts.
  */
 import type { Rial } from "./money";
+import type { LineDimensions } from "./accounting-dimensions";
 
 export interface JournalLine {
   accountId: string;
   debit: Rial;
   credit: Rial;
+  /**
+   * Optional accounting dimensions (issue #868). Absent for every auto-posting
+   * rule that has no attribution to offer; checked by the posting guard, never
+   * by these balance functions, which only ever look at amounts.
+   */
+  dimensions?: LineDimensions | null;
 }
 
 export interface BalanceCheck {

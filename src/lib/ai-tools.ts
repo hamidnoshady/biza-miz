@@ -2880,6 +2880,7 @@ export async function runReadTool(
         entryKind,
         amountMin: null,
         amountMax: null,
+        dimensions: {},
         limit,
         cursor: (typeof args.cursor === "string" && decodeJournalCursor(args.cursor)) || null,
       };

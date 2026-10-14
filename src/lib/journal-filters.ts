@@ -28,6 +28,7 @@
 
 import { isValidIsoDate } from "./iso-date";
 import { isUuid } from "./uuid";
+import { DIMENSION_KINDS, type DimensionKind } from "./accounting-dimensions";
 
 /** One page of the journal. Deliberately smaller than the old 100: the list is compact and keyset-paged, so «بیشتر» is cheap. */
 export const JOURNAL_PAGE_SIZE = 50;
@@ -63,6 +64,14 @@ export interface JournalCursor {
   id: string;
 }
 
+/** The URL parameter each dimension kind is filtered by on the journal (issue #868). */
+export const JOURNAL_DIMENSION_PARAMS: Record<DimensionKind, string> = {
+  cost_center: "costCenter",
+  profit_center: "profitCenter",
+  department: "department",
+  detail: "detail",
+};
+
 export interface JournalFilters {
   dateFrom: string | null;
   dateTo: string | null;
@@ -72,6 +81,13 @@ export interface JournalFilters {
   accountId: string | null;
   createdBy: string | null;
   projectId: string | null;
+  /**
+   * Issue #868: dimension values to match, all on ONE line. A document matches
+   * when a single line carries every value named here, which is the same AND the
+   * reports apply — never a match of one line for one kind and another line for
+   * the other. Empty when no dimension is filtered.
+   */
+  dimensions: Partial<Record<DimensionKind, string>>;
   /**
    * One document by id — the deep link the reports drill-down renders
    * («بازکردن سند»), which must open the journal *on that document* rather
@@ -171,6 +187,12 @@ export function parseJournalFilters(params: URLSearchParams): JournalFilterResul
   if (locationId === undefined || accountId === undefined || createdBy === undefined || projectId === undefined) {
     return { error: "invalid_filter" };
   }
+  const dimensions: Partial<Record<DimensionKind, string>> = {};
+  for (const kind of DIMENSION_KINDS) {
+    const value = uuidFilter(params.get(JOURNAL_DIMENSION_PARAMS[kind]));
+    if (value === undefined) return { error: "invalid_filter" };
+    if (value) dimensions[kind] = value;
+  }
 
   // Its own code rather than `invalid_filter`: this one arrives from a link
   // somebody followed, not from a control they set, so the screen has a
@@ -208,6 +230,7 @@ export function parseJournalFilters(params: URLSearchParams): JournalFilterResul
       accountId,
       createdBy,
       projectId,
+      dimensions,
       entryId,
       reversalState: reversalState ?? "any",
       entryKind: entryKind ?? "any",
@@ -251,6 +274,7 @@ export function hasJournalFilters(filters: JournalFilters): boolean {
     filters.accountId ||
     filters.createdBy ||
     filters.projectId ||
+    Object.keys(filters.dimensions ?? {}).length > 0 ||
     (filters.reversalState && filters.reversalState !== "any") ||
     (filters.entryKind && filters.entryKind !== "any") ||
     filters.amountMin ||

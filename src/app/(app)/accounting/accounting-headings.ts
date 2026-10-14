@@ -64,6 +64,10 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
     description:
       "حسابداری چندارزی — تنظیم ارزها و نرخ‌ها، ثبت اسناد ارزی، تسویه دریافت‌ها و پرداخت‌های ارزی، تجدید ارزیابی و گزارش‌های ارزی.",
   },
+  dimensions: {
+    description:
+      "مرکز هزینه، مرکز سود، واحد سازمانی و بعد تحلیلی: تعریف مقدارها و گزارش هزینه و سود به تفکیک هر بُعد.",
+  },
   payroll: { description: "دوره‌های حقوق، تعهد حقوق کارکنان و پرداخت آن." },
   vat: { description: "مالیات بر ارزش افزودهٔ فروش و خرید در هر دوره." },
   "tax-invoices": {

@@ -87,6 +87,7 @@ describe("reversal pair", () => {
 
 describe("filters ⇄ URL", () => {
   const filled: JournalFilterState = {
+    dimensions: {},
     dateFrom: "2026-01-01",
     dateTo: "2026-03-31",
     sourceType: "manual",

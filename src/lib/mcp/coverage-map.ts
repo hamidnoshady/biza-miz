@@ -107,6 +107,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     note: "landed on main after this map's batch; no MCP verb yet — renumbering is a fiscal-year act for a person",
   },
   {
+    id: "accounting.dimensions",
+    module: "Accounting",
+    entity: "Accounting dimensions (cost/profit centres, departments) & dimension reports",
+    routes: ["ledger/dimensions", "ledger/dimension-reports"],
+    note: "landed on main after this map's batch; no MCP verb yet",
+  },
+  {
     id: "accounting.tax_invoices",
     module: "Accounting",
     entity: "Taxpayer invoices (سامانه مودیان)",

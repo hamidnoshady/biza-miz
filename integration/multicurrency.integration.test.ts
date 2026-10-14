@@ -1147,6 +1147,7 @@ describe("the base ledger is untouched and visible", () => {
       entryKind: "any",
       amountMin: null,
       amountMax: null,
+      dimensions: {},
       limit: 10,
       cursor: null,
     });

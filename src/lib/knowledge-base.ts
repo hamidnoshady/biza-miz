@@ -136,6 +136,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/accounting/reconciliation", "تطبیق بانکی"],
     ["/accounting/multicurrency", "ارز و تسعیر"],
     ["/accounting/chart-of-accounts", "سرفصل حساب‌ها"],
+    ["/accounting/dimensions", "ابعاد حسابداری"],
     ["/accounting/payroll", "حقوق و دستمزد"],
     ["/accounting/vat", "گزارش مالیات"],
     ["/accounting/tax-invoices", "صورتحساب مؤدیان"],

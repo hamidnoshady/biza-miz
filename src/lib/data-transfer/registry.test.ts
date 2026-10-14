@@ -10,6 +10,7 @@
  * the adapters to be registered (which needs the database module).
  */
 import { describe, expect, it } from "vitest";
+import { DIMENSION_CODE_FIELD, DIMENSION_KIND_LABELS, DIMENSION_KINDS } from "../accounting-dimensions";
 import { ALL_PERMISSIONS, PERMISSIONS, roleBasePermissions } from "../permissions";
 import {
   DATA_ENTITIES,
@@ -300,6 +301,44 @@ describe("the expense import contract", () => {
       expect((expenses.fields.find((f) => f.key === key)?.hint ?? "").trim().length, key).toBeGreaterThan(
         10,
       );
+    }
+  });
+});
+
+describe("the expense dimension columns (issue #868)", () => {
+  const expenses = requireEntity("accounting.expenses");
+  const dimensionFields = DIMENSION_KINDS.map((kind) => ({
+    kind,
+    field: expenses.fields.find((f) => f.key === DIMENSION_CODE_FIELD[kind]),
+  }));
+
+  it("declares one optional text column per kind, under the key the adapter reads", () => {
+    for (const { kind, field } of dimensionFields) {
+      expect(field, kind).toBeDefined();
+      expect(field?.type, kind).toBe("text");
+      expect(field?.required ?? false, kind).toBe(false);
+      expect(field?.readOnly ?? false, kind).toBe(false);
+    }
+  });
+
+  it("names each column after its kind, so the header an export writes is the one an import reads", () => {
+    for (const { kind, field } of dimensionFields) {
+      expect(field?.label, kind).toBe(`کد ${DIMENSION_KIND_LABELS[kind]}`);
+      expect(field?.aliases ?? [], kind).toContain(DIMENSION_KIND_LABELS[kind]);
+    }
+  });
+
+  it("keeps them out of the default export, so an export keeps the shape it has always had", () => {
+    for (const { field } of dimensionFields) {
+      expect(field?.exportDefault ?? false, field?.key).toBe(false);
+    }
+  });
+
+  it("is importable, and says in the mapper what a cell may not contain", () => {
+    const importable = importableFields(expenses).map((f) => f.key);
+    for (const { field } of dimensionFields) {
+      expect(importable, field?.key).toContain(field?.key);
+      expect((field?.hint ?? "").trim().length, field?.key).toBeGreaterThan(0);
     }
   });
 });

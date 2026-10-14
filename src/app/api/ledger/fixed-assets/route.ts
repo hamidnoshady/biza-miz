@@ -13,6 +13,7 @@ import {
 import { isValidIsoDate } from "@/lib/jalali";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
+import { AccountingDimensionError } from "@/lib/accounting-dimensions-service";
 
 export const dynamic = "force-dynamic";
 
@@ -102,6 +103,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     purchaseReference?: string | null;
     notes?: string | null;
     assetAccountId?: string | null;
+    /** Default accounting dimensions (issue #868): cost_center / profit_center / department / detail -> value id. */
+    dimensions?: Record<string, string | null> | null;
   };
   try {
     body = await request.json();
@@ -156,10 +159,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       purchaseReference: typeof body.purchaseReference === "string" ? body.purchaseReference : null,
       notes: typeof body.notes === "string" ? body.notes : null,
       assetAccountId: typeof body.assetAccountId === "string" && body.assetAccountId ? body.assetAccountId : null,
+      dimensions: body.dimensions && typeof body.dimensions === "object" ? body.dimensions : null,
     });
     return NextResponse.json({ fixedAsset }, { status: 201 });
   } catch (err) {
     if (err instanceof FixedAssetError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof AccountingDimensionError) return NextResponse.json({ error: err.message }, { status: err.status });
     if (err instanceof MissingLedgerAccountError) return NextResponse.json({ error: "ledger_account_missing" }, { status: 400 });
     const lockCode = fiscalPeriodLockErrorCode(err);
     if (lockCode) return NextResponse.json({ error: lockCode }, { status: 409 });

@@ -36,6 +36,7 @@ import { InstallmentsSection } from "./installments-section";
 import { ChequesSection } from "./cheques-section";
 import { ReconciliationSection } from "./reconciliation-section";
 import { ChartOfAccountsSection } from "./chart-of-accounts-section";
+import { DimensionsSection } from "./dimensions-section";
 import { canEditChartOfAccounts } from "@/lib/coa-tree";
 import { ExpenseSection } from "./expense-section";
 import { PayrollWorkspace } from "./payroll-workspace";
@@ -469,6 +470,7 @@ export function AccountingManager({
           {section === "chart-of-accounts" ? (
             <ChartOfAccountsSection busy={busy} run={run} canEdit={canEditAccounts} />
           ) : null}
+          {section === "dimensions" ? <DimensionsSection canManage={canEditAccounts} /> : null}
           {section === "payroll" ? (
             <PayrollWorkspace
               busy={busy}
