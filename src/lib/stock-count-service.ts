@@ -19,6 +19,7 @@
  */
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
+import { query } from "./db";
 import type { Role } from "./auth-edge";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import { applyStockAdjustmentExact } from "./inventory-adjustment-exact";
@@ -255,6 +256,41 @@ async function reverseAdjustmentLine(
  * difference posted as an 'adjustment' stock movement so on-hand stock matches
  * reality going forward.
  */
+export interface StockCountListRow extends Record<string, unknown> {
+  id: string;
+  note: string | null;
+  counted_at: string;
+  counted_by_name: string | null;
+  line_count: string;
+  shortage_value: string;
+  surplus_value: string;
+  reversed: boolean;
+}
+
+/**
+ * The stock-count list the route `/api/inventory/stock-counts` GET and the MCP
+ * read tool `list_stock_counts` share. Extracted from the route handler for
+ * issue #883 so the screen and the connector literally run the same query —
+ * capped at 50, reversals-only-out (a reversing count replaces what it
+ * reverses), newest first.
+ */
+export async function listStockCounts(locationId: string): Promise<StockCountListRow[]> {
+  const { rows } = await query<StockCountListRow>(
+    `SELECT sc.id, sc.note, sc.counted_at, u.full_name AS counted_by_name,
+            (SELECT count(*) FROM stock_count_lines WHERE stock_count_id = sc.id) AS line_count,
+            COALESCE((SELECT sum(CASE WHEN variance < 0 THEN -variance_value ELSE 0 END)
+                        FROM stock_count_lines WHERE stock_count_id = sc.id), 0)::text AS shortage_value,
+            COALESCE((SELECT sum(CASE WHEN variance > 0 THEN variance_value ELSE 0 END)
+                        FROM stock_count_lines WHERE stock_count_id = sc.id), 0)::text AS surplus_value,
+            EXISTS (SELECT 1 FROM stock_counts reversal WHERE reversal.reversal_of = sc.id) AS reversed
+       FROM stock_counts sc LEFT JOIN users u ON u.id = sc.counted_by
+      WHERE sc.location_id = $1 AND sc.reversal_of IS NULL
+      ORDER BY sc.counted_at DESC LIMIT 50`,
+    [locationId],
+  );
+  return rows;
+}
+
 export async function createStockCount(
   client: PoolClient,
   params: {

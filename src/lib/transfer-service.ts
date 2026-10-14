@@ -1,4 +1,5 @@
 import Decimal from "decimal.js";
+import { query } from "./db";
 import type { PoolClient } from "pg";
 import {
   positiveQuantityText, proportionalDepletionValue, quantityText, rialBigInt, rialText,
@@ -13,6 +14,56 @@ import { appendSyncOutboxEvent } from "./sync-outbox";
 import type { Role } from "./auth-edge";
 
 type TransferSync = { actorRole: Role; clientEventId?: string };
+
+/**
+ * The transfer list the screen paints — moved here verbatim from the route so
+ * GET and the MCP read share one definition (#883 batch L). Ordered newest
+ * first, capped like the route was.
+ */
+export async function listInventoryTransfers(
+  businessId: string,
+  options: { limit?: number } = {},
+): Promise<
+  Array<{
+    id: string;
+    status: string;
+    note: string | null;
+    created_at: string;
+    shipped_at: string | null;
+    received_at: string | null;
+    cancelled_at: string | null;
+    source_location_name: string;
+    destination_location_name: string;
+    line_count: number;
+  }>
+> {
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 100);
+  interface TransferListRow extends Record<string, unknown> {
+    id: string;
+    status: string;
+    note: string | null;
+    created_at: string;
+    shipped_at: string | null;
+    received_at: string | null;
+    cancelled_at: string | null;
+    source_location_name: string;
+    destination_location_name: string;
+    line_count: number;
+  }
+  const { rows } = await query<TransferListRow>(
+    `SELECT t.id, t.status::text AS status, t.note, t.created_at,
+            t.shipped_at, t.received_at, t.cancelled_at,
+            sl.name AS source_location_name, dl.name AS destination_location_name,
+            (SELECT COUNT(*)::int FROM inventory_transfer_lines tl WHERE tl.transfer_id=t.id) AS line_count
+     FROM inventory_transfers t
+     JOIN locations sl ON sl.id = t.source_location_id
+     JOIN locations dl ON dl.id = t.destination_location_id
+     WHERE t.business_id = $1
+     ORDER BY t.created_at DESC LIMIT $2`,
+    [businessId, limit],
+  );
+  return rows;
+}
 
 export async function createInventoryTransfer(client: PoolClient, params: {
   businessId: string; sourceLocationId: string; destinationLocationId: string; note?: string | null;

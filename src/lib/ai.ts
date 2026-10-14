@@ -210,9 +210,623 @@ export type ActionType =
   | "project.memory.add"
   /** Phase F pt.3 — the assistant adds an open task to the CURRENT project.
    *  Same project-scoped, ambient-id shape as project.memory.add. */
-  | "project.task.add";
+  | "project.task.add"
+  // Issue #883 package 2 batch A — the accounting module's write vocabulary.
+  // None is eligible for an unattended tick (no autopilotCategory): every one
+  // runs behind an explicit human confirmation — in-chat approval, or the
+  // MCP approval queue (the registry gates the money-shaped ones
+  // always_approve/high).
+  | "account.create"
+  | "account.update"
+  | "account.disable"
+  | "journal.draft.approve"
+  | "journal.draft.reject"
+  | "expense.reverse"
+  | "ap.payment.record"
+  | "ap.payment.reverse"
+  | "cheque.create"
+  | "cheque.transition"
+  | "installment.plan.create"
+  | "installment.item.pay"
+  | "reconciliation.create"
+  | "reconciliation.complete"
+  | "payroll.run.accrue"
+  | "payroll.run.pay"
+  | "payroll.run.void"
+  | "payroll.advance.record"
+  | "payroll.advance.void"
+  | "fixed-asset.create"
+  | "fixed-asset.depreciate"
+  | "fixed-asset.dispose"
+  // Batch B — POS operations: opening an order is the till's normal act
+  // (idempotency-keyed), and shifts are clock records the routes already make
+  // over the same services. Neither moves money by itself — settlement is a
+  // separate, deliberately-not-exposed moment (payment orchestration lives in
+  // the route and stays there until it is extracted into a service).
+  | "order.create"
+  | "shift.start"
+  | "shift.end"
+  | "shift.close"
+  // Batch C — menu catalogue, inventory barcode hygiene and party records.
+  // menu.item.create already existed as a catalog entry without an executor
+  // (deliberately — see its comment); batches A–C close that gap by assigning
+  // it the service-backed executor below, since the approval-queue risk model
+  // proved out for the other writes.
+  | "menu.category.create"
+  | "menu.category.update"
+  | "menu.item.update"
+  | "barcode.assign"
+  // Batch D — CRM notes/consent/segments/automations. Consent is a legal
+  // record and its flip is logged with actor + timestamp by the service;
+  // the same service decides who can change it (parties.manage on the
+  // route) — the permission map mirrors that.
+  // Batch F — growth: promotions (campaigns.manage) and gift-card issuance
+  // (giftCardsIssue; the liability posting sits inside issueGiftCard's tx,
+  // exactly the route's call shape — hence always_approve).
+  | "promotion.upsert"
+  | "promotion.toggle"
+  | "gift_card.issue"
+  // Batch G — supplier returns: stock out + settlement posting in one tx
+  // (purchases.manage; cash/bank/AP settlement touches money ⇒ always_approve).
+  | "supplier.return.create"
+  // Batch H — workspace projects/tasks. The services key every write on the
+  // owner's workspaceAccessFlags — the same flags requirePermission resolves
+  // for the screen; the executors rebuild them for the authorizing user.
+  | "project.create"
+  | "project.update"
+  | "task.create"
+  | "task.update"
+  | "task.status"
+  // Batch K1 — CRM sales workflow: leads, deals, pipelines. The services are
+  // upserts (saveLead/upsertDeal take an optional id), exactly the routes'
+  // create-vs-update split.
+  | "crm.lead.save"
+  | "crm.deal.save"
+  | "crm.deal.move_stage"
+  | "crm.pipeline.create"
+  | "crm.pipeline.update"
+  // Batch D — production: formulas, runs, reverse. record/reverse run inside a
+  // pool client transaction like the route's own BEGIN/COMMIT block.
+  | "production.formula.create"
+  | "production.formula.update"
+  | "production.formula.deactivate"
+  | "production.formulaInput.set"
+  | "production.formulaInput.delete"
+  // Batch N2b — workspace documents and project templates. Documents validate
+  // every link target against the calling owner (validateDocumentLinks) and
+  // revisions inherit version numbers server-side; template apply itself
+  // stays inside workspace.project.create's templateKey, not standalone.
+  | "workspace.document.create"
+  | "workspace.document.update"
+  | "workspace.document.delete"
+  | "workspace.template.save"
+  | "workspace.template.archive"
+  // Batch N2a — workspace calendar + comments. The services throw
+  // WorkspaceError with the same codes the guard maps to 4xx, and calendar/
+  // comment subjects resolve access from the subject itself, never the body.
+  | "workspace.event.create"
+  | "workspace.event.update"
+  | "workspace.event.delete"
+  | "workspace.comment.add"
+  // Batch M — price lists & entries. Service contract copied 1:1 from the
+  // routes (menuView reads, menuEdit writes); quick-update is mass-price
+  // mutation so it lands as always_approve in the registry.
+  | "priceList.create"
+  | "priceList.rename"
+  | "priceList.delete"
+  | "priceList.entries.save"
+  | "priceList.quick_update"
+  // Batch Q — voiding a settled retail invoice (reversal posting + batch +
+  // loyalty/commission unwind inside the service's own transaction).
+  | "sales.invoice.void"
+  // Batch R — the site's order-status mutation (customer-facing money state).
+  | "website.order.status"
+  // Batch S — the queue's re-pends; an event re-queued was already approved
+  // the first time its payload moved to the shop.
+  | "wp.queue.retry"
+  | "wp.queue.retry_all_failed"
+  | "wp.queue.flush"
+  // Batch T — the site's public identity write (domain change).
+  | "website.domain.set"
+  // Batch V — product masters (attributes + weight-barcode templates).
+  | "product.attribute.create"
+  | "barcode.template.create"
+  // Batch X — media library organisation (collections + soft trash).
+  | "media.collection.create"
+  | "media.collection.rename"
+  | "media.collection.delete"
+  | "media.asset.set_collection"
+  | "media.asset.trash"
+  | "media.asset.restore"
+  // Batch Y2 — chart-of-accounts delete (refused by the service when used).
+  | "account.delete"
+  // Batch Z — fixed-asset acquisition link (the register's only PATCH).
+  | "fixed-asset.set_acquisition"
+  // Batch Z2 — payroll settings + staff pay terms (pay maths for future months).
+  | "payroll.settings.update"
+  | "payroll.staff.terms"
+  // Batch Z3 — reconciliation line clearance (tick/untick against a session).
+  | "reconciliation.line.clear"
+  // Batch Z4 — the fiscal calendar (year create, period status, year close).
+  | "fiscal.year.create"
+  | "fiscal.period.set_status"
+  | "fiscal.year.close"
+  // Batch Z5 — reversing a posted manual entry (a new mirror entry, never an edit).
+  | "journal.entry.reverse"
+  // Batch AA — correcting/removing a posted stock count (adjustment re-do or full reversal).
+  | "inventory.count.edit"
+  | "inventory.count.reverse"
+  // Batch AB — messaging: template save + campaign send-lane controls.
+  | "messaging.template.save"
+  | "messaging.campaign.pause"
+  | "messaging.campaign.resume"
+  | "messaging.campaign.launch"
+  // Batch AC — gift-card money movements (redeem / bulk expiry run).
+  | "gift_card.redeem"
+  | "gift_card.expire_run"
+  // Batch AD — CRM deal/case delete lanes (the save/move/status verbs
+  // already ship from the earlier CRM package).
+  | "crm.deal.delete"
+  | "crm.case.delete"
+  // Batch AE — loyalty: every one of these moves wallet value for a
+  // customer, so all three always step up.
+  | "loyalty.points.redeem"
+  | "loyalty.store_credit.issue"
+  | "loyalty.store_credit.use"
+  | "loyalty.program.upsert"
+  // Batch AF — table sessions (floor-plan table CRUD stays designer-side).
+  | "table.session.open"
+  | "table.session.update"
+  // Batch AH — backup config/run/restore (restore replaces the tenant DB).
+  | "backup.config.set"
+  | "backup.run_now"
+  | "backup.restore.apply"
+  // Batch AI — devices: rename + revoke (pairing stays browser-bound).
+  | "device.rename"
+  | "device.revoke"
+  // Batch AJ — product catalogue attributes + price-list entries.
+  | "product.attribute.update"
+  | "product.attribute.delete"
+  | "barcode.template.delete"
+  // Batch AK — workspace approvals: request + decide (decisions activate
+  // contracts and fix certified figures → every one steps up).
+  | "workspace.approval.request"
+  | "workspace.approval.decide"
+  // Batch AL1 — jewelry catalog (weight items, stones, consignment).
+  | "jewelry.item.create"
+  | "jewelry.item.update"
+  | "jewelry.stone.add"
+  | "jewelry.stone.delete"
+  | "jewelry.item.consign"
+  // Batch AL2 — jewelry money lanes: every one moves gold or cash → all
+  // seven step up on every call, no exceptions.
+  | "jewelry.item.sell"
+  | "jewelry.buyback.create"
+  | "jewelry.layaway.create"
+  | "jewelry.layaway.pay"
+  | "jewelry.layaway.complete"
+  | "jewelry.consignor.payout"
+  | "jewelry.price.record"
+  // Batch AM — consignor directory close-out: creation only (the UI has no
+  // PATCH/DELETE on /jewelry/consignors either).
+  | "jewelry.consignor.create"
+  // Batch AN — cosmetics & accessories verticals. Plain catalog/stock moves
+  // behind inventoryAdjust; the one accessory sale rides ordersCreate exactly
+  // like checkout (route gate), still mode/low like every retail sale.
+  | "cosmetics.brand.create"
+  | "cosmetics.item.create"
+  | "cosmetics.batch.receive"
+  | "cosmetics.stock.update"
+  | "cosmetics.tester.open"
+  | "cosmetics.profile.update"
+  | "cosmetics.matrix.create"
+  | "accessories.item.create"
+  | "accessories.item.sell"
+  | "accessories.stock.update"
+  // Batch AO — the three trade-goods verticals (wholesale / tools_fittings /
+  // haberdashery). One shared route implementation in trade-goods-routes.ts,
+  // one shared executor family: item.create/stock.update ride inventoryAdjust,
+  // item.sell rides ordersCreate — exactly the route guards.
+  | "wholesale.item.create"
+  | "wholesale.item.sell"
+  | "wholesale.stock.update"
+  | "tools_fittings.item.create"
+  | "tools_fittings.item.sell"
+  | "tools_fittings.stock.update"
+  | "haberdashery.item.create"
+  | "haberdashery.item.sell"
+  | "haberdashery.stock.update"
+  // Batch AP — data-transfer config. Schedules and templates are plain
+  // config records (mode/low, template deletes included per the standing
+  // rule). data.import.run queues a mass write of tenant rows from a prior
+  // uploaded file, so it is the only step-up lane down here.
+  | "data.schedule.create"
+  | "data.schedule.update"
+  | "data.schedule.run"
+  | "data.schedule.delete"
+  | "data.template.create"
+  | "data.template.update"
+  | "data.template.delete"
+  | "data.import.run"
+  // Batch AQ — workspace projects close-out (members & phases) + contracts
+  // full lifecycle. Contract.delete is a business-record delete → always
+  // approve; everything else is mode/low per the config/record rules.
+  | "project.member.set"
+  | "project.member.remove"
+  | "project.phase.create"
+  | "contract.create"
+  | "contract.update"
+  | "contract.delete"
+  | "contract.lifecycle"
+  // Batch AR — CRM custom fields close out crm.config: config records, the
+  // save verb is the route's single POST (create and edit share it), the
+  // archive is the route's soft delete.
+  | "crm.customField.save"
+  | "crm.customField.archive"
+  // Batch AS — the barcode bulk mint: idempotent one-transaction labelling of
+  // the whole branch, completing the barcodes row.
+  | "barcode.bulkMint"
+  // Batch AT — purchases & suppliers fade to covered: draft edit, ordered/
+  // cancelled transitions, the ledger-heavy receive, draft deletion, and the
+  // supplier edit/archive pair.
+  | "purchase.update"
+  | "purchase.lifecycle"
+  | "purchase.receive"
+  | "purchase.delete"
+  | "supplier.update"
+  | "supplier.archive"
+  // Batch AV — the dining floor plan: structural edits mirror the designer
+  // (tablesEdit); status steps mirror the floor (tablesManage) and broadcast
+  // exactly like the routes.
+  | "table.edit"
+  | "table.status"
+  | "table.delete"
+  // Batch AW — reservations get the POST/PATCH/DELETE lanes the screen owns;
+  // the stale proposal pair collapses into these executor-backed verbs.
+  | "reservation.edit"
+  | "reservation.lifecycle"
+  | "reservation.delete"
+  // Batch AX — kitchen & floor queues: sections config rides tablesEdit, the
+  // bump lane stays behind the kitchen board's key with the role gates intact.
+  | "floor.section.create"
+  | "floor.section.update"
+  | "floor.section.delete"
+  | "kitchen.item.status"
+  // Batch AY — waste & NRV write-downs: three ledger-posting lanes, every one
+  // of them behind explicit approval like the supplier-return voucher.
+  | "waste.record"
+  | "writeDown.create"
+  | "writeDown.reverse"
+  // Batch AZ — the AI centre's config records: automations, coworker jobs and
+  // assistant memory. The owner-only-auto rule is reapplied with the author's
+  // membership role, exactly like the routes do.
+  | "ai.automation.save"
+  | "ai.automation.delete"
+  | "ai.automation.run"
+  | "coworker.job.save"
+  | "coworker.job.delete"
+  | "coworker.job.run"
+  | "memory.add"
+  | "memory.delete"
+  // Batch BA — the settings doc-lane saves. Each mirror re-reads the settings
+  // the route reads, keeps the partial-update semantics (omitted = unchanged),
+  // and runs the same validators; settings.accounts.save replaces the chart
+  // of accounts inside the route's own guarded transaction.
+  | "settings.business.save"
+  | "settings.pricing.save"
+  | "settings.tax.save"
+  | "settings.onlinePlatforms.save"
+  | "settings.mfaPolicy.save"
+  | "settings.accounts.save"
+  // Batch BA-2 — the settings registry lanes: payment methods (including the
+  // cashier-grid order), printers and print templates, and the per-document
+  // print rule. The route's guards (built-in locks, in-use vetoes,
+  // last-active guard) and transactions run identically.
+  | "paymentMethod.create"
+  | "paymentMethod.update"
+  | "paymentMethod.delete"
+  | "paymentMethod.reorder"
+  | "printer.create"
+  | "printer.update"
+  | "printer.delete"
+  | "printTemplate.save"
+  | "printTemplate.delete"
+  | "settings.printRules.save"
+  // Batch BB — the verb-shaped integration lanes. Each mirrors its POST route:
+  // the provider/toggle/paused guards, plugin-mode queuing vs REST inline
+  // runs, and the 502-shaped upstream envelopes. Connection provisioning
+  // (credentials, link tokens, migration cutovers) stays screen-only by
+  // design — those payloads carry secrets, not business state.
+  | "integrations.sync.products"
+  | "integrations.sync.orders"
+  | "integrations.sync.customers"
+  | "integrations.sync.inventory"
+  | "integrations.connection.test"
+  // Batch BC — the CMS ops that carry no secrets and no publish actions:
+  // the setup step answers, the theme design tokens, and the CDN purge.
+  | "website.setup.save"
+  | "website.design.theme.save"
+  | "website.cdn.purge"
+  // Batch BD — the CMS content-record verbs. Creates/edits are mode/low;
+  // deleting a storefront product/post/asset is a data-record delete on a
+  // public surface, so those three step up. Publishes and media upload
+  // stay route-only by documented design.
+  | "website.product.create"
+  | "website.product.update"
+  | "website.product.delete"
+  | "website.post.delete"
+  | "website.media.update"
+  | "website.media.delete"
+  // Batch BE — the WooCommerce manager's own lanes. Content sync mirrors the
+  // integrations syncs; post save and media create keep the route's
+  // plugin-capability and outbox rules exactly.
+  | "wp.content.sync"
+  | "wp.post.save"
+  | "wp.media.create"
+  // Batch BF — the misc row's plain ops lanes: commission rules, couriers,
+  // deliveries, the business day (close/reopen/config), and the rollup
+  // button/toggles. Session revocation stays identity-bound; rollup's
+  // config/token and per-location token issuance are credential-shaped and
+  // stay route-only by design.
+  | "commission.rule.save"
+  | "commission.rule.setActive"
+  | "courier.create"
+  | "courier.setActive"
+  | "delivery.assign"
+  | "delivery.status.set"
+  | "businessDay.close"
+  | "businessDay.reopen"
+  | "businessDay.config.save"
+  | "rollup.push"
+  | "rollup.location.setActive"
+  // Batch BG — stock-item masters. Delete mirrors the screen: a referenced
+  // item is deactivated instead, exactly like the route does.
+  | "inventory.item.save"
+  | "inventory.item.delete"
+  // Batch BH — the AEC registers close. Four grouped verbs dispatch the 54
+  // uniform lanes (create/update/delete/status) entity-by-entity with the
+  // exact route capability checks, plus the few profile/commercial PUTs and
+  // the participant lane. Record deletes step up (data-record deletes);
+  // review-side actions run under workspaceApprove like the routes.
+  | "aec.record.create"
+  | "aec.record.update"
+  | "aec.record.delete"
+  | "aec.record.action"
+  | "aec.record.review"
+  | "aec.contract.commercial.save"
+  | "aec.boq.version.save"
+  | "aec.profile.save"
+  | "aec.projectProfile.save"
+  | "aec.participant.add"
+  | "aec.participant.update"
+  | "aec.participant.remove"
+  // Batch BJ — closes the pos.orders money lanes that sit on extracted
+  // services. Amend/re-settle + customer return post ledger corrections, so
+  // both are high/always-approve like every other posting lane.
+  | "order.amend.apply"
+  | "order.return.create"
+  // Batch L — inventory transfers & warehouse documents. Contract copied from
+  // the routes: transfers ride the four client-tx services in
+  // transfer-service (idempotency-key required, exactly like the screen); the
+  // warehouse document posts stock immediately through
+  // createWarehouseDocument's own transaction.
+  | "transfer.create"
+  | "transfer.ship"
+  | "transfer.receive"
+  | "transfer.cancel"
+  | "warehouseDocument.create"
+  // Batch K3 — CRM service desk: cases + activities. The routes gate on
+  // partiesView/partiesManage (the CRM screens share that), not crmManage.
+  | "crm.case.save"
+  | "crm.case.set_status"
+  | "crm.activity.create"
+  | "crm.activity.update"
+  // Batch J — saved reports (reports.view on the screen; validateReportConfig
+  // mirrors the route's 400 semantics before a row ever appears).
+  | "report.saved.create"
+  | "report.saved.update"
+  | "report.saved.delete"
+  // Batch E — branches: structural configuration of the business itself.
+  // Membership creation/role changes stay screen-owned for now (access /
+  // identity changes carry step-up policy beyond the approval queue).
+  | "branch.create"
+  | "branch.update"
+  | "branch.lifecycle"
+  | "crm.note.delete"
+  | "crm.note.pin"
+  | "crm.segment.create"
+  | "crm.segment.update"
+  | "crm.segment.archive"
+  | "crm.automation.toggle";
 
 export type AutopilotExecutorKey =
+  | "retailInvoiceVoid"
+  | "websiteOrderStatus"
+  | "websiteDomainSet"
+  | "payrollSettingsUpdate"
+  | "fiscalYearCreate"
+  | "fiscalPeriodSetStatus"
+  | "inventoryCountEdit"
+  | "messagingTemplateSave"
+  | "messagingCampaignPause"
+  | "messagingCampaignResume"
+  | "giftCardRedeem"
+  | "backupConfigSet"
+  | "backupRunNow"
+  | "backupRestoreApply"
+  | "jewelryItemSell"
+  | "jewelryBuybackCreate"
+  | "jewelryLayawayCreate"
+  | "jewelryLayawayPay"
+  | "jewelryLayawayComplete"
+  | "jewelryConsignorPayout"
+  | "jewelryPriceRecord"
+  | "jewelryConsignorCreate"
+  | "cosmeticsBrandCreate"
+  | "cosmeticsItemCreate"
+  | "cosmeticsBatchReceive"
+  | "cosmeticsStockUpdate"
+  | "cosmeticsTesterOpen"
+  | "cosmeticsProfileUpdate"
+  | "cosmeticsMatrixCreate"
+  | "accessoriesItemCreate"
+  | "accessoriesItemSell"
+  | "accessoriesStockUpdate"
+  | "wholesaleItemCreate"
+  | "wholesaleItemSell"
+  | "wholesaleStockUpdate"
+  | "toolsFittingsItemCreate"
+  | "toolsFittingsItemSell"
+  | "toolsFittingsStockUpdate"
+  | "haberdasheryItemCreate"
+  | "haberdasheryItemSell"
+  | "haberdasheryStockUpdate"
+  | "dataScheduleCreate"
+  | "dataScheduleUpdate"
+  | "dataScheduleRun"
+  | "dataScheduleDelete"
+  | "dataTemplateCreate"
+  | "dataTemplateUpdate"
+  | "dataTemplateDelete"
+  | "dataImportRun"
+  | "projectMemberSet"
+  | "projectMemberRemove"
+  | "projectPhaseCreate"
+  | "contractCreate"
+  | "contractUpdate"
+  | "contractDelete"
+  | "contractLifecycle"
+  | "crmCustomFieldSave"
+  | "crmCustomFieldArchive"
+  | "barcodeBulkMint"
+  | "purchaseUpdate"
+  | "purchaseLifecycle"
+  | "purchaseReceive"
+  | "purchaseDelete"
+  | "supplierUpdate"
+  | "supplierArchive"
+  | "tableEdit"
+  | "tableStatus"
+  | "tableDelete"
+  | "reservationCreate"
+  | "reservationEdit"
+  | "reservationLifecycle"
+  | "reservationDelete"
+  | "floorSectionCreate"
+  | "floorSectionUpdate"
+  | "floorSectionDelete"
+  | "kitchenItemStatus"
+  | "wasteRecord"
+  | "writeDownCreate"
+  | "writeDownReverse"
+  | "aiAutomationSave"
+  | "aiAutomationDelete"
+  | "aiAutomationRun"
+  | "coworkerJobSave"
+  | "coworkerJobDelete"
+  | "coworkerJobRun"
+  | "memoryAdd"
+  | "memoryDelete"
+  | "settingsBusinessSave"
+  | "settingsPricingSave"
+  | "settingsTaxSave"
+  | "settingsOnlinePlatformsSave"
+  | "settingsMfaPolicySave"
+  | "settingsAccountsSave"
+  | "paymentMethodCreate"
+  | "paymentMethodUpdate"
+  | "paymentMethodDelete"
+  | "paymentMethodReorder"
+  | "printerCreate"
+  | "printerUpdate"
+  | "printerDelete"
+  | "printTemplateSave"
+  | "printTemplateDelete"
+  | "settingsPrintRulesSave"
+  | "integrationsSyncProducts"
+  | "integrationsSyncOrders"
+  | "integrationsSyncCustomers"
+  | "integrationsSyncInventory"
+  | "integrationsConnectionTest"
+  | "websiteSetupSave"
+  | "websiteDesignThemeSave"
+  | "websiteCdnPurge"
+  | "websiteProductCreate"
+  | "websiteProductUpdate"
+  | "websiteProductDelete"
+  | "websitePostDelete"
+  | "websiteMediaUpdate"
+  | "websiteMediaDelete"
+  | "wpContentSync"
+  | "wpPostSave"
+  | "wpMediaCreate"
+  | "commissionRuleSave"
+  | "commissionRuleSetActive"
+  | "courierCreate"
+  | "courierSetActive"
+  | "deliveryAssign"
+  | "deliveryStatusSet"
+  | "businessDayClose"
+  | "businessDayReopen"
+  | "businessDayConfigSave"
+  | "rollupPush"
+  | "rollupLocationSetActive"
+  | "inventoryItemSave"
+  | "inventoryItemDelete"
+  | "aecRecordCreate"
+  | "aecRecordUpdate"
+  | "aecRecordDelete"
+  | "aecRecordAction"
+  | "aecRecordReview"
+  | "aecContractCommercialSave"
+  | "aecBoqVersionSave"
+  | "aecProfileSave"
+  | "aecProjectProfileSave"
+  | "aecParticipantAdd"
+  | "aecParticipantUpdate"
+  | "aecParticipantRemove"
+  | "orderAmendApply"
+  | "orderReturnCreate"
+  | "jewelryItemCreate"
+  | "jewelryItemUpdate"
+  | "jewelryStoneAdd"
+  | "jewelryStoneDelete"
+  | "jewelryItemConsign"
+  | "workspaceApprovalRequest"
+  | "workspaceApprovalDecide"
+  | "productAttributeUpdate"
+  | "productAttributeDelete"
+  | "barcodeTemplateDelete"
+  | "deviceRename"
+  | "deviceRevoke"
+  | "tableSessionOpen"
+  | "tableSessionUpdate"
+  | "loyaltyPointsRedeem"
+  | "loyaltyStoreCreditIssue"
+  | "loyaltyStoreCreditUse"
+  | "loyaltyProgramUpsert"
+  | "crmDealDelete"
+  | "crmCaseDelete"
+  | "giftCardExpireRun"
+  | "messagingCampaignLaunch"
+  | "inventoryCountReverse"
+  | "journalEntryReverse"
+  | "fiscalYearClose"
+  | "reconciliationLineClear"
+  | "payrollStaffTerms"
+  | "fixedAssetSetAcquisition"
+  | "accountDelete"
+  | "mediaCollectionCreate"
+  | "mediaCollectionRename"
+  | "mediaCollectionDelete"
+  | "mediaAssetSetCollection"
+  | "mediaAssetTrash"
+  | "mediaAssetRestore"
+  | "productAttributeCreate"
+  | "barcodeTemplateCreate"
+  | "wpQueueRetry"
+  | "wpQueueRetryAllFailed"
+  | "wpQueueFlush"
   | "menuItemPatch"
   | "stockCount"
   | "draftPurchase"
@@ -227,12 +841,103 @@ export type AutopilotExecutorKey =
   | "websitePostDraft"
   | "websitePostUpdate"
   | "websiteProductUpsert"
-  | "triggeredMessageCampaign";
+  | "triggeredMessageCampaign"
+  // Issue #883 package 2 batch A — accounting writes. Each calls the same
+  // service function the ledger route handler calls; risk/approval policy
+  // lives in mcp/registry.ts, not here.
+  | "accountCreate"
+  | "accountUpdate"
+  | "accountDisable"
+  | "journalDraftApprove"
+  | "journalDraftReject"
+  | "expenseReverse"
+  | "arReceiptRecord"
+  | "apPaymentRecord"
+  | "apPaymentReverse"
+  | "chequeCreate"
+  | "chequeTransition"
+  | "installmentPlanCreate"
+  | "installmentItemPay"
+  | "reconciliationCreate"
+  | "reconciliationComplete"
+  | "payrollRunAccrue"
+  | "payrollRunPay"
+  | "payrollRunVoid"
+  | "payrollAdvanceRecord"
+  | "payrollAdvanceVoid"
+  | "fixedAssetCreate"
+  | "fixedAssetDepreciate"
+  | "fixedAssetDispose"
+  | "orderCreate"
+  | "shiftStart"
+  | "shiftEnd"
+  | "shiftClose"
+  | "menuCategoryCreate"
+  | "menuCategoryUpdate"
+  | "menuItemCreate"
+  | "menuItemUpdate"
+  | "barcodeAssign"
+  | "partyCustomerCreate"
+  | "partySupplierCreate"
+  | "promotionUpsert"
+  | "promotionToggle"
+  | "giftCardIssue"
+  | "productionFormulaCreate"
+  | "productionFormulaUpdate"
+  | "productionFormulaDeactivate"
+  | "productionFormulaInputSet"
+  | "productionFormulaInputDelete"
+  | "workspaceDocumentCreate"
+  | "workspaceDocumentUpdate"
+  | "workspaceDocumentDelete"
+  | "workspaceTemplateSave"
+  | "workspaceTemplateArchive"
+  | "workspaceEventCreate"
+  | "workspaceEventUpdate"
+  | "workspaceEventDelete"
+  | "workspaceCommentAdd"
+  | "priceListCreate"
+  | "priceListRename"
+  | "priceListDelete"
+  | "priceListEntriesSave"
+  | "priceListQuickUpdate"
+  | "transferCreate"
+  | "transferShip"
+  | "transferReceive"
+  | "transferCancel"
+  | "warehouseDocumentCreate"
+  | "crmCaseSave"
+  | "crmCaseSetStatus"
+  | "crmActivityCreate"
+  | "crmActivityUpdate"
+  | "crmLeadSave"
+  | "crmDealSave"
+  | "crmDealMoveStage"
+  | "crmPipelineCreate"
+  | "crmPipelineUpdate"
+  | "reportSavedCreate"
+  | "reportSavedUpdate"
+  | "reportSavedDelete"
+  | "supplierReturnCreate"
+  | "projectCreate"
+  | "projectUpdate"
+  | "taskCreate"
+  | "taskUpdate"
+  | "taskStatus"
+  | "branchCreate"
+  | "branchUpdate"
+  | "branchLifecycle"
+  | "crmNoteDelete"
+  | "crmNotePin"
+  | "crmSegmentCreate"
+  | "crmSegmentUpdate"
+  | "crmSegmentArchive"
+  | "crmAutomationToggle";
 
 export interface ActionMeta {
   type: ActionType;
   endpoint: string;
-  method: "POST" | "PATCH" | "PUT";
+  method: "POST" | "PATCH" | "PUT" | "DELETE";
   label: string;
   wizardStep?: string;
   payloadHint: string;
@@ -349,6 +1054,24 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     executor: "orderDiscount",
     revertible: "while_open",
   },
+  "order.amend.apply": {
+    type: "order.amend.apply",
+    endpoint: "/api/orders/{id}/amend",
+    method: "POST",
+    label: "تصحیح/ابطال سفارش تکمیل‌شده — ثبت اصلاح حساب‌داری + بازگردانی انبار؛ تأیید صریح لازم",
+    payloadHint:
+      '{ orderId: string, kind: "edit"|"void", reason: string, lines؟: [{ orderItemId?|menuItemId?, quantity?, note?, modifierIds? }] (edit: مجموعهٔ کامل دلخواه — هر خط جاافتاده ابطال می‌شود), discount?: { type, value }|null, note?, tipAmount?, paymentMethod?, reference? }',
+    executor: "orderAmendApply",
+  },
+  "order.return.create": {
+    type: "order.return.create",
+    endpoint: "/api/orders/{id}/returns",
+    method: "POST",
+    label: "برگشت وجه/کالا از مشتری — استرداد + زیان سند انبار؛ تأیید صریح لازم",
+    payloadHint:
+      '{ orderId: string, refundMethod?: "cash"|"card"|"card_to_card"|"online"|"credit" (پیش‌فرض cash), refundAmountRial: string (ریال، متن EXACT), reason?: string, idempotencyKey?: string, lines?: [{ orderItemId, quantity: string, disposition?: "restockable"|"discarded" }] }',
+    executor: "orderReturnCreate",
+  },
   "inventory.reorder.draftPO": {
     type: "inventory.reorder.draftPO",
     endpoint: "/api/inventory/purchases",
@@ -375,15 +1098,20 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     type: "reservation.create",
     endpoint: "/api/reservations",
     method: "POST",
-    label: "ثبت رزرو جدید",
+    label: "رزرو جدید — تداخل میز بررسی می‌شود مگر allowConflict (مثل فرم رزرو)",
     payloadHint:
-      '{ tableId?: string, customerName: string, customerPhone?: string, partySize: number, reservedAt: string /* ISO */, durationMinutes?: number, note?: string, allowConflict?: boolean }',
+      '{ customerName: string, reservedAt: string /* ISO */, partySize: number, durationMinutes?: number=90 (15..600), tableId?: string, customerPhone?: string, note?: string, allowConflict?: boolean, locationId?: string }',
+    executor: "reservationCreate",
   },
+  // Wave 2 keeps this manual-only placeholder even though reservation.edit is
+  // the executor-backed superset — the dashboard prompt contract lists it by
+  // name, and removing a listed name from the prompt is its own regression
+  // (test "dashboard prompt's catalog dump names every Wave 2 action").
   "reservation.reschedule": {
     type: "reservation.reschedule",
     endpoint: "/api/reservations/{reservationId}",
     method: "PATCH",
-    label: "تغییر زمان یا میز رزرو",
+    label: "تغییر زمان یا میز رزرو — برای اجرای واقعی از reservation.edit استفاده می‌شود",
     payloadHint:
       "{ reservationId: string, reservedAt?: string, durationMinutes?: number, tableId?: string|null, allowConflict?: boolean }",
   },
@@ -508,6 +1236,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "افزودن آیتم جدید به منو",
     payloadHint:
       "{ categoryId: string, name: string, price: number /* ریال صحیح */, description?: string, sku?: string }",
+    executor: "menuItemCreate",
   },
   // Phase 38 — the website manager's four writes, through the WebsiteAdapter.
   // Three of them produce something a human still has to publish, so they are
@@ -576,6 +1305,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "افزودن مشتری جدید",
     payloadHint:
       '{ role: "Customer", roles: ["Customer"], personType: "Real"|"Legal", displayName: string, contactInfo?: { mobile?: string, phone?: string, email?: string } } — فقط اطلاعات هویتی و تماس؛ فیلدهای حسابداری (کد حسابداری، درصد مالیات، اطلاعات بانکی) را اینجا نگذار',
+    executor: "partyCustomerCreate",
   },
   "party.supplier.create": {
     type: "party.supplier.create",
@@ -584,6 +1314,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "افزودن تأمین‌کننده جدید",
     payloadHint:
       '{ role: "Supplier", roles: ["Supplier"], personType: "Real"|"Legal", displayName: string, contactInfo?: { mobile?: string, phone?: string, email?: string } } — فقط اطلاعات هویتی و تماس؛ فیلدهای حسابداری را اینجا نگذار',
+    executor: "partySupplierCreate",
   },
   // Creating a campaign only materialises a *draft* — nothing is sent. Launching
   // (`action: "launch"`) is deliberately not a catalogue action: a send that
@@ -600,13 +1331,2207 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
   // Recording an AR receipt moves money, so it is `alwaysConfirm`: a human sees
   // the amount and the customer on the card and clicks. No executor, no
   // category — an unattended tick never records a payment.
+  // ── Issue #883 package 2, batch A — accounting write verbs ────────────────
+  // Route parity is the point of the exercise: every entry's endpoint+payload
+  // is exactly what the tenant UI posts from the matching screens, and the
+  // executor calls the same service the route handler calls. None carries an
+  // autopilotCategory, so none runs unattended; the MCP registry entry decides
+  // risk/approval (money-shaped ones are high risk, always_approve).
+  "account.create": {
+    type: "account.create",
+    endpoint: "/api/ledger/accounts",
+    method: "POST",
+    label: "ایجاد سرفصل جدید",
+    payloadHint:
+      "{ code: string /* کد لاتین ۲–۱۰ رقم در نمودار حساب */, name: string, type: \"asset\"|\"liability\"|\"equity\"|\"revenue\"|\"expense\", parentId?: string /* id سرفصل والد، اختیاری */, isContra?: boolean }",
+    executor: "accountCreate",
+  },
+  "account.update": {
+    type: "account.update",
+    endpoint: "/api/ledger/accounts",
+    method: "PATCH",
+    label: "ویرایش سرفصل",
+    payloadHint: "{ accountId: string, name?: string, parentId?: string|null /* null یعنی بریده از والد */ }",
+    executor: "accountUpdate",
+  },
+  "account.disable": {
+    type: "account.disable",
+    endpoint: "/api/ledger/accounts",
+    method: "PATCH",
+    label: "غیرفعال/فعال‌کردن سرفصل",
+    payloadHint: "{ accountId: string, isActive?: boolean /* پیش‌فرض غیرفعال (false) */ }",
+    executor: "accountDisable",
+  },
+  "journal.draft.approve": {
+    type: "journal.draft.approve",
+    endpoint: "/api/ledger/entries/drafts/[id]/approve",
+    method: "POST",
+    label: "تأیید پیش‌نویس سند دستی",
+    payloadHint: "{ draftId: string }",
+    executor: "journalDraftApprove",
+  },
+  "journal.draft.reject": {
+    type: "journal.draft.reject",
+    endpoint: "/api/ledger/entries/drafts/[id]/reject",
+    method: "POST",
+    label: "رد پیش‌نویس سند دستی",
+    payloadHint: "{ draftId: string, reason: string /* دلیل رد، الزامی */ }",
+    executor: "journalDraftReject",
+  },
+  "expense.reverse": {
+    type: "expense.reverse",
+    endpoint: "/api/ledger/expenses/[id]/reverse",
+    method: "POST",
+    label: "برگشت هزینهٔ ثبت‌شده",
+    payloadHint: "{ expenseId: string, reversalDate?: string /* YYYY-MM-DD */, memo?: string }",
+    executor: "expenseReverse",
+  },
+  "ap.payment.record": {
+    type: "ap.payment.record",
+    endpoint: "/api/ledger/ap/payments",
+    method: "POST",
+    label: "ثبت پرداخت به تأمین‌کننده",
+    payloadHint:
+      "{ supplierId: string, amount: number /* ریال صحیح */, method?: \"cash\"|\"bank\" /* پیش‌فرض cash */, paymentDate?: string, cashAccountId?: string, bankReference?: string, locationId?: string, memo?: string, clientRequestId?: string }",
+    executor: "apPaymentRecord",
+  },
+  "ap.payment.reverse": {
+    type: "ap.payment.reverse",
+    endpoint: "/api/ledger/ap/payments/[id]/reverse",
+    method: "POST",
+    label: "برگشت پرداخت به تأمین‌کننده",
+    payloadHint: "{ paymentId: string, reversalDate?: string, memo?: string }",
+    executor: "apPaymentReverse",
+  },
+  "cheque.create": {
+    type: "cheque.create",
+    endpoint: "/api/ledger/cheques",
+    method: "POST",
+    label: "ثبت چک",
+    payloadHint:
+      "{ direction: \"receivable\"|\"payable\", serialNumber: string, bankName: string, amount: number, dueDate: string, counterpartyName: string, sayadId?: string, accountNumber?: string, issueDate?: string, customerId?: string /* فقط receivable */, supplierId?: string /* فقط payable */, locationId?: string, memo?: string }",
+    executor: "chequeCreate",
+  },
+  "cheque.transition": {
+    type: "cheque.transition",
+    endpoint: "/api/ledger/cheques/[id]/[action]",
+    method: "POST",
+    label: "تغییر وضعیت چک",
+    payloadHint:
+      "{ chequeId: string, action: \"deposit\"|\"endorse\"|\"clear\"|\"bounce\"|\"present\"|\"cancel\", endorsedToSupplierId?: string /* فقط برای endorse */, occurredOn?: string, memo?: string }",
+    executor: "chequeTransition",
+  },
+  "installment.plan.create": {
+    type: "installment.plan.create",
+    endpoint: "/api/ledger/installments",
+    method: "POST",
+    label: "ساخت طرح اقساط",
+    payloadHint:
+      "{ direction: \"receivable\"|\"payable\", partyId: string /* مشتری یا تأمین‌کننده */, principal: number, installmentCount: number, firstDueDate: string, intervalMonths?: number, downPayment?: number, interestPercent?: number, lateFeePercent?: number, note?: string, locationId?: string }",
+    executor: "installmentPlanCreate",
+  },
+  "installment.item.pay": {
+    type: "installment.item.pay",
+    endpoint: "/api/ledger/installments/[id]/pay",
+    method: "POST",
+    label: "تسویهٔ یک قسط",
+    payloadHint: "{ planId: string, itemId: string, method?: \"cash\"|\"bank\", memo?: string }",
+    executor: "installmentItemPay",
+  },
+  "reconciliation.create": {
+    type: "reconciliation.create",
+    endpoint: "/api/ledger/reconciliations",
+    method: "POST",
+    label: "شروع مغایرت‌گیری بانکی",
+    payloadHint:
+      "{ accountCode: \"cash\"|\"bank\"|\"bankClearing\", statementDate: string /* YYYY-MM-DD */, statementBalance: number /* ماندهٔ صورتحساب به ریال صحیح */ }",
+    executor: "reconciliationCreate",
+  },
+  "reconciliation.complete": {
+    type: "reconciliation.complete",
+    endpoint: "/api/ledger/reconciliations/[id]/complete",
+    method: "POST",
+    label: "اتمام مغایرت‌گیری",
+    payloadHint: "{ reconciliationId: string }",
+    executor: "reconciliationComplete",
+  },
+  "payroll.run.accrue": {
+    type: "payroll.run.accrue",
+    endpoint: "/api/ledger/payroll/runs",
+    method: "POST",
+    label: "تسهیم حقوق ماه (accrual)",
+    payloadHint:
+      "{ periodKey: string /* «1403-05» شمسی */, accrualDate?: string, overtime?: { [userId: string]: number }, idempotencyKey?: string }",
+    executor: "payrollRunAccrue",
+  },
+  "payroll.run.pay": {
+    type: "payroll.run.pay",
+    endpoint: "/api/ledger/payroll/runs/[id]/pay",
+    method: "POST",
+    label: "پرداخت اجرای حقوق",
+    payloadHint: "{ runId: string, method?: \"cash\"|\"bank\", paymentAccountId?: string, paidDate?: string }",
+    executor: "payrollRunPay",
+  },
+  "payroll.run.void": {
+    type: "payroll.run.void",
+    endpoint: "/api/ledger/payroll/runs/[id]/void",
+    method: "POST",
+    label: "ابطال اجرای حقوق",
+    payloadHint: "{ runId: string }",
+    executor: "payrollRunVoid",
+  },
+  "payroll.advance.record": {
+    type: "payroll.advance.record",
+    endpoint: "/api/ledger/payroll/advances",
+    method: "POST",
+    label: "ثبت مساعدهٔ کارمند",
+    payloadHint:
+      "{ userId: string, amount: number /* ریال صحیح مثبت */, method?: \"cash\"|\"bank\", paymentAccountId?: string, advanceDate?: string, note?: string }",
+    executor: "payrollAdvanceRecord",
+  },
+  "payroll.advance.void": {
+    type: "payroll.advance.void",
+    endpoint: "/api/ledger/payroll/advances/[id]/void",
+    method: "POST",
+    label: "ابطال مساعده",
+    payloadHint: "{ advanceId: string }",
+    executor: "payrollAdvanceVoid",
+  },
+  "fixed-asset.create": {
+    type: "fixed-asset.create",
+    endpoint: "/api/ledger/fixed-assets",
+    method: "POST",
+    label: "ثبت دارایی ثابت",
+    payloadHint:
+      "{ name: string, acquisitionDate: string, cost: number /* بهای تمام‌شده، ریال صحیح */, usefulLifeMonths: number, salvageValue?: number, inServiceDate?: string, locationId?: string }",
+    executor: "fixedAssetCreate",
+  },
+  "fixed-asset.depreciate": {
+    type: "fixed-asset.depreciate",
+    endpoint: "/api/ledger/fixed-assets/[id]/depreciate",
+    method: "POST",
+    label: "ثبت استهلاک دوره",
+    payloadHint: "{ fixedAssetId: string, periodKey?: string, periodLabel?: string, entryDate?: string }",
+    executor: "fixedAssetDepreciate",
+  },
+  "fixed-asset.dispose": {
+    type: "fixed-asset.dispose",
+    endpoint: "/api/ledger/fixed-assets/[id]/dispose",
+    method: "POST",
+    label: "خروج دارایی (فروش/اسقاط/بازنشستگی)",
+    payloadHint:
+      "{ fixedAssetId: string, kind: \"sale\"|\"write_off\"|\"retirement\", proceeds?: number /* فقط sale */, proceedsAccountId?: string /* فقط sale */, disposalDate?: string, reason?: string }",
+    executor: "fixedAssetDispose",
+  },
+  "order.create": {
+    type: "order.create",
+    endpoint: "/api/orders",
+    method: "POST",
+    label: "ثبت سفارش جدید",
+    payloadHint:
+      "{ locationId?: string /* id یا نام شعبه؛ خالی یعنی شعبهٔ پیش‌فرض */, orderType: \"dine_in\"|\"takeaway\"|\"delivery\", items: [{ menuItemId: string /* از find_items */, quantity: number, notes?: string }], note?: string, customerId?: string /* از find_customers */, tableId?: string, clientOrderId?: string /* کلید ایمن تکرار — ارسال دوبارهٔ همان کلید همان سفارش قبلی را برمی‌گرداند */ } — سفارش باز می‌کند؛ تسویهٔ مبلغ عمداً در این‌جا نیست (هماهنگی پرداخت در route باقی است تا به سرویس مستقل برسد — نگاه کنید به coverage matrix).",
+    executor: "orderCreate",
+  },
+  "shift.start": {
+    type: "shift.start",
+    endpoint: "/api/shifts/start",
+    method: "POST",
+    label: "شروع شیفت",
+    payloadHint: "{ openingFloat?: number /* صندوق اول شیفت به ریال */, locationId?: string } — شیفت به نام صاحبِ مجوز این اتصال باز می‌شود (مثل ورود کارمند).",
+    executor: "shiftStart",
+  },
+  "shift.end": {
+    type: "shift.end",
+    endpoint: "/api/shifts/end",
+    method: "POST",
+    label: "پایان شیفت من",
+    payloadHint: "{ closingFloat?: number /* شمارش پایان شیفت به ریال */ }",
+    executor: "shiftEnd",
+  },
+  "shift.close": {
+    type: "shift.close",
+    endpoint: "/api/shifts/[id]/close",
+    method: "POST",
+    label: "بستن اداری شیفت باز",
+    payloadHint: "{ shiftId: string /* از list_shifts */, closingFloat?: number }",
+    executor: "shiftClose",
+  },
+  "menu.category.create": {
+    type: "menu.category.create",
+    endpoint: "/api/menu/categories",
+    method: "POST",
+    label: "ایجاد دستهٔ منو در یک شعبه",
+    payloadHint:
+      '{ locationId?: string /* id یا نام شعبه؛ خالی یعنی فقط وقتی consent یک شعبه را ثابت کرده */, name: string, taxRate?: number, sortOrder?: number }',
+    executor: "menuCategoryCreate",
+  },
+  "menu.category.update": {
+    type: "menu.category.update",
+    endpoint: "/api/menu/categories/[id]",
+    method: "PATCH",
+    label: "ویرایش دستهٔ منو",
+    payloadHint: "{ categoryId: string /* از get_menu_tree */, name?: string, taxRate?: number, sortOrder?: number, isActive?: boolean }",
+    executor: "menuCategoryUpdate",
+  },
+  "menu.item.update": {
+    type: "menu.item.update",
+    endpoint: "/api/menu/items/[id]",
+    method: "PATCH",
+    label: "ویرایش آیتم منو — قیمت فاکتورهای بعدی را عوض می‌کند",
+    payloadHint: "{ menuItemId: string /* از find_items یا get_menu_tree */, name?: string, price?: number /* به ریال */, sku?: string, description?: string, isActive?: boolean }",
+    executor: "menuItemUpdate",
+  },
+  "barcode.assign": {
+    type: "barcode.assign",
+    endpoint: "/api/inventory/barcodes",
+    method: "POST",
+    label: "تخصیص بارکد به کالای انبار",
+    payloadHint:
+      '{ inventoryItemId: string /* از find_items در مد inventory */, code?: string /* خالی یعنی سیستم خودش بارکد قابل‌اسکن می‌سازد */, symbology?: "EAN13"|"UPC"|"internal", note?: string }',
+    executor: "barcodeAssign",
+  },
+  "project.create": {
+    type: "project.create",
+    endpoint: "/api/workspace/projects",
+    method: "POST",
+    label: "ایجاد پروژهٔ کار — با قالب اختیاری شکل فازها می‌آید",
+    payloadHint:
+      '{ name: string, description?: string, status?: "planning"|"active"|"paused"|"completed"|"cancelled", priority?: "low"|"normal"|"high"|"urgent", startDate?: string, endDate?: string, tags?: string[], ownerUserId?: string /* از list_team_members */, partyId?: string, budgetRial?: number, templateKey?: string }',
+    executor: "projectCreate",
+  },
+  "project.update": {
+    type: "project.update",
+    endpoint: "/api/workspace/projects/[id]",
+    method: "PATCH",
+    label: "ویرایش پروژه (نام/وضعیت/اولویت/تاریخ/تگ)",
+    payloadHint: "{ projectId: string /* از list_workspace_projects */, name?: string, status?: ..., priority?: ..., startDate?: string, endDate?: string, tags?: string[] }",
+    executor: "projectUpdate",
+  },
+  "task.create": {
+    type: "task.create",
+    endpoint: "/api/workspace/tasks",
+    method: "POST",
+    label: "ساخت تَسک در یک پروژه",
+    payloadHint:
+      '{ projectId: string, title: string, description?: string, assigneeUserId?: string, priority?: "low"|"normal"|"high"|"urgent", dueDate?: string, phaseId?: string }',
+    executor: "taskCreate",
+  },
+  "task.update": {
+    type: "task.update",
+    endpoint: "/api/workspace/tasks/[id]",
+    method: "PATCH",
+    label: "ویرایش تَسک (عنوان/توضیح/مسئول/سررسید/فاز)",
+    payloadHint: "{ taskId: string, title?: string, description?: string, assigneeUserId?: string|null, dueDate?: string|null, phaseId?: string|null, priority?: ... }",
+    executor: "taskUpdate",
+  },
+  "task.status": {
+    type: "task.status",
+    endpoint: "/api/workspace/tasks/[id]",
+    method: "PATCH",
+    label: "تغییر وضعیت تَسک — بازکردن، پیش‌بردن یا بستن",
+    payloadHint: '{ taskId: string, status: "open"|"in_progress"|"blocked"|"done" }',
+    executor: "taskStatus",
+  },
+  "production.formula.create": {
+    type: "production.formula.create",
+    endpoint: "/api/inventory/production/formulas",
+    method: "POST",
+    label: "ساخت فرمول تولید — ورودی‌ها را بعداً با production.formulaInput.set اضافه کن",
+    payloadHint:
+      '{ name: string /* لازم و یکتا در شعبه */, outputInventoryItemId: string /* از list_inventory_items */, outputQuantity: string /* عددی اعشاری به صورت متن */, conversionCostRial?: string /* ریال، عدد صحیح به صورت متن، پیش‌فرض 0 */, notes?: string }',
+    executor: "productionFormulaCreate",
+  },
+  "production.formula.update": {
+    type: "production.formula.update",
+    endpoint: "/api/inventory/production/formulas/[id]",
+    method: "PATCH",
+    label: "ویرایش فرمول تولید",
+    payloadHint:
+      '{ formulaId: string /* از list_production_formulas */, name?: string, outputQuantity?: string, conversionCostRial?: string, notes?: string|null, isActive?: boolean }',
+    executor: "productionFormulaUpdate",
+  },
+  "production.formula.deactivate": {
+    type: "production.formula.deactivate",
+    endpoint: "/api/inventory/production/formulas/[id]",
+    method: "DELETE",
+    label: "غیرفعال‌کردن فرمول — ردیف‌های تولید گذشته حفظ می‌شود، مثل دکمهٔ صفحه",
+    payloadHint: "{ formulaId: string /* از list_production_formulas */ }",
+    executor: "productionFormulaDeactivate",
+  },
+  "production.formulaInput.set": {
+    type: "production.formulaInput.set",
+    endpoint: "/api/inventory/production/formulas/[id]/inputs",
+    method: "PUT",
+    label: "افزودن/تغییر مادهٔ اولیهٔ فرمول — حلقهٔ تولید بررسی می‌شود، مثل صفحه",
+    payloadHint: "{ formulaId: string, inventoryItemId: string, quantity: string /* عددی اعشاری به صورت متن */ }",
+    executor: "productionFormulaInputSet",
+  },
+  "production.formulaInput.delete": {
+    type: "production.formulaInput.delete",
+    endpoint: "/api/inventory/production/formulas/[id]/inputs",
+    method: "DELETE",
+    label: "حذف یک مادهٔ اولیه از فرمول",
+    payloadHint: "{ formulaId: string, inventoryItemId: string }",
+    executor: "productionFormulaInputDelete",
+  },
+  "workspace.document.create": {
+    type: "workspace.document.create",
+    endpoint: "/api/workspace/documents",
+    method: "POST",
+    label: "ثبت سند فضای کاری — با supersedesId نسخهٔ بعدیِ آن سند می‌شود",
+    payloadHint:
+      '{ title: string /* لازم */, description?: string, status?: "draft"|"in_review"|"approved"|"rejected"|"archived", projectId?: string|null, taskId?: string|null, contractId?: string|null, partyId?: string|null, journalEntryId?: string|null, mediaAssetId?: string|null, tags?: string[], supersedesId?: string|null /* نسخهٔ قبلی — از list_workspace_documents */ }',
+    executor: "workspaceDocumentCreate",
+  },
+  "workspace.document.update": {
+    type: "workspace.document.update",
+    endpoint: "/api/workspace/documents/[id]",
+    method: "PATCH",
+    label: "ویرایش سند فضای کاری",
+    payloadHint:
+      '{ documentId: string /* از list_workspace_documents */, title?, description?, status?, projectId?: string|null, taskId?: string|null, contractId?: string|null, partyId?: string|null, journalEntryId?: string|null, mediaAssetId?: string|null, tags?: string[] }',
+    executor: "workspaceDocumentUpdate",
+  },
+  "workspace.document.delete": {
+    type: "workspace.document.delete",
+    endpoint: "/api/workspace/documents/[id]",
+    method: "DELETE",
+    label: "حذف سند فضای کاری",
+    payloadHint: "{ documentId: string }",
+    executor: "workspaceDocumentDelete",
+  },
+  "workspace.template.save": {
+    type: "workspace.template.save",
+    endpoint: "/api/workspace/templates",
+    method: "POST",
+    label: "ثبت یا ویرایش قالب پروژه — با key موجود بازنویسی می‌شود، مثل ویرایشگر قالب",
+    payloadHint:
+      '{ name: string /* لازم */, key?: string /* صراحت برای بازنویسی قالب موجود */, description?: string, projectType?: string|null, phases?: [{ name }], defaultTasks?: [{ title, priority? }] }',
+    executor: "workspaceTemplateSave",
+  },
+  "workspace.template.archive": {
+    type: "workspace.template.archive",
+    endpoint: "/api/workspace/templates/[key]",
+    method: "DELETE",
+    label: "بایگانی قالب پروژه",
+    payloadHint: "{ templateKey: string /* از list_workspace_templates */ }",
+    executor: "workspaceTemplateArchive",
+  },
+  "workspace.event.create": {
+    type: "workspace.event.create",
+    endpoint: "/api/workspace/calendar",
+    method: "POST",
+    label: "ثبت رویداد روی تقویم فضای کاری — مثل فرم صفحهٔ تقویم",
+    payloadHint:
+      '{ title: string /* لازم */, kind?: "meeting"|"milestone"|"reminder"|"site_visit"|"other", eventDate: string /* ISO */, startTime?: string|null, endTime?: string|null, location?: string, description?: string, projectId?: string|null, taskId?: string|null }',
+    executor: "workspaceEventCreate",
+  },
+  "workspace.event.update": {
+    type: "workspace.event.update",
+    endpoint: "/api/workspace/calendar/[id]",
+    method: "PATCH",
+    label: "ویرایش رویداد تقویم",
+    payloadHint:
+      '{ eventId: string /* از list_workspace_calendar */, title?, kind?, eventDate?, startTime?: string|null, endTime?: string|null, location?, description?, projectId?: string|null }',
+    executor: "workspaceEventUpdate",
+  },
+  "workspace.event.delete": {
+    type: "workspace.event.delete",
+    endpoint: "/api/workspace/calendar/[id]",
+    method: "DELETE",
+    label: "حذف رویداد تقویم",
+    payloadHint: "{ eventId: string }",
+    executor: "workspaceEventDelete",
+  },
+  "workspace.comment.add": {
+    type: "workspace.comment.add",
+    endpoint: "/api/workspace/comments",
+    method: "POST",
+    label: "افزودن نظر به سوژهٔ فضای کاری — پروژه، وظیفه، سند، قرارداد، نسخهٔ برآورد یا نسخهٔ تعهدنامه",
+    payloadHint:
+      '{ subjectType: "project"|"task"|"document"|"contract"|"estimate_version"|"submittal_revision", subjectId: string /* از فهرست همان سوژه */, body: string /* لازم */ }',
+    executor: "workspaceCommentAdd",
+  },
+  "priceList.create": {
+    type: "priceList.create",
+    endpoint: "/api/products/price-lists",
+    method: "POST",
+    label: "ساخت فهرست قیمت برای شعبهٔ فعال",
+    payloadHint: "{ name: string /* لازم، یکتا در شعبه */, currency?: string /* پیش‌فرض IRR */ }",
+    executor: "priceListCreate",
+  },
+  "priceList.rename": {
+    type: "priceList.rename",
+    endpoint: "/api/products/price-lists/[id]",
+    method: "PATCH",
+    label: "تغییر نام فهرست قیمت",
+    payloadHint: "{ priceListId: string /* از list_price_lists */, name: string }",
+    executor: "priceListRename",
+  },
+  "priceList.delete": {
+    type: "priceList.delete",
+    endpoint: "/api/products/price-lists/[id]",
+    method: "DELETE",
+    label: "حذف یک فهرست قیمت — با همهٔ قلم‌هایش، مثل دکمهٔ صفحه",
+    payloadHint: "{ priceListId: string }",
+    executor: "priceListDelete",
+  },
+  "priceList.entries.save": {
+    type: "priceList.entries.save",
+    endpoint: "/api/products/price-lists/entries",
+    method: "POST",
+    label: "ذخیرهٔ قیمت‌های یک فهرست — با نسخهٔ موردانتظار، مثل صفحهٔ ویرایش قیمت‌ها",
+    payloadHint:
+      '{ updates: [{ priceListId, itemId /* از list_menu_items */, price: number|null /* null = حذف قیمت */, expectedVersion?: string /* version از list_price_list_entries برای تشخیص تداخل */ }] }',
+    executor: "priceListEntriesSave",
+  },
+  "wp.queue.retry": {
+    type: "wp.queue.retry",
+    endpoint: "/api/integrations/wp-manager/queue/[id]",
+    method: "POST",
+    label: "تلاش دوبارهٔ یک رویداد صف ووکامرس (خروجی یا ورودی) — ارسالِ دوبارهٔ همان داده‌ای که پیش‌تر تأیید شده",
+    payloadHint: '{ queueRowId: string, connectionId?: string, direction?: "out"|"in" }',
+    executor: "wpQueueRetry",
+  },
+  "wp.queue.retry_all_failed": {
+    type: "wp.queue.retry_all_failed",
+    endpoint: "/api/integrations/wp-manager/queue",
+    method: "POST",
+    label: "تلاش دوبارهٔ همهٔ رویدادهای ناموفق/مردهٔ صف — بدون دادهٔ تازه‌ای به فروشگاه",
+    payloadHint: '{ connectionId?: string }',
+    executor: "wpQueueRetryAllFailed",
+  },
+  "wp.queue.flush": {
+    type: "wp.queue.flush",
+    endpoint: "/api/integrations/wp-manager/queue",
+    method: "POST",
+    label: "ارسال فوری صف خروجی به فروشگاه (RPC برای اتصال پلاگین، تخلیه برای REST)",
+    payloadHint: '{ connectionId?: string }',
+    executor: "wpQueueFlush",
+  },
+  "website.domain.set": {
+    type: "website.domain.set",
+    endpoint: "/api/cms/website/domain",
+    method: "PUT",
+    label: "تغییر دامنهٔ زندهٔ سایت — نام نمایهٔ عمومی سایت است و لینک‌های قدیمی را می‌شکند",
+    payloadHint: '{ domain: string /* مثل shop.example.com — بدون پروتکل */ }',
+    executor: "websiteDomainSet",
+  },
+  "jewelry.item.sell": {
+    type: "jewelry.item.sell",
+    endpoint: "/api/jewelry/items/{id}/sell",
+    method: "POST",
+    label: "فروش قلم طلای وزنی — سند فروش واقعی با اجرت/سود/مالیات و تسویه؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, makingChargeType: "percent"|"fixed", makingChargeValue: number, profitPercent: number, vatPercent: number, paymentMethod: "cash"|"bank"|"credit", locationId?: string }',
+    executor: "jewelryItemSell",
+  },
+  "jewelry.buyback.create": {
+    type: "jewelry.buyback.create",
+    endpoint: "/api/jewelry/buy-back",
+    method: "POST",
+    label: "خرید طلای دست‌دوم از مشتری با نرخ امروز — پول می‌رود بیرون، موجودی می‌آید داخل؛ هر بار تأیید انسان",
+    payloadHint: '{ purity: string, grossWeight: string, karsorPercent?: number, customerId?: string, locationId?: string }',
+    executor: "jewelryBuybackCreate",
+  },
+  "jewelry.layaway.create": {
+    type: "jewelry.layaway.create",
+    endpoint: "/api/jewelry/layaway",
+    method: "POST",
+    label: "باز کردن امانت-خرید (layaway) برای مشتری — درصدی بیعانه الزامی است؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, grams: string, pricePerGram: number, depositRial?: number, promisedDate?: string|null, itemId?: string, locationId?: string }',
+    executor: "jewelryLayawayCreate",
+  },
+  "jewelry.layaway.pay": {
+    type: "jewelry.layaway.pay",
+    endpoint: "/api/jewelry/layaway/{id}/pay",
+    method: "POST",
+    label: "دریافت قسط امانت-خرید — دریافت واقعی پول؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, amount: number }',
+    executor: "jewelryLayawayPay",
+  },
+  "jewelry.layaway.complete": {
+    type: "jewelry.layaway.complete",
+    endpoint: "/api/jewelry/layaway/{id}/complete",
+    method: "POST",
+    label: "تسویهٔ نهایی امانت-خرید — فروش قطعی ثبت می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "jewelryLayawayComplete",
+  },
+  "jewelry.consignor.payout": {
+    type: "jewelry.consignor.payout",
+    endpoint: "/api/jewelry/consignors/{id}/payout",
+    method: "POST",
+    label: "تسویه با امانت‌دار — پرداخت واقعی نقد/بانک؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, amount: number, paymentMethod: "cash"|"bank", locationId?: string }',
+    executor: "jewelryConsignorPayout",
+  },
+  "jewelry.price.record": {
+    type: "jewelry.price.record",
+    endpoint: "/api/jewelry/prices",
+    method: "POST",
+    label: "ثبت نرخ روز طلا برای یک عیار — قیمت‌گذاری انبوه همهٔ اقلام همین عیار را تغییر می‌دهد؛ هر بار تأیید انسان",
+    payloadHint: '{ purity: string, pricePerGram: number }',
+    executor: "jewelryPriceRecord",
+  },
+  "jewelry.consignor.create": {
+    type: "jewelry.consignor.create",
+    endpoint: "/api/jewelry/consignors",
+    method: "POST",
+    label: "ثبت امانت‌دار جدید — نام (+ تلفن و یادداشت اختیاری)؛ مثل فرم دیرکتوری امانت‌داران",
+    payloadHint: '{ name: string, phone?: string|null, notes?: string|null }',
+    executor: "jewelryConsignorCreate",
+  },
+  "cosmetics.brand.create": {
+    type: "cosmetics.brand.create",
+    endpoint: "/api/cosmetics/brands",
+    method: "POST",
+    label: "ثبت برند آرایشی جدید در شعبهٔ جاری — نام اجباری، کشور و خط محصول اختیاری",
+    payloadHint: '{ name: string, country?: string|null, productLine?: string|null }',
+    executor: "cosmeticsBrandCreate",
+  },
+  "cosmetics.item.create": {
+    type: "cosmetics.item.create",
+    endpoint: "/api/cosmetics/items",
+    method: "POST",
+    label: "ایجاد خانوادهٔ کالا یا یک تنوع آرایشی — بدون parentItemId خانواده ساخته می‌شود",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "cosmeticsItemCreate",
+  },
+  "cosmetics.batch.receive": {
+    type: "cosmetics.batch.receive",
+    endpoint: "/api/cosmetics/items/{id}/batches",
+    method: "POST",
+    label: "ورود بچ (لات) برای کالای بچ‌محور — شماره بچ، تعداد، بهای واحد؛ بچ تکراری با موجودی ادغام می‌شود",
+    payloadHint: '{ id: string, batchNumber: string, quantity: string, unitCost: int≥0, expiryDate?: string|null, supplierReference?: string|null }',
+    executor: "cosmeticsBatchReceive",
+  },
+  "cosmetics.stock.update": {
+    type: "cosmetics.stock.update",
+    endpoint: "/api/cosmetics/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت‌گذاری قفسهٔ یک قلم آرایشی — مثل فرم ورود کالا",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "cosmeticsStockUpdate",
+  },
+  "cosmetics.tester.open": {
+    type: "cosmetics.tester.open",
+    endpoint: "/api/cosmetics/items/{id}/tester",
+    method: "POST",
+    label: "بازکردن تستر — یک واحد قابل‌فروش از موجودی کم و به تستر اختصاص می‌یابد (FEFO روی بچ‌ها)",
+    payloadHint: '{ id: string }',
+    executor: "cosmeticsTesterOpen",
+  },
+  "cosmetics.profile.update": {
+    type: "cosmetics.profile.update",
+    endpoint: "/api/cosmetics/items/{id}/profile",
+    method: "POST",
+    label: "به‌روزرسانی پروفایل قلم آرایشی — برند، کد IRC، پروانه بهداشت، ثبت اصالت، تگ‌ها",
+    payloadHint: '{ id: string, brandId?: string|null, ircCode?: string|null, healthPermit?: string|null, authenticityRegistration?: string|null, tags?: string[] }',
+    executor: "cosmeticsProfileUpdate",
+  },
+  "cosmetics.matrix.create": {
+    type: "cosmetics.matrix.create",
+    endpoint: "/api/cosmetics/matrix",
+    method: "POST",
+    label: "ساخت ماتریس تنوع — یک خانواده + همهٔ ترکیب‌های دو محور (مثل رنگ × حجم) یکجا",
+    payloadHint: '{ parentName: string, parentSku?: string|null, axisA: {name, values[]}, axisB: {name, values[]} }',
+    executor: "cosmeticsMatrixCreate",
+  },
+  "accessories.item.create": {
+    type: "accessories.item.create",
+    endpoint: "/api/accessories/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع کالای لوازم‌جانبی — مثل برد فروشگاه موبایل/کامپیوتر",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "accessoriesItemCreate",
+  },
+  "accessories.item.sell": {
+    type: "accessories.item.sell",
+    endpoint: "/api/accessories/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع لوازم‌جانبی — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "accessoriesItemSell",
+  },
+  "accessories.stock.update": {
+    type: "accessories.stock.update",
+    endpoint: "/api/accessories/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم لوازم‌جانبی — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "accessoriesStockUpdate",
+  },
+  "wholesale.item.create": {
+    type: "wholesale.item.create",
+    endpoint: "/api/wholesale/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع کالای عمده — برد فروشگاه عمده‌فروشی",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "wholesaleItemCreate",
+  },
+  "wholesale.item.sell": {
+    type: "wholesale.item.sell",
+    endpoint: "/api/wholesale/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع عمده — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "wholesaleItemSell",
+  },
+  "wholesale.stock.update": {
+    type: "wholesale.stock.update",
+    endpoint: "/api/wholesale/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم عمده — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "wholesaleStockUpdate",
+  },
+  "tools_fittings.item.create": {
+    type: "tools_fittings.item.create",
+    endpoint: "/api/tools-fittings/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع ابزار و یراق — برد فروشگاه ابزار",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "toolsFittingsItemCreate",
+  },
+  "tools_fittings.item.sell": {
+    type: "tools_fittings.item.sell",
+    endpoint: "/api/tools-fittings/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع ابزار/یراق — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "toolsFittingsItemSell",
+  },
+  "tools_fittings.stock.update": {
+    type: "tools_fittings.stock.update",
+    endpoint: "/api/tools-fittings/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم ابزار/یراق — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "toolsFittingsStockUpdate",
+  },
+  "haberdashery.item.create": {
+    type: "haberdashery.item.create",
+    endpoint: "/api/haberdashery/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع خرازی — برد فروشگاه خرازی",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "haberdasheryItemCreate",
+  },
+  "haberdashery.item.sell": {
+    type: "haberdashery.item.sell",
+    endpoint: "/api/haberdashery/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع خرازی — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "haberdasheryItemSell",
+  },
+  "haberdashery.stock.update": {
+    type: "haberdashery.stock.update",
+    endpoint: "/api/haberdashery/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم خرازی — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "haberdasheryStockUpdate",
+  },
+  "data.schedule.create": {
+    type: "data.schedule.create",
+    endpoint: "/api/data/schedules",
+    method: "POST",
+    label: "برنامهٔ خروجیِ دوره‌ای داده — موجودیت + فرمت + بسامد (روزانه/هفتگی/ماهانه)؛ ایمیل نهایت یکی از دو مسیر تحویل",
+    payloadHint: '{ entity: string, name: string, format?: "csv"|"xlsx"|"pdf"|"json"="xlsx", frequency?: "daily"|"weekly"|"monthly"="daily", hourLocal?: int=7, weekday?: int|null, dayOfMonth?: int|null, fields?: string[], filters?: object, deliverEmail?: string, deliverStore?: bool=true, locationId?: string }',
+    executor: "dataScheduleCreate",
+  },
+  "data.schedule.update": {
+    type: "data.schedule.update",
+    endpoint: "/api/data/schedules/{id}",
+    method: "PATCH",
+    label: "ویرایش برنامهٔ خروجی دوره‌ای — فیلدهای نامشخص دست‌نخورده می‌مانند؛ isActive برای خاموش/روشن",
+    payloadHint: '{ id: string, name?: string, format?: string, frequency?: string, hourLocal?: int, weekday?: int|null, dayOfMonth?: int|null, fields?: string[], filters?: object, deliverEmail?: string, deliverStore?: bool, isActive?: bool }',
+    executor: "dataScheduleUpdate",
+  },
+  "data.schedule.run": {
+    type: "data.schedule.run",
+    endpoint: "/api/data/schedules/{id}",
+    method: "POST",
+    label: "اجرای دستی یک برنامهٔ خروجی — دقیقاً همان مسیری که زمان‌بند می‌رود",
+    payloadHint: '{ id: string }',
+    executor: "dataScheduleRun",
+  },
+  "data.schedule.delete": {
+    type: "data.schedule.delete",
+    endpoint: "/api/data/schedules/{id}",
+    method: "DELETE",
+    label: "حذف برنامهٔ خروجی دوره‌ای — رکورد پیکربندی است، نه دادهٔ تجاری",
+    payloadHint: '{ id: string }',
+    executor: "dataScheduleDelete",
+  },
+  "data.template.create": {
+    type: "data.template.create",
+    endpoint: "/api/data/templates",
+    method: "POST",
+    label: "قالب خروجی/نگاشت ورودی جدید — kind تعیین‌کنندهٔ نوع است (export یا mapping)",
+    payloadHint: '{ kind?: "export"|"mapping"="mapping", entity: string, name: string, description?: string, format?: string, fields?: string[], filters?: object, mapping?: {columns:[…]}, options?: object }',
+    executor: "dataTemplateCreate",
+  },
+  "data.template.update": {
+    type: "data.template.update",
+    endpoint: "/api/data/templates/{id}",
+    method: "PATCH",
+    label: "ویرایش قالب داده — نام/شرح/ستون‌ها/فرمت یا نگاشت، بسته به kind",
+    payloadHint: '{ id: string, kind?: "export"|"mapping"="mapping", name?: string, description?: string, format?: string, fields?: string[], filters?: object, mapping?: {columns:[…]}, options?: object }',
+    executor: "dataTemplateUpdate",
+  },
+  "data.template.delete": {
+    type: "data.template.delete",
+    endpoint: "/api/data/templates/{id}",
+    method: "DELETE",
+    label: "حذف قالب داده — رکورد پیکربندی است، نه دادهٔ تجاری",
+    payloadHint: '{ id: string, kind?: "export"|"mapping"="mapping" }',
+    executor: "dataTemplateDelete",
+  },
+  "data.import.run": {
+    type: "data.import.run",
+    endpoint: "/api/data/imports/{id}",
+    method: "POST",
+    label: "اجرای یا تلاش‌مجدد درون‌ریزی — ردیف‌های فایلِ ازپیش‌بارگذاری‌شده انبوهانه در دادهٔ تنانت نوشته می‌شوند؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, action?: "run"|"retry"="run" }',
+    executor: "dataImportRun",
+  },
+  "project.member.set": {
+    type: "project.member.set",
+    endpoint: "/api/workspace/projects/{id}/members",
+    method: "POST",
+    label: "افزودن/تغییر نقش عضو پروژه — upsert همان‌قدری که فرم اعضا انجام می‌دهد",
+    payloadHint: '{ id: string, userId: string, role?: "owner"|"manager"|"editor"|"viewer"="viewer" }',
+    executor: "projectMemberSet",
+  },
+  "project.member.remove": {
+    type: "project.member.remove",
+    endpoint: "/api/workspace/projects/{id}/members",
+    method: "DELETE",
+    label: "حذف عضو از پروژه — آخرین مالک هرگز حذف نمی‌شود (قفل‌شدن پروژه ممنوع)",
+    payloadHint: '{ id: string, userId: string }',
+    executor: "projectMemberRemove",
+  },
+  "project.phase.create": {
+    type: "project.phase.create",
+    endpoint: "/api/workspace/projects/{id}/phases",
+    method: "POST",
+    label: "افزودن فاز به پروژه، یا اعمال قالب فازها (merge پیش‌فرض؛ dryRun فقط پیش‌نمایش)",
+    payloadHint: '{ id: string, name?: string, startDate?: string, endDate?: string, templateKey?: string, mode?: "merge"|"replace", dryRun?: bool }',
+    executor: "projectPhaseCreate",
+  },
+  "contract.create": {
+    type: "contract.create",
+    endpoint: "/api/workspace/contracts",
+    method: "POST",
+    label: "ثبت قرارداد جدید — عنوان، نوع، مبلغ (ریال)، بازه، یادآوری",
+    payloadHint: '{ title: string, contractType?: string="other", projectId?: string|null, partyId?: string|null, valueRial?: number, startDate?: string, endDate?: string, status?: string="draft", reminderDays?: int, notes?: string }',
+    executor: "contractCreate",
+  },
+  "contract.update": {
+    type: "contract.update",
+    endpoint: "/api/workspace/contracts/{id}",
+    method: "PATCH",
+    label: "ویرایش قرارداد — فیلدهای نامشخص دست‌نخورده می‌مانند",
+    payloadHint: '{ id: string, title?: string, contractType?: string, valueRial?: number, startDate?: string, endDate?: string, status?: string, reminderDays?: int, notes?: string }',
+    executor: "contractUpdate",
+  },
+  "contract.delete": {
+    type: "contract.delete",
+    endpoint: "/api/workspace/contracts/{id}",
+    method: "DELETE",
+    label: "حذف قرارداد — رکورد تجاری محو می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "contractDelete",
+  },
+  "contract.lifecycle": {
+    type: "contract.lifecycle",
+    endpoint: "/api/workspace/contracts/{id}/lifecycle",
+    method: "POST",
+    label: "گذر چرخهٔ قرارداد — تکمیل/فسخ/تمدید/تجدید (endDate برای تمدید و تجدید)",
+    payloadHint: '{ id: string, action: "complete"|"terminate"|"extend"|"renew", endDate?: string }',
+    executor: "contractLifecycle",
+  },
+  "crm.customField.save": {
+    type: "crm.customField.save",
+    endpoint: "/api/crm/custom-fields",
+    method: "POST",
+    label: "ثبت/ویرایش فیلد دلخواه CRM — با id ویرایش، بدون id ساخت جدید (مثل فرم پیکربندی CRM)",
+    payloadHint: '{ target: "party"|"lead"|"deal"|"case", label: string, fieldType?: string="text", key?: string, options?: string[], isRequired?: bool, helpText?: string, displayOrder?: int, id?: string }',
+    executor: "crmCustomFieldSave",
+  },
+  "crm.customField.archive": {
+    type: "crm.customField.archive",
+    endpoint: "/api/crm/custom-fields/{id}",
+    method: "DELETE",
+    label: "بایگانی فیلد دلخواه CRM — حذف نرم است، مقادیر ثبت‌شده باقی می‌ماند",
+    payloadHint: '{ id: string }',
+    executor: "crmCustomFieldArchive",
+  },
+  "barcode.bulkMint": {
+    type: "barcode.bulkMint",
+    endpoint: "/api/inventory/barcodes/bulk",
+    method: "POST",
+    label: "صدور بارکد داخلی برای همهٔ اقلام فاقد کد در شعبه — idempotent، در یک تراکنش",
+    payloadHint: '{ locationId?: string }',
+    executor: "barcodeBulkMint",
+  },
+  "purchase.update": {
+    type: "purchase.update",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "PATCH",
+    label: "بازنویسی پیش‌نویس خرید — اقلام جایگزین می‌شوند؛ دریافت‌شده/لغوشده قابل ویرایش نیست (مثل فرم ویرایش)",
+    payloadHint: '{ id: string, supplierId?: string|null, note?: string, purchaseDate?: string|null, items?: Array<{inventoryItemId, purchaseQty: string, totalCost: string}>, invoice?: object, locationId?: string }',
+    executor: "purchaseUpdate",
+  },
+  "purchase.lifecycle": {
+    type: "purchase.lifecycle",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "PATCH",
+    label: "گذر وضعیت سند خرید به ordered یا cancelled — دریافت با purchase.receive انجام می‌شود",
+    payloadHint: '{ id: string, action: "ordered"|"cancelled", locationId?: string }',
+    executor: "purchaseLifecycle",
+  },
+  "purchase.receive": {
+    type: "purchase.receive",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "PATCH",
+    label: "دریافت خرید — ورود موجودی، میانگین موزون و ثبت دفتر (همان مسیر PATCH status=received)",
+    payloadHint: '{ id: string, settlementMethod?: "cash"|"bank"|"credit"="credit", supplierId?: string }',
+    executor: "purchaseReceive",
+  },
+  "purchase.delete": {
+    type: "purchase.delete",
+    endpoint: "/api/inventory/purchases/{id}",
+    method: "DELETE",
+    label: "حذف سند خرید پیش‌نویس — دریافت‌شده delete نمی‌شود؛ یک حذف رکورد تجاری است",
+    payloadHint: '{ id: string, locationId?: string }',
+    executor: "purchaseDelete",
+  },
+  "supplier.update": {
+    type: "supplier.update",
+    endpoint: "/api/inventory/suppliers/{id}",
+    method: "PATCH",
+    label: "ویرایش تأمین‌کننده — نام/تلفن فقط وقتی party لینک نشده (قاعدهٔ supplier_identity_on_party)",
+    payloadHint: '{ id: string, name?: string, phone?: string|null, notes?: string|null, isActive?: boolean }',
+    executor: "supplierUpdate",
+  },
+  "supplier.archive": {
+    type: "supplier.archive",
+    endpoint: "/api/inventory/suppliers/{id}",
+    method: "DELETE",
+    label: "حذف/غیرفعال‌سازی تأمین‌کننده — اگر خرید دارد فقط غیرفعال می‌شود",
+    payloadHint: '{ id: string }',
+    executor: "supplierArchive",
+  },
+  "table.edit": {
+    type: "table.edit",
+    endpoint: "/api/tables",
+    method: "POST",
+    label: "ساخت/ویرایش ساختاری میز پذیرایی — بدون id ساخت جدید؛ وضعیت عملیاتی با table.status",
+    payloadHint: '{ id?: string, name?: string, zone?: string|null, sectionId?: string|null, capacity?: int=2, posX?: int, posY?: int, width?: int, height?: int, shape?: "rect"|"circle", isActive?: bool, locationId?: string }',
+    executor: "tableEdit",
+  },
+  "table.status": {
+    type: "table.status",
+    endpoint: "/api/tables/{id}",
+    method: "PATCH",
+    label: "تغییر وضعیت عملیاتی میز free/cleaning/out_of_service — نشستن فقط از طریق session",
+    payloadHint: '{ id: string, status: "free"|"cleaning"|"out_of_service", locationId?: string }',
+    executor: "tableStatus",
+  },
+  "table.delete": {
+    type: "table.delete",
+    endpoint: "/api/tables/{id}",
+    method: "DELETE",
+    label: "غیرفعال‌سازی میز — تا session بازی داشته باشد حذف نمی‌شود",
+    payloadHint: '{ id: string, locationId?: string }',
+    executor: "tableDelete",
+  },
+  "reservation.edit": {
+    type: "reservation.edit",
+    endpoint: "/api/reservations/{id}",
+    method: "PATCH",
+    label: "ویرایش فیلدهای رزرو — فقط تا وقتی booked است؛ لمس میز/زمان تداخل را از نو بررسی می‌کند",
+    payloadHint: '{ id: string, tableId?: string|null, reservedAt?: string, durationMinutes?: int, customerName?: string, customerPhone?: string|null, partySize?: int, note?: string, allowConflict?: bool }',
+    executor: "reservationEdit",
+  },
+  "reservation.lifecycle": {
+    type: "reservation.lifecycle",
+    endpoint: "/api/reservations/{id}",
+    method: "PATCH",
+    label: "گذر رزرو: cancel/no_show ساده، seat میز(s) را session باز می‌کند",
+    payloadHint: '{ id: string, action: "cancel"|"no_show"|"seat", tableIds?: string[] }',
+    executor: "reservationLifecycle",
+  },
+  "reservation.delete": {
+    type: "reservation.delete",
+    endpoint: "/api/reservations/{id}",
+    method: "DELETE",
+    label: "حذف فیزیکی رزرو — مسیر عادیِ کنسل، cancel است؛ یک پاک‌سازی رکورد است",
+    payloadHint: '{ id: string }',
+    executor: "reservationDelete",
+  },
+  "floor.section.create": {
+    type: "floor.section.create",
+    endpoint: "/api/floor/sections",
+    method: "POST",
+    label: "ساخت بخش سالن — اسم تکراری در همان شعبه rejected می‌شود",
+    payloadHint: '{ name: string, color?: string|null, assignedWaiterId?: string|null, locationId?: string }',
+    executor: "floorSectionCreate",
+  },
+  "floor.section.update": {
+    type: "floor.section.update",
+    endpoint: "/api/floor/sections/{id}",
+    method: "PATCH",
+    label: "ویرایش بخش سالن — نام/رنگ/گارسون/ترتیب",
+    payloadHint: '{ id: string, name?: string, color?: string|null, assignedWaiterId?: string|null, sortOrder?: int, locationId?: string }',
+    executor: "floorSectionUpdate",
+  },
+  "floor.section.delete": {
+    type: "floor.section.delete",
+    endpoint: "/api/floor/sections/{id}",
+    method: "DELETE",
+    label: "حذف بخش سالن — میزها جدا می‌شوند، پاک نمی‌شوند (کوچک‌حجم، config)",
+    payloadHint: '{ id: string, locationId?: string }',
+    executor: "floorSectionDelete",
+  },
+  "kitchen.item.status": {
+    type: "kitchen.item.status",
+    endpoint: "/api/kitchen/items/{itemId}",
+    method: "PATCH",
+    label: "پیش‌بردن آیتم در صف آشپزخانه: preparing/ready/served — نقش‌ها همان محدودیت‌های board را دارند",
+    payloadHint: '{ itemId: string, status: "preparing"|"ready"|"served", locationId?: string }',
+    executor: "kitchenItemStatus",
+  },
+  "waste.record": {
+    type: "waste.record",
+    endpoint: "/api/inventory/waste",
+    method: "POST",
+    label: "ثبت ضایعات — خروج موجودی و ثبت دفتر؛ تأیید لازم",
+    payloadHint: '{ inventoryItemId: string, quantity: number|string, reason: "spoilage"|"... (waste reasons)", note?: string, locationId?: string }',
+    executor: "wasteRecord",
+  },
+  "writeDown.create": {
+    type: "writeDown.create",
+    endpoint: "/api/inventory/write-downs",
+    method: "POST",
+    label: "تنزیل موجودی به NRV — ثبت دفتر با idempotencyKey اجباری؛ تأیید لازم",
+    payloadHint: '{ valuationDate: "YYYY-MM-DD", reason: string, idempotencyKey: string, lines: Array<{ inventoryItemId: string, nrvValueRial: string|number }>, locationId?: string }',
+    executor: "writeDownCreate",
+  },
+  "writeDown.reverse": {
+    type: "writeDown.reverse",
+    endpoint: "/api/inventory/write-downs/{id}/reverse",
+    method: "POST",
+    label: "برگشت تنزیل NRV — می‌تواند جزئی باشد؛ idempotencyKey اجباری، تأیید لازم",
+    payloadHint: '{ id: string, reason: string, idempotencyKey: string, amounts?: Array<{ inventoryItemId: string, amountRial: string|number }>, locationId?: string }',
+    executor: "writeDownReverse",
+  },
+  "ai.automation.save": {
+    type: "ai.automation.save",
+    endpoint: "/api/ai/automations",
+    method: "POST",
+    label: "ساخت/ویرایش automation — با id ویرایش (PUT)؛ approvalMode=auto فقط مالک",
+    payloadHint: '{ id?: string, name?: string, locationId?: string|null, projectId?: string|null, triggerKind?: "schedule"|"event", eventKind?: string|null, scheduleHour?: int|null, scheduleWeekday?: int|null, conditions?: object, actionType?: string, actionPayload?: object, approvalMode?: "review_each"|"auto", enabled?: bool }',
+    executor: "aiAutomationSave",
+  },
+  "ai.automation.delete": {
+    type: "ai.automation.delete",
+    endpoint: "/api/ai/automations/{id}",
+    method: "DELETE",
+    label: "حذف automation — رکورد پیکربندی است",
+    payloadHint: '{ id: string }',
+    executor: "aiAutomationDelete",
+  },
+  "ai.automation.run": {
+    type: "ai.automation.run",
+    endpoint: "/api/ai/automations/{id}/run",
+    method: "POST",
+    label: "اجرای دستی automation — همان مسیر guardedِ تیک؛ auto فقط مالک",
+    payloadHint: '{ id: string }',
+    executor: "aiAutomationRun",
+  },
+  "coworker.job.save": {
+    type: "coworker.job.save",
+    endpoint: "/api/ai/coworker/jobs",
+    method: "POST",
+    label: "ساخت/ویرایش job کارمند — با id ویرایش (PATCH)؛ approvalMode=auto فقط مالک",
+    payloadHint: '{ id?: string, templateKey?: string, title?: string, locationId?: string|null, projectId?: string|null, triggerKind?: string, eventKind?: string|null, scheduleHour?: int|null, scheduleWeekday?: int|null, params?: object, approvalMode?: "review_each"|"auto", enabled?: bool }',
+    executor: "coworkerJobSave",
+  },
+  "coworker.job.delete": {
+    type: "coworker.job.delete",
+    endpoint: "/api/ai/coworker/jobs/{id}",
+    method: "DELETE",
+    label: "حذف job کارمند — رکورد پیکربندی است",
+    payloadHint: '{ id: string }',
+    executor: "coworkerJobDelete",
+  },
+  "coworker.job.run": {
+    type: "coworker.job.run",
+    endpoint: "/api/ai/coworker/jobs/{id}/run",
+    method: "POST",
+    label: "اجرای دستی job کارمند — نتیجهٔ run برمی‌گردد",
+    payloadHint: '{ id: string }',
+    executor: "coworkerJobRun",
+  },
+  "memory.add": {
+    type: "memory.add",
+    endpoint: "/api/ai/memory",
+    method: "POST",
+    label: "ثبت حافظهٔ دستیار — tenant/app/project؛ project دسترسی پروژه می‌خواهد",
+    payloadHint: '{ content: string, scope?: "tenant"|"app"|"project"="tenant", appKey?: string, projectId?: string }',
+    executor: "memoryAdd",
+  },
+  "memory.delete": {
+    type: "memory.delete",
+    endpoint: "/api/ai/memory",
+    method: "DELETE",
+    label: "حذف نرم حافظهٔ دستیار (بایگانی‌شده)",
+    payloadHint: '{ id: string, scope?: "tenant"|"app"|"project"="tenant", projectId?: string }',
+    executor: "memoryDelete",
+  },
+  "settings.business.save": {
+    type: "settings.business.save",
+    endpoint: "/api/settings/business",
+    method: "PUT",
+    label: "ذخیرهٔ هویت کسب‌وکار + نام/آدرس/تلفن شعبهٔ فعال — همان متن فرم کسب‌وکار؛ نام فیلد‌ها لازم‌اند",
+    payloadHint: '{ businessName: string, locationName: string, address?: string, phone?: string, legalName?: string, taxId?: string, website?: string, receiptFooter?: string, email?: string, currencyDisplay?: "toman"|"rial" }',
+    executor: "settingsBusinessSave",
+  },
+  "settings.pricing.save": {
+    type: "settings.pricing.save",
+    endpoint: "/api/settings/pricing",
+    method: "PUT",
+    label: "سیاست قیمت‌گذاری کسب‌وکار — فیلدِ فرستاده‌نشده تغییر نمی‌کند؛ null دو برآورد را پاک می‌کند",
+    payloadHint: '{ defaultMarginPercent?: number|null, fallbackOverheadPercent?: number|null, overheadMode?: "automatic"|"manual", costDriftThresholdPercent?: number }',
+    executor: "settingsPricingSave",
+  },
+  "settings.tax.save": {
+    type: "settings.tax.save",
+    endpoint: "/api/settings/tax",
+    method: "PUT",
+    label: "نرخ پیش‌فرض مالیات + نرخ‌های هر دسته — یک تراکنش برای همهٔ تغییرات",
+    payloadHint: '{ defaultRate: number (۰تا۱۰۰), categories?: Array<{ id: string, taxRate: number }> }',
+    executor: "settingsTaxSave",
+  },
+  "settings.onlinePlatforms.save": {
+    type: "settings.onlinePlatforms.save",
+    endpoint: "/api/settings/online-platforms",
+    method: "PUT",
+    label: "نرخ کمیسیون اسنپ‌فود — کلید الزامی است؛ null=پاک‌کردن قرارداد",
+    payloadHint: '{ snappfoodCommissionPercent: number|null }',
+    executor: "settingsOnlinePlatformsSave",
+  },
+  "settings.mfaPolicy.save": {
+    type: "settings.mfaPolicy.save",
+    endpoint: "/api/settings/mfa-policy",
+    method: "PUT",
+    label: "سیاست ورود دومرحله‌ای — الزامی برای مدیران؟",
+    payloadHint: '{ requireForManagers?: boolean, requireForAccountants?: boolean }',
+    executor: "settingsMfaPolicySave",
+  },
+  "settings.accounts.save": {
+    type: "settings.accounts.save",
+    endpoint: "/api/settings/accounts",
+    method: "PUT",
+    label: "جایگزینی کامل سرفصل حساب‌ها — فقط وقتی هیچ سندی پست نشده باشد",
+    payloadHint: '{ accounts: Array<{ code: string, name: string, type: string, parentCode?: string, isContra?: bool }> }',
+    executor: "settingsAccountsSave",
+  },
+  "paymentMethod.create": {
+    type: "paymentMethod.create",
+    endpoint: "/api/settings/payment-methods",
+    method: "POST",
+    label: "ساخت روش پرداخت سفارشی — settlement از انواع مجاز",
+    payloadHint: '{ name: string, settlement: string, opensDrawer?: bool, requiresReference?: bool }',
+    executor: "paymentMethodCreate",
+  },
+  "paymentMethod.update": {
+    type: "paymentMethod.update",
+    endpoint: "/api/settings/payment-methods/{id}",
+    method: "PATCH",
+    label: "ویرایش روش پرداخت — settlementِ روشِ پول‌گرفته قفل است؛ آخرین روش فعال غیرفعال نمی‌شود",
+    payloadHint: '{ id: string, name?: string, settlement?: string, isActive?: bool, opensDrawer?: bool, requiresReference?: bool }',
+    executor: "paymentMethodUpdate",
+  },
+  "paymentMethod.delete": {
+    type: "paymentMethod.delete",
+    endpoint: "/api/settings/payment-methods/{id}",
+    method: "DELETE",
+    label: "حذف روش پرداخت — builtin/پول‌گرفته/تنها فعال محفوظ است (به‌جای آن غیرفعال کنید)",
+    payloadHint: '{ id: string }',
+    executor: "paymentMethodDelete",
+  },
+  "paymentMethod.reorder": {
+    type: "paymentMethod.reorder",
+    endpoint: "/api/settings/payment-methods",
+    method: "PUT",
+    label: "چینش یک‌شبهٔ گرید صندوق — ترتیب کامل شناسه‌ها یک‌جا",
+    payloadHint: '{ order: string[] }',
+    executor: "paymentMethodReorder",
+  },
+  "printer.create": {
+    type: "printer.create",
+    endpoint: "/api/settings/printers",
+    method: "POST",
+    label: "افزودن چاپگر — is_default بقیه را همان‌تراکنش رها می‌کند",
+    payloadHint: '{ name: string, kind: "receipt"|"kitchen"|"label", connection: object, isActive?: bool, printerClass?: string, openDrawer?: bool, supportsCut?: bool, isDefault?: bool, paper?: string, paperWidthMm?: number }',
+    executor: "printerCreate",
+  },
+  "printer.update": {
+    type: "printer.update",
+    endpoint: "/api/settings/printers/{id}",
+    method: "PATCH",
+    label: "ویرایش چاپگر — فیلدهای وصل‌نشده به fallbackِ رکورد می‌چسبند؛ تعویض is_default تکی",
+    payloadHint: '{ id: string, name?: string, kind?: string, connection?: object, isActive?: bool, printerClass?: string, openDrawer?: bool, supportsCut?: bool, isDefault?: bool, paper?: string, paperWidthMm?: number }',
+    executor: "printerUpdate",
+  },
+  "printer.delete": {
+    type: "printer.delete",
+    endpoint: "/api/settings/printers/{id}",
+    method: "DELETE",
+    label: "حذف چاپگر — به همین شعبه",
+    payloadHint: '{ id: string }',
+    executor: "printerDelete",
+  },
+  "printTemplate.save": {
+    type: "printTemplate.save",
+    endpoint: "/api/settings/print-templates",
+    method: "POST",
+    label: "ساخت/جایگزینی قالب چاپ — با id جایگزینی (PUT)؛ isDefault بدون id پیش‌فرض false",
+    payloadHint: '{ id?: string, template: object, isDefault?: bool }',
+    executor: "printTemplateSave",
+  },
+  "printTemplate.delete": {
+    type: "printTemplate.delete",
+    endpoint: "/api/settings/print-templates/{id}",
+    method: "DELETE",
+    label: "حذف قالب چاپ — به همین شعبه",
+    payloadHint: '{ id: string }',
+    executor: "printTemplateDelete",
+  },
+  "settings.printRules.save": {
+    type: "settings.printRules.save",
+    endpoint: "/api/settings/print-rules",
+    method: "PUT",
+    label: "قانون چاپ هر سند — قالب (builtin یا ذخیره) + چاپگر/پشتیبان سازگار؛ fallback ≠ primary",
+    payloadHint: '{ documentType: string, templateId?: string, templateKey?: string, printerId?: string, fallbackPrinterId?: string }',
+    executor: "settingsPrintRulesSave",
+  },
+  "integrations.sync.products": {
+    type: "integrations.sync.products",
+    endpoint: "/api/integrations/connections/{id}/sync/products",
+    method: "POST",
+    label: "سینک کاتالوگ + محتوای WP — plugin=صف؛ REST=هم‌خط؛ خطای محتوا sync ناموفق نمی‌کند",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsSyncProducts",
+  },
+  "integrations.sync.orders": {
+    type: "integrations.sync.orders",
+    endpoint: "/api/integrations/connections/{id}/sync/orders",
+    method: "POST",
+    label: "سینک سفارش‌های WooCommerce — sinceDays بیشینه ۳۶۵، پیش‌فرض نگاه‌به‌عقب خود اتصال",
+    payloadHint: '{ connectionId: string, sinceDays?: int (۱ تا ۳۶۵) }',
+    executor: "integrationsSyncOrders",
+  },
+  "integrations.sync.customers": {
+    type: "integrations.sync.customers",
+    endpoint: "/api/integrations/connections/{id}/sync/customers",
+    method: "POST",
+    label: "سینک مشتریان — فقط اتصال WooCommerce",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsSyncCustomers",
+  },
+  "integrations.sync.inventory": {
+    type: "integrations.sync.inventory",
+    endpoint: "/api/integrations/connections/{id}/sync/inventory",
+    method: "POST",
+    label: "سینک موجودی — نوسازی outbox + تخلیهٔ صف در حالت REST",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsSyncInventory",
+  },
+  "integrations.connection.test": {
+    type: "integrations.connection.test",
+    endpoint: "/api/integrations/connections/{id}/test",
+    method: "POST",
+    label: "تست اتصال — نسخه/اثرانگشت/پروفایل Holoo یا ok ساده؛ خطای upstream خطای ۵۰۲ است",
+    payloadHint: '{ connectionId: string }',
+    executor: "integrationsConnectionTest",
+  },
+  "website.setup.save": {
+    type: "website.setup.save",
+    endpoint: "/api/cms/website/setup",
+    method: "PATCH",
+    label: "ذخیرهٔ پاسخ مرحلهٔ راه‌اندازی وب — فیلدهای مرحله‌به‌مرحله؛ بعد از built خطای already_built",
+    payloadHint: '{ domain?: string, domainMode?: string, domainYears?: number, cdnProvider?: string, cdnStatus?: string, cdnNote?: string|null, siteType?: string, siteName?: string, planKey?: string|null }',
+    executor: "websiteSetupSave",
+  },
+  "website.design.theme.save": {
+    type: "website.design.theme.save",
+    endpoint: "/api/cms/website/design/theme-settings",
+    method: "POST",
+    label: "ذخیرهٔ design tokenها — values تنظیم می‌کند، clear این کلیدها را پاک می‌کند",
+    payloadHint: '{ values?: Record<string,string>, clear?: string[] }',
+    executor: "websiteDesignThemeSave",
+  },
+  "website.cdn.purge": {
+    type: "website.cdn.purge",
+    endpoint: "/api/cms/website/cdn/purge",
+    method: "POST",
+    label: "پاک‌سازی CDN — بدون urls یعنی همه؛ not_connected/شکست upstream با همان خطاها برمی‌گردد",
+    payloadHint: '{ urls?: string[] }',
+    executor: "websiteCdnPurge",
+  },
+  "website.product.create": {
+    type: "website.product.create",
+    endpoint: "/api/cms/website/products",
+    method: "POST",
+    label: "ساخت محصول روی سایت متصل — price به واحد ریال مثبت",
+    payloadHint: '{ title: string, price: number, summary?: string, image?: string, sku?: string, trackInventory?: bool, inventory?: number, compareAtPrice?: number }',
+    executor: "websiteProductCreate",
+  },
+  "website.product.update": {
+    type: "website.product.update",
+    endpoint: "/api/cms/website/products/{id}",
+    method: "PATCH",
+    label: "ویرایش محصول سایت — فقط فیلدهای رسیده",
+    payloadHint: '{ id: string, title?: string, price?: number, summary?: string, image?: string, sku?: string, trackInventory?: bool, inventory?: number, compareAtPrice?: number }',
+    executor: "websiteProductUpdate",
+  },
+  "website.product.delete": {
+    type: "website.product.delete",
+    endpoint: "/api/cms/website/products/{id}",
+    method: "DELETE",
+    label: "حذف محصول از سایت — رکورد عمومی، تأیید صریح لازم",
+    payloadHint: '{ id: string }',
+    executor: "websiteProductDelete",
+  },
+  "website.post.delete": {
+    type: "website.post.delete",
+    endpoint: "/api/cms/website/posts/{id}",
+    method: "DELETE",
+    label: "حذف نوشتهٔ منتشرشده — رکورد عمومی، تأیید صریح لازم",
+    payloadHint: '{ id: string }',
+    executor: "websitePostDelete",
+  },
+  "website.media.update": {
+    type: "website.media.update",
+    endpoint: "/api/cms/website/media/{id}",
+    method: "PATCH",
+    label: "متن جایگزین (alt) رسانه — ناگفته‌ها بدون تغییر",
+    payloadHint: '{ id: string, alt: string }',
+    executor: "websiteMediaUpdate",
+  },
+  "website.media.delete": {
+    type: "website.media.delete",
+    endpoint: "/api/cms/website/media/{id}?force=1",
+    method: "DELETE",
+    label: "حذف رسانه — force=true خطای media_in_use را نادیده می‌گیرد؛ تأیید صریح لازم",
+    payloadHint: '{ id: string, force?: bool }',
+    executor: "websiteMediaDelete",
+  },
+  "wp.content.sync": {
+    type: "wp.content.sync",
+    endpoint: "/api/integrations/wp-manager/content",
+    method: "POST",
+    label: "سینک محتوای وردپرس — plugin=صف، REST=هم‌خط؛ فقط اتصال WooCommerceِ غیرمتوقف",
+    payloadHint: '{ connectionId: string }',
+    executor: "wpContentSync",
+  },
+  "wp.post.save": {
+    type: "wp.post.save",
+    endpoint: "/api/integrations/wp-manager/content/posts",
+    method: "POST",
+    label: "ساخت/ویرایش نوشته یا برگه — id عددی=ویرایش؛ plugin=صف با قاعدهٔ capability، REST=هم‌خط",
+    payloadHint: '{ connectionId: string, post_type: "post"|"page", id?: string, title?: string, content?: string, excerpt?: string, slug?: string, status?: "publish"|"draft"|"pending"|"private"|"future" }',
+    executor: "wpPostSave",
+  },
+  "wp.media.create": {
+    type: "wp.media.create",
+    endpoint: "/api/integrations/wp-manager/media",
+    method: "POST",
+    label: "افزودن رسانه با URL — فقط در حالت plugin و با capability؛ idempotency از operationId می‌آید",
+    payloadHint: '{ connectionId: string, url: string, title?: string }',
+    executor: "wpMediaCreate",
+  },
+  "commission.rule.save": {
+    type: "commission.rule.save",
+    endpoint: "/api/commission/rules",
+    method: "POST",
+    label: "ثبت/تغییر قانون کمیسیون — employeeId/kind/basis لازم‌اند",
+    payloadHint: '{ employeeId: string, kind: "percent"|"fixed", basis: "net"|"margin", value: number, itemIds?: string[], brandIds?: string[], categoryIds?: string[], activeFrom?: string|null, activeTo?: string|null, priority?: number, isActive?: bool }',
+    executor: "commissionRuleSave",
+  },
+  "commission.rule.setActive": {
+    type: "commission.rule.setActive",
+    endpoint: "/api/commission/rules",
+    method: "PATCH",
+    label: "فعال/خاموش‌کردن قانون — تاریخچه نگه داشته می‌شود",
+    payloadHint: '{ ruleId: string, isActive: bool }',
+    executor: "commissionRuleSetActive",
+  },
+  "courier.create": {
+    type: "courier.create",
+    endpoint: "/api/couriers",
+    method: "POST",
+    label: "افزودن پیک برای شعبهٔ فعال",
+    payloadHint: '{ name: string, phone?: string|null }',
+    executor: "courierCreate",
+  },
+  "courier.setActive": {
+    type: "courier.setActive",
+    endpoint: "/api/couriers/{id}",
+    method: "PATCH",
+    label: "فعال/خاموش‌کردن پیک",
+    payloadHint: '{ id: string, isActive: bool }',
+    executor: "courierSetActive",
+  },
+  "delivery.assign": {
+    type: "delivery.assign",
+    endpoint: "/api/deliveries/{id}",
+    method: "PATCH",
+    label: "اسناد پیک به رسید — courierId=null یعنی پس‌گرفتن",
+    payloadHint: '{ id: string, courierId: string|null }',
+    executor: "deliveryAssign",
+  },
+  "delivery.status.set": {
+    type: "delivery.status.set",
+    endpoint: "/api/deliveries/{id}",
+    method: "PATCH",
+    label: "تغییر وضعیت ارسال — transitionDelivery قانون‌های گذار را اعمال می‌کند",
+    payloadHint: '{ id: string, status: string }',
+    executor: "deliveryStatusSet",
+  },
+  "businessDay.close": {
+    type: "businessDay.close",
+    endpoint: "/api/business-day/close",
+    method: "POST",
+    label: "بستن روز کاری شعبهٔ فعال — note اختیاری",
+    payloadHint: '{ note?: string }',
+    executor: "businessDayClose",
+  },
+  "businessDay.reopen": {
+    type: "businessDay.reopen",
+    endpoint: "/api/business-day/close",
+    method: "DELETE",
+    label: "بازگشایی بستِ اشتباه — پنجره به شروعِ برنامه می‌رود",
+    payloadHint: '{}',
+    executor: "businessDayReopen",
+  },
+  "businessDay.config.save": {
+    type: "businessDay.config.save",
+    endpoint: "/api/business-day",
+    method: "PATCH",
+    label: "تنظیم شروع روز کاری — startTime مثل «18:00»؛ خاموش‌کردن با null",
+    payloadHint: '{ startTime?: string|null } یا { startMinutes?: number|null }',
+    executor: "businessDayConfigSave",
+  },
+  "rollup.push": {
+    type: "rollup.push",
+    endpoint: "/api/rollup/push",
+    method: "POST",
+    label: "اجرای فوری push همگام‌سازی به مرکز rollup",
+    payloadHint: '{}',
+    executor: "rollupPush",
+  },
+  "rollup.location.setActive": {
+    type: "rollup.location.setActive",
+    endpoint: "/api/rollup/locations/{id}",
+    method: "PATCH",
+    label: "فعال/خاموش‌کردن مکان rollup",
+    payloadHint: '{ id: string, isActive: bool }',
+    executor: "rollupLocationSetActive",
+  },
+  "inventory.item.save": {
+    type: "inventory.item.save",
+    endpoint: "/api/inventory/items",
+    method: "POST",
+    label: "ساخت/ویرایش قلم انبار (ورودی raw برای هر فرد قابل‌نادیده‌است) — با id ویرایش (PATCH)",
+    payloadHint: '{ id?: string, name?: string, unit?: string, sku?: string|null, reorderLevel?: number|null, purchaseUnit?: string|null, purchaseUnitFactor?: number, isActive?: bool, imageMediaId?: string|null } — ساخت: name+unit لازم',
+    executor: "inventoryItemSave",
+  },
+  "inventory.item.delete": {
+    type: "inventory.item.delete",
+    endpoint: "/api/inventory/items/{id}",
+    method: "DELETE",
+    label: "حذف قلم انبار — قلمِ ارجاع‌داده‌شده غیرفعال می‌شود (deactivated: true)",
+    payloadHint: '{ id: string }',
+    executor: "inventoryItemDelete",
+  },
+  "aec.record.create": {
+    type: "aec.record.create",
+    endpoint: "/api/aec/projects/{projectId}/<entity>",
+    method: "POST",
+    label: "ساخت رکورد AEC — entity + parent; بدنهٔ رکورد دقیقاً مانند فرم صفحه",
+    payloadHint: '{ entity: "rfi"|"site_issue"|"site_log"|"variation"|"request"|"submittal"|"transmittal"|"document"|"certificate"|"commitment"|"participant"|"estimate"|"rfq"|"checklist"|"quotation"|"estimate_version"|"document_revision"|"commitment_delivery"|"submittal_revision", projectId?: string (والد برای بیشترموجودیت‌ها), parentId?: string (rfq برای quotation، estimateestimate_version، drawing برای document_revision، commitment برای delivery، submittal برای revision), record: object — سند مانند فرم }',
+    executor: "aecRecordCreate",
+  },
+  "aec.record.update": {
+    type: "aec.record.update",
+    endpoint: "/api/aec/<entity>/{id}",
+    method: "PATCH",
+    label: "ویرایش رکورد AEC — patch همان بدنهٔ PATCH صفحه",
+    payloadHint: '{ entity: rfi|site_issue|site_log|variation|request|submittal|transmittal|document|certificate|commitment|estimate|rfq|quotation|checklist|submittal_revision|drawing_revision, id: string, patch: object }',
+    executor: "aecRecordUpdate",
+  },
+  "aec.record.delete": {
+    type: "aec.record.delete",
+    endpoint: "/api/aec/<entity>/{id}",
+    method: "DELETE",
+    label: "حذف رکورد AEC — رکورد دادهٔ پروژه است؛ تأیید صریح لازم",
+    payloadHint: '{ entity: مانند update، id: string }',
+    executor: "aecRecordDelete",
+  },
+  "aec.record.action": {
+    type: "aec.record.action",
+    endpoint: "/api/aec/<entity>/{id}/status",
+    method: "POST",
+    label: "اقدام manage-side — action‌های ثبت‌کننده (آن‌هایی که رخداد بنویسند، نه تصمیم تصویب)",
+    payloadHint: '{ entity: rfi|site_issue|site_log|variation|request|submittal_revision|boq_version|certificate|commitment|rfq|quotation|transmittal, id: string, action: string, note?: string, approvedAmountRial?: number, deliveredOn?: string, resolutionNote?: string, result?: string, closeoutNote?: string }',
+    executor: "aecRecordAction",
+  },
+  "aec.record.review": {
+    type: "aec.record.review",
+    endpoint: "/api/aec/<entity>/{id}/status",
+    method: "POST",
+    label: "اقدام review-side (workspaceApprove) — تصمیم‌های تصویب/رد؛ قفل money-state است، تأیید صریح لازم",
+    payloadHint: '{ entity: site_issue|variation|request|submittal_revision|boq_version|certificate|commitment|quotation, id: string, action: string, note?: string, result?: string, approvedAmountRial?: number }',
+    executor: "aecRecordReview",
+  },
+  "aec.contract.commercial.save": {
+    type: "aec.contract.commercial.save",
+    endpoint: "/api/aec/contracts/{id}/commercial",
+    method: "PUT",
+    label: "سند قرارداد تجاری پروژه — ساختار دادهٔ مانند فرم می‌آید",
+    payloadHint: '{ contractId: string, commercial: object }',
+    executor: "aecContractCommercialSave",
+  },
+  "aec.boq.version.save": {
+    type: "aec.boq.version.save",
+    endpoint: "/api/aec/boq/versions/{id}",
+    method: "PUT",
+    label: "ذخیرهٔ پیش‌نویس نسخهٔ صورت‌وضعیت — tree کامل",
+    payloadHint: '{ versionId: string, tree: object }',
+    executor: "aecBoqVersionSave",
+  },
+  "aec.profile.save": {
+    type: "aec.profile.save",
+    endpoint: "/api/aec/profile",
+    method: "PUT",
+    label: "پروفایل سازمانی AEC کسب‌وکار (settingsManage)",
+    payloadHint: '{ profile: object }',
+    executor: "aecProfileSave",
+  },
+  "aec.projectProfile.save": {
+    type: "aec.projectProfile.save",
+    endpoint: "/api/aec/projects/{projectId}/profile",
+    method: "PUT",
+    label: "پروفایل AEC یک پروژه",
+    payloadHint: '{ projectId: string, profile: object }',
+    executor: "aecProjectProfileSave",
+  },
+  "aec.participant.add": {
+    type: "aec.participant.add",
+    endpoint: "/api/aec/projects/{projectId}/participants",
+    method: "POST",
+    label: "افزودن شرکت‌کنندهٔ پروژه",
+    payloadHint: '{ projectId: string, participant: object }',
+    executor: "aecParticipantAdd",
+  },
+  "aec.participant.update": {
+    type: "aec.participant.update",
+    endpoint: "/api/aec/projects/{projectId}/participants/{participantId}",
+    method: "PATCH",
+    label: "ویرایش شرکت‌کنندهٔ پروژه",
+    payloadHint: '{ projectId: string, participantId: string, participant: object }',
+    executor: "aecParticipantUpdate",
+  },
+  "aec.participant.remove": {
+    type: "aec.participant.remove",
+    endpoint: "/api/aec/projects/{projectId}/participants/{participantId}",
+    method: "DELETE",
+    label: "حذف شرکت‌کنندهٔ پروژه — تأیید صریح لازم",
+    payloadHint: '{ projectId: string, participantId: string }',
+    executor: "aecParticipantRemove",
+  },
+  "jewelry.item.create": {
+    type: "jewelry.item.create",
+    endpoint: "/api/jewelry/items",
+    method: "POST",
+    label: "ایجاد قلم طلای وزنی — عیار، وزن ناخالص/خالص، هزینهٔ هر گرم",
+    payloadHint: '{ name: string≤200, sku?: string, purity: string, grossWeight: string, netWeight: string, unitCostPerGram?: number|null, locationId?: string }',
+    executor: "jewelryItemCreate",
+  },
+  "jewelry.item.update": {
+    type: "jewelry.item.update",
+    endpoint: "/api/jewelry/items/{id}",
+    method: "PATCH",
+    label: "ویرایش صفات وزنی قلم طلا — فیلدهای نامشخص دست‌نخورده می‌مانند",
+    payloadHint: '{ id: string, purity?: string, grossWeight?: string, netWeight?: string, unitCostPerGram?: number|null }',
+    executor: "jewelryItemUpdate",
+  },
+  "jewelry.stone.add": {
+    type: "jewelry.stone.add",
+    endpoint: "/api/jewelry/items/{id}/stones",
+    method: "POST",
+    label: "افزودن سنگ به قلم طلا — نوع، قیراط، هزینهٔ خرید (ریال صحیح)",
+    payloadHint: '{ itemId: string, stoneType: string, carat: string, cost: number, locationId?: string }',
+    executor: "jewelryStoneAdd",
+  },
+  "jewelry.stone.delete": {
+    type: "jewelry.stone.delete",
+    endpoint: "/api/jewelry/items/{id}/stones/{stoneId}",
+    method: "DELETE",
+    label: "حذف سنگ از قلم طلا — رویداد ثبت می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ itemId: string, stoneId: string, locationId?: string }',
+    executor: "jewelryStoneDelete",
+  },
+  "jewelry.item.consign": {
+    type: "jewelry.item.consign",
+    endpoint: "/api/jewelry/items/{id}/consign",
+    method: "POST",
+    label: "واگذاری قلم به امانت‌دار",
+    payloadHint: '{ id: string, consignorId: string, locationId?: string }',
+    executor: "jewelryItemConsign",
+  },
+  "workspace.approval.request": {
+    type: "workspace.approval.request",
+    endpoint: "/api/workspace/approvals",
+    method: "POST",
+    label: "ثبت درخواست تأیید روی یک سند/موضوع فضای کاری",
+    payloadHint: '{ subjectType: string, subjectId: string, projectId?: string|null, title?: string, approverUserId?: string|null, dueDate?: string, note?: string }',
+    executor: "workspaceApprovalRequest",
+  },
+  "workspace.approval.decide": {
+    type: "workspace.approval.decide",
+    endpoint: "/api/workspace/approvals/{id}",
+    method: "POST",
+    label: "تصمیم روی درخواست تأیید — تأیید/رد/درخواست اصلاح/لغو؛ تصمیم روی سندهای تجاری ارقام را نهایی می‌کند؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string, decision: "approved"|"rejected"|"changes_requested"|"cancelled", note?: string }',
+    executor: "workspaceApprovalDecide",
+  },
+  "product.attribute.update": {
+    type: "product.attribute.update",
+    endpoint: "/api/products/attributes/{id}",
+    method: "PATCH",
+    label: "ویرایش تعریف ویژگی محصول — نام/گزینه‌ها/فعالی",
+    payloadHint: '{ id: string, name?: string, options?: string[], isActive?: boolean }',
+    executor: "productAttributeUpdate",
+  },
+  "product.attribute.delete": {
+    type: "product.attribute.delete",
+    endpoint: "/api/products/attributes/{id}",
+    method: "DELETE",
+    label: "حذف تعریف ویژگی — مقادیرش روی همهٔ اقلام پاک می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "productAttributeDelete",
+  },
+  "barcode.template.delete": {
+    type: "barcode.template.delete",
+    endpoint: "/api/products/barcode-templates/{id}",
+    method: "DELETE",
+    label: "حذف قالب بارکد وزنی",
+    payloadHint: '{ id: string }',
+    executor: "barcodeTemplateDelete",
+  },
+  "device.rename": {
+    type: "device.rename",
+    endpoint: "/api/devices/{id}",
+    method: "PATCH",
+    label: "تغییر نام دستگاه POS",
+    payloadHint: '{ id: string, label: string }',
+    executor: "deviceRename",
+  },
+  "device.revoke": {
+    type: "device.revoke",
+    endpoint: "/api/devices/{id}",
+    method: "DELETE",
+    label: "لغو دستگاه — اعتبارنامهٔ بیومتریک آن هم از کار می‌افتد؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "deviceRevoke",
+  },
+  "backup.config.set": {
+    type: "backup.config.set",
+    endpoint: "/api/backup/config",
+    method: "PUT",
+    label: "تنظیم زمان‌بندی/مقصد بکاپ — فقط Owner؛ رمز نسخه اگر خالی بماند تغییر نمی‌کند",
+    payloadHint: '{ enabled: boolean, intervalHours?: number, retentionDays?: number, localDir?: string, cloud?: object, passphrase?: string }',
+    executor: "backupConfigSet",
+  },
+  "backup.run_now": {
+    type: "backup.run_now",
+    endpoint: "/api/backup/run",
+    method: "POST",
+    label: "اجرای فوری بکاپ — وقتی پلن قیمت‌گذاری کرده باشد از کیف پول کسر می‌کند؛ هر بار تأیید انسان",
+    payloadHint: "{}",
+    executor: "backupRunNow",
+  },
+  "backup.restore.apply": {
+    type: "backup.restore.apply",
+    endpoint: "/api/backup/restore",
+    method: "POST",
+    label: "خطرناک — جایگزینی کامل پایگاه‌دادۀ تنانت با یک نسخهٔ از پیش صحت‌سنجی‌شده؛ هر بار تأیید انسان",
+    payloadHint: '{ artifactId: string /* از لیست restore */, passphrase?: string, verifyOnly?: boolean }',
+    executor: "backupRestoreApply",
+  },
+  "table.session.open": {
+    type: "table.session.open",
+    endpoint: "/api/table-sessions",
+    method: "POST",
+    label: "باز کردن نشست میز — چند میز با یک نشست هم قابل پوشش است",
+    payloadHint: '{ tableId?: string | tableIds?: string[], partySize?: number, guestName?: string, guestPhone?: string, locationId?: string }',
+    executor: "tableSessionOpen",
+  },
+  "table.session.update": {
+    type: "table.session.update",
+    endpoint: "/api/table-sessions/{id}",
+    method: "PATCH",
+    label: "به‌روزرسانی نشست میز — یادداشت|مهمان|آزادسازی|ادغام میز",
+    payloadHint: '{ id: string, action: "set_note"|"set_guests"|"release"|"merge", note?: string, customerIds?: string[], tableId?: string, locationId?: string }',
+    executor: "tableSessionUpdate",
+  },
+  "loyalty.points.redeem": {
+    type: "loyalty.points.redeem",
+    endpoint: "/api/loyalty/customers/{id}/redeem",
+    method: "POST",
+    label: "بخش امتیازات وفاداری مشتری را می‌خرج — پولِ مشتری؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, points: number /* صحیح مثبت */, locationId?: string }',
+    executor: "loyaltyPointsRedeem",
+  },
+  "loyalty.store_credit.issue": {
+    type: "loyalty.store_credit.issue",
+    endpoint: "/api/loyalty/customers/{id}/store-credit",
+    method: "POST",
+    label: "صدور اعتبار فروشگاه برای مشتری — ایجاد ارزش پولی روی حساب مشتری؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, amount: number /* ریال */, reason?: string, locationId?: string }',
+    executor: "loyaltyStoreCreditIssue",
+  },
+  "loyalty.store_credit.use": {
+    type: "loyalty.store_credit.use",
+    endpoint: "/api/loyalty/customers/{id}/store-credit",
+    method: "POST",
+    label: "بازپرداخت اعتبار فروشگاه به مشتری به‌صورت نقد یا بانک — پرداخت واقعی پول؛ هر بار تأیید انسان",
+    payloadHint: '{ customerId: string, amount: number /* ریال */, paymentMethod: "cash"|"bank", locationId?: string }',
+    executor: "loyaltyStoreCreditUse",
+  },
+  "loyalty.program.upsert": {
+    type: "loyalty.program.upsert",
+    endpoint: "/api/loyalty/programs",
+    method: "POST",
+    label: "ایجاد/به‌روزرسانی برنامهٔ وفاداری — نرخ کسب و ارزش امتیاز",
+    payloadHint: '{ name: string, earnPointsPer100000?: number, pointValueRial?: number, pointsExpiryDays?: number|null, isActive?: boolean, isDefault?: boolean }',
+    executor: "loyaltyProgramUpsert",
+  },
+  "crm.deal.delete": {
+    type: "crm.deal.delete",
+    endpoint: "/api/crm/deals/{id}",
+    method: "DELETE",
+    label: "حذف معاملهٔ CRM — برگشت‌ناپذیر؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "crmDealDelete",
+  },
+  "crm.case.delete": {
+    type: "crm.case.delete",
+    endpoint: "/api/crm/cases/{id}",
+    method: "DELETE",
+    label: "حذف پروندهٔ پشتیبانی — برگشت‌ناپذیر؛ هر بار تأیید انسان",
+    payloadHint: '{ id: string }',
+    executor: "crmCaseDelete",
+  },
+  "gift_card.redeem": {
+    type: "gift_card.redeem",
+    endpoint: "/api/promotions/gift-cards/redeem",
+    method: "POST",
+    label: "خرج کارت هدیه در شعبه — پول از موجودی کارت مشتری کم می‌شود؛ هر بار تأیید انسان",
+    payloadHint: '{ code: string, amount: number /* ریال صحیح */, locationId?: string }',
+    executor: "giftCardRedeem",
+  },
+  "gift_card.expire_run": {
+    type: "gift_card.expire_run",
+    endpoint: "/api/promotions/gift-cards/expire",
+    method: "POST",
+    label: "اجرای انقضای کارت‌های سررسیدگذشتهٔ شعبه — صدور رویداد به هر کارت؛ هر بار تأیید انسان",
+    payloadHint: '{ locationId?: string }',
+    executor: "giftCardExpireRun",
+  },
+  "messaging.template.save": {
+    type: "messaging.template.save",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "ذخیرهٔ قالب پیام (sms|email) — متغیرهای ناشناخته رد می‌شوند؛ هیچ پیامی ارسال نمی‌شود",
+    payloadHint: '{ channel: "sms"|"email", name: string, body: string, subject?: string }',
+    executor: "messagingTemplateSave",
+  },
+  "messaging.campaign.pause": {
+    type: "messaging.campaign.pause",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "مکث کمپینِ در حال ارسال — عملیات محافظه‌کارانه",
+    payloadHint: '{ campaignId: string }',
+    executor: "messagingCampaignPause",
+  },
+  "messaging.campaign.resume": {
+    type: "messaging.campaign.resume",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "از سر گرفتن کمپین — برگشت به مسیر ارسال انبوه به مشتریان؛ هر بار تأیید انسان",
+    payloadHint: '{ campaignId: string }',
+    executor: "messagingCampaignResume",
+  },
+  "messaging.campaign.launch": {
+    type: "messaging.campaign.launch",
+    endpoint: "/api/messaging",
+    method: "POST",
+    label: "پرتاب کمپین پیام به همهٔ گیرندگان سگمنت — خروجی انبوه با اعتبار/کد تخفیف اختیاری؛ هر بار تأیید انسان",
+    payloadHint: '{ campaignId: string, creditRial?: number /* ریال صحیح */, discountCode?: string }',
+    executor: "messagingCampaignLaunch",
+  },
+  "inventory.count.edit": {
+    type: "inventory.count.edit",
+    endpoint: "/api/inventory/stock-counts/[id]",
+    method: "PATCH",
+    label: "اصلاح یک شمارش ثبت‌شده — برگشت سطرهای خوانده‌شده ثم ثبت سطرهای اصلاح‌شده در همان تراکنش",
+    payloadHint:
+      '{ countId: string, note?: string, lines?: Array<{ inventoryItemId: string, countedQty: number|string }> }',
+    executor: "inventoryCountEdit",
+  },
+  "inventory.count.reverse": {
+    type: "inventory.count.reverse",
+    endpoint: "/api/inventory/stock-counts/[id]",
+    method: "DELETE",
+    label: "برگشت کامل یک شمارش ثبت‌شده — موجودی برمی‌گردد و اسنادش معکوس می‌شود (الگوی ساخت سند معکوس)",
+    payloadHint: '{ countId: string }',
+    executor: "inventoryCountReverse",
+  },
+  "journal.entry.reverse": {
+    type: "journal.entry.reverse",
+    endpoint: "/api/ledger/entries/[id]/reverse",
+    method: "POST",
+    label: "برگشت یک سند دستی ثبت‌شده — سند جدید با خطوط معکوس، امروز؛ اصل‌سند دست‌نخورده می‌ماند (تاریخ اختیاری)",
+    payloadHint: '{ entryId: string, memo?: string /* سقف MANUAL_MEMO_MAX */, entryDate?: "YYYY-MM-DD", locationId?: string /* fallback شعبه */ }',
+    executor: "journalEntryReverse",
+  },
+  "fiscal.year.create": {
+    type: "fiscal.year.create",
+    endpoint: "/api/ledger/fiscal-years",
+    method: "POST",
+    label: "ساخت سال مالی با ۱۲ دورهٔ ماه‌بندی‌شده — تقویم حسابداری، نه ثبت دفتری",
+    payloadHint: '{ jy: number /* سال جلالی — مثل ۱۴۰۴ */ }',
+    executor: "fiscalYearCreate",
+  },
+  "fiscal.period.set_status": {
+    type: "fiscal.period.set_status",
+    endpoint: "/api/ledger/fiscal-periods/[id]",
+    method: "PATCH",
+    label: "تنظیم وضعیت دورهٔ مالی — open/soft_closed/locked؛ بازکردن دورهٔ بسته، ثبت را دوباره در آن دوره آزاد می‌کند",
+    payloadHint: '{ periodId: string, status: "open"|"soft_closed"|"locked" }',
+    executor: "fiscalPeriodSetStatus",
+  },
+  "fiscal.year.close": {
+    type: "fiscal.year.close",
+    endpoint: "/api/ledger/fiscal-years/[id]/close",
+    method: "POST",
+    label: "قفل‌کردن نهایی یک سال مالی — سندهای اختتامیه را زیر قفل سال می‌سازد و برگشت آن فقط از کنسول مدیریت است",
+    payloadHint: '{ fiscalYearId: string }',
+    executor: "fiscalYearClose",
+  },
+  "reconciliation.line.clear": {
+    type: "reconciliation.line.clear",
+    endpoint: "/api/ledger/reconciliations/[id]/lines",
+    method: "PATCH",
+    label: "علامت‌زدن/برداشتن علامت سطرهای دفتر روی مغایرت‌گیری در جریان — تک‌سطری یا دسته‌ای؛ دستهٔ بدشکل کامل رد می‌شود",
+    payloadHint:
+      '{ reconciliationId: string, cleared: boolean, journalLineId?: string, journalLineIds?: string[] /* دسته‌ای سقف MAX_RECONCILIATION_LINE_BATCH */ }',
+    executor: "reconciliationLineClear",
+  },
+  "payroll.settings.update": {
+    type: "payroll.settings.update",
+    endpoint: "/api/ledger/payroll/settings",
+    method: "PUT",
+    label: "به‌روزرسانی تنظیمات حقوق — مبنای محاسبهٔ ماه‌های آینده است",
+    payloadHint: '{ settings: { ...same payroll settings JSON the screen sends... } }',
+    executor: "payrollSettingsUpdate",
+  },
+  "payroll.staff.terms": {
+    type: "payroll.staff.terms",
+    endpoint: "/api/ledger/payroll/staff/[id]",
+    method: "PATCH",
+    label: "تغییر شرایط پرداخت یک پرسنل — حقوق ماهانه/کمک‌هزینه/کسور ثابت (ریال صحیح)",
+    payloadHint:
+      '{ userId: string, terms: { monthlyWage?: number|null, taxableAllowance?: number, nonTaxableAllowance?: number, fixedDeduction?: number } /* حداقل یک ترم */ }',
+    executor: "payrollStaffTerms",
+  },
+  "fixed-asset.set_acquisition": {
+    type: "fixed-asset.set_acquisition",
+    endpoint: "/api/ledger/fixed-assets/[id]",
+    method: "PATCH",
+    label: "اتصال منشأ تملیک دارایی ثابت — لینک تأمین (خرید) به سند",
+    payloadHint: '{ fixedAssetId: string, acquisitionSource: string, acquisitionEntryId?: string|null }',
+    executor: "fixedAssetSetAcquisition",
+  },
+  "account.delete": {
+    type: "account.delete",
+    endpoint: "/api/ledger/accounts/[id]",
+    method: "DELETE",
+    label: "حذف حساب از دفتر — سرویس برای حسابِ به‌کاررفته (سند خورده/پیش‌نویس/فرزند/حساب‌های شناخته‌شده) خودداری می‌کند",
+    payloadHint: '{ accountId: string }',
+    executor: "accountDelete",
+  },
+  "media.collection.create": {
+    type: "media.collection.create",
+    endpoint: "/api/media/collections",
+    method: "POST",
+    label: "ساخت مجموعهٔ رسانه — فقط یک گروه‌بندی، هیچ فایلی جا‌به‌جا نمی‌شود",
+    payloadHint: '{ name: string, description?: string }',
+    executor: "mediaCollectionCreate",
+  },
+  "media.collection.rename": {
+    type: "media.collection.rename",
+    endpoint: "/api/media/collections/[id]",
+    method: "PATCH",
+    label: "تغییر نام/توضیح یک مجموعهٔ رسانه",
+    payloadHint: '{ collectionId: string, name: string, description?: string }',
+    executor: "mediaCollectionRename",
+  },
+  "media.collection.delete": {
+    type: "media.collection.delete",
+    endpoint: "/api/media/collections/[id]",
+    method: "DELETE",
+    label: "حذف مجموعه — خود فایل‌ها دست‌نخورده می‌مانند",
+    payloadHint: '{ collectionId: string }',
+    executor: "mediaCollectionDelete",
+  },
+  "media.asset.set_collection": {
+    type: "media.asset.set_collection",
+    endpoint: "/api/media/collections/[id]/items",
+    method: "POST",
+    label: "افزودن/حذف یک فایل به/از یک مجموعهٔ رسانه",
+    payloadHint: '{ assetId: string, collectionId: string, action: "add"|"remove" }',
+    executor: "mediaAssetSetCollection",
+  },
+  "media.asset.trash": {
+    type: "media.asset.trash",
+    endpoint: "/api/media/[id]",
+    method: "DELETE",
+    label: "فرستادن فایل به سطل‌زبالهٔ رسانه — بازیابی‌پذیر است؛ روی منو/سایت از نمایش می‌افتد",
+    payloadHint: '{ assetId: string }',
+    executor: "mediaAssetTrash",
+  },
+  "media.asset.restore": {
+    type: "media.asset.restore",
+    endpoint: "/api/media/[id]/restore",
+    method: "POST",
+    label: "بازیابی فایل از سطل‌زبالهٔ رسانه",
+    payloadHint: '{ assetId: string }',
+    executor: "mediaAssetRestore",
+  },
+  "product.attribute.create": {
+    type: "product.attribute.create",
+    endpoint: "/api/products/attributes",
+    method: "POST",
+    label: "ساخت ویژگی کالا با گزینه‌هایش (مثل رنگ: قرمز، آبی)",
+    payloadHint: '{ name: string, options: string[], isActive?: boolean, locationId?: string }',
+    executor: "productAttributeCreate",
+  },
+  "barcode.template.create": {
+    type: "barcode.template.create",
+    endpoint: "/api/products/barcode-templates",
+    method: "POST",
+    label: "ساخت قالب بارکد وزنی — پیشوند دو رقمی + واحد وزن",
+    payloadHint: '{ prefix: string /* دو رقم */, weightUnit: "kilograms"|"grams", locationId?: string }',
+    executor: "barcodeTemplateCreate",
+  },
+  "website.order.status": {
+    type: "website.order.status",
+    endpoint: "/api/cms/website/orders/[id]",
+    method: "PATCH",
+    label: "تغییر وضعیت سفارش سایت (pending/paid/cancelled/refunded) — تغییری مالیِ رو در رو به مشتری؛ سایت قلاب‌های خودش را برای موجودی اجرا می‌کند",
+    payloadHint: '{ orderId: string, status: "pending"|"paid"|"cancelled"|"refunded" }',
+    executor: "websiteOrderStatus",
+  },
+  "sales.invoice.void": {
+    type: "sales.invoice.void",
+    endpoint: "/api/sales/invoices/[id]/void",
+    method: "POST",
+    label: "ابطال فاکتور خرده‌فروشی تسویه‌شده — برگشت ثبت‌های حسابداری، موجودی و امتیاز مشتری؛ نیازمند دلیل و تأیید انسان",
+    payloadHint:
+      '{ invoiceId: string, reason: string /* حداقل ۳ و حداکثر ۵۰۰ نویسه — الزامی */, locationId?: string }',
+    executor: "retailInvoiceVoid",
+  },
+  "priceList.quick_update": {
+    type: "priceList.quick_update",
+    endpoint: "/api/products/price-lists/quick-update",
+    method: "POST",
+    label: "افزایش/کاهش انبوه قیمت — درصدی یا مبلغی، با گردکردن اختیاری؛ دقیقاً ستونِ «به‌روزرسانی سریع»",
+    payloadHint:
+      '{ target: { kind: "sale"|"purchase" } | { kind: "list", priceListId: string }, mode: "percent"|"amount", value: number, round: boolean /* گرد به هزار تومان */, itemIds?: string[] /* خالی = همهٔ اقلام شعبه */ }',
+    executor: "priceListQuickUpdate",
+  },
+  "transfer.create": {
+    type: "transfer.create",
+    endpoint: "/api/inventory/transfers",
+    method: "POST",
+    label: "ساخت پیش‌نویس انتقال بین شعب — ارسال/دریافت/لغو بعداً با transfer.ship/receive/cancel",
+    payloadHint:
+      '{ destinationLocationId: string /* شعبهٔ مقصد — مبدأ از locationId یا شعبهٔ فعال */, lines: [{ sourceInventoryItemId, destinationInventoryItemId, quantity: string }], note?: string, idempotencyKey: string /* لازم — کلید تکرارناپذیری */, locationId?: string /* شعبهٔ مبدأ اگر پین متفاوت است */ }',
+    executor: "transferCreate",
+  },
+  "transfer.ship": {
+    type: "transfer.ship",
+    endpoint: "/api/inventory/transfers/[id]/ship",
+    method: "POST",
+    label: "ارسال انتقال — خروج موجودی از مبدأ با قیمت‌گذاری دقیق",
+    payloadHint: "{ transferId: string /* از list_inventory_transfers — وضعیت باید draft باشد */ }",
+    executor: "transferShip",
+  },
+  "transfer.receive": {
+    type: "transfer.receive",
+    endpoint: "/api/inventory/transfers/[id]/receive",
+    method: "POST",
+    label: "دریافت انتقال — ورود موجودی به مقصد با هزینهٔ حملت‌همسلسله",
+    payloadHint: "{ transferId: string /* وضعیت باید shipped باشد */ }",
+    executor: "transferReceive",
+  },
+  "transfer.cancel": {
+    type: "transfer.cancel",
+    endpoint: "/api/inventory/transfers/[id]/cancel",
+    method: "POST",
+    label: "لغو انتقال — دریافت‌شده فقط با انتقال برگشتی، مثل هشدار صفحه",
+    payloadHint: "{ transferId: string /* draft یا shipped — received لغو نمی‌شود */ }",
+    executor: "transferCancel",
+  },
+  "warehouseDocument.create": {
+    type: "warehouseDocument.create",
+    endpoint: "/api/inventory/warehouse-documents",
+    method: "POST",
+    label: "ثبت حوالهٔ انبار (رسید/صدور) — بلافاصله پست می‌شود مثل دکمهٔ صفحه",
+    payloadHint:
+      '{ kind: "receipt"|"issue", locationId?: string /* شعبهٔ پین‌شده اگر نیاد */, supplierId?: string, recipient?: string, documentNumber?: string, note?: string, lines: [{ inventoryItemId, quantity: string, unitCost?: string /* فقط رسید — ریال به‌صورت متن */ }] }',
+    executor: "warehouseDocumentCreate",
+  },
+  "crm.case.save": {
+    type: "crm.case.save",
+    endpoint: "/api/crm/cases",
+    method: "POST",
+    label: "ثبت یا ویرایش پروندهٔ پشتیبانی — با id ویرایش می‌شود، مثل فرم صفحهٔ پرونده‌ها",
+    payloadHint:
+      '{ id?: string, subject: string /* لازم */, body?: string, customerId?: string|null, status?: "open"|"in_progress"|"waiting"|"resolved"|"closed", priority?: "low"|"normal"|"high"|"urgent", category?: string, orderId?: string|null, assigneeUserId?: string|null, assignedTo?: string, resolution?: string }',
+    executor: "crmCaseSave",
+  },
+  "crm.case.set_status": {
+    type: "crm.case.set_status",
+    endpoint: "/api/crm/cases/[id]/status",
+    method: "POST",
+    label: "تغییر وضعیت پرونده — ساعت SLA و اولین پاسخ دقیقاً مثل صفحه ثبت می‌شوند",
+    payloadHint:
+      '{ caseId: string /* از list_crm_cases */, status: "open"|"in_progress"|"waiting"|"resolved"|"closed", comment?: string, isInternal?: boolean /* یادداشت داخلی، نه پاسخ مشتری */ }',
+    executor: "crmCaseSetStatus",
+  },
+  "crm.activity.create": {
+    type: "crm.activity.create",
+    endpoint: "/api/crm/activities",
+    method: "POST",
+    label: "ثبت فعالیت CRM — تماس، جلسه، پیام، یادداشت، کار، بازدید",
+    payloadHint:
+      '{ kind: "call"|"meeting"|"message"|"note"|"task"|"visit", subject: string /* لازم */, body?: string, dueAt?: string|null, customerId?: string|null, dealId?: string|null, caseId?: string|null, assigneeUserId?: string|null, assignedTo?: string, completed?: boolean }',
+    executor: "crmActivityCreate",
+  },
+  "crm.activity.update": {
+    type: "crm.activity.update",
+    endpoint: "/api/crm/activities/[id]",
+    method: "PATCH",
+    label: "ویرایش یا تیک‌زدن فعالیت — فقط فیلدهای ارسالی نوشته می‌شوند مثل صفحه",
+    payloadHint:
+      '{ activityId: string /* از list_crm_activities */, kind?, subject?, body?, dueAt?: string|null, assigneeUserId?: string|null, assignedTo?: string, customerId?: string|null, completed?: boolean }',
+    executor: "crmActivityUpdate",
+  },
+  "crm.lead.save": {
+    type: "crm.lead.save",
+    endpoint: "/api/crm/leads",
+    method: "POST",
+    label: "ثبت یا ویرایش سرنخ — با id ویرایش می‌شود، مثل فرم صفحهٔ سرنخ‌ها",
+    payloadHint:
+      '{ id?: string, name: string /* لازم */, phone?: string, email?: string, organization?: string, source?: string, sourceDetail?: string, status?: "new"|"contacted"|"working"|"qualified"|"unqualified"|"converted", rating?: "hot"|"warm"|"cold", ownerUserId?: string, ownerName?: string, notes?: string, nextAction?: string, nextActionAt?: string, qualificationReason?: string, disqualificationReason?: string, utm?: object }',
+    executor: "crmLeadSave",
+  },
+  "crm.deal.save": {
+    type: "crm.deal.save",
+    endpoint: "/api/crm/deals",
+    method: "POST",
+    label: "ثبت یا ویرایش معامده — با id ویرایش می‌شود، مثل فرم کانبان",
+    payloadHint:
+      '{ id?: string, title: string /* لازم */, customerId?: string|null, stageId?: string /* از list_crm_pipelines */, valueRial?: number, probability?: number|null, expectedCloseDate?: string|null, ownerUserId?: string, ownerUser?: string, source?: string, lostReason?: string|null, orderId?: string|null, description?: string }',
+    executor: "crmDealSave",
+  },
+  "crm.deal.move_stage": {
+    type: "crm.deal.move_stage",
+    endpoint: "/api/crm/deals/[id]/stage",
+    method: "POST",
+    label: "جابه‌جایی معامده بین مراحل قیف — همان درگ کانبان با تاریخچهٔ مرحله",
+    payloadHint:
+      '{ dealId: string /* از list_crm_deals */, stageId: string /* از list_crm_pipelines */, note?: string, lostReason?: string /* برای مرحلهٔ باخته */, wonReason?: string /* برای مرحلهٔ برده */ }',
+    executor: "crmDealMoveStage",
+  },
+  "crm.pipeline.create": {
+    type: "crm.pipeline.create",
+    endpoint: "/api/crm/pipelines",
+    method: "POST",
+    label: "ساخت قیف فروش تازه — مثل پنل تنظیمات CRM",
+    payloadHint: '{ name: string /* لازم و یکتا */, description?: string, isDefault?: boolean }',
+    executor: "crmPipelineCreate",
+  },
+  "crm.pipeline.update": {
+    type: "crm.pipeline.update",
+    endpoint: "/api/crm/pipelines/[id]",
+    method: "PATCH",
+    label: "ویرایش یا بایگانی قیف — مثل پنل تنظیمات CRM",
+    payloadHint: '{ pipelineId: string /* از list_crm_pipelines */, name?: string, description?: string, isDefault?: boolean, archived?: boolean }',
+    executor: "crmPipelineUpdate",
+  },
+  "report.saved.create": {
+    type: "report.saved.create",
+    endpoint: "/api/reports/saved",
+    method: "POST",
+    label: "ذخیرهٔ گزارش سفارشی — با همان اعتبارسنجِ صفحهٔ گزارش‌ها",
+    payloadHint:
+      '{ name: string, config: { view: string, metric: string, aggregation: "sum"|"avg"|"count"|"min"|"max", dimension: string, filters?: {...}, sort?: {...}, limit?: number } } — view/metric/dimension باید از مجموعهٔ وایت‌لیست گزارش‌ساز باشند؛ غلط = همان خطای صفحه',
+    executor: "reportSavedCreate",
+  },
+  "report.saved.update": {
+    type: "report.saved.update",
+    endpoint: "/api/reports/saved/[id]",
+    method: "PATCH",
+    label: "ویرایش نام یا پیکربندی یک گزارش ذخیره‌شده — با همان اعتبارسنج صفحه",
+    payloadHint: "{ savedReportId: string, name?: string, config?: { view, metric, aggregation, dimension, filters?, sort?, limit? } }",
+    executor: "reportSavedUpdate",
+  },
+  "report.saved.delete": {
+    type: "report.saved.delete",
+    endpoint: "/api/reports/saved/[id]",
+    method: "DELETE",
+    label: "حذف یک گزارش ذخیره‌شده",
+    payloadHint: "{ savedReportId: string /* از list_saved_reports */ }",
+    executor: "reportSavedDelete",
+  },
+  "supplier.return.create": {
+    type: "supplier.return.create",
+    endpoint: "/api/inventory/supplier-returns",
+    method: "POST",
+    label: "برگشت خرید به تأمین‌کننده — کاهش موجودی + ثبت تسویه",
+    payloadHint:
+      '{ locationId?: string, purchaseId: string /* از list_purchases */, settlementMethod: "accounts_payable"|"cash"|"bank"|"supplier_receivable", reason: string, idempotencyKey: string /* کلید ایمن تکرار */, lines: [{ purchaseItemId: string, inventoryLotId?: string|null, quantity: string /* مثبت */ }] }',
+    executor: "supplierReturnCreate",
+  },
+  "promotion.upsert": {
+    type: "promotion.upsert",
+    endpoint: "/api/promotions",
+    method: "POST",
+    label: "ایجاد/ویرایش ترفیج — قیمت‌های صندوق را تغییر می‌دهد",
+    payloadHint:
+      '{ promotionId?: string /* وقتی ویرایش است */, name: string, kind: "percent"|"amount"|"bundle_price"|"buy_x_get_y", value: number, minQuantity?: number, itemIds?: string[], activeFrom?: string, activeTo?: string, daysOfWeek?: number[], timeFrom?: string, timeTo?: string, isActive?: boolean }',
+    executor: "promotionUpsert",
+  },
+  "promotion.toggle": {
+    type: "promotion.toggle",
+    endpoint: "/api/promotions",
+    method: "PATCH",
+    label: "فعال/غیرفعال کردن ترفیج",
+    payloadHint: "{ promotionId: string /* از list_promotions */, isActive: boolean }",
+    executor: "promotionToggle",
+  },
+  "gift_card.issue": {
+    type: "gift_card.issue",
+    endpoint: "/api/promotions/gift-cards",
+    method: "POST",
+    label: "صدور کارت هدیه — ارزشش به عنوان بدهی (2420) ثبت می‌شود",
+    payloadHint:
+      "{ locationId?: string /* شعبهٔ صدور؛ خالی یعنی پیش‌فرض connection */, code: string /* کد منحصربه‌فرد کارت */, initialValue: number /* ریال، مثبت */ }",
+    executor: "giftCardIssue",
+  },
+  "branch.create": {
+    type: "branch.create",
+    endpoint: "/api/branches",
+    method: "POST",
+    label: "ایجاد شعبهٔ تازه",
+    payloadHint:
+      "{ name: string, address?: string, phone?: string, timezone?: string /* IANA name, خالی یعنی تهران */, color?: string, copyMenuFromLocationId?: string /* منوی آن شعبه را می‌گیرد */ }",
+    executor: "branchCreate",
+  },
+  "branch.update": {
+    type: "branch.update",
+    endpoint: "/api/branches/[id]",
+    method: "PATCH",
+    label: "ویرایش نام/نشانی/تلفن/منطقهٔ زمانی شعبه",
+    payloadHint: "{ branchId: string /* از list_branches */, name?: string, address?: string, phone?: string, timezone?: string, color?: string }",
+    executor: "branchUpdate",
+  },
+  "branch.lifecycle": {
+    type: "branch.lifecycle",
+    endpoint: "/api/branches/[id]",
+    method: "PATCH",
+    label: "فعال/غیرفعال‌کردن شعبه",
+    payloadHint: '{ branchId: string, action: "deactivate"|"reactivate" } — غیرفعال‌کردن شعبه، گزارش‌های روزانهٔش را متوقف می‌کند؛ برمی‌گرداندنش برعکس',
+    executor: "branchLifecycle",
+  },
+  "crm.note.delete": {
+    type: "crm.note.delete",
+    endpoint: "/api/crm/customers/[id]/notes",
+    method: "DELETE",
+    label: "حذف یادداشت مشتری",
+    payloadHint: "{ noteId: string /* از list_customer_notes */, customerId?: string /* گار نمایهٔ یادداشت — بخش ویرگی */ }",
+    executor: "crmNoteDelete",
+  },
+  "crm.note.pin": {
+    type: "crm.note.pin",
+    endpoint: "/api/crm/customers/[id]/notes",
+    method: "PATCH",
+    label: "سنجاق/برداشتن سنجاق یادداشت",
+    payloadHint: "{ noteId: string /* از list_customer_notes */, pinned: boolean, customerId?: string }",
+    executor: "crmNotePin",
+  },
+  "crm.segment.create": {
+    type: "crm.segment.create",
+    endpoint: "/api/crm/segments",
+    method: "POST",
+    label: "ساخت بخش‌بندی مشتریان",
+    payloadHint: "{ name: string, description?: string, definition: { all?: [], any?: [] } /* قوانین بخش‌بندی از list_customer_segments ببینید */ }",
+    executor: "crmSegmentCreate",
+  },
+  "crm.segment.update": {
+    type: "crm.segment.update",
+    endpoint: "/api/crm/segments/[id]",
+    method: "PATCH",
+    label: "ویرایش بخش‌بندی (نام/توضیح/قواعد)",
+    payloadHint: "{ segmentId: string /* از list_customer_segments */, name?: string, description?: string, definition?: {...} }",
+    executor: "crmSegmentUpdate",
+  },
+  "crm.segment.archive": {
+    type: "crm.segment.archive",
+    endpoint: "/api/crm/segments/[id]",
+    method: "DELETE",
+    label: "بایگانی بخش‌بندی مشتریان",
+    payloadHint: "{ segmentId: string /* از list_customer_segments */ }",
+    executor: "crmSegmentArchive",
+  },
+  "crm.automation.toggle": {
+    type: "crm.automation.toggle",
+    endpoint: "/api/crm/automations/[id]",
+    method: "PATCH",
+    label: "فعال/غیرفعال‌کردن رُبات اتوماسیون CRM — روی همه مشتریان اثر دارد",
+    payloadHint: "{ automationId: string /* از list_crm_automations */, isActive: boolean }",
+    executor: "crmAutomationToggle",
+  },
   "ar.receipt.record": {
     type: "ar.receipt.record",
     endpoint: "/api/ledger/ar/receipts",
     method: "POST",
     label: "ثبت دریافت از مشتری",
     payloadHint:
-      '{ customerId: string /* از find_customers */, method: "cash"|"bank"|"clearing", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد. کلید idempotency را نفرست؛ خودکار افزوده می‌شود',
+      '{ customerId: string /* از find_customers */, method: "cash"|"bank"|"clearing", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, cashAccountId?: string, bankReference?: string, locationId?: string, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد. کلید idempotency را نفرست؛ خودکار افزوده می‌شود',
+    executor: "arReceiptRecord",
     alwaysConfirm: true,
     needsIdempotencyKey: true,
   },
@@ -1324,6 +4249,186 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       "فاکتورهای باز به تأمین‌کنندگان (بدون تاریخ سررسید ثبت‌شده)، مرتب‌شده بر اساس قدمت برای اولویت پرداخت.",
     ),
     noArgsTool("get_unreconciled_bank_lines", "ردیف‌های دفتر (نقد و بانک در جریان) که هنوز در هیچ مغایرت‌گیری تطبیق نشده‌اند."),
+    {
+      type: "function",
+      function: {
+        name: "list_accounts",
+        description:
+          "دفتر کامل سرفصل‌های حسابداری (کد، نام، نوع حساب دارایی/بدهی/…، والد و فعال/غیرفعال). برای پیدا کردن سرفصل از روی نام یا کد همیشه اول این را صدا بزن.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string", description: "بخشی از نام یا کد سرفصل، اختیاری" },
+            accountType: {
+              type: "string",
+              enum: ["asset", "liability", "equity", "revenue", "expense"],
+              description: "نقش حساب، اختیاری",
+            },
+            includeInactive: { type: "boolean", description: "پیش‌فرض false — غیرفعال‌ها هم آورده شوند" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_journal_entries",
+        description:
+          "اسناد ثبت‌شدهٔ دفتر روزنامه با فیلتر. بعد از صدا زدن run_report یا قبل از بررسی یک سند خاص، از این استفاده کن. صفحه‌بندی با cursor.",
+        parameters: {
+          type: "object",
+          properties: {
+            dateFrom: { type: "string", description: "از تاریخ (ISO)، اختیاری — بازه محدود نگه دار" },
+            dateTo: { type: "string", description: "تا تاریخ (ISO)" },
+            sourceType: { type: "string", description: "نوع منبع سند، مثل sale/expense/purchase/receipt/payment/payroll/manual" },
+            q: { type: "string", description: "جست‌وجو در شرح سند، نام ثبت‌کننده، کد یا نام سرفصل" },
+            accountId: { type: "string", description: "فقط اسنادی که این سرفصل را درگیر کرده‌اند" },
+            entryKind: { type: "string", enum: ["any", "manual", "system"], description: "سیستمی یا دستی" },
+            reversalState: { type: "string", enum: ["any", "none", "reversal", "reversed"], description: "وضعیت برگشت" },
+            limit: { type: "number", description: "حداکثر ردیف (۱ تا ۱۰۰)، پیش‌فرض ۵۰" },
+            cursor: { type: "string", description: "nextCursorٔ پاسخ قبلی برای صفحهٔ بعد" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_manual_journal_drafts",
+        description: "پیش‌نویس‌های سند دستی در انتظار بررسی — دستهٔ ثبت‌کننده و تأییدکننده را با هم برمی‌گرداند.",
+        parameters: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_expenses",
+        description: "دفتر هزینه‌ها با فیلتر تاریخ، وضعیت ثبت (در انتظار/ثبت‌شده/برگشت‌خورده) و جست‌وجو. صفحه‌بندی با cursor.",
+        parameters: {
+          type: "object",
+          properties: {
+            dateFrom: { type: "string", description: "از تاریخ (ISO)" },
+            dateTo: { type: "string", description: "تا تاریخ (ISO)" },
+            status: { type: "string", enum: ["recorded", "pending", "reversed"] },
+            accountId: { type: "string", description: "سرفصل هزینه، اختیاری" },
+            q: { type: "string" },
+            limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            cursor: { type: "string", description: "nextCursorٔ پاسخ قبلی" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_expense",
+        description: "جزئیات کامل یک هزینه + خطوط سندی که زده (اگر ثبت شده باشد).",
+        parameters: {
+          type: "object",
+          properties: { expenseId: { type: "string", description: "شناسهٔ هزینه (از list_expenses)" } },
+          required: ["expenseId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_receipts",
+        description: "حواله‌های دریافتی از طرف‌ها (مشتری/تأمین‌کننده) به ترتیب جدیدترین. صفحه‌بندی با limit.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string", description: "نام طرف، مبلغ یا شرح" },
+            limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_payments",
+        description: "حواله‌های پرداختنی به طرف‌ها. صفحه‌بندی با limit.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string" },
+            limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_cheques",
+        description:
+          "چک‌ها به تفکیک جهت (دریافتنی/پرداختنی)، هر جهت به ترتیب تاریخ سررسید با چک‌های زنده (در انتظار/در وضعیت پیگیری) در ابتدای فهرست.",
+        parameters: {
+          type: "object",
+          properties: {
+            direction: { type: "string", enum: ["receivable", "payable"], description: "دریافتنی=receivable، پرداختنی=payable، اختیاری" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    noArgsTool("list_fixed_assets", "فهرست دارایی‌های ثابت فعال با تاریخ خرید و مبلغ بهای تمام‌شده."),
+    {
+      type: "function",
+      function: {
+        name: "list_installment_plans",
+        description: "اقساط باز یا تسویه‌شدهٔ فروش/خرید با تاریخ بعدی و ماندهٔ هر امور.",
+        parameters: {
+          type: "object",
+          properties: {
+            direction: { type: "string", enum: ["receivable", "payable"], description: "receivable=اقساط فروش به مشتری، payable=اقساط خرید از تأمین‌کننده" },
+            status: { type: "string", enum: ["open", "settled", "overdue", "all"] },
+            q: { type: "string", description: "نام مشتری یا تأمین‌کننده" },
+          },
+          required: ["direction"],
+          additionalProperties: false,
+        },
+      },
+    },
+    noArgsTool("list_fiscal_years", "سال‌های مالی با وضعیت فراز/نویسه و تاریخ شروع و پایان هرکدام."),
+    {
+      type: "function",
+      function: {
+        name: "list_payroll_runs",
+        description: "اجراهای حقوق و دستمزد با تاریخ/وضعیت (آماده/پرداخت‌شده/برگشتی). برای یک اجرأ خاص از روی شناخته‌شده از pay run IDs.",
+        parameters: {
+          type: "object",
+          properties: { limit: { type: "number", description: "۱ تا ۱۲ اجرای اخیر، پیش‌فرض ۶" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    noArgsTool("list_payroll_advances", "مساعده‌های باز هر کارمند با مبلغ و تاریخ ثبت."),
+    {
+      type: "function",
+      function: {
+        name: "list_reconciliations",
+        description: "فهرست مغایرت‌گیری‌های صورتحساب بانکی (راه‌اندازی‌هاشده، شرو‌ع‌شده یا کامل‌شده) به تفکیک حساب تطبیق‌پذیر.",
+        parameters: {
+          type: "object",
+          properties: {
+            accountCode: { type: "string", description: "کد حساب تطبیق‌پذیر؛ خالی یعنی همهٔ حساب‌ها" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
     noArgsTool("get_payroll_summary", "خلاصه اجراهای اخیر حقوق و دستمزد و مجموع حقوق ماهانه کارکنان فعال."),
     dateRangeTool("get_vat_liability", "مالیات بر ارزش افزوده فروش در برابر خرید و وضعیت بدهی خالص برای یک بازه."),
     dateRangeTool(
@@ -1454,6 +4559,231 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       "get_website_status",
       "فرادادهٔ اتصال وب‌سایت و صف همگام‌سازی کل کسب‌وکار: اتصال، دامنه، آخرین آزمایش، کلیدهای ارسال قیمت و موجودی و شمار صف؛ گزارش شعبه‌ای نیست.",
     ),
+    {
+      type: "function",
+      function: {
+        name: "list_cms_pages",
+        description:
+          "برگه‌های سایت با وضعیت (منتشرشده/پیش‌نویس) — انتشار عمداً از MCP بیرون است؛ شناسهٔ برگه برای استناد.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: { type: "number", description: "پیش‌فرض ۵۰، سقف ۱۰۰" },
+            page: { type: "number", description: "شمارهٔ صفحه — از ۱" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_cms_media",
+        description:
+          "رسانه‌های کتابخانهٔ سایت — نشانی و ابعاد برای featuredImageId در دفتر/به‌روزرسانی نوشته؛ بارگذاری بایت عمداً از MCP بیرون است.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: { type: "number", description: "پیش‌فرض ۲۴، سقف ۱۰۰" },
+            page: { type: "number", description: "شمارهٔ صفحه — از ۱" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_sales_invoices",
+        description:
+          "فاکتورهای خرده‌فروشی شعبهٔ فعال — جستجو با شمارهٔ فاکتور، فیلتر وضعیت (completed|voided)، روش تسویه (cash|bank|credit)، بازهٔ تاریخ ISO، فقط فاکتورهای واجد نصب اقساط، صفحه‌بندی. ثبت فاکتور جدید فقط از صندوق؛ بطلان از طریق فعل sales.invoice.void با تأیید انسان.",
+        parameters: {
+          type: "object",
+          properties: {
+            q: { type: "string", description: "شمارهٔ فاکتور یا ارقام فارسی — نرمال می‌شود" },
+            method: { type: "string", enum: ["cash", "bank", "credit"] },
+            status: { type: "string", enum: ["completed", "voided"] },
+            dateFrom: { type: "string", description: "YYYY-MM-DD" },
+            dateTo: { type: "string", description: "YYYY-MM-DD" },
+            installmentEligible: { type: "boolean", description: "فقط فاکتورهای واجد نصب اقساط" },
+            page: { type: "number" },
+            pageSize: { type: "number", description: "پیش‌فرض ۲۰، سقف ۱۰۰" },
+            locationId: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_sales_invoice",
+        description: "جزئیات کامل یک فاکتور: اقلام، نحوهٔ تسویه، مشتری و وضعیت بطلان.",
+        parameters: {
+          type: "object",
+          properties: {
+            invoiceId: { type: "string" },
+            locationId: { type: "string" },
+          },
+          required: ["invoiceId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_media_collections",
+        description: "مجموعه‌های رسانه با شمارش فایل — برای دسته‌بندی کتابخانهٔ رسانه.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_media_folders",
+        description: "پوشه‌های کتابخانهٔ رسانه با شمارش فایل.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_fiscal_readiness",
+        description:
+          "آمادگی بستن سال مالی — مانده‌های باز حساب‌های موقت، دوره‌های قفل‌نشده و گام‌های لازم پیش از fiscal.year.close.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_account_statement",
+        description:
+          "صورت‌حساب یک حساب از دفتر — ماهیت مدیون/بستانکار، ماندهٔ افتتاح، سطرهای حرکت و ماندهٔ پایان در بازهٔ ISO.",
+        parameters: {
+          type: "object",
+          properties: {
+            accountId: { type: "string", description: "شناسهٔ حساب — از list_accounts" },
+            dateFrom: { type: "string", description: "YYYY-MM-DD — اختیاری" },
+            dateTo: { type: "string", description: "YYYY-MM-DD — اختیاری" },
+          },
+          required: ["accountId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_audit_log",
+        description:
+          "دفتر رویداد کسب‌وکار — چه کسی چه کرد (forcement log)؛ فیلتر موجودیت، عمل، عامل، یا موجودیت id؛ صفحه‌بندی مکان‌نما با before.",
+        parameters: {
+          type: "object",
+          properties: {
+            entity: { type: "string", description: "نام موجودیت — مثل order یا party" },
+            entityId: { type: "string" },
+            actorId: { type: "string", description: "شناسهٔ کاربر عامل" },
+            action: { type: "string", description: "نام عمل — مثل create یا update" },
+            before: { type: "number", description: "مکان‌نمای صفحه — کوچکتر از این id" },
+            limit: { type: "number", description: "پیش‌فرض ۵۰، سقف ۲۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_product_attributes",
+        description: "ویژگی‌های کالا (رنگ/برند/…) با گزینه‌هایشان در شعبهٔ فعال.",
+        parameters: {
+          type: "object",
+          properties: { locationId: { type: "string" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_barcode_templates",
+        description: "قالب‌های بارکد وزنی شعبه — پیشوند و واحد وزن هر قالب.",
+        parameters: {
+          type: "object",
+          properties: { locationId: { type: "string" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_kb_catalogue",
+        description: "فهرست راهنمای محصول: دسته‌ها و نوشته‌ها با slug — برای اشارهٔ دقیق به یک راهنما (پس از این می‌توانی با search_kb_articles متن را بیابی).",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_website_dns",
+        description: "وضعیت DNS دامنهٔ سایت — رکوردها، nameserverها و تأیید (برای «چرا دامنه‌ام وصل نشد؟»).",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_website_cdn",
+        description: "وضعیت CDN سایت — حالت کش و آمار پس‌زدگی/دفع.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_wp_queue",
+        description:
+          "صف همگام‌سازی ووکامرس — رویدادهای خروجی (موجودی/قیمت/محصول/سفارش) در حالت pending/failed/dead و ورودی‌های شکست‌خورده؛ فایل یک اتصال مشخص یا اتصال واحد فعال.",
+        parameters: {
+          type: "object",
+          properties: {
+            connectionId: { type: "string", description: "اگر بیش از یک فروشگاه وصل است، الزامی" },
+            status: { type: "string", description: "پیش‌فرض open" },
+            direction: { type: "string", enum: ["out", "in", "all"] },
+            search: { type: "string" },
+            limit: { type: "number", description: "پیش‌فرض ۲۵، سقف ۵۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_wp_queue_summary",
+        description: "شمارش‌های خلاصهٔ صف ووکامرس برای همان اتصال.",
+        parameters: {
+          type: "object",
+          properties: { connectionId: { type: "string" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_wp_overview",
+        description: "داشبورد مدیر ووکامرس: شمارش اتصال‌ها، سطح صف و آخرین رویدادها.",
+        parameters: {
+          type: "object",
+          properties: { connectionId: { type: "string" } },
+          additionalProperties: false,
+        },
+      },
+    },
     // Phase C — the messaging reads that make the two new campaign writes
     // usable: the assistant needs a template id and a segment id before it can
     // propose `messaging.campaign.create`, and campaign status to answer «کمپینم
@@ -1818,6 +5148,877 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
         },
       },
     },
+      {
+        type: "function",
+        function: {
+          name: "list_orders",
+          description:
+            "فهرست سفارش‌های یک شعبه به ترتیب جدیدترین با فیلتر وضعیت. شعبه: خالی یعنی شعبهٔ پیش‌فرض (بدون اتصال محدود‌شده)، یا id شعبهٔ خاص.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+              status: { type: "string", enum: ["open", "held", "completed", "voided"], description: "وضعیت سفارش، اختیاری" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_order",
+          description: "جزئیات کامل یک سفارش: اقلام، مبلغ کل، پرداخت‌ها، میز و وضعیت. شناسه را از list_orders بگیر.",
+          parameters: {
+            type: "object",
+            properties: { orderId: { type: "string", description: "شناسهٔ سفارش" } },
+            required: ["orderId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_shifts",
+          description: "شیفت‌های کارکنان با کارمند/شعبه/وضعیت (باز یا بسته) — همراه خلاصهٔ صندوق هر شیفت.",
+          parameters: {
+            type: "object",
+            properties: {
+              employeeId: { type: "string", description: "دیدن شیفت‌های یک کارمند خاص، اختیاری" },
+              locationId: { type: "string", description: "دیدن شیفت‌های یک شعبه، اختیاری" },
+              status: { type: "string", enum: ["open", "closed"], description: "باز یا بسته، اختیاری" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+              offset: { type: "number", description: "ردیف شروع صفحهٔ بعد، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_menu_tree",
+          description:
+            "درخت کامل منوی یک شعبه: دسته‌ها و آیتم‌ها با قیمت. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال)، یا id شعبه.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_formulas",
+          description:
+            "فرمول‌های تولید (دستور پخت) یک شعبه — منظاب و اجراهای تولید از این فرمول‌ها جداست.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_production_runs",
+          description:
+            "اجراهای تولید یک شعبه به ترتیب جدیدترین. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال).",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_item_barcodes",
+          description: "بارکدهای ضمیمه‌شده به یک کالای انبار. شعبهٔ کالا باید داخل منظاب اتصال باشد.",
+          parameters: {
+            type: "object",
+            properties: {
+              inventoryItemId: { type: "string", description: "شناسهٔ کالای انبار" },
+            },
+            required: ["inventoryItemId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_items_without_barcode",
+          description:
+            "کالاهای انبار یک شعبه که هنوز بارکد قابل‌اسکن ندارند — ورودی کار بارکدچی. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال).",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_customer_notes",
+          description:
+            "یادداشت‌های یک مشتری به ترتیب سنجاق‌دارها اول و بعد تازه‌ترین‌ها.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string", description: "شناسهٔ مشتری (از find_customers)" },
+            },
+            required: ["customerId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_activities",
+          description:
+            "فعالیت‌های CRM (تماس/جلسه/وظیفه) — قابل تنگ‌کردن به مشتری یا سرنخ معامله؛ فقط خواندنی.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string", description: "تنگ به یک مشتری، اختیاری" },
+              openOnly: { type: "boolean", description: "فقط انجام‌نشده‌ها" },
+              completedOnly: { type: "boolean", description: "فقط انجام‌شده‌ها" },
+              limit: { type: "number", description: "۱ تا ۱۰۰، پیش‌فرض ۵۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_automations",
+          description:
+            "ربات‌های اتوماسیون CRM — ماشه (trigger)، اقدام و وضعیت فعالی. اجراهایشان (runs) از این ابزار جداست.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_branches",
+          description:
+            "شعبه‌های فعال کسب‌وکار — شناسه، نام، رنگ و منطقهٔ زمانی؛ مبنای شعبه‌ها برای هر ابزار دیگر.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_team_members",
+          description:
+            "اعضای تیم کسب‌وکار — نام، نقش، وضعیت فعالی و دسترسی شعبه؛ قبل از هر «تغییر فرد» از این ابزار شناسهٔ درست بگیر.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_promotions",
+          description:
+            "تریج‌های فعال کسب‌وکار — نوع (percent/amount/bundle_price/buy_x_get_y)، مقدار و بازهٔ فعالی. غیرفعال‌ها فقط وقتی که صریح درخواست شوند.",
+          parameters: {
+            type: "object",
+            properties: {
+              includeInactive: { type: "boolean", description: "true یعنی غیرفعال‌ها هم بیایند" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_backup_status",
+          description:
+            "وضعیت سلامت بکاپ و تاریخچهٔ آخرین اجراها — health + recent runs، همان کارتِ صفحهٔ تنظیمات بکاپ.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_devices",
+          description:
+            "دستگاه‌های جفت‌شدهٔ تنانت — لیست دستگاه‌ها + شناسهٔ دستگاه جاریِ قابل‌استفاده برای rename/revoke.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_jewelry_items",
+          description:
+            "قلم‌های طلای وزنی تنانت در شعبهٔ جاری — نام، عیار، وزن و موجودی؛ متناظر جدول اقلام در بخش طلا.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_contract",
+          description:
+            "جزئیات یک قرارداد — وضعیت، مبلغ، بازه، میزان قابلیت گذر چرخه برای کاربر جاری.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "شناسهٔ قرارداد" } },
+            required: ["id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_custom_fields",
+          description:
+            "فیلدهای دلخواه CRM گروه‌بندی‌شده بر اساس هدف — با بایگانی‌شده‌ها مگر includeArchived=0.",
+          parameters: {
+            type: "object",
+            properties: {
+              target: { type: "string", enum: ["party", "lead", "deal", "case"], description: "خالی = همهٔ اهداف" },
+              includeArchived: { type: "boolean", description: "پیش‌فرض true" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_cosmetic_items",
+          description:
+            "برد اقلام آرایشی شعبهٔ جاری — خانواده‌ها و تنوع‌ها با موجودی/قیمت/وضعیت بچ؛ فقط برای کسب‌وکارهای آرایشی.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_cosmetic_brands",
+          description:
+            "برندهای آرایشی ثبت‌شده در شعبهٔ جاری — نام، کشور، خط محصول؛ فقط برای کسب‌وکارهای آرایشی.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_accessory_items",
+          description:
+            "برد فروشگاه لوازم‌جانبی شعبهٔ جاری — خانواده‌ها و تنوع‌ها با صفات، موجودی و قیمت؛ فقط کسب‌وکارهای لوازم‌جانبی.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_trade_goods_items",
+          description:
+            "برد کالای عمده/ابزار/خرازی شعبهٔ جاری — industry یکی از wholesale|tools_fittings|haberdashery.",
+          parameters: {
+            type: "object",
+            properties: {
+              industry: {
+                type: "string",
+                enum: ["wholesale", "tools_fittings", "haberdashery"],
+                description: "صنعت موردنظر — فقط برای همان صنعت فعال است",
+              },
+            },
+            required: ["industry"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_data_entities",
+          description:
+            "موجودیت‌های قابل انتقال داده برای این صنعت — کلید، ماژول، فیلدها و فیلدهای پیش‌فرض خروجی؛ متناظر صفحهٔ انتقال داده.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_export_jobs",
+          description:
+            "کارهای خروجی دادهٔ تنانت — اخیرترین‌ها اول؛ entityKey اختیاری برای فیلتر.",
+          parameters: {
+            type: "object",
+            properties: { entityKey: { type: "string", description: "کلید موجودیت — از list_data_entities" } },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_export_job",
+          description: "جزئیات یک کار خروجی بر اساس شناسه — وضعیت، فیلدها، تعداد ردیف.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "شناسهٔ کار خروجی" } },
+            required: ["id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_import_jobs",
+          description: "کارهای درون‌ریزی دادهٔ تنانت — اخیرترین‌ها اول؛ entityKey اختیاری برای فیلتر.",
+          parameters: {
+            type: "object",
+            properties: { entityKey: { type: "string", description: "کلید موجودیت — از list_data_entities" } },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_import_job",
+          description: "جزئیات یک کار درون‌ریزی — وضعیت، شمار ردیف‌ها و خطاها.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "شناسهٔ کار درون‌ریزی" } },
+            required: ["id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_data_schedules",
+          description: "برنامه‌های خروجی دوره‌ای داده — موجودیت، بسامد، اجرای بعدی، وضعیت فعال‌بودن.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_data_templates",
+          description: "قالب‌های انتقال داده — kind=export قالب‌های خروجی، kind=mapping قالب‌های نگاشت ورودی.",
+          parameters: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["export", "mapping"], description: "پیش‌فرض mapping" },
+              entity: { type: "string", description: "کلید موجودیت — اختیاری برای فیلتر" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_gift_card_status",
+          description:
+            "مانده و تاریخچهٔ یک کارت هدیه بر اساس کد — درست مثل جستجوی کارت در صفحهٔ رشد.",
+          parameters: {
+            type: "object",
+            properties: {
+              code: { type: "string", description: "کد کارت هدیه" },
+            },
+            required: ["code"],
+            additionalProperties: false,
+          },
+        },
+      },      {
+        type: "function",
+        function: {
+          name: "list_stock_counts",
+          description:
+            "شمارش‌های انبار یک شعبه به ترتیب جدیدترین — خطوط، کمبود/افزون به ریال. شعبه: خالی یعنی شعبهٔ پیش‌فرض (یا محدودهٔ اتصال).",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه، اختیاری" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_stock_count",
+          description: "جزییات یک شمارش انبار — هر خط با تعداد شماره‌دهی و انحراف.",
+          parameters: {
+            type: "object",
+            properties: {
+              countId: { type: "string", description: "شناسهٔ شمارش — از list_stock_counts" },
+            },
+            required: ["countId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_suppliers",
+          description:
+            "تأمین‌کننده‌های کسب‌وکار با صفحه‌بندی — همانم سرویسی که صفحهٔ اشخاص/تأمین‌کننده ازش می‌خواند.",
+          parameters: {
+            type: "object",
+            properties: {
+              q: { type: "string", description: "جستجو در نام/تلفن" },
+              includeInactive: { type: "boolean" },
+              page: { type: "number", description: "۱-بر، پیش‌فرض ۱" },
+              pageSize: { type: "number", description: "۱ تا ۵۰، پیش‌فرض ۲۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_projects",
+          description:
+            "پروژه‌های فضای کاری کسب‌وکار — وضعیت، اولویت، مالک و تگ‌ها؛ به همان ترتیب ادم‌های فضای کاری می‌بینند.",
+          parameters: {
+            type: "object",
+            properties: {
+              includeArchived: { type: "boolean", description: "true یعنی بایگانی‌شده‌ها هم بیایند" },
+              limit: { type: "number", description: "۱ تا ۲۰۰، پیش‌فرض ۱۰۰" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "search_kb_articles",
+          description:
+            "جستجوی متن‌آزاد در دفترچهٔ راهنما (مرکز دانش) — عناوین و خلاصه‌های مقالهٔ هم‌نام؛ برای «راهنمای فلان صفحه کجاست».",
+          parameters: {
+            type: "object",
+            properties: {
+              q: { type: "string", description: "متن واژهٔ جستجو" },
+              limit: { type: "number", description: "۱ تا ۲۰، پیش‌فرض ۶" },
+            },
+            required: ["q"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_media_assets",
+          description:
+            "کتابخانهٔ رسانهٔ کسب‌وکار — جستجو بر نام/برچسب؛ آخرین بارگذاری‌ها ابتدا. پیوند خواندنیِ هر فایل در خروجی آمده است.",
+          parameters: {
+            type: "object",
+            properties: {
+              search: { type: "string" },
+              kind: { type: "string", description: "نوع رسانه (image/video/document/...)" },
+              limit: { type: "number", description: "۱ تا ۵۰، پیش‌فرض ۱۲" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_media_asset",
+          description:
+            "جزییات یک فایل رسانهٔ کسب‌وکار بر پایهٔ شناسه — نام، نوع، اندازه و سرور میزبان؛ دربارهٔ استفاده‌اش از این ابزار اطلاعات نمی‌دهد.",
+          parameters: {
+            type: "object",
+            properties: {
+              assetId: { type: "string", description: "شناسهٔ فایل — از list_media_assets" },
+            },
+            required: ["assetId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_saved_reports",
+          description:
+            "گزارش‌های ذخیره‌شدهٔ کسب‌وکار — استانداردها و سفارشی‌ها با پیکربندی کامل؛ برای «گزارش فروش را اجراکن» اول نگاه کن آیا وجود دارد.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_deals",
+          description:
+            "معامله‌های CRM با فیلتر مرحله/قیف/مالک/مشتری و بازهٔ مبلغ — کارت‌های کانبان؛ openOnly معامله‌های باز را می‌دهد. شناسه‌ها برای crm.deal.save و crm.deal.move_stage لازم‌اند.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string" },
+              stageId: { type: "string" },
+              pipelineId: { type: "string" },
+              ownerUserId: { type: "string" },
+              openOnly: { type: "boolean" },
+              q: { type: "string", description: "جستجو در عنوان معامده یا نام مشتری" },
+              minValueRial: { type: "number" },
+              maxValueRial: { type: "number" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۲۰۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_leads",
+          description:
+            "سرنخ‌های CRM با فیلتر وضعیت/مالک/امتیاز/منشأ — فهرست صفحهٔ سرنخ‌ها با صفحه‌بندی؛ سرنخ‌های موعددار با dueOnly.",
+          parameters: {
+            type: "object",
+            properties: {
+              status: { type: "string", description: "new|contacted|working|qualified|unqualified|converted یا open" },
+              ownerUserId: { type: "string" },
+              rating: { type: "string", description: "hot|warm|cold" },
+              source: { type: "string" },
+              search: { type: "string" },
+              dueOnly: { type: "boolean", description: "فقط سرنخ‌هایی که اقدام بعدی‌ای به موعد رسیده دارند" },
+              limit: { type: "number", description: "پیش‌فرض ۵۰، سقف ۱۰۰" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_pipelines",
+          description:
+            "قیف‌های فروش با مراحلشان — شناسهٔ مرحله برای crm.deal.save و crm.deal.move_stage لازم است؛ همان دادهٔ پنل تنظیمات CRM.",
+          parameters: {
+            type: "object",
+            properties: {
+              includeArchived: { type: "boolean" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_crm_overview",
+          description:
+            "داده‌کاوی CRM — شمارش مشتری‌ها، رضایت، قیف، پرونده‌ها و روند ۳۰روزهٔ اخیر در برابر دورهٔ قبل؛ همان داشبورد صفحهٔ CRM.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_crm_data_quality",
+          description:
+            "گروه‌های کیفیت دادهٔ CRM — موارد ناقص (تلفن/ایمیل غایب، تکراری‌های مشکوک) با تعداد و نمونه؛ همان صفحهٔ سلامت داده.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_members",
+          description:
+            "اعضای قابل‌انتساب CRM برای مالکیت سرنخ/معامله/فعالت/پرونده — شناسهٔ عضو برای ownerUserId و assigneeUserId.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_crm_queue",
+          description:
+            "تعریف و فیلترهای یک صفِ کاری CRM — کلیدهای صف را از کمینهٔ صفحهٔ CRM می‌شود یافت؛ خروجی کاربردی برای ساخت فیلتر list_crm_deals/list_crm_leads.",
+          parameters: {
+            type: "object",
+            properties: {
+              queueKey: { type: "string", description: "کلید صف — مثل unassigned_leads یا unowned_work" },
+            },
+            required: ["queueKey"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_crm_cases",
+          description:
+            "پرونده‌های پشتیبانی CRM با فیلتر وضعیت/اولویت/مسئول/مشتری و جستجو — openOnly فقط بازها، breachedOnly فقط از SLA گذشته‌ها. شناسه برای crm.case.save و crm.case.set_status لازم است.",
+          parameters: {
+            type: "object",
+            properties: {
+              customerId: { type: "string" },
+              status: { type: "string", description: "open|in_progress|waiting|resolved|closed" },
+              priority: { type: "string", description: "low|normal|high|urgent" },
+              q: { type: "string", description: "متن آزاد روی موضوع، متن و نام مشتری" },
+              openOnly: { type: "boolean" },
+              breachedOnly: { type: "boolean", description: "فقط پرونده‌هایی که ساعت SLA‌شان تمام‌شده" },
+              assigneeUserId: { type: "string" },
+              unowned: { type: "boolean", description: "فقط پرونده‌های بدون مسئول" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۲۰۰" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_inventory_transfers",
+          description:
+            "انتقال‌های بین‌شعبه‌ای با مبدأ/مقصد و وضعیت (draft/shipped/received/cancelled) — تازه‌ترین اول؛ شناسه برای transfer.ship/receive/cancel لازم است.",
+          parameters: {
+            type: "object",
+            properties: {
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۱۰۰ — همان سقف صفحه" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_warehouse_documents",
+          description:
+            "حواله‌های انبار (رسید/صدور) با فیلتر نوع و شعبه — تازه‌ترین اول؛ شناسهٔ سند و شمارهٔ سند برای استناد.",
+          parameters: {
+            type: "object",
+            properties: {
+              kind: { type: "string", description: "receipt|issue" },
+              locationId: { type: "string" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۵۰۰ — همان سقف صفحه" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_price_lists",
+          description:
+            "فهرست‌های قیمت شعبه — نام، واحد پول، ترتیب؛ فیلد برای priceList.rename/delete و قیمت‌گذاری فعالیت‌های رشد.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string", description: "شناسهٔ شعبه اگر شعبهٔ پین/فعال غلط است" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_price_list_entries",
+          description:
+            "قیمت‌های تمام فهرست‌های شعبه — هر سلول با itemId و version برای ذخیرهٔ تداخل‌گذار با priceList.entries.save.",
+          parameters: {
+            type: "object",
+            properties: {
+              locationId: { type: "string" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_dashboard",
+          description:
+            "داشبورد فضای کاری — وظایف امروز/عقب‌افتاده/پیش‌رو، پروژه‌ها و پروژه‌هایی که می‌لغزند؛ همان صفحهٔ اول فضای کاری با تقویم روز به وقت محلی.",
+          parameters: {
+            type: "object",
+            properties: {
+              horizonDays: { type: "number", description: "پنجرهٔ روزهای پیش‌رو — پیش‌فرض ۱۴" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_insights",
+          description:
+            "بینش‌های فضای کاری — پروژه‌های در حال لغزش، اعضای بیش‌بار، قراردادهای مسدود و گلوگاه‌ها؛ همان کارت‌های بینش.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_project_report",
+          description:
+            "گزارش وضعیت پروژه‌ها — پیشرفت، وظایف باز/انجام‌شده، تأخیر؛ با projectId فقط همان یکی. فقط برای اعضایی که می‌توانند مالی پروژه را ببینند ستون‌های مالی پر می‌شود.",
+          parameters: {
+            type: "object",
+            properties: {
+              projectId: { type: "string", description: "از list_workspace_projects" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_templates",
+          description:
+            "قالب‌های پروژهٔ فضای کاری — کلید برای workspace.project.create با templateKey؛ فهرستِ همان انتخابگر قالبِ صفحه.",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_calendar",
+          description:
+            "رویدادهای تقویم فضای کاری میان دو تاریخ — همراه با موعدهای وظایف و قراردادها در همان ردیف؛ projectId برای محدودکردن.",
+          parameters: {
+            type: "object",
+            properties: {
+              from: { type: "string", description: "ISO date — لازم" },
+              to: { type: "string", description: "ISO date — لازم" },
+              projectId: { type: "string" },
+            },
+            required: ["from", "to"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_comments",
+          description:
+            "نخ نظرهای یک سوژهٔ فضای کاری — پروژه/وظیفه/سند/قرارداد/نسخهٔ برآورد/نسخهٔ تعهدنامه؛ دسترسی از خود سوژه می‌آید نه از ورودی.",
+          parameters: {
+            type: "object",
+            properties: {
+              subjectType: { type: "string", description: "project|task|document|contract|estimate_version|submittal_revision" },
+              subjectId: { type: "string" },
+            },
+            required: ["subjectType", "subjectId"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_workspace_documents",
+          description:
+            "اسناد فضای کاری — با فیلتر پروژه/وظیفه/قرارداد/طرف‌حساب/وضعیت و جستجو؛ currentOnly نسخه‌های جایگزین‌شده را پنهان می‌کند (پیش‌فرض فهرست صفحه).",
+          parameters: {
+            type: "object",
+            properties: {
+              projectId: { type: "string" },
+              taskId: { type: "string" },
+              contractId: { type: "string" },
+              partyId: { type: "string" },
+              status: { type: "string", description: "draft|in_review|approved|rejected|archived|all" },
+              currentOnly: { type: "boolean", description: "پیش‌فرض true — فقط آخرین نسخهٔ هر زنجیره" },
+              search: { type: "string" },
+              limit: { type: "number", description: "پیش‌فرض ۱۰۰، سقف ۳۰۰" },
+              offset: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_workspace_document",
+          description:
+            "جزئیات کامل یک سند — با includeVersions کل زنجیرهٔ نسخه‌ها از قدیم به جدید برمی‌گردد.",
+          parameters: {
+            type: "object",
+            properties: {
+              documentId: { type: "string" },
+              includeVersions: { type: "boolean" },
+            },
+            required: ["documentId"],
+            additionalProperties: false,
+          },
+        },
+      },
+
   ];
 
   const receiptTool: OpenAiTool = {

@@ -19,6 +19,7 @@
  * Pure and side-effect-free by design — per CLAUDE.md that makes them unit
  * testable directly (`manual-journal.test.ts`), unlike the DB-touching service.
  */
+import { voucherReferenceProblem } from "./voucher-numbering";
 
 import { parseLineDimensions, type LineDimensions } from "./accounting-dimensions";
 
@@ -45,7 +46,8 @@ export type ManualPayloadProblem =
   | "invalid_amount"
   | "invalid_entry_date"
   | "invalid_idempotency_key"
-  | "invalid_dimension";
+  | "invalid_dimension"
+  | "voucher_reference_invalid";
 
 /** A draft-create request body, parsed and known to be well-formed. */
 export interface ManualDraftPayload {
@@ -55,6 +57,12 @@ export interface ManualDraftPayload {
   lines: ManualJournalLine[];
   /** Client-supplied dedupe key, or `null` when the caller did not send one. */
   idempotencyKey: string | null;
+  /**
+   * The accountant's own reference number for the document (issue #867) —
+   * what it was called in the system it came from. Advisory metadata: never
+   * part of the fiscal-year sequence. `null` when the form left it empty.
+   */
+  voucherReference: string | null;
 }
 
 export type ManualPayloadResult =
@@ -235,9 +243,23 @@ export function parseManualDraftPayload(body: unknown): ManualPayloadResult {
     idempotencyKey = key;
   }
 
+  // Issue #867 — the optional reference number. Empty means "none" (the form
+  // sends "" when the field is blank), and a present value must have exactly
+  // the shape the entry's column (0217's CHECK) and the draft's own column
+  // (0218) accept — the same rule the renumber dialog and the register apply.
+  let voucherReference: string | null = null;
+  if (raw.voucherReference !== undefined && raw.voucherReference !== null) {
+    if (typeof raw.voucherReference !== "string") return { ok: false, problem: "voucher_reference_invalid" };
+    const reference = raw.voucherReference.trim();
+    if (reference && voucherReferenceProblem(reference)) {
+      return { ok: false, problem: "voucher_reference_invalid" };
+    }
+    voucherReference = reference || null;
+  }
+
   return {
     ok: true,
-    value: { memo: typeof raw.memo === "string" ? raw.memo : "", entryDate, lines, idempotencyKey },
+    value: { memo: typeof raw.memo === "string" ? raw.memo : "", entryDate, lines, idempotencyKey, voucherReference },
   };
 }
 

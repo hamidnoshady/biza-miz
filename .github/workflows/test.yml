@@ -465,6 +465,13 @@ jobs:
         # Registers its own 220 receivables through the API, on this job's
         # fresh database, so it never touches the visual-regression fixture.
         run: npm run test:e2e:cheques
+      - name: Fiscal opening E2E (opening set life, unit import, close, carry-forward)
+        # Defines its own fiscal years and walks the opening set's full life
+        # (import preview → create → submit → approve → post), the selected-unit
+        # CSV import, the trigger-guarded year close, and the carry-forward,
+        # through the real API with the seeded owner session — on this job's
+        # fresh database, so it never touches the visual-regression fixture.
+        run: npm run test:e2e:fiscal-opening
       - name: Server log (on failure)
         if: failure()
         run: cat server.log || true

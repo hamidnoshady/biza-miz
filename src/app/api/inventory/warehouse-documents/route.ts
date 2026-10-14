@@ -6,6 +6,7 @@ import { isUuid } from "@/lib/uuid";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import {
   createWarehouseDocument,
+  listWarehouseDocuments,
   isWarehouseDocumentKind,
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
@@ -47,25 +48,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     clauses.push(`d.location_id = $${params.length}`);
   }
 
-  const { rows } = await query(
-    `SELECT d.id, d.kind, d.location_id, l.name AS location_name,
-            COALESCE(p.name, s.name) AS supplier_name,
-            d.recipient, d.document_number, d.note,
-            d.total_value_rial::text AS total_value_rial,
-            d.created_at, u.full_name AS created_by_name,
-            (SELECT count(*) FROM warehouse_document_lines l2
-              WHERE l2.document_id = d.id)::int AS line_count
-       FROM warehouse_documents d
-       JOIN locations l ON l.id = d.location_id
-       LEFT JOIN suppliers s ON s.id = d.supplier_id
-       LEFT JOIN parties p ON p.id = s.party_id AND p.business_id = $1
-       LEFT JOIN users u ON u.id = d.created_by
-      WHERE ${clauses.join(" AND ")}
-      ORDER BY d.created_at DESC
-      LIMIT $${params.length + 1}`,
-    [...params, limit],
-  );
-  return NextResponse.json({ documents: rows });
+  const documents = await listWarehouseDocuments(session.businessId, {
+    kind: kind === null || kind === "" ? undefined : kind,
+    locationId: locationId === null || locationId === "" ? undefined : locationId,
+    limit,
+  });
+  return NextResponse.json({ documents });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {

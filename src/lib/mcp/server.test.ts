@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PERMISSIONS } from "../permissions";
 import type { MemberAccess } from "../member-access";
 import type { McpAuthentication } from "./auth";
+import { parseMcpGrants } from "./grants";
 import { parseMessage } from "./protocol";
 import { dispatchMcpMessage } from "./server";
 
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
       actorUserId?: string,
       permissions?: ReadonlySet<string>,
       pinnedLocationId?: string,
+      mcpScope?: { allowedBranchIds: string[] | null },
     ) => Promise<{ ok: true; data: { accepted: true } }>
   >(async () => ({ ok: true, data: { accepted: true } })),
 }));
@@ -35,6 +37,12 @@ const AUTH: McpAuthentication = {
   scopes: ["pos.read"],
   writeMode: "approve",
   authorizedByUserId: "manager-1",
+  // Legacy grants: every app, every branch — the branch-consent half has its
+  // own tests; these pin the live-authorizer half.
+  grants: parseMcpGrants({}),
+  // What authenticateMcp resolved; the dispatcher intersects it with the
+  // live membership, so it can only narrow.
+  permissions: new Set([PERMISSIONS.reportsView, PERMISSIONS.reportsBusinessWide, PERMISSIONS.aiUse]),
 };
 
 function toolCall(name: string, args: Record<string, unknown> = {}) {
@@ -100,15 +108,37 @@ describe("MCP read authorization", () => {
     expect(permissions?.has(PERMISSIONS.reportsBusinessWide)).toBe(true);
   });
 
-  it("lets a deleted author retain the branch-pinned read grant but strips the owner-only aggregate", async () => {
+  it("reads nothing once the authorizer's membership is gone", async () => {
     mocks.memberAccessForUser.mockResolvedValue(null);
     await dispatchMcpMessage(AUTH, toolCall("run_report", { key: "daily_sales_summary" }));
     const [, , , , actorUserId, permissions, pinnedLocationId] = mocks.runSystemReadTool.mock.calls[0];
-    expect(actorUserId).toBeUndefined();
+    expect(actorUserId).toBe("manager-1");
     expect(pinnedLocationId).toBe("location-1");
-    expect(permissions?.has(PERMISSIONS.reportsBusinessWide)).toBe(false);
-    expect(permissions?.has(PERMISSIONS.reportsView)).toBe(true);
+    expect(permissions).toEqual(new Set());
     expect(mocks.resolveActiveLocationForUser).not.toHaveBeenCalled();
+  });
+
+  it("never lets the live membership widen what authentication resolved", async () => {
+    mocks.memberAccessForUser.mockResolvedValue({
+      role: "owner",
+      isActive: true,
+      permissions: new Set([PERMISSIONS.reportsView, PERMISSIONS.reportsBusinessWide]),
+    } satisfies MemberAccess);
+    await dispatchMcpMessage(
+      { ...AUTH, permissions: new Set([PERMISSIONS.reportsView]) },
+      toolCall("run_report", { key: "daily_sales_summary" }),
+    );
+    expect(mocks.runSystemReadTool.mock.calls[0][5]).toEqual(new Set([PERMISSIONS.reportsView]));
+  });
+
+  it("passes the connection's branch consent to the executor alongside the pinned branch", async () => {
+    await dispatchMcpMessage(
+      { ...AUTH, grants: parseMcpGrants({ apps: { pos: { read: true } }, branches: ["location-1"] }) },
+      toolCall("run_report", { key: "daily_sales_summary" }),
+    );
+    const call = mocks.runSystemReadTool.mock.calls[0];
+    expect(call[6]).toBe("location-1");
+    expect(call[7]).toEqual({ allowedBranchIds: ["location-1"] });
   });
 
   it("fails closed when the active authorizer can no longer access the connection's pinned branch", async () => {
@@ -147,7 +177,7 @@ describe("MCP read authorization", () => {
       "business-1",
       undefined,
       undefined,
-      undefined,
+      new Set([PERMISSIONS.reportsView]),
       "location-1",
     );
   });

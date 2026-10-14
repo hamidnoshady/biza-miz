@@ -50,9 +50,26 @@ interface Script {
   ownedItemIds?: string[] | "echo";
 }
 
+/**
+ * The voucher-numbering queries every posting now issues in-transaction
+ * (issue #867): the fiscal-year lookup, the counter upsert/lock/increment and
+ * the entry's own number. A mock counter starting at zero is enough — these
+ * tests pin the posting's lines, not the number.
+ */
+function voucherRows(flat: string): Record<string, unknown>[] | undefined {
+  if (flat.includes("SELECT id FROM fiscal_years")) return [];
+  if (flat.includes("INSERT INTO voucher_sequences")) return [];
+  if (flat.includes("FROM voucher_sequences")) return [{ last_number: "0" }];
+  if (flat.includes("UPDATE voucher_sequences")) return [];
+  if (flat.includes("UPDATE journal_entries") && flat.includes("voucher_number")) return [];
+  return undefined;
+}
+
 /** Answers the service's queries in the shape the real schema would. */
 function respondWith(script: Script) {
   return (sql: string, params: unknown[]): Record<string, unknown>[] | undefined => {
+    const voucher = voucherRows(sql);
+    if (voucher !== undefined) return voucher;
     if (sql.includes("FROM settings")) {
       return script.costing ? [{ value: script.costing }] : [];
     }
@@ -71,7 +88,9 @@ function respondWith(script: Script) {
     if (sql.includes("INSERT INTO periodic_closing_lines")) return [];
     if (sql.includes("INSERT INTO periodic_closings")) return [{ id: "closing-1" }];
     if (sql.includes("SELECT code, id FROM accounts")) return ACCOUNTS;
-    if (sql.includes("INSERT INTO journal_entries")) return [{ id: "entry-1" }];
+    // The entry's own date is what its voucher number is derived from, so
+    // the RETURNING carries it the way the real column does.
+    if (sql.includes("INSERT INTO journal_entries")) return [{ id: "entry-1", entry_date: "2026-01-31" }];
     if (sql.includes("INSERT INTO journal_lines")) return [];
     if (sql.includes("SELECT set_config('app.fiscal_constructing_entry_id'")) return [];
     if (sql.includes("UPDATE periodic_closings SET journal_entry_id")) return [];

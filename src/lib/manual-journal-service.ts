@@ -35,6 +35,7 @@ import {
 import type { RialText } from "./inventory-exact";
 import { isUuid } from "./uuid";
 import { locationBusinessToday } from "./business-day-service";
+import { voucherReferenceProblem } from "./voucher-numbering";
 
 export { MANUAL_LINES_MAX, MANUAL_MEMO_MAX };
 
@@ -181,6 +182,12 @@ export interface JournalDraft {
   proposedBy: string | null;
   proposedByName: string | null;
   proposedAt: string | null;
+  /**
+   * The accountant's own reference number for the document (issue #867).
+   * Advisory metadata: `approveDraft` carries it onto the posted entry as
+   * `journal_entries.voucher_reference`, never into the fiscal-year sequence.
+   */
+  voucherReference: string | null;
   lines: DraftLine[];
 }
 
@@ -196,6 +203,7 @@ interface DraftRow extends Record<string, unknown> {
   proposed_by: string | null;
   proposed_by_name: string | null;
   proposed_at: string | null;
+  voucher_reference: string | null;
 }
 interface DraftLineRow extends Record<string, unknown> {
   draft_id: string;
@@ -260,6 +268,7 @@ async function attachLines(
     proposedBy: d.proposed_by,
     proposedByName: d.proposed_by_name,
     proposedAt: d.proposed_at,
+    voucherReference: d.voucher_reference,
     lines: linesByDraft.get(d.id) ?? [],
   }));
 }
@@ -282,7 +291,7 @@ const DRAFT_SELECT = `SELECT d.id, d.entry_date::text AS entry_date, d.location_
               l.name AS location_name, d.memo, d.created_by,
               u.full_name AS created_by_name, d.created_at::text AS created_at,
               d.proposed_by, p.full_name AS proposed_by_name,
-              d.proposed_at::text AS proposed_at
+              d.proposed_at::text AS proposed_at, d.voucher_reference
        FROM journal_entry_drafts d
        LEFT JOIN users u ON u.id = d.created_by
        LEFT JOIN users p ON p.id = d.proposed_by
@@ -347,10 +356,28 @@ export async function createDraft(params: {
   createdBy: string;
   /** Client-supplied dedupe key; a retry with the same key returns the first draft. */
   idempotencyKey?: string | null;
+  /**
+   * Issue #867 — the accountant's own reference number for the document
+   * (what it was called in the system it came from). Optional advisory
+   * metadata; the route parses it, this owns the rule so a direct caller
+   * cannot store a reference the entry's column (0217) would reject.
+   */
+  voucherReference?: string | null;
 }): Promise<{ id: string; duplicate: boolean }> {
   const memo = typeof params.memo === "string" ? params.memo.trim() : "";
   const memoProblem = manualMemoProblem(memo);
   if (memoProblem) throw new ManualJournalError(memoProblem);
+
+  // Validate the reference before any write, so a malformed one is a named
+  // 400 here rather than a CHECK violation from the INSERT three lines down.
+  let voucherReference: string | null = null;
+  if (params.voucherReference) {
+    const trimmed = params.voucherReference.trim();
+    if (trimmed && voucherReferenceProblem(trimmed)) {
+      throw new ManualJournalError("voucher_reference_invalid");
+    }
+    voucherReference = trimmed || null;
+  }
   /*
    * «خالی یعنی امروز» is a promise the form makes, so it is kept *here*, at
    * the moment the draft is written — not at approval.
@@ -397,11 +424,19 @@ export async function createDraft(params: {
 
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO journal_entry_drafts
-         (business_id, location_id, entry_date, memo, created_by, proposed_by, proposed_at, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $5, now(), $6)
+         (business_id, location_id, entry_date, memo, created_by, proposed_by, proposed_at, idempotency_key, voucher_reference)
+       VALUES ($1, $2, $3, $4, $5, $5, now(), $6, $7)
        ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`,
-      [params.businessId, params.locationId, entryDate, memo, params.createdBy, params.idempotencyKey ?? null],
+      [
+        params.businessId,
+        params.locationId,
+        entryDate,
+        memo,
+        params.createdBy,
+        params.idempotencyKey ?? null,
+        voucherReference,
+      ],
     );
     // The concurrent case: two identical requests racing past the read above.
     // The loser's insert is a no-op, so it re-reads the winner's row and
@@ -597,6 +632,9 @@ export async function approveDraft(params: {
       sourceType: "manual",
       sourceId: null,
       createdBy: params.actorId,
+      // Issue #867 — the reference the accountant typed with the draft is
+      // metadata on the posted document, carried over exactly as stored.
+      voucherReference: draft.voucherReference ?? null,
       lines: nonZero as JournalLine[],
     });
     /*

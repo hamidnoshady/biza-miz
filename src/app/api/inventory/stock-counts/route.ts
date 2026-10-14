@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { createStockCount, type StockCountLineInput } from "@/lib/stock-count-service";
+import { createStockCount, listStockCounts, type StockCountLineInput } from "@/lib/stock-count-service";
 
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
@@ -13,19 +13,9 @@ export const GET = withTenantScope(async () => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ counts: [] });
 
-  const { rows: counts } = await query(
-    `SELECT sc.id, sc.note, sc.counted_at, u.full_name AS counted_by_name,
-            (SELECT count(*) FROM stock_count_lines WHERE stock_count_id = sc.id) AS line_count,
-            COALESCE((SELECT sum(CASE WHEN variance < 0 THEN -variance_value ELSE 0 END)
-                        FROM stock_count_lines WHERE stock_count_id = sc.id), 0)::text AS shortage_value,
-            COALESCE((SELECT sum(CASE WHEN variance > 0 THEN variance_value ELSE 0 END)
-                        FROM stock_count_lines WHERE stock_count_id = sc.id), 0)::text AS surplus_value,
-            EXISTS (SELECT 1 FROM stock_counts reversal WHERE reversal.reversal_of = sc.id) AS reversed
-       FROM stock_counts sc LEFT JOIN users u ON u.id = sc.counted_by
-      WHERE sc.location_id = $1 AND sc.reversal_of IS NULL
-      ORDER BY sc.counted_at DESC LIMIT 50`,
-    [location.id],
-  );
+  // The query lives in the service now (issue #883): the MCP read tool
+  // `list_stock_counts` runs the exact same query the screen does.
+  const counts = await listStockCounts(location.id);
   return NextResponse.json({ counts });
 });
 

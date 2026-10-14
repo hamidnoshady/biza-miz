@@ -1,4 +1,4 @@
-import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
+import { runReadTool, type FloorReadScope, type McpReadScope, type ToolResult } from "./ai-tools";
 import { SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
 import type { Permission } from "./permissions";
 
@@ -17,6 +17,8 @@ export function runSystemReadTool(
   permissions: ReadonlySet<Permission> = SYSTEM_AI_READ_PERMISSIONS,
   /** Durable MCP credentials stay pinned to the branch the issuer approved. */
   pinnedLocationId?: string,
+  /** Issue #883 §1 — an MCP connection's branch consent; consent only narrows. */
+  mcpScope?: McpReadScope,
 ): Promise<ToolResult> {
-  return runReadTool(name, args, businessId, floorScope, actorUserId, permissions, pinnedLocationId);
+  return runReadTool(name, args, businessId, floorScope, actorUserId, permissions, pinnedLocationId, mcpScope);
 }
