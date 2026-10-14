@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
+import { requirePermission } from "@/lib/auth";
 
 /**
  * Kept as a safe compatibility endpoint after Phase 18 removed the
@@ -8,7 +9,7 @@ import { requireManager } from "@/lib/setup-state";
  * provider credentials; the AI connection is platform-managed (LiteLLM).
  */
 export const GET = withTenantScope(async () => {
-  const { error } = await requireManager();
+  const { error } = await requirePermission(PERMISSIONS.aiManage);
   if (error) return error;
   return NextResponse.json(
     { error: "ai_configuration_platform_managed" },
@@ -17,7 +18,7 @@ export const GET = withTenantScope(async () => {
 });
 
 export const PUT = withTenantScope(async () => {
-  const { error } = await requireManager();
+  const { error } = await requirePermission(PERMISSIONS.aiManage);
   if (error) return error;
   return NextResponse.json(
     { error: "ai_configuration_platform_managed" },

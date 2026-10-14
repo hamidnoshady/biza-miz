@@ -11,9 +11,14 @@
  *     to a second, freshly-migrated, otherwise-empty database reproduces
  *     exactly those rows there — the literal Phase 17 exit criterion ("a
  *     single tenant's backup restores into a clean database without
- *     carrying any other tenant's rows"), even though the interactive
- *     restore *workflow* (mirroring Phase 10's dry-run-then-apply UX) is a
- *     separate, not-yet-built follow-up.
+ *     carrying any other tenant's rows").
+ *
+ * The *physical* restore workflow (verify into a scratch database, then apply
+ * after a typed confirmation) now exists in the dashboard and the super-admin
+ * console — issue #807 put both halves on `restore-engine.ts`. Replaying a
+ * *logical* snapshot like this one through an application path is still future
+ * work; `restore-engine.ts` refuses it by name (`artifact_is_logical_snapshot`)
+ * rather than treating it as a dump.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";

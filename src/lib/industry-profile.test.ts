@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { INDUSTRIES, type Industry } from "./industries";
+import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, isIndustry, type Industry } from "./industries";
 import {
   defaultGoldMakingChargePercent,
   defaultGoldProfitPercent,
-  defaultRetailVatPercent,
   hasModule,
   industryProfile,
   labelFor,
@@ -34,6 +33,7 @@ const RETAIL_INDUSTRIES: Industry[] = [
   "wholesale",
   "tools_fittings",
   "haberdashery",
+  "automotive",
 ];
 
 describe("INDUSTRY_PROFILES", () => {
@@ -80,12 +80,12 @@ describe("module sets", () => {
         module === "wholesale" ||
         module === "tools_fittings" ||
         module === "haberdashery" ||
+        module === "automotive" ||
         module === "stock"
       )
         continue;
-      // Phase 35 module keys that exist but are not yet wired into any industry:
-      // `messaging` gets its pages in a later phase, and `website` left this
-      // list alongside `crm` once the phases that built the apps shipped.
+      // `website` and `messaging` are core but deliberately not in the
+      // original F&B baseline this loop pins.
       if (module === "website" || module === "messaging") continue;
       expect(modules, module).toContain(module);
     }
@@ -121,22 +121,95 @@ describe("module sets", () => {
     }
   });
 
-  it("gives trading industries a selling screen, but keeps service/SaaS out of POS", () => {
-    for (const industry of INDUSTRIES.filter((value) => value !== "service_saas")) {
+  it("gives every counter-selling trade a selling screen, and keeps the service trades out of POS", () => {
+    // Two trades deliberately have no counter: `service_saas` bills through
+    // Billing/Accounting, and issue #799's AEC trade writes statements and
+    // progress certificates rather than ringing up a cart. Everything else
+    // sells from `/accounting/pos`.
+    const POS_LESS: Industry[] = ["service_saas", "architecture_construction"];
+    for (const industry of INDUSTRIES.filter((value) => !POS_LESS.includes(value))) {
       expect(hasModule(industry, "pos"), industry).toBe(true);
     }
-    expect(hasModule("service_saas", "pos")).toBe(false);
+    for (const industry of POS_LESS) {
+      expect(hasModule(industry, "pos"), industry).toBe(false);
+    }
+  });
+
+  it("gives no non-F&B industry a restaurant module", () => {
+    // Issue #799's "no restaurant-specific module leaks into the AEC tenant"
+    // rule, stated for every trade at once: these modules exist because a café
+    // has tables, a kitchen and a menu, and no other business type inherits
+    // them. A future industry that genuinely needs one adds itself here with a
+    // note, rather than getting it by accident.
+    const RESTAURANT_MODULES: ModuleKey[] = [
+      "tables", "waiter", "kitchen", "reservations", "delivery", "inventory", "menu", "orders",
+    ];
+    for (const industry of INDUSTRIES.filter((value) => value !== "food_service")) {
+      for (const module of RESTAURANT_MODULES) {
+        expect(hasModule(industry, module), `${industry}/${module}`).toBe(false);
+      }
+    }
   });
 
   it("keeps the open-orders board to F&B", () => {
     // /dashboard/orders is a board of open tickets with kitchen statuses and a
     // realtime feed. A retail invoice is settled the moment it is written, so
     // it would never appear there; the shop's history lives on its selling
-    // screen instead.
+    // screen instead. AEC is further still from it — no tickets at all.
     expect(hasModule("food_service", "orders")).toBe(true);
-    for (const industry of RETAIL_INDUSTRIES) {
+    for (const industry of INDUSTRIES.filter((value) => value !== "food_service")) {
       expect(hasModule(industry, "orders"), industry).toBe(false);
     }
+  });
+});
+
+describe("architecture_construction (issue #799)", () => {
+  const AEC = industryProfile("architecture_construction");
+
+  it("brands itself as the AEC trade and not as a café or a shop", () => {
+    expect(AEC.brandTitle).toBe("عمران، معماری و پیمانکاری");
+    expect(AEC.brandSubtitle).not.toContain("کافه");
+    expect(AEC.brandTitle).not.toBe(industryProfile("food_service").brandTitle);
+  });
+
+  it("gets exactly the core platform modules — no café, no retail counter", () => {
+    const forbidden: ModuleKey[] = [
+      "orders", "pos", "tables", "waiter", "kitchen", "reservations", "delivery",
+      "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
+      "wholesale", "tools_fittings", "haberdashery",
+    ];
+    for (const module of forbidden) {
+      expect(hasModule("architecture_construction", module), module).toBe(false);
+    }
+    // The operational centre (projects, tasks, documents) has no module key of
+    // its own — see the MODULE_KEYS note in industry-profile.ts — so the trade
+    // reaches My Workspace through the shell, exactly like every other trade.
+    for (const module of ["dashboard", "customers", "crm", "ledger", "reports", "media", "ai", "settings"] as ModuleKey[]) {
+      expect(hasModule("architecture_construction", module), module).toBe(true);
+    }
+  });
+
+  it("calls its commercial document a صورتحساب, never a فاکتور or a سفارش", () => {
+    expect(labelFor("architecture_construction", "saleDocument")).toBe("صورتحساب");
+    expect(labelFor("architecture_construction", "saleDocumentPlural")).toBe("صورتحساب‌ها");
+    for (const key of LABEL_KEYS) {
+      expect(labelFor("architecture_construction", key), key).not.toContain("منو");
+      expect(labelFor("architecture_construction", key), key).not.toContain("سفارش");
+    }
+  });
+
+  it("seeds the restaurant-shaped features off at provision time", () => {
+    expect(AEC.defaultDisabledFeatures).toEqual(
+      expect.arrayContaining(["inventory", "reservations", "delivery"]),
+    );
+    expect(AEC.capabilities).toEqual([]);
+    expect(AEC.salesModel).toBe("retail_invoice");
+  });
+
+  it("is registered everywhere the app offers an industry", () => {
+    expect(ENABLED_INDUSTRIES).toContain("architecture_construction");
+    expect(INDUSTRY_LABELS.architecture_construction).toBe("مهندسی عمران، معماری و پیمانکاری");
+    expect(isIndustry("architecture_construction")).toBe(true);
   });
 });
 
@@ -215,18 +288,12 @@ describe("defaultDisabledFeatures", () => {
 });
 
 describe("Phase 35 module keys", () => {
-  it("declares the ecosystem and future-phase keys without assigning them to any industry yet", () => {
-    // This key exists so the app registry (src/lib/apps.ts) can give it a
-    // place, but it is not wired into a trade yet: `messaging` gets its pages
-    // in a later phase. Locking this prevents a profile from silently gaining
-    // it and changing module-gated routing. `crm` and `website` graduated out
-    // of this list once built — see the tests below.
-    const futureKeys = ["messaging"] as const;
-    for (const key of futureKeys) {
-      expect(MODULE_KEYS, key).toContain(key);
-      for (const industry of INDUSTRIES) {
-        expect(hasModule(industry, key as ModuleKey), `${industry} should not yet have ${key}`).toBe(false);
-      }
+  it("gives every trade messaging, now that /growth/messaging is a real section (issue #764)", () => {
+    // It used to be a forward reference no trade had, so the page fell through
+    // to the `loyalty` module and /api/messaging answered no module at all:
+    // a Growth «در حال تعمیر» badged the page and left the sends' API open.
+    for (const industry of INDUSTRIES) {
+      expect(hasModule(industry, "messaging"), `${industry} should have messaging`).toBe(true);
     }
   });
 
@@ -251,6 +318,13 @@ describe("Phase 35 module keys", () => {
 });
 
 describe("moduleForApiPath", () => {
+  it("directly gates online-platform settings by the F&B delivery module", () => {
+    const module = moduleForApiPath("/api/settings/online-platforms");
+    expect(module).toBe("delivery");
+    expect(module && hasModule("food_service", module)).toBe(true);
+    expect(module && hasModule("jewelry", module)).toBe(false);
+  });
+
   it("maps a route and everything under it", () => {
     expect(moduleForApiPath("/api/tables")).toBe("tables");
     expect(moduleForApiPath("/api/tables/abc/close")).toBe("tables");
@@ -288,6 +362,10 @@ describe("moduleForApiPath", () => {
     expect(moduleForApiPath("/api/ledger/entries")).toBe("ledger");
     expect(moduleForApiPath("/api/reports/sales")).toBe("reports");
     expect(moduleForApiPath("/api/settings/pricing")).toBe("menu");
+    expect(moduleForApiPath("/api/settings/online-platforms")).toBe("delivery");
+    expect(moduleForApiPath("/api/settings/online-platforms/snapfood")).toBe("delivery");
+    expect(hasModule("food_service", "delivery")).toBe(true);
+    expect(hasModule("jewelry", "delivery")).toBe(false);
     expect(moduleForApiPath("/api/settings/business")).toBe("settings");
     expect(moduleForApiPath("/api/dashboard/overview")).toBe("dashboard");
     expect(moduleForApiPath("/api/waiter/board")).toBe("waiter");
@@ -328,27 +406,25 @@ describe("moduleForPagePath", () => {
 });
 
 describe("retail POS pricing defaults — one place, not hardcoded in the screen", () => {
-  it("gives jewelry its configured اجرت/سود/مالیات defaults, not a literal in the POS component", () => {
+  it("gives jewelry its configured اجرت/سود defaults, not a literal in the POS component", () => {
     expect(defaultGoldMakingChargePercent("jewelry")).toBe(
       INDUSTRY_PROFILES.jewelry.retailDefaults?.goldMakingChargePercent,
     );
     expect(defaultGoldProfitPercent("jewelry")).toBe(INDUSTRY_PROFILES.jewelry.retailDefaults?.goldProfitPercent);
-    expect(defaultRetailVatPercent("jewelry")).toBe(INDUSTRY_PROFILES.jewelry.retailDefaults?.vatPercent);
   });
 
-  it("falls back to 9% VAT and 7%/7% gold defaults for an industry with no retailDefaults opinion", () => {
+  it("falls back to 7%/7% gold defaults for an industry with no retailDefaults opinion", () => {
     const noOpinion = Object.entries(INDUSTRY_PROFILES).find(([, p]) => !p.retailDefaults)?.[0] as
       | Industry
       | undefined;
     if (!noOpinion) return; // every industry has opted in — nothing to assert
-    expect(defaultRetailVatPercent(noOpinion)).toBe(9);
     expect(defaultGoldMakingChargePercent(noOpinion)).toBe(7);
     expect(defaultGoldProfitPercent(noOpinion)).toBe(7);
   });
 
-  it("reads a per-industry VAT default for every retail industry without throwing", () => {
+  it("assumes no VAT rate per trade — VAT is the business's own setting (audit F05)", () => {
     for (const industry of INDUSTRIES) {
-      expect(defaultRetailVatPercent(industry)).toBeGreaterThanOrEqual(0);
+      expect(INDUSTRY_PROFILES[industry].retailDefaults ?? {}).not.toHaveProperty("vatPercent");
     }
   });
 });

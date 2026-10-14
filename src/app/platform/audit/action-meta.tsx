@@ -34,11 +34,18 @@ export const ACTION_META: Record<string, ActionMeta> = {
   // `completed` only exists if the database delete committed, so its presence
   // is evidence the business is gone — the old single `business.delete` event
   // was written before the delete ran and could imply success after a failure.
-  "business.delete": { label: "حذف قطعی", tone: "danger", icon: Trash2 },
-  "business.delete.requested": { label: "درخواست حذف قطعی", tone: "warning", icon: Trash2 },
-  "business.delete.completed": { label: "حذف قطعی انجام شد", tone: "danger", icon: Trash2 },
-  "business.delete.failed": { label: "حذف قطعی ناموفق", tone: "danger", icon: Trash2 },
-  "business.reset": { label: "ریست کامل کسب‌وکار", tone: "danger", icon: RotateCcw },
+  "business.delete": { label: "حذف دائمی", tone: "danger", icon: Trash2 },
+  "business.delete.requested": { label: "درخواست حذف دائمی", tone: "warning", icon: Trash2 },
+  "business.delete.completed": { label: "حذف دائمی انجام شد", tone: "danger", icon: Trash2 },
+  "business.delete.failed": { label: "حذف دائمی ناموفق", tone: "danger", icon: Trash2 },
+  // The reset lifecycle mirrors the delete one (issue #822): requested only
+  // after permission + typed confirmation, completed only after commit,
+  // failed otherwise. `business.reset` itself is the historical single event
+  // written by the old implementation — kept so old rows still render.
+  "business.reset.requested": { label: "درخواست بازنشانی کسب‌وکار", tone: "warning", icon: RotateCcw },
+  "business.reset.completed": { label: "بازنشانی کسب‌وکار انجام شد", tone: "success", icon: RotateCcw },
+  "business.reset.failed": { label: "بازنشانی کسب‌وکار ناموفق", tone: "danger", icon: RotateCcw },
+  "business.reset": { label: "بازنشانی کسب‌وکار", tone: "danger", icon: RotateCcw },
   "business.plan": { label: "تغییر پلن", tone: "info", icon: Layers },
   "business.edit": { label: "ویرایش کسب‌وکار", tone: "info", icon: Pencil },
   "business.subdomain": { label: "تغییر نشانی (زیردامنه)", tone: "info", icon: Globe },

@@ -16,6 +16,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { query, type PoolClient } from "./db";
+import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
 import {
   accessoryCogs,
   computeAccessorySalePrice,
@@ -308,6 +309,8 @@ export interface VariantSummary {
   subUnit: string | null;
   conversionFactor: number | null;
   isSellable: boolean;
+  /** Audit F13 — the integration row that owns this item, so twins are told apart. */
+  source: ItemSource | null;
 }
 
 /** The accessories board: every family and variant at this branch, with its attributes, stock and pricing, in one round trip. */
@@ -329,9 +332,11 @@ export async function listVariantBoard(locationId: string): Promise<VariantSumma
     sub_unit: string | null;
     conversion_factor: string | null;
     is_sellable: boolean;
+    source: ItemSource | null;
   }>(
     `SELECT i.id, i.parent_item_id, p.name AS parent_name, i.name, i.sku, i.kind, i.is_active,
             i.barcode, i.unit, i.sub_unit, i.conversion_factor, i.is_sellable,
+            ${ITEM_SOURCE_SQL} AS source,
             s.quantity, s.unit_cost, s.unit_price,
             COALESCE(
               (SELECT json_agg(json_build_object('name', a.name, 'value', a.value) ORDER BY a.name)
@@ -363,5 +368,6 @@ export async function listVariantBoard(locationId: string): Promise<VariantSumma
     subUnit: r.sub_unit,
     conversionFactor: r.conversion_factor == null ? null : Number(r.conversion_factor),
     isSellable: r.is_sellable,
+    source: r.source ?? null,
   }));
 }

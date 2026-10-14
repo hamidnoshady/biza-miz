@@ -35,8 +35,9 @@ export async function receivePurchaseInTransaction(
     status: string;
     total: string;
     supplier_id: string | null;
+    vat_amount: string;
   }>(
-    "SELECT id,status::text,total::text,supplier_id FROM purchases WHERE id=$1 AND location_id=$2 FOR UPDATE",
+    "SELECT id,status::text,total::text,supplier_id,vat_amount::text FROM purchases WHERE id=$1 AND location_id=$2 FOR UPDATE",
     [params.purchaseId, params.locationId],
   );
   const purchase = locked[0];
@@ -74,6 +75,10 @@ export async function receivePurchaseInTransaction(
     [params.purchaseId],
   );
   if (totals.rows[0].total !== purchase.total) throw new Error("purchase_total_mismatch");
+  // Audit F11 — the supplier invoice's VAT, stored on the purchase while it was
+  // a draft. Posted to input VAT on top of the goods value (see
+  // `purchaseSettlementLines`); `total` stays the goods value the costing checks.
+  const vat = rialText(purchase.vat_amount);
 
   if ((await getInventorySystem(params.businessId, client)) === "periodic") {
     await client.query(
@@ -87,6 +92,7 @@ export async function receivePurchaseInTransaction(
       createdBy: params.createdBy,
       total: rialText(totals.rows[0].total),
       settlementMethod: params.settlementMethod,
+      vat,
     });
     await enqueueHolooPurchase(client, params.businessId, params.purchaseId, "purchase");
     await appendOutbox();
@@ -136,6 +142,7 @@ export async function receivePurchaseInTransaction(
     total: costing.receiptValue,
     settlementMethod: params.settlementMethod,
     inventoryEventId,
+    vat,
   });
   await postNegativeStockSettlementEntry(client, {
     businessId: params.businessId,

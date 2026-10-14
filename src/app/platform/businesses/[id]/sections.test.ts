@@ -9,6 +9,10 @@ function labelsFor(role: "support" | "engineer" | "owner") {
 }
 
 describe("business workspace navigation", () => {
+  it("requires the dedicated reporting capability in every navigation consumer", () => {
+    expect(businessSections(BUSINESS_ID, ["businesses.read"]).some((s) => s.href.endsWith("/reports"))).toBe(false);
+    for (const role of ["support", "engineer", "owner"] as const) expect(labelsFor(role)).toContain("گزارش‌ها و تحلیل");
+  });
   it("gives the owner each distinct detail section beneath the selected business", () => {
     const sections = businessSections(BUSINESS_ID, CAPABILITIES_FOR("owner"));
     const hrefs = sections.map((section) => section.href);
@@ -17,6 +21,7 @@ describe("business workspace navigation", () => {
     // consolidated commercial section (`billing?tab=subscription`).
     expect(hrefs).toEqual([
       "/platform/businesses/business-1",
+      "/platform/businesses/business-1/reports",
       "/platform/businesses/business-1/profile",
       "/platform/businesses/business-1/settings",
       "/platform/businesses/business-1/billing",

@@ -75,6 +75,8 @@ interface MediaAssetUsage {
   purchases: MediaAssetUsageRef[];
   /** Migration 0181 — parties whose avatar this asset is. */
   parties: MediaAssetUsageRef[];
+  /** Automotive vehicle photo, video or document links. */
+  vehicles?: MediaAssetUsageRef[];
 }
 
 /** A version-history entry — an ancestor or a direct descendant of the open asset. */
@@ -1622,7 +1624,8 @@ export function AssetDrawer({
       usage.inventoryItems.length +
       (usage.expenses?.length ?? 0) +
       (usage.purchases?.length ?? 0) +
-      (usage.parties?.length ?? 0)
+      (usage.parties?.length ?? 0) +
+      (usage.vehicles?.length ?? 0)
     : 0;
 
   async function save() {
@@ -1870,6 +1873,7 @@ export function AssetDrawer({
           ...(data.usage.expenses ?? []),
           ...(data.usage.purchases ?? []),
           ...(data.usage.parties ?? []),
+          ...(data.usage.vehicles ?? []),
         ]
           .map((r) => r.name)
           .join("، ");
@@ -1938,6 +1942,7 @@ export function AssetDrawer({
               ...(usage!.expenses ?? []),
               ...(usage!.purchases ?? []),
               ...(usage!.parties ?? []),
+              ...(usage!.vehicles ?? []),
             ]
               .map((r) => r.name)
               .join("، ")}

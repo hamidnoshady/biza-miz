@@ -26,8 +26,14 @@ import { AUTOPILOT_EXECUTORS } from "../ai-autopilot-executors";
 import { createAiActionAudit } from "../ai-action-audit";
 import type { McpAuthentication } from "./auth";
 
-/** Every row an MCP write creates says so, the way AUTOPILOT_NOTE_PREFIX does for autopilot. */
-export const MCP_ACTOR_PREFIX = "اتصال هوش مصنوعی — ";
+/**
+ * Every row an MCP write creates says so, the way AUTOPILOT_NOTE_PREFIX does
+ * for autopilot. Defined once in `src/lib/ai-provenance.ts` — see the note
+ * there for why a pure module owns it — and re-exported so existing importers
+ * are untouched.
+ */
+export { MCP_ACTOR_PREFIX } from "../ai-provenance";
+import { MCP_ACTOR_PREFIX } from "../ai-provenance";
 
 export interface McpWriteOutcome {
   status: "applied" | "pending_approval" | "failed";

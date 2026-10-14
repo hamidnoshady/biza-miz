@@ -17,31 +17,67 @@ import { isFeatureEnabled } from "../../features";
 import { getConnection } from "../connections-service";
 import { getHolooSettingsRow, holooSqlConfigFor } from "./connection-service";
 import { connectHolooSql, type HolooSqlClient } from "./client";
-import { matchProfile, profileForKey, type HolooSchemaProfile } from "./schema-profile";
+import { diagnoseProfile, type HolooSchemaFingerprint, type HolooSchemaProfile } from "./schema-profile";
+import { probeHolooSchema } from "./schema-probe";
 import { applyBaseImport, type BaseImportInput } from "./import-service";
 import { mapAccount, mapGoods, mapOpeningInventory, mapPerson } from "./mappers";
 import { writeIntegrationAudit } from "../audit";
 
 export const HOLOO_SYNC_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const BATCH_SIZE = 500;
+/** Per-scope guard for synchronous, previewable provider migrations. */
+export const MAX_HOLOO_MIGRATION_ROWS = 50_000;
 
 type CursorEntity = "goods" | "persons" | "accounts" | "openingInventory";
 
-async function readCursor(businessId: string, connectionId: string, entityType: string): Promise<string | null> {
+/** Cursor value plus a stable remote-key tie-breaker. */
+export interface HolooSyncCursor {
+  cursor: string | null;
+  id: string;
+  /** Legacy scalar cursors must replay the whole boundary tie group once. */
+  inclusive?: boolean;
+}
+
+/** Read both the new composite cursor and the legacy scalar cursor safely. */
+export function decodeHolooSyncCursor(value: string | null): HolooSyncCursor | null {
+  if (value === null) return null;
+  try {
+    const decoded = JSON.parse(value) as { cursor?: unknown; id?: unknown };
+    if (
+      decoded &&
+      typeof decoded === "object" &&
+      (typeof decoded.cursor === "string" || decoded.cursor === null) &&
+      typeof decoded.id === "string"
+    ) {
+      return { cursor: decoded.cursor, id: decoded.id };
+    }
+  } catch {
+    // Existing installations stored only the cursor value. Resume inclusively
+    // at that value so tied rows are replayed idempotently instead of skipped.
+  }
+  return { cursor: value, id: "", inclusive: true };
+}
+
+async function readCursor(businessId: string, connectionId: string, entityType: string): Promise<HolooSyncCursor | null> {
   const { rows } = await query<{ last_key: string | null }>(
     `SELECT last_key FROM holoo_sync_cursors WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3`,
     [businessId, connectionId, entityType],
   );
-  return rows[0]?.last_key ?? null;
+  return decodeHolooSyncCursor(rows[0]?.last_key ?? null);
 }
 
-async function writeCursor(businessId: string, connectionId: string, entityType: string, lastKey: string): Promise<void> {
+async function writeCursor(
+  businessId: string,
+  connectionId: string,
+  entityType: string,
+  cursor: HolooSyncCursor,
+): Promise<void> {
   await query(
     `INSERT INTO holoo_sync_cursors (business_id, connection_id, entity_type, last_key, last_seen_at)
      VALUES ($1, $2, $3, $4, now())
      ON CONFLICT (connection_id, entity_type)
      DO UPDATE SET last_key = EXCLUDED.last_key, last_seen_at = now(), updated_at = now()`,
-    [businessId, connectionId, entityType, lastKey],
+    [businessId, connectionId, entityType, JSON.stringify(cursor)],
   );
 }
 
@@ -50,20 +86,21 @@ function ident(name: string): string {
 }
 
 function literal(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
+  return `N'${value.replace(/'/g, "''")}'`;
 }
 
 function cursorExpr(column: string | undefined, fallback: string): string {
   return ident(column ?? fallback);
 }
 
-function selectSql(
+export function buildHolooBaseSelectSql(
   profile: HolooSchemaProfile,
   entity: CursorEntity,
   columns: Record<string, string | undefined>,
   cursorColumn: string | undefined,
   fallbackCursorColumn: string,
-  lastKey: string | null,
+  lastKey: HolooSyncCursor | null,
+  limit = BATCH_SIZE,
 ): string {
   const table =
     entity === "goods"
@@ -73,13 +110,42 @@ function selectSql(
         : entity === "accounts"
           ? profile.tables.accounts
           : profile.tables.stock_movements;
+  const schema = profile.supportedSchemas[0];
+  if (!schema) throw new Error("holoo_profile_schema_missing");
   const cursor = cursorExpr(cursorColumn, fallbackCursorColumn);
+  const cursorText = `CONVERT(nvarchar(4000), ${cursor}, 126)`;
+  const cursorNullRank = `CASE WHEN ${cursor} IS NULL THEN 0 ELSE 1 END`;
+  const cursorValue = `COALESCE(${cursorText}, N'')`;
+  const remoteKey = ident(fallbackCursorColumn);
+  const remoteText = `COALESCE(CONVERT(nvarchar(4000), ${remoteKey}, 126), N'')`;
   const projection = Object.entries(columns)
     .filter((entry): entry is [string, string] => Boolean(entry[1]))
     .map(([alias, column]) => `${ident(column)} AS ${ident(alias)}`);
-  projection.push(`${cursor} AS ${ident("cursor_key")}`);
-  const where = lastKey ? `WHERE CONVERT(nvarchar(100), ${cursor}, 126) > ${literal(lastKey)}` : "";
-  return `SELECT TOP (${BATCH_SIZE}) ${projection.join(", ")} FROM ${ident(table)} ${where} ORDER BY ${cursor}, ${ident(fallbackCursorColumn)}`;
+  projection.push(`${cursorText} AS ${ident("cursor_key")}`);
+  projection.push(`${remoteText} AS ${ident("remote_key")}`);
+
+  let where = "";
+  if (lastKey) {
+    const cursorRank = lastKey.cursor === null ? 0 : 1;
+    const cursorLiteral = literal(lastKey.cursor ?? "");
+    const remoteLiteral = literal(lastKey.id);
+    const remoteComparison = lastKey.inclusive ? ">=" : ">";
+    where = `WHERE (
+      ${cursorNullRank} > ${cursorRank}
+      OR (
+        ${cursorNullRank} = ${cursorRank}
+        AND (
+          ${cursorValue} COLLATE DATABASE_DEFAULT > ${cursorLiteral} COLLATE DATABASE_DEFAULT
+          OR (
+            ${cursorValue} COLLATE DATABASE_DEFAULT = ${cursorLiteral} COLLATE DATABASE_DEFAULT
+            AND ${remoteText} COLLATE DATABASE_DEFAULT ${remoteComparison} ${remoteLiteral} COLLATE DATABASE_DEFAULT
+          )
+        )
+      )
+    )`;
+  }
+  return `SELECT TOP (${limit}) ${projection.join(", ")} FROM ${ident(schema)}.${ident(table)} ${where}
+          ORDER BY ${cursorNullRank}, ${cursorValue} COLLATE DATABASE_DEFAULT, ${remoteText} COLLATE DATABASE_DEFAULT`;
 }
 
 function asString(value: unknown): string {
@@ -98,25 +164,29 @@ async function pullBaseRows(
   client: HolooSqlClient,
   profile: HolooSchemaProfile,
   settings: NonNullable<Awaited<ReturnType<typeof getHolooSettingsRow>>>,
-  cursors: Record<CursorEntity, string | null>,
-): Promise<{ input: BaseImportInput; nextCursors: Partial<Record<CursorEntity, string>> }> {
+  cursors: Record<CursorEntity, HolooSyncCursor | null>,
+  limit = BATCH_SIZE,
+  scopes: readonly CursorEntity[] = ["goods", "persons", "accounts", "openingInventory"],
+): Promise<{
+  input: BaseImportInput;
+  nextCursors: Partial<Record<CursorEntity, HolooSyncCursor>>;
+  rowsRead: Record<CursorEntity, number>;
+}> {
   const goodsColumns = profile.columns.goods;
   const personColumns = profile.columns.persons;
   const accountColumns = profile.columns.accounts;
   const stockColumns = profile.columns.stockMovements;
 
+  const selected = new Set(scopes);
+  const readScope = (scope: CursorEntity, sql: string) =>
+    selected.has(scope) ? client.query<Record<string, unknown>>(sql) : Promise.resolve([] as Record<string, unknown>[]);
   const [goodsRows, personRows, accountRows, stockRows] = await Promise.all([
-    client.query<Record<string, unknown>>(
-      selectSql(profile, "goods", goodsColumns, goodsColumns.updatedAt, goodsColumns.id, cursors.goods),
-    ),
-    client.query<Record<string, unknown>>(
-      selectSql(profile, "persons", personColumns, personColumns.updatedAt, personColumns.id, cursors.persons),
-    ),
-    client.query<Record<string, unknown>>(
-      selectSql(profile, "accounts", accountColumns, accountColumns.updatedAt, accountColumns.id, cursors.accounts),
-    ),
-    client.query<Record<string, unknown>>(
-      selectSql(
+    readScope("goods", buildHolooBaseSelectSql(profile, "goods", goodsColumns, goodsColumns.updatedAt, goodsColumns.id, cursors.goods, limit)),
+    readScope("persons", buildHolooBaseSelectSql(profile, "persons", personColumns, personColumns.updatedAt, personColumns.id, cursors.persons, limit)),
+    readScope("accounts", buildHolooBaseSelectSql(profile, "accounts", accountColumns, accountColumns.updatedAt, accountColumns.id, cursors.accounts, limit)),
+    readScope(
+      "openingInventory",
+      buildHolooBaseSelectSql(
         profile,
         "openingInventory",
         {
@@ -129,16 +199,27 @@ async function pullBaseRows(
         stockColumns.updatedAt ?? stockColumns.date,
         stockColumns.id,
         cursors.openingInventory,
+        limit,
       ),
     ),
   ]);
+  if (
+    limit > MAX_HOLOO_MIGRATION_ROWS &&
+    [goodsRows, personRows, accountRows, stockRows].some((rows) => rows.length > MAX_HOLOO_MIGRATION_ROWS)
+  ) {
+    throw new HolooProfileError("holoo_source_too_large");
+  }
 
   const goodsNameById = new Map(goodsRows.map((row) => [asString(row.id), asString(row.name)]));
   const goodsUnitById = new Map(goodsRows.map((row) => [asString(row.id), asString(row.unit)]));
-  const nextCursors: Partial<Record<CursorEntity, string>> = {};
+  const nextCursors: Partial<Record<CursorEntity, HolooSyncCursor>> = {};
   const remember = (entity: CursorEntity, rows: Record<string, unknown>[]) => {
     if (rows.length === 0) return;
-    nextCursors[entity] = asString(rows[rows.length - 1].cursor_key);
+    const last = rows[rows.length - 1];
+    nextCursors[entity] = {
+      cursor: last.cursor_key == null ? null : asString(last.cursor_key),
+      id: asString(last.remote_key),
+    };
   };
   remember("goods", goodsRows);
   remember("persons", personRows);
@@ -195,52 +276,107 @@ async function pullBaseRows(
         }),
     },
     nextCursors,
+    rowsRead: {
+      goods: goodsRows.length,
+      persons: personRows.length,
+      accounts: accountRows.length,
+      openingInventory: stockRows.length,
+    },
   };
 }
 
-/**
- * Read Holoo base data since the cursor and hand it to `applyBaseImport`.
- *
- * The raw SQL → mapped-row read is driven by the matched schema profile and is
- * the half verified against a real Holoo install (Wave 1's probe is the
- * instrument). Returning an empty manifest for an unmapped install is the safe
- * no-op: the mirror imports nothing rather than guessing at columns.
- */
+export class HolooProfileError extends Error {
+  constructor(
+    readonly code: "holoo_schema_unsupported" | "holoo_profile_not_verified" | "holoo_source_too_large",
+    readonly diagnostics: ReturnType<typeof diagnoseProfile>["diagnostics"] = [],
+  ) {
+    super(code);
+    this.name = "HolooProfileError";
+  }
+}
+
+interface FetchedHolooBase {
+  input: BaseImportInput;
+  nextCursors: Partial<Record<CursorEntity, HolooSyncCursor>>;
+  profile: HolooSchemaProfile;
+  fingerprint: HolooSchemaFingerprint;
+}
+
+/** Read base data using a freshly verified structural profile. */
 async function fetchHolooBase(
   businessId: string,
   connectionId: string,
   settings: NonNullable<Awaited<ReturnType<typeof getHolooSettingsRow>>>,
-): Promise<{ input: BaseImportInput; nextCursors: Partial<Record<CursorEntity, string>> }> {
+  fullSnapshot = false,
+  scopes: readonly CursorEntity[] = ["goods", "persons", "accounts", "openingInventory"],
+): Promise<FetchedHolooBase> {
   const client = await connectHolooSql(holooSqlConfigFor(settings));
   try {
-    const profile = settings.schema_profile
-      ? profileForKey(settings.schema_profile)
-      : matchProfile(
-          (await client.query<{ TABLE_NAME: string }>(
-            `SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE = 'BASE TABLE'`,
-          )).map((t) => t.TABLE_NAME),
-        );
+    const snapshot = await probeHolooSchema(client);
+    const { profile, diagnostics } = diagnoseProfile(snapshot);
     if (!profile) {
-      await writeIntegrationAudit({ businessId, connectionId, action: "pull.unknown_profile" });
-      return { input: { goods: [], persons: [], accounts: [], openingInventory: [] }, nextCursors: {} };
+      await writeIntegrationAudit({
+        businessId,
+        connectionId,
+        action: "pull.unknown_profile",
+        payload: { diagnostics },
+      });
+      throw new HolooProfileError("holoo_schema_unsupported", diagnostics);
     }
-    const cursors = {
-      goods: await readCursor(businessId, connectionId, "goods"),
-      persons: await readCursor(businessId, connectionId, "persons"),
-      accounts: await readCursor(businessId, connectionId, "accounts"),
-      openingInventory: await readCursor(businessId, connectionId, "openingInventory"),
-    } satisfies Record<CursorEntity, string | null>;
-    const pulled = await pullBaseRows(client, profile, settings, cursors);
+    // Do not let a stale/legacy profile key authorize a read after the remote
+    // structure has changed. The connection must be tested and pinned again.
+    if (settings.schema_profile !== profile.key) {
+      throw new HolooProfileError("holoo_profile_not_verified");
+    }
+
+    const cursors: Record<CursorEntity, HolooSyncCursor | null> = fullSnapshot
+      ? { goods: null, persons: null, accounts: null, openingInventory: null }
+      : {
+          goods: await readCursor(businessId, connectionId, "goods"),
+          persons: await readCursor(businessId, connectionId, "persons"),
+          accounts: await readCursor(businessId, connectionId, "accounts"),
+          openingInventory: await readCursor(businessId, connectionId, "openingInventory"),
+        };
+    const pulled = await pullBaseRows(
+      client,
+      profile,
+      settings,
+      cursors,
+      fullSnapshot ? MAX_HOLOO_MIGRATION_ROWS + 1 : BATCH_SIZE,
+      scopes,
+    );
+    if (fullSnapshot && Object.values(pulled.rowsRead).some((count) => count > MAX_HOLOO_MIGRATION_ROWS)) {
+      throw new HolooProfileError("holoo_source_too_large");
+    }
     return {
       input: pulled.input,
-      nextCursors: {
-        ...Object.fromEntries(Object.entries(cursors).filter((entry): entry is [CursorEntity, string] => Boolean(entry[1]))),
-        ...pulled.nextCursors,
-      },
+      nextCursors: fullSnapshot
+        ? {}
+        : {
+            ...Object.fromEntries(Object.entries(cursors).filter((entry): entry is [CursorEntity, HolooSyncCursor] => entry[1] !== null)),
+            ...pulled.nextCursors,
+          },
+      profile,
+      fingerprint: snapshot.fingerprint,
     };
   } finally {
     await client.close();
   }
+}
+
+/**
+ * A Data Transfer import reads a bounded full snapshot (rather than the
+ * companion cursor) and returns only the mapped domain records required by the
+ * existing Holoo services. Credentials never leave this module.
+ */
+export async function readHolooBaseForMigration(
+  businessId: string,
+  connectionId: string,
+  scopes: readonly CursorEntity[] = ["goods", "persons", "accounts", "openingInventory"],
+): Promise<FetchedHolooBase> {
+  const settings = await getHolooSettingsRow(businessId, connectionId);
+  if (!settings) throw new Error("holoo_connection_not_found");
+  return fetchHolooBase(businessId, connectionId, settings, true, scopes);
 }
 
 /** Mirror one connection's base data. Returns a summary for the audit log. */

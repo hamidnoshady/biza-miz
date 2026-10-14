@@ -74,33 +74,51 @@ export function holooAccountType(code: string, nature?: string | null): AccountT
 export interface AccountImportPlan {
   /** Holoo accounts whose code already exists in the seed chart — map, don't recreate. */
   mappedToSeed: MappedAccount[];
-  /** Holoo accounts with codes absent from the seed chart — create fresh. */
+  /** Holoo accounts with codes absent from the seed chart — create fresh, parents first. */
   toCreate: MappedAccount[];
-  /** Accounts whose parent code is neither in the seed nor among created codes. */
+  /** Accounts whose parent is unavailable or belongs to an invalid/cyclic chain. */
   orphaned: MappedAccount[];
+  /** Remote identities already linked by an earlier run. */
+  skipped: number;
 }
 
-export function planAccountImport(holooAccounts: MappedAccount[], seedCodes: ReadonlySet<string>): AccountImportPlan {
+export function planAccountImport(
+  holooAccounts: MappedAccount[],
+  seedCodes: ReadonlySet<string>,
+  alreadyMapped: ReadonlySet<string> = new Set(),
+): AccountImportPlan {
   const mappedToSeed: MappedAccount[] = [];
-  const toCreate: MappedAccount[] = [];
-  const known = new Set<string>(seedCodes);
+  const pending: MappedAccount[] = [];
+  const alreadyMappedCodes = new Set<string>();
+  let skipped = 0;
 
   for (const account of holooAccounts) {
-    if (known.has(account.code)) {
+    if (alreadyMapped.has(account.remoteId)) {
+      alreadyMappedCodes.add(account.code);
+      skipped += 1;
+    } else if (seedCodes.has(account.code)) {
       mappedToSeed.push(account);
     } else {
-      toCreate.push(account);
-      known.add(account.code); // its children may reference it
+      pending.push(account);
     }
   }
 
-  // Re-check parent pointers now that the full code set is known.
-  const finalToCreate: MappedAccount[] = [];
-  const orphaned: MappedAccount[] = [];
-  for (const account of toCreate) {
-    if (account.parentCode && !known.has(account.parentCode)) orphaned.push(account);
-    else finalToCreate.push(account);
+  // Resolve parents before children regardless of workbook/source row order.
+  // Anything left after topological sorting has a missing parent or a cycle;
+  // fail closed rather than silently creating a detached chart account.
+  const knownParents = new Set([...seedCodes, ...alreadyMappedCodes]);
+  const toCreate: MappedAccount[] = [];
+  while (pending.length > 0) {
+    const readyIndexes = pending
+      .map((account, index) => ({ account, index }))
+      .filter(({ account }) => !account.parentCode || knownParents.has(account.parentCode));
+    if (readyIndexes.length === 0) break;
+    for (const { account } of readyIndexes) {
+      toCreate.push(account);
+      knownParents.add(account.code);
+    }
+    for (const { index } of readyIndexes.reverse()) pending.splice(index, 1);
   }
 
-  return { mappedToSeed, toCreate: finalToCreate, orphaned };
+  return { mappedToSeed, toCreate, orphaned: pending, skipped };
 }

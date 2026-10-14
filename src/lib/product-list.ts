@@ -5,6 +5,7 @@
  * can pin the search, status-filter, KPI, pager and export behaviour.
  */
 import { toLatinDigits } from "./digits";
+import { moneyToInput, type MoneyUnit } from "./money";
 
 /**
  * The structural slice of the trade's `VariantSummary` the list reads, kept
@@ -132,19 +133,35 @@ function quantityForCsv(row: ProductListRow): string {
   return Number.isFinite(numeric) ? String(numeric) : row.quantity;
 }
 
-/** One CSV field, quoted per RFC 4180 (embedded quotes doubled). */
+/**
+ * One CSV field, quoted per RFC 4180 (embedded quotes doubled).
+ *
+ * A cell starting `=`, `+`, `-` or `@` is a formula to Excel even inside
+ * quotes, so a product named `=HYPERLINK(...)` ran on the machine of whoever
+ * opened the export. The leading apostrophe makes it inert text — the same
+ * guard the platform's shared writer (`data-transfer/codecs.ts`) applies.
+ */
 function csvCell(text: string): string {
-  return `"${text.replaceAll('"', '""')}"`;
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
+/** A Rial amount as the plain number a spreadsheet adds up, in the chosen unit. */
+function moneyCell(rial: number | null, unit: MoneyUnit): string {
+  return rial != null ? String(moneyToInput(rial, unit)) : "";
 }
 
 /**
  * The «دانلود CSV» payload: a BOM (so Windows Excel detects UTF-8), quoted
  * header, one row per variant/family in the order shown, CRLF row endings.
- * Money columns are the raw integer Rial the API stores — that is what the
- * header advertises and what imports/accounting tools expect.
+ * Money columns are plain Latin-digit numbers in the business's selected unit,
+ * and the header names that unit: a Toman business used to get Rial under a
+ * «(ریال)» header — ten times the figure on its screen — while every other
+ * export in the product speaks the selected unit. `unit` defaults to Rial.
  */
-export function buildProductsCsv(rows: ProductListRow[]): string {
-  const head = ["نام", "خانواده", "کد کالا", "بارکد", "واحد", "موجودی", "قیمت فروش (ریال)", "قیمت خرید (ریال)"];
+export function buildProductsCsv(rows: ProductListRow[], unit: MoneyUnit = "rial"): string {
+  const unitLabel = unit === "rial" ? "ریال" : "تومان";
+  const head = ["نام", "خانواده", "کد کالا", "بارکد", "واحد", "موجودی", `قیمت فروش (${unitLabel})`, `قیمت خرید (${unitLabel})`];
   const lines = rows.map((row) =>
     [
       row.name,
@@ -153,8 +170,8 @@ export function buildProductsCsv(rows: ProductListRow[]): string {
       row.barcode ?? "",
       row.unit ?? "",
       quantityForCsv(row),
-      row.unitPrice != null ? String(row.unitPrice) : "",
-      row.unitCost != null ? String(row.unitCost) : "",
+      moneyCell(row.unitPrice, unit),
+      moneyCell(row.unitCost, unit),
     ]
       .map(csvCell)
       .join(","),

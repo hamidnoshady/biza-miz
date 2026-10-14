@@ -337,7 +337,9 @@ describe("the legacy addresses", () => {
     ["/dashboard/commission", "/growth/commission"],
     ["/dashboard/customers", "/crm/directory"],
     ["/dashboard/persons", "/crm/directory"],
-    ["/dashboard/menu", "/settings/menu"],
+    ["/dashboard/menu", "/accounting/menu"],
+    // The settings address is a compatibility redirect too (issue #844).
+    ["/settings/menu", ACCOUNTING_WORKSPACE_HREFS.menu],
     ["/dashboard/team", "/settings/team"],
     ["/dashboard/backup", "/settings/backup"],
     ["/dashboard/ledger", "/accounting/overview"],
@@ -363,6 +365,7 @@ describe("the legacy addresses", () => {
       "/accounting/vendors",
       "/accounting/receivables",
       "/accounting/payables",
+      "/accounting/menu",
     ]) {
       const { status, location } = await visit(pathname, { authed: false });
       expect(status, `${pathname} should bounce a signed-out visitor`).toBe(

@@ -5,7 +5,7 @@ import { requireManager, type TaxSetting } from "@/lib/setup-state";
 import { withTenantScope } from "@/lib/auth";
 
 /**
- * Step 4 — tax. A default VAT rate (percent) is stored business-wide and
+ * Tax. A default VAT rate (percent) is stored business-wide and
  * stamped onto new menu categories; per-category overrides handle exemptions.
  */
 export const GET = withTenantScope(async () => {

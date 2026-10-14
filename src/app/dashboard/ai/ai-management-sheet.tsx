@@ -11,6 +11,14 @@
  * registry), so there is one assistant experience, not two sidebars managing
  * one assistant.
  *
+ * Issue #812 §4/§11 — two of the old sections are deliberately gone. There is
+ * no «ایجنت‌ها»: agents are system-wide, built and versioned by Superadmin, and
+ * a tenant meets one only through a suggestion card assigned to it. And there
+ * is no «دانش دستیار» with its reindex controls: knowledge retrieval is
+ * infrastructure owned by the configured AI layer, not something a tenant
+ * manages. In their place sit the two surfaces the issue adds — layered memory
+ * and the Deep Research run history.
+ *
  * It is a sheet, not a second permanent rail: it opens from the *far* edge of
  * the right-side workspace sidebar, or full-screen on a phone, and closes back
  * to the chat it came from. Escape, outside click, focus handling and the
@@ -21,8 +29,8 @@
 import {
   ActivityIcon,
   BotIcon,
-  LibraryBigIcon,
-  SparklesIcon,
+  BrainIcon,
+  FlaskConicalIcon,
   WalletIcon,
   ZapIcon,
   type LucideIcon,
@@ -41,19 +49,19 @@ import {
   type AiPanelSectionKey,
 } from "@/lib/ai-panel";
 import { FilterChip } from "../filters";
-import { AgentsManager } from "@/app/(app)/ai/agents/agents-manager";
 import { AutomationsManager } from "@/app/(app)/ai/automations/automations-manager";
-import { KnowledgeManager } from "@/app/(app)/ai/knowledge/knowledge-manager";
 import { UsageDashboard } from "@/app/(app)/ai/usage/usage-dashboard";
 import { AiCoworkerPanel } from "./ai-coworker-panel";
 import { AiAutopilotActivity } from "./ai-autopilot-activity";
+import { AiMemoryPanel } from "./ai-memory-panel";
+import { AiResearchPanel } from "./ai-research-panel";
 
 const ICONS: Record<AiPanelIconName, LucideIcon> = {
-  agents: SparklesIcon,
+  memory: BrainIcon,
   coworkers: BotIcon,
   automations: ZapIcon,
   activity: ActivityIcon,
-  knowledge: LibraryBigIcon,
+  research: FlaskConicalIcon,
   usage: WalletIcon,
 };
 
@@ -66,8 +74,8 @@ function AiPanelBody({
   canAutoApply: boolean;
 }) {
   switch (section) {
-    case "agents":
-      return <AgentsManager />;
+    case "memory":
+      return <AiMemoryPanel />;
     case "coworkers":
       // Only an owner may hand a job the authority to act unattended — the
       // server-side `owner_required` checks mirror this prop.
@@ -76,8 +84,8 @@ function AiPanelBody({
       return <AutomationsManager canAutoApply={canAutoApply} />;
     case "activity":
       return <AiAutopilotActivity />;
-    case "knowledge":
-      return <KnowledgeManager />;
+    case "research":
+      return <AiResearchPanel />;
     case "usage":
       return <UsageDashboard />;
   }
@@ -97,7 +105,7 @@ export function AiManagementSheet({
   onClose: () => void;
 }) {
   // While closed, keep the last section mounted so the exit slide has content.
-  const active = aiPanelSection(section ?? "agents");
+  const active = aiPanelSection(section ?? "memory");
 
   return (
     <Sheet open={section !== null} onOpenChange={(open) => (open ? null : onClose())}>
@@ -114,7 +122,7 @@ export function AiManagementSheet({
         <SheetHeader className="shrink-0 border-b border-border/80 px-4 py-3">
           <SheetTitle>مدیریت دستیار هوشمند</SheetTitle>
           <SheetDescription>
-            ایجنت‌ها، همکاران، اتوماسیون‌ها و دانش دستیار — همان گفت‌وگو، یک قدم فراتر.
+            حافظه، همکاران، اتوماسیون‌ها، پژوهش و هزینهٔ دستیار — همان گفت‌وگو، یک قدم فراتر.
           </SheetDescription>
         </SheetHeader>
 

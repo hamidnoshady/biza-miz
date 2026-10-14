@@ -22,11 +22,30 @@ import { tomanLabel, formatRial } from "@/lib/platform-money";
 
 interface Overview {
   subscriptions: { active: number; trialing: number; pastDue: number; cancelled: number; expired: number };
-  money: { month: string | null; billedRial: number; successfulPayments: number; failedPayments: number };
+  money: {
+    month: string | null;
+    timezone?: string;
+    billedRial: number;
+    collectedRevenueRial?: number;
+    netUsageSpendRial?: number;
+    successfulPayments: number;
+    failedPayments: number;
+  };
   invoices: { outstandingCount: number; outstandingRial: number };
-  wallets: { liabilityRial: number; count: number };
-  ai: { allowanceGrantedRial: number; allowanceUsedRial: number; walletChargedRial: number; costingEnabled: boolean };
-  messaging: { creditBalanceRial: number; usageRialThisMonth: number };
+  wallets: { liabilityRial: number; aiDebtRial?: number; netLiabilityRial?: number; count: number };
+  ai: {
+    allowanceGrantedRial: number;
+    allowanceUsedRial: number;
+    walletChargedRial: number;
+    debtRial?: number;
+    costingEnabled: boolean;
+  };
+  messaging: {
+    creditBalanceRial: number;
+    grossUsageRialThisMonth?: number;
+    refundedRialThisMonth?: number;
+    usageRialThisMonth: number;
+  };
   media: { businesses: number; storedBytes: number; chargesRialThisMonth: number };
   gateway: { configured: string; sandbox: boolean; currency: string; merchantIdSet: boolean; lastSuccessfulPayment: string | null };
 }
@@ -72,7 +91,7 @@ export function BillingOverviewTab() {
           label="مبلغ صورتحساب این ماه"
           value={tomanLabel(data.money.billedRial)}
           icon={<CreditCardIcon className="size-4" />}
-          hint={`${data.money.successfulPayments} پرداخت موفق · ${data.money.failedPayments} ناموفق`}
+          hint={`وصول‌شده: ${tomanLabel(data.money.collectedRevenueRial ?? 0)} · ${data.money.successfulPayments} موفق / ${data.money.failedPayments} ناموفق`}
         />
         <StatCard
           label="فاکتورهای باز"
@@ -85,7 +104,11 @@ export function BillingOverviewTab() {
           label="بدهی کیف پول‌ها"
           value={tomanLabel(data.wallets.liabilityRial)}
           icon={<WalletLiability />}
-          hint={`${data.wallets.count} کیف پول فعال`}
+          hint={`${data.wallets.count} کیف پول فعال${
+            (data.wallets.aiDebtRial ?? 0) > 0
+              ? ` · بدهی AI: ${tomanLabel(data.wallets.aiDebtRial ?? 0)}`
+              : ""
+          }`}
         />
       </div>
 
@@ -116,6 +139,14 @@ export function BillingOverviewTab() {
               <span className="text-muted-foreground">شارژ از کیف پول</span>
               <span className="tabular-nums">{tomanLabel(data.ai.walletChargedRial)}</span>
             </li>
+            {(data.ai.debtRial ?? 0) > 0 && (
+              <li className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">بدهی معوق هوش مصنوعی</span>
+                <span className="font-medium tabular-nums text-amber-700 dark:text-amber-300">
+                  {tomanLabel(data.ai.debtRial ?? 0)}
+                </span>
+              </li>
+            )}
           </ul>
           {allowanceUsedPct != null && (
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={allowanceUsedPct} aria-valuemin={0} aria-valuemax={100}>
@@ -129,15 +160,27 @@ export function BillingOverviewTab() {
           </p>
         </Card>
 
-        <Card title="کیف پول">
+        <Card title="کیف پول و پیام‌رسانی">
           <ul className="space-y-2 text-sm">
             <li className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">ماندهٔ کیف پول پلتفرم</span>
               <span className="font-semibold tabular-nums">{tomanLabel(data.messaging.creditBalanceRial)}</span>
             </li>
             <li className="flex items-center justify-between gap-2">
-              <span className="text-muted-foreground">هزینهٔ پیام این ماه</span>
+              <span className="text-muted-foreground">هزینهٔ خالص پیام این ماه</span>
               <span className="tabular-nums">{tomanLabel(data.messaging.usageRialThisMonth)}</span>
+            </li>
+            {(data.messaging.refundedRialThisMonth ?? 0) > 0 && (
+              <li className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">برگشت وجه پیام‌های ناموفق</span>
+                <span className="tabular-nums text-emerald-700 dark:text-emerald-300">
+                  {tomanLabel(data.messaging.refundedRialThisMonth ?? 0)}
+                </span>
+              </li>
+            )}
+            <li className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">مجموع مصرف خالص این ماه</span>
+              <span className="tabular-nums">{tomanLabel(data.money.netUsageSpendRial ?? 0)}</span>
             </li>
           </ul>
           <p className="mt-3 text-xs text-muted-foreground">

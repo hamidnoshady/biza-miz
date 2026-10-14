@@ -19,6 +19,33 @@ npm run test:visual
 It also runs on every pull request (`.github/workflows/test.yml`, job
 `visual-regression`) and is one of the jobs the `required` status check fans in.
 
+### Running it from a sandbox that cannot reach Playwright's CDN
+
+CI installs the browser pinned by `playwright@1.56.0` — Chromium 141. A sandbox
+whose egress blocks `cdn.playwright.dev` and
+`playwright.download.prss.microsoft.com` cannot do that, and pointing the harness
+at *whatever* Chromium is lying around is not an option: it refuses a mismatched
+major on purpose, because text rasterises differently between majors (that was
+the first all-red CI run). The recipe that works is a **matching** build from an
+npm package:
+
+```bash
+npm i --no-save --no-package-lock @sparticuz/chromium@141.0.0
+# extract the browser and the shared libraries it links against
+node -e 'import("@sparticuz/chromium").then(async (m) => console.log(await m.default.executablePath()))'
+node -e 'const {brotliDecompressSync}=require("node:zlib");const {readFileSync,writeFileSync}=require("node:fs");writeFileSync("/tmp/al2023.tar",brotliDecompressSync(readFileSync("node_modules/@sparticuz/chromium/bin/al2023.tar.br")))'
+mkdir -p /tmp/chromium-libs && tar -xf /tmp/al2023.tar -C /tmp/chromium-libs
+LD_LIBRARY_PATH=/tmp/chromium-libs/lib VISUAL_CHROMIUM_PATH=/tmp/chromium npm run test:visual
+```
+
+That build calls itself `141.0.7390.0` (the package strips the last version
+component), which satisfies the major check. What it does **not** change is
+anything else on this page: seed the fixture, build for production, and serve the
+seeded database — the two CRM baselines re-recorded through this recipe came out
+at 2.9% and 3.3% against the old ones for exactly the reason the diff images
+showed, and the other twelve screens matched to the pixel, which is the evidence
+that the environment was not the variable.
+
 ## What is covered
 
 | Baseline | App | What it establishes |
@@ -73,6 +100,12 @@ clears the measured noise ceiling without approaching the structural floor; see
 the comment on `MAX_DIFF_RATIO`. A failure between 0.3% and 0.5% deserves its
 diff image opened before assuming either way.)
 
+One screen pair has its own ceiling: the cheque register (`accounting-cheques`
+and `accounting-cheques-dark`) allows 1%, by the owner's decision on
+2026-10-13. Its frame is almost all small RTL table text, and CI measured 0.65%
+and 0.52% there on identical content. A screen opts in with `maxDiffRatio` on
+its entry in `SCREENS`; prefer that over raising the global limit.
+
 ## Reviewing a failure — read this before touching a baseline
 
 When the job fails it writes `docs/design/visual/__diff__/<id>.actual.png` and
@@ -105,8 +138,12 @@ selector matches nothing, rather than silently recording the unscrolled frame.
 ## Adding a screen
 
 Add an entry to `SCREENS` in `scripts/visual-regression.mjs`, run
-`npm run test:visual` once to record it, look at the resulting PNG, and commit
-it with the change. Prefer screens that are the canonical example of a shared
+`node scripts/visual-regression.mjs --update` once to record it, look at the
+resulting PNG, and commit it **together with the entry**. The harness refuses
+to run a screen that has no committed baseline: it used to record one on the
+spot and count that as a pass, which on CI — where the file is discarded with
+the runner — meant a green job for a screen it had never compared. An entry
+without its PNG is a gate that exists only in the list. Prefer screens that are the canonical example of a shared
 pattern over screens that merely look good. Keep the list short: this check is
 valuable in proportion to how seriously each failure is taken, and a
 fifty-screen suite trains people to skim.
@@ -199,3 +236,33 @@ If you cannot reach Playwright's CDN, set `VISUAL_CHROMIUM_PATH` to a Chromium
 you obtained another way — but it must be the **same major**, or the check above
 will stop you. (`@sparticuz/chromium@141.0.0` on npm is one such source, and is
 how the committed baselines were produced.)
+
+## Focused local review (without weakening CI)
+
+For an already-inspected, intended change, select only the affected screens:
+
+```sh
+npm run test:visual -- --screens=accounting-receivables,accounting-expenses
+npm run test:visual:update -- --screens=accounting-receivables
+```
+
+The selection is local-only: CI rejects `--screens`, and commands without it
+still run the complete suite. Unknown/empty screen names fail rather than
+silently skipping coverage. This avoids recording unrelated baselines during a
+review. All browser, viewport, locale, loaded-state, comparison and tolerance
+rules above remain unchanged. Local development captures are diagnostic evidence;
+only the exact-head production CI comparison can establish that they also match
+production rendering.
+
+`npm run test:a11y:subledger` checks the seeded receivables surface with the same
+Chromium major and locale, in light/dark at 1440 and 390 pixels. It requests a
+one-row window from the real API to exercise pagination in the two-customer
+fixture, tests keyboard entry/exit and focus containment/restoration, and runs
+axe WCAG A/AA checks on search/summary/paging, statement and journal detail.
+Actual violations fail. For axe's indeterminate transparent-cell contrast in
+stacked mobile dialogs, it additionally measures rendered foreground/opaque
+background colors, verifies text is not occluded, and requires at least 4.5:1;
+unsupported compositing fails rather than being waived. Raw indeterminate
+results and direct measurements remain in the log. Set `A11Y_SCREENSHOT_DIR`
+locally to retain review screenshots. This focused audit is not a claim of
+whole-application WCAG conformance.

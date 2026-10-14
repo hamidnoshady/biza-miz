@@ -112,14 +112,19 @@ describe("Phase C read tools", () => {
       aiTools.runReadTool("list_message_templates", {}, alpha.businessId),
     );
     expect(all.ok).toBe(true);
-    const allRows = all.data as Array<{ templateId: string; channel: string; name: string }>;
+    const allData = all.data as {
+      scopeNote: string;
+      templates: Array<{ templateId: string; channel: string; name: string }>;
+    };
+    const allRows = allData.templates;
+    expect(allData.scopeNote).toContain("کل کسب‌وکار");
     expect(allRows.length).toBe(2);
     expect(allRows.every((r) => typeof r.templateId === "string")).toBe(true);
 
     const sms = await dbLib.withTenant(alpha.businessId, () =>
       aiTools.runReadTool("list_message_templates", { channel: "sms" }, alpha.businessId),
     );
-    const smsRows = sms.data as Array<{ channel: string }>;
+    const smsRows = (sms.data as { templates: Array<{ channel: string }> }).templates;
     expect(smsRows.length).toBe(1);
     expect(smsRows[0].channel).toBe("sms");
   });
@@ -145,7 +150,12 @@ describe("Phase C read tools", () => {
       aiTools.runReadTool("list_message_campaigns", {}, alpha.businessId),
     );
     expect(alphaList.ok).toBe(true);
-    const alphaRows = alphaList.data as Array<{ campaignId: string; name: string; status: string }>;
+    const alphaData = alphaList.data as {
+      scopeNote: string;
+      campaigns: Array<{ campaignId: string; name: string; status: string }>;
+    };
+    const alphaRows = alphaData.campaigns;
+    expect(alphaData.scopeNote).toContain("کل کسب‌وکار");
     expect(alphaRows.some((r) => r.campaignId === created.id)).toBe(true);
     expect(alphaRows.find((r) => r.campaignId === created.id)?.status).toBe("draft");
 
@@ -153,7 +163,7 @@ describe("Phase C read tools", () => {
     const betaList = await dbLib.withTenant(beta.businessId, () =>
       aiTools.runReadTool("list_message_campaigns", {}, beta.businessId),
     );
-    const betaRows = betaList.data as Array<{ campaignId: string }>;
+    const betaRows = (betaList.data as { campaigns: Array<{ campaignId: string }> }).campaigns;
     expect(betaRows.some((r) => r.campaignId === created.id)).toBe(false);
   });
 });

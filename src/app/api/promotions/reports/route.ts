@@ -5,7 +5,7 @@ import { promotionEffectivenessReport } from "@/lib/promotions-service";
 
 /** گزارش اثربخشی کمپین‌ها — how often each promotion fired and how much discount it cost. */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyView);
+  const { session, error } = await requirePermission(PERMISSIONS.campaignsView);
   if (error) return error;
 
   const params = request.nextUrl.searchParams;

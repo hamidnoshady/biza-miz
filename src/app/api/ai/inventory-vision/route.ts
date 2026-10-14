@@ -9,9 +9,10 @@ import {
 } from "@/lib/ai-wallet-billing";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 import { InventoryVisionError, runInventoryVisionCount } from "@/lib/ai-inventory-vision-service";
-import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { query } from "@/lib/db";
-import { withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 
 /**
  * Metered AI tagging/counting for the visual stock counter — the same shape
@@ -22,7 +23,7 @@ import { withTenantScope } from "@/lib/auth";
  * settled against actual usage.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requirePermission(PERMISSIONS.aiManage);
   if (guard.error) return guard.error;
   const session = guard.session;
 

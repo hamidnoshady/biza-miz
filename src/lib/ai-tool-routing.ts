@@ -46,10 +46,14 @@ const TOOL_APP_MAP: Record<string, AppKey> = {
   "get_supplier_performance": "accounting",
 
   // Growth app — the audience *engines*. The customer record itself moved to
-  // the CRM in Phase 36; these two stayed because they are about a campaign
-  // and a payroll-adjacent payout, not about who a customer is.
+  // the CRM in Phase 36; these stayed because they are about a campaign
+  // and a payroll-adjacent payout, not about who a customer is. Message
+  // templates and campaign status belong to the same Growth workbench and its
+  // `/api/messaging` permission path.
   "get_repurchase_candidates": "growth",
   "get_staff_commission": "growth",
+  "list_message_templates": "growth",
+  "list_message_campaigns": "growth",
 
   // CRM app (Phase 36). `get_customer_profile` and `get_at_risk_customers`
   // moved here from Growth with the record they read: a question about one
@@ -75,6 +79,14 @@ const TOOL_APP_MAP: Record<string, AppKey> = {
   "get_vat_liability": "accounting",
   "get_branch_comparison": "accounting",
   "forecast_demand": "accounting",
+
+  // Website app (Phase 38) — the manager's three reads. All go through the
+  // business's WebsiteAdapter, so they are website-owned rather than
+  // general-purpose: focusing on Website now narrows to these instead of
+  // falling back to the whole catalogue.
+  "list_website_posts": "website",
+  "list_website_products": "website",
+  "get_website_status": "website",
 };
 
 /**

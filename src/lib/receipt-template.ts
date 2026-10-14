@@ -71,6 +71,17 @@ export interface ReceiptLine {
     warrantyMonths?: number | null;
     warrantyEndDate?: string | null;
   } | null;
+  /**
+   * Issue #839 §8 — a vehicle line's identity, printed so the customer's copy
+   * says exactly which car was sold (its stock number and, where it has one,
+   * its VIN/chassis/plate). Absent on every non-vehicle line.
+   */
+  vehicle?: {
+    stockNumber: string;
+    vin?: string | null;
+    chassisNumber?: string | null;
+    plateNumber?: string | null;
+  } | null;
 }
 
 /**
@@ -87,6 +98,16 @@ export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   credit: "نسیه",
   snappfood: "اسنپ‌فود",
 };
+
+/**
+ * The Persian name of a payment settlement, for every surface that has no
+ * business-named payment way to show (dashboard audit F19). Never the raw
+ * code: an unknown one reads «روش پرداخت نامشخص» rather than leaking
+ * `online` into a financial screen.
+ */
+export function paymentMethodLabel(method: string | null | undefined): string {
+  return (method && PAYMENT_METHOD_LABELS[method]) || "روش پرداخت نامشخص";
+}
 
 /** Exported so the retail invoice detail modal reads the same labels the printed receipt does. */
 export const CONDITION_GRADE_LABELS: Record<string, string> = {
@@ -204,7 +225,7 @@ export function renderReceiptHtml(data: ReceiptData, opts: { paperWidthMm?: Pape
         )
         .join("")
     : data.paymentMethod
-      ? `<div class="totals-row"><span>روش پرداخت</span><span>${escapeHtml(PAYMENT_METHOD_LABELS[data.paymentMethod] ?? data.paymentMethod)}</span></div>`
+      ? `<div class="totals-row"><span>روش پرداخت</span><span>${escapeHtml(paymentMethodLabel(data.paymentMethod))}</span></div>`
       : "";
   const tipRow =
     data.tip && data.tip > 0

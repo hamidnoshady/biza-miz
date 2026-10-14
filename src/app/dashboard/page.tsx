@@ -39,14 +39,18 @@ import { memberAccessFor } from "@/lib/member-access";
 export default async function DashboardPage() {
   const session = await getSession();
   if (!session) redirect("/login");
-  // Phase 45: the assistant is a cloud screen; a Hybrid desktop opens on the till.
+  // Phase 46: on a Hybrid desktop the assistant is the cloud's, shown in the
+  // till window's cloud pane by the layout's gate. Members who cannot use it
+  // (till staff) open on their till screen instead.
   const deployment = await withTenant(session.businessId, () => readDeploymentProfile(session.businessId));
   if (isHybridSite(deployment.profile, deploymentRole())) {
-    const [industry, reservations, member] = await Promise.all([
+    const [industry, reservations, member, assistantOn] = await Promise.all([
       getBusinessIndustry(session.businessId),
       isFeatureEnabled(session.businessId, "reservations"),
       memberAccessFor(session),
+      isFeatureEnabled(session.businessId, "ai_assistant"),
     ]);
+    if (assistantOn && member?.permissions.has(PERMISSIONS.aiUse)) return null;
     const home = siteHomeFor({
       role: session.role,
       // Fails open on an unreadable industry, exactly as `isModuleEnabled` does.
@@ -61,7 +65,7 @@ export default async function DashboardPage() {
         <div className={`${cardClass} w-full max-w-lg p-6 text-center`}>
           <h1 className="text-lg font-semibold text-foreground">صفحه‌ای از صندوق برای شما باز نیست</h1>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            روی این دستگاه فقط صندوق، سفارش‌ها، میزها و آشپزخانه کار می‌کنند و هیچ‌کدام برای نقش شما فعال نیست. از مدیر کسب‌وکار بخواهید دسترسی لازم را بدهد، یا بخش‌های دیگر را در نسخهٔ ابری باز کنید.
+            صندوق، سفارش‌ها، میزها و آشپزخانه برای نقش شما فعال نیست. بخش‌های دیگر را از منو باز کنید، یا از مدیر کسب‌وکار بخواهید دسترسی لازم را بدهد.
           </p>
         </div>
       </div>

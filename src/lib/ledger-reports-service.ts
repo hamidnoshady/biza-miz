@@ -1,30 +1,37 @@
 /**
- * The two read-only reports the Accounting app opens on: the trial balance and
- * the app's own dashboard.
+ * Read-only accounting reports. Trial-balance semantics live here as a single
+ * period-scoped, BigInt-safe source of truth; dashboard KPIs explicitly use
+ * lifetime account movements instead of reusing a misleading "trial balance".
  *
- * Both were SQL inside their route handlers, which is why they drifted: each
- * carried its own copy of "which accounts count", and when one was fixed the
- * other was not. Per the repo layout rule DB-touching logic belongs in
- * `src/lib/*`, and having one module means the dashboard and the trial balance
- * cannot disagree about the same books — they now share
- * {@link accountTotals}.
- *
- * The load-bearing rule here is `ARCHIVED_WITH_POSTINGS`: an **archived
- * account still reports the postings it received**. Archiving an account only
- * stops it being offered for *new* entries — `accounts-service.ts` says so in
- * as many words ("a trial balance or statement still shows every posting an
- * archived account ever received") — so filtering the report on `is_active`
- * dropped one side of a real, balanced entry and made a correct book report
- * itself نامتوازن. An archived account with no postings is still left out: that
- * is noise, not history.
- *
- * DB-touching, so per repo convention no direct unit test; covered by
- * integration/ledger-reports.integration.test.ts.
+ * Archived accounts remain in a report when postings through the requested
+ * closing date contribute to its opening, movement, or closing figures. An
+ * unused archived account is omitted unless a caller explicitly includes zero
+ * balances at the presentation layer.
  */
 import { query } from "./db";
+import { classifyAccounts, isClearing } from "./account-classification";
+import { isValidIsoDate } from "./iso-date";
+import type { AccountLevel, AccountType, NormalBalance } from "./coa-template";
+import type {
+  TrialBalanceFilters,
+  TrialBalanceReport,
+  TrialBalanceRow,
+  TrialBalanceTotals,
+} from "./trial-balance";
 
-export type AccountType =
-  "asset" | "liability" | "equity" | "revenue" | "expense";
+/**
+ * The trial balance's shape is defined in `./trial-balance`, the pure module the
+ * client screen also imports. Re-exported here so server callers keep one
+ * import for "the trial balance", and so a type can never be declared twice and
+ * drift between the query and the screen.
+ */
+export type {
+  TrialBalanceFilters,
+  TrialBalanceReport,
+  TrialBalanceRow,
+  TrialBalanceTotals,
+} from "./trial-balance";
+export type { AccountType, NormalBalance };
 
 interface AccountTotalRow extends Record<string, unknown> {
   id: string;
@@ -32,6 +39,7 @@ interface AccountTotalRow extends Record<string, unknown> {
   name: string;
   type: AccountType;
   is_active: boolean;
+  parent_id?: string | null;
   debit: string;
   credit: string;
 }
@@ -44,27 +52,27 @@ interface LedgerIntegrityRow extends Record<string, unknown> {
   balance_difference: string;
   unbalanced_entry_count: string;
   invalid_entry_count: string;
-  balanced: boolean;
+  through_entry_count: string;
+  through_line_count: string;
 }
 
 interface LedgerIntegritySummary {
   entryCount: number;
   lineCount: number;
-  totalDebit: number;
-  totalCredit: number;
-  balanceDifference: number;
+  totalDebit: string;
+  totalCredit: string;
+  balanceDifference: string;
   unbalancedEntryCount: number;
   invalidEntryCount: number;
-  balanced: boolean;
+  throughEntryCount: number;
+  throughLineCount: number;
+  ledgerHealthy: boolean;
 }
 
-/**
- * Every account that belongs in a report, with its lifetime debit and credit
- * totals: the active chart, plus any archived account that carries postings.
- */
-async function accountTotals(businessId: string): Promise<AccountTotalRow[]> {
+/** Lifetime movements are used only for the Accounting dashboard's lifetime KPIs. */
+async function lifetimeAccountMovements(businessId: string): Promise<AccountTotalRow[]> {
   const { rows } = await query<AccountTotalRow>(
-    `SELECT a.id, a.code, a.name, a.type, a.is_active,
+    `SELECT a.id, a.code, a.name, a.type, a.is_active, a.parent_id,
             COALESCE(SUM(CASE WHEN je.id IS NOT NULL THEN jl.debit ELSE 0 END), 0)::text AS debit,
             COALESCE(SUM(CASE WHEN je.id IS NOT NULL THEN jl.credit ELSE 0 END), 0)::text AS credit
        FROM accounts a
@@ -81,23 +89,21 @@ async function accountTotals(businessId: string): Promise<AccountTotalRow[]> {
 }
 
 /**
- * Ledger health is an entry-level question, not only a grand-total question.
- *
- * The old dashboard did `SUM(debit) === SUM(credit)` over account totals. That
- * has two dangerous false positives: an empty ledger (0 = 0) and two broken
- * entries whose differences cancel each other out. This summary keeps those
- * states separate so the UI can say «بدون سند» or «نامتوازن» instead of a
- * green, fake all-clear.
+ * Integrity is deliberately separate from the trial-balance totals. An empty
+ * ledger and offsetting corrupt entries cannot earn a false green state. Counts
+ * and amount strings include the whole ledger; the `through*` counts describe
+ * the ledger activity represented by the requested closing date.
  */
 async function ledgerIntegritySummary(
   businessId: string,
+  throughDate: string,
 ): Promise<LedgerIntegritySummary> {
   const { rows } = await query<LedgerIntegrityRow>(
     `WITH per_entry AS (
-       SELECT je.id,
+       SELECT je.id, je.entry_date,
               COUNT(jl.id)::bigint AS line_count,
-              COALESCE(SUM(jl.debit), 0) AS debit,
-              COALESCE(SUM(jl.credit), 0) AS credit
+              COALESCE(SUM(jl.debit), 0)::bigint AS debit,
+              COALESCE(SUM(jl.credit), 0)::bigint AS credit
          FROM journal_entries je
          LEFT JOIN journal_lines jl ON jl.entry_id = je.id
         WHERE je.business_id = $1
@@ -110,98 +116,201 @@ async function ledgerIntegritySummary(
             (COALESCE(SUM(debit), 0) - COALESCE(SUM(credit), 0))::text AS balance_difference,
             COUNT(*) FILTER (WHERE debit <> credit)::text AS unbalanced_entry_count,
             COUNT(*) FILTER (WHERE line_count < 2)::text AS invalid_entry_count,
-            (COUNT(*) > 0
-              AND COUNT(*) FILTER (WHERE line_count < 2) = 0
-              AND COUNT(*) FILTER (WHERE debit <> credit) = 0
-              AND COALESCE(SUM(debit), 0) = COALESCE(SUM(credit), 0)) AS balanced
+            COUNT(*) FILTER (WHERE entry_date <= $2::date)::text AS through_entry_count,
+            COALESCE(SUM(line_count) FILTER (WHERE entry_date <= $2::date), 0)::text AS through_line_count
        FROM per_entry`,
-    [businessId],
+    [businessId, throughDate],
   );
 
   const row = rows[0];
+  const entryCount = Number(row?.entry_count ?? 0);
+  const unbalancedEntryCount = Number(row?.unbalanced_entry_count ?? 0);
+  const invalidEntryCount = Number(row?.invalid_entry_count ?? 0);
+  const balanceDifference = row?.balance_difference ?? "0";
   return {
-    entryCount: Number(row?.entry_count ?? 0),
+    entryCount,
     lineCount: Number(row?.line_count ?? 0),
-    totalDebit: Number(row?.total_debit ?? 0),
-    totalCredit: Number(row?.total_credit ?? 0),
-    balanceDifference: Number(row?.balance_difference ?? 0),
-    unbalancedEntryCount: Number(row?.unbalanced_entry_count ?? 0),
-    invalidEntryCount: Number(row?.invalid_entry_count ?? 0),
-    balanced: row?.balanced ?? false,
+    totalDebit: row?.total_debit ?? "0",
+    totalCredit: row?.total_credit ?? "0",
+    balanceDifference,
+    unbalancedEntryCount,
+    invalidEntryCount,
+    throughEntryCount: Number(row?.through_entry_count ?? 0),
+    throughLineCount: Number(row?.through_line_count ?? 0),
+    ledgerHealthy:
+      entryCount > 0 &&
+      unbalancedEntryCount === 0 &&
+      invalidEntryCount === 0 &&
+      balanceDifference === "0",
   };
 }
 
-function accountCodeNumber(code: string): number | null {
-  // The system templates use ASCII digit account codes. Treat any decorated or
-  // free-form code as outside a numeric range rather than guessing.
-  if (!/^\d+$/.test(code)) return null;
-  const value = Number(code);
-  return Number.isSafeInteger(value) ? value : null;
-}
-
-function accountCodeInRange(code: string, start: number, end: number): boolean {
-  const value = accountCodeNumber(code);
-  return value !== null && value >= start && value <= end;
-}
-
-export interface TrialBalanceRow {
+interface TrialBalanceSqlRow extends Record<string, unknown> {
   id: string;
   code: string;
   name: string;
   type: AccountType;
-  /** False for an archived account. It still reports the postings it received. */
-  isActive: boolean;
-  debit: string;
-  credit: string;
+  is_active: boolean;
+  parent_id: string | null;
+  parent_code: string | null;
+  level: AccountLevel;
+  has_children: boolean;
+  is_contra: boolean;
+  normal_balance: NormalBalance;
+  opening_debit: string;
+  opening_credit: string;
+  period_debit: string;
+  period_credit: string;
+  raw_closing_debit: string;
+  raw_closing_credit: string;
 }
 
-export interface TrialBalance {
-  accounts: TrialBalanceRow[];
-  totalDebit: number;
-  totalCredit: number;
-  balanced: boolean;
-  /** Posted journal entries. Zero means there is nothing to call balanced yet. */
-  entryCount: number;
-  lineCount: number;
-  /** Entries whose debit and credit totals differ, even if the grand totals cancel out. */
-  unbalancedEntryCount: number;
-  /** Persisted journal entries with fewer than two lines. */
-  invalidEntryCount: number;
-  /** debit − credit across posted journal lines. */
-  balanceDifference: number;
+function splitSignedBalance(signed: bigint): { debit: string; credit: string } {
+  return signed >= 0n
+    ? { debit: signed.toString(), credit: "0" }
+    : { debit: "0", credit: (-signed).toString() };
 }
 
 /**
- * Every account's total debit/credit across all journal lines. The posting
- * services validate new entries, but imported or hand-repaired data can still be
- * bad, so the health flag is checked at the journal-entry level rather than
- * inferred from a grand total.
+ * A production trial balance: opening net balances, in-period gross turnover,
+ * and closing net balances. All money is kept in PostgreSQL BIGINT / BigInt /
+ * decimal strings through the API. No `Number` conversion is used here.
  */
 export async function getTrialBalance(
   businessId: string,
-): Promise<TrialBalance> {
-  const [rows, integrity] = await Promise.all([
-    accountTotals(businessId),
-    ledgerIntegritySummary(businessId),
+  filters: TrialBalanceFilters,
+): Promise<TrialBalanceReport> {
+  const closingOnly = Boolean(filters.asOf);
+  const dateFrom = closingOnly ? null : filters.dateFrom;
+  const dateTo = closingOnly ? filters.asOf : filters.dateTo;
+  if (
+    !dateTo ||
+    !isValidIsoDate(dateTo) ||
+    (closingOnly && (filters.dateFrom !== undefined || filters.dateTo !== undefined)) ||
+    (!closingOnly && (!dateFrom || !isValidIsoDate(dateFrom) || dateFrom > dateTo))
+  ) {
+    throw new Error("invalid_trial_balance_scope");
+  }
+
+  const [accountsResult, integrity, businessResult] = await Promise.all([
+    query<TrialBalanceSqlRow>(
+      `SELECT a.id, a.code, a.name, a.type::text AS type, a.is_active,
+              a.parent_id, parent.code AS parent_code, a.level::text AS level,
+              EXISTS (SELECT 1 FROM accounts child WHERE child.parent_id = a.id) AS has_children,
+              a.is_contra, a.normal_balance::text AS normal_balance,
+              COALESCE(SUM(jl.debit) FILTER (
+                WHERE $2::date IS NOT NULL AND je.entry_date < $2::date
+              ), 0)::text AS opening_debit,
+              COALESCE(SUM(jl.credit) FILTER (
+                WHERE $2::date IS NOT NULL AND je.entry_date < $2::date
+              ), 0)::text AS opening_credit,
+              COALESCE(SUM(jl.debit) FILTER (
+                WHERE $2::date IS NOT NULL AND je.entry_date >= $2::date
+                  AND je.entry_date <= $3::date
+              ), 0)::text AS period_debit,
+              COALESCE(SUM(jl.credit) FILTER (
+                WHERE $2::date IS NOT NULL AND je.entry_date >= $2::date
+                  AND je.entry_date <= $3::date
+              ), 0)::text AS period_credit,
+              COALESCE(SUM(jl.debit) FILTER (WHERE je.id IS NOT NULL), 0)::text AS raw_closing_debit,
+              COALESCE(SUM(jl.credit) FILTER (WHERE je.id IS NOT NULL), 0)::text AS raw_closing_credit
+         FROM accounts a
+         LEFT JOIN accounts parent ON parent.id = a.parent_id AND parent.business_id = $1
+         LEFT JOIN journal_lines jl ON jl.account_id = a.id
+         LEFT JOIN journal_entries je
+           ON je.id = jl.entry_id AND je.business_id = $1 AND je.entry_date <= $3::date
+        WHERE a.business_id = $1
+        GROUP BY a.id, parent.code
+       HAVING a.is_active OR COUNT(je.id) > 0
+        ORDER BY a.code`,
+      [businessId, dateFrom, dateTo],
+    ),
+    ledgerIntegritySummary(businessId, dateTo),
+    query<{ name: string }>("SELECT name FROM businesses WHERE id = $1", [businessId]),
   ]);
+
+  const totals: TrialBalanceTotals = {
+    openingDebit: "0",
+    openingCredit: "0",
+    periodDebit: "0",
+    periodCredit: "0",
+    closingDebit: "0",
+    closingCredit: "0",
+    closingDifference: "0",
+  };
+  const accounts = accountsResult.rows.map((row) => {
+    const opening = splitSignedBalance(BigInt(row.opening_debit) - BigInt(row.opening_credit));
+    const closingNet = BigInt(row.raw_closing_debit) - BigInt(row.raw_closing_credit);
+    const closing = splitSignedBalance(closingNet);
+    const normalBalance: NormalBalance = row.is_contra
+      ? row.normal_balance === "debit" ? "credit" : "debit"
+      : row.normal_balance;
+    // A detailed report must reconcile: what came in plus what moved is what
+    // went out. The compact as-of view deliberately does not compute opening or
+    // movement at all, so there is nothing there to reconcile against.
+    if (!closingOnly) {
+      const openingNet = BigInt(row.opening_debit) - BigInt(row.opening_credit);
+      const movementNet = BigInt(row.period_debit) - BigInt(row.period_credit);
+      if (closingNet !== openingNet + movementNet) {
+        throw new Error("trial_balance_scope_did_not_reconcile");
+      }
+    }
+
+    totals.openingDebit = (BigInt(totals.openingDebit) + BigInt(opening.debit)).toString();
+    totals.openingCredit = (BigInt(totals.openingCredit) + BigInt(opening.credit)).toString();
+    totals.periodDebit = (BigInt(totals.periodDebit) + BigInt(row.period_debit)).toString();
+    totals.periodCredit = (BigInt(totals.periodCredit) + BigInt(row.period_credit)).toString();
+    totals.closingDebit = (BigInt(totals.closingDebit) + BigInt(closing.debit)).toString();
+    totals.closingCredit = (BigInt(totals.closingCredit) + BigInt(closing.credit)).toString();
+    totals.closingDifference = (BigInt(totals.closingDifference) + closingNet).toString();
+
+    return {
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      type: row.type,
+      isActive: row.is_active,
+      parentId: row.parent_id,
+      parentCode: row.parent_code,
+      level: row.level,
+      hasChildren: row.has_children,
+      isContra: row.is_contra,
+      normalBalance,
+      isAbnormalBalance: closingNet !== 0n && (normalBalance === "debit" ? closingNet < 0n : closingNet > 0n),
+      openingDebit: opening.debit,
+      openingCredit: opening.credit,
+      periodDebit: row.period_debit,
+      periodCredit: row.period_credit,
+      closingDebit: closing.debit,
+      closingCredit: closing.credit,
+    };
+  });
+
+  const activityEntryCount = integrity.throughEntryCount;
+  const activityLineCount = integrity.throughLineCount;
+  const closingTotalsMatch = totals.closingDebit === totals.closingCredit;
   return {
-    accounts: rows.map((a) => ({
-      id: a.id,
-      code: a.code,
-      name: a.name,
-      type: a.type,
-      isActive: a.is_active,
-      debit: a.debit,
-      credit: a.credit,
-    })),
-    totalDebit: integrity.totalDebit,
-    totalCredit: integrity.totalCredit,
-    balanced: integrity.balanced,
-    entryCount: integrity.entryCount,
-    lineCount: integrity.lineCount,
-    unbalancedEntryCount: integrity.unbalancedEntryCount,
-    invalidEntryCount: integrity.invalidEntryCount,
-    balanceDifference: integrity.balanceDifference,
+    businessName: businessResult.rows[0]?.name ?? "",
+    mode: closingOnly ? "closing" : "detailed",
+    periodFrom: dateFrom ?? null,
+    periodTo: dateTo,
+    asOf: closingOnly ? dateTo : null,
+    accounts,
+    totals,
+    // Deliberately not tied to ledgerHealthy: two corrupt entries can offset in
+    // the report totals while integrity still warns the accountant. It does
+    // require *lines* in scope, though — a journal header with no lines leaves
+    // both columns at zero, and 0 = 0 over nothing is not a balanced report.
+    trialBalanceBalanced: activityLineCount > 0 && closingTotalsMatch,
+    activity: { entryCount: activityEntryCount, lineCount: activityLineCount },
+    integrity: {
+      ledgerHealthy: integrity.ledgerHealthy,
+      entryCount: integrity.entryCount,
+      lineCount: integrity.lineCount,
+      unbalancedEntryCount: integrity.unbalancedEntryCount,
+      invalidEntryCount: integrity.invalidEntryCount,
+      balanceDifference: integrity.balanceDifference,
+    },
   };
 }
 
@@ -218,14 +327,35 @@ export interface LedgerOverview {
   invalidEntryCount: number;
   /** debit − credit across posted journal lines. */
   balanceDifference: number;
+  /**
+   * Money the business can spend now: cash, bank and petty cash, as the shared
+   * account classifier (`account-classification.ts`) defines them. Card/PSP
+   * money in transit is *not* in here — see `paymentClearing`.
+   */
   cashAndBank: number;
+  /** The usable figure split by role, so the screen can name each part. */
+  liquidity: { cash: number; bank: number; pettyCash: number };
+  /** Settlement in transit (card reader/gateway clearing, platform receivables) — real, not yet usable. */
+  paymentClearing: number;
+  /** Owed by customers (1200, notes, retention) — never recoverable VAT. */
   receivables: number;
+  /** Recoverable input VAT and non-customer receivables, kept apart from customer balances. */
+  otherReceivables: number;
+  vatReceivable: number;
   payables: number;
   revenue: number;
   expenses: number;
   netIncome: number;
   openReceivableCheques: number;
   openPayableCheques: number;
+  /**
+   * Website sales whose cost was not (fully) recorded — dashboard audit F01.
+   * When `lines > 0` the profit above is provisional: revenue is complete,
+   * COGS is not. Read from `online_sale_lines` (migration 0209).
+   */
+  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: number; provisional: boolean };
+  /** What the balances cover: lifetime, every branch, as of this read. */
+  scope: { period: "lifetime"; branches: "all"; asOf: string };
   recentEntries: {
     id: string;
     date: string;
@@ -235,52 +365,65 @@ export interface LedgerOverview {
   }[];
 }
 
-/** Cash and bank equivalents: the 1100–1130 block (صندوق، بانک، کارت‌خوان، تنخواه and their custom sub-accounts). */
-const CASH_AND_BANK_CODE_START = 1100;
-const CASH_AND_BANK_CODE_END = 1130;
-
 /**
  * The Accounting app's dashboard, in one read.
  *
  * The balances use each account's normal side — assets and expenses are
  * debit-normal, liabilities and revenue are credit-normal — so a positive
  * number always means "we have / we owe / we earned", never a signed ledger
- * figure the owner has to decode.
+ * figure the owner has to decode. Which account counts as cash, clearing,
+ * receivable or payable is decided by `classifyAccounts`, the same contract
+ * the cash-flow statement uses, so the two cannot disagree about "cash".
  */
 export async function getLedgerOverview(
   businessId: string,
 ): Promise<LedgerOverview> {
   const [accounts, integrity] = await Promise.all([
-    accountTotals(businessId),
-    ledgerIntegritySummary(businessId),
+    lifetimeAccountMovements(businessId),
+    ledgerIntegritySummary(businessId, "9999-12-31"),
   ]);
 
   const balance = (row: AccountTotalRow, debitNormal: boolean) =>
     (Number(row.debit) - Number(row.credit)) * (debitNormal ? 1 : -1);
 
-  let cashAndBank = 0;
+  const roles = classifyAccounts(
+    accounts.map((a) => ({ id: a.id, code: a.code, parentId: a.parent_id ?? null, type: a.type })),
+  );
+
+  const liquidity = { cash: 0, bank: 0, pettyCash: 0 };
+  let paymentClearing = 0;
   let receivables = 0;
+  let otherReceivables = 0;
+  let vatReceivable = 0;
   let payables = 0;
   let revenue = 0;
   let expenses = 0;
 
   for (const row of accounts) {
-    if (
-      accountCodeInRange(
-        row.code,
-        CASH_AND_BANK_CODE_START,
-        CASH_AND_BANK_CODE_END,
-      )
-    ) {
-      cashAndBank += balance(row, true);
-    }
-    // حساب‌های دریافتنی و اسناد دریافتنی: the 12xx asset block.
-    if (row.code.startsWith("12")) receivables += balance(row, true);
-    // حساب‌های پرداختنی و اسناد پرداختنی: the 21xx liability block.
-    if (row.code.startsWith("21")) payables += balance(row, false);
+    const role = roles.get(row.id) ?? null;
+    if (role === "cash") liquidity.cash += balance(row, true);
+    else if (role === "bank") liquidity.bank += balance(row, true);
+    else if (role === "petty_cash") liquidity.pettyCash += balance(row, true);
+    else if (isClearing(role)) paymentClearing += balance(row, true);
+    else if (role === "trade_receivable") receivables += balance(row, true);
+    else if (role === "other_receivable") otherReceivables += balance(row, true);
+    else if (role === "vat_receivable") vatReceivable += balance(row, true);
+    else if (role === "trade_payable") payables += balance(row, false);
     if (row.type === "revenue") revenue += balance(row, false);
     if (row.type === "expense") expenses += balance(row, true);
   }
+  const cashAndBank = liquidity.cash + liquidity.bank + liquidity.pettyCash;
+
+  const { rows: coverage } = await query<{ lines: string; orders: string; net: string }>(
+    `SELECT count(*)::text AS lines, count(DISTINCT f.order_id)::text AS orders,
+            COALESCE(sum(f.net_rial), 0)::text AS net
+       FROM online_sale_lines f
+       JOIN locations l ON l.id = f.location_id AND l.business_id = $1
+       JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
+      WHERE f.cost_status IN ('partial', 'missing', 'unattributed')`,
+    [businessId],
+  );
+  const uncostedLines = Number(coverage[0]?.lines ?? 0);
 
   const { rows: cheques } = await query<{
     open_receivable: string;
@@ -314,20 +457,31 @@ export async function getLedgerOverview(
   );
 
   return {
-    balanced: integrity.balanced,
-    totalDebit: integrity.totalDebit,
-    totalCredit: integrity.totalCredit,
+    balanced: integrity.ledgerHealthy,
+    totalDebit: Number(integrity.totalDebit),
+    totalCredit: Number(integrity.totalCredit),
     journalEntryCount: integrity.entryCount,
     journalLineCount: integrity.lineCount,
     unbalancedEntryCount: integrity.unbalancedEntryCount,
     invalidEntryCount: integrity.invalidEntryCount,
-    balanceDifference: integrity.balanceDifference,
+    balanceDifference: Number(integrity.balanceDifference),
     cashAndBank,
+    liquidity,
+    paymentClearing,
     receivables,
+    otherReceivables,
+    vatReceivable,
     payables,
     revenue,
     expenses,
     netIncome: revenue - expenses,
+    costCoverage: {
+      uncostedLines,
+      uncostedOrders: Number(coverage[0]?.orders ?? 0),
+      uncostedNetRial: Number(coverage[0]?.net ?? 0),
+      provisional: uncostedLines > 0,
+    },
+    scope: { period: "lifetime", branches: "all", asOf: new Date().toISOString() },
     openReceivableCheques: Number(cheques[0]?.open_receivable ?? 0),
     openPayableCheques: Number(cheques[0]?.open_payable ?? 0),
     recentEntries: recent.map((entry) => ({

@@ -45,6 +45,14 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/server-sync/master",
   "/api/server-sync/digest",
   "/api/server-sync/site-profile",
+  // Phase 46 — «ورود با حساب ابری»: the cloud half (the page the desktop opens
+  // in the browser, its code-minting POST, the install's redemption and the
+  // embedded pane's session hand-off). The desktop half lives under
+  // /api/auth/cloud-login and runs on the site.
+  "/api/server-sync/desktop-login",
+  "/api/auth/desktop-login",
+  "/api/auth/desktop-session",
+  "/desktop-login",
   "/api/server-sync/config/generate-token",
   "/api/peer/backup",
   "/api/v1",
@@ -62,6 +70,8 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/integrations",
   "/api/integrations/wordpress",
   "/api/integrations/woocommerce/webhook",
+  // Tax provider/TSP callbacks verify a tenant-bound HMAC in their handler.
+  "/api/integrations/tax-invoices/webhook",
   "/api/mcp",
   "/api/connections/mcp",
   "/api/well-known/oauth-",
@@ -107,6 +117,29 @@ const PUBLIC_PATHS = [
   "/admin",
   "/api/auth/login",
   "/api/auth/pin-login",
+  // Issue #885 L01 — the phone-OTP door. Both halves were already listed in
+  // AUTH_RATE_LIMITED_PATHS (so the platform knew they are login traffic) but
+  // not here, which meant handleTenantAuth answered 401 before the route
+  // handler ran. The visible «ورود با شمارهٔ موبایل» path therefore could not
+  // even begin while signed out, and the form surfaced that 401 as «مهلت این
+  // مرحله تمام شده است» — an expired-step message for a number that had
+  // simply never been valid.
+  //
+  // Pre-session by the same definition as pin-login above: the point of the
+  // door is that nobody is signed in yet, and the credential is the SMS code
+  // itself. Both handlers keep their own validation, lockout checks and send
+  // budget; this only stops the generic session gate from rejecting them
+  // first. Deliberately not the whole /api/auth/phone prefix —
+  // /api/auth/phone/self is self-service for an already-authenticated member
+  // and stays gated.
+  "/api/auth/phone-otp/request",
+  "/api/auth/phone-otp/verify",
+  // Issue #885 L04 — a read-only probe the login chooser needs in order to
+  // stop promising offline access on a deployment that cannot offer it. No
+  // session exists when the chooser renders, by definition. Answers
+  // deployment profile and phone-OTP enforceability and nothing else: no
+  // secrets, no member names, no counts.
+  "/api/auth/login-capabilities",
   // Phase 20 Wave 3 — the biometric-login counterpart of pin-login: no
   // session exists yet either, by the same definition. Registering a new
   // authenticator (/api/auth/webauthn/register/*) is deliberately NOT here —
@@ -118,6 +151,15 @@ const PUBLIC_PATHS = [
   // definition (the token exists precisely to mint the first one). Same shape
   // as accept-invite.
   "/api/auth/impersonate-handoff",
+  // Phase 46 — «ورود با حساب ابری». On the cloud, the desktop pane's
+  // single-use session code is the credential (same shape as the handoff
+  // above). On the desktop, nobody is signed in yet when the button is pressed
+  // or when the browser hands back: `start` mints only a state cookie, and
+  // `callback` signs no one in unless that cookie matches and the cloud
+  // redeems the code for this install's own bearer credential.
+  "/api/auth/desktop-session",
+  "/api/auth/cloud-login/start",
+  "/api/auth/cloud-login/callback",
   // Platform-company staff cross from the admin origin to the protected
   // internal tenant with a short-lived one-use token. This is a mapped staff
   // membership, not a customer impersonation grant.
@@ -163,6 +205,15 @@ const PUBLIC_PATHS = [
   // accept-invite, and public for the same reason.
   "/activate",
   "/api/auth/owner-activation",
+  "/reset-password",
+  "/api/auth/password-reset",
+  // Issue #885 L10 — the initiation half. Already covered by the entry above
+  // through `isPublicPath`'s prefix match, and listed anyway: the two halves
+  // have different reasons for being public (redemption carries a
+  // single-use token in the body; initiation carries no credential at all),
+  // and folding one into the other's prefix would let a future edit to the
+  // redemption entry silently un-publish the request endpoint.
+  "/api/auth/password-reset/request",
   // Phase 9: the caller is another location's server, not a browser — the
   // route authenticates it with a per-location bearer token, not a session.
   "/api/rollup/ingest",
@@ -176,6 +227,9 @@ const PUBLIC_PATHS = [
   "/api/server-sync/push",
   "/api/server-sync/pull",
   "/api/server-sync/media",
+  // Phase 46: a paired desktop redeems a one-click sign-in code with its site
+  // bearer credential, checked in the route (server-sync-auth.ts).
+  "/api/server-sync/desktop-login",
   // The desktop's per-tick runtime report (and the pre-runtime-status
   // update-check older installs still call) authenticate with that same site
   // bearer credential. Missing from this list, every call was answered 401
@@ -219,6 +273,8 @@ const PUBLIC_PATHS = [
   // signature, not a tenant session — the handler authenticates the delivery
   // against the connection's webhook secret before resolving its business.
   "/api/integrations/woocommerce/webhook",
+  // Tax provider/TSP callbacks verify a tenant-bound HMAC in their handler.
+  "/api/integrations/tax-invoices/webhook",
   // The other way a store connects: the WordPress plugin authenticates every
   // call with a bearer link token plus an HMAC envelope over timestamp, nonce
   // and body (src/lib/integrations/plugin-link.ts), never a tenant session.
@@ -308,6 +364,55 @@ const PLATFORM_PUBLIC_PATHS = [
  * same rule — its subtree form is `"//"`, which no real path starts with — so
  * listing it opens the root page alone, not the whole app.
  */
+/**
+ * Issue #885 — the pre-session mutations a *browser* makes while signing in.
+ *
+ * Everything on this list is reachable with no session, which means it also
+ * returns before the Origin check further down (that one only runs on
+ * requests that passed the session gate). Before the phone-OTP endpoints were
+ * added to PUBLIC_PATHS that gap did not matter for them, because they were
+ * never reached at all; opening them made the gap live.
+ *
+ * The check applied to these is deliberately weaker than the authenticated
+ * one: a *missing* Origin is allowed, a *mismatched* one is not. A cross-site
+ * form POST from a victim's browser always carries an Origin, so the mismatch
+ * rule is what stops login CSRF — an attacker forcing a victim's browser to
+ * complete a sign-in into the attacker's account. A missing Origin means a
+ * non-browser caller (the desktop app, a script, a server), and refusing
+ * those would break legitimate protocol and local callbacks for no gain.
+ *
+ * Notably absent, and why: `/api/auth/desktop-session` and
+ * `/api/auth/cloud-login/callback` are cross-origin by design (a desktop app
+ * talking to the cloud origin), and the `/api/server-sync`, `/api/iam`,
+ * `/api/v1` and `/api/mcp` families authenticate with bearer credentials
+ * rather than a cookie, so an Origin check would only reject their legitimate
+ * callers.
+ */
+const BROWSER_LOGIN_MUTATION_PATHS = [
+  "/api/auth/login",
+  "/api/auth/pin-login",
+  "/api/auth/phone-otp/request",
+  "/api/auth/phone-otp/verify",
+  "/api/auth/mfa/challenge",
+  "/api/auth/mfa/verify",
+  "/api/auth/mfa/enrol",
+  "/api/auth/webauthn/login",
+  "/api/auth/directory",
+  // Issue #885 L10 — forgotten-password initiation. It is pre-session by
+  // definition (the caller cannot get in), takes an email address, and can
+  // cause an email to be sent, so it belongs with the other browser-driven
+  // sign-in mutations behind the Origin check rather than being callable
+  // cross-site.
+  "/api/auth/password-reset/request",
+];
+
+/** Is this one of the browser-driven, pre-session sign-in mutations? */
+export function isBrowserLoginMutationPath(pathname: string): boolean {
+  return BROWSER_LOGIN_MUTATION_PATHS.some(
+    (p) => pathname === p || pathname.startsWith(`${p}/`),
+  );
+}
+
 export function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some(
     (p) => pathname === p || pathname.startsWith(`${p}/`),
@@ -497,6 +602,13 @@ function rateLimited(retryAfterMs: number): NextResponse {
 const AUTH_RATE_LIMITED_PATHS = [
   "/api/auth/login",
   "/api/auth/pin-login",
+  // The login screen's «همگام‌سازی دوباره» for missing replicated credentials
+  // is a pre-session action that makes the site call the cloud, so it shares
+  // this per-IP bucket instead of being an unbounded outbound trigger.
+  "/api/auth/pin-login/roster/sync",
+  // Phase 46: both redeem a single-use sign-in code.
+  "/api/auth/desktop-session",
+  "/api/auth/cloud-login/callback",
   // Phase 20 Wave 3 — the biometric login ceremony's two steps. Deliberately
   // *not* the staff picker's roster read, which preceded the PIN here until it
   // turned out that sharing one 20/min budget let the login page's own loads
@@ -585,6 +697,7 @@ const SYNC_TOKEN_RATE_LIMITED_PATHS = [
   "/api/server-sync/master",
   "/api/server-sync/digest",
   "/api/server-sync/site-profile",
+  "/api/server-sync/desktop-login",
 ];
 
 /**
@@ -1142,6 +1255,28 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
       const url = request.nextUrl.clone();
       url.pathname = prefixed[1];
       return NextResponse.redirect(url, 301);
+    }
+  }
+
+  // Issue #885 — login CSRF. Runs *before* the public early-return below,
+  // because every path it covers is public by definition.
+  if (
+    process.env.ORIGIN_CHECK !== "0" &&
+    process.env.ORIGIN_CHECK !== "off" &&
+    MUTATING_METHODS.has(request.method) &&
+    isBrowserLoginMutationPath(pathname)
+  ) {
+    const origin = request.headers.get("origin");
+    if (origin) {
+      let mismatched = true;
+      try {
+        mismatched = new URL(origin).host !== requestHost(request.headers);
+      } catch {
+        mismatched = true;
+      }
+      if (mismatched) {
+        return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+      }
     }
   }
 

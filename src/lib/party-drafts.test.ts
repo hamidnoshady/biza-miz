@@ -179,10 +179,16 @@ describe("unsaved changes", () => {
   });
 
   it("is false when the only change is the default written back as itself", () => {
-    // Typing 9 in the tax field, or moving through a tab and leaving it as it was,
-    // must not create a draft or prompt to restore one.
-    const touched = { ...resetPartyForm(), generalInfo: { ...resetPartyForm().generalInfo, taxPercentage: 9 } };
+    // Clearing the tax field (back to «follows the business rate»), or moving
+    // through a tab and leaving it as it was, must not create a draft or prompt
+    // to restore one.
+    const touched = { ...resetPartyForm(), generalInfo: { ...resetPartyForm().generalInfo, taxPercentage: null } };
     expect(partyFormHasUnsavedChanges(touched, PARTY_FORM_DEFAULTS)).toBe(false);
+  });
+
+  it("is true when a rate is typed, since a new party assumes none (audit F05)", () => {
+    const touched = { ...resetPartyForm(), generalInfo: { ...resetPartyForm().generalInfo, taxPercentage: 9 } };
+    expect(partyFormHasUnsavedChanges(touched, PARTY_FORM_DEFAULTS)).toBe(true);
   });
 
   it("is true on the first character of a name", () => {

@@ -4,20 +4,32 @@ import { cardClass, EmptyState, LoadingSkeleton, StatusBadge } from "@/app/dashb
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { PlusIcon, Trash2Icon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { Button } from "@/components/ui/button";
+import {
+  DataTable,
+  DataTableBody,
+  DataTableHead,
+  DataTableRow,
+  Td,
+  Th,
+} from "@/app/dashboard/data-table";
 import { api, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import {
   MANUAL_LINES_MAX,
   MANUAL_MEMO_MAX,
+  MANUAL_REJECTION_REASON_MAX,
+  canDecideOnDraft,
   manualDocumentProblem,
+  manualJournalTotals,
   type ManualJournalProblem,
 } from "@/lib/manual-journal";
+import { provenanceLabel, provenanceOfMemo } from "@/lib/ai-provenance";
 import type { AccountRow, Runner } from "./accounting-manager";
 
 interface DraftLineInput {
@@ -46,12 +58,28 @@ interface DraftLine {
 interface JournalDraft {
   id: string;
   entryDate: string | null;
+  locationId: string | null;
+  locationName: string | null;
   memo: string;
   createdBy: string | null;
   createdByName: string | null;
   createdAt: string;
+  proposedBy: string | null;
+  proposedByName: string | null;
+  proposedAt: string | null;
   lines: DraftLine[];
 }
+
+interface DraftPage {
+  drafts: JournalDraft[];
+  total: number;
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+  activeLocation: { id: string; name: string } | null;
+}
+
+const PAGE_SIZE = 25;
 
 const SIDE_OPTIONS = [
   { value: "debit", label: "بدهکار" },
@@ -71,6 +99,38 @@ const DOCUMENT_PROBLEM_TEXT: Record<ManualJournalProblem, string> = {
   invalid_line: "یکی از ردیف‌ها معتبر نیست؛ حساب و مبلغ آن را بررسی کنید.",
   not_balanced: "سند متوازن نیست.",
 };
+
+/** «۳ روز پیش» — the age a reviewer needs before they can call a draft stale. */
+function ageLabel(createdAt: string): string {
+  const ms = Date.now() - new Date(createdAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const days = Math.floor(ms / 86_400_000);
+  if (days <= 0) return "امروز";
+  if (days === 1) return "دیروز";
+  return `${toPersianDigits(String(days))} روز پیش`;
+}
+
+/** A draft's id is a UUID; the first group is enough to find one in a list. */
+function shortRef(id: string): string {
+  return id.slice(0, 8);
+}
+
+/**
+ * A key that is stable across a retry of *this* document and changes the moment
+ * the document does.
+ *
+ * Two `POST /api/ledger/entries/drafts` with the same key create one draft; a
+ * busy spinner is not enough protection on its own, because the requests that
+ * duplicate a draft are the ones the person never saw — a fetch retried after a
+ * dropped connection, a double-submitted form, a reconnecting client. Keying on
+ * the payload's own signature also means an unchanged re-submit cannot post the
+ * same document twice, while editing a single figure mints a fresh key.
+ */
+function newIdempotencyKey(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `key-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 /**
  * Generic balanced multi-line journal entry — covers both "manual expense
@@ -92,12 +152,19 @@ const DOCUMENT_PROBLEM_TEXT: Record<ManualJournalProblem, string> = {
  *    array position, so deleting row 2 of 4 re-labelled every row under it and
  *    React re-used the deleted row's DOM node — the account you had picked in
  *    row 3 appeared to move up into the row you just emptied.
+ *
+ * And one rule about its own controls: every button inside this form that is
+ * not the submit button says `type="button"`. A `<button>` inside a `<form>` is
+ * `type="submit"` by default, so «افزودن ردیف» once both added a row *and*
+ * submitted the document underneath — a draft created by a person who was still
+ * reaching for the next row.
  */
 export function ManualEntrySection({
   accounts,
   busy,
   run,
   refreshKey,
+  canPropose,
   canApprove,
   currentUserId,
 }: {
@@ -106,20 +173,30 @@ export function ManualEntrySection({
   run: Runner;
   refreshKey: number;
   /**
-   * Whether this member holds `ledger.approve`. The review queue's «تأیید و
-   * ثبت» is that permission's button, not the app door's: a manager reaches
-   * this screen and may draft, but approving answered 403 from a button that
-   * looked live. Undefined means the page could not read the member's
-   * permissions, in which case the button is drawn and the API stays the gate.
+   * Whether this member may draft a journal (`ledger.propose`).
+   *
+   * Required, not optional, and `false` when the page could not read the
+   * member's permissions. The page opens on `ledger.view`, so a read-only
+   * reviewer reaches a screen that draws a complete, live-looking form and
+   * answers 403 only after «ثبت پیش‌نویس» — read-only has to look read-only.
+   * The alternative (drawing the button and letting the API refuse) was the
+   * bug, not the guard.
    */
-  canApprove?: boolean;
+  canPropose: boolean;
+  /**
+   * Whether this member may turn a draft into a real posting (`ledger.approve`).
+   * «تأیید و ثبت» is that permission's button, not the app door's: a manager
+   * reaches this screen and may draft, but approving answered 403 from a
+   * control that looked live.
+   */
+  canApprove: boolean;
   /**
    * Who is looking. `DELETE …/drafts/{id}` allows the drafter to discard their
    * own draft without `ledger.approve`, so «رد کردن» can only be hidden on
    * someone else's draft — hiding it on all of them would take away an action
    * the server permits.
    */
-  currentUserId?: string;
+  currentUserId: string;
 }) {
   const money = useMoney();
   const formId = useId();
@@ -135,31 +212,48 @@ export function ManualEntrySection({
   const [lines, setLines] = useState<{ key: string; value: DraftLineInput }[]>(() =>
     blankLines().map((value) => ({ key: makeKey(), value })),
   );
-  const [drafts, setDrafts] = useState<JournalDraft[] | null>(null);
+  const [page, setPage] = useState<DraftPage | null>(null);
+  const [offset, setOffset] = useState(0);
   const [localError, setLocalError] = useState("");
   const [notice, setNotice] = useState("");
   /** The draft whose row action is in flight, so only its own buttons go busy. */
   const [pendingDraftId, setPendingDraftId] = useState<string | null>(null);
   /** The row a reviewer pressed «رد کردن» on — discarding is confirmed, not instant. */
   const [confirmRejectId, setConfirmRejectId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  /** The idempotency key for the document currently on screen, keyed by its content. */
+  const idempotencyRef = useRef<{ signature: string; key: string } | null>(null);
 
   const loadDrafts = useCallback(() => {
     let cancelled = false;
-    api<{ drafts: JournalDraft[] }>("/api/ledger/entries/drafts").then(({ ok, data }) => {
+    api<DraftPage>(`/api/ledger/entries/drafts?limit=${PAGE_SIZE}&offset=${offset}`).then(({ ok, data }) => {
       if (cancelled) return;
       if (ok) {
-        setDrafts(data.drafts);
+        /*
+         * Rejecting the last draft on the last page leaves `offset` past the
+         * end of a now-shorter queue: the page comes back empty while
+         * «۵۰ سند» still says there are fifty, and the screen reads as an
+         * emptied queue with work left in it. Step back to the last real page.
+         */
+        if (data.drafts.length === 0 && data.total > 0 && data.offset >= data.total) {
+          const lastPage = Math.max(0, Math.floor((data.total - 1) / data.limit) * data.limit);
+          if (lastPage !== data.offset) {
+            setOffset(lastPage);
+            return;
+          }
+        }
+        setPage(data);
         setLocalError("");
       } else {
         // An endless skeleton reads as "still loading"; say what happened instead.
-        setDrafts([]);
+        setPage({ drafts: [], total: 0, hasMore: false, limit: PAGE_SIZE, offset, activeLocation: null });
         setLocalError("بارگذاری پیش‌نویس‌ها ناموفق بود.");
       }
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [offset]);
 
   useEffect(loadDrafts, [loadDrafts, refreshKey]);
 
@@ -168,10 +262,20 @@ export function ManualEntrySection({
    * («۱۰۰۰ دارایی‌ها», «۵۰۰۰ هزینه‌ها») is a heading that totals its children;
    * posting to it is accepted by the database but corrupts every rollup that
    * sums children into a parent, and the chart-of-accounts screen already draws
-   * the same distinction. `parent_code` is what the picker's own endpoint
-   * returns, so the leaves are the codes nothing else names as a parent.
+   * the same distinction.
+   *
+   * `is_postable` is the server's answer and the picker defers to it. Deriving
+   * "leaf" here instead — from the active accounts only, the codes nothing else
+   * names as a parent — disagreed with the server exactly once and that was
+   * enough: a parent whose only child had been archived was not a parent in the
+   * active subset, so it was offered here and refused at approval time with
+   * `not_a_leaf_account`, by the reviewer rather than by the person typing.
+   * The fallback is only for a caller whose payload predates the column.
    */
   const postableAccounts = useMemo(() => {
+    if (accounts.some((a) => typeof a.is_postable === "boolean")) {
+      return accounts.filter((a) => a.is_postable === true);
+    }
     const parents = new Set(accounts.map((a) => a.parent_code).filter(Boolean));
     return accounts.filter((a) => !parents.has(a.code));
   }, [accounts]);
@@ -246,13 +350,20 @@ export function ManualEntrySection({
     };
   });
 
-  let totalDebit = 0;
-  let totalCredit = 0;
-  for (const l of journalLines) {
-    totalDebit += l.debit;
-    totalCredit += l.credit;
-  }
-  const difference = totalDebit - totalCredit;
+  /*
+   * The totals are the shared module's BigInt arithmetic, not a second sum done
+   * in JS numbers. With two hundred rows near the top of the legal range the
+   * aggregate passes `Number.MAX_SAFE_INTEGER`, and a `number` total then
+   * rounds two genuinely different sides into the same figure — «متوازن» for a
+   * document the server's own BigInt comparison refuses. `formatText` takes the
+   * exact value as a string, so nothing is narrowed on its way to the screen.
+   */
+  const totals = manualJournalTotals(journalLines);
+  const differenceText = (() => {
+    const abs = totals.difference < 0n ? -totals.difference : totals.difference;
+    return money.formatText(abs.toString());
+  })();
+  const differenceIsDebit = totals.difference > 0n;
 
   /*
    * The verdict comes from the same function the API validates with
@@ -263,18 +374,34 @@ export function ManualEntrySection({
   const documentProblem = manualDocumentProblem(journalLines);
   const balanced = documentProblem === null;
   const memoTooLong = memo.trim().length > MANUAL_MEMO_MAX;
-  const canSubmit = balanced && !!memo.trim() && !memoTooLong && invalidAmountLines === 0;
+  const canSubmit =
+    canPropose &&
+    balanced &&
+    !!memo.trim() &&
+    !memoTooLong &&
+    invalidAmountLines === 0 &&
+    /*
+     * A half-typed row used to be silently dropped: `submit` filtered the rows
+     * down to the complete ones, so a balanced document plus one row with only
+     * an amount on it submitted cleanly and the row vanished on reset. The
+     * summary now treats "there is a row you have not finished" as a reason
+     * not to submit, the same way it treats an unbalanced document.
+     */
+    incompleteLines === 0;
 
   /** Why «ثبت پیش‌نویس» is disabled, in the order a person would fix the problems. */
   const blockingReason = (() => {
+    if (!canPropose) return "";
     if (!memo.trim()) return "شرح سند را بنویسید.";
     if (memoTooLong)
       return `شرح سند حداکثر ${toPersianDigits(String(MANUAL_MEMO_MAX))} نویسه است.`;
     if (invalidAmountLines > 0)
       return `${toPersianDigits(String(invalidAmountLines))} ردیف مبلغ نامعتبر دارد؛ مبلغ باید عددی بزرگ‌تر از صفر باشد.`;
+    if (incompleteLines > 0)
+      return `${toPersianDigits(String(incompleteLines))} ردیف ناقص است (حساب یا مبلغ ندارد)؛ آن را کامل کنید یا حذفش کنید.`;
     if (documentProblem === "not_balanced")
-      return `سند متوازن نیست؛ اختلاف ${money.format(Math.abs(difference))} ${
-        difference > 0 ? "در سمت بدهکار" : "در سمت بستانکار"
+      return `سند متوازن نیست؛ اختلاف ${differenceText} ${
+        differenceIsDebit ? "در سمت بدهکار" : "در سمت بستانکار"
       } است.`;
     return documentProblem ? DOCUMENT_PROBLEM_TEXT[documentProblem] : "";
   })();
@@ -284,16 +411,30 @@ export function ManualEntrySection({
     setNotice("");
     setLocalError("");
     if (!canSubmit) return;
+    const signature = JSON.stringify({ memo: memo.trim(), entryDate, lines: journalLines });
+    const stable =
+      idempotencyRef.current?.signature === signature
+        ? idempotencyRef.current.key
+        : newIdempotencyKey();
+    idempotencyRef.current = { signature, key: stable };
     const ok = await run(() =>
       api("/api/ledger/entries/drafts", {
         method: "POST",
-        body: JSON.stringify({ memo: memo.trim(), entryDate: entryDate || undefined, lines: journalLines }),
+        body: JSON.stringify({
+          memo: memo.trim(),
+          entryDate: entryDate || undefined,
+          lines: journalLines,
+          idempotencyKey: stable,
+        }),
       }),
     );
     if (ok) {
       setMemo("");
       setEntryDate("");
       setLines(blankLines().map((value) => ({ key: makeKey(), value })));
+      // The document changed, so the next submit is a new document, not a retry.
+      idempotencyRef.current = null;
+      setOffset(0);
       // Saving used to look identical to nothing happening: the form emptied,
       // the new draft appeared somewhere down the page, and no word was said.
       setNotice("پیش‌نویس سند ثبت شد و در فهرست «در انتظار بررسی» پایین همین صفحه است.");
@@ -316,13 +457,21 @@ export function ManualEntrySection({
     // Through the shared runner, like approve: it surfaces the error and bumps
     // refreshKey, which refetches this queue — a rejected draft has to leave the
     // AI review queue too, not just this list.
-    const ok = await run(() => api(`/api/ledger/entries/drafts/${id}`, { method: "DELETE" }));
+    const ok = await run(() =>
+      api(`/api/ledger/entries/drafts/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify({ reason: rejectReason.trim() || null }),
+      }),
+    );
     setPendingDraftId(null);
     setConfirmRejectId(null);
-    if (ok) setNotice("پیش‌نویس رد و حذف شد.");
+    setRejectReason("");
+    if (ok) setNotice("پیش‌نویس رد و حذف شد؛ علت آن در تاریخچه نگهداری می‌شود.");
   }
 
   const hasNoPostableAccounts = postableAccounts.length === 0;
+  const drafts = page?.drafts ?? null;
+  const activeLocation = page?.activeLocation ?? null;
 
   return (
     <div className="space-y-4">
@@ -335,6 +484,16 @@ export function ManualEntrySection({
           <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
             سند ابتدا به‌صورت پیش‌نویس ذخیره می‌شود و تا تأیید در فهرست پایین، اثری در دفاتر ندارد.
           </p>
+          {/* Which branch this draft will post to. The queue below is
+              business-wide, so a document can be drafted here and approved by
+              somebody whose own branch is a different one — and approval posts
+              to the draft's branch, not theirs. */}
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">
+            شعبهٔ ثبت:{" "}
+            <span className="font-semibold text-foreground">
+              {activeLocation ? activeLocation.name : "تعیین نشده"}
+            </span>
+          </p>
         </header>
 
         {notice ? (
@@ -346,12 +505,22 @@ export function ManualEntrySection({
           </p>
         ) : null}
 
-        {hasNoPostableAccounts ? (
+        {!canPropose ? (
+          /* Read-only is read-only on screen, not only in the API. The page
+             opens on ledger.view, so a reviewer without ledger.propose used to
+             get a full live form and a 403 after typing a whole document. */
+          <p className="mx-4 mt-4 rounded-xl border border-border/80 bg-muted/60 px-3 py-2 text-sm leading-6 text-muted-foreground sm:mx-5">
+            شما دسترسی «پیشنهاد سند» ندارید؛ این صفحه فقط برای مشاهده و بررسی پیش‌نویس‌هاست.
+          </p>
+        ) : null}
+
+        {canPropose && hasNoPostableAccounts ? (
           <p className="mx-4 mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-950 sm:mx-5 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200">
             هیچ حساب قابل ثبتی در سرفصل حساب‌ها وجود ندارد؛ ابتدا از «سرفصل حساب‌ها» حساب تعریف کنید.
           </p>
         ) : null}
 
+        {canPropose ? (
         <form onSubmit={submit} className="space-y-4 p-4 sm:p-5">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem]">
             <label className="block">
@@ -374,7 +543,14 @@ export function ManualEntrySection({
             <label className="block">
               <span className="mb-1.5 block text-sm font-medium text-foreground">تاریخ سند</span>
               <JalaliDatePicker value={entryDate} onChange={setEntryDate} placeholder="امروز" />
-              <span className="mt-1 block text-xs text-muted-foreground">خالی یعنی تاریخ امروز.</span>
+              {/* «امروز» is resolved the moment the draft is saved, in this
+                  branch's own calendar, and stays with the document. Saying
+                  only «خالی یعنی امروز» left open when "today" was decided —
+                  and it used to be decided at approval, so a draft created on
+                  the 30th and approved on the 1st posted on the 1st. */}
+              <span className="mt-1 block text-xs text-muted-foreground">
+                خالی یعنی امروزِ این شعبه؛ تاریخ همین حالا در پیش‌نویس ثبت می‌شود و با تأیید عوض نمی‌شود.
+              </span>
             </label>
           </div>
 
@@ -475,7 +651,9 @@ export function ManualEntrySection({
               })}
             </ul>
 
-            <SecondaryButton onClick={addLine} disabled={lines.length >= MANUAL_LINES_MAX}>
+            {/* `type="button"`: a <button> inside a <form> submits by default,
+                so this one used to add a row *and* file the draft underneath. */}
+            <SecondaryButton type="button" onClick={addLine} disabled={lines.length >= MANUAL_LINES_MAX}>
               <PlusIcon aria-hidden="true" className="size-4" />
               افزودن ردیف
             </SecondaryButton>
@@ -485,11 +663,15 @@ export function ManualEntrySection({
             <dl className="grid gap-3 text-sm sm:grid-cols-3">
               <div>
                 <dt className="text-muted-foreground">جمع بدهکار</dt>
-                <dd className="mt-1 font-bold tabular-nums text-foreground">{money.format(totalDebit)}</dd>
+                <dd className="mt-1 font-bold tabular-nums text-foreground">
+                  {money.formatText(totals.totalDebit.toString())}
+                </dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">جمع بستانکار</dt>
-                <dd className="mt-1 font-bold tabular-nums text-foreground">{money.format(totalCredit)}</dd>
+                <dd className="mt-1 font-bold tabular-nums text-foreground">
+                  {money.formatText(totals.totalCredit.toString())}
+                </dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">وضعیت سند</dt>
@@ -501,10 +683,10 @@ export function ManualEntrySection({
                 {/* The difference, not just "not balanced yet": the number a
                     person needs in order to fix it was the one thing the
                     summary never said. */}
-                {!balanced && difference !== 0 ? (
+                {!balanced && totals.difference !== 0n ? (
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    اختلاف: <span className="tabular-nums">{money.format(Math.abs(difference))}</span>
-                    {difference > 0 ? " (بدهکار بیشتر است)" : " (بستانکار بیشتر است)"}
+                    اختلاف: <span className="tabular-nums">{differenceText}</span>
+                    {differenceIsDebit ? " (بدهکار بیشتر است)" : " (بستانکار بیشتر است)"}
                   </p>
                 ) : null}
               </div>
@@ -514,7 +696,8 @@ export function ManualEntrySection({
             <div role="status" aria-live="polite" className="empty:hidden">
               {incompleteLines > 0 ? (
                 <p className="mt-3 text-xs leading-5 text-amber-700 dark:text-amber-300">
-                  {toPersianDigits(String(incompleteLines))} ردیف ناقص است (حساب یا مبلغ ندارد) و در سند ثبت نمی‌شود.
+                  {toPersianDigits(String(incompleteLines))} ردیف ناقص است (حساب یا مبلغ ندارد) و مانع ثبت سند
+                  است.
                 </p>
               ) : null}
               {invalidAmountLines > 0 ? (
@@ -538,6 +721,7 @@ export function ManualEntrySection({
             ) : null}
           </div>
         </form>
+        ) : null}
       </section>
 
       <section aria-labelledby={`${formId}-queue-heading`} className={cardClass}>
@@ -545,13 +729,13 @@ export function ManualEntrySection({
           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">کنترل و تأیید</p>
           <h2 id={`${formId}-queue-heading`} className="mt-1 text-base font-semibold text-foreground">
             پیش‌نویس‌های در انتظار بررسی
-            {drafts && drafts.length > 0 ? (
+            {page && page.total > 0 ? (
               <span className="ms-2 text-sm font-normal text-muted-foreground">
-                ({toPersianDigits(String(drafts.length))} سند)
+                ({toPersianDigits(String(page.total))} سند)
               </span>
             ) : null}
           </h2>
-          {canApprove === false ? (
+          {!canApprove ? (
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
               شما دسترسی «تأیید سند» ندارید؛ می‌توانید پیش‌نویس ثبت کنید و پیش‌نویس‌های خودتان را رد کنید.
             </p>
@@ -571,11 +755,25 @@ export function ManualEntrySection({
             <ul className="space-y-3">
               {drafts.map((d) => {
                 const rowBusy = pendingDraftId === d.id;
-                const total = d.lines.reduce((sum, l) => sum + l.debit, 0);
+                /*
+                 * The same exact arithmetic as the form above, for the same
+                 * reason: `reduce` over JS numbers rounded two different sides
+                 * into one figure once a document was big enough, so the number
+                 * a reviewer trusted was the one the server disagreed with.
+                 */
+                const total = manualJournalTotals(d.lines).totalDebit.toString();
                 const confirming = confirmRejectId === d.id;
-                // Mirrors the DELETE route: your own draft, or ledger.approve.
-                const canReject =
-                  canApprove !== false || (!!currentUserId && d.createdBy === currentUserId);
+                // The route's own rule, imported rather than mirrored — the
+                // screen used to keep a hand-written copy of it, which is how
+                // it came to offer (and hide) the wrong buttons.
+                const { mayDecide: canReject, isAuthor } = canDecideOnDraft({
+                  actorId: currentUserId,
+                  draftAuthorId: d.createdBy,
+                  canApprove,
+                });
+                const proposedAt = d.proposedAt ?? d.createdAt;
+                const age = ageLabel(proposedAt);
+                const originLabel = provenanceLabel(provenanceOfMemo(d.memo));
                 return (
                   <li key={d.id} className="rounded-xl border border-border/80 bg-muted/60 p-4">
                     <div className="flex flex-wrap items-start justify-between gap-2">
@@ -583,67 +781,127 @@ export function ManualEntrySection({
                         {/* `break-words`: a long memo used to run past the card
                             on a phone instead of wrapping. */}
                         <h3 className="text-sm font-semibold break-words text-foreground">{d.memo}</h3>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {d.entryDate ? toPersianDigits(formatJalali(d.entryDate)) : "بدون تاریخ (امروز)"}
-                          {d.createdByName ? ` — ${d.createdByName}` : ""}
+                        {/* Everything a reviewer needs before deciding, in one
+                            line: the date it will post under, whose branch it
+                            posts to, who proposed it and how long it has been
+                            waiting. The queue is business-wide, so without the
+                            branch a reviewer approves a document without
+                            knowing whose books it lands in. */}
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          {/* The date is fixed when the draft is written — the
+                              form's «امروز» resolves here, not at approval — so
+                              a blank one is a draft from before that rule, not a
+                              promise to fill in later. */}
+                          {d.entryDate ? toPersianDigits(formatJalali(d.entryDate)) : "بدون تاریخ"}
+                          {d.proposedByName ? ` — ${d.proposedByName}` : d.createdByName ? ` — ${d.createdByName}` : ""}
+                          {age ? ` — ${age}` : ""}
+                        </p>
+                        <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                          <span className="rounded-full border border-border bg-background px-2 py-0.5 font-medium text-foreground">
+                            {d.locationName ?? "بدون شعبه"}
+                          </span>
+                          {/* Where the document came from, when it says so. An
+                              autopilot draft is approved on different grounds
+                              than a typed one, and the mark on its memo is the
+                              only place that difference is recorded. */}
+                          {originLabel ? (
+                            <span className="rounded-full border border-sky-500/30 bg-sky-500/5 px-2 py-0.5 font-medium text-sky-800 dark:text-sky-300">
+                              {originLabel}
+                            </span>
+                          ) : null}
+                          <span className="tabular-nums">#{toPersianDigits(shortRef(d.id))}</span>
                         </p>
                       </div>
                       <span className="shrink-0 text-sm font-bold tabular-nums text-foreground">
-                        {money.format(total)}
+                        {money.formatText(total)}
                       </span>
                     </div>
 
-                    <div className="mt-3 space-y-2">
-                      <div
-                        className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-3 border-b border-border pb-1 text-xs text-muted-foreground"
-                        aria-hidden="true"
-                      >
-                        <span>حساب</span>
-                        <span className="text-end">بدهکار</span>
-                        <span className="text-end">بستانکار</span>
-                      </div>
-                      {d.lines.map((l, i) => (
-                        <div
-                          key={`${d.id}-${i}`}
-                          className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-3 border-t border-border pt-2 text-sm first:border-t-0 first:pt-0"
-                        >
-                          <span className="min-w-0 break-words text-muted-foreground">
-                            {l.accountCode} {l.accountName}
-                          </span>
-                          <span className="whitespace-nowrap tabular-nums text-foreground">
-                            {l.debit ? money.format(l.debit) : "—"}
-                          </span>
-                          <span className="whitespace-nowrap tabular-nums text-foreground">
-                            {l.credit ? money.format(l.credit) : "—"}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+                    {/* A real table, not three spans under an aria-hidden
+                        header: with the heading hidden there was nothing left
+                        to say which number was the debit. `frame={false}` —
+                        the draft card already draws the panel. */}
+                    <DataTable caption={`ردیف‌های پیش‌نویس ${d.memo}`} frame={false} className="mt-3">
+                      <DataTableHead>
+                        <Th className="py-2">حساب</Th>
+                        <Th numeric className="py-2">
+                          بدهکار
+                        </Th>
+                        <Th numeric className="py-2">
+                          بستانکار
+                        </Th>
+                      </DataTableHead>
+                      <DataTableBody>
+                        {d.lines.map((l, i) => (
+                          <DataTableRow key={`${d.id}-${i}`}>
+                            <Th scope="row" className="py-2 font-normal">
+                              {l.accountCode} {l.accountName}
+                            </Th>
+                            <Td numeric className="py-2">
+                              <span className="sr-only">بدهکار: </span>
+                              {l.debit ? money.format(l.debit) : "—"}
+                            </Td>
+                            <Td numeric className="py-2">
+                              <span className="sr-only">بستانکار: </span>
+                              {l.credit ? money.format(l.credit) : "—"}
+                            </Td>
+                          </DataTableRow>
+                        ))}
+                      </DataTableBody>
+                    </DataTable>
 
                     {confirming ? (
                       /* Discarding a draft is irreversible and «رد کردن» sat
-                         one tap from «تأیید و ثبت»; it asks first now. */
+                         one tap from «تأیید و ثبت»; it asks first now, and
+                         records what the reviewer says — a rejection with no
+                         reason is indistinguishable from a deletion. */
                       <div className="mt-4 rounded-xl border border-destructive/30 bg-destructive/5 p-3">
                         <p className="text-sm text-destructive">
-                          این پیش‌نویس حذف شود؟ این کار قابل بازگشت نیست.
+                          این پیش‌نویس رد و حذف شود؟ این کار قابل بازگشت نیست.
                         </p>
+                        <label className="mt-3 block">
+                          <span className="mb-1.5 block text-xs font-medium text-foreground">
+                            علت رد{isAuthor ? " (اختیاری)" : ""}
+                          </span>
+                          <textarea
+                            className={inputClass}
+                            rows={2}
+                            value={rejectReason}
+                            onChange={(e) => setRejectReason(e.target.value)}
+                            maxLength={MANUAL_REJECTION_REASON_MAX}
+                            placeholder={isAuthor ? "مثلاً: اشتباه تایپ کردم" : "مثلاً: مبلغ با فاکتور مطابقت ندارد"}
+                          />
+                        </label>
                         <div className="mt-3 flex flex-wrap gap-2">
                           <Button
                             type="button"
                             variant="destructive"
                             onClick={() => reject(d.id)}
-                            disabled={busy || rowBusy}
+                            disabled={
+                              busy ||
+                              rowBusy ||
+                              // Reviewing somebody else's draft owes them an
+                              // explanation; withdrawing your own does not.
+                              (!isAuthor && !rejectReason.trim())
+                            }
                           >
-                            {rowBusy ? "در حال حذف…" : "بله، حذف کن"}
+                            {rowBusy ? "در حال حذف…" : "بله، رد کن"}
                           </Button>
-                          <SecondaryButton onClick={() => setConfirmRejectId(null)} disabled={rowBusy}>
+                          <SecondaryButton
+                            type="button"
+                            onClick={() => {
+                              setConfirmRejectId(null);
+                              setRejectReason("");
+                            }}
+                            disabled={rowBusy}
+                          >
                             انصراف
                           </SecondaryButton>
                         </div>
                       </div>
                     ) : (
                       <div className="mt-4 flex flex-wrap gap-2">
-                        {canApprove === false ? null : (
+                        {canApprove ? (
                           <div className="min-w-40 flex-1 sm:max-w-xs">
                             <PrimaryButton
                               type="button"
@@ -653,9 +911,13 @@ export function ManualEntrySection({
                               {rowBusy ? "در حال ثبت…" : "تأیید و ثبت"}
                             </PrimaryButton>
                           </div>
-                        )}
+                        ) : null}
                         {canReject ? (
-                          <SecondaryButton onClick={() => setConfirmRejectId(d.id)} disabled={busy || rowBusy}>
+                          <SecondaryButton
+                            type="button"
+                            onClick={() => setConfirmRejectId(d.id)}
+                            disabled={busy || rowBusy}
+                          >
                             رد کردن
                           </SecondaryButton>
                         ) : (
@@ -670,6 +932,36 @@ export function ManualEntrySection({
               })}
             </ul>
           )}
+
+          {/* Bounded on purpose: the queue is business-wide and open-ended, so
+              it is read a page at a time rather than loaded whole. */}
+          {page && page.total > page.limit ? (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4">
+              <p className="text-xs text-muted-foreground">
+                نمایش {toPersianDigits(String(page.offset + 1))} تا{" "}
+                {toPersianDigits(String(page.offset + (drafts?.length ?? 0)))} از{" "}
+                {toPersianDigits(String(page.total))}
+              </p>
+              <div className="flex gap-2">
+                <SecondaryButton
+                  type="button"
+                  onClick={() => setOffset(Math.max(0, page.offset - page.limit))}
+                  disabled={busy || page.offset === 0}
+                >
+                  <ChevronRightIcon aria-hidden="true" className="size-4" />
+                  صفحهٔ قبل
+                </SecondaryButton>
+                <SecondaryButton
+                  type="button"
+                  onClick={() => setOffset(page.offset + page.limit)}
+                  disabled={busy || !page.hasMore}
+                >
+                  صفحهٔ بعد
+                  <ChevronLeftIcon aria-hidden="true" className="size-4" />
+                </SecondaryButton>
+              </div>
+            </div>
+          ) : null}
         </div>
       </section>
     </div>

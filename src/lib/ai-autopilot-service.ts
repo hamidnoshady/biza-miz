@@ -22,10 +22,11 @@ import {
   type AutopilotCategory,
   type AutopilotCategorySetting,
 } from "./ai-autopilot";
-import { AUTOPILOT_EXECUTORS, AUTOPILOT_REVERTERS } from "./ai-autopilot-executors";
+import { AUTOPILOT_EXECUTORS, AUTOPILOT_REVERTERS, executorTargetLocation } from "./ai-autopilot-executors";
 import { autopilotAmountContext } from "./ai-amount-context";
 import { createAiActionAudit } from "./ai-action-audit";
-import { runAgentTurn } from "./ai-service";
+import { runAgentTurn, accruedUsageOf } from "./ai-service";
+import { isDeferrableDenial, verifyUnattendedAuthority } from "./ai-unattended-authority";
 import { runSystemReadTool } from "./ai-system-read";
 import { compactProactiveFacts, type LocalBusinessClock } from "./ai-proactive";
 import {
@@ -446,6 +447,7 @@ async function recordProposal(input: {
 export type AutopilotProposalOutcome =
   | { outcome: "applied"; auditId: string; result: Record<string, unknown> }
   | { outcome: "failed"; auditId: string; errorCode: string }
+  | { outcome: "revoked"; auditId: string; reasonCode: string; reasonFa: string }
   | { outcome: "deferred"; auditId: string; reasonCode: string; reasonFa: string };
 
 /**
@@ -494,9 +496,43 @@ export async function applyOrDeferProposal(input: {
     return { outcome: "deferred", auditId, reasonCode: verdict.reasonCode, reasonFa: verdict.reasonFa };
   }
 
+  // Issue #812 §13 — the stored `authorized_by` is revocable delegation, not
+  // standing authority. Resolve the authorizing member's CURRENT role,
+  // permission overrides, business status, branch scope and the canonical
+  // action permission immediately before the write, and refuse when any of
+  // them no longer holds. A revocation defers the run (the owner can undo the
+  // change); a run that never had an authorizer is failed outright.
+  const authority = await verifyUnattendedAuthority({
+    businessId,
+    authorizedByUserId: authorizedBy,
+    actionType: proposal.type,
+    targetLocationId: await executorTargetLocation(meta.executor, proposal.payload),
+  });
+  if (!authority.ok) {
+    if (isDeferrableDenial(authority)) {
+      // The owner can undo the change that revoked the delegation, so the row
+      // stays 'proposed' and shows in the hub with the reason attached.
+      await query(
+        `UPDATE ai_action_audit SET deferred_reason = $3 WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+        [auditId, businessId, authority.reasonCode],
+      );
+      return {
+        outcome: "revoked",
+        auditId,
+        reasonCode: authority.reasonCode ?? "authority_denied",
+        reasonFa: authority.reasonFa ?? "اجرای خودکار به دلیل قطع مجوز انجام نشد.",
+      };
+    }
+    return {
+      outcome: "failed",
+      auditId,
+      errorCode: authority.reasonCode ?? "authority_denied",
+    };
+  }
+
   const executor = meta.executor ? AUTOPILOT_EXECUTORS[meta.executor] : null;
   if (!executor) throw new Error("autopilot_executor_missing");
-  const result = await executor({ businessId, authorizedByUserId: authorizedBy, payload: proposal.payload });
+  const result = await executor({ businessId, authorizedByUserId: authority.userId, payload: proposal.payload });
 
   await query(
     `UPDATE ai_action_audit
@@ -529,6 +565,9 @@ async function runCategory(input: {
   config: PlatformAiConfig;
 }): Promise<boolean> {
   const { businessId, category, setting, clock, config } = input;
+  // Hoisted so the failure path can attribute the settlement of an already
+  // incurred provider cost to the member whose delegation the run carried.
+  let authorizedBy: string | null = null;
   const actionTypes = actionTypesForCategory(category);
   if (actionTypes.length === 0) return false;
 
@@ -547,7 +586,7 @@ async function runCategory(input: {
       return false;
     }
 
-    const authorizedBy = await authorizingUser(businessId, category);
+    authorizedBy = await authorizingUser(businessId, category);
     // Phase B — gate on the wallet; an unaffordable business is skipped, not
     // reserved against.
     try {
@@ -612,12 +651,42 @@ async function runCategory(input: {
       content:
         decision.outcome === "deferred"
           ? `${reply.content}\n\n[برای تأیید شما نگه داشته شد: ${decision.reasonFa}]`
-          : reply.content,
+          : decision.outcome === "revoked"
+            ? `${reply.content}\n\n[اجرا نشد، مجوز فعلی کافی نیست: ${decision.reasonFa}]`
+            : reply.content,
       facts,
       creditRequestId: requestId,
     });
     return true;
   } catch (error) {
+    // Issue #812 §16 — a run that failed after the provider answered already
+    // spent money. Settle exactly what it accrued against the same request id,
+    // so an unattended failure is neither free to the platform nor charged
+    // twice. The finish-run bookkeeping below is unchanged.
+    const accrued = accruedUsageOf(error);
+    if (accrued) {
+      try {
+        await settleAiTurn({
+          businessId,
+          requestId,
+          config,
+          usage: accrued.usage,
+          costUsd: accrued.costUsd,
+          attribution: {
+            requestType: "autopilot",
+            model: config.model,
+            userId: authorizedBy,
+            note: "failed_turn",
+            metadata: { source: "autopilot", kind: category, periodKey: `${clock.dateKey}:${category}`, status: "failed" },
+          },
+        });
+      } catch (settleError) {
+        console.error("autopilot failed-turn settlement failed", {
+          requestId,
+          error: settleError instanceof Error ? settleError.message : String(settleError),
+        });
+      }
+    }
     // Phase B — no reservation to cancel.
     await finishAutopilotRun({ businessId, runId, status: "failed", facts, error: errorText(error) }).catch(
       (finishError) => console.error("autopilot run could not be marked failed", finishError),

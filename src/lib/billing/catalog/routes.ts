@@ -42,9 +42,9 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   couriers: keys("accounting.operations"),
   shifts: keys("accounting.operations"),
   "business-day": keys("accounting.operations"),
-  printers: keys("accounting.operations"),
   printing: keys("accounting.operations"),
   ledger: keys("accounting.ledger"),
+  currencies: keys("accounting.ledger"),
   parties: keys("accounting.parties"),
   staff: keys("accounting.parties"),
   team: keys("accounting.parties"),
@@ -62,6 +62,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   growth: keys("growth.loyalty"),
   dashboard: keys("operations.shared"),
   workspace: keys("operations.shared"),
+  // Issue #799 Wave 2 — the AEC project profile and participant routes. They
+  // are My Workspace's project-metadata endpoints, so they classify exactly as
+  // `workspace` does rather than as a capability of their own.
+  aec: keys("operations.shared"),
   knowledge: keys("operations.shared"),
   support: keys("operations.shared"),
   "support-access": keys("operations.shared"),
@@ -78,6 +82,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   merchandising: keys("retail.trades"),
   jewelry: keys("retail.trades"),
   watch: keys("retail.trades"),
+  // Issue #839 — a dealership's counter and board are the same retail
+  // capability the other trades bill under: the routes exist for an automotive
+  // tenant, and nothing in them is a separately-charged platform feature.
+  automotive: keys("retail.trades"),
   accessories: keys("retail.trades"),
   cosmetics: keys("retail.trades"),
   integrations: keys("integrations.api"),

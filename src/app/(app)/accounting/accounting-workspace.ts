@@ -111,6 +111,8 @@ const WORKSPACE_GROUP_SLOTS: readonly { key: string; label: string; description?
     slots: [
       { href: "/accounting/orders" },
       { href: ACCOUNTING_WORKSPACE_HREFS.pos },
+      // After «صندوق (فروش)» (issue #844): the menu is what the till sells.
+      { href: ACCOUNTING_WORKSPACE_HREFS.menu },
     ],
   },
   {
@@ -139,6 +141,8 @@ const WORKSPACE_GROUP_SLOTS: readonly { key: string; label: string; description?
       { href: ACCOUNTING_WORKSPACE_HREFS.delivery },
       { href: "/accounting/jewelry" },
       { href: "/accounting/watch" },
+      // Issue #839 — a dealership's vehicles are its operations.
+      { href: ACCOUNTING_WORKSPACE_HREFS.automotive },
       { href: ACCOUNTING_WORKSPACE_HREFS.cosmetics },
     ],
   },
@@ -165,6 +169,7 @@ export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
   "trial-balance",
   "entries",
   "manual",
+  "multicurrency",
   "chart-of-accounts",
   "receivables",
   "payables",
@@ -176,6 +181,7 @@ export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
   "fixed-assets",
   "fiscal-periods",
   "vat",
+  "tax-invoices",
   "payroll",
 ];
 
@@ -199,14 +205,14 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   label: string;
   keys: readonly AccountingSectionKey[];
 }[] = [
-  { key: "ledger-books", label: "دفتر و اسناد", keys: ["trial-balance", "entries", "manual", "chart-of-accounts"] },
+  { key: "ledger-books", label: "دفتر و اسناد", keys: ["trial-balance", "entries", "manual", "multicurrency", "chart-of-accounts"] },
   {
     key: "ledger-receivables",
     label: "دریافتنی و پرداختنی",
     keys: ["receivables", "payables", "installments", "cheques"],
   },
   { key: "ledger-funds", label: "وجوه و هزینه", keys: ["receipts", "expenses", "reconciliation", "fixed-assets"] },
-  { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "vat", "payroll"] },
+  { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "vat", "tax-invoices", "payroll"] },
 ];
 
 /** The label «فضای کار حسابداری» wears wherever it is drawn — menu and page alike. */

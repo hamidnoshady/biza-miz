@@ -17,7 +17,8 @@ import { getPool, query } from "../../db";
 import { decryptSecret, encryptSecret, resolveEncryptionKey } from "../secrets";
 import { writeIntegrationAudit } from "../audit";
 import { connectHolooSql, type HolooSqlServerConfig, type HolooWebServiceConfig } from "./client";
-import { matchProfile, type HolooSchemaProfile } from "./schema-profile";
+import { diagnoseProfile, profileAllowsDirectSql, type HolooProfileDiagnostic, type HolooSchemaFingerprint, type HolooSchemaProfile } from "./schema-profile";
+import { probeHolooSchema } from "./schema-probe";
 import type { HolooCurrencyUnit } from "./holoo-money";
 
 export type HolooWriteMode = "none" | "web_service" | "direct_sql";
@@ -70,6 +71,7 @@ export interface HolooSettings {
   writeMode: HolooWriteMode;
   directSqlArmedAt: string | null;
   directSqlProfileKey: string | null;
+  directSqlSupported: boolean;
   companionActivatedAt: string | null;
   hasSqlCredentials: boolean;
   hasWebServiceCredentials: boolean;
@@ -93,6 +95,7 @@ function mapSettings(row: HolooSettingsRow): HolooSettings {
     writeMode: row.write_mode,
     directSqlArmedAt: row.direct_sql_armed_at,
     directSqlProfileKey: row.direct_sql_profile_key,
+    directSqlSupported: profileAllowsDirectSql(row.schema_profile),
     companionActivatedAt: row.companion_activated_at,
     hasSqlCredentials: Boolean(row.sql_user_ciphertext && row.sql_password_ciphertext),
     hasWebServiceCredentials: Boolean(row.ws_user_ciphertext && row.ws_password_ciphertext),
@@ -131,6 +134,7 @@ export async function createHolooConnection(
   if (!trimmedName || trimmedName.length > 120) return { ok: false, error: "invalid_name" };
   const validation = validate(input);
   if (validation) return { ok: false, error: validation };
+  if (input.writeMode === "direct_sql") return { ok: false, error: "direct_sql_not_supported" };
 
   const key = resolveEncryptionKey(process.env);
   const db = await getPool().connect();
@@ -202,6 +206,9 @@ export async function updateHolooSettings(
 ): Promise<{ ok: true; settings: HolooSettings } | { ok: false; error: string }> {
   const existing = await getHolooSettingsRow(businessId, connectionId);
   if (!existing) return { ok: false, error: "not_found" };
+  if (input.writeMode === "direct_sql" && !profileAllowsDirectSql(existing.schema_profile)) {
+    return { ok: false, error: "direct_sql_not_supported" };
+  }
 
   const key = resolveEncryptionKey(process.env);
   const sets: string[] = [];
@@ -322,15 +329,19 @@ export async function hasActiveHolooCompanion(businessId: string): Promise<boole
 
 export interface HolooTestResult {
   ok: boolean;
+  /** SQL Server version string (not represented as Holoo's own product version). */
   version?: string;
+  fingerprint?: HolooSchemaFingerprint;
   profile?: HolooSchemaProfile | null;
+  diagnostics?: HolooProfileDiagnostic[];
   error?: string;
 }
 
 /**
- * Test a Holoo connection: connect to SQL Server read-only, read the version,
- * probe the candidate tables and match a schema profile — the three facts the
- * management screen shows after a successful test.
+ * Test connectivity and inspect the full structural fingerprint using a
+ * read-only SQL client. Network health and migration-profile recognition are
+ * separate outcomes: an unknown schema may be diagnosed, but never migrated
+ * through this adapter or armed for direct SQL.
  */
 export async function testHolooConnection(businessId: string, connectionId: string): Promise<HolooTestResult> {
   const row = await getHolooSettingsRow(businessId, connectionId);
@@ -344,17 +355,17 @@ export async function testHolooConnection(businessId: string, connectionId: stri
   }
 
   try {
-    const version = await client.serverVersion();
-    const tables = await client.query<{ TABLE_NAME: string }>(
-      `SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE = 'BASE TABLE'`,
-    );
-    const profile = matchProfile(tables.map((t) => t.TABLE_NAME));
+    const snapshot = await probeHolooSchema(client);
+    const { profile, diagnostics } = diagnoseProfile(snapshot);
+    const version = snapshot.fingerprint.productVersion || snapshot.fingerprint.serverVersion;
 
     await query(
       `UPDATE holoo_connection_settings SET holoo_version = $3, schema_profile = $4, updated_at = now()
         WHERE business_id = $1 AND connection_id = $2`,
-      [businessId, connectionId, version, profile?.key ?? null],
+      [businessId, connectionId, version || null, profile?.key ?? null],
     );
+    // A reachable but unsupported SQL schema is still a healthy connection.
+    // Migration and direct-write callers independently fail closed on profile.
     await query(
       `UPDATE integration_connections SET status = 'active', last_sync_at = now(), last_error = NULL, updated_at = now()
         WHERE business_id = $1 AND id = $2`,
@@ -364,9 +375,16 @@ export async function testHolooConnection(businessId: string, connectionId: stri
       businessId,
       connectionId,
       action: profile ? "connection.test_ok" : "connection.test_ok_unknown_profile",
-      payload: { version, profile: profile?.key ?? null },
+      payload: {
+        version,
+        productLevel: snapshot.fingerprint.productLevel,
+        edition: snapshot.fingerprint.edition,
+        databaseCollation: snapshot.fingerprint.databaseCollation,
+        profile: profile?.key ?? null,
+        diagnostics,
+      },
     });
-    return { ok: true, version, profile };
+    return { ok: true, version, fingerprint: snapshot.fingerprint, profile, diagnostics };
   } catch (err) {
     const message = (err as Error).message;
     await query(

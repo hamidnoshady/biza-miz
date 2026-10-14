@@ -3,11 +3,19 @@
  *
  * The assistant is the dashboard itself: `/dashboard` is the chat home, and
  * the management surfaces that used to be a second application at `/ai/<section>`
- * — custom agents, the coworker's jobs and decision inbox, the automation
- * engine, the autopilot activity feed, the knowledge index and the usage/cost
- * report — open from the chat home in one panel. This module is the single
- * registry of those sections: what they are called, what `?aiPanel=` value
- * opens each, and who may open them.
+ * — the coworker's jobs and decision inbox, the automation engine, the
+ * autopilot activity feed, the layered memory manager, the Deep Research run
+ * history and the usage/cost report — open from the chat home in one panel.
+ * This module is the single registry of those sections: what they are called,
+ * what `?aiPanel=` value opens each, and who may open them.
+ *
+ * Issue #812 §4/§11 — two sections are deliberately GONE. There is no tenant
+ * Agent Builder («ایجنت‌ها»): agents are system-wide, built and versioned by
+ * Superadmin, and a tenant meets one only through an assigned suggestion card.
+ * And there is no tenant knowledge/reindex section: knowledge is infrastructure
+ * owned by the configured LiteLLM/AI layer, not something a tenant manages.
+ * The retired `agents` and `knowledge` `?aiPanel=` values degrade to the chat
+ * home through `isAiPanelSectionKey`, so an old bookmark never 404s.
  *
  * Framework-free by the same rule as `apps.ts` / `app-routes.ts` (no `next`,
  * no `db`, no JSX): the Edge middleware reads the section keys for the
@@ -29,11 +37,11 @@ import { PERMISSIONS, type Permission } from "./permissions";
 export const AI_PANEL_PARAM = "aiPanel";
 
 export const AI_PANEL_SECTION_KEYS = [
-  "agents",
+  "memory",
   "coworkers",
   "automations",
   "activity",
-  "knowledge",
+  "research",
   "usage",
 ] as const;
 
@@ -56,20 +64,20 @@ export interface AiPanelSection {
  * real components.
  */
 export type AiPanelIconName =
-  | "agents"
+  | "memory"
   | "coworkers"
   | "automations"
   | "activity"
-  | "knowledge"
+  | "research"
   | "usage";
 
 /** The panel's sections, in menu order. */
 export const AI_PANEL_SECTIONS: readonly AiPanelSection[] = [
   {
-    key: "agents",
-    label: "ایجنت‌ها",
-    description: "دستیارهای سفارشی: نقش، ابزارها و اجازهٔ عملیات",
-    icon: "agents",
+    key: "memory",
+    label: "حافظهٔ دستیار",
+    description: "حقایق و فرایندهای ماندگار کسب‌وکار که دستیار به‌خاطر می‌سپارد",
+    icon: "memory",
   },
   {
     key: "coworkers",
@@ -90,10 +98,10 @@ export const AI_PANEL_SECTIONS: readonly AiPanelSection[] = [
     icon: "activity",
   },
   {
-    key: "knowledge",
-    label: "دانش دستیار",
-    description: "آنچه دستیار می‌تواند از متن‌های کسب‌وکار به‌خاطر بیاورد",
-    icon: "knowledge",
+    key: "research",
+    label: "پژوهش عمیق",
+    description: "پژوهش‌های جداگانه، هزینه‌ای و نتیجه‌های مستندشده",
+    icon: "research",
   },
   {
     key: "usage",

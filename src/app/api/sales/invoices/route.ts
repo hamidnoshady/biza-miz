@@ -20,8 +20,10 @@ import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-produc
 import { ledgerSettlementFor, type PaymentSettlement } from "@/lib/payment-methods";
 import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
+import { holdsPermission } from "@/app/api/automotive/guard";
 import { formatJalali } from "@/lib/jalali";
-import { rowsToCsv, type ReportTable } from "@/lib/report-export";
+import { moneyColumnLabel, moneyExportCell, rowsToCsv, type ReportTable } from "@/lib/report-export";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
 
 const PAYMENT_METHODS: SettlementMethod[] = ["cash", "bank", "credit"];
 const INVOICE_METHODS = new Set<string>(PAYMENT_METHODS);
@@ -113,7 +115,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // پیش نمی‌داندش، پس فروش تک‌روشی (اکثریت قریب‌به‌اتفاق فاکتورها) باید بتواند
   // بدون دانستن جمع نهایی، «همه‌چیز را با همین روش بگیر» بفرستد. یک فروش
   // چندروشی هر سهمش را صریح می‌فرستد و فقط آخرین (یا هر یک) سهم را باز می‌گذارد.
-  if (!Array.isArray(body.tenders) || body.tenders.length === 0) {
+  if (!Array.isArray(body.tenders)) {
+    return NextResponse.json({ error: "no_payment" }, { status: 400 });
+  }
+  if (
+    body.tenders.length === 0 &&
+    (!Array.isArray(body.lines) || body.lines.length === 0 || !body.lines.every((line) => line?.kind === "vehicle"))
+  ) {
     return NextResponse.json({ error: "no_payment" }, { status: 400 });
   }
   if (body.tenders.length > MAX_RETAIL_TENDERS) {
@@ -197,6 +205,27 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const lines = body.lines as RetailInvoiceLineInput[];
   if (!lines.every((line) => line && typeof line === "object" && typeof line.kind === "string")) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  // Issue #839 §8 — a vehicle line sells one exact car, and its two
+  // automotive-specific decisions are made *here*, at the HTTP boundary, rather
+  // than trusted from the browser: selling a car needs `vehicles.sell` on top of
+  // the till's own `payments.take`, and crossing the car's recorded floor needs
+  // `vehicles.override_min_price`. A caller that asks for the override without
+  // holding it is refused, not quietly obeyed; any other caller's line keeps the
+  // floor intact.
+  const vehicleLines = lines.filter((line) => line.kind === "vehicle");
+  if (vehicleLines.length > 0) {
+    if (!(await holdsPermission(session, PERMISSIONS.vehiclesSell))) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    const mayOverride = await holdsPermission(session, PERMISSIONS.vehiclesOverrideMinPrice);
+    for (const line of vehicleLines) {
+      if (line.overrideMinPrice === true && !mayOverride) {
+        return NextResponse.json({ error: "min_price_override_forbidden" }, { status: 403 });
+      }
+      line.overrideMinPrice = line.overrideMinPrice === true && mayOverride;
+    }
   }
 
   const client = await getPool().connect();
@@ -317,6 +346,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   });
 
   if (format === "csv") {
+    // The amount column speaks the business's selected unit and says which —
+    // it used to be raw Rial under «مبلغ (ریال)» for a Toman business.
+    const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(session.businessId, SETTING_KEYS.businessPrefs);
+    const unit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
     const table: ReportTable = {
       columns: [
         { key: "orderNumber", label: "شماره فاکتور" },
@@ -324,7 +357,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         { key: "lineCount", label: "اقلام" },
         { key: "paymentMethods", label: "روش پرداخت" },
         { key: "status", label: "وضعیت" },
-        { key: "total", label: "مبلغ (ریال)" },
+        { key: "total", label: moneyColumnLabel("مبلغ", unit) },
         { key: "closedAt", label: "تاریخ ثبت" },
       ],
       rows: invoices.map((invoice) => ({
@@ -333,7 +366,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         lineCount: invoice.lineCount,
         paymentMethods: invoice.paymentMethods.map((m) => m.name).join("، "),
         status: invoice.status === "voided" ? "باطل‌شده" : "تکمیل‌شده",
-        total: invoice.total,
+        total: moneyExportCell(invoice.total, unit, "csv"),
         closedAt: invoice.closedAt
           ? toPersianDigits(formatJalali(invoice.closedAt, { timeZone: location.timezone, withTime: true }))
           : "",

@@ -39,8 +39,8 @@ function launch(name, bootstrap) {
     });
     const timer = setTimeout(() => {
       spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
-      fail(`${name} packaged launch timed out after 5 minutes`);
-    }, 300_000);
+      fail(`${name} packaged launch timed out after 10 minutes`);
+    }, 600_000); // above the 5-minute server-readiness wait in backend-manager.js plus the rest of startup
     child.once("error", (error) => fail(`${name} could not start: ${error.message}`));
     child.once("exit", (code) => {
       clearTimeout(timer);

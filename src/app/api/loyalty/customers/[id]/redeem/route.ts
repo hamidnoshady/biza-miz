@@ -9,7 +9,7 @@ import { redeemPoints } from "@/lib/loyalty-service";
 
 /** Redeems points into store credit, in one transaction. */
 export const POST = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyManage);
+  const { session, error } = await requirePermission(PERMISSIONS.loyaltyRedeem);
   if (error) return error;
   const { id } = await context.params;
 

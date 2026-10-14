@@ -22,6 +22,7 @@ const SLUGS: {
   requires?: PlatformCapability[];
 }[] = [
   { slug: "", label: "نمای کلی", hint: "خلاصهٔ وضعیت، مصرف و میان‌بُرهای بخش‌ها" },
+  { slug: "reports", label: "گزارش‌ها و تحلیل", hint: "گزارش‌های کسب‌وکار، عملکرد، مشتریان، برنامه‌ها و مشاوره", requires: ["business.reports.read"] },
   // Owner & managers (issue #755 §1). A list, not a single-owner card, because
   // a business can have more than one login-holding member. Reads ride
   // `businesses.read` (every admin); only `business.edit` holders can change a
@@ -52,11 +53,20 @@ const SLUGS: {
   {
     slug: "danger",
     label: "منطقهٔ خطر",
-    hint: "ریست کامل داده‌ها و حذف قطعی کسب‌وکار",
+    hint: "بازنشانی داده‌های عملیاتی و حذف دائمی کسب‌وکار",
     requires: ["business.reset", "business.delete"],
   },
 ];
 
+/**
+ * `some()`, not `every()`, is deliberate for the danger section (issue #822):
+ * reset (`business.reset`) and hard delete (`business.delete`) are different
+ * trusts a future role may hold separately. Holding EITHER one makes the
+ * section worth opening, and the page then renders only the cards the
+ * operator can actually act with — `ResetPanel`/`RemovePanel` each check
+ * their own capability — so a reset-only role sees the reset card alone
+ * instead of an empty page.
+ */
 export function businessSections(id: string, caps: PlatformCapability[]): BusinessSection[] {
   return SLUGS.filter((s) => !s.requires || s.requires.some((c) => caps.includes(c))).map((s) => ({
     href: s.slug ? `/platform/businesses/${id}/${s.slug}` : `/platform/businesses/${id}`,

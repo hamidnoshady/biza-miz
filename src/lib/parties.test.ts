@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   ACCOUNTING_CODE_MODES,
-  DEFAULT_TAX_PERCENTAGE,
   MAX_PARTY_DISPLAY_NAME,
   PARTY_ROLE_LABELS,
   PARTY_ROLES,
@@ -21,6 +20,7 @@ import {
   partyFieldErrorMessage,
   resetPartyForm,
   taxPercentageOf,
+  taxPercentageText,
   validatePartyForm,
 } from "./parties";
 
@@ -228,7 +228,7 @@ describe("buildPartyPayload / formStateFromParty", () => {
     const payload = buildPartyPayload({ ...resetPartyForm(), displayName: "نانوایی" });
     expect(payload.address_info).toEqual({});
     expect(payload.contact_info).toEqual({});
-    expect(payload.general_info.taxPercentage).toBe(DEFAULT_TAX_PERCENTAGE);
+    expect(payload.general_info.taxPercentage).toBeNull();
     expect(payload.accountingCode).toBeNull();
     expect(payload.accountingCodeMode).toBe("Automatic");
     expect(payload.displayName).toBe("نانوایی");
@@ -301,21 +301,21 @@ describe("buildPartyPayload / formStateFromParty", () => {
   });
 
   it("reads the tax percentage back defensively", () => {
-    expect(taxPercentageOf({})).toBe(DEFAULT_TAX_PERCENTAGE);
+    expect(taxPercentageOf({})).toBeNull();
     expect(taxPercentageOf({ generalInfo: { taxPercentage: "۱۲" } })).toBe(12);
-    // A rate that is not a rate (or is out of range) is the default, not a NaN in
-    // the ledger's copy of the party.
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: null } })).toBe(DEFAULT_TAX_PERCENTAGE);
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: -3 } })).toBe(DEFAULT_TAX_PERCENTAGE);
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: 101 } })).toBe(DEFAULT_TAX_PERCENTAGE);
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: "چیزی" } })).toBe(DEFAULT_TAX_PERCENTAGE);
+    // A rate that is not a rate (or is out of range) follows the business rate
+    // (null), not a NaN in the ledger's copy of the party and not an assumed 9%.
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: null } })).toBeNull();
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: -3 } })).toBeNull();
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: 101 } })).toBeNull();
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: "چیزی" } })).toBeNull();
   });
 
   it("keeps a fractional rate instead of multiplying it by ten", () => {
     /*
      * This read the text through `asciiDigits`, which strips every non-digit —
      * the decimal mark included. «۱۲٫۵» became `125`, which failed the range
-     * check and silently reverted to 9%; «۹٫۵» became `95`, which *passed* it,
+     * check and silently reverted to the old fixed default; «۹٫۵» became `95`, which *passed* it,
      * so a party typed as 9.5% was stored at 95% and every invoice raised
      * against them used that rate. Both spellings of the separator and both
      * digit sets have to survive, because the keyboard decides which arrives.
@@ -335,12 +335,21 @@ describe("buildPartyPayload / formStateFromParty", () => {
      * never be what an empty field means. A whitespace-only value used to reach
      * `Number("")` and land on 0, quietly making a party tax-exempt.
      */
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: "" } })).toBe(DEFAULT_TAX_PERCENTAGE);
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: "   " } })).toBe(DEFAULT_TAX_PERCENTAGE);
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: undefined } })).toBe(DEFAULT_TAX_PERCENTAGE);
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: "" } })).toBeNull();
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: "   " } })).toBeNull();
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: undefined } })).toBeNull();
     expect(taxPercentageOf({ generalInfo: { taxPercentage: "0" } })).toBe(0);
     expect(taxPercentageOf({ generalInfo: { taxPercentage: "۰" } })).toBe(0);
     expect(taxPercentageOf({ generalInfo: { taxPercentage: 0 } })).toBe(0);
+  });
+
+  it("assumes no rate for a new party: it follows the business setting (audit F05)", () => {
+    expect(resetPartyForm().generalInfo.taxPercentage).toBeNull();
+    // The form shows an empty box for «follows the business rate», never «null»
+    // and never a guessed number; an explicit 0 stays visible as 0.
+    expect(taxPercentageText({})).toBe("");
+    expect(taxPercentageText({ generalInfo: { taxPercentage: 0 } })).toBe("0");
+    expect(taxPercentageText({ generalInfo: { taxPercentage: "۱۲٫۵" } })).toBe("12.5");
   });
 });
 

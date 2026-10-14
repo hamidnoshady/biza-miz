@@ -86,6 +86,20 @@ their names, dates render Shamsi, and money is emitted in the unit the business
 selected with that unit named in the header. Four formats: Excel, CSV, PDF,
 JSON. All / selected / filtered, with a field chooser and saveable templates.
 
+Two consequences for the file coming back in, both of them a field's contract
+rather than an entity's exception:
+
+- The header a money column gets is `«مبلغ (تومان)»`, not `«مبلغ»`. An entity that
+  wants its own export to re-import lists the unit spellings among the field's
+  `aliases` (the expense `amount` and `vatAmount` do); `suggestMapping` matches a
+  header against key, label and aliases only, so an entity that says nothing gets
+  its money columns reported as unmapped.
+- `validation.integral` on a `money` field refuses a fractional cell instead of
+  rounding it to the nearest whole Rial. Any column the ledger *posts* should carry
+  it: ۱۵/۷۵ تومان rounded to ۱۵۸ is a journal line that reconciles with no
+  document, and a silently-rounded figure is the one thing an accountant cannot
+  find afterwards. Ordinary list prices keep the default, which is to round.
+
 ### Background processing
 
 `runImportQueueTick` (every 10s) and `runScheduledExportsTick` +

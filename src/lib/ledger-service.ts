@@ -113,7 +113,51 @@ export async function postExactJournalEntry(
       [rows[0].id, line.accountId, line.debit, line.credit],
     );
   }
+  // The DB line trigger grants insertion into a soft-closed period only while
+  // this freshly-created entry is being assembled. Do not let later statements
+  // in the same outer transaction reuse that construction marker.
+  await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
   return rows[0].id;
+}
+
+/**
+ * Audit F11 — the credit side and input-VAT leg shared by both purchase
+ * receipt postings. The supplier's invoice may carry VAT on top of the goods
+ * value: it is debited to input VAT (`vatReceivable`, 1220 — the account the
+ * VAT report reads) and the settlement account is credited goods + VAT, so a
+ * credit purchase's payable is what the supplier actually billed. With no VAT
+ * the entry is exactly what it always was (and 1220 is not even looked up).
+ */
+async function purchaseSettlementLines(
+  client: PoolClient,
+  businessId: string,
+  settlementMethod: SettlementMethod,
+  goods: RialText,
+  vat: RialText | undefined,
+): Promise<ExactJournalLine[]> {
+  const creditCode =
+    settlementMethod === "cash"
+      ? WELL_KNOWN_CODES.cash
+      : settlementMethod === "bank"
+        ? WELL_KNOWN_CODES.bankClearing
+        : WELL_KNOWN_CODES.accountsPayable;
+  const vatValue = vat ? rialBigInt(vat) : 0n;
+  if (vatValue < 0n) throw new Error("invalid_purchase_vat");
+  const accounts = await accountIdsByCode(
+    client,
+    businessId,
+    vatValue > 0n ? [creditCode, WELL_KNOWN_CODES.vatReceivable] : [creditCode],
+  );
+  const lines: ExactJournalLine[] = [];
+  if (vatValue > 0n) {
+    lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: vat!, credit: "0" as RialText });
+  }
+  lines.push({
+    accountId: accounts.get(creditCode)!,
+    debit: "0" as RialText,
+    credit: (rialBigInt(goods) + vatValue).toString() as RialText,
+  });
+  return lines;
 }
 
 export async function postExactPurchaseEntry(
@@ -126,6 +170,8 @@ export async function postExactPurchaseEntry(
     total: RialText;
     settlementMethod: SettlementMethod;
     inventoryEventId: string;
+    /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
+    vat?: RialText;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
@@ -134,12 +180,7 @@ export async function postExactPurchaseEntry(
     WELL_KNOWN_CODES.cash,
     WELL_KNOWN_CODES.bankClearing,
   ]);
-  const creditCode =
-    params.settlementMethod === "cash"
-      ? WELL_KNOWN_CODES.cash
-      : params.settlementMethod === "bank"
-        ? WELL_KNOWN_CODES.bankClearing
-        : WELL_KNOWN_CODES.accountsPayable;
+  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -151,7 +192,7 @@ export async function postExactPurchaseEntry(
     inventoryEventId: params.inventoryEventId,
     lines: [
       { accountId: accounts.get(WELL_KNOWN_CODES.inventory)!, debit: params.total, credit: "0" as RialText },
-      { accountId: accounts.get(creditCode)!, debit: "0" as RialText, credit: params.total },
+      ...settlementLines,
     ],
   });
 }
@@ -172,6 +213,8 @@ export async function postPeriodicPurchaseEntry(
     createdBy: string | null;
     total: RialText;
     settlementMethod: SettlementMethod;
+    /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
+    vat?: RialText;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
@@ -180,12 +223,7 @@ export async function postPeriodicPurchaseEntry(
     WELL_KNOWN_CODES.cash,
     WELL_KNOWN_CODES.bankClearing,
   ]);
-  const creditCode =
-    params.settlementMethod === "cash"
-      ? WELL_KNOWN_CODES.cash
-      : params.settlementMethod === "bank"
-        ? WELL_KNOWN_CODES.bankClearing
-        : WELL_KNOWN_CODES.accountsPayable;
+  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -196,7 +234,7 @@ export async function postPeriodicPurchaseEntry(
     postingKind: "periodic_purchase",
     lines: [
       { accountId: accounts.get(WELL_KNOWN_CODES.periodicPurchases)!, debit: params.total, credit: "0" as RialText },
-      { accountId: accounts.get(creditCode)!, debit: "0" as RialText, credit: params.total },
+      ...settlementLines,
     ],
   });
 }
@@ -790,6 +828,66 @@ export async function postExactOperationalInventoryEntry(
   });
 }
 
+/**
+ * A supplier return: Debit the settlement side / Credit inventory for the goods
+ * — exactly `postExactOperationalInventoryEntry` when the purchase carried no
+ * VAT — and, when it did (audit F11), Credit input VAT (1220) for the share of
+ * the invoice's VAT this return reverses, in the same entry, with the
+ * settlement side debited goods + VAT so A/P and 1220 both come back down.
+ */
+export async function postExactSupplierReturnEntry(
+  client: PoolClient,
+  params: {
+    businessId: string;
+    locationId: string;
+    supplierReturnId: string;
+    createdBy: string | null;
+    inventoryEventId: string;
+    debitCode: string;
+    goods: RialText;
+    vat: RialText;
+  },
+): Promise<string | null> {
+  const common = {
+    businessId: params.businessId,
+    locationId: params.locationId,
+    sourceType: "supplier_return",
+    sourceId: params.supplierReturnId,
+    postingKind: "supplier_return",
+    memo: "Supplier return",
+    createdBy: params.createdBy,
+    inventoryEventId: params.inventoryEventId,
+  };
+  const vat = rialBigInt(params.vat);
+  if (vat < 0n) throw new Error("invalid_supplier_return_vat");
+  if (vat === 0n) {
+    return postExactOperationalInventoryEntry(client, {
+      ...common,
+      debitCode: params.debitCode,
+      creditCode: WELL_KNOWN_CODES.inventory,
+      amount: params.goods,
+    });
+  }
+  const accounts = await accountIdsByCode(client, params.businessId, [
+    params.debitCode,
+    WELL_KNOWN_CODES.inventory,
+    WELL_KNOWN_CODES.vatReceivable,
+  ]);
+  const zero = "0" as RialText;
+  return postExactJournalEntry(client, {
+    ...common,
+    lines: [
+      {
+        accountId: accounts.get(params.debitCode)!,
+        debit: (rialBigInt(params.goods) + vat).toString() as RialText,
+        credit: zero,
+      },
+      { accountId: accounts.get(WELL_KNOWN_CODES.inventory)!, debit: zero, credit: params.goods },
+      { accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: zero, credit: params.vat },
+    ],
+  });
+}
+
 export async function postExactCustomerRefundEntry(
   client: PoolClient,
   params: {
@@ -864,6 +962,9 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
       l.credit,
     ]);
   }
+  // A soft-close construction token is single-use at the entry boundary, not
+  // a continuing authorization to append lines later in this transaction.
+  await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
   return entryId;
 }
 

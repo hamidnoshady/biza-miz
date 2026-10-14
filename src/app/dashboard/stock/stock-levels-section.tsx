@@ -380,15 +380,17 @@ export function StockLevelsSection({
                     <div className="font-medium text-foreground">
                       {formatQuantity(item.quantity)}
                     </div>
-                    {Number(item.reorderPoint) > 0 && (
-                      <div className="mt-0.5 text-xs text-muted-foreground">
-                        نقطه سفارش: {formatQuantity(item.reorderPoint)}
-                      </div>
-                    )}
+                    <div className="mt-0.5 text-xs text-muted-foreground">
+                      {Number(item.reorderPoint) > 0
+                        ? `نقطه سفارش: ${formatQuantity(item.reorderPoint)}`
+                        : "یادآوری سفارش خاموش"}
+                    </div>
                   </Td>
                   <Td numeric nowrap muted>
                     {item.unitCost == null || item.unitCost === 0
-                      ? "—"
+                      ? Number(item.quantity) > 0
+                        ? "بها ثبت نشده"
+                        : "—"
                       : money.format(item.unitCost)}
                   </Td>
                   <Td numeric nowrap className="font-semibold">

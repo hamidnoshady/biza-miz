@@ -32,6 +32,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Switch } from "@/components/ui/switch";
 import {
   BLOCK_LABELS,
+  HIDDEN_BLOCK_TYPES,
   DOC_TYPE_LABELS,
   ITEM_COLUMN_LABELS,
   PAPERS,
@@ -61,25 +62,18 @@ const SIZE_LABELS: Record<TextSize, string> = {
 
 const ALIGN_LABELS: Record<Align, string> = { start: "راست", center: "وسط", end: "چپ" };
 
-/** Blocks a person can add. `items`/`totals` may appear more than once safely. */
-const ADDABLE: BlockType[] = [
-  "logo",
-  "businessName",
-  "businessMeta",
-  "title",
-  "meta",
-  "customer",
-  "items",
-  "totals",
-  "payments",
-  "note",
-  "text",
-  "qr",
-  "barcode",
-  "signature",
-  "divider",
-  "spacer",
-];
+/**
+ * Blocks a person can add. `items`/`totals` may appear more than once safely.
+ *
+ * `qr` is deliberately absent (see `HIDDEN_BLOCK_TYPES` in print-template.ts):
+ * no document supplies a QR payload yet, and offering a control whose output
+ * the renderer would drop is exactly the drift this model exists to prevent.
+ * `labelFields` is here because the label pipeline is now a template like any
+ * other.
+ */
+const ADDABLE: BlockType[] = (Object.keys(BLOCK_LABELS) as BlockType[]).filter(
+  (type) => !HIDDEN_BLOCK_TYPES.includes(type),
+);
 
 function newBlock(type: BlockType): TemplateBlock {
   const base: TemplateBlock = { id: crypto.randomUUID(), type, visible: true };

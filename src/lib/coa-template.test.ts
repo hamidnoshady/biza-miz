@@ -3,6 +3,7 @@ import { INDUSTRIES, type Industry } from "./industries";
 import {
   ACCESSORIES_COA_TEMPLATE,
   ACCOUNT_LEVELS,
+  ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE,
   coaTemplateForIndustry,
   COSMETICS_COA_TEMPLATE,
   costOfSalesCodesForIndustry,
@@ -45,6 +46,12 @@ const CORE_REQUIRED_CODES: readonly string[] = [
   WELL_KNOWN_CODES.vatPayable,
   WELL_KNOWN_CODES.salariesPayable,
   WELL_KNOWN_CODES.salariesExpense,
+  // Gross-to-net payroll (audit F11): every trade runs payroll.
+  WELL_KNOWN_CODES.employerInsuranceExpense,
+  WELL_KNOWN_CODES.insurancePayable,
+  WELL_KNOWN_CODES.payrollTaxPayable,
+  WELL_KNOWN_CODES.otherPayrollDeductionsPayable,
+  WELL_KNOWN_CODES.staffAdvances,
   WELL_KNOWN_CODES.commissionExpense,
   WELL_KNOWN_CODES.accumulatedDepreciation,
   WELL_KNOWN_CODES.depreciationExpense,
@@ -80,6 +87,33 @@ const CORE_REQUIRED_CODES: readonly string[] = [
 /** Each trade's own accounts, on top of the core every chart shares. */
 const TRADE_REQUIRED_CODES: Record<Industry, readonly string[]> = {
   service_saas: ["1200", "2100", "4500", "4510", "4520", "5660", "5670"],
+  // Issue #839 — the automotive trade's own lines: vehicle inventory and its
+  // landed-cost clearing account, vehicle revenue, the COGS/reconditioning
+  // pair that keeps capitalised cost and period expense apart, and the
+  // trade-in obligation the second wave settles against.
+  automotive: [
+    WELL_KNOWN_CODES.vehicleInventory,
+    WELL_KNOWN_CODES.vehicleLandedCostClearing,
+    WELL_KNOWN_CODES.vehicleSalesRevenue,
+    WELL_KNOWN_CODES.vehicleCogs,
+    WELL_KNOWN_CODES.vehicleReconditioningExpense,
+    WELL_KNOWN_CODES.vehicleTradeInPayable,
+  ],
+  // Issue #799 — the AEC trade's own lines: its three revenues, retention on
+  // both sides, contract work in progress, subcontractors' payable, and the
+  // three accounts its direct project cost is split across.
+  architecture_construction: [
+    WELL_KNOWN_CODES.aecDesignRevenue,
+    WELL_KNOWN_CODES.aecSupervisionRevenue,
+    WELL_KNOWN_CODES.aecConstructionRevenue,
+    WELL_KNOWN_CODES.aecRetentionReceivable,
+    WELL_KNOWN_CODES.aecRetentionPayable,
+    WELL_KNOWN_CODES.aecContractWorkInProgress,
+    WELL_KNOWN_CODES.aecSubcontractorPayable,
+    WELL_KNOWN_CODES.aecProjectDirectCost,
+    WELL_KNOWN_CODES.aecSubcontractorExpense,
+    WELL_KNOWN_CODES.aecEquipmentExpense,
+  ],
   food_service: [
     WELL_KNOWN_CODES.inventory,
     WELL_KNOWN_CODES.cogs,
@@ -203,9 +237,55 @@ describe("the retail templates carry no F&B recipe-shaped accounts", () => {
   );
 });
 
+describe("the AEC template carries no hospitality or counter-sales accounts", () => {
+  /**
+   * Issue #799 — the "no restaurant-specific module leaks into the AEC
+   * tenant" rule, applied to the chart. These are the codes F&B's template
+   * owns that a design office or a contractor would never post to; the
+   * template is built by filtering the F&B chart, so this test is what proves
+   * the filter list stays ahead of anything the F&B template grows later.
+   */
+  const HOSPITALITY_ONLY_CODES = [
+    "4100", // فروش غذا
+    "4200", // فروش نوشیدنی
+    "4310", // فروش حضوری (سالن)
+    "4320", // فروش بیرون‌بر
+    "4330", // فروش ارسالی
+    "4360", // حق سرویس
+    "5100", // بهای تمام‌شده مواد (recipe costing)
+    "5150", // ضایعات مواد
+    "5160", // کسری و مغایرت شمارش
+    "5180", // هزینهٔ تبدیل جذب‌شده در تولید
+    "1310", // کالای در جریان ساخت (production wash account)
+    "5650", // کارمزد پلتفرم‌های سفارش آنلاین
+  ];
+
+  it("omits every one of them", () => {
+    const codes = new Set(coaTemplateForIndustry("architecture_construction").map((a) => a.code));
+    expect(HOSPITALITY_ONLY_CODES.filter((code) => codes.has(code))).toEqual([]);
+  });
+
+  it("keeps the accounts a project business actually posts to", () => {
+    const codes = new Set(coaTemplateForIndustry("architecture_construction").map((a) => a.code));
+    for (const code of [
+      WELL_KNOWN_CODES.aecContractWorkInProgress,
+      WELL_KNOWN_CODES.aecRetentionReceivable,
+      WELL_KNOWN_CODES.aecRetentionPayable,
+      WELL_KNOWN_CODES.aecSubcontractorPayable,
+      WELL_KNOWN_CODES.aecDesignRevenue,
+      WELL_KNOWN_CODES.aecProjectDirectCost,
+    ]) {
+      expect(codes.has(code), code).toBe(true);
+    }
+  });
+});
+
 describe("coaTemplateForIndustry", () => {
   it("gives each industry its own template", () => {
     expect(coaTemplateForIndustry("food_service")).toBe(FNB_COA_TEMPLATE);
+    expect(coaTemplateForIndustry("architecture_construction")).toBe(
+      ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE,
+    );
     expect(coaTemplateForIndustry("jewelry")).toBe(JEWELRY_COA_TEMPLATE);
     expect(coaTemplateForIndustry("watch")).toBe(WATCH_COA_TEMPLATE);
     expect(coaTemplateForIndustry("accessories")).toBe(ACCESSORIES_COA_TEMPLATE);
@@ -297,6 +377,24 @@ describe("validateAccounts", () => {
   it("rejects an empty list", () => {
     expect(validateAccounts([]).length).toBeGreaterThan(0);
   });
+
+  it("rejects a child whose type differs from its parent's (issue #824 §2, the wizard's own check)", () => {
+    const errors = validateAccounts([
+      { code: "1000", name: "دارایی", type: "asset" },
+      { code: "1100", name: "بدهی", type: "liability", parentCode: "1000" },
+    ]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("1100");
+  });
+
+  it("accepts a child whose type matches its parent's", () => {
+    expect(
+      validateAccounts([
+        { code: "1000", name: "دارایی", type: "asset" },
+        { code: "1100", name: "صندوق", type: "asset", parentCode: "1000" },
+      ]),
+    ).toEqual([]);
+  });
 });
 
 describe("isNonCurrentCode", () => {
@@ -347,6 +445,14 @@ describe("isNonCurrentCode", () => {
 describe("costOfSalesCodesForIndustry", () => {
   it("names each trade's own cost of goods sold", () => {
     expect(costOfSalesCodesForIndustry("food_service")).toContain(WELL_KNOWN_CODES.cogs);
+    // Issue #799 — a contractor's cost of sales is direct project cost, never
+    // a bought-for-resale account.
+    expect(costOfSalesCodesForIndustry("architecture_construction")).toContain(
+      WELL_KNOWN_CODES.aecProjectDirectCost,
+    );
+    expect(costOfSalesCodesForIndustry("architecture_construction")).not.toContain(
+      WELL_KNOWN_CODES.cogs,
+    );
     expect(costOfSalesCodesForIndustry("jewelry")).toContain(WELL_KNOWN_CODES.goldCogs);
     expect(costOfSalesCodesForIndustry("watch")).toContain(WELL_KNOWN_CODES.watchCogs);
     expect(costOfSalesCodesForIndustry("accessories")).toContain(WELL_KNOWN_CODES.accessoryCogs);

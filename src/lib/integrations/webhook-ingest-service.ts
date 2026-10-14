@@ -16,7 +16,13 @@ import { WELL_KNOWN_CODES } from "../coa-template";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
 import { deductForOrder } from "../inventory-service";
 import { createCustomerReturn, type ReturnLine } from "../customer-return-service";
+import { RETAIL_ACCOUNT_CODES } from "../retail-account-codes";
+import { INDUSTRY_NOT_STOREFRONT, hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
 import { quantityText, type RialText } from "../inventory-exact";
+import { recordUntrackedOnlineLine, sellOnlineRetailLine } from "../retail-online-sale-service";
+import { isProvisionalCost, parseRemoteInstant, planOnlineLineReturn } from "../online-sale-policy";
+import { recordOnlineOrderDocument, resolveOnlineChronology } from "../online-order-document-service";
+import { restoreOrderItemBatchStock } from "../retail-batch-inventory";
 import { getPrimaryLocation } from "../setup-state";
 import {
   CONNECTION_COLUMNS,
@@ -30,6 +36,7 @@ import {
 } from "./webhook-signature";
 import { wooAmountToRial } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
+import { insertNewMappingOnClient, lockRemoteIdentity } from "./mapping-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { connectionLocationId, resolveOrderCustomerId, upsertCustomerFromWoo, upsertProductFromWoo } from "./sync-service";
 import { wooLineCandidateIds, shouldImportWooOrder } from "./woo-catalogue";
@@ -47,44 +54,6 @@ const zero = "0" as RialText;
  * own chart of accounts seeds (see coa-template.ts), so the WooCommerce order
  * lands in the same accounts a counter sale of the same item would.
  */
-const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue: string; cogs: string; inventory: string }> = {
-  service_saas: { revenue: "4500", cogs: "5670", inventory: "1400" },
-  jewelry: {
-    revenue: WELL_KNOWN_CODES.goldSalesRevenue,
-    cogs: WELL_KNOWN_CODES.goldCogs,
-    inventory: WELL_KNOWN_CODES.goldInventory,
-  },
-  watch: {
-    revenue: WELL_KNOWN_CODES.watchSalesRevenue,
-    cogs: WELL_KNOWN_CODES.watchCogs,
-    inventory: WELL_KNOWN_CODES.watchInventory,
-  },
-  accessories: {
-    revenue: WELL_KNOWN_CODES.accessorySalesRevenue,
-    cogs: WELL_KNOWN_CODES.accessoryCogs,
-    inventory: WELL_KNOWN_CODES.accessoryInventory,
-  },
-  cosmetics: {
-    revenue: WELL_KNOWN_CODES.cosmeticSalesRevenue,
-    cogs: WELL_KNOWN_CODES.cosmeticCogs,
-    inventory: WELL_KNOWN_CODES.cosmeticInventory,
-  },
-  wholesale: {
-    revenue: WELL_KNOWN_CODES.wholesaleSalesRevenue,
-    cogs: WELL_KNOWN_CODES.wholesaleCogs,
-    inventory: WELL_KNOWN_CODES.wholesaleInventory,
-  },
-  tools_fittings: {
-    revenue: WELL_KNOWN_CODES.toolsSalesRevenue,
-    cogs: WELL_KNOWN_CODES.toolsCogs,
-    inventory: WELL_KNOWN_CODES.toolsInventory,
-  },
-  haberdashery: {
-    revenue: WELL_KNOWN_CODES.haberdasherySalesRevenue,
-    cogs: WELL_KNOWN_CODES.haberdasheryCogs,
-    inventory: WELL_KNOWN_CODES.haberdasheryInventory,
-  },
-};
 
 export async function handleWooCommerceWebhook(
   connectionId: string,
@@ -575,7 +544,25 @@ async function ensureVariationStub(
 ): Promise<string | null> {
   const variationId = Number(line.variation_id ?? 0) || 0;
   if (variationId <= 0) return null;
+  // A savepoint, so a failure here really is best-effort: without it a failed
+  // statement aborted the whole order transaction despite the catch below.
+  await db.query("SAVEPOINT variation_stub");
   try {
+    // Audit F13: under the identity lock, and re-reading the mapping, so the
+    // same variation on a second line of this order — or a concurrent product
+    // sync of it — reuses the one row instead of minting a twin and
+    // re-pointing the mapping at it.
+    const mapped = await lockRemoteIdentity(
+      db,
+      connection.business_id,
+      connection.id,
+      "product",
+      String(variationId),
+    );
+    if (mapped) {
+      await db.query("RELEASE SAVEPOINT variation_stub");
+      return mapped;
+    }
     const { rows } = await db.query<{ id: string }>(
       `INSERT INTO items (location_id, parent_item_id, name, sku, kind, tracking)
        VALUES ($1, $2, $3, $4, 'variant_child', 'none') RETURNING id`,
@@ -586,17 +573,13 @@ async function ensureVariationStub(
       `INSERT INTO item_stock (item_id, quantity, unit_price) VALUES ($1, 0, $2)`,
       [itemId, priceRial > 0n ? Number(priceRial) : null],
     );
-    await db.query(
-      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
-       VALUES ($1, $2, 'product', $3, $4)
-       ON CONFLICT (connection_id, entity_type, remote_id)
-       DO UPDATE SET local_id = EXCLUDED.local_id, updated_at = now()`,
-      [connection.business_id, connection.id, String(variationId), itemId],
-    );
+    await insertNewMappingOnClient(db, connection.business_id, connection.id, "product", String(variationId), itemId);
+    await db.query("RELEASE SAVEPOINT variation_stub");
     return itemId;
   } catch {
-    // A duplicate SKU, a constraint from an extension — none of it is worth
+    // A constraint from an extension, a lock conflict — none of it is worth
     // failing the order over.
+    await db.query("ROLLBACK TO SAVEPOINT variation_stub");
     return null;
   }
 }
@@ -606,9 +589,30 @@ function relievesStock(line: ResolvedOrderLine): boolean {
   return line.via === "variation" || line.via === "product";
 }
 
+/**
+ * A Woo order instant: the `*_gmt` field (UTC by Woo's convention), else the
+ * store-local field only if it carries an explicit offset — never a guessed
+ * store timezone.
+ */
+function wooOrderInstant(gmt: string | null | undefined, local: string | null | undefined): string | null {
+  return parseRemoteInstant(gmt, { assumeUtc: true }) ?? parseRemoteInstant(local, { assumeUtc: false });
+}
+
+/** A component the payload may omit: null (unknown) rather than zero. */
+function optionalWooAmount(value: string | null | undefined, unit: ConnectionRow["currency_unit"]): bigint | null {
+  if (value == null || value === "") return null;
+  return wooAmountToRial(value, unit);
+}
+
 async function ingestOrder(connection: ConnectionRow, order: WooOrder): Promise<void> {
   const industry = await getBusinessIndustry(connection.business_id);
-  if (industry && industry !== "food_service") {
+  // Issue #799 Wave 11 — "not F&B" is not "retail". A trade with no sellable
+  // catalogue (the architecture/construction trade today) gets the order
+  // refused by name: the caller records the delivery as failed with this
+  // message, which the connection's own screen shows, rather than a retail sale
+  // appearing in books that only ever sell services.
+  if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
+  if (isRetailCatalogueIndustry(industry)) {
     await ingestRetailOrder(connection, order, industry);
     return;
   }
@@ -808,10 +812,15 @@ async function ingestFnBOrder(connection: ConnectionRow, order: WooOrder): Promi
 /**
  * Retail: one WooCommerce order -> a `retail` order whose lines point at the
  * `items` model (order_items.item_id) rather than F&B's `menu_items`, with the
- * revenue posted to the trade's own sales-revenue account. COGS is posted only
- * for lines whose item already has a weighted-average cost basis — the same
- * "no cost yet, no COGS" rule the counter sale enforces — and the stock
- * quantity is relieved in the same step.
+ * revenue posted to the trade's own sales-revenue account.
+ *
+ * Stock and COGS are not decided here: every line goes through
+ * `sellOnlineRetailLine` (retail-online-sale-service.ts), the same domain
+ * service the counter path's rules come from. A `tracking='batch'` cosmetics
+ * line therefore gets FEFO allocation, expired stock is refused, the exact
+ * batch rows are relieved, its allocation is persisted and COGS is the actual
+ * cost of the lots consumed — the Woo channel can no longer bypass the batch
+ * engine. A fungible line keeps the retail "no cost basis, no COGS" rule.
  */
 async function ingestRetailOrder(
   connection: ConnectionRow,
@@ -856,11 +865,19 @@ async function ingestRetailOrder(
     );
     const orderNumber = Number(counter[0].next_number);
 
+    // The sale's own instant, not the import's — see online-order-document-service.ts.
+    const remoteCreatedAt = wooOrderInstant(order.date_created_gmt, order.date_created);
+    const chronology = await resolveOnlineChronology(client, locationId, {
+      createdAt: remoteCreatedAt,
+      paidAt: wooOrderInstant(order.date_paid_gmt, order.date_paid),
+      completedAt: wooOrderInstant(order.date_completed_gmt, order.date_completed),
+    });
+
     const { rows: orderRows } = await client.query<{ id: string }>(
-      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id)
-       VALUES ($1, $2, 'retail', 'open', $3, 0, 0, $4, $5, $6, $7)
+      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id, opened_at)
+       VALUES ($1, $2, 'retail', 'open', $3, 0, 0, $4, $5, $6, $7, $8)
        RETURNING id`,
-      [locationId, orderNumber, net.toString(), tax.toString(), total.toString(), note, customerId],
+      [locationId, orderNumber, net.toString(), tax.toString(), total.toString(), note, customerId, chronology.openedAt],
     );
     const orderId = orderRows[0].id;
 
@@ -887,20 +904,11 @@ async function ingestRetailOrder(
       }
     }
 
-    // The cost basis for every mapped line, fetched once so COGS and stock
-    // relief use the exact weighted-average cost the counter sale would.
-    const itemIds = resolvedIds;
-    const costById = new Map<string, bigint>();
-    if (itemIds.length > 0) {
-      const { rows: stockRows } = await client.query<{ item_id: string; unit_cost: string | null }>(
-        `SELECT item_id, unit_cost::text FROM item_stock WHERE item_id = ANY($1::uuid[]) AND unit_cost IS NOT NULL`,
-        [itemIds],
-      );
-      for (const r of stockRows) costById.set(r.item_id, BigInt(r.unit_cost as string));
-    }
-
     let cogsRial = "0";
     let stubbedVariations = 0;
+    let batchLines = 0;
+    let uncostedLines = 0;
+    let linesSubtotal = 0n;
     for (const [index, line] of (order.line_items ?? []).entries()) {
       const unitPrice = wooAmountToRial(line.price ?? "0", connection.currency_unit);
       const quantity = Math.max(1, Math.round(line.quantity ?? 1));
@@ -921,42 +929,72 @@ async function ingestRetailOrder(
         }
       }
 
-      await client.query(
+      const { rows: itemRows } = await client.query<{ id: string }>(
         `INSERT INTO order_items (location_id, order_id, item_id, name_snapshot, unit_price, quantity, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'served')`,
+         VALUES ($1, $2, $3, $4, $5, $6, 'served')
+         RETURNING id`,
         [locationId, orderId, itemId, line.name, unitPrice.toString(), quantity],
       );
+      // The line's net (after its own discount, before tax) — what the
+      // variant/brand reports attribute to it. `total` is Woo's exact figure;
+      // price × quantity is the fallback for a payload that omits it.
+      const lineNet = line.total != null && line.total !== ""
+        ? wooAmountToRial(line.total, connection.currency_unit)
+        : unitPrice * BigInt(quantity);
+      const lineGross = line.subtotal != null && line.subtotal !== ""
+        ? wooAmountToRial(line.subtotal, connection.currency_unit)
+        : lineNet;
+      linesSubtotal += lineGross;
 
-      // COGS + stock relief only for a mapped item with a known cost basis —
-      // the retail analogue of F&B's "no recipe, no COGS" — and only when the
-      // line resolved to the row that actually carries stock.
-      const unitCost = itemId && relievesStock(resolution[index]) ? costById.get(itemId) : undefined;
-      if (unitCost != null && unitCost > 0n) {
-        cogsRial = (BigInt(cogsRial) + unitCost * BigInt(quantity)).toString();
-        // GREATEST(0, …) so a stock picture already synced post-sale (WooCommerce
-        // deducted it) can never drive the quantity negative and abort the order;
-        // the next catalogue sync re-establishes the authoritative level.
-        await client.query(
-          `UPDATE item_stock SET quantity = GREATEST(0, quantity - $2), last_sold_at = now(), updated_at = now()
-            WHERE item_id = $1`,
-          [itemId, quantity],
-        );
+      // The sale itself — FEFO + expired-batch exclusion + exact batch COGS
+      // for a `tracking='batch'` item, or the fungible item_stock rule for
+      // everything else — is decided by the canonical online retail sale
+      // service, never by this adapter. A line that resolved to a container
+      // (a variable parent) holds no stock and is skipped, exactly as before.
+      if (itemId && relievesStock(resolution[index])) {
+        const sold = await sellOnlineRetailLine(client, {
+          locationId,
+          orderId,
+          orderItemId: itemRows[0].id,
+          itemId,
+          quantity: String(quantity),
+          netRial: (lineNet < 0n ? 0n : lineNet).toString(),
+          sourceType: "woocommerce_order",
+          sourceId: orderId,
+          occurredAt: chronology.occurredAt,
+          remoteOccurredAt: remoteCreatedAt,
+        });
+        if (sold.tracking === "batch") batchLines += 1;
+        if (isProvisionalCost(sold.costStatus)) uncostedLines += 1;
+        cogsRial = (BigInt(cogsRial) + BigInt(sold.cogsRial)).toString();
+      } else {
+        await recordUntrackedOnlineLine(client, {
+          locationId,
+          orderId,
+          orderItemId: itemRows[0].id,
+          itemId,
+          quantity: String(quantity),
+          netRial: (lineNet < 0n ? 0n : lineNet).toString(),
+          sourceType: "woocommerce_order",
+          sourceId: orderId,
+          occurredAt: chronology.occurredAt,
+        });
       }
     }
 
     if (total > 0n) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference)
-         VALUES ($1, $2, 'online', $3, $4)`,
-        [locationId, orderId, total.toString(), order.number ?? remoteId],
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_at)
+         VALUES ($1, $2, 'online', $3, $4, $5)`,
+        [locationId, orderId, total.toString(), order.number ?? remoteId, chronology.occurredAt],
       );
     }
 
     const { rowCount: closed } = await client.query(
-      `UPDATE orders SET status = 'completed', closed_at = now()
+      `UPDATE orders SET status = 'completed', closed_at = $2
         WHERE id = $1 AND status = 'open'
         RETURNING id`,
-      [orderId],
+      [orderId, chronology.occurredAt],
     );
     if (closed !== 1) {
       throw new Error("order_close_failed");
@@ -973,6 +1011,7 @@ async function ingestRetailOrder(
         sourceType: "woocommerce_order",
         sourceId: orderId,
         createdBy: null,
+        entryDate: chronology.entryDate,
         postingKind: "cogs",
         lines: [
           { accountId: cogsAccounts.get(codes.cogs)!, debit: cogsRial as RialText, credit: zero },
@@ -993,6 +1032,7 @@ async function ingestRetailOrder(
       sourceType: "woocommerce_order",
       sourceId: orderId,
       createdBy: null,
+      entryDate: chronology.entryDate,
       postingKind: "revenue",
       lines: [
         { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: total.toString() as RialText, credit: zero },
@@ -1001,6 +1041,26 @@ async function ingestRetailOrder(
           ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: zero, credit: tax.toString() as RialText }]
           : []),
       ],
+    });
+
+    const breakdown = await recordOnlineOrderDocument(client, {
+      orderId,
+      locationId,
+      sourceType: "woocommerce_order",
+      remoteId,
+      remoteNumber: order.number ?? null,
+      currency: order.currency ?? null,
+      chronology,
+      components: {
+        linesSubtotalRial: linesSubtotal,
+        discountRial: optionalWooAmount(order.discount_total, connection.currency_unit),
+        shippingRial: optionalWooAmount(order.shipping_total, connection.currency_unit),
+        feesRial: order.fee_lines
+          ? order.fee_lines.reduce((sum, fee) => sum + wooAmountToRial(fee.total ?? "0", connection.currency_unit), 0n)
+          : null,
+        taxRial: tax,
+        totalRial: total,
+      },
     });
 
     await client.query(
@@ -1023,6 +1083,12 @@ async function ingestRetailOrder(
         totalRial: total.toString(),
         cogsRial,
         stubbedVariations,
+        batchLines,
+        uncostedLines,
+        occurredAt: chronology.occurredAt,
+        occurredAtSource: chronology.occurredAtSource,
+        breakdownStatus: breakdown.status,
+        unexplainedDifferenceRial: breakdown.unexplainedDifferenceRial.toString(),
       },
     });
   } catch (err) {
@@ -1140,7 +1206,10 @@ async function ingestRefund(connection: ConnectionRow, refund: WooRefund, inboxI
     }
 
     const industry = await getBusinessIndustry(businessId);
-    if (industry && industry !== "food_service") {
+    // Same refusal as ingestOrder, for the same reason: a reversal must never be
+    // the door a storefront-less business acquires a sale row through.
+    if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
+    if (isRetailCatalogueIndustry(industry)) {
       await ingestRetailRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId, industry });
     } else {
       await ingestFnBRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId });
@@ -1181,12 +1250,22 @@ interface RefundMeta {
 }
 
 /**
- * Retail refund: restock `item_stock` directly and post a trade-specific COGS
- * reversal — the retail analogue of `createCustomerReturn`. Because retail
- * orders don't populate `order_item_inventory_snapshots` (that's F&B's recipe
- * deductor), inventory recovery bypasses the customer-return machinery and
- * updates `item_stock.quantity` directly, using the unit_cost the order
- * import recorded.
+ * Retail refund: restore the stock the refunded lines actually relieved and
+ * post a trade-specific COGS reversal — the retail analogue of
+ * `createCustomerReturn`. Because retail orders don't populate
+ * `order_item_inventory_snapshots` (that's F&B's recipe deductor), inventory
+ * recovery bypasses the customer-return machinery and goes through the
+ * canonical batch engine instead:
+ *
+ *   - a batch-tracked line restores its ORIGINAL allocation
+ *     (`order_item_batch_allocations`), lot by lot, and the item_stock rollup
+ *     is recomputed — never a bare `item_stock.quantity += n`, which used to
+ *     leave aggregate stock belonging to no lot;
+ *   - a fungible line keeps the running weighted-average restock;
+ *   - COGS is reversed by exactly the value that came back.
+ *
+ * Variation lines map to their variation's local item, symmetrically with the
+ * sale side.
  */
 async function ingestRetailRefund(
   client: import("pg").PoolClient,
@@ -1205,10 +1284,22 @@ async function ingestRetailRefund(
   const orderId = orderRows[0]?.id ?? null;
 
   // Resolve product mappings for the refund's line items so we can match
-  // them to item_id rows in order_items and find their cost basis.
-  const remoteProductIds = (refund.line_items ?? [])
-    .map((line) => String(line.product_id))
-    .filter((id): id is string => Boolean(id));
+  // them to item_id rows in order_items. A refunded VARIATION identifies
+  // itself exactly like the order line did — `variation_id` when present —
+  // so the mapping is looked up for the variation first and only then for the
+  // parent product. Looking up `product_id` alone (as this did) resolved a
+  // variable product's refund to the parent, which holds no stock and was
+  // never the sold row: the refund then restored the wrong sellable item.
+  const remoteProductIds = [
+    ...new Set(
+      (refund.line_items ?? [])
+        .flatMap((line) => [
+          Number(line.variation_id ?? 0) || 0 ? String(line.variation_id) : "",
+          line.product_id ? String(line.product_id) : "",
+        ])
+        .filter(Boolean),
+    ),
+  ];
   const itemByRemote = new Map<string, string>();
   if (remoteProductIds.length > 0) {
     const { rows: productMappings } = await client.query<{ remote_id: string; local_id: string }>(
@@ -1220,14 +1311,13 @@ async function ingestRetailRefund(
     for (const m of productMappings) itemByRemote.set(m.remote_id, m.local_id);
   }
 
-  // Fetch the unit_cost for every mapped item so the COGS reversal uses the
-  // same weighted-average cost the sale side posted.
-  const itemIds = [...new Set(itemByRemote.values())];
+  // The fallback cost basis for fungible (non-batch) lines, read once.
+  const mappedItemIds = [...new Set(itemByRemote.values())];
   const costById = new Map<string, bigint>();
-  if (itemIds.length > 0) {
+  if (mappedItemIds.length > 0) {
     const { rows: stockRows } = await client.query<{ item_id: string; unit_cost: string | null }>(
       `SELECT item_id, unit_cost::text FROM item_stock WHERE item_id = ANY($1::uuid[]) AND unit_cost IS NOT NULL FOR UPDATE`,
-      [itemIds],
+      [mappedItemIds],
     );
     for (const r of stockRows) costById.set(r.item_id, BigInt(r.unit_cost as string));
   }
@@ -1236,7 +1326,10 @@ async function ingestRetailRefund(
 
   if (orderId) {
     for (const line of refund.line_items ?? []) {
-      const itemId = itemByRemote.get(String(line.product_id));
+      const variationId = Number(line.variation_id ?? 0) || 0;
+      const itemId =
+        (variationId > 0 ? itemByRemote.get(String(variationId)) : undefined) ??
+        itemByRemote.get(String(line.product_id));
       if (!itemId) continue;
       const qty = Math.max(0, Math.abs(Math.round(line.quantity ?? 0)));
       if (qty === 0) continue;
@@ -1267,7 +1360,7 @@ async function ingestRetailRefund(
           `INSERT INTO customer_returns
              (business_id, location_id, order_id, refund_method, refund_amount_rial, reason, created_by, idempotency_key)
            VALUES ($1, $2, $3, 'online', $4, $5, $6, $7)
-           ON CONFLICT (idempotency_key) DO NOTHING
+           ON CONFLICT (business_id, idempotency_key) DO NOTHING
            RETURNING id`,
           [meta.businessId, meta.locationId, orderId, "0",
             `WooCommerce refund #${meta.remoteId}`, null,
@@ -1283,16 +1376,83 @@ async function ingestRetailRefund(
           );
         }
 
-        // Restock item_stock: add the returned quantity back.
-        await client.query(
-          `UPDATE item_stock SET quantity = quantity + $2, updated_at = now()
-            WHERE item_id = $1`,
-          [itemId, take],
+        // Restock the returned quantity. A batch-tracked line has its exact
+        // original allocation persisted (migration 0198): each unit goes back
+        // into the SAME lot it was sold from, and the item_stock rollup is
+        // recomputed — so a refund can never create aggregate stock that
+        // belongs to no batch. The COGS reversal is then the actual value of
+        // the lots restored, not a shelf average.
+        const batchRestore = await restoreOrderItemBatchStock(client, {
+          orderItemId: item.id,
+          itemId,
+          locationId: meta.locationId,
+          quantity: String(take),
+          disposition: "restockable",
+          sourceType: "woocommerce_refund",
+          sourceId: `${connection.id}:${meta.remoteId}`,
+        });
+        // The sale fact (migration 0209) says what this line actually took
+        // off the shelf and what COGS it posted; a refund restores exactly
+        // that — never a unit the sale did not relieve, never COGS it did not
+        // post. A pre-0209 line has no fact and keeps the legacy rule.
+        const { rows: factRows } = await client.query<{
+          quantity: string; short_quantity: string; relieved_quantity: string;
+          restored_quantity: string; cogs_rial: string; restored_cogs_rial: string;
+        }>(
+          `SELECT quantity::text, short_quantity::text, relieved_quantity::text,
+                  restored_quantity::text, cogs_rial::text, restored_cogs_rial::text
+             FROM online_sale_lines WHERE order_item_id = $1 FOR UPDATE`,
+          [item.id],
         );
+        const fact = factRows[0] ?? null;
 
-        // Reverse COGS if we have a cost basis.
-        if (unitCost != null && unitCost > 0n) {
-          recoveredCogsRial = (BigInt(recoveredCogsRial) + unitCost * BigInt(take)).toString();
+        if (batchRestore) {
+          recoveredCogsRial = (BigInt(recoveredCogsRial) + BigInt(batchRestore.restockedValue)).toString();
+          if (fact) {
+            await client.query(
+              `UPDATE online_sale_lines
+                  SET returned_quantity = LEAST(quantity, returned_quantity + $2::numeric),
+                      restored_quantity = LEAST(relieved_quantity, restored_quantity + $2::numeric),
+                      restored_cogs_rial = LEAST(cogs_rial, restored_cogs_rial + $3::bigint)
+                WHERE order_item_id = $1`,
+              [item.id, String(take), batchRestore.restockedValue],
+            );
+          }
+        } else if (fact) {
+          const plan = planOnlineLineReturn({
+            quantity: fact.quantity,
+            shortQuantity: fact.short_quantity,
+            relievedQuantity: fact.relieved_quantity,
+            restoredQuantity: fact.restored_quantity,
+            cogsRial: fact.cogs_rial,
+            restoredCogsRial: fact.restored_cogs_rial,
+          }, String(take));
+          if (Number(plan.restock) > 0) {
+            await client.query(
+              `UPDATE item_stock SET quantity = quantity + $2::numeric, updated_at = now() WHERE item_id = $1`,
+              [itemId, plan.restock],
+            );
+          }
+          await client.query(
+            `UPDATE online_sale_lines
+                SET returned_quantity = LEAST(quantity, returned_quantity + $2::numeric),
+                    restored_quantity = restored_quantity + $3::numeric,
+                    restored_cogs_rial = restored_cogs_rial + $4::bigint
+              WHERE order_item_id = $1`,
+            [item.id, String(take), plan.restock, plan.cogsReversalRial],
+          );
+          recoveredCogsRial = (BigInt(recoveredCogsRial) + BigInt(plan.cogsReversalRial)).toString();
+        } else {
+          // Legacy (pre-0209) fungible line: add the returned quantity back and
+          // reverse COGS at the running weighted-average cost.
+          await client.query(
+            `UPDATE item_stock SET quantity = quantity + $2, updated_at = now()
+              WHERE item_id = $1`,
+            [itemId, take],
+          );
+          if (unitCost != null && unitCost > 0n) {
+            recoveredCogsRial = (BigInt(recoveredCogsRial) + unitCost * BigInt(take)).toString();
+          }
         }
 
         remaining -= take;

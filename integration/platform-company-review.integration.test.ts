@@ -1,0 +1,690 @@
+/**
+ * Codex review regressions for PR #806, against real PostgreSQL.
+ *
+ * Source writes, posting and the CRM/Growth route handlers use the restricted
+ * runtime role (NOSUPERUSER/NOBYPASSRLS). Only fixture DDL and inspection use
+ * the database owner. The sole framework stub is the request cookie store;
+ * session verification, active-identity/membership checks, permissions and
+ * tenant scoping all remain real.
+ */
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { Client } from "pg";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { runMigrations } from "../scripts/migrate";
+import { createAppRole } from "../src/lib/create-app-role";
+import type { PlatformCompanyCustomerSummary } from "../src/lib/platform-company-types";
+import type { GrowthAudienceSummary } from "../src/app/api/platform/company/growth/audience/route";
+
+const cookie = vi.hoisted(() => ({ value: "" }));
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) => name === "pos_platform_session" && cookie.value
+      ? { value: cookie.value }
+      : undefined,
+  }),
+}));
+
+const rootDatabaseUrl = process.env.DATABASE_URL;
+if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
+const originalDeploymentRole = process.env.DEPLOYMENT_ROLE;
+const exec = promisify(execFile);
+const roleName = "pos_platco_review";
+const rolePassword = "platform_company_review_test_only";
+let databaseName: string;
+let owner: Client;
+let db: typeof import("../src/lib/db");
+let billing: typeof import("../src/lib/platform-company-billing");
+let crm: typeof import("../src/lib/crm-service");
+let subscriptions: typeof import("../src/lib/subscription-service");
+let customerRoute: typeof import("../src/app/api/platform/company/crm/customers/route");
+let growthRoute: typeof import("../src/app/api/platform/company/growth/audience/route");
+let companyId: string;
+
+function databaseUrl(database: string, appRole = false): string {
+  const url = new URL(rootDatabaseUrl!);
+  url.pathname = `/${database}`;
+  if (appRole) {
+    url.username = roleName;
+    url.password = rolePassword;
+  }
+  return url.toString();
+}
+
+async function companyScript(file: string, args: string[] = []) {
+  return exec(process.execPath, [
+    join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"),
+    join(process.cwd(), "scripts", file), ...args,
+  ], {
+    env: { ...process.env, DATABASE_URL: databaseUrl(databaseName, true), DEPLOYMENT_ROLE: "central" },
+    timeout: 20_000,
+  });
+}
+
+async function postedPaymentTotal(invoiceId: string) {
+  const { rows } = await owner.query<{ amount: string }>(
+    `SELECT COALESCE(sum(jl.credit),0)::text AS amount
+       FROM platform_company_billing_events e
+       JOIN platform_company_accounting_postings p ON p.event_id=e.id
+       JOIN journal_lines jl ON jl.entry_id=p.journal_entry_id
+       JOIN accounts a ON a.id=jl.account_id AND a.business_id=p.business_id
+      WHERE e.customer_invoice_id=$1 AND e.source_kind='invoice_payment' AND a.code='1200'`,
+    [invoiceId],
+  );
+  return Number(rows[0].amount);
+}
+
+beforeAll(async () => {
+  databaseName = `pos_platco_review_${randomUUID().replaceAll("-", "")}`;
+  const maintenance = new Client({ connectionString: databaseUrl("postgres") });
+  await maintenance.connect();
+  try {
+    await maintenance.query(`CREATE DATABASE "${databaseName}"`);
+  } finally {
+    await maintenance.end();
+  }
+  await runMigrations({ databaseUrl: databaseUrl(databaseName), quiet: true });
+  await createAppRole({ databaseUrl: databaseUrl(databaseName), roleName, password: rolePassword, quiet: true });
+  owner = new Client({ connectionString: databaseUrl(databaseName) });
+  await owner.connect();
+  const { rows: admins } = await owner.query<{ id: string }>(
+    `INSERT INTO platform_admins (email, full_name, password_hash, role, is_active)
+     VALUES ($1, 'مدیر آزمون', 'x', 'owner', true) RETURNING id`,
+    [`review-${randomUUID()}@example.test`],
+  );
+  process.env.DATABASE_URL = databaseUrl(databaseName, true);
+  process.env.DEPLOYMENT_ROLE = "central";
+  db = await import("../src/lib/db");
+  billing = await import("../src/lib/platform-company-billing");
+  crm = await import("../src/lib/crm-service");
+  subscriptions = await import("../src/lib/subscription-service");
+  const company = await import("../src/lib/platform-company");
+  const auth = await import("../src/lib/platform-auth");
+  const session = { padmin: admins[0].id, role: "owner" as const, fullName: "مدیر آزمون", email: "review@example.test" };
+  const provisioned = await db.withoutTenantScope("platform", () => company.ensurePlatformCompany(session));
+  companyId = provisioned!.business_id;
+  cookie.value = await auth.signPlatformSession(session);
+  customerRoute = await import("../src/app/api/platform/company/crm/customers/route");
+  growthRoute = await import("../src/app/api/platform/company/growth/audience/route");
+}, 180_000);
+
+afterAll(async () => {
+  cookie.value = "";
+  await db?.closeDatabasePool();
+  await owner?.end();
+  process.env.DATABASE_URL = rootDatabaseUrl;
+  if (originalDeploymentRole === undefined) delete process.env.DEPLOYMENT_ROLE;
+  else process.env.DEPLOYMENT_ROLE = originalDeploymentRole;
+  if (databaseName) {
+    const maintenance = new Client({ connectionString: databaseUrl("postgres") });
+    await maintenance.connect();
+    try {
+      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+    } finally {
+      await maintenance.end();
+    }
+  }
+});
+
+async function newTenant(): Promise<string> {
+  const { rows } = await owner.query<{ id: string }>(
+    `INSERT INTO businesses (name, slug, subdomain, ownership_kind, status)
+     VALUES ('مشتری آزمون', $1, $1, 'customer', 'active') RETURNING id`,
+    [`review-${randomUUID().slice(0, 12)}`],
+  );
+  return rows[0].id;
+}
+
+async function invoice(tenantId: string, total = 1_000_000): Promise<string> {
+  const { rows } = await db.withTenant(tenantId, () => db.query<{ id: string }>(
+    `INSERT INTO billing_invoices (business_id, invoice_number, reference, status, subtotal_rial, total_rial)
+     VALUES ($1, $2, $2, 'open', $3, $3) RETURNING id`,
+    [tenantId, `review-${randomUUID()}`, total],
+  ));
+  return rows[0].id;
+}
+
+async function debitWallet(tenantId: string, invoiceId: string, amount: number) {
+  await db.withTenant(tenantId, () => db.query(
+    `INSERT INTO wallet_ledger (business_id, kind, direction, amount_rial, balance_after_rial, metadata)
+     VALUES ($1, 'subscription', 'debit', $2, 5000000, jsonb_build_object('invoiceId', $3::text))`,
+    [tenantId, amount, invoiceId],
+  ));
+}
+
+async function verifyPayment(tenantId: string, invoiceId: string, amount: number, gateway = "zarinpal") {
+  return db.withTenant(tenantId, async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO billing_payments (business_id, invoice_id, gateway, amount_rial, credit_rial, status)
+       VALUES ($1, $2, $3, $4, 0, 'pending') RETURNING id`,
+      [tenantId, invoiceId, gateway, amount],
+    );
+    await db.query(`UPDATE billing_payments SET status='verified', verified_at=now() WHERE id=$1`, [rows[0].id]);
+    return rows[0].id;
+  });
+}
+
+async function recordPaid(tenantId: string, invoiceId: string, amount: number) {
+  await db.withTenant(tenantId, () => db.query(
+    `UPDATE billing_invoices SET paid_rial=$2,
+            status=CASE WHEN $2=total_rial THEN 'paid' ELSE 'partially_paid' END,
+            updated_at=now() WHERE id=$1`,
+    [invoiceId, amount],
+  ));
+}
+
+async function paymentsFor(invoiceId: string) {
+  const { rows } = await owner.query<{ id: string; amount_rial: string; settlement_method: string }>(
+    `SELECT id, amount_rial::text, settlement_method FROM platform_company_billing_events
+      WHERE customer_invoice_id=$1 AND source_kind='invoice_payment'
+      ORDER BY settlement_method, occurred_at, id`,
+    [invoiceId],
+  );
+  return rows;
+}
+
+async function post() {
+  expect((await billing.runPlatformCompanyBillingTick(100)).failed).toBe(0);
+}
+
+async function customers() {
+  const response = await customerRoute.GET();
+  expect(response.status).toBe(200);
+  return await response.json() as { customers: PlatformCompanyCustomerSummary[]; balanceSource: string };
+}
+
+async function audience() {
+  const response = await growthRoute.GET();
+  expect(response.status).toBe(200);
+  return (await response.json() as { audience: GrowthAudienceSummary }).audience;
+}
+
+describe("verified settlement excludes its own AFTER UPDATE row from prior payments", () => {
+  it("uses a real restricted runtime role", async () => {
+    const { rows } = await db.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+      `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user`,
+    );
+    expect(rows[0]).toEqual({ rolsuper: false, rolbypassrls: false });
+  });
+
+  it.each(["zarinpal", "manual"])("posts a fully %s-paid invoice exactly once", async (gateway) => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    const paymentId = await verifyPayment(tenantId, invoiceId, 1_000_000, gateway);
+    await recordPaid(tenantId, invoiceId, 1_000_000);
+    const events = await paymentsFor(invoiceId);
+    expect(events).toHaveLength(1);
+    expect(events[0].amount_rial).toBe("1000000");
+    expect(events[0].settlement_method).toBe(gateway === "manual" ? "manual" : "gateway");
+    await post();
+    const { rows } = await owner.query<{ code: string; debit: string; credit: string }>(
+      `SELECT a.code, jl.debit::text, jl.credit::text
+         FROM platform_company_accounting_postings p
+         JOIN journal_lines jl ON jl.entry_id=p.journal_entry_id
+         JOIN accounts a ON a.id=jl.account_id WHERE p.event_id=$1 ORDER BY a.code`,
+      [events[0].id],
+    );
+    expect(rows).toEqual([
+      { code: "1110", debit: "1000000", credit: "0" },
+      { code: "1200", debit: "0", credit: "1000000" },
+    ]);
+    await db.withTenant(tenantId, () => db.query(
+      `UPDATE billing_payments SET status='verified' WHERE id=$1`, [paymentId],
+    ));
+    await post();
+    expect(await paymentsFor(invoiceId)).toEqual(events);
+    const count = await owner.query<{ count: string }>(
+      `SELECT count(*)::text FROM platform_company_accounting_postings WHERE event_id=$1`, [events[0].id],
+    );
+    expect(count.rows[0].count).toBe("1");
+  });
+
+  it("does not clip a payment larger than half, or omit the final payment", async () => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    await verifyPayment(tenantId, invoiceId, 700_000);
+    expect((await paymentsFor(invoiceId)).map(row => row.amount_rial)).toEqual(["700000"]);
+    await verifyPayment(tenantId, invoiceId, 300_000);
+    await recordPaid(tenantId, invoiceId, 1_000_000);
+    expect((await paymentsFor(invoiceId)).map(row => Number(row.amount_rial)).sort((a, b) => a - b))
+      .toEqual([300_000, 700_000]);
+  });
+
+  it("posts real 600k wallet + 400k verified gateway sources, not a residual substitute", async () => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    await debitWallet(tenantId, invoiceId, 600_000);
+    await verifyPayment(tenantId, invoiceId, 400_000);
+    await recordPaid(tenantId, invoiceId, 1_000_000);
+    const events = await paymentsFor(invoiceId);
+    expect(events.map(row => [row.settlement_method, row.amount_rial])).toEqual([
+      ["gateway", "400000"], ["wallet", "600000"],
+    ]);
+    await post();
+    const { rows } = await owner.query<{ code: string; debit: string }>(
+      `SELECT a.code, jl.debit::text FROM platform_company_accounting_postings p
+         JOIN platform_company_billing_events e ON e.id=p.event_id
+         JOIN journal_lines jl ON jl.entry_id=p.journal_entry_id
+         JOIN accounts a ON a.id=jl.account_id
+        WHERE e.customer_invoice_id=$1 AND e.source_kind='invoice_payment' AND jl.debit>0
+        ORDER BY a.code`,
+      [invoiceId],
+    );
+    expect(rows).toEqual([{ code: "1110", debit: "400000" }, { code: "2455", debit: "600000" }]);
+  });
+});
+
+describe("successive residual payments are increments, not cumulative totals", () => {
+  it("posts 300k followed by 200k through applyInvoicePayment exactly once", async () => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 300_000, { idempotencyKey: "manual-first" }));
+    await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 200_000, { idempotencyKey: "manual-second" }));
+    // A retry must not create another audit row, payment event or posting.
+    await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 200_000, { idempotencyKey: "manual-second" }));
+    const payments = await paymentsFor(invoiceId);
+    expect(payments.map(e => Number(e.amount_rial)).sort((a, b) => a - b)).toEqual([200_000, 300_000]);
+    expect((await owner.query(`SELECT count(*)::int AS n FROM billing_invoice_payments WHERE invoice_id=$1`, [invoiceId])).rows[0].n).toBe(2);
+    await post();
+    expect(await postedPaymentTotal(invoiceId)).toBe(500_000);
+    await post();
+    expect(await postedPaymentTotal(invoiceId)).toBe(500_000);
+  });
+
+  it.each(["wallet", "gateway"] as const)("does not re-emit earlier residuals when a later payment has a %s source", async method => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 300_000, { idempotencyKey: "residual-first" }));
+    let paymentId: string | undefined;
+    if (method === "wallet") await debitWallet(tenantId, invoiceId, 200_000);
+    else paymentId = await verifyPayment(tenantId, invoiceId, 200_000);
+    await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 200_000, { idempotencyKey: "source-second", paymentId }));
+    const payments = await paymentsFor(invoiceId);
+    expect(payments).toHaveLength(2);
+    expect(payments.filter(e => e.settlement_method === "other").map(e => Number(e.amount_rial))).toEqual([300_000]);
+    expect(payments.filter(e => e.settlement_method === method).map(e => Number(e.amount_rial))).toEqual([200_000]);
+    await post();
+    expect(await postedPaymentTotal(invoiceId)).toBe(500_000);
+  });
+
+  it("serializes concurrent manual payments without cumulative over-posting", async () => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    await Promise.all([
+      db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 100_000, { idempotencyKey: "parallel-first" })),
+      db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 200_000, { idempotencyKey: "parallel-second" })),
+    ]);
+    const payments = await paymentsFor(invoiceId);
+    expect(payments.map(e => Number(e.amount_rial)).sort((a, b) => a - b)).toEqual([100_000, 200_000]);
+    await post();
+    expect(await postedPaymentTotal(invoiceId)).toBe(300_000);
+  });
+
+  it.each([false, true])("backfills only missing residuals, even with a later live event (later=%s)", async later => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 300_000, { idempotencyKey: "before-missing-history" }));
+    // Simulate an auditable older payment whose invoice outbox write was missed.
+    await owner.query("BEGIN");
+    try {
+      await owner.query("ALTER TABLE billing_invoices DISABLE TRIGGER platform_company_invoice_outbox");
+      await owner.query(
+        `INSERT INTO billing_invoice_payments (invoice_id,business_id,amount_rial,idempotency_key)
+         VALUES ($1,$2,200000,'missing-history')`, [invoiceId, tenantId],
+      );
+      await owner.query(`UPDATE billing_invoices SET paid_rial=500000, status='partially_paid', updated_at=now() WHERE id=$1`, [invoiceId]);
+      await owner.query("ALTER TABLE billing_invoices ENABLE TRIGGER platform_company_invoice_outbox");
+      await owner.query("COMMIT");
+    } catch (error) {
+      await owner.query("ROLLBACK");
+      throw error;
+    }
+    if (later) await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 100_000, { idempotencyKey: "after-missing-history" }));
+    const args = [`--cutoff=${new Date(Date.now() + 60_000).toISOString()}`];
+    const before = await paymentsFor(invoiceId);
+    const dryRun = await companyScript("platform-company-billing-backfill.ts", args);
+    expect(dryRun.stdout).toContain('"dryRun": true');
+    expect(await paymentsFor(invoiceId)).toEqual(before);
+    await companyScript("platform-company-billing-backfill.ts", [...args, "--apply"]);
+    const payments = await paymentsFor(invoiceId);
+    expect(payments.map(e => Number(e.amount_rial)).sort((a, b) => a - b)).toEqual(later ? [100_000, 200_000, 300_000] : [200_000, 300_000]);
+    await companyScript("platform-company-billing-backfill.ts", [...args, "--apply"]);
+    expect(await paymentsFor(invoiceId)).toEqual(payments);
+    await post();
+    expect(await postedPaymentTotal(invoiceId)).toBe(later ? 600_000 : 500_000);
+  });
+});
+
+describe("CRM balance follows posted receivable lines, including invoice voids", () => {
+  it.each([0, 300_000, 1_000_000])("clears a void with %i Rial already paid, only after Accounting posts", async (paid) => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    if (paid) {
+      await debitWallet(tenantId, invoiceId, paid);
+      await recordPaid(tenantId, invoiceId, paid);
+    }
+    await post();
+    const find = async () => (await customers()).customers.find(c => c.tenants.some(t => t.tenantId === tenantId))!;
+    expect((await find()).accountingBalanceRial).toBe(1_000_000 - paid);
+    await db.withTenant(tenantId, () => db.query(
+      `UPDATE billing_invoices SET status='void', updated_at=now() WHERE id=$1`, [invoiceId],
+    ));
+    // Operational state cannot clear the CRM balance before the reversal posts.
+    expect((await find()).accountingBalanceRial).toBe(1_000_000 - paid);
+    await post();
+    const customer = await find();
+    expect(customer.accountingBalanceRial).toBe(0);
+    expect(customer.invoicedRial).toBe(1_000_000);
+    expect(customer.settledRial).toBe(1_000_000);
+    const { rows } = await owner.query<{ balance: string }>(
+      `SELECT COALESCE(sum(jl.debit-jl.credit),0)::text AS balance
+         FROM platform_company_billing_events e
+         JOIN platform_company_accounting_postings p ON p.event_id=e.id
+         JOIN journal_lines jl ON jl.entry_id=p.journal_entry_id
+         JOIN accounts a ON a.id=jl.account_id
+        WHERE e.customer_invoice_id=$1 AND a.code='1200'`,
+      [invoiceId],
+    );
+    expect(Number(rows[0].balance)).toBe(customer.accountingBalanceRial);
+    expect((await customers()).balanceSource).toBe("accounting_postings");
+  });
+
+  it("includes posted positive adjustments and credit notes, but never wallet top-up liabilities", async () => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId, 100_000);
+    await post();
+    const find = async () => (await customers()).customers.find(c => c.tenants.some(t => t.tenantId === tenantId))!;
+    await db.withTenant(tenantId, () => db.query(
+      `INSERT INTO billing_adjustments (business_id, invoice_id, amount_rial, reason)
+       VALUES ($1, $2, 50000, 'additional service'), ($1, $2, -20000, 'commercial credit')`,
+      [tenantId, invoiceId],
+    ));
+    await db.withTenant(tenantId, () => db.query(
+      `INSERT INTO wallet_ledger (business_id, kind, direction, amount_rial, balance_after_rial)
+       VALUES ($1, 'top_up', 'credit', 80000, 80000)`,
+      [tenantId],
+    ));
+    expect((await find()).accountingBalanceRial).toBe(100_000);
+    await post();
+    const customer = await find();
+    expect(customer.invoicedRial).toBe(150_000);
+    expect(customer.settledRial).toBe(20_000);
+    expect(customer.accountingBalanceRial).toBe(130_000);
+  });
+});
+
+describe("health check covers refund and provider-cost posting accounts", () => {
+  it("is read-only with a complete chart", async () => {
+    const snapshot = () => owner.query(
+      `SELECT count(DISTINCT j.id)::int AS n, COALESCE(sum(jl.debit),0)::text AS debit
+         FROM journal_entries j LEFT JOIN journal_lines jl ON jl.entry_id=j.id
+        WHERE j.business_id=$1`, [companyId],
+    );
+    const before = await snapshot();
+    const result = JSON.parse((await companyScript("platform-company-health.ts")).stdout);
+    expect(result.mode).toBe("read-only");
+    expect(result.missingAccounts).toBe(0);
+    expect((await snapshot()).rows).toEqual(before.rows);
+  });
+
+  it.each([
+    { code: "4400", absent: false }, { code: "5670", absent: false },
+    { code: "4400", absent: true }, { code: "5670", absent: true },
+  ])("reports missing/inactive account $code (absent=$absent) without repairing it", async ({ code, absent }) => {
+    const { rows: accounts } = await owner.query(`SELECT * FROM accounts WHERE business_id=$1 AND code=$2`, [companyId, code]);
+    const account = accounts[0];
+    try {
+      // A renamed code is absent from the required set while preserving its row/id.
+      if (absent) await owner.query(`UPDATE accounts SET code='98765' WHERE id=$1`, [account.id]);
+      else await owner.query(`UPDATE accounts SET is_active=false WHERE id=$1`, [account.id]);
+      const before = (await owner.query(`SELECT * FROM accounts WHERE id=$1`, [account.id])).rows;
+      const result = JSON.parse((await companyScript("platform-company-health.ts")).stdout);
+      expect(result.mode).toBe("read-only");
+      expect(result.missingAccounts).toBe(1);
+      expect((await owner.query(`SELECT * FROM accounts WHERE id=$1`, [account.id])).rows).toEqual(before);
+    } finally {
+      await owner.query(`UPDATE accounts SET code=$2, is_active=$3 WHERE id=$1`, [account.id, account.code, account.is_active]);
+    }
+  });
+});
+
+async function party(role = "customer", active = true): Promise<string> {
+  const { rows } = await db.withTenant(companyId, () => db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, role, roles, is_active)
+     VALUES ($1, 'رضایت آزمون', $2, ARRAY[$2]::text[], $3) RETURNING id`,
+    [companyId, role, active],
+  ));
+  return rows[0].id;
+}
+
+describe("Growth consent is current CRM state, not a historical grant", () => {
+  it("removes revoked SMS and email consent without deleting their audit history", async () => {
+    const id = await party();
+    for (const channel of ["sms", "email"] as const) {
+      await crm.setConsent(companyId, id, { channel, granted: true, source: "customer_request" });
+      await crm.setConsent(companyId, id, { channel, granted: false, source: "customer_request" });
+    }
+    const { rows } = await owner.query<{ count: string }>(
+      `SELECT count(*)::text FROM crm_consent_events WHERE customer_id=$1`, [id],
+    );
+    expect(rows[0].count).toBe("4");
+    expect((await audience()).consent).toEqual({ sms: 0, email: 0, partiesWithConsent: 0 });
+  });
+
+  it("counts the union of consenting live customers, excluding archived, merged and supplier records", async () => {
+    const sms = await party();
+    const email = await party();
+    const both = await party();
+    await crm.setConsent(companyId, sms, { channel: "sms", granted: true });
+    await crm.setConsent(companyId, email, { channel: "email", granted: true });
+    await crm.setConsent(companyId, both, { channel: "sms", granted: true });
+    await crm.setConsent(companyId, both, { channel: "email", granted: true });
+    const inactive = await party("customer", false);
+    const supplier = await party("supplier");
+    const merged = await party();
+    await db.withTenant(companyId, () => db.query(
+      `UPDATE parties SET sms_consent=true, marketing_consent=true WHERE id=ANY($1::uuid[])`,
+      [[inactive, supplier, merged]],
+    ));
+    await db.withTenant(companyId, () => db.query(`UPDATE parties SET merged_into_id=$2 WHERE id=$1`, [merged, both]));
+    expect((await audience()).consent).toEqual({ sms: 2, email: 2, partiesWithConsent: 3 });
+  });
+});
+
+describe("Growth renewals are upcoming, renewable and explicitly mapped", () => {
+  it("excludes old periods, cancelled/expired/scheduled cancellations and dates after 14 days", async () => {
+    const cases = [
+      { status: "active", days: 2, expected: true },
+      { status: "trialing", days: 13, expected: true },
+      { status: "past_due", days: 3, expected: true },
+      { status: "active", days: -1, expected: false },
+      { status: "past_due", days: -100, expected: false },
+      { status: "cancelled", days: 2, expected: false },
+      { status: "expired", days: 2, expected: false },
+      { status: "active", days: 2, cancellation: true, expected: false },
+      { status: "active", days: 15, expected: false },
+      { status: "active", days: 2, archived: true, expected: false },
+      { status: "active", days: 2, unmapped: true, expected: false },
+    ];
+    const expected: string[] = [];
+    for (const scenario of cases) {
+      const tenantId = await newTenant();
+      // The public worker creates the explicit CRM/customer mapping; do not
+      // export or bypass its private mapping implementation just for a fixture.
+      if (!scenario.unmapped) {
+        await invoice(tenantId, 1);
+        await post();
+      }
+      await owner.query(
+        `INSERT INTO business_subscriptions (business_id, plan_key, status, current_period_end, cancel_at_period_end, auto_renew)
+         VALUES ($1, 'free', $2, now()+($3::int*interval '1 day'), $4, true)`,
+        [tenantId, scenario.status, scenario.days, scenario.cancellation ?? false],
+      );
+      if (scenario.archived) await owner.query(`UPDATE businesses SET status='archived' WHERE id=$1`, [tenantId]);
+      if (scenario.expected) expected.push(tenantId);
+    }
+    const candidates = (await audience()).renewalCandidates;
+    expect(candidates.map(c => c.tenantId).sort()).toEqual(expected.sort());
+    for (const candidate of candidates) expect(candidate.daysLeft).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("explicit historical backfill preserves gateway/manual and mixed settlement amounts", () => {
+  it("is read-only by default, enqueues the same amounts as live sources, and replays as a no-op", async () => {
+    const scenarios = [
+      { gateway: "zarinpal", wallet: 0, payment: 1_000_000 },
+      { gateway: "manual", wallet: 0, payment: 1_000_000 },
+      { gateway: "zarinpal", wallet: 600_000, payment: 400_000 },
+      { gateway: "zarinpal", wallet: 0, payment: 700_000 },
+    ];
+    const fixtures: { invoiceId: string; gateway: string; wallet: number; payment: number }[] = [];
+    // Historical facts existed before the corrected source triggers. Disable
+    // only these outbox producers, inside one test-only transaction; no posted
+    // event or journal is removed/rewritten to simulate the history.
+    await owner.query("BEGIN");
+    try {
+      await owner.query(`ALTER TABLE billing_invoices DISABLE TRIGGER platform_company_invoice_outbox`);
+      await owner.query(`ALTER TABLE billing_payments DISABLE TRIGGER platform_company_payment_outbox`);
+      await owner.query(`ALTER TABLE wallet_ledger DISABLE TRIGGER platform_company_wallet_outbox`);
+      for (const scenario of scenarios) {
+        const tenantId = await newTenant();
+        const invoiceId = randomUUID();
+        const paid = scenario.wallet + scenario.payment;
+        await owner.query(
+          `INSERT INTO billing_invoices
+             (id, business_id, invoice_number, reference, status, subtotal_rial, total_rial, paid_rial, created_at, updated_at)
+           VALUES ($1::uuid, $2, $1::uuid::text, $1::uuid::text, $3, 1000000, 1000000, $4, '2020-01-10', '2020-01-11')`,
+          [invoiceId, tenantId, paid === 1_000_000 ? "paid" : "partially_paid", paid],
+        );
+        if (scenario.wallet) await owner.query(
+          `INSERT INTO wallet_ledger (business_id, kind, direction, amount_rial, balance_after_rial, metadata, created_at)
+           VALUES ($1, 'subscription', 'debit', $2, 5000000, jsonb_build_object('invoiceId', $3::text), '2020-01-11')`,
+          [tenantId, scenario.wallet, invoiceId],
+        );
+        await owner.query(
+          `INSERT INTO billing_payments (business_id, invoice_id, gateway, amount_rial, credit_rial, status, created_at, verified_at)
+           VALUES ($1, $2, $3, $4, 0, 'verified', '2020-01-10', '2020-01-11')`,
+          [tenantId, invoiceId, scenario.gateway, scenario.payment],
+        );
+        fixtures.push({ invoiceId, ...scenario });
+      }
+      await owner.query(`ALTER TABLE billing_invoices ENABLE TRIGGER platform_company_invoice_outbox`);
+      await owner.query(`ALTER TABLE billing_payments ENABLE TRIGGER platform_company_payment_outbox`);
+      await owner.query(`ALTER TABLE wallet_ledger ENABLE TRIGGER platform_company_wallet_outbox`);
+      await owner.query("COMMIT");
+    } catch (error) {
+      await owner.query("ROLLBACK");
+      throw error;
+    }
+    const args = [join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"),
+      join(process.cwd(), "scripts", "platform-company-billing-backfill.ts"),
+      "--from=2020-01-01T00:00:00Z", "--cutoff=2020-02-01T00:00:00Z"];
+    const options = { env: { ...process.env, DATABASE_URL: databaseUrl(databaseName, true) }, timeout: 20_000 };
+    const dryRun = await exec(process.execPath, args, options);
+    expect(dryRun.stdout).toContain('"dryRun": true');
+    for (const fixture of fixtures) expect(await paymentsFor(fixture.invoiceId)).toEqual([]);
+    await exec(process.execPath, [...args, "--apply"], options);
+    const snapshots = [];
+    for (const fixture of fixtures) {
+      const events = await paymentsFor(fixture.invoiceId);
+      const expected = [[fixture.gateway === "manual" ? "manual" : "gateway", String(fixture.payment)]];
+      if (fixture.wallet) expected.push(["wallet", String(fixture.wallet)]);
+      expect(events.map(row => [row.settlement_method, row.amount_rial])).toEqual(expected);
+      snapshots.push(events);
+    }
+    await exec(process.execPath, [...args, "--apply"], options);
+    for (const [index, fixture] of fixtures.entries()) expect(await paymentsFor(fixture.invoiceId)).toEqual(snapshots[index]);
+  }, 60_000);
+});
+
+
+describe("paid amounts predating canonical residual capture", () => {
+  it.each([
+    { method: "wallet", legacy: false }, { method: "gateway", legacy: false },
+    { method: "wallet", legacy: true }, { method: "gateway", legacy: true },
+  ])("does not invent a residual for $method after old paid amounts (legacy=$legacy)", async ({ method, legacy }) => {
+    const tenantId = await newTenant();
+    const invoiceId = await invoice(tenantId);
+    await owner.query("BEGIN");
+    try {
+      await owner.query("ALTER TABLE billing_invoices DISABLE TRIGGER platform_company_invoice_outbox");
+      await owner.query(`UPDATE billing_invoices SET paid_rial=300000,status='partially_paid',updated_at=now() WHERE id=$1`, [invoiceId]);
+      await owner.query("ALTER TABLE billing_invoices ENABLE TRIGGER platform_company_invoice_outbox");
+      await owner.query("COMMIT");
+    } catch (error) {
+      await owner.query("ROLLBACK");
+      throw error;
+    }
+    if (legacy) {
+      await owner.query(
+        `INSERT INTO platform_company_billing_events
+         (internal_business_id,source_kind,source_table,source_id,source_version,customer_tenant_id,amount_rial,payload,customer_invoice_id)
+         VALUES ($1,'invoice_payment','billing_invoices',$2::uuid::text,'paid:300000',$3,300000,jsonb_build_object('invoiceId',$2::uuid),$2::uuid)`,
+        [companyId, invoiceId, tenantId],
+      );
+    }
+    await post();
+    const oldPostings = (await owner.query(
+      `SELECT p.* FROM platform_company_accounting_postings p JOIN platform_company_billing_events e ON e.id=p.event_id
+        WHERE e.customer_invoice_id=$1 ORDER BY p.id`, [invoiceId],
+    )).rows;
+    if (method === "gateway") {
+      const paymentId = await verifyPayment(tenantId, invoiceId, 200_000);
+      await db.withTenant(tenantId, () => subscriptions.applyInvoicePayment(invoiceId, 200_000, { idempotencyKey: "after-old-paid", paymentId }));
+    } else {
+      // Same transaction shape as renewOneBusiness: debit, then invoice UPDATE.
+      await db.withTenant(tenantId, async () => {
+        const client = await db.getPool().connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            `INSERT INTO wallet_ledger (business_id,kind,direction,amount_rial,balance_after_rial,metadata)
+             VALUES ($1,'subscription','debit',200000,5000000,jsonb_build_object('invoiceId',$2::text))`, [tenantId, invoiceId],
+          );
+          await client.query(`UPDATE billing_invoices SET paid_rial=500000,status='partially_paid',updated_at=now() WHERE id=$1`, [invoiceId]);
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        } finally { client.release(); }
+      });
+    }
+    const payments = await paymentsFor(invoiceId);
+    expect(payments).toHaveLength(legacy ? 2 : 1);
+    expect(payments.filter(e => e.settlement_method === method).map(e => Number(e.amount_rial))).toEqual([200_000]);
+    expect(payments.some(e => e.settlement_method === "other")).toBe(false);
+    await post();
+    expect(await postedPaymentTotal(invoiceId)).toBe(legacy ? 500_000 : 200_000);
+    for (const old of oldPostings) {
+      expect((await owner.query(`SELECT * FROM platform_company_accounting_postings WHERE id=$1`, [old.id])).rows[0]).toEqual(old);
+    }
+  });
+
+  it("reports ambiguous legacy snapshots and refuses replay before any financial write", async () => {
+    const before = (await owner.query(`SELECT count(*)::int AS n,sum(amount_rial)::text AS amount FROM platform_company_billing_events`)).rows;
+    const args = [`--cutoff=${new Date(Date.now() + 60_000).toISOString()}`];
+    const dryRun = await companyScript("platform-company-billing-backfill.ts", args);
+    expect(dryRun.stdout).toContain('"legacyInvoiceSettlements": 2');
+    expect(dryRun.stdout).toContain("need explicit reconciliation");
+    await expect(companyScript("platform-company-billing-backfill.ts", [...args, "--apply"]))
+      .rejects.toThrow("legacy_invoice_settlements_require_reconciliation");
+    expect((await owner.query(`SELECT count(*)::int AS n,sum(amount_rial)::text AS amount FROM platform_company_billing_events`)).rows).toEqual(before);
+    const health = JSON.parse((await companyScript("platform-company-health.ts")).stdout);
+    expect(health.legacyInvoiceSettlements).toBe(2);
+    const legacyBefore = (await owner.query(
+      `SELECT * FROM platform_company_billing_events e
+        WHERE e.customer_invoice_id IN (SELECT customer_invoice_id FROM platform_company_billing_events
+                                        WHERE source_kind='invoice_payment' AND source_table='billing_invoices'
+                                          AND payload->>'settlement' IS DISTINCT FROM 'residual') ORDER BY e.id`,
+    )).rows;
+    await companyScript("platform-company-billing-backfill.ts", [...args, "--apply", "--exclude-legacy-invoices"]);
+    expect((await owner.query(
+      `SELECT * FROM platform_company_billing_events e
+        WHERE e.customer_invoice_id IN (SELECT customer_invoice_id FROM platform_company_billing_events
+                                        WHERE source_kind='invoice_payment' AND source_table='billing_invoices'
+                                          AND payload->>'settlement' IS DISTINCT FROM 'residual') ORDER BY e.id`,
+    )).rows).toEqual(legacyBefore);
+  });
+});

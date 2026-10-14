@@ -82,6 +82,9 @@ export function DataTableBody({ children, className }: { children: ReactNode; cl
   return <tbody className={className}>{children}</tbody>;
 }
 
+/** What counts as a control of its own inside a clickable row. */
+const ROW_CONTROLS = "a, button, input, select, textarea, label, summary, [role='button'], [role='menuitem']";
+
 /**
  * A body row. `selected` is the amber-tinted "this is the one you picked" wash
  * from the reference tables; `onClick` additionally makes the row behave as a
@@ -92,17 +95,39 @@ export function DataTableRow({
   children,
   className,
   selected = false,
+  onClick,
+  onKeyDown,
   ...rest
 }: {
   children: ReactNode;
   className?: string;
   selected?: boolean;
 } & Omit<React.HTMLAttributes<HTMLTableRowElement>, "className" | "children">) {
-  const interactive = typeof rest.onClick === "function";
+  const interactive = typeof onClick === "function";
   return (
     <tr
       aria-selected={selected || undefined}
       tabIndex={interactive ? 0 : undefined}
+      // A control inside the row (an action button, a file link) does its own
+      // thing — it must not also open the row (#761 §23).
+      onClick={
+        interactive
+          ? (event) => {
+              const control = (event.target as Element).closest?.(ROW_CONTROLS);
+              if (control && control !== event.currentTarget && event.currentTarget.contains(control)) return;
+              onClick(event);
+            }
+          : undefined
+      }
+      // Focusable means operable: Enter/Space on the row itself opens it.
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (!interactive || event.defaultPrevented || event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.currentTarget.click();
+        }
+      }}
       className={cn(
         "border-b border-border last:border-b-0",
         selected && "bg-amber-50/60 dark:bg-amber-500/10",

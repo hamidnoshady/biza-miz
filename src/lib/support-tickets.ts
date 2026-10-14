@@ -35,6 +35,31 @@ export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
   closed: "بسته‌شده",
 };
 
+/**
+ * The same canonical status, read from the viewer's side (audit F10). The wire
+ * value `waiting_customer` means the CUSTOMER owes the next reply; the member
+ * page says «در انتظار پاسخ شما» (awaiting your reply) while the operator desk
+ * must say the opposite. Identifiers never change; only the words do.
+ */
+export type TicketViewer = "member" | "operator";
+
+export const TICKET_STATUS_LABELS_BY_VIEWER: Record<TicketViewer, Record<TicketStatus, string>> = {
+  member: TICKET_STATUS_LABELS,
+  operator: {
+    open: "باز — منتظر بررسی پشتیبانی",
+    in_progress: "در حال بررسی پشتیبانی",
+    waiting_customer: "در انتظار پاسخ مشتری",
+    resolved: "حل‌شده",
+    closed: "بسته‌شده",
+  },
+};
+
+/** Persian label for a status as seen by `viewer`; unknown values pass through. */
+export function ticketStatusLabel(status: string, viewer: TicketViewer = "member"): string {
+  const labels = TICKET_STATUS_LABELS_BY_VIEWER[viewer];
+  return (labels as Record<string, string>)[status] ?? status;
+}
+
 export const TICKET_PRIORITY_LABELS: Record<TicketPriority, string> = {
   low: "کم",
   normal: "عادی",

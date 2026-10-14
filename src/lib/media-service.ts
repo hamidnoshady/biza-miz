@@ -407,6 +407,8 @@ export interface MediaAssetUsage {
    * (`parties.profile_image_asset_id`). `name` is the party's own
    * display name. */
   parties: MediaAssetUsageRef[];
+  /** Automotive vehicles using the canonical asset for a photo, video or document. */
+  vehicles: MediaAssetUsageRef[];
 }
 
 /**
@@ -430,6 +432,26 @@ export interface MediaAssetUsage {
  * GET /api/inventory/purchases — rather than a fourth permission just for
  * this.
  */
+export async function mediaAssetUsedByVehicleInLocations(
+  assetId: string,
+  businessId: string,
+  locationIds: readonly string[],
+): Promise<boolean> {
+  if (locationIds.length === 0) return false;
+  const { rows } = await query<{ linked: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM automotive_vehicle_media vm
+         JOIN automotive_vehicle_attributes v
+           ON v.business_id = vm.business_id AND v.serial_id = vm.serial_id
+        WHERE vm.business_id = $1 AND vm.media_asset_id = $2
+          AND v.location_id = ANY($3::uuid[])
+     ) AS linked`,
+    [businessId, assetId, [...locationIds]],
+  );
+  return rows[0]?.linked === true;
+}
+
 export async function getMediaAssetUsage(assetId: string): Promise<MediaAssetUsage> {
   const [
     { rows: menuItems },
@@ -437,6 +459,7 @@ export async function getMediaAssetUsage(assetId: string): Promise<MediaAssetUsa
     { rows: expenses },
     { rows: purchases },
     { rows: parties },
+    { rows: vehicles },
   ] = await Promise.all([
     query<MediaAssetUsageRef>(`SELECT id, name FROM menu_items WHERE image_media_id = $1 ORDER BY name`, [assetId]),
     query<MediaAssetUsageRef>(`SELECT id, name FROM inventory_items WHERE image_media_id = $1 ORDER BY name`, [
@@ -454,8 +477,16 @@ export async function getMediaAssetUsage(assetId: string): Promise<MediaAssetUsa
     query<MediaAssetUsageRef>(`SELECT id, name FROM parties WHERE profile_image_asset_id = $1 ORDER BY name`, [
       assetId,
     ]),
+    query<MediaAssetUsageRef>(
+      `SELECT v.serial_id AS id, v.stock_number || ' — ' || v.make || ' ' || v.model AS name
+         FROM automotive_vehicle_media vm
+         JOIN automotive_vehicle_attributes v
+           ON v.business_id = vm.business_id AND v.serial_id = vm.serial_id
+        WHERE vm.media_asset_id = $1 ORDER BY v.stock_number`,
+      [assetId],
+    ),
   ]);
-  return { menuItems, inventoryItems, expenses, purchases, parties };
+  return { menuItems, inventoryItems, expenses, purchases, parties, vehicles };
 }
 
 export function mediaAssetUsageIsEmpty(usage: MediaAssetUsage): boolean {
@@ -464,7 +495,8 @@ export function mediaAssetUsageIsEmpty(usage: MediaAssetUsage): boolean {
     usage.inventoryItems.length === 0 &&
     usage.expenses.length === 0 &&
     usage.purchases.length === 0 &&
-    usage.parties.length === 0
+    usage.parties.length === 0 &&
+    (usage.vehicles?.length ?? 0) === 0
   );
 }
 
@@ -1179,7 +1211,14 @@ export async function runMediaBillingTick(now: Date = new Date()): Promise<numbe
             unit: "byte_hour",
             resource: "media_library",
             resourceId: holder.business_id,
-            dimensions: { day, storedBytes: bytes, flatRial: breakdown.flatRial, perGbRial: breakdown.perGbRial },
+            ratedAmountRial: breakdown.totalRial,
+            dimensions: {
+              walletBacked: true,
+              day,
+              storedBytes: bytes,
+              flatRial: breakdown.flatRial,
+              perGbRial: breakdown.perGbRial,
+            },
           }).catch((error) => {
             console.error("media usage event failed:", holder.business_id, error);
           });

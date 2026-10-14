@@ -12,6 +12,7 @@
  * rather than only through route handlers.
  */
 import type { Role } from "./auth";
+import { PERMISSION_DEPENDENCIES as PERMISSION_DEPENDENCIES_SOURCE } from "./permission-dependencies";
 
 /**
  * Every capability the system recognises. Coarse enough to stay manageable in
@@ -26,11 +27,8 @@ export const PERMISSIONS = {
   // without receiving any of the data tools below.
   aiUse: "ai.use",
   aiManage: "ai.manage",
-  aiAgentsManage: "ai.agents.manage",
   aiAutomationsManage: "ai.automations.manage",
-  aiKnowledgeManage: "ai.knowledge.manage",
   aiUsageView: "ai.usage.view",
-  aiWidgetsManage: "ai.widgets.manage",
 
   // Point of sale
   ordersView: "orders.view",
@@ -68,6 +66,44 @@ export const PERMISSIONS = {
   inventoryView: "inventory.view",
   inventoryAdjust: "inventory.adjust",
   purchasesManage: "purchases.manage",
+
+  /**
+   * Automotive — «خودرو و نمایشگاه اتومبیل» (issue #839).
+   *
+   * Split by *blast radius*, like the CRM and Growth blocks, because the trade
+   * has three genuinely different jobs on one lot: a salesperson shows and
+   * prices cars, a cashier takes money for one, and only the office may touch
+   * what the dealership paid. The two boundaries the issue names explicitly are
+   * both here and both are *reads* of money rather than screens:
+   *
+   *   * `vehicles.cost_view` is the cost/margin read. A cashier or salesperson
+   *     without it sees the asking price and the car, never the basis — which is
+   *     why it is its own key rather than a side effect of `vehicles.view`;
+   *     `vehicles.view` deliberately grants no cost, price-history or margin.
+   *   * `vehicles.override_min_price` is the one act that can complete a sale
+   *     below the floor the owner set. It is separate from `vehicles.sell` so
+   *     "sell cars" and "sell cars at a loss the owner did not authorise" are
+   *     two decisions, and it is audited.
+   *
+   * `vehicles.cost_edit` and `vehicles.expense_record` are the two ways the
+   * effective cost changes — the number COGS freezes at sale — so both are
+   * high-risk and audited. Pricing is deliberately *not* a cost permission
+   * (issue §6): `vehicles.price_edit` writes the asking/minimum/wholesale
+   * figures and can never reach the acquisition cost.
+   */
+  vehiclesView: "vehicles.view",
+  vehiclesCreate: "vehicles.create",
+  vehiclesEdit: "vehicles.edit",
+  vehiclesCostView: "vehicles.cost_view",
+  vehiclesCostEdit: "vehicles.cost_edit",
+  vehiclesPriceEdit: "vehicles.price_edit",
+  vehiclesReserve: "vehicles.reserve",
+  vehiclesReservationCancel: "vehicles.reservation_cancel",
+  vehiclesSell: "vehicles.sell",
+  vehiclesOverrideMinPrice: "vehicles.override_min_price",
+  vehiclesTransfer: "vehicles.transfer",
+  vehiclesExpenseRecord: "vehicles.expense_record",
+  vehiclesArchive: "vehicles.archive",
 
   /**
    * Parties — «اشخاص»: the one record behind a customer, a supplier and a
@@ -157,6 +193,25 @@ export const PERMISSIONS = {
    * approve would make the whole mechanism decorative.
    */
   workspaceApprove: "workspace.approve",
+  /**
+   * Issue a document revision to an outside party (issue #799 §24's
+   * "drawings/document issue"). Drafting a revision is ordinary project work and
+   * rides `workspace.manage`; *issuing* one is the moment a drawing becomes a
+   * record that names what went to whom, and the moment the register stops
+   * accepting changes to it (migration 0197 freezes it). Its own key for the
+   * same reason a contract has one: the act cannot be taken back, so it must not
+   * be inherited by everyone who can tick a task off.
+   */
+  workspaceDocumentsIssue: "workspace.documents_issue",
+  /**
+   * Reach every project regardless of membership, acting as its manager.
+   * The explicit business-wide override (#761): `workspace.view` and
+   * `workspace.manage` only ever reach the projects a member is on, and this
+   * is the one key that lifts that — so a business owner is never locked out
+   * of a project nobody added them to, without every viewer being able to
+   * enumerate every project.
+   */
+  workspaceAdmin: "workspace.admin",
 
   // Accounting
   ledgerView: "ledger.view",
@@ -182,13 +237,69 @@ export const PERMISSIONS = {
   financeReconciliationManage: "finance.reconciliation_manage",
   financeAssetsManage: "finance.assets_manage",
 
-  /** Salary data is narrower than the surrounding ledger. Owner and accountant only. */
+  /**
+   * Salary data is narrower than the surrounding ledger, so it has its own pair
+   * of keys. `payroll.view` reads wage orders, payroll runs and the wage-change
+   * history; `payroll.manage` sets wages and accrues, pays and voids a run (it
+   * implies view). The default presets give both to the owner, the admin and
+   * the accountant and neither to the manager, but a business can grant or
+   * revoke either key per member — so code tests the capability, never a role
+   * name.
+   */
   payrollView: "payroll.view",
   payrollManage: "payroll.manage",
 
-  // Insight
+  // Taxpayer e-invoicing (issue #866). One key per thing it changes: what the
+  // authority sees, what leaves the building, what is withdrawn, and who may hold
+  // the taxpayer's keys. A business can grant the reading without the sending.
+  taxView: "tax.view",
+  taxPrepare: "tax.prepare",
+  taxSend: "tax.send",
+  taxInquiry: "tax.inquiry",
+  taxAmend: "tax.amend",
+  taxCancel: "tax.cancel",
+  taxManageSettings: "tax.manage_settings",
+  taxExport: "tax.export",
+
+  /**
+   * Insight — the reporting stack's capabilities (issue #819).
+   *
+   * The keys answer four *different* questions, and the audit that produced
+   * them found the answers conflated: `/api/reports/query` — the normal read
+   * path for previews, row reports and the builder — required
+   * `reports.export`, so `reports.view` alone could not run a report; saving
+   * or deleting a saved report required the download key; cross-branch
+   * consolidated reporting was guarded by the same `reports.view` as a single
+   * branch's own reports; and a role's default dashboard layout could be
+   * replaced by anybody who could view reports at all.
+   *
+   *   reports.view   run/read standard reports, saved reports, builder
+   *                  previews, and the caller's own dashboard widgets.
+   *   reports.manage author saved reports: create, rename, edit, delete, and
+   *                  save a personal dashboard layout. Not a read key, and not
+   *                  a download key.
+   *   reports.export CSV/Excel/PDF download. Export is a different act from
+   *                  reading — it is how data leaves the building — so it
+   *                  implies `reports.view` rather than the other way round.
+   *   reports.business_wide
+   *                  consolidated numbers across the business's own branches
+   *                  (the branch-comparison screen, its export, and the AI
+   *                  branch-comparison tool). Owner-reserved, in the same
+   *                  cross-location trust family as `rollup.manage`: a member
+   *                  sees their own branch's reports with `reports.view`, and
+   *                  reading every branch at once stays with ownership.
+   *   reports.dashboard_defaults.manage
+   *                  replace a *role's* default dashboard layout, which a
+   *                  member inherits until they make a personal override.
+   *                  Owner, Admin and Manager receive it by default; it is
+   *                  separate from both personal-layout (`reports.manage`) and
+   *                  business-wide reporting authority.
+   */
   reportsView: "reports.view",
+  reportsManage: "reports.manage",
   reportsExport: "reports.export",
+  reportsBusinessWide: "reports.business_wide",
+  reportsDashboardDefaultsManage: "reports.dashboard_defaults.manage",
 
   /**
    * «ورود و خروج داده» — the platform-wide data transfer engine.
@@ -246,11 +357,49 @@ export const PERMISSIONS = {
   woocommerceManage: "woocommerce.manage",
   woocommerceSync: "woocommerce.sync",
   woocommerceConfigure: "woocommerce.configure",
+  /**
+   * Growth & Marketing (issue #764). One key per capability, split by what
+   * the act does to money and to people — not by screen:
+   *
+   *   growth.view           the management dashboard, the audience insights and
+   *                         the accounting bridge. Not a floor capability.
+   *   campaigns.*           discount rules and outbound messaging.
+   *   loyalty.view/manage   reading balances / configuring loyalty programs.
+   *   loyalty.redeem        spending a customer's earned points at the till.
+   *   store_credit.issue    *creating* a liability out of nothing (a goodwill
+   *                         credit) — a different trust from redeeming one.
+   *   store_credit.payout   paying a credit balance out in cash or to a bank.
+   *   gift_cards.*          looking a card up / issuing one (a new liability) /
+   *                         spending one.
+   *   commission.*          compensation data. Its own boundary, server-side;
+   *                         hiding the menu entry was never the protection.
+   *                         `calculate` builds a settlement run, `approve`
+   *                         reviews and approves it, `payout` pays it out and
+   *                         closes it, `reverse` undoes a payout (#869).
+   *   marketing.configure   Growth-wide configuration.
+   *
+   * `src/lib/growth-access.ts` maps every Growth page and API to exactly one of
+   * these, and its test asserts the routes agree.
+   */
   growthView: "growth.view",
   campaignsView: "campaigns.view",
   campaignsManage: "campaigns.manage",
   loyaltyView: "loyalty.view",
   loyaltyManage: "loyalty.manage",
+  loyaltyRedeem: "loyalty.redeem",
+  storeCreditIssue: "store_credit.issue",
+  storeCreditPayout: "store_credit.payout",
+  giftCardsView: "gift_cards.view",
+  giftCardsIssue: "gift_cards.issue",
+  giftCardsRedeem: "gift_cards.redeem",
+  commissionView: "commission.view",
+  commissionManage: "commission.manage",
+  // Issue #869: the settlement lifecycle is split so that no single key can
+  // both decide what is owed and pay it out.
+  commissionCalculate: "commission.calculate",
+  commissionApprove: "commission.approve",
+  commissionPayout: "commission.payout",
+  commissionReverse: "commission.reverse",
   marketingConfigure: "marketing.configure",
   integrationsView: "integrations.view",
   integrationsManage: "integrations.manage",
@@ -296,9 +445,25 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.ledgerApprove,
   PERMISSIONS.ledgerClosePeriod,
   PERMISSIONS.reportsExport,
+  // Cross-branch consolidated numbers (issue #819): money-adjacent data
+  // leaving its own branch, and owner-reserved below.
+  PERMISSIONS.reportsBusinessWide,
   PERMISSIONS.dataExport,
   PERMISSIONS.teamManage,
   PERMISSIONS.backupManage,
+  PERMISSIONS.storeCreditIssue,
+  PERMISSIONS.storeCreditPayout,
+  PERMISSIONS.giftCardsIssue,
+  PERMISSIONS.commissionManage,
+  PERMISSIONS.commissionCalculate,
+  PERMISSIONS.commissionApprove,
+  PERMISSIONS.commissionPayout,
+  PERMISSIONS.commissionReverse,
+  // Issue #839: changing what a car cost (the figure COGS freezes at), selling
+  // below the owner's floor, and hiding a vehicle from the lot.
+  PERMISSIONS.vehiclesCostEdit,
+  PERMISSIONS.vehiclesOverrideMinPrice,
+  PERMISSIONS.vehiclesArchive,
 ]);
 const REASON_REQUIRED = new Set<Permission>([
   PERMISSIONS.ordersAmendClosed,
@@ -349,6 +514,13 @@ export const OWNER_ONLY_PERMISSIONS: readonly Permission[] = [
   PERMISSIONS.backupExport,
   PERMISSIONS.backupRestore,
   PERMISSIONS.rollupManage,
+  // Issue #819 — the reporting-stack member of the cross-location trust
+  // family, next to `rollup.manage` (cross-branch aggregation pushed between
+  // servers). The branch-comparison screen, its export and the AI's branch
+  // comparison are the whole business's trading at once; a member assigned to
+  // one branch reaches their own branch's reports with `reports.view` and
+  // never the rest by asking for a "report".
+  PERMISSIONS.reportsBusinessWide,
 ];
 
 export function isOwnerOnlyPermission(permission: Permission): boolean {
@@ -356,25 +528,33 @@ export function isOwnerOnlyPermission(permission: Permission): boolean {
 }
 
 const {
-  aiUse, aiManage, aiAgentsManage, aiAutomationsManage, aiKnowledgeManage, aiUsageView, aiWidgetsManage,
+  aiUse, aiManage, aiAutomationsManage, aiUsageView,
   ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
   tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
   menuView, menuEdit,
   inventoryView, inventoryAdjust, purchasesManage,
+  vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
+  vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+  vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
   partiesView, partiesManage,
   crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
-  workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove,
+  workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
+  workspaceAdmin,
   ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
   financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
   financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
   payrollView, payrollManage,
-  reportsView, reportsExport,
+  taxView, taxPrepare, taxSend, taxInquiry, taxAmend, taxCancel, taxManageSettings, taxExport,
+  reportsView, reportsManage, reportsExport, reportsBusinessWide, reportsDashboardDefaultsManage,
   dataImport, dataExport,
   teamView, teamManage, teamPermissionsManage, settingsManage, locationsManage, backupManage,
   websiteView, websiteManage, websiteSettingsManage,
   cmsView, cmsContentManage, cmsPublish, cmsConfigure,
   woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
-  growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, marketingConfigure,
+  growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
+  storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
+  commissionView, commissionManage, commissionCalculate, commissionApprove, commissionPayout, commissionReverse,
+  marketingConfigure,
   integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
 } = PERMISSIONS;
 
@@ -390,11 +570,18 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
   // ownership, destructive recovery, master API or cross-location trust keys.
   admin: ALL_PERMISSIONS.filter((permission) => !isOwnerOnlyPermission(permission)),
   manager: [
-    aiUse, aiManage, aiAgentsManage, aiAutomationsManage, aiKnowledgeManage, aiUsageView, aiWidgetsManage,
+    aiUse, aiManage, aiAutomationsManage, aiUsageView,
     ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
     tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
     menuView, menuEdit,
     inventoryView, inventoryAdjust, purchasesManage,
+    // Issue #839 — the manager runs the lot: every vehicle capability,
+    // including the cost and margin reads and the audited override. A
+    // dealership that wants a narrower sales manager revokes the individual
+    // keys per member, which is what overrides are for.
+    vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
+    vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+    vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
     partiesView, partiesManage,
     // The manager reached every CRM screen before these permissions existed
     // (the routes gated on requireRole("owner","manager")), so the preset
@@ -408,13 +595,22 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // open them and do everything on them. Introducing a permission must not
     // remove access somebody already had, so the preset grants all four. A
     // business that wants a narrower manager revokes the individual keys.
-    workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove,
-    ledgerView, reportsView, reportsExport,
+    workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
+    workspaceAdmin,
+    // Issue #819. `reports.manage` and the role-default dashboard key keep the
+    // manager doing what the reports screens and the widgets route always
+    // documented they could do; `reports.export` they already held. Not
+    // `reports.business_wide`: cross-branch comparison is granted explicitly.
+    ledgerView, reportsView, reportsManage, reportsExport, reportsDashboardDefaultsManage,
     // Operational finance the manager already did under a role gate. Not
     // accounting authority, and not payroll.
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
     ledgerPropose,
+    // Taxpayer invoicing, operational half: prepare, send and inquire. The
+    // amendment, cancellation, export and the taxpayer's keys stay with the
+    // accountant and the administrator, who answer for what the authority holds.
+    taxView, taxPrepare, taxSend, taxInquiry,
     // «ورود و خروج داده». The manager already held every bulk door the product
     // had (crm.export gated both the customer export AND the customer import;
     // reports.export gated the report download), so granting these two keeps
@@ -425,7 +621,16 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     websiteView, websiteManage, websiteSettingsManage,
     cmsView, cmsContentManage, cmsPublish, cmsConfigure,
     woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
-    growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, marketingConfigure,
+    // Issue #764 split the old loyalty.manage / growth.view into graded
+    // capabilities; the manager keeps every one of them, so nothing they did
+    // before is lost.
+    growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
+    storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
+    commissionView, commissionManage,
+    // #869: a manager may build a settlement run, but approving and paying it
+    // is the books' work, and stays with the accountant.
+    commissionCalculate,
+    marketingConfigure,
     integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
   ],
   // Phase 16's role: the books, and only the books. No till, no floor. Manages
@@ -437,12 +642,26 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     aiUse, aiUsageView,
     menuView,
     inventoryView,
+    // Issue #839 — the books read vehicle stock at cost. `vehicles.cost_view`
+    // is the vehicle valuation and COGS side; `vehicles.view` is what the car
+    // is. No selling, no reserving, no expense recording: a cost the office
+    // did not agree to is not the accountant's to enter, and margin is not a
+    // floor capability.
+    vehiclesView, vehiclesCostView,
     partiesView, partiesManage,
     ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
     payrollView, payrollManage,
-    reportsView, reportsExport,
+    // Taxpayer invoicing, accounting half: every record action except the
+    // taxpayer's keys, which only the administrator holds. Cancelling an accepted
+    // invoice and exporting the register are the two most consequential here.
+    taxView, taxPrepare, taxSend, taxInquiry, taxAmend, taxCancel, taxExport,
+    // Issue #819: the accountant could already download the statements; running
+    // and saving a report is the read/manage half of the same work. Not the
+    // role-default dashboard key (Owner, Admin and Manager receive that
+    // separate capability by default) and not `reports.business_wide`.
+    reportsView, reportsManage, reportsExport,
     // Same reasoning as the manager's: the accountant already downloaded the
     // financial statements through reports.export, and importing a chart of
     // accounts or a month of expenses is the accounting work this role exists
@@ -455,8 +674,12 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // cost is accounting work, committing the business to a new contractor is
     // not.
     workspaceView,
-    // Growth accounting and customer reads were open to the accountant.
-    growthView,
+    // Growth accounting and customer reads were open to the accountant, and
+    // commission is compensation — the same data class as payroll, which this
+    // role already reads. Writing a commission rule is not books work; the
+    // settlement lifecycle is (#869): build, approve, pay and reverse a run.
+    growthView, commissionView,
+    commissionCalculate, commissionApprove, commissionPayout, commissionReverse,
   ],
   cashier: [
     aiUse,
@@ -464,14 +687,25 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     tablesManage, reservationsView, reservationsManage,
     menuView, deliveryManage,
     inventoryView,
+    // Issue #839 — a cashier may take payment for a car the lot has already
+    // priced, and nothing else: no cost or margin read, no price edit, no
+    // reservation authority, no sale below the floor. `vehicles.sell` is the
+    // till act; `phone the office` is what a deal below the floor takes.
+    vehiclesView, vehiclesSell,
     partiesView, partiesManage,
     // Matches what the CRM nav already showed a cashier (directory, persons,
     // activities, cases) — logging that a customer called is floor work. No
     // crmView: the 360° file, segments and pipeline are not. No merge, no
     // consent, no export.
     crmManage,
-    // Till staff historically earned/redeemed loyalty and gift-card value.
-    growthView, loyaltyView, loyaltyManage, campaignsView, printingExecute,
+    // Till staff earn and redeem loyalty points and look a gift card's balance
+    // up. Since issue #764 that is all: no growth.view (the management
+    // dashboard and the accounting bridge), no commission data, no
+    // campaigns, and no act that *creates* or pays out a liability — issuing
+    // store credit or a gift card, paying credit out, or spending a gift card
+    // outside the till's own tender flow. An owner who wants a senior cashier
+    // to do one of those grants that exact key.
+    loyaltyView, loyaltyRedeem, giftCardsView, printingExecute,
     // Sees the projects they are a member of and works the tasks on them —
     // the floor-staff case the workspace is for. No contracts, no approvals.
     workspaceView, workspaceManage,
@@ -527,45 +761,28 @@ function isPermission(value: string): value is Permission {
  * `team.manage` on its only owner would be permanently locked out of itself,
  * so overrides are simply not applied to an absolute role.
  */
-const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>> = {
-  [PERMISSIONS.crmManage]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmMerge]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmConsentManage]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmConfigure]: [PERMISSIONS.crmView],
-  [PERMISSIONS.crmDelete]: [PERMISSIONS.crmView],
-  [PERMISSIONS.inventoryAdjust]: [PERMISSIONS.inventoryView],
-  [PERMISSIONS.purchasesManage]: [PERMISSIONS.inventoryView],
-  [PERMISSIONS.menuEdit]: [PERMISSIONS.menuView],
-  [PERMISSIONS.ledgerPost]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.ledgerPropose]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeExpensesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeReceivablesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financePayablesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeChequesManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeInstallmentsManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeReconciliationManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.financeAssetsManage]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.payrollManage]: [PERMISSIONS.payrollView],
-  [PERMISSIONS.ledgerApprove]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.accountsEdit]: [PERMISSIONS.ledgerView],
-  [PERMISSIONS.reportsExport]: [PERMISSIONS.reportsView],
-  [PERMISSIONS.reservationsManage]: [PERMISSIONS.reservationsView],
-  [PERMISSIONS.teamManage]: [PERMISSIONS.teamView],
-  [PERMISSIONS.teamPermissionsManage]: [PERMISSIONS.teamView],
-  [PERMISSIONS.woocommerceManage]: [PERMISSIONS.woocommerceView],
-  [PERMISSIONS.woocommerceSync]: [PERMISSIONS.woocommerceView],
-  [PERMISSIONS.woocommerceConfigure]: [PERMISSIONS.woocommerceView],
-  [PERMISSIONS.websiteManage]: [PERMISSIONS.websiteView],
-  [PERMISSIONS.websiteSettingsManage]: [PERMISSIONS.websiteView],
-  [PERMISSIONS.cmsContentManage]: [PERMISSIONS.cmsView],
-  [PERMISSIONS.cmsPublish]: [PERMISSIONS.cmsView],
-  [PERMISSIONS.cmsConfigure]: [PERMISSIONS.cmsView],
-  [PERMISSIONS.campaignsManage]: [PERMISSIONS.campaignsView, PERMISSIONS.growthView],
-  [PERMISSIONS.loyaltyManage]: [PERMISSIONS.loyaltyView, PERMISSIONS.growthView],
-  [PERMISSIONS.integrationsManage]: [PERMISSIONS.integrationsView],
-  [PERMISSIONS.mediaManage]: [PERMISSIONS.mediaView],
-  [PERMISSIONS.billingManage]: [PERMISSIONS.billingView],
-};
+const PERMISSION_DEPENDENCIES = PERMISSION_DEPENDENCIES_SOURCE;
+
+/**
+ * Every permission a member holding `permission` also holds: the transitive
+ * closure of `PERMISSION_DEPENDENCIES`.
+ *
+ * Exported because a *second* reader needs the same answer as the runtime:
+ * `crm-permissions.test.ts` checks each CRM API route against the section
+ * table, and it must model "who holds what" exactly as a request does. A test
+ * with its own idea of the implications would pass while production 403s.
+ */
+export function impliedPermissions(permission: Permission): Set<Permission> {
+  const out = new Set<Permission>();
+  const pending = [...(PERMISSION_DEPENDENCIES[permission] ?? [])];
+  while (pending.length > 0) {
+    const next = pending.pop()!;
+    if (out.has(next)) continue;
+    out.add(next);
+    for (const dependency of PERMISSION_DEPENDENCIES[next] ?? []) pending.push(dependency);
+  }
+  return out;
+}
 
 export function effectivePermissions(
   role: Role,
@@ -585,21 +802,15 @@ export function effectivePermissions(
 
   // Convenience grants include their read prerequisites. Explicit revocation
   // is applied afterwards and therefore remains authoritative.
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const permission of [...base]) {
-      for (const dependency of PERMISSION_DEPENDENCIES[permission] ?? []) {
-        if (!base.has(dependency)) { base.add(dependency); changed = true; }
-      }
-    }
+  for (const permission of [...base]) {
+    for (const dependency of impliedPermissions(permission)) base.add(dependency);
   }
   for (const key of overrides?.revoked ?? []) {
     if (isPermission(key)) base.delete(key);
   }
 
   // A revoked prerequisite also disables dependent mutation capabilities.
-  changed = true;
+  let changed = true;
   while (changed) {
     changed = false;
     for (const permission of [...base]) {

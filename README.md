@@ -32,25 +32,40 @@ npm run dev             # http://localhost:3000
 ### First run — the Setup Wizard (Phase 1)
 
 On a **completely empty database**, opening the app sends you to `/welcome`, which
-creates the business + first Owner account, then walks you through an 8-step guided
-wizard (`/setup/*`) — no manual DB edits needed:
+creates the business + first Owner account, then walks you through the guided
+wizard (`/setup/*`) — no manual DB edits needed. The step sequence is
+industry-shaped (`src/lib/wizard-steps.ts` is the one place that decides it):
 
-1. **Business info** — name, location, currency/language defaults
-2. **Chart of accounts** — editable pre-built F&B template
-3. **Inventory costing** — FIFO vs Weighted Average (locked after the first transaction)
-4. **Tax** — default VAT rate + per-category rates
-5. **Roles & users** — Manager (email/password) and Cashier/Waiter/Kitchen (4–12-digit PIN)
-6. **Menu** — manual entry or CSV/Excel import (downloadable template)
-7. **Hardware** — printer pairing + test print (a Windows-installed or network printer, reached through the one-click local print connector; same screen as Settings)
-8. **Opening balances** — opening inventory count + balanced opening journal entry
+- **Food service (کافه و رستوران)** — the full path:
 
-A standalone desktop install gets one extra optional step between hardware and opening —
-**backup destination**, with a real OS folder dialog — and `/welcome` there first asks
-whether to set up locally or pair with an existing online business
-([docs/standalone-desktop-app.md](docs/standalone-desktop-app.md#first-run--local-setup-or-pairing)).
+  1. **Business info** — name, location, currency/language defaults
+  2. **Chart of accounts** — editable pre-built F&B template
+  3. **Inventory costing** — FIFO/LIFO/Weighted Average, perpetual vs periodic (locked after the first inventory transaction)
+  4. **Tax** — default VAT rate + per-category rates
+  5. **Roles & users** — Manager (email/password) and Cashier/Waiter/Kitchen (4–12-digit PIN) *(optional)*
+  6. **Menu** — manual entry or CSV/Excel import (downloadable template). The step is only ready once at least one active item exists.
+  7. **Hardware** — printer pairing + test print, the *same* panel as Settings → Printers. On the desktop app printing goes straight through Electron; in a browser/cloud till the panel installs the one-click Windows print connector. *(optional)*
+  8. **Backup destination** — local-only installs, with a real OS folder dialog *(optional)*
+  9. **Opening balances** — opening inventory count + balanced opening journal entry *(optional)*
 
-Until the wizard is completed, Owner/Manager logins are routed into it; the dashboard
-shows a "resume setup" banner.
+- **Trade-goods retail (طلا و جواهر، ساعت، بدلیجات، آرایشی، عمده‌فروشی، ابزار، خرازی)** —
+  the same path without costing and menu: the catalogue is managed in the products
+  workspace (`/accounting/products`, or the trade's own items page), and the wizard's
+  finish page points at it.
+- **Services / SaaS** — business info, chart of accounts, tax, then the optional
+  users/hardware/backup/opening steps.
+
+A standalone desktop install also has `/welcome` ask whether to set up locally or pair
+with an existing online business
+([docs/standalone-desktop-app.md](docs/standalone-desktop-app.md#first-run--local-setup-or-pairing));
+pairing imports an already-configured business and marks setup complete outright.
+
+Until `POST /api/setup/complete` stamps the completion marker (the Finish step), Owner/
+Manager logins are routed into the wizard; the dashboard shows a "resume setup" banner.
+Reaching a required step does *not* end the wizard on its own — Hardware, Backup,
+Opening and Finish stay reachable for every industry. Businesses created ready-to-use by
+the platform console (and the demo seed) are stamped complete up front, so they never
+enter onboarding.
 
 ### Optional: seed a demo business instead
 
@@ -147,24 +162,33 @@ plain VPS, Komodo, managed-Postgres PaaS, on-site machine):
 
 ### AI assistant (دستیار هوشمند)
 
-A floating assistant (bottom-left launcher) built with the shadcn UI kit, in two
-modes:
+The assistant **is** the dashboard: `/dashboard` is a full-page chat home for every
+member who holds `ai.use`, with a floating launcher, and the management sections
+(memory, coworkers, automations, activity, research, usage) open in its
+«مدیریت دستیار» panel at `/dashboard?aiPanel=<key>`. There are three **runtime
+modes**, and only three: `auto`, `instant` and `deep_research`.
 
 - **Wizard mode** — mounted on every `/setup/*` step. You describe the
-  cafe/restaurant in chat and the agent gathers the missing details, then
+  cafe/restaurant in chat and the assistant gathers the missing details, then
   proposes a fully-filled payload for that step. Nothing is written until you
   press **«تأیید و اجرا»** (human-in-the-loop); on apply it POSTs to the existing
   `/api/setup/*` endpoint and jumps to the next incomplete step. The wizard pages
   themselves are unchanged — the assistant sits on top of them.
-- **Dashboard mode** — mounted for Owner/Manager. It runs the standard reports
+- **Chat on the dashboard home** — it runs the standard reports
   (`run_report`/`list_reports`), inspects setup state, answers questions, and can
   perform allowed "jobs" (e.g. add a menu category/item) — again only through the
-  same confirmed-action gate.
+  same confirmed-action gate. Which tools it may actually call is the intersection
+  of the platform catalogue, the invoked agent's allowlist, the business's enabled
+  apps and **the member's own effective permissions**, so a cashier and an owner
+  ask the same question and get differently-scoped answers.
 
-The agent's mutations are restricted to a fixed allowlist (`ACTION_CATALOG` in
-`src/lib/ai.ts`) that maps each proposed action to an already role-guarded
-endpoint, so it can never call an arbitrary URL. Read tools run server-side and
-never mutate data.
+Every mutation is restricted to an allowlist (`ACTION_CATALOG` in
+`src/lib/ai.ts`) that maps each proposed action to an already permission-guarded
+endpoint, so it can never call an arbitrary URL, and an unknown action ID is
+refused rather than ignored. Read tools run server-side and never mutate data.
+Unattended writes — an `auto` automation, a scheduled job — re-check the acting
+member's **current** authority immediately before executing, not the state
+captured when the job was queued.
 
 **Wave 5 interaction safeguards.** Before an assistant request reaches a provider,
 the chat panel asks for confirmation against a conservative, visible credit-cost
@@ -174,53 +198,77 @@ Suggested prompt chips appear on open, and **«توضیح این عدد»** on e
 previews/pinned widgets opens the assistant with the visible report context
 pre-filled. Every proposed action is recorded in a tenant-scoped audit trail with
 the prompting user, proposed payload summary, and applied/failed/dismissed outcome,
-available to Owner/Manager at `/dashboard/ai`. No real WhatsApp, Telegram, voice,
+available to Owner/Manager in the dashboard assistant's Activity panel (`/dashboard?aiPanel=activity`). No real WhatsApp, Telegram, voice,
 SMS, or automatic customer-message channel is introduced.
 
-**Platform-owned provider and billing.** **LiteLLM** is the only supported
-provider (Phase 39 collapsed the old direct-vendor/gateway split to one connection
-shape) — one platform-owned connection configured only at `/platform/ai`. Businesses
-never enter or receive a provider key. Each assistant turn atomically reserves a
-configured maximum, settles its actual provider token usage, and refunds unused
-credit; a business with insufficient credit is blocked before a provider request.
-Credit, subscription and top-up management is not a console surface anymore: the
-ledger keeps working, and the platform console's AI section is a purely technical
-LiteLLM console. Deployment-level env variables remain bootstrap fallbacks; see
-`.env.example`.
+**Platform-owned provider and billing.** **LiteLLM** is the only supported AI connection;
+there is no direct-provider or `AI_API_KEY` fallback. The platform singleton is stored in
+`platform_ai_gateway`; app-side `LITELLM_*` connection variables are bootstrap defaults only
+until a row is saved. Businesses never enter or receive provider credentials. Each assistant turn is
+reserved, settled against provider usage and the Rial wallet/plan allowance, and blocked before
+a provider request when the business cannot pay. Plan/Billing—not the AI connection page—owns
+prices, allowances, wallet operations and revenue.
 
-**What the console does and does not own.** `/platform/ai` configures the gateway
-address, master key, chat/embedding model **aliases**, the virtual-keys toggle, and
-per-business **and per-branch** virtual-key lifecycle (provision, verify, rotate,
-revoke) plus fleet-wide readiness monitoring — searchable, filterable
-(ready / missing key / key sync error / entitlement disabled / branch override /
-gateway unavailable) and paginated so it stays usable with many tenants. It never
-becomes a billing, routing or model-policy surface: failover between upstream
-vendors, per-model rate limits/budgets, retries and MCP tool policy live entirely in
-LiteLLM's own config (`docker/litellm/config.yaml`), never in the app. Selecting a
-specific business/branch shows a scope-aware readiness view for that exact pair —
-entitlement, credential source (its own key vs. inherited from the business), model
-alias, last verification time and any technical sync error — not just the
-business-default status.
+**The AI control plane has distinct pages.** `/platform/ai` is the technical gateway and
+business/branch key lifecycle page. Runtime modes, published prompt layers, system agents,
+research caps and widgets live under `/platform/ai/modes`, `/platform/ai/prompts`,
+`/platform/ai/agents`, `/platform/ai/research` and `/platform/ai/widgets`. The fleet is
+searchable, status-filtered (ready / missing key / key sync error / entitlement disabled /
+branch override / gateway unavailable) and paginated. Selecting a specific `(business,
+location)` shows entitlement, gateway readiness, effective credential source, business and
+branch key status, inherited-vs-branch credential, effective model alias, last verification
+and separate technical sync errors. The old `/platform/ai/gateway` **page URL** redirects to
+`/platform/ai`; `/api/platform/ai/gateway` is the live API route. Prompt versioning at
+`/platform/ai/prompts` is current and is not the retired prompt-fragment manager.
 
-Two things deliberately do not move. **Billing stays in Rial** — LiteLLM's own USD
-budgets, if configured, are only a technical backstop; the ledger in
-`ai_business_billing` is still the only thing a business is billed against, and the
-gateway's reported spend is a reconciliation diagnostic. And **a gateway failure
-fails closed, never silently**: since Phase 39 there is no other provider to fall
-back to, so a gateway or database error while resolving config surfaces the
-assistant's existing "unavailable" state rather than throwing or pretending a working
-connection exists.
+**Ownership boundaries.** LiteLLM owns upstream deployments, provider routing, retries,
+fallbacks, provider-side limits and any proxy budgets. The application owns prompt versions,
+runtime modes, permission-filtered OpenAI function tools, tenant isolation, conversation and
+research orchestration, and settlement. The app no longer runs its own semantic answer cache
+or pgvector RAG stack (migration 0204). It does not send LiteLLM prompt IDs or proxy MCP
+declarations from its assistant runtime; the POS's external MCP connector at `/api/mcp` is a
+separate surface, not a proxy MCP registry. Old app-side fallback/model/MCP mirror columns
+were dropped in migration 0184. A system agent is built/versioned by Superadmin and reaches a
+business through an assignment; tenants do not build platform agents.
 
-The `litellm` container in `docker-compose.yml` is optional and off by default — a
-deployment can instead point `LITELLM_BASE_URL` at an already-managed LiteLLM
-instance. Start the bundled one with `docker compose --profile ai up -d litellm`
-(config template at `docker/litellm/config.yaml`), then finish the technical setup on
-`/platform/ai`: connection, model aliases, and per-business/per-branch keys. It is
-bound to the compose network only, never published to the host, because it holds
-every upstream vendor key and its management API can mint keys and read spend. There
-is no user-level AI settings page — a business's model alias is set by the platform.
-See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md) and
-[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md).
+Billing remains in integer Rial. LiteLLM's USD spend and optional gateway budgets are
+reconciliation/technical safeguards, not a second product wallet. Gateway or database
+resolution failures fail closed; the app has no second provider to silently fall back to.
+
+The bundled `litellm` service is optional and off by default; when AI is enabled, either run
+that profile or point the app at a separately managed LiteLLM instance. Start the bundled
+proxy with `docker compose --profile ai up -d litellm` (template:
+`docker/litellm/config.yaml`). It is not published to the host because it holds upstream
+provider credentials and exposes key-management APIs. The provider secret `OPENAI_API_KEY`
+in compose is consumed by LiteLLM only, never by the POS app. There is no tenant provider or
+model-settings page; `/dashboard/ai` is a compatibility redirect to `/dashboard`, where assistant
+panels use `?aiPanel=...`. `/dashboard/ai/settings` and `/ai/settings` also redirect to the
+dashboard. See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md),
+[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md) and
+[docs/ai-subsystem-architecture.md](docs/ai-subsystem-architecture.md) for current ownership,
+prompt composition, memory and Deep Research details.
+
+**Secret-column rollout (operators).** Against every deployment database, run
+`npm run db:encrypt-ai-secrets -- --dry-run`, then `npm run db:encrypt-ai-secrets`, then
+`npm run db:encrypt-ai-secrets -- --verify-only` with the app's current
+`INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`). While any credential is stored and the
+confirmation below is not set, the migration runner leaves 0209 pending on its own and the
+container entrypoint backfills missing ciphertext without clearing plaintext, so production
+ciphertext-backed reads/probes can be verified on every instance first. Later migrations still
+apply **except** one that names a legacy plaintext column — that case blocks the deferral
+outright, because such a migration could not run either. Drain
+pre-cutover instances, then run `AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true npm run db:migrate`.
+Both the migration runner and SQL require that post-verification confirmation when credentials
+exist. Remove the temporary flags afterward; `AI_GATEWAY_SECRET_CUTOVER_VERIFIED` is a one-time
+operator confirmation and must never become a permanent deployment default.
+
+A **bare `npm run db:migrate` will defer 0209 again** while a credential is still stored — that is
+the safety net working, not a failure. `/platform/system` reports the deferral as a gated cleanup
+awaiting verification, with the exact next steps, rather than as a generic schema-mismatch
+warning; `/platform` shows the same classification on its health tile. See
+[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md)
+for the full sequence. The local repository cannot establish that production backfill or
+verification has occurred.
 
 ## On-site deployment (café laptop / mini PC)
 
@@ -379,8 +427,9 @@ could not do was take an instruction and keep it. An owner who already knows the
 شیفت بسته می‌شود، نانی که مانده را ضایعات بزن» — had nowhere to put that sentence.
 
 A **job** is that sentence: a ready-made template, the owner's intent (which item, which reason,
-which formula), a trigger, and an approval mode. It lives at `/dashboard/ai` ← «همکار هوشمند», and
-each firing produces a **run** in the approval inbox.
+which formula), a trigger, and an approval mode. It lives in the dashboard assistant's
+Coworkers panel (`/dashboard?aiPanel=coworkers`), and each firing produces a **run** in the
+approval inbox.
 
 - **Triggers are business events, not just clock times.** `shift_open`, `shift_close` and
   `day_close` are facts `employee_shifts` and `business_day_closures` already know; a cron
@@ -1020,10 +1069,17 @@ waste, trial balance) becomes a suite an accountant can actually close a year on
   canonical record remain CRM-owned: `/dashboard/customers` is a compatibility redirect to the
   CRM directory (Owner/Manager/Cashier/Accountant, gated by the `customers.view`/`customers.manage`
   permissions), independent of the `ledger` feature flag.
-- **Bank & cash reconciliation**, **expense management** (categorised, with attachments and
-  recurring expenses), and **payroll entries** (accrual/payment postings, not a payroll engine).
-- **Manual journals** — draft → review → post, reversal rather than deletion, recurring
-  templates, and an approval permission distinct from posting.
+- **Bank & cash reconciliation**, **expense management** (categorised; paid out of a cash, bank,
+  float or card-settlement account, or recorded as owed to a named supplier — «پرداخت بعدی», which
+  credits Accounts Payable and is settled from the A/P screen like any supplier bill — with a receipt
+  photo held in the Media Library, input-VAT splitting and reversals rather than edits; *no
+  recurring/scheduled expenses*: the phase that scoped them deferred them, and no schema for them
+  exists), and **payroll** (a monthly gross-to-net run from the business's own insurance and tax rates, salary advances, commission settled with the run, and payment and void postings — journal-level, not a statutory payroll engine; see [docs/payroll.md](docs/payroll.md)).
+- **Manual journals** — draft → review → post, reversal rather than deletion, and an approval
+  permission (`ledger.approve`) distinct from proposing one (`ledger.propose`). Each draft keeps
+  its proposer, its branch, its business-local accounting date and — once decided — its
+  approver or the reviewer who rejected it and why. Recurring journal templates were
+  deliberately deferred by Phase 16 and are **not** implemented.
 - **Chart-of-accounts customisation** and **VAT/tax reporting** (output vs. input VAT, net
   payable position).
 
@@ -1043,8 +1099,9 @@ default) — and the correction is a real one, not a cosmetic change to `orders.
   report — they all filter on `status = 'completed'`.
 - Both are dated on **the day the order was sold**, not the day of the correction — the journal
   entries *and* the stock movements, so the two ledgers agree about which day the goods moved.
-  A locked or soft-closed fiscal period therefore refuses the amendment (migration 0024's
-  trigger) rather than silently moving it, and a business pushing daily summaries to a central
+  A locked or soft-closed fiscal period therefore refuses the amendment (the fiscal-period
+  database guard, originally migration 0024 and hardened in 0216) rather than silently moving it;
+  after fiscal-control adoption, an uncovered date is refused as well. A business pushing daily summaries to a central
   server (Phase 9) has its push high-water mark wound back to the amended day so central
   converges on the correction instead of keeping the stale figures.
 - Every amendment records a mandatory reason, a before/after snapshot of the bill, and an
@@ -1082,8 +1139,10 @@ A closed sale that was rung up wrongly is still corrected through the amendment 
 historical trading from another system is an import rather than a till action: the Holoo migration
 writes order-ticket sales through `src/lib/integrations/holoo/imported-sale-service.ts`, which
 dates `orders.opened_at`/`closed_at`, `payments.received_at`, `stock_movements.occurred_at` and
-`journal_entries.entry_date` to when the sale happened — so a closed fiscal period refuses the
-import (`fiscal_period_locked`) rather than absorbing it into the current one — while taking the
+`journal_entries.entry_date` to when the sale happened — so a locked/soft-closed period, or an
+uncovered date after fiscal-control adoption, refuses the import (`fiscal_period_locked`,
+`fiscal_period_soft_closed` or `fiscal_period_not_defined`) rather than absorbing it into the
+current one — while taking the
 order number off the branch's ordinary counter and never attaching a `table_id`.
 
 ## Feature Gating & Platform Hardening (Phase 17)

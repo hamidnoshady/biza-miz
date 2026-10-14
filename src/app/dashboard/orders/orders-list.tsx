@@ -761,7 +761,9 @@ export function OrdersList({
               className="flex items-center gap-2 border-b border-border/80 bg-muted px-4 py-2 text-[11px] text-muted-foreground"
               role="status"
             >
+              {/* role="img": aria-label is prohibited on a role-less span (axe aria-prohibited-attr). */}
               <span
+                role="img"
                 title="راهنمای بازه سفارش‌ها"
                 className="inline-flex shrink-0"
                 aria-label="راهنمای بازه سفارش‌ها"

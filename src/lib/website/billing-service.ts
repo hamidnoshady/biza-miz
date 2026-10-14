@@ -236,7 +236,7 @@ export async function recordWebsiteCharge(input: RecordChargeInput): Promise<Cha
 
   if (input.settle === false || amount === 0) return { status: "recorded" };
 
-  await ensureWebsiteInvoice({
+  const invoiceId = await ensureWebsiteInvoice({
     businessId: input.businessId,
     reference: invoiceReference,
     amount,
@@ -246,13 +246,18 @@ export async function recordWebsiteCharge(input: RecordChargeInput): Promise<Cha
   });
 
   try {
+    // `metadata.invoiceId` is what makes the wallet debit the authoritative
+    // settlement record for this invoice rather than a bare wallet spend. The
+    // platform company's billing → accounting bridge reads exactly this field;
+    // without it the charge would be posted twice — once as wallet revenue and
+    // again as a bank receipt.
     const { balanceRial } = await chargeFeatureUse({
       businessId: input.businessId,
       featureKey: WEBSITE_FEATURE_KEY,
       priceRial: amount,
       note: input.description,
       userId: input.userId ?? null,
-      metadata: { kind: input.kind, reference: input.reference },
+      metadata: { kind: input.kind, reference: input.reference, invoiceId },
     });
     await query(
       `UPDATE billing_invoices SET status = 'paid', paid_rial = total_rial, updated_at = now()
@@ -283,7 +288,7 @@ async function ensureWebsiteInvoice(input: {
   description: string;
   periodStart: string | null;
   periodEnd: string | null;
-}): Promise<void> {
+}): Promise<string | null> {
   const { getPool } = await import("../db");
   const { allocateInvoiceNumber } = await import("../billing/runtime");
   const client = await getPool().connect();
@@ -307,7 +312,19 @@ async function ensureWebsiteInvoice(input: {
         [rows[0].id, input.description, input.amount],
       );
     }
+    if (rows[0]) {
+      await client.query("COMMIT");
+      return rows[0].id;
+    }
+    // The invoice for this period already exists (a retry, or a charge recorded
+    // before settlement). Its id is still needed so the wallet debit names the
+    // invoice it settles.
+    const { rows: existing } = await client.query<{ id: string }>(
+      `SELECT id FROM billing_invoices WHERE business_id = $1 AND reference = $2`,
+      [input.businessId, input.reference],
+    );
     await client.query("COMMIT");
+    return existing[0]?.id ?? null;
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;

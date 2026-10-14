@@ -5,6 +5,7 @@ import { CircleAlertIcon, InfoIcon } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
+import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 
 /**
  * The dashboard's fetch wrapper.
@@ -28,17 +29,36 @@ export async function api<T = Record<string, unknown>>(
   url: string,
   init?: RequestInit,
 ): Promise<{ ok: boolean; status: number; data: T; aborted: boolean }> {
+  // Helper to detect abort at any point: AbortController can fire between
+  // `await fetch(...)` resolving and our next `await res.json()`, or even
+  // mid-stream during JSON parsing, in which case the json() catch block would
+  // otherwise surface as a spurious ok:true/empty-body (issue #824 review
+  // item 3). Check the signal explicitly on every exit path.
+  const isAborted = () => init?.signal?.aborted === true;
   try {
     const res = await fetch(url, {
       headers: init?.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
       ...init,
     });
+    // Abort can fire between headers arriving and body consumption.
+    if (isAborted()) {
+      return { ok: false, status: 0, data: {} as T, aborted: true };
+    }
     let data: T;
     try {
       data = (await res.json()) as T;
-    } catch {
+    } catch (jsonErr) {
+      // If the body stream was aborted mid-read, surface that rather than
+      // swallowing into {} — an AbortError during body consumption is a
+      // deliberate cancellation, not a malformed response.
+      if (isAborted() || (jsonErr instanceof DOMException && jsonErr.name === "AbortError")) {
+        return { ok: false, status: 0, data: {} as T, aborted: true };
+      }
       // A 204, an HTML error page from a proxy, or a body cut off mid-flight.
       data = {} as T;
+    }
+    if (isAborted()) {
+      return { ok: false, status: 0, data: {} as T, aborted: true };
     }
     // Section 12 (professional error handling) follow-up: a 5xx is the
     // server itself failing, not a validation rejection — worth capturing in
@@ -62,8 +82,7 @@ export async function api<T = Record<string, unknown>>(
     // `network_error` would put «ارتباط با سرور برقرار نشد» on screen every time
     // a newer search superseded an older one, which is the normal path, not a
     // failure. Callers that pass `init.signal` check `aborted` and return.
-    const aborted =
-      init?.signal?.aborted === true || (err instanceof DOMException && err.name === "AbortError");
+    const aborted = isAborted() || (err instanceof DOMException && err.name === "AbortError");
     if (!aborted) {
       recordApiFailure({ method: init?.method ?? "GET", url, status: 0, code: "network_error" });
     }
@@ -78,6 +97,9 @@ export async function api<T = Record<string, unknown>>(
 
 /** Persian messages for the API's error codes. */
 const ERROR_MESSAGES: Record<string, string> = {
+    // The fixed-asset register's domain errors live in their own dictionary
+    // (fixed-assets-errors.ts) — spread here so every screen shares them.
+    ...FIXED_ASSET_ERROR_TRANSLATIONS,
     unauthorized: "وارد نشده‌اید.",
     forbidden: "دسترسی مجاز نیست.",
     bad_request: "درخواست نامعتبر بود.",
@@ -126,6 +148,10 @@ const ERROR_MESSAGES: Record<string, string> = {
     account_has_postings: "این حساب سند خورده و قابل حذف نیست؛ می‌توانید آن را غیرفعال کنید.",
     account_has_draft_postings: "این حساب در یک پیش‌نویس استفاده شده و قابل حذف نیست.",
     account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
+    parent_has_active_children: "نمی‌توان حسابی را که زیرمجموعهٔ فعال دارد بایگانی کرد؛ ابتدا زیرمجموعه‌ها را بایگانی یا جابه‌جا کنید.",
+    ancestor_archived: "نمی‌توان این حساب را فعال کرد؛ یکی از حساب‌های والد در زنجیره هنوز بایگانی است.",
+    parent_type_mismatch: "نوع حساب زیرمجموعه باید با نوع شاخهٔ والد یکسان باشد.",
+    parent_archived: "نمی‌توان حساب را زیر یک حساب بایگانی‌شده ایجاد یا جابه‌جا کرد.",
     missing_file: "فایل را انتخاب کنید.",
     file_too_large: "حجم فایل بیش از حد مجاز است.",
     unsupported_format: "فرمت فایل پشتیبانی نمی‌شود. CSV یا XLSX استفاده کنید.",
@@ -162,6 +188,16 @@ const ERROR_MESSAGES: Record<string, string> = {
     item_not_found: "آیتم پیدا نشد.",
     group_not_found: "گروه افزودنی پیدا نشد.",
     modifier_not_found: "افزودنی پیدا نشد.",
+    // Menu manager (issue #844) — canonical menu service codes.
+    sku_exists: "کد کالا (SKU) تکراری است؛ کد دیگری وارد کنید.",
+    group_name_exists: "گروه افزودنی دیگری با این نام وجود دارد.",
+    modifier_exists: "افزودنی دیگری با این نام در این گروه وجود دارد.",
+    reorder_mismatch:
+      "ترتیب ارسال‌شده با فهرست فعلی همخوان ندارد؛ فهرست را تازه کنید و دوباره مرتب کنید.",
+    invalid_media:
+      "تصویر انتخاب‌شده معتبر نیست؛ تصویر را از کتابخانهٔ رسانهٔ همین کسب‌وکار انتخاب کنید.",
+    no_suggestion:
+      "برای این آیتم قیمت پیشنهادی محاسبه نشده است؛ ابتدا دستورعمل یا حاشیهٔ سود را کامل کنید.",
     table_exists: "میزی با این نام وجود دارد.",
     table_not_found: "میز پیدا نشد.",
     table_required: "برای سفارش حضوری انتخاب میز الزامی است.",
@@ -251,8 +287,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     reconnect_required: "این چاپگر باید دوباره متصل شود.",
     // Phase 7 — ledger
     ledger_account_missing: "یکی از حساب‌های مورد نیاز سیستم در سرفصل حساب‌ها یافت نشد. سرفصل حساب‌ها را بررسی کنید.",
-    fiscal_period_locked: "دورهٔ مالی این تاریخ بسته شده و ثبت سند در آن ممکن نیست.",
-    fiscal_period_soft_closed: "دورهٔ مالی این تاریخ نیمه‌بسته است؛ فقط مالک یا حسابدار می‌تواند در آن سند ثبت کند.",
+    fiscal_period_locked: "دورهٔ مالی این تاریخ قفل شده و ثبت یا ویرایش سند در آن ممکن نیست.",
+    fiscal_period_soft_closed: "دورهٔ مالی این تاریخ بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است.",
+    fiscal_period_not_defined: "این تاریخ در هیچ دورهٔ مالیِ تعریف‌شده‌ای قرار نمی‌گیرد. در حسابداری، بخش «سال‌ها و دوره‌های مالی»، سال شمسیِ مربوط را تعریف کنید؛ تا آن زمان ثبت سند پذیرفته نمی‌شود.",
     // Phase 16 — سند دستی (manual journal: draft → review → post, and reversal).
     // These reach this shared map whenever a screen shows a manual-journal
     // failure through `errorMessage` rather than the accounting manager's own
@@ -365,14 +402,140 @@ const ERROR_MESSAGES: Record<string, string> = {
     // Not a usable YYYY-MM-DD calendar date — what the ledger's aging and
     // voucher routes answer a malformed date parameter with.
     invalid_date: "تاریخ واردشده معتبر نیست.",
+    // A wrong-typed memo off the wire (a number, an object) — rejected as a
+    // 400, never trimmed into a TypeError 500.
+    invalid_memo: "شرح واردشده معتبر نیست.",
+    // پروفایل کسب‌وکار و پروژه‌های AEC (issue #799، موج ۲)
+    industry_mismatch: "این بخش فقط برای کسب‌وکارهای عمران، معماری و پیمانکاری است.",
+    invalid_operating_profile: "پروفایل کسب‌وکار انتخابی معتبر نیست.",
+    invalid_coordinate: "مختصات جغرافیایی معتبر نیست.",
+    invalid_area: "متراژ باید عددی نامنفی باشد.",
+    invalid_floor_count: "تعداد طبقات باید عددی بین ۰ و ۵۰۰ باشد.",
+    invalid_progress: "درصد پیشرفت باید عددی بین ۰ و ۱۰۰ باشد.",
+    invalid_reference: "یکی از موارد انتخاب‌شده معتبر نیست.",
+    role_not_allowed:
+      "این نقش با پروفایل کسب‌وکار شما سازگار نیست؛ برای فعال‌کردن آن، قابلیت مربوط را در تنظیمات روشن کنید.",
+    participant_exists: "این طرف با همین نقش از قبل برای این پروژه ثبت شده است.",
+    participant_not_found: "طرف پروژه پیدا نشد یا قبلاً حذف شده است.",
+    project_not_found: "پروژه پیدا نشد.",
+    end_before_start: "تاریخ پایان نمی‌تواند پیش از تاریخ شروع باشد.",
+    // AEC registers — registration, document control, RFIs, submittals and the
+    // site (issue #799, waves 4–7). The API answers these codes and the AEC
+    // panels render them through `workspaceError`, so a code with no sentence
+    // here reached the user as `submittal_revision_not_editable`. The Wave 7
+    // entries are the bottom block.
+    capability_disabled:
+      "این قابلیت برای کسب‌وکار شما روشن نیست؛ از «تنظیمات ← کسب‌وکار» می‌توانید آن را روشن کنید.",
+    estimate_not_found: "برآورد پیدا نشد.",
+    estimate_version_not_found: "نسخهٔ برآورد پیدا نشد.",
+    version_not_editable: "این نسخه دیگر قابل ویرایش نیست.",
+    invalid_estimate_transition: "این تغییر وضعیت برای نسخهٔ برآورد مجاز نیست.",
+    estimate_has_approved_version: "این برآورد نسخهٔ تأییدشده دارد و قابل حذف نیست.",
+    estimate_empty: "برآورد خالی است؛ ابتدا ردیف‌های متره را ثبت کنید.",
+    boq_total_out_of_range: "مبلغ برآورد از سقف مجاز بیشتر است.",
+    drawing_not_found: "نقشه یا سند پیدا نشد.",
+    revision_not_found: "بازنگری پیدا نشد.",
+    transmittal_not_found: "برگهٔ ارسال پیدا نشد.",
+    document_number_taken: "این شمارهٔ سند قبلاً ثبت شده است.",
+    revision_code_taken: "این کد بازنگری قبلاً ثبت شده است.",
+    transmittal_number_taken: "این شمارهٔ برگهٔ ارسال قبلاً ثبت شده است.",
+    revision_not_editable: "این بازنگری دیگر قابل تغییر نیست.",
+    transmittal_not_editable: "این برگهٔ ارسال دیگر قابل تغییر نیست.",
+    drawing_has_issued_revisions: "این سند بازنگری صادرشده دارد و قابل حذف نیست.",
+    transmittal_empty: "برگهٔ ارسال بدون ردیف قابل صدور نیست.",
+    transmittal_has_no_recipients: "برگهٔ ارسال بدون گیرنده قابل صدور نیست.",
+    transmittal_not_issued: "این برگهٔ ارسال هنوز صادر نشده است.",
+    recipient_already_acknowledged: "این دریافت قبلاً ثبت شده است.",
+    rfi_not_found: "استعلام پیدا نشد.",
+    submittal_not_found: "سابمیتال پیدا نشد.",
+    submittal_revision_not_found: "بازنگری سابمیتال پیدا نشد.",
+    media_not_found: "فایل انتخاب‌شده در کتابخانهٔ رسانه پیدا نشد.",
+    rfi_number_taken: "این شمارهٔ استعلام قبلاً ثبت شده است.",
+    submittal_number_taken: "این شمارهٔ سابمیتال قبلاً ثبت شده است.",
+    rfi_not_editable: "این استعلام در این وضعیت قابل ویرایش نیست.",
+    submittal_not_editable: "این سابمیتال در این وضعیت قابل ویرایش نیست.",
+    submittal_revision_not_editable: "این بازنگری دیگر قابل تغییر نیست.",
+    submittal_has_submitted_revisions: "این سابمیتال بازنگری ارسال‌شده دارد و قابل حذف نیست.",
+    submittal_first_revision_required: "سابمیتال باید دست‌کم یک بازنگری داشته باشد.",
+    invalid_rfi_transition: "این تغییر وضعیت برای استعلام مجاز نیست.",
+    invalid_submittal_transition: "این تغییر وضعیت برای سابمیتال مجاز نیست.",
+    // Issue #799 Wave 7 — the daily log and §14's register.
+    site_log_not_found: "گزارش روزانه پیدا نشد.",
+    site_issue_not_found: "مورد کارگاه پیدا نشد.",
+    checklist_not_found: "چک‌لیست پیدا نشد.",
+    site_log_exists: "برای این تاریخ قبلاً گزارش روزانه ثبت شده است؛ همان را ویرایش کنید.",
+    site_issue_number_taken: "این شمارهٔ مورد قبلاً در پروژه ثبت شده است.",
+    checklist_name_taken: "چک‌لیستی با همین نام قبلاً ثبت شده است.",
+    site_log_not_editable: "این گزارش در این وضعیت قابل ویرایش نیست.",
+    site_issue_not_editable: "این مورد در این وضعیت قابل تغییر نیست.",
+    invalid_site_log_transition: "این تغییر وضعیت برای گزارش روزانه مجاز نیست.",
+    invalid_site_issue_transition: "این تغییر وضعیت برای مورد کارگاه مجاز نیست.",
+    site_log_work_required: "شرح کارهای انجام‌شده را بنویسید؛ گزارش خالی ثبت نمی‌شود.",
+    site_issue_title_required: "عنوان مورد الزامی است.",
+    site_issue_resolution_required: "شرح اقدام انجام‌شده را بنویسید.",
+    site_issue_result_required: "برای بستن بازرسی، نتیجهٔ آن (قبول/قبول با تذکر/رد) را ثبت کنید.",
+    site_issue_verifier_is_assignee:
+      "تأیید نهایی را نمی‌تواند کسی ثبت کند که خودش مسئول رفع نقص بوده است؛ فرد دیگری آن را تأیید کند.",
+    checklist_not_for_kind: "چک‌لیست فقط برای بازرسی و تحویل به‌کار می‌رود.",
+    invalid_site_log_line: "یکی از ردیف‌های گزارش روزانه کامل یا معتبر نیست.",
+    invalid_site_issue_kind: "نوع مورد کارگاه نامعتبر است.",
+    invalid_site_check: "یکی از ردیف‌های چک‌لیست معتبر نیست.",
+    invalid_site_issue_result: "نتیجهٔ بازرسی نامعتبر است.",
+    invalid_category: "دستهٔ انتخاب‌شده معتبر نیست.",
+    invalid_severity: "شدت انتخاب‌شده معتبر نیست.",
+    invalid_checklist_kind: "نوع چک‌لیست نامعتبر است.",
+    // Wave 5's drawing register raises this too; it had no sentence because only
+    // the picker could reach it, and the picker is built from the catalogue.
+    invalid_discipline: "رشتهٔ انتخاب‌شده معتبر نیست.",
+    checklist_name_required: "نام چک‌لیست الزامی است.",
+    checklist_item_required: "عنوان هر ردیف چک‌لیست الزامی است.",
+    // Issue #799 Wave 8 — the commercial controls: change orders, payment
+    // certificates and the contract's commercial block. Every sentence is a
+    // refusal an accountant has to act on, so each says what to do next rather
+    // than only what went wrong.
+    variation_not_found: "تغییر پیدا نشد.",
+    certificate_not_found: "صورت‌وضعیت پیدا نشد.",
+    contract_not_found: "قرارداد پیدا نشد.",
+    contract_project_mismatch: "قرارداد انتخاب‌شده به این پروژه تعلق ندارد.",
+    rfi_project_mismatch: "استعلام انتخاب‌شده به این پروژه تعلق ندارد.",
+    boq_item_not_found: "ردیف متره انتخاب‌شده پیدا نشد.",
+    boq_item_project_mismatch: "ردیف متره انتخاب‌شده به این پروژه تعلق ندارد.",
+    invalid_variation_source: "منشأ تغییر نامعتبر است.",
+    invalid_certificate_kind: "نوع صورت‌وضعیت نامعتبر است.",
+    variation_description_required: "شرح تغییر الزامی است.",
+    variation_not_editable:
+      "این تغییر در این وضعیت قابل ویرایش نیست؛ برای اصلاح، ابتدا آن را بازگشایی کنید.",
+    certificate_not_editable:
+      "این صورت‌وضعیت در این وضعیت قابل ویرایش نیست؛ برای اصلاح، ابتدا آن را به پیش‌نویس برگردانید.",
+    invalid_variation_transition: "این تغییر وضعیت برای تغییر مجاز نیست.",
+    invalid_certificate_transition: "این تغییر وضعیت برای صورت‌وضعیت مجاز نیست.",
+    variation_estimate_required:
+      "برای قیمت‌گذاری تغییر، ابتدا برآورد داخلی آن را ثبت کنید.",
+    variation_submitted_amount_required: "برای ارسال تغییر، مبلغ پیشنهادی را ثبت کنید.",
+    variation_approved_amount_required: "برای تأیید تغییر، مبلغ توافق‌شده را ثبت کنید.",
+    certificate_period_required: "دورهٔ اندازه‌گیری (شروع و پایان) الزامی است.",
+    invalid_certificate_period: "تاریخ پایان دوره نباید پیش از شروع آن باشد.",
+    certificate_line_label_required: "برای هر ردیف اندازه‌گیری، شرح الزامی است.",
+    certificate_deductions_exceed_gross:
+      "جمع کسورات از مبلغ کار انجام‌شده بیشتر است؛ ارقام را بازبینی کنید.",
+    certificate_lines_mismatch:
+      "جمع ردیف‌های اندازه‌گیری با مبلغ ناخالص صورت‌وضعیت برابر نیست؛ یکی را اصلاح کنید.",
+    approved_amount_exceeds_net: "مبلغ تأییدشده نمی‌تواند از مبلغ خالص صورت‌وضعیت بیشتر باشد.",
+    advance_over_recovery:
+      "بازیافت پیش‌پرداخت از ماندهٔ پیش‌پرداخت قرارداد بیشتر است؛ پیش‌پرداخت پرداخت‌شده را بررسی کنید.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
+    supplier_location_mismatch: "تأمین‌کننده به شعبهٔ دیگری تعلق دارد؛ شعبهٔ درست را انتخاب کنید.",
+    supplier_record_missing: "برای این شخص در شعبهٔ انتخاب‌شده، پروندهٔ تأمین‌کننده وجود ندارد.",
+    installment_location_required: "این برنامهٔ پرداختنی به شعبه مشخصی وابسته نیست و چند پروندهٔ تأمین‌کننده دارد؛ ابتدا شعبهٔ آن را تعیین کنید.",
+    idempotency_key_required: "شناسهٔ یکتای درخواست پرداخت معتبر نیست؛ فرم را تازه‌سازی و دوباره تلاش کنید.",
+    idempotency_conflict: "شناسهٔ درخواست قبلاً با جزئیات دیگری استفاده شده است؛ برای این پرداخت درخواست تازه‌ای بسازید.",
+    payment_not_found: "پرداخت موردنظر پیدا نشد.",
+    payment_not_reversible: "این پرداخت سند قابل برگشت ندارد یا از این مسیر قابل برگشت نیست.",
     // Phase 22 — fixed assets & depreciation
-    fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-    fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
-    period_already_depreciated: "استهلاک این دوره قبلاً برای این دارایی ثبت شده است.",
-    fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است.",
     salvage_value_invalid: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
+    // Issue #833 — fixed-asset lifecycle
+    location_required: "انتخاب شعبه الزامی است.",
     // Phase 16 — bank & cash reconciliation
     invalid_account: "حساب انتخاب‌شده معتبر نیست.",
     statement_date_required: "تاریخ صورتحساب الزامی است.",
@@ -386,8 +549,13 @@ const ERROR_MESSAGES: Record<string, string> = {
     negative_statement_balance:
       "مانده صورتحساب صندوق یا کارت‌خوان نمی‌تواند منفی باشد؛ مانده پایانی را وارد کنید، نه گردش دوره.",
     journal_line_not_found: "سند انتخاب‌شده معتبر نیست.",
+    journal_line_required: "هیچ سندی انتخاب نشده است.",
     journal_line_already_reconciled: "این سند در یک تطبیق قفل‌شدهٔ دیگر ثبت شده و دوباره قابل تطبیق نیست.",
     balance_mismatch: "مانده محاسبه‌شده با مانده صورتحساب برابر نیست.",
+    // A future statement would lock the account against every real statement
+    // after it, so the server refuses it rather than warning about it.
+    statement_date_in_future:
+      "تاریخ صورتحساب نمی‌تواند در آینده باشد؛ تاریخ پایان صورتحسابی را وارد کنید که دریافت کرده‌اید.",
     // Phase 17 — plan limits / feature gating
     feature_disabled: "این امکان برای کسب‌وکار شما فعال نیست.",
     branch_limit_exceeded: "به سقف تعداد شعبه در پلن فعلی رسیده‌اید. برای افزودن شعبهٔ بیشتر، پلن را ارتقا دهید.",
@@ -436,6 +604,7 @@ const ERROR_MESSAGES: Record<string, string> = {
     confirmation_mismatch: "عبارت تأیید دقیقاً مطابق متن خواسته‌شده نیست.",
     unknown_profile: "ابتدا اتصال هلو را تست کنید تا پروفایل ساختار دیتابیس شناسایی شود.",
     holoo_direct_sql_profile_not_pinned: "پروفایل فعلی با پروفایل پین‌شده برای SQL مستقیم هم‌خوان نیست؛ دوباره تست و مسلح‌سازی کنید.",
+    direct_sql_not_supported: "هیچ‌یک از پروفایل‌های فعلی هلو نوشتن مستقیم SQL را مجاز نمی‌کند؛ وب‌سرویس را انتخاب کنید.",
     holoo_owned: "این ردیف از هلو آمده و در حالت همراه مالکیت آن با هلو است.",
     opening_inventory_exists: "موجودی افتتاحیه قبلاً ثبت شده است.",
     missing_manifest: "فایل/مانیفست مهاجرت ارسال نشده است.",
@@ -528,7 +697,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_domain_mode: "نوع تأمین دامنه معتبر نیست.",
     invalid_cdn_provider: "ارائه‌دهندهٔ CDN معتبر نیست.",
     invalid_cdn_status: "وضعیت CDN معتبر نیست.",
-    invalid_period: "مدت ثبت دامنه باید بین ۱ تا ۵ سال باشد.",
     invalid_operation: "نوع عملیات دامنه معتبر نیست.",
     // `invalid_status` is already mapped above (the floor-plan's table status)
     // and the CMS order select only ever submits one of its four options, so
@@ -586,15 +754,12 @@ const ERROR_MESSAGES: Record<string, string> = {
     run_voided: "این تعهد ابطال شده و قابل پرداخت نیست.",
     run_not_found: "تعهد حقوق پیدا نشد.",
     no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
-    period_label_required: "عنوان دوره الزامی است.",
-    period_label_too_long: "عنوان دوره بیش از حد طولانی است.",
     invalid_accrual_date: "تاریخ تعهد معتبر نیست.",
     invalid_paid_date: "تاریخ پرداخت معتبر نیست.",
     // «حقوق ماهانه» is saved through ui.tsx's own errorMessage, so the wage
     // screen's 404 needs a message here too — without it a wage saved against
     // a member who was just deactivated reported «خطای غیرمنتظره».
     user_not_found: "عضو موردنظر پیدا نشد.",
-    supplier_record_missing: "این شخص در فهرست تأمین‌کنندگان ثبت نشده است؛ ابتدا او را به‌عنوان تأمین‌کننده ثبت کنید.",
     installment_amount_too_small: "مبلغ هر قسط بسیار کم است؛ تعداد اقساط را کاهش دهید.",
     item_required: "قسط را انتخاب کنید.",
 };
@@ -695,19 +860,29 @@ export function PrimaryButton({
   );
 }
 
+/**
+ * The default is `type="button"` — and it is a default rather than an
+ * afterthought because every `<button>` inside a `<form>` submits that form
+ * unless something says otherwise. A secondary control («افزودن ردیف»,
+ * «انصراف», a pager) that a person reaches for while filling a form must never
+ * be the thing that files it; `type` is exposed so a caller can still ask for
+ * `submit` explicitly instead of relying on the browser's default.
+ */
 export function SecondaryButton({
   children,
   onClick,
   disabled,
   className,
+  type = "button",
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   className?: string;
+  type?: "submit" | "button";
 }) {
   return (
-    <Button type="button" variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
+    <Button type={type} variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
       {children}
     </Button>
   );

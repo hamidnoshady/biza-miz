@@ -53,3 +53,6 @@ docs/design/visual/__diff__/
 # output. One was committed once and went stale against a two-version-old
 # electron-builder; ignore the shape so it cannot happen again.
 electron/build-output.log
+
+# Local read-only reporting browser-review screenshots (not approved baselines).
+.cache/platform-report-smoke/

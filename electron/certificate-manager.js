@@ -3,8 +3,18 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const forge = require("node-forge");
+// @peculiar/x509 resolves its algorithm providers through tsyringe, which needs this first.
+require("reflect-metadata");
+const x509 = require("@peculiar/x509");
 const { computePaths } = require("./app-paths");
+
+// Certificates are built with @peculiar/x509 over Node's own WebCrypto. It
+// replaced node-forge (GHSA-86w9-cpqp-85rv, no fix available upstream). A CA
+// an older build wrote — PKCS#1 key, forge-encoded certificate — is still read
+// and still signs: phones already trust it, so it must never be replaced.
+x509.cryptoProvider.set(crypto.webcrypto);
+const { subtle } = crypto.webcrypto;
+const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256", publicExponent: new Uint8Array([1, 0, 1]), modulusLength: 2048 };
 
 function pemFingerprint(pem) {
   const der = Buffer.from(pem.replace(/-----(?:BEGIN|END) CERTIFICATE-----|\s/g, ""), "base64");
@@ -16,8 +26,23 @@ function writePrivate(file, content) {
   try { fs.chmodSync(file, 0o600); } catch {}
 }
 
+/** A positive 128-bit serial (the leading 01 keeps the DER INTEGER's sign bit clear). */
 function serial() {
-  return crypto.randomBytes(16).toString("hex").replace(/^0+/, "1");
+  return `01${crypto.randomBytes(15).toString("hex")}`;
+}
+
+async function generateKeys() {
+  return subtle.generateKey(RSA, true, ["sign", "verify"]);
+}
+
+async function privateKeyPem(key) {
+  return x509.PemConverter.encode(await subtle.exportKey("pkcs8", key), "PRIVATE KEY");
+}
+
+/** Any PEM private key (PKCS#1 from forge, or PKCS#8) as a WebCrypto signing key. */
+async function importPrivateKey(pem) {
+  const der = crypto.createPrivateKey(pem).export({ type: "pkcs8", format: "der" });
+  return subtle.importKey("pkcs8", der, RSA, false, ["sign"]);
 }
 
 function createCertificateManager(userDataDir, logger) {
@@ -32,39 +57,41 @@ function createCertificateManager(userDataDir, logger) {
   const leafCertPath = path.join(directory, "gateway-cert.pem");
   const metadataPath = path.join(directory, "gateway-certificate.json");
 
-  function ensureCa() {
+  async function ensureCa() {
     fs.mkdirSync(directory, { recursive: true });
     if (fs.existsSync(caKeyPath) && fs.existsSync(caCertPath)) {
       return {
-        key: forge.pki.privateKeyFromPem(fs.readFileSync(caKeyPath, "utf8")),
-        cert: forge.pki.certificateFromPem(fs.readFileSync(caCertPath, "utf8")),
+        key: await importPrivateKey(fs.readFileSync(caKeyPath, "utf8")),
+        cert: new x509.X509Certificate(fs.readFileSync(caCertPath, "utf8")),
       };
     }
     logger.info("Generating local mobile-access certificate authority");
-    const keys = forge.pki.rsa.generateKeyPair(2048);
-    const cert = forge.pki.createCertificate();
-    cert.publicKey = keys.publicKey;
-    cert.serialNumber = serial();
-    cert.validity.notBefore = new Date(Date.now() - 5 * 60_000);
-    cert.validity.notAfter = new Date(Date.now() + 10 * 365 * 24 * 60 * 60_000);
-    const attrs = [
-      { name: "commonName", value: "Business Suite Local CA" },
-      { name: "organizationName", value: "Business Suite Local Installation" },
-    ];
-    cert.setSubject(attrs);
-    cert.setIssuer(attrs);
-    cert.setExtensions([
-      { name: "basicConstraints", cA: true, critical: true },
-      { name: "keyUsage", keyCertSign: true, cRLSign: true, digitalSignature: true, critical: true },
-      { name: "subjectKeyIdentifier" },
-    ]);
-    cert.sign(keys.privateKey, forge.md.sha256.create());
-    writePrivate(caKeyPath, forge.pki.privateKeyToPem(keys.privateKey));
-    fs.writeFileSync(caCertPath, forge.pki.certificateToPem(cert), { encoding: "utf8", mode: 0o644 });
+    const keys = await generateKeys();
+    const name = "CN=Business Suite Local CA, O=Business Suite Local Installation";
+    const cert = await x509.X509CertificateGenerator.create({
+      serialNumber: serial(),
+      subject: name,
+      issuer: name,
+      notBefore: new Date(Date.now() - 5 * 60_000),
+      notAfter: new Date(Date.now() + 10 * 365 * 24 * 60 * 60_000),
+      signingAlgorithm: RSA,
+      publicKey: keys.publicKey,
+      signingKey: keys.privateKey,
+      extensions: [
+        new x509.BasicConstraintsExtension(true, undefined, true),
+        new x509.KeyUsagesExtension(
+          x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign | x509.KeyUsageFlags.digitalSignature,
+          true,
+        ),
+        await x509.SubjectKeyIdentifierExtension.create(keys.publicKey),
+      ],
+    });
+    writePrivate(caKeyPath, await privateKeyPem(keys.privateKey));
+    fs.writeFileSync(caCertPath, cert.toString("pem"), { encoding: "utf8", mode: 0o644 });
     return { key: keys.privateKey, cert };
   }
 
-  function ensureLeaf(addresses, force = false) {
+  async function ensureLeaf(addresses, force = false) {
     const normalized = [...new Set(addresses)].sort();
     if (!force && fs.existsSync(metadataPath) && fs.existsSync(leafKeyPath) && fs.existsSync(leafCertPath)) {
       try {
@@ -74,41 +101,43 @@ function createCertificateManager(userDataDir, logger) {
         }
       } catch {}
     }
-    const ca = ensureCa();
+    const ca = await ensureCa();
     logger.info("Generating HTTPS gateway certificate", { addresses: normalized.join(",") });
-    const keys = forge.pki.rsa.generateKeyPair(2048);
-    const cert = forge.pki.createCertificate();
-    cert.publicKey = keys.publicKey;
-    cert.serialNumber = serial();
-    cert.validity.notBefore = new Date(Date.now() - 5 * 60_000);
+    const keys = await generateKeys();
     // Apple and Chromium enforce the modern 398-day maximum for publicly
     // trusted-style TLS server leaves even when onboarding a private local CA.
-    cert.validity.notAfter = new Date(Date.now() + 397 * 24 * 60 * 60_000);
-    cert.setSubject([
-      { name: "commonName", value: normalized[0] || "business-suite.local" },
-      { name: "organizationName", value: "Business Suite Local Installation" },
-    ]);
-    cert.setIssuer(ca.cert.subject.attributes);
-    cert.setExtensions([
-      { name: "basicConstraints", cA: false, critical: true },
-      { name: "keyUsage", digitalSignature: true, keyEncipherment: true, critical: true },
-      { name: "extKeyUsage", serverAuth: true },
-      {
-        name: "subjectAltName",
-        altNames: [
-          { type: 2, value: "business-suite.local" },
-          ...normalized.map((ip) => ({ type: 7, ip })),
-        ],
-      },
-    ]);
-    cert.sign(ca.key, forge.md.sha256.create());
-    const certPem = forge.pki.certificateToPem(cert);
-    writePrivate(leafKeyPath, forge.pki.privateKeyToPem(keys.privateKey));
+    const notAfter = new Date(Date.now() + 397 * 24 * 60 * 60_000);
+    const cert = await x509.X509CertificateGenerator.create({
+      serialNumber: serial(),
+      subject: new x509.Name([
+        { CN: [normalized[0] || "business-suite.local"] },
+        { O: ["Business Suite Local Installation"] },
+      ]),
+      // The CA's subject as it is encoded, byte for byte, so the chain also
+      // builds from a CA an older (forge) build wrote.
+      issuer: ca.cert.subjectName,
+      notBefore: new Date(Date.now() - 5 * 60_000),
+      notAfter,
+      signingAlgorithm: RSA,
+      publicKey: keys.publicKey,
+      signingKey: ca.key,
+      extensions: [
+        new x509.BasicConstraintsExtension(false, undefined, true),
+        new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature | x509.KeyUsageFlags.keyEncipherment, true),
+        new x509.ExtendedKeyUsageExtension([x509.ExtendedKeyUsage.serverAuth]),
+        new x509.SubjectAlternativeNameExtension([
+          { type: "dns", value: "business-suite.local" },
+          ...normalized.map((ip) => ({ type: "ip", value: ip })),
+        ]),
+      ],
+    });
+    const certPem = cert.toString("pem");
+    writePrivate(leafKeyPath, await privateKeyPem(keys.privateKey));
     fs.writeFileSync(leafCertPath, certPem, { encoding: "utf8", mode: 0o644 });
     const meta = {
       addresses: normalized,
       generatedAt: new Date().toISOString(),
-      expiresAt: cert.validity.notAfter.toISOString(),
+      expiresAt: notAfter.toISOString(),
       fingerprint: pemFingerprint(certPem),
       caFingerprint: pemFingerprint(fs.readFileSync(caCertPath, "utf8")),
     };

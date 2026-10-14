@@ -9,6 +9,7 @@
  * never move); the gold account is a signed gram subledger whose balance is a
  * SUM, never a stored column.
  */
+import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { createItem, setWeightAttributes } from "./items-service";
@@ -16,7 +17,7 @@ import { query } from "./db";
 import { roundRial, rialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
 import { computeBuyBack, validateBuyBackInput } from "./gold-buyback";
-import { layawayBook } from "./industry-reports";
+import type { LayawayBook } from "./industry-reports";
 import type { Purity } from "./gold";
 // Side-effect import: registers the jewelry.* flagship posting rules.
 import "./jewelry-flagship-posting-rules";
@@ -288,32 +289,30 @@ export async function completeLayaway(
 /**
  * Phase 27 Wave 13 — the layaway book: every plan for a branch plus the
  * summary (open count, outstanding Rial, total grams) the jeweller reads off
- * at a glance. Pure arithmetic lives in `layawayBook` (industry-reports.ts).
+ * at a glance. SQL aggregates follow the pure `layawayBook` contract
+ * (industry-reports.ts); pagination never changes the book totals.
  */
-export async function listLayaways(
-  businessId: string,
-  locationId: string,
-): Promise<{ rows: LayawayPlan[]; book: ReturnType<typeof layawayBook> }> {
-  const { rows } = await query<LayawayRow>(
-    `SELECT * FROM layaway_plans
-      WHERE business_id = $1 AND location_id = $2
-      ORDER BY plan_number`,
+async function readLayaways(businessId: string, locationId: string, page?: number) {
+  const result = await queryReportPage<LayawayRow, LayawayBook>(
+    `SELECT * FROM layaway_plans WHERE business_id = $1 AND location_id = $2`,
     [businessId, locationId],
+    { page, orderBy: "plan_number, id", summary: `jsonb_build_object(
+      'openCount', count(*) FILTER (WHERE status='open'),
+      'completedCount', count(*) FILTER (WHERE status='completed'),
+      'openValueRial', coalesce(sum(total_value_rial) FILTER (WHERE status='open'),0),
+      'openPaidRial', coalesce(sum(paid_rial) FILTER (WHERE status='open'),0),
+      'openOutstandingRial', coalesce(sum(total_value_rial-paid_rial) FILTER (WHERE status='open'),0),
+      'totalGrams', coalesce(sum(grams),0)::text)` },
   );
-  const plans = rows.map(mapLayaway);
-  return {
-    rows: plans,
-    book: layawayBook(
-      plans.map((p) => ({
-        planNumber: p.planNumber,
-        status: p.status,
-        totalValueRial: p.totalValueRial,
-        paidRial: p.paidRial,
-        grams: p.grams,
-      })),
-    ),
-  };
+  return { ...result, rows: result.rows.map(mapLayaway), summary: {
+    ...result.summary, totalGrams: new Decimal(result.summary.totalGrams).toString(),
+  } };
 }
+export async function listLayaways(businessId: string, locationId: string): Promise<{ rows: LayawayPlan[]; book: LayawayBook }> {
+  const result = await readLayaways(businessId, locationId);
+  return { rows: result.rows, book: result.summary };
+}
+export const listLayawaysPage = (businessId: string, locationId: string, page: number) => readLayaways(businessId, locationId, page);
 
 // ------------------------------------------------------------ gold account
 

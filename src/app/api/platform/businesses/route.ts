@@ -1,3 +1,4 @@
+import { isBusinessSortValue, parseSortDirection } from "@/lib/business-sort";
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformAdmin, requirePlatformCapability, platformAudit, withPlatformScope } from "@/lib/platform-auth";
 import {
@@ -9,6 +10,7 @@ import { rootDomain } from "@/lib/host";
 import { isIndustry } from "@/lib/industries";
 import {
   provisionBusiness,
+  shouldCompleteSetupForPlatformProvision,
   validateProvisionBody,
   ExistingOwnerConfirmationRequiredError,
   OwnerPhoneRequiredError,
@@ -18,7 +20,6 @@ import {
 import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
 
 const VALID_STATUS = new Set(["active", "suspended", "archived"]);
-const VALID_SORT = new Set(["newest", "oldest", "name", "orders", "members", "activity"]);
 const VALID_ACTIVITY = new Set(["active", "idle"]);
 
 /**
@@ -54,7 +55,8 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     createdFrom: sp.get("from") ?? undefined,
     createdTo: sp.get("to") ?? undefined,
     activity: activityParam && VALID_ACTIVITY.has(activityParam) ? (activityParam as BusinessQuery["activity"]) : undefined,
-    sort: sortParam && VALID_SORT.has(sortParam) ? (sortParam as BusinessQuery["sort"]) : undefined,
+    sort: isBusinessSortValue(sortParam) ? sortParam : undefined,
+    sortDir: parseSortDirection(sp.get("dir")),
     page: Number.isFinite(pageNum) && pageNum > 0 ? pageNum : undefined,
     pageSize: Number.isFinite(pageSizeNum) && pageSizeNum > 0 ? pageSizeNum : undefined,
   };
@@ -74,10 +76,11 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
 });
 
 /**
- * Provision a working business end-to-end: identity, owner membership, first
- * branch, and — because this is the console, not the setup wizard — the default
- * chart of accounts, so the owner can log straight in and sell (exit criterion
- * 1). Owner-only (`business.provision`), and audited before we return.
+ * Provision a business end-to-end: identity, owner membership, first branch,
+ * and the default chart of accounts. Non-F&B trades retain the console's
+ * ready-to-enter path; food_service must complete its persisted menu/costing/
+ * tax setup in the wizard before its lifecycle is marked complete (issue #840).
+ * Owner-only (`business.provision`), and audited before we return.
  *
  * **No password is accepted here (issue #755 §14).** The console used to take
  * an operator-chosen owner password and print the owner's second factor and
@@ -121,6 +124,13 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     const provisioned = await provisionBusiness({
       ...input,
       seedChartOfAccounts: true,
+      // Food-service readiness includes persisted preferences, costing, tax
+      // and a sellable menu. Bare provisioning does not create those, so an
+      // F&B tenant must enter the same wizard and Finish contract as an
+      // interactively-created one rather than inheriting a false completion
+      // stamp. Other industries retain the console's existing ready-to-enter
+      // contract (issue #840).
+      completeSetup: shouldCompleteSetupForPlatformProvision(input.industry),
       createdBy: session.padmin,
       confirmExistingOwner: body.confirmExistingOwner === true,
     });

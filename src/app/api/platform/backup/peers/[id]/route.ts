@@ -7,6 +7,7 @@ import {
   getPlatformBackupConfig,
   upsertPlatformBackupPeer,
 } from "@/lib/platform-backup-service";
+import { requireRecentAuth } from "@/lib/recent-auth";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -18,8 +19,10 @@ function isUuid(value: string): boolean {
 
 /** Editing a peer keeps its id, so its check history and any restore rows survive. */
 export const PUT = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
+  const recentError = requireRecentAuth(session);
+  if (recentError) return recentError;
 
   const { id } = await ctx.params;
   if (!isUuid(id)) return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -71,8 +74,10 @@ export const PUT = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
  * credential this install would have used.
  */
 export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
+  const recentError = requireRecentAuth(session);
+  if (recentError) return recentError;
 
   const { id } = await ctx.params;
   if (!isUuid(id)) return NextResponse.json({ error: "not_found" }, { status: 404 });

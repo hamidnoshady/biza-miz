@@ -28,9 +28,17 @@
  * lose it the way the one-at-a-time version did.
  */
 import { getPool, query } from "../db";
+import { changeMenuItemPrice } from "../menu-price-service";
 import { getBusinessIndustry } from "../industry-guard";
+import { hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
 import { getConnection, wooClientFor, type ConnectionRow } from "./connections-service";
-import { listMappings, localIdForRemote, mergeMappingMeta, upsertMapping } from "./mapping-service";
+import {
+  createForRemoteOnce,
+  listMappings,
+  localIdForRemote,
+  mergeMappingMeta,
+  upsertMapping,
+} from "./mapping-service";
 import { wooAmountToRial } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
 import {
@@ -125,10 +133,18 @@ export async function upsertProductFromWoo(
   product: WooProduct,
 ): Promise<"created" | "updated" | "skipped"> {
   const industry = await getBusinessIndustry(connection.business_id);
-  if (industry !== "food_service") {
+  // Issue #799 Wave 11: the branch is the industry *family*, not "not F&B". A
+  // business with no sellable catalogue (the architecture/construction trade
+  // today, a service trade tomorrow) has nowhere for a web-store product to
+  // land — `items` and `menu_items` are both the wrong shape — so the product
+  // is skipped rather than written as a retail row.
+  if (isRetailCatalogueIndustry(industry)) {
     return upsertRetailProduct(connection, locationId, product);
   }
-  return upsertFnbProduct(connection, locationId, product);
+  if (industry === "food_service") {
+    return upsertFnbProduct(connection, locationId, product);
+  }
+  return "skipped";
 }
 
 /**
@@ -152,25 +168,47 @@ async function upsertFnbProduct(
   const attributes = wooVariationAttributes(product);
   const name = attributes.length ? wooVariationDisplayName(product.name, attributes) : product.name;
   const price = wooAmountToRial(product.regular_price || product.price || "0", connection.currency_unit);
-  const existing = await localIdForRemote(businessId, connection.id, "product", String(product.id));
+  const remoteId = String(product.id);
 
-  if (existing) {
+  const applyUpdate = async (existing: string): Promise<"updated"> => {
+    // name/sku stay a plain update; the price is a canonical price change
+    // (issue #844): locked, validated, written to the current price and to
+    // immutable history + audit together, `source = 'integration'` naming this
+    // WooCommerce connection. An unchanged price writes no history row.
     await query(
-      `UPDATE menu_items SET name = $3, sku = $4, price = $5, updated_at = now()
+      `UPDATE menu_items SET name = $3, sku = $4, updated_at = now()
         WHERE id = $1 AND location_id = $2`,
-      [existing, locationId, name, product.sku || null, price.toString()],
+      [existing, locationId, name, product.sku || null],
     );
+    const change = await changeMenuItemPrice({
+      businessId,
+      locationId,
+      menuItemId: existing,
+      newPrice: Number(price),
+      source: "integration",
+      changedBy: null,
+      sourceRef: `woocommerce:${connection.id}`,
+    });
+    if (!change.ok) throw new Error(change.error);
     await recordProductShape(connection, product);
     return "updated";
-  }
+  };
+
+  const existing = await localIdForRemote(businessId, connection.id, "product", remoteId);
+  if (existing) return applyUpdate(existing);
 
   const categoryId = await categoryForProduct(connection, locationId, product);
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO menu_items (location_id, category_id, name, sku, price)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [locationId, categoryId, name, product.sku || null, price.toString()],
-  );
-  await upsertMapping(businessId, connection.id, "product", String(product.id), rows[0].id);
+  // Created under the identity lock (audit F13): a second delivery of the same
+  // new product waits here and then applies itself as an update.
+  const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO menu_items (location_id, category_id, name, sku, price)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [locationId, categoryId, name, product.sku || null, price.toString()],
+    );
+    return rows[0].id;
+  });
+  if (!outcome.created) return applyUpdate(outcome.localId);
   await recordProductShape(connection, product);
   return "created";
 }
@@ -197,9 +235,9 @@ async function upsertRetailProduct(
     shape.itemKind === "variant_child" && attributes.length
       ? wooVariationDisplayName(product.name, attributes)
       : product.name;
-  const existing = await localIdForRemote(businessId, connection.id, "product", String(product.id));
+  const remoteId = String(product.id);
 
-  if (existing) {
+  const applyUpdate = async (existing: string): Promise<"updated"> => {
     await query(
       `UPDATE items SET name = $3, sku = $4, updated_at = now()
         WHERE id = $1 AND location_id = $2`,
@@ -207,22 +245,31 @@ async function upsertRetailProduct(
     );
     // A container is not sellable — it carries no stock/price of its own.
     if (!shape.container) {
-      await upsertItemStock(existing, stockQuantity, price);
+      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price);
     }
     if (attributes.length) {
       await replaceVariantAttributes(existing, attributes);
     }
     await recordProductShape(connection, product);
     return "updated";
-  }
+  };
 
+  const existing = await localIdForRemote(businessId, connection.id, "product", remoteId);
+  if (existing) return applyUpdate(existing);
+
+  // Every create below runs under the identity lock (audit F13): a second
+  // delivery of the same new product waits, finds the first one's mapping and
+  // applies its payload as an update instead of inserting a twin item.
   if (shape.container) {
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO items (location_id, name, sku, kind, tracking)
-       VALUES ($1, $2, $3, 'variant_parent', 'none') RETURNING id`,
-      [locationId, name, product.sku || null],
-    );
-    await upsertMapping(businessId, connection.id, "product", String(product.id), rows[0].id);
+    const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO items (location_id, name, sku, kind, tracking)
+         VALUES ($1, $2, $3, 'variant_parent', 'none') RETURNING id`,
+        [locationId, name, product.sku || null],
+      );
+      return rows[0].id;
+    });
+    if (!outcome.created) return applyUpdate(outcome.localId);
     await recordProductShape(connection, product);
     return "created";
   }
@@ -240,9 +287,7 @@ async function upsertRetailProduct(
 
   // Item + stock + attributes + mapping in one transaction, so a retry after a
   // partial failure cannot orphan a stock row or duplicate a variant.
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
+  const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO items (location_id, parent_item_id, name, sku, kind, tracking)
        VALUES ($1, $2, $3, $4, $5, 'none') RETURNING id`,
@@ -250,9 +295,9 @@ async function upsertRetailProduct(
     );
     const itemId = rows[0].id;
     await client.query(
-      `INSERT INTO item_stock (item_id, quantity, unit_price)
-       VALUES ($1, $2, $3)`,
-      [itemId, stockQuantity, price > 0n ? Number(price) : null],
+      `INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
+       VALUES ($1, $2, $3, $4)`,
+      [itemId, stockQuantity, price > 0n ? Number(price) : null, remoteManagesStock(shape, product) ? new Date().toISOString() : null],
     );
     for (const attr of attributes) {
       await client.query(
@@ -260,22 +305,11 @@ async function upsertRetailProduct(
         [itemId, attr.name, attr.option],
       );
     }
-    await client.query(
-      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
-       VALUES ($1, $2, 'product', $3, $4)
-       ON CONFLICT (connection_id, entity_type, remote_id)
-       DO UPDATE SET local_id = EXCLUDED.local_id, updated_at = now()`,
-      [businessId, connection.id, String(product.id), itemId],
-    );
-    await client.query("COMMIT");
-    await recordProductShape(connection, product);
-    return "created";
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+    return itemId;
+  });
+  if (!outcome.created) return applyUpdate(outcome.localId);
+  await recordProductShape(connection, product);
+  return "created";
 }
 
 /**
@@ -332,14 +366,43 @@ async function categoryForProduct(
   }
 }
 
-/** Upsert a retail item's on-hand quantity and shelf price (Rial). */
-async function upsertItemStock(itemId: string, quantity: number, price: bigint): Promise<void> {
+/**
+ * Whether the store is the authority for this product's quantity. A product
+ * that does not manage stock (or an `external` one) reports no quantity, so
+ * the local shelf — counted up by receipts in this app — must not be reset
+ * to zero by every product sync, as it used to be.
+ */
+function remoteManagesStock(shape: ReturnType<typeof wooProductShape>, product: WooProduct): boolean {
+  return Boolean(shape.stockTracked && product.manage_stock && product.stock_quantity != null);
+}
+
+/**
+ * Upsert a retail item's shelf price (Rial) and — when the store manages the
+ * product's stock — its on-hand quantity as an absolute snapshot.
+ *
+ * A snapshot stamps `remote_snapshot_at` with the moment it was applied: the
+ * online sale service compares a remote order's instant against it so a sale
+ * the store already deducted is not relieved a second time (dashboard audit
+ * F03; `decideOnlineStockRelief`). `quantity = null` updates the price only.
+ */
+async function upsertItemStock(itemId: string, quantity: number | null, price: bigint): Promise<void> {
+  const unitPrice = price > 0n ? Number(price) : null;
+  if (quantity == null) {
+    await query(
+      `INSERT INTO item_stock (item_id, quantity, unit_price)
+       VALUES ($1, 0, $2)
+       ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()`,
+      [itemId, unitPrice],
+    );
+    return;
+  }
   await query(
-    `INSERT INTO item_stock (item_id, quantity, unit_price)
-     VALUES ($1, $2, $3)
+    `INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
+     VALUES ($1, $2, $3, now())
      ON CONFLICT (item_id) DO UPDATE
-       SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price, updated_at = now()`,
-    [itemId, quantity, price > 0n ? Number(price) : null],
+       SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
+           remote_snapshot_at = now(), updated_at = now()`,
+    [itemId, quantity, unitPrice],
   );
 }
 
@@ -800,6 +863,8 @@ export async function mappedProducts(
   const ids = mappings.map((m) => m.localId);
   const industry = await getBusinessIndustry(businessId);
 
+  if (!hasSellableCatalogue(industry)) return [];
+
   if (industry === "food_service") {
     const { rows } = await query<{ id: string; name: string; price: string }>(
       `SELECT id, name, price FROM menu_items WHERE id = ANY($1::uuid[])`,
@@ -861,6 +926,9 @@ export async function catalogueFor(
   const mappings = await listMappings(businessId, connectionId, "product");
   const industry = await getBusinessIndustry(businessId);
   if (mappings.length === 0) return { industry: industry ?? "", rows: [] };
+  // No sellable catalogue: an empty register is the truthful answer, not a
+  // query against a table this trade does not fill.
+  if (!hasSellableCatalogue(industry)) return { industry: industry ?? "", rows: [] };
   const remoteIds = mappings.map((m) => m.remoteId);
   const categories = await termsByRemoteId(businessId, connectionId, remoteIds, "product_cat");
 

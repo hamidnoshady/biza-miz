@@ -21,16 +21,34 @@ The desktop's home is the member's till screen (`siteHomeFor`: kitchen →
 `/accounting/pos`), falling back to `/accounting/pos` and then
 `/accounting/orders` when the role's screen is not available to that member (a
 waiter without reservations, a trade without the kitchen module); with none
-openable it explains rather than redirecting. Every other screen opens the cloud
-in the «نسخهٔ ابری» window (`electron/cloud-window.js`: no preload, sandboxed,
-`persist:cloud` partition, navigation and redirects locked to the origin it was
-opened with — a redirect anywhere else, a renamed business subdomain included,
-goes to the system browser — closed with the till window). Billing and subscription
-(`/settings/billing`, `/settings/subscription`) open in the system browser
-instead, because the payment gateway returns to a page that needs the
-browser's own session. Offline, the hand-off screen says the section needs the Internet and
-opens the cloud window by itself once the connection returns. The cloud itself
-is unchanged and standalone.
+openable it explains rather than redirecting — except a member who can use the
+assistant, whose home is the cloud's assistant (Phase 46). Every other screen
+renders the cloud inside the till window, under the desktop's full menu
+(`CloudPane`, a `<webview>` hardened by `electron/cloud-pane.js`: no preload, no
+Node, sandboxed, `persist:cloud` partition, navigation and redirects locked to
+the origin it was attached with — a redirect anywhere else, a renamed business
+subdomain included, goes to the system browser). The cloud recognises the pane
+by a user-agent token and draws that page without its own sidebar
+(`src/lib/cloud-embed.ts`). Billing and subscription (`/settings/billing`,
+`/settings/subscription`) open in the system browser instead, because the
+payment gateway returns to a page that needs the browser's own session.
+Offline, the pane says the section needs the Internet and reopens by itself
+once the connection returns, and the desktop toasts the change both ways. The
+cloud itself is unchanged and standalone.
+
+A paired desktop acknowledges a pulled cloud event whose domain it has no
+screen for — stock, transfers and ledger reversals (`siteSkipsPulledEvent`) —
+as an applied no-op, instead of deferring it forever on master data it never
+receives (a cloud purchase names a supplier the desktop does not have).
+
+«ورود با حساب ابری» (Phase 46) signs a member in on the desktop through the
+cloud: the desktop opens `/desktop-login` in the system browser, the cloud
+mints a two-minute single-use code for that one paired install and hands the
+browser back through `businesssuite://cloud-login`, and the desktop redeems it
+with its own bearer credential (`POST /api/server-sync/desktop-login`) after
+checking the `state` cookie it set when the button was pressed. The answer
+also carries a session code the cloud pane redeems once on the business's
+origin (`GET /api/auth/desktop-session`), so one sign-in covers both.
 
 Each tick, at most once per sync interval (30 s) however often a wake-up runs
 it — after master data and **before** push/pull, so the bills pulled in
@@ -116,6 +134,92 @@ changes (`login_managed_by_cloud`). A recovery code spent on the site is POSTed
 back to the same endpoint so it is single-use on both replicas; while the site is
 offline, that code still works on the cloud until the next tick reports it.
 
+The same response carries every active member's quick-login **PIN hash**
+(`pins`), so staff created and given a PIN on the cloud appear on the desktop's
+«ورود سریع کارکنان» roster. For cashier/waiter/kitchen the cloud's PIN is
+authoritative and a different local one is put back; an owner or manager keeps
+the offline PIN chosen in the pairing wizard, and the cloud's only fills it in
+when the desktop has none (`planPinReplication`). A member the cloud has no PIN
+for keeps the desktop's.
+
+Suspension and offboarding are the exception to "keeps the desktop's": the
+cloud revokes such a member's PIN when it removes them, so the site's event
+apply does too — for the PIN roles, whose PIN the cloud owns. The member's
+device-local owner/manager PIN is deliberately left alone, since that is this
+install's own offline door, and the membership itself is already inert.
+
+Deleting a staff PIN without touching the membership is the other exception,
+and it needs the cloud to say so explicitly (issue #850). `pins` only ever lists
+members the cloud *has* a PIN for, so absence from it cannot mean "removed": it
+also covers a member the cloud has never seen, a legacy cloud, and every
+password-role member. The payload therefore carries a companion block —
+`staffPins: { authoritative: true, memberships: [...] }` — naming the PIN-role
+memberships the cloud speaks for. When it is present and complete, a listed
+staff member with no entry in `pins` has their local PIN revoked, exactly as a
+suspension would, and `pins_revoked` records how many. Without the block the
+pre-#850 rule stands (the site keeps its own PIN); a half-sent block is an
+invalid payload rather than a licence to delete.
+
+### Credential convergence is its own plane (issue #843)
+
+The IAM snapshot is metadata-only, so a site can be fully converged on
+memberships while every replicated PIN is still missing: cloud-made cashiers
+then exist locally but are silently absent from `loginRoster()`, and the
+operator sees an owner-only login screen while ordinary sync looks healthy.
+That partial state is no longer invisible:
+
+- **Durable state.** `iam_login_credential_sync_state` (migration 0203) stores
+  one row per `(business_id, site_device_id)`: `status` (`healthy` / `pending` /
+  `syncing` / `degraded` / `unsupported_legacy_cloud` / `snapshot_required` /
+  `repair_required`), attempt/success timestamps, `last_error`, how many
+  credential and PIN records arrived and were applied, and what is still
+  missing — `pin_members_expected`, `pin_members_usable`,
+  `pin_members_missing`, `missing_identity_bindings`. Membership health stays in
+  `iam_sync_state`; the two are read separately and only together do they mean
+  "identity converged".
+- **One reconciliation function.** `syncHybridLoginCredentials(businessId)`
+  (`src/lib/iam/login-credential-sync.ts`) reports spent recovery codes, fetches
+  and validates the payload in full before applying anything, applies PINs and
+  password/MFA identities, measures the remaining PIN gap and records the
+  outcome. The sync tick, pairing completion, the manual sync/repair action and
+  the login screen's retry all call this one function.
+- **Failures are visible, not console-only.** A non-404 HTTP error, an invalid
+  payload, a failed apply, a failed spent-code report, or a remaining roster
+  gap records `degraded` with the reason. A cloud that genuinely lacks the
+  endpoint (404/405) records `unsupported_legacy_cloud` — supported, but never
+  reported as fully healthy. Operational sync keeps running either way; the
+  installation is simply no longer green.
+- **Pairing does not finish before convergence.** `/api/setup/pair` runs the
+  credential reconciliation right after the snapshot is committed and the site
+  is acknowledged, so the first login after pairing already sees cloud PIN
+  staff. If the cloud is momentarily unavailable, the local owner stays usable,
+  the state is `pending`/`degraded` and the wizard says identity sync is still
+  pending rather than claiming success.
+- **The login screen and the connection panel read it.** The staff roster
+  response carries the credential summary; when active PIN-role members cannot
+  sign in yet the door shows «برخی حساب‌های کارکنان هنوز برای ورود آفلاین همگام
+  نشده‌اند» with a retry (`POST /api/auth/pin-login/roster/sync`, rate-limited)
+  and a link to Settings → اتصال. Settings shows identity/membership,
+  login-credential and operational rows separately; `hybridIdentityHealth()`
+  (`src/lib/iam/credential-health.ts`) refuses to call the combination healthy
+  while required PIN credentials are missing.
+- **Repair reconciles both planes.** `POST /api/team/iam-status
+  { action: "repair" }` forces the canonical snapshot, reconciles events and
+  then reconciles login credentials, verifying that active PIN-role members are
+  locally sign-in capable before it reports success.
+- **Cloud sign-in requires identity convergence.** «ورود با حساب ابری» on a
+  paired desktop (`/api/auth/cloud-login/callback`) verifies that the member the
+  cloud handed back is bound locally to the expected `platformUserId` and
+  `tokenVersion` before minting a session. Membership-only convergence answers
+  `identity_not_synced` (after one credential reconciliation attempt) instead of
+  creating a session outside the cloud's token-version revocation chain; a
+  PIN-only membership with no cloud identity is unaffected.
+- **A tenant password lockout is disclosed only after the password is proven**
+  (`/api/auth/login`, `/api/auth/directory`, `/api/platform/auth/login`): a
+  wrong password on a locked account answers `401 invalid_credentials`, exactly
+  like any other wrong password, and `423 account_locked` follows only a correct
+  one.
+
 ## Event transport
 
 On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):
@@ -170,6 +274,37 @@ LAN, queued local mutations remain in IndexedDB or `sync_events` as
 appropriate, and synchronization retries after cloud reachability returns.
 The UI distinguishes local-server reachability from Internet/cloud status.
 
+### Business-scope events (issue #869)
+
+Almost every event belongs to one location, and every `sync_events` row carries
+that location. A business-wide money action has none: a commission payout covers
+every branch. Its event is recorded with `scope = 'business'`, `business_id` set and
+`location_id` NULL (migration 0217). It is never borrowed from a branch.
+
+- **Who records it:** only the cloud, in the transaction that moves the money
+  (`appendBusinessSyncOutboxEvent`, `src/lib/sync-outbox.ts`). A site refuses to
+  record one: a site pushes only its own location's rows, so a payout made there
+  would never leave it.
+- **Who receives it:** a location-bound credential (a site device) never does. Its
+  pull filters on the location and on `scope = 'location'`. A business-wide
+  credential (the per-business token, which resolves with no location) does. A
+  desktop acknowledges a pulled copy without applying it (`siteSkipsPulledEvent`,
+  effect class `commission_settlement`), and records that acknowledgement as an
+  applied effect, so a re-pull is a duplicate. The record needs a location to attach to,
+  so the desktop files the acknowledgement under its own location (or the business's first).
+- **Idempotency:** the event's `client_event_id` is derived from the payout's (or
+  reversal's) own id. The unique index `(business_id, client_event_id)` for business
+  rows lands a retried or doubly delivered event once. On a desktop the
+  `sync_domain_effects` key does the same.
+- **Replay:** the handler refuses a replayed copy (`business_event_not_replayable`, a
+  terminal dead letter). The money moved at its origin already, so applying it again
+  would move it twice.
+- **Isolation:** the `tenant_isolation` policy on `sync_events` has a business branch,
+  `scope = 'business' AND business_id = app_current_business()`, next to the location
+  branch. Another business neither reads such a row nor writes one.
+- **Location-scoped sync is unchanged.** The push, pull, health and connection-status
+  queries now also name `scope = 'location'`, so the rule is written where it applies.
+
 ## Supported event scope
 
 `src/lib/data-ownership.ts` is the versioned, machine-readable replication
@@ -189,13 +324,29 @@ production/reversal events, and (contract v3) shifts opened and cashed up
 derived from `shift.opened:<id>` / `shift.closed:<id>`; a second open shift for
 the same person is a terminal error and dead-letters visibly). Each is written
 in the local mutation transaction, uses stable IDs and `client_event_id`
-idempotency, and is applied through the versioned registry. Since contract v2
+idempotency, and is applied through the versioned registry. Commission payouts and their reversals
+(`commission.payout.recorded@1`, `commission.payout.reversed@1`, #869) are business-scope
+events the cloud records alone; see *Business-scope events* above. Since contract v2
 the **central server records the same events for a branch that has an active
 paired desktop**, so a bill, purchase or journal the owner records in the
 cloud for that branch reaches it; the desktop stays the operational authority
 and a cloud event it cannot apply becomes a dead letter the owner sees.
 Replays keep the sale's own instant (`opened_at`, `closed_at`, `received_at`)
 and the paying side's journal date.
+
+**The ledger is the exception to "the desktop is the operational authority".**
+Accounting has one authority — the cloud — and the three contracts that
+describe it (`src/lib/data-ownership.ts`, `src/lib/replication-catalogue.ts`
+and the sync-event registry) now say so identically: a pulled
+`accounting.manual_journal.reversed@1` is *acknowledged* by a desktop rather
+than applied, because re-deriving a posting locally would fork the books. What
+a desktop sends is the request to reverse (`site_to_cloud`), and the reversal
+is posted where the original entry lives — the event is tagged with the
+**reversed entry's** branch, never the reversing user's currently active one,
+so a head-office accountant correcting a branch's document cannot deliver that
+branch's ledger effect into another branch's stream. Drafting, approval and
+rejection of a journal draft are cloud-only workflow and have no sync events at
+all: a draft is not a financial fact, so there is nothing for a peer to replay.
 
 **Master data** — customers (`parties`, `party_categories`), payment ways, and
 the branch's menu, modifiers, recipes, stock items and tables — synchronises
@@ -209,6 +360,24 @@ ciphertext (the plaintext crosses and is re-encrypted under the receiver's
 key). A change that cannot merge — two rows created independently with the
 same unique name, a delete the other side's history blocks — is recorded as a
 master conflict and listed on the sync panel.
+
+**AEC (issue #799 §26)** — the architecture/engineering/construction registers
+are classified rather than assumed. `src/lib/aec-sync-classification.ts` puts
+every AEC table in one of §26's buckets — the field-capture candidates (tasks,
+checklists, site logs, inspections, snags, daily progress, photo and drawing
+metadata, RFI and submittal drafts) and the financial/high-risk registers (BOQ
+and estimates, variations, payment certificates, procurement, transmittals) —
+and records for each the reason, the conflict rule and the protocol it would
+need before it could travel. **Nothing there replicates today**, in either
+direction: a pair is a till, an AEC business has no till modules, and a paired
+AEC desktop opens on the cloud pane rather than a half-copy of a register.
+`data-ownership.ts` carries the matching `aec_field_capture` and
+`aec_commercial_registers` domains as `not_replicated`, which is what the
+pairing disclosure prints, and two tests keep it honest: the unit suite refuses
+a classification that leaves a table out, and
+`integration/aec-sync-classification.integration.test.ts` proves against
+PostgreSQL that no AEC table carries the master-data capture trigger and that a
+paired desktop database holds zero rows in every one of them.
 
 This is still **not** full-database replication. Staff access follows its own
 IAM control plane; retail invoices and the retail catalogue are not part of

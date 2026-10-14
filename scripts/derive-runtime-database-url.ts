@@ -37,7 +37,7 @@ import "dotenv/config";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "pg";
-import { createAppRole, DEFAULT_APP_ROLE } from "../src/lib/create-app-role";
+import { createAppRole, decodeUrlCredential, DEFAULT_APP_ROLE } from "../src/lib/create-app-role";
 
 async function isPrivileged(databaseUrl: string): Promise<boolean> {
   const client = new Client({ connectionString: databaseUrl });
@@ -68,7 +68,9 @@ export async function deriveRuntimeDatabaseUrl(
 
   const roleName = env.APP_DB_USER || DEFAULT_APP_ROLE;
   const source = new URL(databaseUrl);
-  const password = env.APP_DB_PASSWORD || source.password;
+  // Plaintext, not the URL's percent-encoded spelling: this value becomes the
+  // role's password (and is re-encoded below when it goes back into the URL).
+  const password = env.APP_DB_PASSWORD || decodeUrlCredential(source.password);
 
   await createAppRole({ databaseUrl, roleName, password, quiet: true });
 

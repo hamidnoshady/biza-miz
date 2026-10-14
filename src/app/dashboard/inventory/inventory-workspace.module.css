@@ -10,6 +10,22 @@
 }
 
 /*
+ * The neutrals above are light-surface values, and a CSS-module override beats
+ * the `.dark` tokens on <html> for everything inside the workspace. In dark
+ * mode that painted the table header wash (`bg-muted/60`) a light grey under
+ * the dark theme's light muted text — 1.07:1, unreadable (axe color-contrast,
+ * F20) — and drew near-white hairlines round every card. Hand the neutrals back
+ * to the dark theme; the amber brand accent stays the workspace's own.
+ */
+:global(.dark) .workspace {
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --accent: oklch(0.3 0.02 85);
+  --accent-foreground: oklch(0.96 0.01 85);
+  --muted: oklch(0.269 0 0);
+}
+
+/*
  * Touch-height form controls, uniformly.
  *
  * The height must land on every control-shaped thing or the row looks broken:

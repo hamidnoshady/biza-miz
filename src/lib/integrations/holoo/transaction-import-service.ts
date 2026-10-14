@@ -11,6 +11,7 @@
  * reporting (transaction-plan.ts), and one mapping row per imported document.
  */
 import Decimal from "decimal.js";
+import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, query } from "../../db";
 import { getBusinessIndustry } from "../../industry-guard";
@@ -387,6 +388,10 @@ export async function applyTransactions(
     if (tx.type === "receipt" && tx.personId) {
       const customerId = await localIdForRemote(businessId, connectionId, "holoo_customer", tx.personId);
       if (!customerId) continue;
+      // The key is stable per remote document (same shape as the payment key
+      // below): the mapping pre-check skips clean re-runs, and the key closes
+      // the crash window between posting the receipt and writing the mapping —
+      // a retry then replays the original receipt instead of posting a second.
       const receipt = await receivePayment({
         businessId,
         locationId: connection.location_id,
@@ -394,6 +399,7 @@ export async function applyTransactions(
         method: "cash",
         amount: tx.amountRial ? Number(tx.amountRial) : 0,
         receiptDate: tx.occurredAt.slice(0, 10),
+        idempotencyKey: `holoo-receipt:${createHash("sha256").update(`${connectionId}:${tx.remoteId}`).digest("hex")}`,
         createdBy,
         skipHolooPush: true,
       });
@@ -412,6 +418,7 @@ export async function applyTransactions(
         method: "cash",
         amount: tx.amountRial ? Number(tx.amountRial) : 0,
         paymentDate: tx.occurredAt.slice(0, 10),
+        clientRequestId: `holoo-payment:${createHash("sha256").update(`${connectionId}:${tx.remoteId}`).digest("hex")}`,
         createdBy,
         skipHolooPush: true,
       });

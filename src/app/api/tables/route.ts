@@ -6,8 +6,9 @@ import { resolveSectionId } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
 
 /**
- * Minimal table list for Phase 2's dine-in picker (a plain list, not a
- * floor plan — the real floor plan/map arrives in Phase 3).
+ * Operational table list for the dine-in picker. Reading/using tables stays
+ * available to floor roles with `tables.manage`; creating a table is a
+ * structural floor-plan edit and uses `tables.edit` below.
  */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.tablesManage);
@@ -27,7 +28,7 @@ export const GET = withTenantScope(async () => {
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.tablesManage);
+  const { session, error } = await requirePermission(PERMISSIONS.tablesEdit);
   if (error) return error;
 
   let body: {

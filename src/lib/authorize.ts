@@ -57,6 +57,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { NextResponse } from "next/server";
+import { setAuthorizationSnapshot, withAuthorizationContext } from "./authorization-context";
 import type { Role, SessionPayload } from "./auth-edge";
 import { query, withoutTenantScope } from "./db";
 import {
@@ -68,6 +69,7 @@ import {
 import {
   effectivePermissions,
   isOwnerOnlyPermission,
+  PERMISSIONS,
   parseOverrides,
   type Permission,
   type PermissionOverrides,
@@ -173,7 +175,7 @@ export interface AuthorizeRequest {
 const memoStore = new AsyncLocalStorage<Map<string, Promise<MembershipContext | null>>>();
 
 export function withAuthorizationMemo<T>(fn: () => Promise<T>): Promise<T> {
-  return memoStore.run(new Map(), fn);
+  return memoStore.run(new Map(), () => withAuthorizationContext(fn));
 }
 
 function requestMemo<T>(key: string, load: () => Promise<T>): Promise<T> {
@@ -230,7 +232,9 @@ export async function loadMembership(
                 u.location_id,
                 u.location_scope::text AS location_scope,
                 b.status::text          AS business_status,
-                CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE NULL END AS custom_role_permissions,
+                CASE WHEN u.custom_role_id IS NULL THEN NULL
+                     WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions))
+                     ELSE ARRAY[]::text[] END AS custom_role_permissions,
                 dp.value->>'profile' AS deployment_profile,
                 CASE WHEN sma.id IS NOT NULL THEN ARRAY(SELECT jsonb_array_elements_text(sma.permission_denies)) ELSE NULL END AS site_permission_denies,
                 sma.allowed_location_ids AS site_allowed_location_ids,
@@ -315,12 +319,12 @@ async function platformIdentityRevoked(session: SessionPayload): Promise<boolean
   if (!session.platformUserId) return false;
   if (!session.tokenVersion) return true;
   const { rows } = await withoutTenantScope("authorization-membership", () =>
-    query<{ token_version: number }>(
-      `SELECT token_version FROM platform_users WHERE id = $1`,
+    query<{ token_version: number; is_active: boolean }>(
+      `SELECT token_version, is_active FROM platform_users WHERE id = $1`,
       [session.platformUserId],
     ),
   );
-  return rows.length === 0 || rows[0].token_version !== session.tokenVersion;
+  return rows.length === 0 || !rows[0].is_active || rows[0].token_version !== session.tokenVersion;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +354,13 @@ export async function authorize(
   // 2. Does the membership still exist, and is it usable?
   const membership = await loadMembership(session);
   if (!membership) return { ok: false, code: "MEMBERSHIP_NOT_FOUND", status: 401 };
+  setAuthorizationSnapshot({
+    businessId: membership.businessId,
+    userId: membership.userId,
+    membershipActive: membership.isActive,
+    businessActive: membership.businessStatus === "active",
+    canCloseFiscalPeriod: membership.permissions.has(PERMISSIONS.ledgerClosePeriod),
+  });
   if (!membership.isActive) return { ok: false, code: "MEMBERSHIP_INACTIVE", status: 401 };
 
   // 3. Is the tenant itself usable? Suspended and archived businesses stop

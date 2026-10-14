@@ -8,6 +8,10 @@
  * below unit-testable without a database.
  */
 
+import type { AecOperatingProfile } from "./aec";
+import type { Industry } from "./industries";
+import { AEC_BUILTIN_TEMPLATES } from "./workspace-aec-templates";
+
 /* ---------------------------------------------------------------------------
  * Sections
  * ------------------------------------------------------------------------- */
@@ -275,7 +279,33 @@ export const DOCUMENT_STATUS_LABELS: Record<WorkspaceDocumentStatus, string> = {
  * Approvals
  * ------------------------------------------------------------------------- */
 
-export const APPROVAL_SUBJECTS = ["project", "task", "document", "contract"] as const;
+export const APPROVAL_SUBJECTS = [
+  "project",
+  "task",
+  "document",
+  "contract",
+  "estimate_version",
+  // Issue #799 §11 — a submittal revision is reviewed through the same engine
+  // under the same `workspace.approve` key. A sixth subject rather than a second
+  // approval store, for the reason given below for the fifth: the queue, the
+  // dashboard counters and the reminder job learn about submittals for free.
+  "submittal_revision",
+  // Issue #799 §15 and §16 (Wave 8) — an approved change order and a certified
+  // claim are the two commercial determinations, and both go through this same
+  // engine under the same `workspace.approve` key. Two more subjects rather than
+  // a commercial approval store of their own: §24 says high-risk commercial
+  // actions must not inherit ordinary edit rights, and the way to achieve that
+  // without a second framework is to file them where the right key already is.
+  "variation",
+  "payment_certificate",
+  // Issue #799 §18 (Wave 9) — a material request and a purchase/subcontract
+  // commitment. The requirement is approved before the firm goes to market and
+  // the award is approved before any money is committed, so both are decisions
+  // and both belong where the deciding key already is rather than in a
+  // procurement approval store of their own.
+  "material_request",
+  "commitment",
+] as const;
 export type WorkspaceApprovalSubject = (typeof APPROVAL_SUBJECTS)[number];
 
 export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> = {
@@ -283,17 +313,189 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   task: "وظیفه",
   document: "سند",
   contract: "قرارداد",
+  // Issue #799 §7 — a BOQ revision is approved through the same engine as a
+  // contract, under the same `workspace.approve` key. It is a fifth subject
+  // rather than a second approval table, which is why a submission appears in
+  // the approvals queue, the dashboard counters and the widgets for free.
+  estimate_version: "نسخهٔ برآورد",
+  submittal_revision: "بازنگری سابمیتال",
+  variation: "تغییر / دستور کار",
+  payment_certificate: "صورت‌وضعیت",
+  material_request: "درخواست کالا",
+  commitment: "تعهد خرید / پیمان جزء",
 };
 
-export const APPROVAL_STATUSES = ["pending", "approved", "rejected", "cancelled"] as const;
+export const APPROVAL_STATUSES = [
+  "pending",
+  "approved",
+  "rejected",
+  "changes_requested",
+  "cancelled",
+] as const;
 export type WorkspaceApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 
 export const APPROVAL_STATUS_LABELS: Record<WorkspaceApprovalStatus, string> = {
   pending: "در انتظار",
   approved: "تأییدشده",
   rejected: "ردشده",
+  changes_requested: "نیازمند اصلاح",
   cancelled: "لغو‌شده",
 };
+
+export type WorkspaceApprovalDecision = Exclude<WorkspaceApprovalStatus, "pending">;
+
+/**
+ * Pure: may this actor record `decision` on a pending approval?
+ *
+ * - Cancelling withdraws a request, so it belongs to whoever asked (or an
+ *   administrator cleaning up).
+ * - Every other decision is the approver's. The requester may never decide
+ *   their own request — an approval you can grant yourself is decorative.
+ * - A named approver is the ONLY one who may decide, apart from an explicit
+ *   business-wide administrator override.
+ * - An unassigned request may be decided by a manager of the subject's
+ *   project (`canManageSubject`).
+ *
+ * Returns null when allowed, or the error code to refuse with.
+ */
+export function approvalDecisionError(input: {
+  decision: WorkspaceApprovalDecision;
+  actorUserId: string;
+  requestedBy: string | null;
+  approverUserId: string | null;
+  isAdministrator: boolean;
+  canManageSubject: boolean;
+}): string | null {
+  const { decision, actorUserId, requestedBy, approverUserId } = input;
+  if (decision === "cancelled") {
+    return requestedBy === actorUserId || input.isAdministrator ? null : "not_the_requester";
+  }
+  if (requestedBy && requestedBy === actorUserId) return "self_approval_forbidden";
+  if (approverUserId) {
+    return approverUserId === actorUserId || input.isAdministrator ? null : "not_the_approver";
+  }
+  return input.isAdministrator || input.canManageSubject ? null : "insufficient_project_role";
+}
+
+/* ---------------------------------------------------------------------------
+ * Business-wide access
+ * ------------------------------------------------------------------------- */
+
+/**
+ * How far past project membership a member reaches.
+ *
+ * - `administer`: holds `workspace.admin` — the business's own workspace
+ *   administrator, who acts as a manager on every project. Explicit, granted
+ *   by preset to manager/admin and revocable per member; never implied by
+ *   `workspace.view` or `workspace.manage`.
+ * - `read`: holds `ledger.view` — projects are cost centres the books post
+ *   against, so the accountant reads every project as a viewer, never writes.
+ * - `null`: membership only.
+ */
+export type WorkspaceOverride = "administer" | "read" | null;
+
+export interface WorkspaceAccessFlags {
+  override: WorkspaceOverride;
+  /** Ledger-derived spend may be shown. */
+  canViewFinancials: boolean;
+  /** May see business-level (project-less) contracts. */
+  canManageContracts: boolean;
+  /** May use the pickers (people, parties, media) a write form needs. */
+  canManage: boolean;
+  /** Holds `workspace.approve`. */
+  canApprove: boolean;
+  /**
+   * Holds `workspace.documents_issue` — may issue a document revision to an
+   * outside party (issue #799 §9). Separate from `canApprove` because issuing
+   * is not approving: it is the moment a drawing becomes a record that names
+   * what went to whom, and the register freezes it (migration 0197).
+   */
+  canIssueDocuments: boolean;
+  /** Holds `media.view` — may open a document's file (the media route's own rule). */
+  canViewMedia: boolean;
+}
+
+/**
+ * What the actor may do on one project: the platform permission AND the
+ * project role, computed once on the server so the client renders controls
+ * from it instead of guessing. The server still re-checks every write.
+ */
+export interface WorkspaceProjectCapabilities {
+  canView: boolean;
+  canContribute: boolean;
+  canEdit: boolean;
+  canManageProject: boolean;
+  canAdminister: boolean;
+  canManageContracts: boolean;
+  canApprove: boolean;
+  canIssueDocuments: boolean;
+  canViewFinancials: boolean;
+}
+
+export function projectCapabilities(
+  role: WorkspaceRole | null,
+  flags: WorkspaceAccessFlags,
+): WorkspaceProjectCapabilities {
+  const can = (capability: WorkspaceCapability) => role !== null && roleCan(role, capability);
+  // Every write also needs `workspace.manage`; a viewer-preset member who is
+  // an editor on a project still cannot write.
+  const writes = flags.canManage;
+  return {
+    canView: can("view"),
+    canContribute: writes && can("contribute"),
+    canEdit: writes && can("edit"),
+    canManageProject: writes && can("manage"),
+    canAdminister: writes && can("administer"),
+    canManageContracts: flags.canManageContracts && can("edit"),
+    canApprove: flags.canApprove && can("view"),
+    // Issuing is a platform permission like the contract register's: it is the
+    // *act* that is restricted, and any project member the business trusts with
+    // it may do it — an external party never holds it, because it is not a
+    // project role.
+    canIssueDocuments: flags.canIssueDocuments && can("view"),
+    canViewFinancials: flags.canViewFinancials && can("view"),
+  };
+}
+
+/** Pure: the access flags a set of effective permissions confers. */
+export function workspaceAccessFlags(permissions: ReadonlySet<string>): WorkspaceAccessFlags {
+  return {
+    override: permissions.has("workspace.admin")
+      ? "administer"
+      : permissions.has("ledger.view")
+        ? "read"
+        : null,
+    canViewFinancials: permissions.has("ledger.view"),
+    canManageContracts: permissions.has("workspace.contracts_manage"),
+    canManage: permissions.has("workspace.manage"),
+    canApprove: permissions.has("workspace.approve"),
+    canIssueDocuments: permissions.has("workspace.documents_issue"),
+    canViewMedia: permissions.has("media.view"),
+  };
+}
+
+/** Pure: the role an override confers on a project the member is not on. */
+export function overrideRole(override: WorkspaceOverride): WorkspaceRole | null {
+  if (override === "administer") return "manager";
+  if (override === "read") return "viewer";
+  return null;
+}
+
+/** Pure: the stronger of a member role and an override role. */
+export function effectiveProjectRole(
+  memberRole: WorkspaceRole | null,
+  override: WorkspaceOverride,
+): WorkspaceRole | null {
+  const fromOverride = overrideRole(override);
+  if (!memberRole) return fromOverride;
+  if (!fromOverride) return memberRole;
+  return roleAtLeast(memberRole, fromOverride) ? memberRole : fromOverride;
+}
+
+/** Pure: a date/time interval is ordered (either end may be absent). */
+export function intervalOrdered(start: string | null, end: string | null): boolean {
+  return !start || !end || end >= start;
+}
 
 /* ---------------------------------------------------------------------------
  * Calendar
@@ -371,6 +573,23 @@ export interface WorkspaceTemplate {
   projectType: string;
   phases: WorkspaceTemplatePhase[];
   defaultTasks: string[];
+  /**
+   * The industry this blueprint belongs to, or nothing for the generic
+   * catalogue every trade sees. (#799 §4's six AEC templates are the first
+   * industry-scoped ones: a café must not be offered «پیمانکاری عمومی».)
+   */
+  industry?: Industry | null;
+  /**
+   * AEC operating profiles this template is *recommended* for. Ordering and a
+   * badge only — never a gate: a contractor renovating an office still gets
+   * the fit-out template, it is simply not the one marked «پیشنهادی».
+   */
+  recommendedProfiles?: readonly AecOperatingProfile[];
+}
+
+/** A template plus the answer to "should this business see it first". */
+export interface WorkspaceTemplateChoice extends WorkspaceTemplate {
+  recommended: boolean;
 }
 
 /**
@@ -385,6 +604,12 @@ export interface WorkspaceTemplate {
  * software, marketing, event, consulting, and a bare generic — because the
  * brief's requirement is a workspace that fits ANY business, and a
  * restaurant-shaped phase list would have made it fit exactly one.
+ *
+ * Industry-scoped templates (`industry` set) are appended from their own
+ * module — `workspace-aec-templates.ts` holds issue #799 §4's six AEC
+ * blueprints — and are only offered to that industry. Keeping them out of this
+ * literal is what stops the generic catalogue from growing a trade-specific
+ * branch every time an industry is added.
  */
 export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
   {
@@ -484,11 +709,39 @@ export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
     ],
     defaultTasks: ["جلسهٔ آغازین", "جمع‌آوری داده"],
   },
+  ...AEC_BUILTIN_TEMPLATES,
 ];
 
 /** Pure: looks a built-in template up by key. */
 export function builtinTemplate(key: string): WorkspaceTemplate | null {
   return BUILTIN_TEMPLATES.find((t) => t.key === key) ?? null;
+}
+
+/**
+ * Pure: the templates a business of `industry` may choose, with the ones
+ * recommended for its operating profile first and flagged.
+ *
+ * `industry: null` means the caller could not resolve one (an unprovisioned or
+ * missing row) and keeps only the generic catalogue — an unknown tenant must
+ * never be *offered* a trade it may not be. Sorting is stable, so the built-in
+ * order (generic families, then the industry's own set) survives inside each
+ * group and the catalogue stays authored rather than incidental.
+ */
+export function templatesForIndustry(
+  templates: WorkspaceTemplate[],
+  industry: Industry | null,
+  profile: AecOperatingProfile | null = null,
+): WorkspaceTemplateChoice[] {
+  const eligible = templates
+    .filter((template) => !template.industry || template.industry === industry)
+    .map((template) => ({
+      ...template,
+      recommended: Boolean(profile && template.recommendedProfiles?.includes(profile)),
+    }));
+  return [
+    ...eligible.filter((template) => template.recommended),
+    ...eligible.filter((template) => !template.recommended),
+  ];
 }
 
 /* ---------------------------------------------------------------------------
@@ -691,3 +944,263 @@ export const WORKSPACE_TOOL_LABELS: Record<WorkspaceToolName, string> = {
   list_expiring_contracts: "قراردادهای رو به انقضا",
   list_workspace_approvals: "تأییدهای در انتظار",
 };
+
+/* ---------------------------------------------------------------------------
+ * Project health (#761 §7, §8, §15)
+ * ------------------------------------------------------------------------- */
+
+export type ProjectHealth = "on_track" | "at_risk" | "off_track";
+
+export const PROJECT_HEALTH_LABELS: Record<ProjectHealth, string> = {
+  on_track: "طبق برنامه",
+  at_risk: "در معرض خطر",
+  off_track: "عقب از برنامه",
+};
+
+export type ProjectHealthReason =
+  | "overdue_tasks"
+  | "behind_schedule"
+  | "past_deadline"
+  | "over_budget"
+  | "budget_nearly_spent"
+  | "pending_approvals"
+  | "contracts_expiring";
+
+export const PROJECT_HEALTH_REASON_LABELS: Record<ProjectHealthReason, string> = {
+  overdue_tasks: "وظیفهٔ عقب‌افتاده",
+  behind_schedule: "پیشرفت کمتر از زمان سپری‌شده",
+  past_deadline: "مهلت پروژه گذشته است",
+  over_budget: "هزینه از بودجه گذشته است",
+  budget_nearly_spent: "بیش از ۹۰٪ بودجه مصرف شده",
+  pending_approvals: "تأیید در انتظار",
+  contracts_expiring: "قرارداد رو به انقضا",
+};
+
+export interface ProjectHealthInput {
+  today: string;
+  startDate: string | null;
+  endDate: string | null;
+  completed: boolean;
+  taskCount: number;
+  doneTaskCount: number;
+  overdueTaskCount: number;
+  budgetRial: number | null;
+  /** Null when the actor may not read the ledger — budget is then not judged. */
+  spentRial: number | null;
+  pendingApprovals: number;
+  expiringContracts: number;
+}
+
+/**
+ * Pure: how a project is doing, and why — the same answer on the portfolio,
+ * the project page and the reports, from facts the server already has.
+ *
+ * - **off_track**: the deadline has passed with work open, spend is over
+ *   budget, or progress trails elapsed time by 25 points or more.
+ * - **at_risk**: overdue tasks, progress trailing time by 10+ points, ≥90%
+ *   of budget spent, approvals waiting, or contracts expiring within 30 days.
+ * - **on_track** otherwise. A completed project is always on track.
+ *
+ * "Behind schedule" compares the share of the project's duration that has
+ * elapsed with the share of its tasks that are done; it needs both dates and
+ * at least one task, and is not judged before the start date.
+ */
+export function projectHealth(input: ProjectHealthInput): {
+  health: ProjectHealth;
+  reasons: ProjectHealthReason[];
+  elapsedPercent: number | null;
+  progressPercent: number;
+} {
+  const progressPercent = completionPercent(input.doneTaskCount, input.taskCount);
+  let elapsedPercent: number | null = null;
+  if (input.startDate && input.endDate && input.endDate > input.startDate) {
+    const total = daysUntil(input.endDate, input.startDate);
+    const gone = daysUntil(input.today, input.startDate);
+    elapsedPercent = Math.max(0, Math.min(100, Math.round((gone / total) * 100)));
+  }
+  if (input.completed) return { health: "on_track", reasons: [], elapsedPercent, progressPercent };
+
+  const severe: ProjectHealthReason[] = [];
+  const warn: ProjectHealthReason[] = [];
+  const open = input.taskCount - input.doneTaskCount;
+
+  if (input.endDate && input.endDate < input.today && open > 0) severe.push("past_deadline");
+  if (input.budgetRial !== null && input.spentRial !== null && input.budgetRial > 0) {
+    if (input.spentRial > input.budgetRial) severe.push("over_budget");
+    else if (input.spentRial >= input.budgetRial * 0.9) warn.push("budget_nearly_spent");
+  }
+  if (elapsedPercent !== null && input.taskCount > 0 && elapsedPercent > 0) {
+    const gap = elapsedPercent - progressPercent;
+    if (gap >= 25) severe.push("behind_schedule");
+    else if (gap >= 10) warn.push("behind_schedule");
+  }
+  if (input.overdueTaskCount > 0) warn.push("overdue_tasks");
+  if (input.pendingApprovals > 0) warn.push("pending_approvals");
+  if (input.expiringContracts > 0) warn.push("contracts_expiring");
+
+  const reasons = [...severe, ...warn];
+  return {
+    health: severe.length ? "off_track" : warn.length ? "at_risk" : "on_track",
+    reasons,
+    elapsedPercent,
+    progressPercent,
+  };
+}
+
+/**
+ * The dependency rule, explicit (#761 §9): a task may not be marked DONE
+ * while any task it waits on is unfinished. Moving it to in-progress or
+ * blocked is allowed — the board shows the open blockers as a warning.
+ */
+export function dependencyBlocksStatus(
+  nextStatus: WorkspaceTaskStatus,
+  unfinishedBlockers: number,
+): boolean {
+  return nextStatus === "done" && unfinishedBlockers > 0;
+}
+
+/**
+ * Pure: the Saturday that starts the week `date` falls in — the Persian week,
+ * which the timeline lanes and the calendar both use.
+ */
+export function weekStartSaturday(date: string): string {
+  const day = new Date(`${date}T00:00:00Z`).getUTCDay(); // Sun=0 … Sat=6
+  return addDays(date, -((day + 1) % 7));
+}
+
+/* ---------------------------------------------------------------------------
+ * Contract lifecycle (#761 §12)
+ * ------------------------------------------------------------------------- */
+
+export const CONTRACT_LIFECYCLE_ACTIONS = ["complete", "terminate", "extend", "renew"] as const;
+export type ContractLifecycleAction = (typeof CONTRACT_LIFECYCLE_ACTIONS)[number];
+
+export const CONTRACT_LIFECYCLE_LABELS: Record<ContractLifecycleAction, string> = {
+  complete: "اتمام",
+  terminate: "فسخ",
+  extend: "تمدید مدت",
+  renew: "تجدید",
+};
+
+const LIFECYCLE_FROM: Record<ContractLifecycleAction, readonly WorkspaceContractStatus[]> = {
+  // Work delivered: a live (or lapsed-but-unclosed) contract is closed out.
+  complete: ["active", "expired"],
+  // Ended early, by either side, at any point before it was closed out.
+  terminate: ["draft", "pending_approval", "active", "expired"],
+  // Same agreement, later end date.
+  extend: ["active", "expired"],
+  // A new term of an agreement that ran its course.
+  renew: ["expired", "completed"],
+};
+
+/** Pure: which lifecycle actions a contract in this status can take. */
+export function allowedContractActions(status: WorkspaceContractStatus): ContractLifecycleAction[] {
+  return CONTRACT_LIFECYCLE_ACTIONS.filter((action) => LIFECYCLE_FROM[action].includes(status));
+}
+
+/**
+ * Pure: what a lifecycle action does to a contract, or why it cannot.
+ *
+ * - complete → `completed`; terminate → `terminated` (end date = today when
+ *   it was later, so the record says when it actually stopped).
+ * - extend → stays/returns `active` with a later end date.
+ * - renew → `active` for a new term starting the day after the old end (or
+ *   today, whichever is later) and ending on the given date.
+ */
+export function contractLifecycleChange(
+  action: ContractLifecycleAction,
+  current: { status: WorkspaceContractStatus; startDate: string | null; endDate: string | null },
+  input: { endDate?: string | null; today: string },
+):
+  | { ok: true; status: WorkspaceContractStatus; startDate: string | null; endDate: string | null }
+  | { ok: false; error: string } {
+  if (!LIFECYCLE_FROM[action].includes(current.status)) return { ok: false, error: "invalid_contract_transition" };
+  const today = input.today;
+  if (action === "complete") {
+    return { ok: true, status: "completed", startDate: current.startDate, endDate: current.endDate };
+  }
+  if (action === "terminate") {
+    const endDate = current.endDate && current.endDate < today ? current.endDate : today;
+    return { ok: true, status: "terminated", startDate: current.startDate, endDate };
+  }
+  const newEnd = input.endDate ?? null;
+  if (!newEnd) return { ok: false, error: "end_date_required" };
+  if (action === "extend") {
+    const floor = current.endDate ?? today;
+    if (newEnd <= floor) return { ok: false, error: "extension_not_later" };
+    return { ok: true, status: "active", startDate: current.startDate, endDate: newEnd };
+  }
+  // renew
+  const dayAfterEnd = current.endDate ? addDays(current.endDate, 1) : today;
+  const start = dayAfterEnd > today ? dayAfterEnd : today;
+  if (newEnd <= start) return { ok: false, error: "end_before_start" };
+  return { ok: true, status: "active", startDate: start, endDate: newEnd };
+}
+
+/* ---------------------------------------------------------------------------
+ * Template application plan (#761 §16)
+ * ------------------------------------------------------------------------- */
+
+export const TEMPLATE_APPLY_MODES = ["merge", "replace"] as const;
+export type TemplateApplyMode = (typeof TEMPLATE_APPLY_MODES)[number];
+
+export interface TemplatePlan {
+  addPhases: Array<{ name: string; displayOrder: number; startDate: string | null; endDate: string | null }>;
+  addTasks: string[];
+  /** Existing phases a `replace` removes — only empty ones, never a phase holding tasks. */
+  removePhases: Array<{ id: string; name: string }>;
+  /** Phases the template names that the project already has (left as they are). */
+  keptPhases: string[];
+}
+
+/**
+ * Pure: exactly what applying a template would do — the preview IS the plan
+ * that runs, so what the member saw is what happens.
+ *
+ * - **merge** (default): add the template's phases and starter tasks the
+ *   project does not already have (matched by name, case-insensitively).
+ *   Applying the same template twice changes nothing.
+ * - **replace**: merge, and also remove existing phases the template does not
+ *   name — but only phases with no tasks. Tasks are never deleted, so a
+ *   phase that holds work stays and is reported as kept.
+ */
+export function planTemplateApplication(input: {
+  existingPhases: Array<{ id: string; name: string; displayOrder: number; taskCount: number }>;
+  existingTaskTitles: string[];
+  templatePhases: Array<{ name: string; displayOrder: number; startDate: string | null; endDate: string | null }>;
+  defaultTasks: string[];
+  mode: TemplateApplyMode;
+}): TemplatePlan {
+  const key = (text: string) => text.trim().toLowerCase();
+  const templateNames = new Set(input.templatePhases.map((phase) => key(phase.name)));
+  const removePhases =
+    input.mode === "replace"
+      ? input.existingPhases
+          .filter((phase) => !templateNames.has(key(phase.name)) && phase.taskCount === 0)
+          .map((phase) => ({ id: phase.id, name: phase.name }))
+      : [];
+  const removed = new Set(removePhases.map((phase) => phase.id));
+  const remaining = input.existingPhases.filter((phase) => !removed.has(phase.id));
+  const have = new Set(remaining.map((phase) => key(phase.name)));
+  const offset = remaining.reduce((max, phase) => Math.max(max, phase.displayOrder + 1), 0);
+
+  const addPhases: TemplatePlan["addPhases"] = [];
+  const keptPhases: string[] = [];
+  for (const phase of input.templatePhases) {
+    if (have.has(key(phase.name))) {
+      keptPhases.push(phase.name);
+      continue;
+    }
+    have.add(key(phase.name));
+    addPhases.push({ ...phase, displayOrder: offset + phase.displayOrder });
+  }
+  const haveTasks = new Set(input.existingTaskTitles.map(key));
+  const addTasks: string[] = [];
+  for (const raw of input.defaultTasks) {
+    const title = raw.slice(0, WORKSPACE_LIMITS.taskTitleMax);
+    if (!title.trim() || haveTasks.has(key(title))) continue;
+    haveTasks.add(key(title));
+    addTasks.push(title);
+  }
+  return { addPhases, addTasks, removePhases, keptPhases };
+}

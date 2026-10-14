@@ -144,6 +144,19 @@ export interface PartyReference {
    * CHECK forbids — so those rows are deleted instead of moved.
    */
   selfEdgeColumn?: string;
+  /**
+   * An audited-guard door, declared ON the reference that needs it.
+   *
+   * Some tables sit behind an immutability trigger that allows a party move
+   * only when the audit row exists first and a transaction-local flag is on.
+   * The SQL that writes that audit row belongs beside the reference's own
+   * declaration — it is part of what moving THIS reference means — and the
+   * merge service runs it, inside the merge transaction, immediately before
+   * the move statement, then turns the flag on. Same bind order as the move:
+   * business, loser, winner, then actor. The ledger attribution move
+   * (journal_lines.party_id, issue #863) is the one entry that uses this.
+   */
+  preMoveSql?: string;
 }
 
 /**
@@ -174,6 +187,78 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "رسید دریافت",
   },
   {
+    // Multicurrency (issue #863). The party attribution ON A LINE — the
+    // foreign open item itself. Amounts (debit/credit/foreign) are untouched:
+    // only who the ledger says the balance belongs to moves, exactly like the
+    // orders entry above. Parent-scoped: journal_lines is tenanted by its
+    // entry, and the generated UPDATE must hop through journal_entries.
+    table: "journal_lines",
+    column: "party_id",
+    scope: "parent",
+    parent: { table: "journal_entries", childColumn: "entry_id", parentColumn: "id" },
+    disposition: "move",
+    reason:
+      "A foreign receivable/payable leg IS the person's open balance — the settlement FIFO and the foreign party report resolve it live. Leaving it on the archived record hides real money from the survivor's file; moving it touches only the attribution, never the posted amounts.",
+    // The door through the journal's immutability guard: the attribution move
+    // lands in `ledger_party_attribution_moves` FIRST (same transaction), then
+    // `journal_immutable_columns_guard` accepts the party update under the
+    // transaction-local flag. Every other session still hits the guard.
+    preMoveSql: `INSERT INTO ledger_party_attribution_moves
+                   (business_id, line_id, entry_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, jl.id, jl.entry_id, jl.party_id, $3, $4
+                   FROM journal_lines jl
+                   JOIN journal_entries je ON je.id = jl.entry_id
+                  WHERE je.business_id = $1 AND jl.party_id = $2`,
+  },
+  {
+    // Multicurrency (issue #863). The lot trail's denormalized copy of the
+    // same attribution; it must keep agreeing with the settlement document
+    // and the lot line it points at, so it follows the same merge.
+    table: "fx_settlement_applications",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The application repeats its settlement's party for the audit trail; after a merge it must still name the surviving party or the trail contradicts the settlement document and the lot line it belongs to.",
+  },
+  {
+    // Multicurrency (issue #863). The attribution trail's own columns are
+    // HISTORY, not live attribution: a row records who the party WAS (old)
+    // and who it became (new) at a moment in time. Rewriting it to follow a
+    // later merge would falsify the audit record — the exact thing the
+    // append-only guard forbids. Both columns stay on the archived record.
+    table: "ledger_party_attribution_moves",
+    column: "old_party_id",
+    scope: "business",
+    disposition: "historical",
+    reason:
+      "The move's audit row records what happened, including the party that was archived; rewriting history is what the append-only guard exists to prevent.",
+  },
+  {
+    table: "ledger_party_attribution_moves",
+    column: "new_party_id",
+    scope: "business",
+    disposition: "historical",
+    reason:
+      "The destination of a recorded move is a fact about that move; a later merge of the winner must not rewrite it.",
+  },
+  {
+    table: "fixed_assets",
+    column: "custodian_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "An asset's custodian is operational: the register reads it live (history, responsibility), so it must resolve to the surviving party instead of an archived one. No journal line references the custodian — the trial balance is untouched.",
+  },
+  {
+    table: "fixed_assets",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The vendor an asset was bought from is a live register attribute (list, filters, export), not an audit row about the party itself; re-pointing keeps the provenance readable after two supplier files become one. The purchase journal entry is not touched.",
+  },
+  {
     table: "cheques",
     column: "customer_id",
     scope: "business",
@@ -191,6 +276,23 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     reason: "An instalment plan is a live obligation of the person, not of the record that lost a merge.",
     preview: true,
     previewLabel: "قرارداد اقساط",
+  },
+  {
+    table: "expenses",
+    column: "party_id",
+    scope: "business",
+    // An expense survives its party being deleted outright — `ON DELETE SET
+    // NULL` plus the free-text `vendor` snapshot keep the posted fact intact
+    // (issue #832 §12). A merge is a different act: it does not destroy the
+    // record, it declares that two rows were always the same person. Leaving
+    // the link on the loser would strand it on an archived row, and the ledger
+    // question the column exists to answer — «به این شخص/شرکت چقدر پرداختیم» —
+    // would silently lose every expense the loser had.
+    disposition: "move",
+    reason:
+      "The supplier link on a paid expense is a live ledger reference, not an audit annotation; the audit trail is the journal entry and the `vendor` snapshot, which a merge does not touch.",
+    preview: true,
+    previewLabel: "هزینه",
   },
 
   // -- Growth-owned programs ------------------------------------------------
@@ -242,6 +344,36 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     reason: "A custom-order ticket is live work owed to the person (jewellery).",
     preview: true,
     previewLabel: "سفارش ساخت",
+  },
+  {
+    table: "serial_returns",
+    column: "customer_id",
+    scope: "location",
+    disposition: "move",
+    reason:
+      "A serialized return claim (issue #795) is live work owed to the person — a pending refund or exchange must be reachable from the surviving file.",
+    preview: true,
+    previewLabel: "مرجوعی سریالی",
+  },
+  {
+    table: "serial_preowned_intakes",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "A pre-owned intake (issue #795 item 18) is the provenance document of where a unit came from — it must keep pointing at the surviving file.",
+    preview: true,
+    previewLabel: "دریافت دست‌دوم",
+  },
+  {
+    table: "serial_reservations",
+    column: "customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "A reservation (issue #795 item 20) is a unit promised to the person — the hold must survive the merge so their invoice can still convert it.",
+    preview: true,
+    previewLabel: "رزرو ساعت",
   },
   {
     table: "layaway_plans",
@@ -467,6 +599,295 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     disposition: "move",
     reason:
       "A document filed against the customer. Leaving it on the loser removes it from the surviving file's document list, which is how a signed contract scan goes missing.",
+  },
+
+  // -- AEC (issue #799 Wave 2) ----------------------------------------------
+  // Migration 0194's three party columns. All four are `move`: they name a live
+  // counterparty on a project that is still running, and the migration's own
+  // trigger refuses an archived or merged-away party — so leaving one pointing
+  // at the loser would not merely hide it, it would make the row unwritable on
+  // the next edit.
+  {
+    table: "aec_project_profiles",
+    column: "employer_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The project's employer — the party the work is being delivered for. A duplicate-record merge must not leave the profile naming an archived company.",
+    preview: true,
+    previewLabel: "کارفرمای پروژه",
+  },
+  {
+    table: "aec_project_profiles",
+    column: "lead_consultant_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The lead consultant on the project. Same rule as the employer: the merged-away record must not remain the consultant of record.",
+  },
+  {
+    table: "aec_project_profiles",
+    column: "main_contractor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The main contractor on the project, and a party the profile's trigger requires to be live and unmerged.",
+  },
+  {
+    table: "aec_project_participants",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "An external participant's role on a project. It belongs to the surviving counterparty, and its trigger refuses a merged-away party just as the profile's does.",
+    preview: true,
+    previewLabel: "طرف‌های پروژه",
+  },
+
+  // -- AEC (issue #799 Wave 4) ----------------------------------------------
+  {
+    table: "aec_boq_items",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // Only a *draft* revision may be written at all: migration 0196's line
+    // guard refuses an UPDATE to any line of a submitted, approved or
+    // superseded revision, so moving a frozen row would abort the whole merge.
+    // Skipping them is also the right answer rather than a workaround — an
+    // approved estimate is a historical document, and the supplier it named is
+    // part of what was approved. Draft lines do move, because a draft stays
+    // editable and its trigger refuses a merged-away party: leaving one behind
+    // would make the next edit of that line fail.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_estimate_versions v WHERE v.id = {t}.version_id AND v.status = 'draft')",
+    reason:
+      "The supplier or contractor a draft measured line is priced against. A draft line moves with the surviving record; a frozen revision keeps the name it was approved with.",
+    preview: true,
+    previewLabel: "ردیف‌های متره (پیش‌نویس)",
+  },
+  {
+    table: "aec_transmittals",
+    column: "sender_party_id",
+    scope: "business",
+    disposition: "move",
+    // Same reasoning as the BOQ line: migration 0197's transmittal guard refuses
+    // any content change to an issued transmittal, so a frozen one keeps the
+    // sender it was issued under. Drafts move, because a draft stays editable
+    // and its trigger refuses a merged-away party.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_transmittals tm WHERE tm.id = {t}.id AND tm.status = 'draft')",
+    reason:
+      "The party a draft transmittal says it came from. A draft moves with the surviving record; an issued transmittal keeps the sender named in the record it issued.",
+    preview: true,
+    previewLabel: "برگه‌های ارسال (پیش‌نویس)",
+  },
+  {
+    table: "aec_transmittal_recipients",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // Only a *draft* transmittal's recipients may be rewritten: 0197 freezes the
+    // recipient rows of an issued one, so moving a frozen row would abort the
+    // merge — and keeping it is right, because that row is also the receipt.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_transmittals tm WHERE tm.id = {t}.transmittal_id AND tm.status = 'draft')",
+    reason:
+      "Who a draft transmittal is addressed to. Drafts follow the surviving party; an issued transmittal keeps the recipient it was sent to, because that row is the receipt.",
+    preview: true,
+    previewLabel: "گیرندگان برگهٔ ارسال (پیش‌نویس)",
+  },
+
+  // -- AEC (issue #799 Wave 6) ----------------------------------------------
+  {
+    table: "aec_rfis",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Migration 0198's RFI guard freezes number, subject, question and the
+    // original ask once the RFI leaves draft, and freezes the response once one
+    // exists. The party that owes the answer is *not* among the frozen fields,
+    // so the column always moves with the surviving record — a draft in
+    // progress and an answered RFI alike. Leaving a closed RFI pointing at a
+    // merged-away party would fail the trigger the next time the row is touched
+    // (and the RFI's history would name a party that no longer exists).
+    reason:
+      "The party that owes (or owed) the answer to a project question. Always moves with the surviving record; who was asked is not part of a frozen RFI.",
+    preview: true,
+    previewLabel: "استعلام‌ها (RFI)",
+  },
+  // -- AEC (issue #799 Wave 7) ----------------------------------------------
+  {
+    table: "aec_site_log_lines",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // 0199's line guard refuses any change to the lines of a *submitted* day, so
+    // the filter moves a draft day's lines and leaves a signed day's exactly as
+    // they were signed — the same shape as a draft transmittal's recipients.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_site_logs sl WHERE sl.id = {t}.log_id AND sl.status = 'draft')",
+    reason:
+      "The contractor, plant owner or supplier a draft day's line names. A draft moves with the surviving party; a submitted day keeps the crew and supplier it was signed with.",
+    preview: true,
+    previewLabel: "عوامل و تجهیزات گزارش روزانه (پیش‌نویس)",
+  },
+  {
+    table: "aec_site_issues",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Same reasoning as the RFI and submittal registers one wave earlier: a
+    // closed or cancelled issue is frozen by 0199's guard and refuses the UPDATE,
+    // and leaving the reference behind would abort the next write against it.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_site_issues si WHERE si.id = {t}.id AND si.status NOT IN ('closed', 'cancelled'))",
+    reason:
+      "The contractor or supplier who owes a fix. A live issue follows the surviving party; a closed one keeps the party it was closed against.",
+    preview: true,
+    previewLabel: "موارد باز کارگاه",
+  },
+  {
+    table: "aec_submittals",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Same shape: 0198's submittal guard freezes the identity of a register
+    // entry once a revision has been submitted, but the responsible party is not
+    // part of that identity — the submitter keeps moving so a live log never
+    // names a party the merge removed.
+    reason:
+      "The party answerable for a submittal. Always moves with the surviving record; it is not part of what a submitted revision froze.",
+    preview: true,
+    previewLabel: "سابمیتال‌ها",
+  },
+  // -- AEC (issue #799 Wave 8) ----------------------------------------------
+  {
+    table: "aec_variations",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Migration 0200's variation guard freezes every field of a change order
+    // once it has been submitted (only a rejected one may be reopened, and only
+    // to be re-priced), so a merge can re-point the party on a draft or priced
+    // change and must leave the rest exactly where they were named — the party a
+    // submitted order was raised against must not change underneath the client
+    // who received it.
+    filterSql: "{t}.status IN ('draft', 'priced')",
+    reason:
+      "The party answerable for a change order. A draft or priced order follows the surviving record; a submitted one keeps the party it was raised against, because the client has seen that document.",
+    preview: true,
+    previewLabel: "تغییرات در حال تنظیم",
+  },
+
+  // -- AEC (issue #799 Wave 9) ----------------------------------------------
+  // §18's three supplier columns. Suppliers stay `parties` — that is the whole
+  // reason these are references to classify rather than a second supplier model.
+  // Migration 0201's `aec_assert_party_live()` refuses an archived or
+  // merged-away party, so a row left pointing at the loser becomes unwritable on
+  // its next edit; each entry moves what may be moved and leaves the frozen rest.
+  {
+    table: "aec_rfq_suppliers",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // An issued RFQ is frozen (0201's rfq guard), and its invitation rows are
+    // part of what was sent — so only a draft tender's list moves. The unique
+    // key is (rfq_id, party_id): when both records were invited to the same
+    // tender, the loser's duplicate row is dropped rather than aborting the
+    // merge.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_rfqs q WHERE q.id = {t}.rfq_id AND q.status = 'draft')",
+    uniqueWithSql: ["rfq_id"],
+    reason:
+      "A supplier invited to a draft RFQ. Drafts follow the surviving record; an issued tender keeps the invitation list it was sent with.",
+    preview: true,
+    previewLabel: "تأمین‌کنندگان دعوت‌شده به استعلام (پیش‌نویس)",
+  },
+  {
+    table: "aec_supplier_quotations",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // `selected` and `declined` quotations are history and 0201 refuses to
+    // update them at all; received and shortlisted ones are still live rows and
+    // move. Same unique key as the invitation list, so the same collision rule.
+    filterSql: "{t}.status NOT IN ('selected', 'declined')",
+    uniqueWithSql: ["rfq_id"],
+    reason:
+      "The supplier an offer came from. A live offer follows the surviving record; a decided one is the history the award was made against.",
+    preview: true,
+    previewLabel: "پیشنهادهای تأمین‌کنندگان",
+  },
+  {
+    table: "aec_commitments",
+    column: "supplier_party_id",
+    scope: "business",
+    disposition: "move",
+    // A submitted award is frozen (0201's commitment guard), so a draft moves
+    // and the rest keep the supplier they oblige. No unique conflict: a project
+    // may have many awards to one supplier.
+    filterSql: "{t}.status = 'draft'",
+    reason:
+      "The supplier a purchase order or subcontract obliges. A draft moves with the surviving record; a submitted award keeps the supplier the client and the books were told about.",
+    preview: true,
+    previewLabel: "سفارش‌های خرید و پیمان‌های جزئی (پیش‌نویس)",
+  },
+
+  // -- Automotive (issue #839 Wave 6) ---------------------------------------
+  // A car's row is live stock: it is edited (state, price, costs) long after
+  // the purchase, so a reference on it that resolved to an archived party would
+  // be exactly the stale-pointer bug this registry exists to prevent. All four
+  // move — the merge asserts these two records were one person, so the
+  // deduplicated record is the correct counterparty for every one of them.
+  {
+    table: "automotive_vehicle_attributes",
+    column: "acquisition_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The party the car was bought from (a customer's trade-in, a private seller, a supplier). Money is still owed or settled through that relationship — a trade-in payable names them — so an acquisition left on the archived record would hide the obligation from the surviving file.",
+    preview: true,
+    previewLabel: "خرید خودرو",
+  },
+  {
+    table: "automotive_vehicle_attributes",
+    column: "provenance_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "Who the car came from, as documented on the unit. It sits on the same live row as the acquisition and is resolved by name on the vehicle screen (`LEFT JOIN parties`), so leaving it archived would print a name nobody can open — the merge says the two records were one person all along.",
+    preview: true,
+    previewLabel: "سابقهٔ خودرو",
+  },
+  {
+    table: "automotive_vehicle_attributes",
+    column: "sold_customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The buyer of a sold car. The sale's own order moves too (`orders.customer_id`), and the two must not disagree about who bought the vehicle: a warranty, a follow-up or a reversal after the merge has to reach the surviving record.",
+    preview: true,
+    previewLabel: "فروش خودرو",
+  },
+  {
+    table: "automotive_vehicle_sales",
+    column: "customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The sale occurrence retains the buyer alongside the canonical retail order. A customer merge must move both references together so the surviving CRM record can find every sale without changing its price, tax or ledger history.",
+    preview: true,
+    previewLabel: "خریدار فروش خودرو",
+  },
+  {
+    table: "automotive_vehicle_costs",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The vendor paid for reconditioning, freight or a repair. The row is a live expense (void-not-edit) whose amount is part of the car's landed cost, and the vendor is a payable like any other — repointing it keeps one vendor record instead of two.",
+    preview: true,
+    previewLabel: "هزینهٔ خودرو",
   },
 
   // -- Historical / audit: deliberately NOT moved ---------------------------

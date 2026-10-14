@@ -27,6 +27,7 @@ import {
 } from "@/lib/ai-gateway-service";
 import { rialFromGatewayUsd } from "@/lib/ai-gateway";
 import { getPlanAllowance } from "@/lib/ai-plan-allowance";
+import { parseSafeIntInput } from "@/lib/platform-money";
 import { query } from "@/lib/db";
 import {
   BILLING_ALWAYS_INCLUDED,
@@ -150,7 +151,7 @@ export const GET = withPlatformScope(
       planAllowance,
       overrides,
     ] = await Promise.all([
-      want.has("wallet") ? getWallet(businessId) : null,
+      want.has("wallet") || want.has("ai") ? getWallet(businessId) : null,
       want.has("ledger") ? listLedger(businessId, ledgerLimit, ledgerOffset) : null,
       want.has("ledger") ? countLedger(businessId) : null,
       want.has("subscription") ? listEntitlements(businessId) : null,
@@ -189,7 +190,7 @@ export const GET = withPlatformScope(
       // recovery path crashes where the happy path worked. `emptyMediaUsage()`
       // carries every kind, so `usage.byKind.image.count` is always defined.
       want.has("usage") ? mediaUsageFor(businessId).catch(() => emptyMediaUsage()) : null,
-      want.has("ai") ? getPlanAllowance(businessId) : null,
+      want.has("wallet") || want.has("ai") ? getPlanAllowance(businessId) : null,
       // Every override row, classified. The entitlement engine already ignores
       // an expired override, so returning expired rows as if they were live made
       // the console disagree with the engine that actually decides access.
@@ -244,7 +245,17 @@ export const GET = withPlatformScope(
       },
     };
 
-    if (wallet) response.wallet = wallet;
+    if (wallet && want.has("wallet")) {
+      const remainingAllowanceRial = planAllowance?.remainingRial ?? 0;
+      const netBalanceRial =
+        wallet.netBalanceRial ?? Math.max(0, wallet.balanceRial - (wallet.aiDebtRial ?? 0));
+      response.wallet = {
+        ...wallet,
+        netBalanceRial,
+        aiAllowanceRemainingRial: remainingAllowanceRial,
+        usableAiCreditRial: netBalanceRial + remainingAllowanceRial,
+      };
+    }
     if (ledger) response.ledger = ledger;
     if (entitlements) response.entitlements = entitlements;
     if (payments) response.payments = payments;
@@ -264,11 +275,16 @@ export const GET = withPlatformScope(
       }));
     }
     if (want.has("ai")) {
+      const remainingAllowanceRial = planAllowance?.remainingRial ?? 0;
+      const aiDebtRial = wallet?.aiDebtRial ?? 0;
+      const netWalletBalanceRial = wallet?.netBalanceRial ?? 0;
       response.ai = {
         allowance: planAllowance,
         walletSpentRial: (usage?.rows ?? [])
-          .filter((u) => u.feature_key === "ai")
+          .filter((u) => u.feature_key === "ai" || u.feature_key === "ai_assistant")
           .reduce((sum, u) => sum + Number(u.spent_rial), 0),
+        aiDebtRial,
+        usableAiCreditRial: netWalletBalanceRial + remainingAllowanceRial,
       };
     }
     if (want.has("overrides")) {
@@ -321,7 +337,7 @@ export const POST = withPlatformScope(
     if (guard.error) return guard.error;
     const { id: businessId } = await ctx.params;
 
-    let body: { amountRial?: number; note?: string; action?: string; locationId?: string | null };
+    let body: { amountRial?: unknown; note?: string; action?: string; locationId?: string | null };
     try {
       body = await req.json();
     } catch {
@@ -371,8 +387,8 @@ export const POST = withPlatformScope(
       });
     }
 
-    const amount = Math.floor(Number(body.amountRial ?? 0));
-    if (amount === 0 || !Number.isSafeInteger(amount)) {
+    const amount = parseSafeIntInput(body.amountRial, { min: -Number.MAX_SAFE_INTEGER });
+    if (amount === null || amount === 0) {
       return NextResponse.json({ error: "bad_amount" }, { status: 400 });
     }
 
@@ -392,6 +408,7 @@ export const POST = withPlatformScope(
               note: body.note?.trim() || undefined,
               platformAdminId: guard.session.padmin,
             });
+      const afterWallet = await getWallet(businessId);
       await platformAudit({
         adminId: guard.session.padmin,
         businessId,
@@ -403,9 +420,17 @@ export const POST = withPlatformScope(
           note: body.note?.trim() || null,
           beforeRial: before.balanceRial,
           afterRial: result.balanceRial,
+          beforeDebtRial: before.aiDebtRial,
+          afterDebtRial: afterWallet.aiDebtRial,
+          debtPaidRial: (result as { debtPaidRial?: number }).debtPaidRial ?? 0,
         },
       });
-      return NextResponse.json({ balanceRial: result.balanceRial });
+      return NextResponse.json({
+        balanceRial: result.balanceRial,
+        aiDebtRial: afterWallet.aiDebtRial,
+        netBalanceRial: afterWallet.netBalanceRial,
+        debtPaidRial: (result as { debtPaidRial?: number }).debtPaidRial ?? 0,
+      });
     } catch (err) {
       if (err instanceof Error && err.message === "insufficient_credits") {
         return NextResponse.json({ error: "insufficient_credits" }, { status: 409 });

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { LIFECYCLE_STAGES } from "@/lib/crm-scoring";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
@@ -88,6 +89,13 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     conditions.push(`c.id = $${params.length}`);
   } else {
     if (!includeInactive) conditions.push("c.is_active");
+    // Audience filter (issue #764): one lifecycle stage, validated against the
+    // CRM's own vocabulary so an unknown value is ignored, never interpolated.
+    const stage = searchParams.get("stage")?.trim() ?? "";
+    if (stage && stage in LIFECYCLE_STAGES) {
+      params.push(stage);
+      conditions.push(`c.lifecycle_stage = $${params.length}`);
+    }
     if (q) {
       // The directory's own matcher, not a second definition of it: blind index,
       // last four, Persian digits and escaped wildcards. Hand-rolling

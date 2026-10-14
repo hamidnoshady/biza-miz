@@ -6,6 +6,8 @@ import {
   visibleWorkspaceSections,
   WORKSPACE_SECTION_GROUPS,
   WORKSPACE_SECTION_META,
+  workspaceAssistantHref,
+  workspaceCreateActions,
 } from "./workspace-routes";
 import { WORKSPACE_SECTIONS } from "@/lib/workspace-shared";
 
@@ -15,12 +17,8 @@ describe("My Workspace navigation", () => {
     expect(grouped).toEqual([...WORKSPACE_SECTIONS]);
     expect(new Set(grouped).size).toBe(grouped.length);
     expect(WORKSPACE_SECTION_GROUPS.map((group) => group.label)).toEqual([
-      "نمای کلی",
-      "کار",
-      "اسناد",
-      "سازمان",
-      "بینش",
-      "پیکربندی",
+      "کار روزانه",
+      "بیشتر",
     ]);
   });
 
@@ -40,5 +38,39 @@ describe("My Workspace navigation", () => {
       PERMISSIONS.workspaceManage,
     ]);
     expect(manager.map((section) => section.key)).toEqual(Object.keys(WORKSPACE_SECTION_META));
+  });
+});
+
+describe("workspaceCreateActions", () => {
+  it("offers only what the platform permissions allow", () => {
+    expect(workspaceCreateActions(["workspace.view"])).toEqual([]);
+    const keys = workspaceCreateActions(["workspace.view", "workspace.manage"]).map((a) => a.key);
+    expect(keys).toEqual(["project", "task", "event", "document", "member"]);
+    expect(
+      workspaceCreateActions(["workspace.manage", "workspace.contracts_manage"]).map((a) => a.key),
+    ).toContain("contract");
+  });
+
+  it("preselects the project inside one, and drops «new project» there", () => {
+    const actions = workspaceCreateActions(["workspace.manage"], "p-1");
+    expect(actions.map((a) => a.key)).not.toContain("project");
+    expect(actions.find((a) => a.key === "task")?.href).toBe(
+      `${workspaceSectionHref("tasks")}?create=1&project=p-1`,
+    );
+  });
+});
+
+describe("workspaceAssistantHref", () => {
+  it("opens the assistant focused on the workspace with the page's question prefilled", () => {
+    const url = new URL(workspaceAssistantHref("contracts"), "https://x.test");
+    expect(url.pathname).toBe("/dashboard");
+    expect(url.searchParams.get("focus")).toBe("workspace");
+    expect(url.searchParams.get("ctx")).toContain("قرارداد");
+    expect(url.searchParams.has("project")).toBe(false);
+  });
+  it("scopes to the project inside one", () => {
+    const url = new URL(workspaceAssistantHref("projects", "p-9"), "https://x.test");
+    expect(url.searchParams.get("project")).toBe("p-9");
+    expect(url.searchParams.get("ctx")).toContain("پروژه");
   });
 });

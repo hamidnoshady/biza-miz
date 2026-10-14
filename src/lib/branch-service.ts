@@ -84,6 +84,64 @@ function toBranch(row: BranchRow): Branch {
 }
 
 /** Every branch of a business, active and inactive, for the management screen. */
+/**
+ * The business's own active branches, in the order the switcher lists them.
+ *
+ * Deliberately not `listBranches`: that carries the open-order / open-session /
+ * member counts the management screen needs to explain why a branch cannot be
+ * deactivated, and a lookup that only has to name a branch has no business
+ * running four aggregate subqueries for it.
+ */
+export async function activeBranchRefs(businessId: string): Promise<{ id: string; name: string }[]> {
+  const { rows } = await query<{ id: string; name: string }>(
+    `SELECT id, name FROM locations WHERE business_id = $1 AND is_active ORDER BY created_at`,
+    [businessId],
+  );
+  return rows;
+}
+
+/** The branch an automation writes to when nobody said otherwise: the oldest active one. */
+export async function defaultBranchId(businessId: string): Promise<string | null> {
+  const refs = await activeBranchRefs(businessId);
+  return refs[0]?.id ?? null;
+}
+
+/**
+ * A branch named the way a person or a model names one — by id, or by exactly one
+ * active branch's name — resolved *within this business* and nowhere else.
+ *
+ * Three things make this the only right place for the rule: the comparison is
+ * `isSameBranchName`, the same indistinguishable-to-a-reader key the branch form
+ * enforces uniqueness with (so a lookup can never match two names the business
+ * would refuse to create twice); an id that belongs to another tenant is simply
+ * not in the list, so a foreign id is a refusal rather than a widened write; and
+ * an ambiguous name is its own answer — two branches called «مرکزی» is a naming
+ * mistake the owner should hear about, not a coin flip inside an automation that
+ * is about to post a journal entry.
+ */
+export async function resolveBranchRef(
+  businessId: string,
+  ref: string | null | undefined,
+): Promise<
+  | { ok: true; locationId: string | null; matched: "requested" | "default" }
+  | { ok: false; reason: "unknown" | "ambiguous"; branchNames: string[] }
+> {
+  const wanted = typeof ref === "string" ? ref.trim() : "";
+  const branches = await activeBranchRefs(businessId);
+  if (!wanted) return { ok: true, locationId: branches[0]?.id ?? null, matched: "default" };
+
+  if (isUuid(wanted)) {
+    const byId = branches.find((branch) => branch.id === wanted);
+    if (byId) return { ok: true, locationId: byId.id, matched: "requested" };
+  }
+  const byName = branches.filter((branch) => isSameBranchName(branch.name, wanted));
+  if (byName.length === 1) return { ok: true, locationId: byName[0].id, matched: "requested" };
+  if (byName.length > 1) {
+    return { ok: false, reason: "ambiguous", branchNames: byName.map((branch) => branch.name) };
+  }
+  return { ok: false, reason: "unknown", branchNames: branches.map((branch) => branch.name) };
+}
+
 export async function listBranches(businessId: string): Promise<Branch[]> {
   const { rows } = await query<BranchRow>(
     `SELECT l.id, l.name, l.address, l.phone, l.timezone, l.color, l.is_active, l.created_at,

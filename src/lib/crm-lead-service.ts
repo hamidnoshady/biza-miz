@@ -36,6 +36,8 @@ import { query, withTenantTransaction } from "./db";
 import { phoneE164 } from "./phone";
 import { phoneMatchKeys, phoneMatchSql, createParty } from "./parties-service";
 import { recordCrmAudit } from "./crm-audit-service";
+import { runCrmAutomations } from "./crm-automation-service";
+import { resolveOwner } from "./crm-ownership";
 import { normaliseSource, type CrmSource } from "./crm-sources";
 import { defaultPipeline } from "./crm-pipeline-service";
 import { isUuid } from "./uuid";
@@ -209,7 +211,9 @@ interface SaveLeadInput {
   sourceDetail?: string;
   status?: LeadStatus;
   rating?: LeadRating;
+  /** The owner as a **member id**; preferred over the name below. */
   ownerUserId?: string | null;
+  /** A name, for integrations and legacy callers. Resolved, never trusted. */
   ownerName?: string;
   notes?: string;
   nextAction?: string;
@@ -248,6 +252,12 @@ export async function saveLead(
     ? (input.rating as LeadRating)
     : "warm";
 
+  // Ownership is a member id, with the name kept beside it as the row's
+  // snapshot (see `crm-ownership.ts`). Resolved here rather than trusted from
+  // the body so an integration that sends a name — or a stale id from another
+  // business — cannot assign a lead to somebody who does not exist here.
+  const owner = await resolveOwner(businessId, input.ownerUserId ?? input.ownerName);
+
   if (input.id) {
     if (!isUuid(input.id)) return null;
     // A converted lead is history. Editing it would let somebody rewrite what
@@ -278,8 +288,8 @@ export async function saveLead(
         input.sourceDetail?.trim() ?? "",
         status,
         rating,
-        input.ownerUserId ?? null,
-        input.ownerName?.trim() ?? "",
+        owner.userId,
+        owner.name,
         input.notes?.trim() ?? "",
         input.nextAction?.trim() ?? "",
         input.nextActionAt ?? null,
@@ -303,7 +313,7 @@ export async function saveLead(
     return getLead(businessId, input.id);
   }
 
-  const { rows } = await query<{ id: string }>(
+  const { rows } = await query<{ id: string; isNew: boolean }>(
     `INSERT INTO crm_leads
        (business_id, name, organization, phone, phone_e164, email, source, source_detail,
         status, rating, owner_user_id, owner_name, notes, next_action, next_action_at,
@@ -313,7 +323,10 @@ export async function saveLead(
      ON CONFLICT (business_id, connection_id, external_ref)
        WHERE connection_id IS NOT NULL AND external_ref IS NOT NULL
        DO UPDATE SET updated_at = now()
-     RETURNING id`,
+     -- xmax = 0 distinguishes a real insert from the conflict branch, which
+     -- re-delivers an integration's old lead; only the first is a new lead, and
+     -- only it should put work in somebody's day.
+     RETURNING id, (xmax = 0) AS "isNew"`,
     [
       businessId,
       name,
@@ -325,8 +338,8 @@ export async function saveLead(
       input.sourceDetail?.trim() ?? "",
       status,
       rating,
-      input.ownerUserId ?? null,
-      input.ownerName?.trim() ?? "",
+      owner.userId,
+      owner.name,
       input.notes?.trim() ?? "",
       input.nextAction?.trim() ?? "",
       input.nextActionAt ?? null,
@@ -348,7 +361,23 @@ export async function saveLead(
     actorName: actor.name,
   });
 
-  return getLead(businessId, rows[0].id);
+  const lead = await getLead(businessId, rows[0].id);
+  if (lead && rows[0].isNew) {
+    await runCrmAutomations(businessId, {
+      trigger: "lead_created",
+      entity: {
+        type: "lead",
+        id: lead.id,
+        title: lead.name,
+        partyId: null,
+        source: lead.source,
+        ownerUserId: lead.ownerUserId,
+        ownerName: lead.ownerName,
+      },
+      actor,
+    });
+  }
+  return lead;
 }
 
 interface LeadDuplicate {

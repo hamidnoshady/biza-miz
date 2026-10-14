@@ -3,7 +3,11 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const pathname = vi.hoisted(() => ({ value: "/dashboard" }));
-vi.mock("next/navigation", () => ({ usePathname: () => pathname.value }));
+vi.mock("next/navigation", () => ({
+  usePathname: () => pathname.value,
+  useSearchParams: () => new URLSearchParams(),
+  useRouter: () => ({ push: vi.fn() }),
+}));
 
 import { DeploymentCapabilityGate } from "./deployment-capability-gate";
 
@@ -19,16 +23,28 @@ describe("DeploymentCapabilityGate on a Hybrid desktop", () => {
     );
   };
 
-  it("lets the home page decide (it redirects to a till screen, or explains there is none)", () => {
-    renderAt("/dashboard");
+  it("renders a till screen itself", () => {
+    renderAt("/accounting/pos");
     expect(screen.getByText("page")).toBeTruthy();
   });
 
-  it("renders a till screen and hands every other screen to the cloud", () => {
-    renderAt("/accounting/pos");
+  it("shows every other screen from the cloud — the assistant home included", () => {
+    for (const path of ["/accounting/reports", "/crm/overview", "/dashboard"]) {
+      renderAt(path);
+      expect(screen.queryByText("page"), path).toBeNull();
+      cleanup();
+    }
+  });
+});
+
+describe("DeploymentCapabilityGate on the cloud", () => {
+  it("never interferes", () => {
+    pathname.value = "/crm/overview";
+    render(
+      <DeploymentCapabilityGate profile="cloud" runtimeRole="central" cloudUrl={null}>
+        <p>page</p>
+      </DeploymentCapabilityGate>,
+    );
     expect(screen.getByText("page")).toBeTruthy();
-    cleanup();
-    renderAt("/accounting/reports");
-    expect(screen.queryByText("page")).toBeNull();
   });
 });

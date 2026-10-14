@@ -8,7 +8,7 @@
  * continues (charged or free) or catches `FeatureNotEntitledError` /
  * `WalletInsufficientFundsError` and shows the buy-credits prompt.
  */
-import { withoutTenantScope } from "./db";
+import { query, withoutTenantScope } from "./db";
 import { chargeFeatureUse, WalletInsufficientFundsError } from "./wallet-service";
 import {
   grantEntitlement,
@@ -124,39 +124,74 @@ export async function activatePurchasedPlan(input: {
  * gateway return and the super-admin's manual approval both call, so the two
  * paths can never drift into different activation logic again.
  *
- * Idempotent at the payment layer (both callers settle-then-fulfil; a
- * re-verified payment short-circuits before this), and safe to call twice:
- * entitlement grants are upserts and changeBusinessPlan is a no-op when the
- * business is already on the plan.
+ * Durable and idempotent: when `payment.id` is provided, tracks `fulfilment_status`
+ * (`pending` -> `succeeded` | `failed`) on `billing_payments`. If activation
+ * fails after payment settlement, `fulfilment_status` is marked `'failed'` so a
+ * subsequent retry of `fulfilPurchasedPayment` or `reviewManualPayment` can
+ * complete fulfilment without double-crediting the wallet.
  */
 export async function fulfilPurchasedPayment(payment: {
+  id?: string;
   businessId: string;
   purpose: string;
   planKey: string | null;
   featureKey: string | null;
 }): Promise<void> {
-  if (payment.purpose === "addon_purchase" && payment.featureKey) {
-    await fulfilPurchasedEntitlement({
-      businessId: payment.businessId,
-      featureKey: payment.featureKey,
-      source: "addon",
-    });
-    return;
+  if (payment.id) {
+    const { rows } = await query<{ fulfilment_status: string }>(
+      `SELECT fulfilment_status FROM billing_payments WHERE id = $1`,
+      [payment.id],
+    );
+    if (rows[0]?.fulfilment_status === "succeeded") {
+      return;
+    }
   }
-  if (payment.purpose === "plan_purchase" && payment.planKey) {
-    await activatePurchasedPlan({ businessId: payment.businessId, planKey: payment.planKey });
-    const features = await listPlanFeatures(payment.planKey);
-    for (const f of features) {
-      if (f.pricingModel === "included" || f.pricingModel === "monthly") {
-        await fulfilPurchasedEntitlement({
-          businessId: payment.businessId,
-          featureKey: f.featureKey,
-          source: "plan",
-          freeUntil: f.freeUntil,
-          freeLimit: f.freeLimit,
-        });
+
+  try {
+    if (payment.purpose === "addon_purchase" && payment.featureKey) {
+      await fulfilPurchasedEntitlement({
+        businessId: payment.businessId,
+        featureKey: payment.featureKey,
+        source: "addon",
+      });
+    } else if (payment.purpose === "plan_purchase" && payment.planKey) {
+      await activatePurchasedPlan({ businessId: payment.businessId, planKey: payment.planKey });
+      const features = await listPlanFeatures(payment.planKey);
+      for (const f of features) {
+        if (f.pricingModel === "included" || f.pricingModel === "monthly") {
+          await fulfilPurchasedEntitlement({
+            businessId: payment.businessId,
+            featureKey: f.featureKey,
+            source: "plan",
+            freeUntil: f.freeUntil,
+            freeLimit: f.freeLimit,
+          });
+        }
       }
     }
+
+    if (payment.id) {
+      await query(
+        `UPDATE billing_payments
+            SET fulfilment_status = 'succeeded',
+                fulfilled_at = COALESCE(fulfilled_at, now()),
+                fulfilment_error = NULL
+          WHERE id = $1`,
+        [payment.id],
+      );
+    }
+  } catch (err) {
+    if (payment.id) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      await query(
+        `UPDATE billing_payments
+            SET fulfilment_status = 'failed',
+                fulfilment_error = $2
+          WHERE id = $1`,
+        [payment.id, errMessage],
+      ).catch(() => {});
+    }
+    throw err;
   }
 }
 
@@ -166,21 +201,25 @@ export async function fulfilPurchasedPayment(payment: {
  * manual-review queue. Approval settles the payment (posting the wallet
  * credit exactly once) and fulfils what it purchased through the same path
  * an automatic gateway success uses; rejection marks it failed and moves no
- * money. Returns the payment's final status.
+ * money (never overwriting an already-verified payment). Returns the payment's
+ * actual persisted status.
  */
 export async function reviewManualPayment(input: {
   paymentId: string;
   action: "approve" | "reject";
   platformAdminId: string;
 }): Promise<"verified" | "failed" | "cancelled"> {
+  if (input.action !== "approve" && input.action !== "reject") {
+    throw new Error("invalid_review_action");
+  }
   const { getPaymentById, rejectPayment, settlePayment } = await import("./wallet-service");
   const { GatewayError } = await import("./payment-gateway");
   const payment = await getPaymentById(input.paymentId);
   if (!payment) throw new GatewayError("payment_not_found");
 
   if (input.action === "reject") {
-    await rejectPayment(input.paymentId, { platformAdminId: input.platformAdminId });
-    return "failed";
+    const updated = await rejectPayment(input.paymentId, { platformAdminId: input.platformAdminId });
+    return updated.status as "verified" | "failed" | "cancelled";
   }
 
   if (payment.status !== "verified") {
@@ -189,16 +228,19 @@ export async function reviewManualPayment(input: {
       gatewayStatus: "manual_approved",
       platformAdminId: input.platformAdminId,
     });
-    const settled = await getPaymentById(input.paymentId);
-    if (settled) {
-      await fulfilPurchasedPayment({
-        businessId: settled.businessId,
-        purpose: settled.purpose,
-        planKey: settled.planKey,
-        featureKey: settled.featureKey,
-      });
-    }
   }
+
+  const settled = await getPaymentById(input.paymentId);
+  if (settled && settled.status === "verified" && settled.fulfilmentStatus !== "succeeded") {
+    await fulfilPurchasedPayment({
+      id: settled.id,
+      businessId: settled.businessId,
+      purpose: settled.purpose,
+      planKey: settled.planKey,
+      featureKey: settled.featureKey,
+    });
+  }
+
   const updated = await getPaymentById(input.paymentId);
   return (updated?.status ?? "pending") as "verified" | "failed" | "cancelled";
 }

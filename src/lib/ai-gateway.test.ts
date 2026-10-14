@@ -455,6 +455,9 @@ describe("the public gateway config is technical-only", () => {
         maxTurnRial: 40_000,
       }),
     );
+    // Issue #812 §2/§6 — the managed-knowledge and Deep Research pointers are
+    // technical connection state, so they belong here; the knowledge key does
+    // NOT, only a boolean saying whether one is set.
     expect(pub).toEqual({
       enabled: true,
       baseUrl: "http://litellm:4000/v1",
@@ -462,6 +465,19 @@ describe("the public gateway config is technical-only", () => {
       embeddingModel: "",
       virtualKeysEnabled: false,
       hasMasterKey: true,
+      knowledgeEnabled: false,
+      knowledgeBaseUrl: "",
+      knowledgeModel: "",
+      knowledgeMaxResults: 8,
+      hasKnowledgeApiKey: false,
+      researchEnabled: false,
+      researchModelAlias: "",
+      researchMaxRounds: 12,
+      researchMaxContextBytes: 2_000_000,
+      researchTtlHours: 24,
+      researchMaxSpendRial: 0,
+      researchMinDataReadiness: 1,
+      researchExternalWeb: false,
     });
     const json = JSON.stringify(pub);
     expect(json).not.toContain("sk-secret");

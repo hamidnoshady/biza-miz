@@ -7,6 +7,7 @@ import {
   listPlatformBackupPeers,
   upsertPlatformBackupPeer,
 } from "@/lib/platform-backup-service";
+import { requireRecentAuth } from "@/lib/recent-auth";
 
 /**
  * The servers this install may restore FROM (migration 0132) — the "address"
@@ -17,7 +18,7 @@ import {
  * the peer row needs server-side and the browser has no business holding.
  */
 export const GET = withPlatformScope(async () => {
-  const { error } = await requirePlatformCapability("backup.manage");
+  const { error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
   return NextResponse.json({ peers: await listPlatformBackupPeers() });
 });
@@ -29,8 +30,10 @@ export const GET = withPlatformScope(async () => {
  * `https_required`, not a mysterious network failure three dialogs later.
  */
 export const POST = withPlatformScope(async (request: NextRequest) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
+  const recentError = requireRecentAuth(session);
+  if (recentError) return recentError;
 
   let body: Record<string, unknown>;
   try {
