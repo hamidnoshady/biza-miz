@@ -282,8 +282,10 @@ describe("/platform/system refresh behaviour", () => {
       fireEvent.click(screen.getByRole("button", { name: /تازه‌سازی/ }));
       await new Promise((resolve) => setTimeout(resolve, 10));
     });
+    // The failed refresh settles on its own schedule; wait for the stale-data
+    // notice instead of assuming it has landed after a fixed delay.
+    expect(await screen.findByText(/نمایش آخرین وضعیت موفق/)).toBeTruthy();
     expect(screen.getByText(/مهاجرت هنوز روی پایگاه‌داده اعمال/)).toBeTruthy();
-    expect(screen.getByText(/نمایش آخرین وضعیت موفق/)).toBeTruthy();
   });
 
   it("never lets an older response overwrite a newer one", async () => {
