@@ -60,6 +60,7 @@ function draftPage(overrides: Record<string, unknown> = {}) {
         proposedBy: "user-2",
         proposedByName: "زهرا احمدی",
         proposedAt: "2026-03-01T09:00:00.000Z",
+        voucherReference: null,
         lines: [
           { accountId: EXPENSE, accountCode: "5100", accountName: "اجاره", debit: 50_000_000, credit: 0 },
           { accountId: CASH, accountCode: "1001", accountName: "صندوق", debit: 0, credit: 50_000_000 },
@@ -324,6 +325,36 @@ describe("ManualEntrySection — the review queue", () => {
     expect(screen.getAllByText("شعبهٔ مرکزی").length).toBeGreaterThan(0);
     expect(screen.getByText(/زهرا احمدی/)).toBeTruthy();
     expect(screen.getByText(`#${toPersianDigits(DRAFT_ID.slice(0, 8))}`)).toBeTruthy();
+  });
+
+  it("does not show an empty reference chip for a draft without one", async () => {
+    // Issue #867 — a draft without a reference number must not wear a blank
+    // «مرجع:» chip on the card the reviewer decides on.
+    renderSection();
+    await screen.findByText("اجاره اسفند");
+    expect(screen.queryByText(/مرجع:/)).toBeNull();
+  });
+
+  it("shows the reference number on the card when the draft carries one", async () => {
+    // The reviewer decides on the card, so the reference the posted entry
+    // will wear (issue #867) has to be visible there.
+    fetchMock = vi.fn(async (url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () =>
+        url.startsWith("/api/ledger/entries/drafts")
+          ? draftPage({ voucherReference: "F-1403-887" })
+          : {},
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSection();
+    await screen.findByText("اجاره اسفند");
+    // The chip's value sits in a nested `dir="ltr"` span, so match the chip
+    // by its whole text content rather than one text node.
+    expect(
+      screen.getByText((_, element) => element?.textContent === "مرجع: F-1403-887"),
+    ).toBeTruthy();
   });
 
   it("says when a draft was written by the assistant rather than a person", async () => {

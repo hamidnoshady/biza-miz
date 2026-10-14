@@ -58,9 +58,11 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "ledger", label: LEDGER_WORKSPACE_LABEL },
   { key: "trial-balance", label: "تراز آزمایشی" },
   { key: "entries", label: "دفتر روزنامه" },
+  { key: "vouchers", label: "اسناد و شماره‌گذاری" },
   { key: "manual", label: "ثبت سند دستی" },
   { key: "expenses", label: "هزینه‌ها" },
   { key: "fiscal-periods", label: "دوره‌های مالی" },
+  { key: "opening-balances", label: "ترازات افتتاحیه" },
   // The platform's one people directory. «مشتریان»، «تأمین‌کنندگان» and
   // «فروشندگان» were three more sections here; they are `?view=` filters of
   // this one now (`src/lib/party-directory.ts`), so there is one screen, one

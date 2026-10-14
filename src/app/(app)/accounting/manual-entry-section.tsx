@@ -30,6 +30,7 @@ import {
   type ManualJournalProblem,
 } from "@/lib/manual-journal";
 import { provenanceLabel, provenanceOfMemo } from "@/lib/ai-provenance";
+import { voucherReferenceProblem } from "@/lib/voucher-numbering";
 import type { AccountRow, Runner } from "./accounting-manager";
 
 interface DraftLineInput {
@@ -67,6 +68,8 @@ interface JournalDraft {
   proposedBy: string | null;
   proposedByName: string | null;
   proposedAt: string | null;
+  /** The accountant's own reference number (issue #867), when the form carried one. */
+  voucherReference: string | null;
   lines: DraftLine[];
 }
 
@@ -202,6 +205,10 @@ export function ManualEntrySection({
   const formId = useId();
   const [memo, setMemo] = useState("");
   const [entryDate, setEntryDate] = useState("");
+  // Issue #867 — the optional reference number the document was known by
+  // before it entered this ledger. Advisory: it never joins the fiscal-year
+  // sequence, so an empty field is simply "no reference", not an error.
+  const [voucherReference, setVoucherReference] = useState("");
   /*
    * Each row carries its own `key`. See the docblock: an index key made React
    * re-use a removed row's DOM node, so the row *below* a deletion appeared to
@@ -374,11 +381,16 @@ export function ManualEntrySection({
   const documentProblem = manualDocumentProblem(journalLines);
   const balanced = documentProblem === null;
   const memoTooLong = memo.trim().length > MANUAL_MEMO_MAX;
+  // The same pure rule the server's parser applies — the screen and the API
+  // cannot disagree about a reference number (issue #867).
+  const voucherReferenceBad =
+    voucherReference.trim().length > 0 && voucherReferenceProblem(voucherReference.trim()) !== null;
   const canSubmit =
     canPropose &&
     balanced &&
     !!memo.trim() &&
     !memoTooLong &&
+    !voucherReferenceBad &&
     invalidAmountLines === 0 &&
     /*
      * A half-typed row used to be silently dropped: `submit` filtered the rows
@@ -395,6 +407,8 @@ export function ManualEntrySection({
     if (!memo.trim()) return "شرح سند را بنویسید.";
     if (memoTooLong)
       return `شرح سند حداکثر ${toPersianDigits(String(MANUAL_MEMO_MAX))} نویسه است.`;
+    if (voucherReferenceBad)
+      return "شمارهٔ مرجع فقط حرف، عدد و . _ / - می‌خواهد (تا ۶۴ حرف).";
     if (invalidAmountLines > 0)
       return `${toPersianDigits(String(invalidAmountLines))} ردیف مبلغ نامعتبر دارد؛ مبلغ باید عددی بزرگ‌تر از صفر باشد.`;
     if (incompleteLines > 0)
@@ -411,7 +425,12 @@ export function ManualEntrySection({
     setNotice("");
     setLocalError("");
     if (!canSubmit) return;
-    const signature = JSON.stringify({ memo: memo.trim(), entryDate, lines: journalLines });
+    const signature = JSON.stringify({
+      memo: memo.trim(),
+      entryDate,
+      lines: journalLines,
+      voucherReference: voucherReference.trim(),
+    });
     const stable =
       idempotencyRef.current?.signature === signature
         ? idempotencyRef.current.key
@@ -425,12 +444,14 @@ export function ManualEntrySection({
           entryDate: entryDate || undefined,
           lines: journalLines,
           idempotencyKey: stable,
+          voucherReference: voucherReference.trim() || undefined,
         }),
       }),
     );
     if (ok) {
       setMemo("");
       setEntryDate("");
+      setVoucherReference("");
       setLines(blankLines().map((value) => ({ key: makeKey(), value })));
       // The document changed, so the next submit is a new document, not a retry.
       idempotencyRef.current = null;
@@ -522,7 +543,7 @@ export function ManualEntrySection({
 
         {canPropose ? (
         <form onSubmit={submit} className="space-y-4 p-4 sm:p-5">
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem]">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_11rem_13rem]">
             <label className="block">
               <span className="mb-1.5 block text-sm font-medium text-foreground">شرح سند</span>
               <input
@@ -550,6 +571,29 @@ export function ManualEntrySection({
                   the 30th and approved on the 1st posted on the 1st. */}
               <span className="mt-1 block text-xs text-muted-foreground">
                 خالی یعنی امروزِ این شعبه؛ تاریخ همین حالا در پیش‌نویس ثبت می‌شود و با تأیید عوض نمی‌شود.
+              </span>
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-foreground">
+                شمارهٔ مرجع <span className="font-normal text-muted-foreground">(اختیاری)</span>
+              </span>
+              <input
+                className={inputClass}
+                dir="ltr"
+                style={{ textAlign: "end" }}
+                value={voucherReference}
+                onChange={(e) => setVoucherReference(e.target.value)}
+                placeholder="مثلاً F-1403-887"
+                maxLength={64}
+                aria-describedby={`${formId}-reference-hint`}
+              />
+              <span
+                id={`${formId}-reference-hint`}
+                className="mt-1 block text-xs text-muted-foreground"
+              >
+                {voucherReferenceBad
+                  ? "فقط حرف، عدد و . _ / - — تا ۶۴ حرف."
+                  : "شماره‌ای که سند پیش از این سیستم داشته؛ فقط اطلاعاتی است و وارد توالی شمارهٔ سال مالی نمی‌شود."}
               </span>
             </label>
           </div>
@@ -800,6 +844,14 @@ export function ManualEntrySection({
                           <span className="rounded-full border border-border bg-background px-2 py-0.5 font-medium text-foreground">
                             {d.locationName ?? "بدون شعبه"}
                           </span>
+                          {/* The reference number, when the form carried one —
+                              the reviewer sees on the card what the posted
+                              entry will wear (issue #867). */}
+                          {d.voucherReference ? (
+                            <span className="rounded-full border border-border bg-background px-2 py-0.5 font-medium text-foreground">
+                              مرجع: <span dir="ltr">{d.voucherReference}</span>
+                            </span>
+                          ) : null}
                           {/* Where the document came from, when it says so. An
                               autopilot draft is approved on different grounds
                               than a typed one, and the mark on its memo is the
