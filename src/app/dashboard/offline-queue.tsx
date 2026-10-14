@@ -222,6 +222,13 @@ export interface ConnectionState {
   cloudSync: CloudSyncState;
   pendingActions: number;
   syncError: boolean;
+  /**
+   * Issue #948 P0/P1-5 — *why* the sync is paused, when the server could
+   * classify it: `transport_unreachable` is a line problem; `auth_expired`,
+   * `identity_blocked`, `server_error`… are not, and must never be rendered
+   * as "the Internet is down".
+   */
+  syncFault: string | null;
   /** Entries stuck in `failed` or `conflict` — need a human decision, not just time. */
   attentionNeeded: number;
 }
@@ -238,6 +245,17 @@ export interface ConnectionStatusSnapshot {
   deadLetters?: number;
   lastSuccessfulSyncAt?: string | null;
   error?: string | null;
+  /** Issue #948 — classified fault behind `error`/`sync` (see connection-state.ts). */
+  fault?: string | null;
+  /** Issue #948 — the typed independent-health model, when the server sends it. */
+  health?: {
+    internet?: string;
+    cloudReachability?: { state?: string; checkedAt?: string | null; cached?: boolean };
+    cloudAuth?: string;
+    operationalSync?: string;
+    identityBinding?: { missing?: number; repairedLastPass?: number; rekeyedLastPass?: number };
+    lastSuccessfulContactAt?: string | null;
+  } | null;
   /**
    * Hybrid identity planes, reported separately from operational sync:
    * memberships (`identitySync`) and the login-credential/PIN stage
@@ -290,6 +308,7 @@ function useOfflineQueueState(): OfflineQueueState {
   const [internet, setInternet] = useState<InternetState>("internet_unknown");
   const [cloudSync, setCloudSync] = useState<CloudSyncState>("cloud_sync_not_configured");
   const [syncError, setSyncError] = useState(false);
+  const [syncFault, setSyncFault] = useState<string | null>(null);
 
   const refreshEntries = useCallback(() => {
     void getOfflineDb().pendingActions.orderBy("createdAt").toArray().then(setEntries);
@@ -316,6 +335,7 @@ function useOfflineQueueState(): OfflineQueueState {
         if (!response.ok) return;
         const body = (await response.json()) as ConnectionStatusSnapshot;
         setServerStatus(body);
+        setSyncFault(body.fault ?? null);
         if (body.cloudSync === "connected") {
           setCloudSync("cloud_sync_connected");
           setInternet("internet_available");
@@ -326,6 +346,9 @@ function useOfflineQueueState(): OfflineQueueState {
           setSyncError(false);
         } else if (body.cloudSync === "paused") {
           setCloudSync("cloud_sync_paused");
+          // Issue #948 — a paused sync is *not* proof of a dead Internet
+          // connection. The browser's own interface is the only authority on
+          // the local network; until it says otherwise this stays "unknown".
           setInternet(navigator.onLine ? "internet_unknown" : "internet_unavailable");
           setSyncError(Boolean(body.error));
         } else {
@@ -370,6 +393,7 @@ function useOfflineQueueState(): OfflineQueueState {
       cloudSync,
       pendingActions: entries.length,
       syncError,
+      syncFault,
       attentionNeeded,
     },
   };

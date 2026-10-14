@@ -11,6 +11,12 @@ import type {
   PlatformConnectionState,
 } from "@/lib/connection-state";
 import {
+  classifyConnectionFault,
+  cloudStatusForFault,
+  faultErrorCode,
+} from "@/lib/connection-state";
+import { probeCloudReachability } from "@/lib/cloud-reachability";
+import {
   deliverCloudExceptions,
   pullCloudExceptionResponses,
 } from "@/lib/cloud-exception-relay";
@@ -171,7 +177,14 @@ export const GET = withTenantScope(async () => {
     identityError = `identity_sync_degraded: ${identityStatus.reason ?? "unknown"}`;
   }
   const siteProfile = await getSetting<SiteProfileState>(session.businessId, SETTING_KEYS.siteProfileState);
-  const errorText = syncState.lastPushError || syncState.lastPullError || iamError;
+  // Issue #948 P0/P1-5 — classify the *persisted* errors instead of folding
+  // them into one "remote_unreachable". A push/pull error is evidence about
+  // the last sync attempt, not about the Internet; an IAM/identity error is
+  // its own plane; only a transport-class failure may claim the cloud is
+  // unreachable.
+  const operationalError = syncState.lastPushError || syncState.lastPullError || null;
+  const errorText = operationalError || iamError;
+  const fault = classifyConnectionFault(errorText);
   const configured = Boolean(config?.enabled);
   const sync: ConnectionStatus = !configured
     ? "not_configured"
@@ -183,18 +196,28 @@ export const GET = withTenantScope(async () => {
   const cloud: ConnectionStatus = !configured
     ? "not_configured"
     : errorText
-      ? "unreachable"
+      ? cloudStatusForFault(fault)
       : lastSuccessfulSyncAt
         ? "connected"
         : "connecting";
+  // A fresh, bounded reachability probe of the cloud host — the "current"
+  // transport fact the persisted errors cannot provide.
+  const reachability = config?.remoteUrl
+    ? await probeCloudReachability(config.remoteUrl).catch(() => ({
+        state: "unknown" as const,
+        checkedAt: null,
+        cached: true,
+        httpStatus: null,
+      }))
+    : { state: "unknown" as const, checkedAt: null, cached: true, httpStatus: null };
   const state: PlatformConnectionState = {
     localServer: "connected",
     lanGateway: "unknown",
-    internet: errorText
-      ? "unknown"
-      : cloud === "connected"
-        ? "connected"
-        : "unknown",
+    // Never inferred downward from a sync error: "connected" only while the
+    // cloud pipe demonstrably works, otherwise *unknown* — the browser's own
+    // `navigator.onLine` is the only authority on the local network, and a
+    // stale push error is no authority on the Internet at all.
+    internet: cloud === "connected" ? "connected" : "unknown",
     cloud,
     sync,
     externalServices: cloud,
@@ -221,7 +244,57 @@ export const GET = withTenantScope(async () => {
           : sync === "paused"
             ? "paused"
             : "not_configured",
-    error: errorText ? "remote_unreachable" : null,
+    error: faultErrorCode(fault),
+    fault,
+    // Issue #948 — the typed, *independent* connection-health model. Each
+    // dimension answers its own question; nothing here is inferred from
+    // another dimension's stale error. Toasts, banners, the status badge,
+    // /settings/cloud-sync and the embedded cloud pane all consume this one
+    // classified state.
+    health: {
+      localServer: "connected" as const,
+      /** The browser's network is only knowable client-side; merged in the UI. */
+      browserNetwork: "reported_by_client" as const,
+      internet: state.internet,
+      cloudReachability: reachability,
+      cloudAuth:
+        fault === "auth_expired"
+          ? ("auth_expired" as const)
+          : fault === "forbidden"
+            ? ("forbidden" as const)
+            : operationalError && !iamError
+              ? ("unknown" as const)
+              : ("ok" as const),
+      operationalSync: sync,
+      iamMembership: identityStatus?.configured
+        ? {
+            state: identityStatus.identity?.state ?? "snapshot_required",
+            lastError: identityStatus.identity?.lastError ?? null,
+            lastSuccessAt: identityStatus.identity?.lastSuccessAt ?? null,
+          }
+        : null,
+      credentialSync: identityStatus?.configured
+        ? {
+            state: identityStatus.credentials?.status ?? "pending",
+            lastError: identityStatus.credentials?.lastError ?? null,
+            lastSuccessAt: identityStatus.credentials?.lastSuccessAt ?? null,
+            identityContract: identityStatus.credentials?.identityContract ?? null,
+          }
+        : null,
+      identityBinding: {
+        missing: identityStatus?.missingIdentityBindings ?? 0,
+        repairedLastPass: identityStatus?.credentials?.identityMismatches ?? 0,
+        rekeyedLastPass: identityStatus?.credentials?.identityRekeys ?? 0,
+      },
+      queue: {
+        outboundPending,
+        inboundPending: Number(row?.inbound ?? 0),
+        deferred: Number(row?.deferred ?? 0),
+        conflicts: Number(row?.conflicts ?? 0),
+        deadLetters: Number(row?.dead_letters ?? 0),
+      },
+      lastSuccessfulContactAt: lastSuccessfulSyncAt,
+    },
     // The two identity planes, side by side with the operational state above,
     // plus the combined verdict. A UI that renders a single green badge reads
     // `overallIdentity`; a UI with room for detail renders `identitySync` and

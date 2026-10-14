@@ -62,6 +62,16 @@ describe("login-door remembered choice", () => {
     expect(readRememberedLoginDoor()).toBeNull();
   });
 
+  it("degrades an old remembered «offline» choice to the staff door (issue #948)", () => {
+    // The offline card was a duplicate of the staff PIN flow and is gone from
+    // Cloud/Hybrid; a browser that remembered it must land on staff, not on a
+    // re-shown chooser or a dead option.
+    const localStorage = storageThat();
+    vi.stubGlobal("window", { localStorage });
+    localStorage.setItem("pos:loginDoor", JSON.stringify({ door: "offline", remember: true }));
+    expect(readRememberedLoginDoor()).toBe("staff");
+  });
+
   it("fails closed when browser storage is unavailable", () => {
     vi.stubGlobal("window", { localStorage: storageThat(true) });
     expect(readRememberedLoginDoor()).toBeNull();

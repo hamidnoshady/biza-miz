@@ -91,8 +91,8 @@ describe("LoginDoorChooser — destination survives a door change (L06)", () => 
   });
 });
 
-describe("LoginDoorChooser — the offline promise matches the install (L04)", () => {
-  it("does not claim Internet-free login on a cloud origin", async () => {
+describe("LoginDoorChooser — the offline promise matches the install (L04/#948)", () => {
+  it("shows only the two doors on a cloud origin — no offline card, no Internet-free claim", async () => {
     stubCapabilities({
       deploymentProfile: "cloud",
       localServer: false,
@@ -101,20 +101,19 @@ describe("LoginDoorChooser — the offline promise matches the install (L04)", (
     });
     render(<LoginDoorChooser onChoose={() => {}} />);
 
-    // The defect: this exact sentence appeared on the hosted origin, where the
-    // page is by definition reached over the Internet and pressing the card
-    // only mounted the same same-origin staff form.
+    // Issue #948 P1-4: the «ورود آفلاین (محلی)» card was a misleading
+    // duplicate of the staff PIN door on Cloud (and Hybrid). Cloud shows
+    // exactly «ورود کارکنان» and «ورود مدیر / مالک».
+    await screen.findByText("ورود کارکنان");
+    expect(screen.getByText("ورود مدیر / مالک")).toBeTruthy();
     await waitFor(() =>
-      expect(
-        screen.queryByText("نیازی به اینترنت ندارد", { exact: false }),
-      ).toBeNull(),
+      expect(screen.queryByText("ورود آفلاین (محلی)")).toBeNull(),
     );
-    expect(
-      await screen.findByText(/اپلیکیشن محلی/, { exact: false }),
-    ).toBeTruthy();
+    expect(screen.queryByText("نیازی به اینترنت ندارد", { exact: false })).toBeNull();
+    expect(screen.queryByText(/اپلیکیشن محلی/, { exact: false })).toBeNull();
   });
 
-  it("keeps the claim on a local install, where it is true", async () => {
+  it("keeps the offline card on a full Local-only install, where the claim is true", async () => {
     stubCapabilities({
       deploymentProfile: "local",
       localServer: true,
@@ -123,20 +122,38 @@ describe("LoginDoorChooser — the offline promise matches the install (L04)", (
     });
     render(<LoginDoorChooser onChoose={() => {}} />);
 
+    expect(await screen.findByText("ورود آفلاین (محلی)")).toBeTruthy();
     expect(
       await screen.findByText("نیازی به اینترنت ندارد"),
     ).toBeTruthy();
   });
 
-  it("does not claim Internet-free login for a paired business served from the cloud", async () => {
-    // Issue #885, gap 8. A business paired to the cloud stores `hybrid`, and
-    // `deploymentProfile` is the same on every origin serving it. The claim
-    // used to be keyed on that field, so the *hosted* login page for a paired
-    // business asserted «نیازی به اینترنت ندارد» about itself — the exact false
-    // promise L04 existed to remove, arrived at by a different route.
-    //
-    // Same stored profile as the local case above; the only difference is that
-    // this origin is not the local server. That difference is what decides.
+  it("shows only the two doors for a paired business, even on its local server", async () => {
+    // Issue #948 P1-4 — the exact product rule: Hybrid gets the same two
+    // doors as Cloud. Removing the card does *not* remove Hybrid's ability to
+    // use the local PIN offline: that is the staff door itself
+    // (`pin-login/roster`, `pin-login`), which needs no Internet whenever the
+    // local server is reachable — with or without this card.
+    stubCapabilities({
+      deploymentProfile: "hybrid",
+      localServer: true,
+      phoneOtpEnforcement: "off",
+      phoneOtpDaysLeft: null,
+    });
+    render(<LoginDoorChooser onChoose={() => {}} />);
+
+    await screen.findByText("ورود کارکنان");
+    expect(screen.getByText("ورود مدیر / مالک")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.queryByText("ورود آفلاین (محلی)")).toBeNull(),
+    );
+    expect(screen.queryByText("نیازی به اینترنت ندارد", { exact: false })).toBeNull();
+  });
+
+  it("shows only the two doors for a paired business served from the cloud", async () => {
+    // Issue #885, gap 8 + issue #948: `deploymentProfile` is the same on every
+    // origin serving a business, and neither `hybrid` nor `cloud` may ever
+    // show the offline duplicate.
     stubCapabilities({
       deploymentProfile: "hybrid",
       localServer: false,
@@ -146,25 +163,9 @@ describe("LoginDoorChooser — the offline promise matches the install (L04)", (
     render(<LoginDoorChooser onChoose={() => {}} />);
 
     await waitFor(() =>
-      expect(
-        screen.queryByText("نیازی به اینترنت ندارد", { exact: false }),
-      ).toBeNull(),
+      expect(screen.queryByText("ورود آفلاین (محلی)")).toBeNull(),
     );
-    expect(await screen.findByText(/اپلیکیشن محلی/, { exact: false })).toBeTruthy();
-  });
-
-  it("keeps the claim for a paired business when the local server is answering", async () => {
-    // The mirror of the test above: `hybrid` on a site install *is* a local
-    // server, so the claim is true there and must survive the fix.
-    stubCapabilities({
-      deploymentProfile: "hybrid",
-      localServer: true,
-      phoneOtpEnforcement: "off",
-      phoneOtpDaysLeft: null,
-    });
-    render(<LoginDoorChooser onChoose={() => {}} />);
-
-    expect(await screen.findByText("نیازی به اینترنت ندارد")).toBeTruthy();
+    expect(screen.queryByText("نیازی به اینترنت ندارد", { exact: false })).toBeNull();
   });
 
   it("makes no claim when the probe answers without the local-server field", async () => {
@@ -182,36 +183,48 @@ describe("LoginDoorChooser — the offline promise matches the install (L04)", (
         screen.queryByText("نیازی به اینترنت ندارد", { exact: false }),
       ).toBeNull(),
     );
+    expect(screen.queryByText("ورود آفلاین (محلی)")).toBeNull();
+  });
+
+  it("fails closed while the probe is in flight — no flash of an unsupported option", async () => {
+    // A fetch that never settles is the loading case: the chooser must show
+    // the two safe doors, never briefly the third.
+    fetchMock.mockReturnValue(new Promise(() => {}));
+    render(<LoginDoorChooser onChoose={() => {}} />);
+
+    await screen.findByText("ورود کارکنان");
+    expect(screen.queryByText("ورود آفلاین (محلی)")).toBeNull();
   });
 
   it("states the phone-verification prerequisite once enforcement is live", async () => {
     stubCapabilities({
-      deploymentProfile: "hybrid",
+      deploymentProfile: "local",
       localServer: true,
       phoneOtpEnforcement: "enforced",
       phoneOtpDaysLeft: 0,
     });
     render(<LoginDoorChooser onChoose={() => {}} />);
 
-    // A local install whose policy enforces OTP still needs a fresh SMS once
-    // the member's seven-day window closes; saying so beats letting them
-    // discover it at the keypad.
+    // A Local-only install whose policy enforces OTP still needs a fresh SMS
+    // once the member's seven-day window closes; saying so beats letting them
+    // discover it at the keypad. (On Hybrid/Cloud the card is gone, so this
+    // copy only ever appears where the card appears.)
     expect(
       await screen.findByText(/تأیید پیامکی/, { exact: false }),
     ).toBeTruthy();
   });
 
-  it("falls back to the cloud wording when the probe cannot complete", async () => {
+  it("falls back to the two doors when the probe cannot complete", async () => {
     stubCapabilitiesFailure();
     render(<LoginDoorChooser onChoose={() => {}} />);
 
-    // Guessing optimistically here is exactly the bug being fixed, so a probe
-    // that fails must not produce the Internet-free claim.
+    // Guessing optimistically here is exactly the bug being fixed: a probe
+    // that fails must not produce the offline card or the Internet-free claim.
+    await screen.findByText("ورود کارکنان");
     await waitFor(() =>
-      expect(
-        screen.queryByText("نیازی به اینترنت ندارد", { exact: false }),
-      ).toBeNull(),
+      expect(screen.queryByText("ورود آفلاین (محلی)")).toBeNull(),
     );
+    expect(screen.queryByText("نیازی به اینترنت ندارد", { exact: false })).toBeNull();
   });
 });
 
