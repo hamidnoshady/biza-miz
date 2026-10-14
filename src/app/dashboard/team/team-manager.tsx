@@ -523,7 +523,6 @@ const REHIRE_ERROR_MESSAGES: Record<string, string> = {
   identity_not_found: "هویت ورود این عضو در سطح سامانه حذف شده است؛ با پشتیبانی تماس بگیرید.",
   already_a_member: "هویت ورود این عضو همین حالا به عضوی دیگر در این کسب‌وکار متصل است.",
   pin_required: "برای این نقش، رمز عددی فعالی برای بازیابی وجود ندارد؛ رمز عددی تازه‌ای تعیین کنید.",
-  pin_taken: "این رمز عددی در این کسب‌وکار استفاده شده است؛ رمز دیگری انتخاب کنید.",
   invalid_pin: `رمز عددی باید ${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم باشد.`,
   custom_role_not_found: "نقش سفارشی ذخیره‌شدهٔ این عضو دیگر فعال نیست؛ ابتدا نقش او را مشخص کنید.",
   selected_locations_required: "شعبه‌های این عضو را انتخاب کنید.",

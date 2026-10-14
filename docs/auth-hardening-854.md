@@ -96,7 +96,7 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.10 branch-scope validation incomplete | resolved (pass 1) | explicit scope validated at creation and acceptance |
 | P2.11 invitation UI lacks branch scope | resolved (pass 1) | the invite form asks for scope + branches |
 | P2.12 PIN uniqueness copy and implementation disagree | resolved (pass 1) | the PIN surface copy and the blind-index constraint now describe the same per-business rule |
-| P2.13 PIN uniqueness race-prone check | resolved (pass 1) | keyed blind index + unique index, migration `0211` §3 |
+| P2.13 PIN uniqueness race-prone check | **superseded (migration `0221`)** | uniqueness itself is gone: refusing a duplicate PIN told the person choosing it what a colleague's PIN was. The door now always names the member (`employeeId` is required by `/api/auth/pin-login`), the blind index and its unique index are dropped, and `secret_hash` is the only stored form of a PIN |
 | P2.14 custom-role `default_location_scope` dead | **resolved (pass 2, GAP 10)** | the scope is now applied: `createTenantRole`/`updateTenantRole` store and serve it (update is an access change and needs a reason), the roles dialog edits it, and both membership-creation paths inherit it when no explicit branch policy is given — refusing `selected`/`home` defaults that cannot be honoured instead of silently widening to "all". Pinned by the GAP 4 invitation/creation cases in `auth-hardening-854-gaps.integration.test.ts` |
 | P2.15 confirmPassword ignored | resolved (pass 1) | one server-side validator |
 | P2.16 whitespace-only password | resolved (pass 1) | rejected by the same validator |
