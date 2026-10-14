@@ -665,9 +665,12 @@ export async function assertDimensionsPostable(
   const entryDate =
     input.entryDate ?? (await db.query<{ today: string }>(`SELECT CURRENT_DATE::text AS today`)).rows[0].today;
 
+  // FOR SHARE holds the settings and the chosen values until the caller's
+  // transaction ends, so an archive, a disabled kind or a moved branch/window
+  // cannot commit between this check and the lines being inserted.
   const [settings, values, parents] = await Promise.all([
     db.query<{ kind: string; is_enabled: boolean }>(
-      `SELECT kind, is_enabled FROM accounting_dimension_settings WHERE business_id = $1`,
+      `SELECT kind, is_enabled FROM accounting_dimension_settings WHERE business_id = $1 FOR SHARE`,
       [input.businessId],
     ),
     db.query<{
@@ -679,7 +682,7 @@ export async function assertDimensionsPostable(
       effective_to: string | null;
     }>(
       `SELECT id, kind, is_active, location_id, effective_from::text AS effective_from, effective_to::text AS effective_to
-         FROM accounting_dimension_values WHERE business_id = $1 AND id = ANY($2::uuid[])`,
+         FROM accounting_dimension_values WHERE business_id = $1 AND id = ANY($2::uuid[]) FOR SHARE`,
       [input.businessId, allIds],
     ),
     db.query<{ parent_id: string }>(

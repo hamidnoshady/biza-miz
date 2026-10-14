@@ -293,6 +293,9 @@ export function FixedAssetsSection({
   const [sortBy, setSortBy] = useState<"date_desc" | "date_asc" | "cost_desc" | "book_value_desc">("date_desc");
   const [categories, setCategories] = useState<string[]>([]);
   const [locations, setLocations] = useState<LocationOption[] | null>(null);
+  // The branch a new asset is recorded at (the POST route uses the session's
+  // active branch), so its dimension picker offers that branch's values.
+  const [activeLocationId, setActiveLocationId] = useState<string | null>(null);
 
   // Dialog targets
   const [depreciateTarget, setDepreciateTarget] = useState<FixedAssetRow | null>(null);
@@ -386,8 +389,10 @@ export function FixedAssetsSection({
     api<{ categories: string[] }>("/api/ledger/fixed-assets/filter-options").then(({ ok, data }) => {
       if (ok) setCategories(data.categories);
     });
-    api<{ locations: LocationOption[] }>("/api/locations/active").then(({ ok, data }) => {
-      if (ok) setLocations(data.locations.map((l) => ({ id: l.id, name: l.name })));
+    api<{ active?: { id: string } | null; locations: LocationOption[] }>("/api/locations/active").then(({ ok, data }) => {
+      if (!ok) return;
+      setLocations(data.locations.map((l) => ({ id: l.id, name: l.name })));
+      setActiveLocationId(data.active?.id ?? null);
     });
   }, [refreshKey]);
 
@@ -522,6 +527,7 @@ export function FixedAssetsSection({
       {readOnly ? null : (
         <AssetForm
           busy={busy}
+          activeLocationId={activeLocationId}
           accounts={accounts}
           onNotice={(message) => {
             setLocalError("");
@@ -1023,12 +1029,14 @@ export function FixedAssetsSection({
 
 function AssetForm({
   busy,
+  activeLocationId,
   accounts,
   onNotice,
   onError,
   onCreated,
 }: {
   busy: boolean;
+  activeLocationId: string | null;
   accounts?: AccountRow[];
   onNotice: (message: string) => void;
   onError: (message: string) => void;
@@ -1509,7 +1517,7 @@ function AssetForm({
                 <DimensionFields
                   idPrefix="asset-dimensions"
                   catalog={dimCatalog.catalog}
-                  locationId={null}
+                  locationId={activeLocationId}
                   value={assetDimensions}
                   onChange={setAssetDimensions}
                   disabled={busy || isSubmitting}

@@ -64,29 +64,25 @@ export async function getAccountDimensionMatrix(
   const column = DIMENSION_COLUMN[scope.kind];
   const accountType = scope.accountType ?? null;
 
-  const [rowsResult, totalsResult, values] = await Promise.all([
-    query<MatrixSqlRow>(
+  // One statement, two grouping sets: the per-value rows and each account's
+  // unfiltered total are read from the same snapshot, so a posting that
+  // commits while the report loads cannot land in one half and not the other.
+  const [groupedResult, values] = await Promise.all([
+    query<MatrixSqlRow & { is_total: boolean }>(
       `SELECT a.id AS account_id, a.code, a.name, a.type::text AS type,
               a.normal_balance::text AS normal_balance, a.is_contra,
               jl.${column} AS value_id,
+              (GROUPING(jl.${column}) = 1) AS is_total,
               COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
          JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
         WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
           AND ($4::text IS NULL OR a.type::text = $4::text)
-        GROUP BY a.id, a.code, a.name, a.type, a.normal_balance, a.is_contra, jl.${column}`,
-      [businessId, scope.dateFrom, scope.dateTo, accountType],
-    ),
-    // The same scope with no dimension at all: what each account really moved.
-    query<{ account_id: string; debit: string; credit: string }>(
-      `SELECT a.id AS account_id, COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
-         FROM journal_lines jl
-         JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
-         JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
-        WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
-          AND ($4::text IS NULL OR a.type::text = $4::text)
-        GROUP BY a.id`,
+        GROUP BY GROUPING SETS (
+          (a.id, a.code, a.name, a.type, a.normal_balance, a.is_contra, jl.${column}),
+          (a.id, a.code, a.name, a.type, a.normal_balance, a.is_contra)
+        )`,
       [businessId, scope.dateFrom, scope.dateTo, accountType],
     ),
     // Archived values are included: a historical line still names them. The
@@ -95,6 +91,8 @@ export async function getAccountDimensionMatrix(
     // the full list rather than through the capped catalogue.
     listDimensionValuesUncapped(businessId, { kind: scope.kind, includeArchived: true }),
   ]);
+  const rowsResult = { rows: groupedResult.rows.filter((row) => !row.is_total) };
+  const totalsResult = { rows: groupedResult.rows.filter((row) => row.is_total) };
 
   const rows: MatrixAccountRow[] = rowsResult.rows.map((row) => ({
     accountId: row.account_id,
@@ -141,32 +139,28 @@ export async function getProfitAndLossByDimension(
   assertDimensionReportScope(scope);
   const column = DIMENSION_COLUMN[scope.kind];
 
-  const [byValue, unfilteredResult, industry, values] = await Promise.all([
-    query<ProfitSqlRow>(
+  // One statement, two grouping sets (see the matrix above): the per-value rows
+  // and the unfiltered rows they reconcile against share one snapshot.
+  const [groupedResult, industry, values] = await Promise.all([
+    query<ProfitSqlRow & { is_total: boolean }>(
       `SELECT jl.${column} AS value_id, a.id AS account_id, a.code, a.type::text AS type,
+              (GROUPING(jl.${column}) = 1) AS is_total,
               COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
          JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
         WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
           AND a.type::text IN ('revenue', 'expense')
-        GROUP BY jl.${column}, a.id, a.code, a.type`,
-      [businessId, scope.dateFrom, scope.dateTo],
-    ),
-    query<ProfitSqlRow>(
-      `SELECT NULL::uuid AS value_id, a.id AS account_id, a.code, a.type::text AS type,
-              COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
-         FROM journal_lines jl
-         JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
-         JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
-        WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
-          AND a.type::text IN ('revenue', 'expense')
-        GROUP BY a.id, a.code, a.type`,
+        GROUP BY GROUPING SETS ((jl.${column}, a.id, a.code, a.type), (a.id, a.code, a.type))`,
       [businessId, scope.dateFrom, scope.dateTo],
     ),
     getBusinessIndustry(businessId),
     listDimensionValuesUncapped(businessId, { kind: scope.kind, includeArchived: true }),
   ]);
+  const byValue = { rows: groupedResult.rows.filter((row) => !row.is_total) };
+  // A total row's value_id is NULL by GROUPING, the same shape the separate
+  // unfiltered query used to return.
+  const unfilteredResult = { rows: groupedResult.rows.filter((row) => row.is_total).map((row) => ({ ...row, value_id: null })) };
 
   const toProfitRow = (row: ProfitSqlRow): ProfitRow => ({
     valueId: row.value_id,

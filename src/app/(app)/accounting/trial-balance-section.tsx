@@ -449,6 +449,9 @@ export function TrialBalanceSection({
 
   function renderAmountButton(account: TrialBalanceRow, field: DrillableAmount) {
     const value = account[field];
+    // The drill-down reads every line of the account; it has no dimension
+    // predicate, so a filtered cell would open lines that never made it up.
+    if (dimensionActive) return amount(value);
     return (
       <button
         type="button"
