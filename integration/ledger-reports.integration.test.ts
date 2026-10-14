@@ -445,17 +445,24 @@ describe("an installment plan's remaining balance", () => {
     const plan = await installments.getInstallmentPlan(biz.id, id);
     const itemId = plan!.items![0].id;
 
-    const results = await Promise.allSettled([
+    // Both requests succeed — the loser replays the winner's settlement, the
+    // same retry semantic the payable side keeps — but exactly one receipt is
+    // posted, stamped with the slice's deterministic key.
+    await Promise.all([
       installments.payInstallmentItem({ businessId: biz.id, locationId: null, planId: id, itemId, method: "cash", createdBy: user.id }),
       installments.payInstallmentItem({ businessId: biz.id, locationId: null, planId: id, itemId, method: "cash", createdBy: user.id }),
     ]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
-    const receipts = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM ar_receipts WHERE business_id = $1 AND customer_id = $2",
+    const receipts = await db.query<{ count: string; idempotency_key: string; request_fingerprint: string }>(
+      "SELECT count(*)::text AS count, min(idempotency_key) AS idempotency_key, min(request_fingerprint) AS request_fingerprint FROM ar_receipts WHERE business_id = $1 AND customer_id = $2",
       [biz.id, party.id],
     );
     expect(Number(receipts.rows[0].count)).toBe(1);
+    expect(receipts.rows[0].idempotency_key).toBe(`installment-ar:${id}:${itemId}`);
+    expect(receipts.rows[0].request_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    // A retry with changed intent is a conflict, not a replay.
+    await expect(
+      installments.payInstallmentItem({ businessId: biz.id, locationId: null, planId: id, itemId, method: "bank", createdBy: user.id }),
+    ).rejects.toThrow("idempotency_conflict");
   });
 
   it("allows only one installment plan for each credit invoice", async () => {

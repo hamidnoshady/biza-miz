@@ -16,6 +16,7 @@
  * Framework-free and unit-tested; the DB half is desktop-cloud-login-service.ts.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { safeLoginNextPath } from "./login-contract";
 
 export const LOGIN_PROTOCOL = "businesssuite";
 /** Both codes live two minutes: long enough to switch windows, short enough to be useless later. */
@@ -68,6 +69,10 @@ export function cloudLoginPageUrl(remoteUrl: string, state: string, devicePublic
 
 /** A same-origin path to land on after a hand-off; never another host (`//x`, `/\x`, `https:`). */
 export function safeNextPath(next: string | null | undefined, fallback = "/dashboard"): string {
-  if (!next || !next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\")) return fallback;
-  return next;
+  // Issue #885 — delegates to the one canonical validator rather than keeping
+  // a second copy of the rule. This copy was the *stricter* of the two (it
+  // also rejected the backslash authority form the tenant doors missed), so
+  // consolidating only widens what the others reject; nothing that used to
+  // pass here changes.
+  return safeLoginNextPath(next, fallback);
 }

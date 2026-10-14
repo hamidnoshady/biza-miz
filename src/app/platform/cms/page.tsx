@@ -44,6 +44,7 @@ import {
   useCan,
 } from "../ui";
 import { cmsErrorText, syncStatusTone } from "./text";
+import { StructuredHealth } from "./structured-health";
 
 interface OverviewResponse {
   billingHealth?: Record<string, unknown> | null;
@@ -201,9 +202,7 @@ export default function CmsOverviewPage() {
           {data?.saasOverviewError ? (
             <p className="text-sm text-muted-foreground">{cmsErrorText(data.saasOverviewError)}</p>
           ) : data?.saasOverview ? (
-            <pre className="max-h-48 overflow-auto rounded-lg bg-muted p-2 text-xs" dir="ltr">
-              {JSON.stringify(data.saasOverview, null, 2)}
-            </pre>
+            <StructuredHealth data={data.saasOverview} />
           ) : (
             <p className="text-sm text-muted-foreground">گزارش در دسترس نیست.</p>
           )}
@@ -212,9 +211,7 @@ export default function CmsOverviewPage() {
           {data?.billingHealthError ? (
             <p className="text-sm text-muted-foreground">{cmsErrorText(data.billingHealthError)}</p>
           ) : data?.billingHealth ? (
-            <pre className="max-h-48 overflow-auto rounded-lg bg-muted p-2 text-xs" dir="ltr">
-              {JSON.stringify(data.billingHealth, null, 2)}
-            </pre>
+            <StructuredHealth data={data.billingHealth} />
           ) : (
             <p className="text-sm text-muted-foreground">—</p>
           )}

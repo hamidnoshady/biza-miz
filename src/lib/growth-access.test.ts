@@ -243,6 +243,16 @@ describe("the assistant obeys the same contract", () => {
     expect(AI_ACTION_PERMISSION_MAP["messaging.campaign.create"]).toBe(growthApiPermission("/api/messaging", "POST")[0]);
   });
 
+  it("uses CMS access for website content and website access for connection status", () => {
+    expect(AI_TOOL_PERMISSION_MAP.list_website_posts).toBe(PERMISSIONS.cmsView);
+    expect(AI_TOOL_PERMISSION_MAP.list_website_products).toBe(PERMISSIONS.cmsView);
+    expect(AI_TOOL_PERMISSION_MAP.get_website_status).toBe(PERMISSIONS.websiteView);
+  });
+
+  it("uses the commission screen's dedicated permission for the assistant leaderboard", () => {
+    expect(AI_TOOL_PERMISSION_MAP.get_staff_commission).toBe(PERMISSIONS.commissionView);
+  });
+
   it("routes /api/messaging through the Growth app's availability", () => {
     expect(appForApiPath("/api/messaging")).toBe("growth");
   });

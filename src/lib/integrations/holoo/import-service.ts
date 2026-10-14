@@ -16,12 +16,15 @@ import { getPool, query } from "../../db";
 import { getBusinessIndustry } from "../../industry-guard";
 import { industryProfile } from "../../industry-profile";
 import { getConnection } from "../connections-service";
-import { localIdForRemote, upsertMapping, upsertMappingOnClient } from "../mapping-service";
-import { coaTemplateForIndustry, WELL_KNOWN_CODES } from "../../coa-template";
+import { localIdForRemote, localIdForRemoteOnClient, upsertMapping, upsertMappingOnClient } from "../mapping-service";
+import { coaTemplateForIndustry, WELL_KNOWN_CODES, type AccountLevel } from "../../coa-template";
 import { getSetting, SETTING_KEYS } from "../../settings";
 import { planAccountImport, planGoods, planPersons, holooAccountType } from "./import-plan";
 import type { MappedAccount, MappedGoods, MappedOpeningInventory, MappedPerson } from "./mappers";
 import { createParty } from "../../parties-service";
+import { lockChartOfAccounts, recordAccountAudit } from "../../accounts-service";
+import { resolveAttachableParent } from "../../account-hierarchy";
+import type { PoolClient } from "pg";
 
 async function resolveLocationId(businessId: string, connectionLocationId: string | null): Promise<string> {
   if (connectionLocationId) return connectionLocationId;
@@ -30,6 +33,28 @@ async function resolveLocationId(businessId: string, connectionLocationId: strin
     [businessId],
   );
   if (!rows[0]) throw new Error("no_location");
+  return rows[0].id;
+}
+
+/**
+ * The local id of a Holoo parent account: its mapping when one exists, else the
+ * seed account with the same code. Runs on the import transaction so a mapping
+ * written earlier in the same run is seen. Whether the parent may take a child
+ * is decided by the caller through `resolveAttachableParent`.
+ */
+async function resolveHolooParentId(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  parentCode: string,
+): Promise<string> {
+  const mapped = await localIdForRemoteOnClient(client, businessId, connectionId, "holoo_account", parentCode);
+  if (mapped) return mapped;
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
+    [businessId, parentCode],
+  );
+  if (!rows[0]) throw new Error("unresolved_account_parent");
   return rows[0].id;
 }
 
@@ -196,26 +221,46 @@ async function applyOpeningInventory(
       const inventoryAccount = byCode.get(WELL_KNOWN_CODES.inventory);
       const openingEquity = byCode.get(WELL_KNOWN_CODES.openingEquity);
       if (!inventoryAccount || !openingEquity) throw new Error("opening_accounts_missing");
-      await client.query(
-        `INSERT INTO journal_entries
-           (business_id, location_id, entry_date, memo, source_type, source_id, created_by, posting_kind, inventory_event_id)
-         VALUES ($1, $2, CURRENT_DATE, 'موجودی افتتاحیه از هلو', 'opening_inventory', $3, $4, 'inventory', $3)
-         ON CONFLICT (business_id, source_type, source_id, posting_kind) WHERE source_id IS NOT NULL AND posting_kind IS NOT NULL DO NOTHING`,
-        [businessId, locationId, eventId, createdBy],
-      );
-      const { rows: entryRows } = await client.query<{ id: string }>(
+      // Treat a retry as a read, never as permission to rewrite an existing
+      // posted journal. A fresh entry gets its lines exactly once; conflicts
+      // (including concurrent retries) keep the original lines immutable.
+      const { rows: existingEntries } = await client.query<{ id: string }>(
         `SELECT id FROM journal_entries
-          WHERE business_id = $1 AND source_type = 'opening_inventory' AND source_id = $2 AND posting_kind = 'inventory'`,
+          WHERE business_id = $1 AND source_type = 'opening_inventory' AND source_id = $2 AND posting_kind = 'inventory'
+          FOR UPDATE`,
         [businessId, eventId],
       );
-      const entryId = entryRows[0]?.id;
-      if (entryId) {
-        await client.query(`DELETE FROM journal_lines WHERE entry_id = $1`, [entryId]);
+      let entryId = existingEntries[0]?.id;
+      let createdEntry = false;
+      if (!entryId) {
+        const { rows: insertedEntries } = await client.query<{ id: string }>(
+          `INSERT INTO journal_entries
+             (business_id, location_id, entry_date, memo, source_type, source_id, created_by, posting_kind, inventory_event_id)
+           VALUES ($1, $2, CURRENT_DATE, 'موجودی افتتاحیه از هلو', 'opening_inventory', $3, $4, 'inventory', $3)
+           ON CONFLICT (business_id, source_type, source_id, posting_kind)
+             WHERE source_id IS NOT NULL AND posting_kind IS NOT NULL DO NOTHING
+           RETURNING id`,
+          [businessId, locationId, eventId, createdBy],
+        );
+        entryId = insertedEntries[0]?.id;
+        createdEntry = Boolean(entryId);
+        if (!entryId) {
+          const { rows: racedEntries } = await client.query<{ id: string }>(
+            `SELECT id FROM journal_entries
+              WHERE business_id = $1 AND source_type = 'opening_inventory' AND source_id = $2 AND posting_kind = 'inventory'
+              FOR UPDATE`,
+            [businessId, eventId],
+          );
+          entryId = racedEntries[0]?.id;
+        }
+      }
+      if (createdEntry && entryId) {
         await client.query(
           `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
            VALUES ($1, $2, $3, 0), ($1, $4, 0, $3)`,
           [entryId, inventoryAccount, totalValue.toString(), openingEquity],
         );
+        await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
       }
     }
     // A zero-value opening event has no journal lines to post, but the stock
@@ -420,35 +465,71 @@ export async function applyBaseImport(
   const seedCodes = new Set(coaTemplateForIndustry(industry).map((a) => a.code));
   const accountsMapped = await alreadyMapped(businessId, connectionId, "holoo_account", input.accounts.map((account) => account.remoteId));
   const accountsPlan = planAccountImport(input.accounts, seedCodes, accountsMapped);
-  // Link seed accounts without claiming ownership of their pre-existing local rows.
-  for (const account of accountsPlan.mappedToSeed) {
-    const { rows } = await query<{ id: string }>(
-      `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
-      [businessId, account.code],
-    );
-    if (!rows[0]) throw new Error("seed_account_missing");
-    await upsertMapping(businessId, connectionId, "holoo_account", account.remoteId, rows[0].id, importRunId, false);
-  }
-  // Create accounts with codes absent from the seed chart, parents first.
-  for (const account of accountsPlan.toCreate) {
-    let parentId = account.parentCode
-      ? await localIdForRemote(businessId, connectionId, "holoo_account", account.parentCode)
-      : null;
-    if (account.parentCode && !parentId) {
-      const { rows } = await query<{ id: string }>(
-        `SELECT id FROM accounts WHERE business_id = $1 AND code = $2 AND is_active`,
-        [businessId, account.parentCode],
-      );
-      parentId = rows[0]?.id ?? null;
+  // Accounts are written in one transaction under the canonical chart lock
+  // (issue #824 review item 6): the seed links, the new account rows, their
+  // derived `level`s and their Holoo mappings commit together or not at all.
+  // Every parent is resolved through the shared attachment rules in
+  // account-hierarchy.ts, so the archived-parent, depth and type checks are the
+  // same ones the editor applies — for a parent found by mapping and for one
+  // found by code alike (issue #824 finding 1).
+  //
+  // `level` is derived from the parent, not left to the column default; the old
+  // insert omitted the column, so every imported sub-account landed as «گروه».
+  if (accountsPlan.mappedToSeed.length > 0 || accountsPlan.toCreate.length > 0) {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await lockChartOfAccounts(client, businessId);
+      // Link seed accounts without claiming ownership of their pre-existing local rows.
+      for (const account of accountsPlan.mappedToSeed) {
+        const { rows } = await client.query<{ id: string }>(
+          `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
+          [businessId, account.code],
+        );
+        if (!rows[0]) throw new Error("seed_account_missing");
+        await upsertMappingOnClient(client, businessId, connectionId, "holoo_account", account.remoteId, rows[0].id, importRunId, false);
+      }
+      // Create accounts with codes absent from the seed chart, parents first.
+      for (const account of accountsPlan.toCreate) {
+        const childType = holooAccountType(account.code, account.nature);
+        let parentId: string | null = null;
+        let level: AccountLevel = "group";
+        if (account.parentCode) {
+          parentId = await resolveHolooParentId(client, businessId, connectionId, account.parentCode);
+          ({ level } = await resolveAttachableParent(client, businessId, parentId, childType));
+        }
+        const { rows } = await client.query<{ id: string }>(
+          `INSERT INTO accounts (business_id, parent_id, code, name, type, level)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [businessId, parentId, account.code, account.name, childType, level],
+        );
+        // Audited in this transaction like every other account creation. The
+        // import has no signed-in actor; the payload says where the row came from.
+        await recordAccountAudit(client, businessId, null, "account.created", rows[0].id, {
+          code: account.code,
+          name: account.name,
+          type: childType,
+          level,
+          source: "holoo_import",
+        });
+        await upsertMappingOnClient(
+          client,
+          businessId,
+          connectionId,
+          "holoo_account",
+          account.remoteId,
+          rows[0].id,
+          importRunId,
+        );
+        createdAccounts += 1;
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
-    if (account.parentCode && !parentId) throw new Error("unresolved_account_parent");
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO accounts (business_id, parent_id, code, name, type)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [businessId, parentId, account.code, account.name, holooAccountType(account.code, account.nature)],
-    );
-    await upsertMapping(businessId, connectionId, "holoo_account", account.remoteId, rows[0].id, importRunId);
-    createdAccounts += 1;
   }
 
   const openingInventoryRows = input.openingInventory ?? [];

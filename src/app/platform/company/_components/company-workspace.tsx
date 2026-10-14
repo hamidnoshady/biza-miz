@@ -219,7 +219,7 @@ export function CompanyWorkspace({
                 );
               })}
             </nav>
-            {children ?? <CompanyHome />}
+            {children ?? <CompanyHome entitlements={entitlements} />}
           </>
         )}
       </div>
@@ -227,25 +227,48 @@ export function CompanyWorkspace({
   );
 }
 
-function CompanyHome() {
+/**
+ * The company home uses the same entitlement contract as the navigation (audit
+ * F17): a destination the company is not entitled to is shown as unavailable
+ * with no entry link, so the card and the nav can never disagree.
+ */
+function CompanyHome({ entitlements }: { entitlements: ReadonlySet<string> }) {
+  const anyEnabled = DESTINATIONS.some((item) => entitlements.has(item.key));
   return (
     <>
+      {anyEnabled ? null : (
+        <p className="mb-3 rounded-xl border border-dashed border-border bg-muted/40 p-3 text-sm text-muted-foreground">
+          هیچ بخشی برای این شرکت فعال نیست. برای فعال‌سازی، با مدیر پلتفرم تماس بگیرید.
+        </p>
+      )}
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {DESTINATIONS.map((item) => {
           const Icon = item.icon;
+          const enabled = entitlements.has(item.key);
           return (
-            <article key={item.key} className="rounded-2xl border border-border bg-card p-4">
+            <article
+              key={item.key}
+              aria-disabled={enabled ? undefined : "true"}
+              className={cn(
+                "rounded-2xl border border-border bg-card p-4",
+                !enabled && "opacity-60",
+              )}
+            >
               <Icon className="size-5 text-primary" />
               <h2 className="mt-3 font-bold">{COMPANY_APP_LABELS[item.key]}</h2>
               <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                ورود به موتور مشترک و داده‌های ایزولهٔ شرکت پلتفرم.
+                {enabled
+                  ? "ورود به موتور مشترک و داده‌های ایزولهٔ شرکت پلتفرم."
+                  : "این بخش برای شرکت پلتفرم غیرفعال است."}
               </p>
-              <Link
-                href={item.href}
-                className="mt-3 inline-flex items-center gap-1 text-sm text-primary hover:underline"
-              >
-                باز کردن <ExternalLinkIcon className="size-3.5" />
-              </Link>
+              {enabled ? (
+                <Link
+                  href={item.href}
+                  className="mt-3 inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                >
+                  باز کردن <ExternalLinkIcon className="size-3.5" />
+                </Link>
+              ) : null}
             </article>
           );
         })}

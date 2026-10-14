@@ -21,6 +21,7 @@ import {
   type BusinessStatus,
 } from "@/lib/platform-service";
 import { businessDestructivePhrase } from "@/lib/platform-admin";
+import { AccountsError } from "@/lib/accounts-error";
 import {
   businessLifecycleTransition,
   isBusinessLifecycleStatus,
@@ -146,7 +147,17 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
       return NextResponse.json({ business: existing, seededAccountCodes: [] });
     }
 
-    const result = await changeBusinessIndustry(id, industry);
+    let result: Awaited<ReturnType<typeof changeBusinessIndustry>>;
+    try {
+      result = await changeBusinessIndustry(id, industry);
+    } catch (err) {
+      // A live-chart conflict (an archived parent, or a parent of another type)
+      // rolled the whole change back. It is reported as itself, not as a 500.
+      if (err instanceof AccountsError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
     if (!result) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
     await platformAudit({
@@ -381,6 +392,11 @@ export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => 
       });
       return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
     }
+    if (err instanceof BusinessDeleteBlockedError && ["tax_accepted_retained", "tax_inflight_retained", "tax_retention_hold"].includes(err.reference)) {
+      await platformAudit({ adminId: session.padmin, businessId: id, action: "business.reset.failed", entity: "business", entityId: id, payload: { ...identity, reason: err.reference } });
+      return NextResponse.json({ error: err.reference, message: "صورتحساب‌های پذیرفته‌شده، در انتظار پاسخ یا دارای شواهد متناقض باید نگهداری شوند؛ بازنشانی مجاز نیست." }, { status: 409 });
+    }
+
     // resetBusiness is one transaction, so this response also guarantees that
     // no partial reset was committed. Keep the database detail in server logs.
     console.error("platform business reset failed", { businessId: id, err });

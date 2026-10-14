@@ -11,6 +11,7 @@ import {
   TICKET_STATUS_LABELS,
   TICKET_PRIORITY_LABELS,
   TICKET_CATEGORY_LABELS,
+  ticketStatusLabel,
   isTicketOpen,
   isMemberSettableStatus,
   isTicketStatus,
@@ -88,5 +89,22 @@ describe("support ticket membership rules", () => {
     expect(statusAfterAdminReply("resolved")).toBe("waiting_customer");
     // A closed ticket stays closed: the member must reopen it themselves.
     expect(statusAfterAdminReply("closed")).toBe("closed");
+  });
+});
+
+describe("contextual support status labels (audit F10)", () => {
+  it("tells the operator desk that waiting_customer means the customer owes the reply", () => {
+    expect(ticketStatusLabel("waiting_customer", "operator")).toBe("در انتظار پاسخ مشتری");
+    expect(ticketStatusLabel("waiting_customer", "operator")).not.toMatch(/شما/);
+  });
+
+  it("keeps the member's own wording for the member side", () => {
+    expect(ticketStatusLabel("waiting_customer", "member")).toBe("در انتظار پاسخ شما");
+    expect(ticketStatusLabel("waiting_customer")).toBe("در انتظار پاسخ شما");
+  });
+
+  it("does not change canonical wire identifiers, and passes unknown values through", () => {
+    expect(ticketStatusLabel("open", "operator")).not.toBe("open");
+    expect(ticketStatusLabel("mystery_state", "operator")).toBe("mystery_state");
   });
 });

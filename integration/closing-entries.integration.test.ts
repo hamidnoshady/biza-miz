@@ -18,6 +18,7 @@ import {
   vi,
 } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import type { Role, SessionPayload } from "../src/lib/auth-edge";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -29,10 +30,12 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let fiscalService: typeof import("../src/lib/fiscal-periods-service");
 let closingService: typeof import("../src/lib/closing-service");
+let authorization: typeof import("../src/lib/authorize");
 
 const biz = { id: "" };
 const acct = { cash: "", revenue: "", expense: "", retainedEarnings: "" };
-const users = { owner: "", accountant: "", cashier: "" };
+const users: { owner: string; accountant: string; cashier: string } = { owner: "", accountant: "", cashier: "" };
+const rolesByUser = new Map<string, Role>();
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -63,6 +66,7 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   fiscalService = await import("../src/lib/fiscal-periods-service");
   closingService = await import("../src/lib/closing-service");
+  authorization = await import("../src/lib/authorize");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -88,11 +92,15 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  // journal_lines.account_id is ON DELETE RESTRICT (not CASCADE), so clear
-  // the ledger explicitly before cascading the business away.
+  // A confirmed fixture reset may clear even locked-period postings; normal
+  // journal mutations remain guarded by migration 0216.
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM businesses");
+  await db.query("COMMIT");
+  rolesByUser.clear();
 
   const bizRow = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Closing Co', $1) RETURNING id",
@@ -106,6 +114,7 @@ beforeEach(async () => {
       [biz.id, role],
     );
     users[role] = rows[0].id;
+    rolesByUser.set(rows[0].id, role);
   }
 
   const accounts = await db.query<{ id: string; code: string }>(
@@ -128,7 +137,7 @@ async function postEntry(
   entryDate: string,
   debitAcct: string,
   creditAcct: string,
-  amount: number,
+  amount: number | string,
   createdBy: string,
 ) {
   const { rows } = await db.query<{ id: string }>(
@@ -153,23 +162,68 @@ async function accountBalance(accountId: string): Promise<number> {
   return Number(rows[0].debit) - Number(rows[0].credit);
 }
 
+async function exactAccountBalance(accountId: string): Promise<string> {
+  const { rows } = await db.query<{ balance: string }>(
+    `SELECT (COALESCE(SUM(debit), 0) - COALESCE(SUM(credit), 0))::text AS balance
+       FROM journal_lines WHERE account_id = $1`,
+    [accountId],
+  );
+  return rows[0].balance;
+}
+
+function sessionFor(userId: string): SessionPayload {
+  return {
+    sub: userId,
+    role: rolesByUser.get(userId) ?? "cashier",
+    businessId: biz.id,
+    locationId: null,
+    fullName: "Member",
+  };
+}
+
+async function withMember<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  return dbLib.withTenant(
+    biz.id,
+    () => authorization.withAuthorizationMemo(async () => {
+      await authorization.authorize(sessionFor(userId), {});
+      return fn();
+    }),
+    { userId },
+  );
+}
+
+async function createYear(year: number, actorId = users.owner) {
+  return withMember(actorId, () => fiscalService.createFiscalYear(biz.id, year, actorId));
+}
+
+async function listYears() {
+  return dbLib.withTenant(biz.id, () => fiscalService.listFiscalYears(biz.id));
+}
+
+async function listPeriods(fiscalYearId: string) {
+  return dbLib.withTenant(biz.id, () => fiscalService.listPeriods(biz.id, fiscalYearId));
+}
+
+async function setPeriodStatus(periodId: string, status: "open" | "soft_closed" | "locked", actorId = users.owner) {
+  return withMember(actorId, () => fiscalService.setPeriodStatus(biz.id, periodId, status, actorId));
+}
+
+async function closeYear(fiscalYearId: string, actorId = users.owner) {
+  return withMember(actorId, () => closingService.closeFiscalYear(biz.id, fiscalYearId, actorId));
+}
+
 async function softCloseAllPeriods(fiscalYearId: string) {
-  const periods = await fiscalService.listPeriods(biz.id, fiscalYearId);
+  const periods = await listPeriods(fiscalYearId);
   for (const p of periods) {
-    await fiscalService.setPeriodStatus(
-      biz.id,
-      p.id,
-      "soft_closed",
-      users.owner,
-    );
+    await setPeriodStatus(p.id, "soft_closed", users.owner);
   }
   return periods;
 }
 
 describe("closeFiscalYear", () => {
   it("rolls net income into retained earnings and locks every period", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
 
     await postEntry(
       "2025-04-05",
@@ -188,13 +242,9 @@ describe("closeFiscalYear", () => {
 
     await softCloseAllPeriods(year.id);
 
-    const result = await closingService.closeFiscalYear(
-      biz.id,
-      year.id,
-      users.owner,
-    );
+    const result = await closeYear(year.id, users.owner);
     expect(result.closingEntryId).not.toBeNull();
-    expect(result.netIncome).toBe(600_000);
+    expect(result.netIncome).toBe("600000");
 
     expect(await accountBalance(acct.revenue)).toBe(0);
     expect(await accountBalance(acct.expense)).toBe(0);
@@ -203,16 +253,80 @@ describe("closeFiscalYear", () => {
     // as the negative of it (a credit balance).
     expect(await accountBalance(acct.retainedEarnings)).toBe(-600_000);
 
-    const periods = await fiscalService.listPeriods(biz.id, year.id);
+    const periods = await listPeriods(year.id);
     expect(periods.every((p) => p.status === "locked")).toBe(true);
 
-    const [closedYear] = await fiscalService.listFiscalYears(biz.id);
+    const [closedYear] = await listYears();
     expect(closedYear.closedAt).not.toBeNull();
+
+    const { rows: audit } = await db.query<{ action: string; entity_id: string; user_id: string; payload: Record<string, unknown> }>(
+      `SELECT action, entity_id, user_id, payload
+         FROM audit_log
+        WHERE business_id = $1 AND action IN ('fiscal_period.locked', 'fiscal_year.closed')`,
+      [biz.id],
+    );
+    const periodAudit = audit.filter((row) => row.action === "fiscal_period.locked");
+    const yearAudit = audit.find((row) => row.action === "fiscal_year.closed");
+    expect(periodAudit).toHaveLength(12);
+    for (const row of periodAudit) {
+      expect(row.user_id).toBe(users.owner);
+      expect(row.payload).toMatchObject({
+        actorId: users.owner,
+        closingEntryId: result.closingEntryId,
+        netIncome: "600000",
+        previousStatus: "soft_closed",
+        newStatus: "locked",
+      });
+      expect(row.payload.startsOn).toBeTruthy();
+      expect(row.payload.endsOn).toBeTruthy();
+    }
+    expect(yearAudit?.entity_id).toBe(year.id);
+    expect(yearAudit?.user_id).toBe(users.owner);
+    expect(yearAudit?.payload).toMatchObject({
+      closingEntryId: result.closingEntryId,
+      netIncome: "600000",
+      actorId: users.owner,
+      startsOn: "2025-03-21",
+      endsOn: "2026-03-20",
+    });
+    await expect(
+      db.query("UPDATE audit_log SET payload = '{}'::jsonb WHERE action = 'fiscal_year.closed' AND entity_id = $1", [year.id]),
+    ).rejects.toThrow("fiscal_audit_append_only");
+    await expect(
+      db.query("DELETE FROM audit_log WHERE action = 'fiscal_year.closed' AND entity_id = $1", [year.id]),
+    ).rejects.toThrow("fiscal_audit_append_only");
+  });
+
+  it("posts and returns a close above Number.MAX_SAFE_INTEGER exactly", async () => {
+    await createYear(1404);
+    const [year] = await listYears();
+    const exactRevenue = "9007199254740993";
+    await postEntry("2025-04-05", acct.cash, acct.revenue, exactRevenue, users.owner);
+    await softCloseAllPeriods(year.id);
+
+    const result = await closeYear(year.id, users.owner);
+    expect(result.netIncome).toBe(exactRevenue);
+    expect(await exactAccountBalance(acct.revenue)).toBe("0");
+    expect(await exactAccountBalance(acct.retainedEarnings)).toBe(`-${exactRevenue}`);
+
+    const { rows: lines } = await db.query<{
+      account_id: string;
+      debit: string;
+      credit: string;
+    }>(
+      `SELECT account_id, debit::text AS debit, credit::text AS credit
+         FROM journal_lines WHERE entry_id = $1`,
+      [result.closingEntryId],
+    );
+    expect(Object.fromEntries(lines.map((line) => [line.account_id, { debit: line.debit, credit: line.credit }]))).toEqual({
+      [acct.revenue]: { debit: exactRevenue, credit: "0" },
+      [acct.retainedEarnings]: { debit: "0", credit: exactRevenue },
+    });
   });
 
   it("debits retained earnings for a net loss", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
 
     await postEntry(
       "2025-04-05",
@@ -230,37 +344,29 @@ describe("closeFiscalYear", () => {
     );
 
     await softCloseAllPeriods(year.id);
-    const result = await closingService.closeFiscalYear(
-      biz.id,
-      year.id,
-      users.owner,
-    );
+    const result = await closeYear(year.id, users.owner);
 
-    expect(result.netIncome).toBe(-700_000);
+    expect(result.netIncome).toBe("-700000");
     // A loss debits retained earnings, so its debit-credit balance is positive.
     expect(await accountBalance(acct.retainedEarnings)).toBe(700_000);
   });
 
   it("posts no entry, but still locks every period, when there was no activity", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
 
     await softCloseAllPeriods(year.id);
-    const result = await closingService.closeFiscalYear(
-      biz.id,
-      year.id,
-      users.owner,
-    );
+    const result = await closeYear(year.id, users.owner);
 
     expect(result.closingEntryId).toBeNull();
-    expect(result.netIncome).toBe(0);
-    const periods = await fiscalService.listPeriods(biz.id, year.id);
+    expect(result.netIncome).toBe("0");
+    const periods = await listPeriods(year.id);
     expect(periods.every((p) => p.status === "locked")).toBe(true);
   });
 
   it("refuses a partial fiscal year instead of producing a closing entry over incomplete books", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
     await db.query(
       `DELETE FROM fiscal_periods
         WHERE id = (
@@ -273,35 +379,30 @@ describe("closeFiscalYear", () => {
     await softCloseAllPeriods(year.id);
 
     await expect(
-      closingService.closeFiscalYear(biz.id, year.id, users.owner),
+      closeYear(year.id, users.owner),
     ).rejects.toThrow("periods_incomplete");
   });
 
   it("rejects closing while any period is still open", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
-    const periods = await fiscalService.listPeriods(biz.id, year.id);
+    await createYear(1404);
+    const [year] = await listYears();
+    const periods = await listPeriods(year.id);
     // Soft-close only the first period; the other eleven stay open.
-    await fiscalService.setPeriodStatus(
-      biz.id,
-      periods[0].id,
-      "soft_closed",
-      users.owner,
-    );
+    await setPeriodStatus(periods[0].id, "soft_closed", users.owner);
 
     await expect(
-      closingService.closeFiscalYear(biz.id, year.id, users.owner),
+      closeYear(year.id, users.owner),
     ).rejects.toThrow("periods_not_ready");
   });
 
   it("serializes final close against an in-flight reopen without deadlocking", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
     const periods = await softCloseAllPeriods(year.id);
 
     const results = await Promise.allSettled([
-      closingService.closeFiscalYear(biz.id, year.id, users.owner),
-      fiscalService.setPeriodStatus(biz.id, periods[0].id, "open", users.owner),
+      closeYear(year.id, users.owner),
+      setPeriodStatus(periods[0].id, "open", users.owner),
     ]);
     const failureCodes = results
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -310,8 +411,8 @@ describe("closeFiscalYear", () => {
     // a normal business-state conflict, never PostgreSQL's deadlock error.
     expect(failureCodes.every((code) => ["periods_not_ready", "fiscal_year_closed"].includes(code))).toBe(true);
 
-    const [currentYear] = await fiscalService.listFiscalYears(biz.id);
-    const currentPeriods = await fiscalService.listPeriods(biz.id, year.id);
+    const [currentYear] = await listYears();
+    const currentPeriods = await listPeriods(year.id);
     if (currentYear.closedAt) {
       expect(currentPeriods.every((period) => period.status === "locked")).toBe(true);
     } else {
@@ -321,51 +422,51 @@ describe("closeFiscalYear", () => {
   });
 
   it("rejects closing an already-closed year", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
     await softCloseAllPeriods(year.id);
-    await closingService.closeFiscalYear(biz.id, year.id, users.owner);
+    await closeYear(year.id, users.owner);
 
     await expect(
-      closingService.closeFiscalYear(biz.id, year.id, users.owner),
+      closeYear(year.id, users.owner),
     ).rejects.toThrow("fiscal_year_already_closed");
   });
 
   it("rejects closing a fiscal year that doesn't exist", async () => {
     await expect(
-      closingService.closeFiscalYear(biz.id, randomUUID(), users.owner),
+      closeYear(randomUUID(), users.owner),
     ).rejects.toThrow("fiscal_year_not_found");
   });
 
-  describe("postJournalEntry failure handling", () => {
-    it("throws period_locked_for_closing if postJournalEntry throws a fiscal period lock error", async () => {
-      await fiscalService.createFiscalYear(biz.id, 1404);
-      const [year] = await fiscalService.listFiscalYears(biz.id);
+  describe("exact journal-entry failure handling", () => {
+    it("throws period_locked_for_closing if postExactJournalEntry throws a fiscal period lock error", async () => {
+      await createYear(1404);
+      const [year] = await listYears();
       await softCloseAllPeriods(year.id);
 
       const ledgerService = await import("../src/lib/ledger-service");
       const spy = vi
-        .spyOn(ledgerService, "postJournalEntry")
+        .spyOn(ledgerService, "postExactJournalEntry")
         .mockRejectedValue(new Error("fiscal_period_locked"));
 
       await expect(
-        closingService.closeFiscalYear(biz.id, year.id, users.owner),
+        closeYear(year.id, users.owner),
       ).rejects.toThrow("period_locked_for_closing");
       spy.mockRestore();
     });
 
-    it("rethrows if postJournalEntry throws an unrelated error", async () => {
-      await fiscalService.createFiscalYear(biz.id, 1404);
-      const [year] = await fiscalService.listFiscalYears(biz.id);
+    it("rethrows if postExactJournalEntry throws an unrelated error", async () => {
+      await createYear(1404);
+      const [year] = await listYears();
       await softCloseAllPeriods(year.id);
 
       const ledgerService = await import("../src/lib/ledger-service");
       const spy = vi
-        .spyOn(ledgerService, "postJournalEntry")
+        .spyOn(ledgerService, "postExactJournalEntry")
         .mockRejectedValue(new Error("some_other_error"));
 
       await expect(
-        closingService.closeFiscalYear(biz.id, year.id, users.owner),
+        closeYear(year.id, users.owner),
       ).rejects.toThrow("some_other_error");
       spy.mockRestore();
     });
@@ -374,24 +475,24 @@ describe("closeFiscalYear", () => {
 
 describe("reopening a period after its fiscal year is closed", () => {
   it("is rejected, to avoid an open period under an already-closed year", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
     await softCloseAllPeriods(year.id);
-    await closingService.closeFiscalYear(biz.id, year.id, users.owner);
+    await closeYear(year.id, users.owner);
 
-    const [farvardin] = await fiscalService.listPeriods(biz.id, year.id);
+    const [farvardin] = await listPeriods(year.id);
     await expect(
-      fiscalService.setPeriodStatus(biz.id, farvardin.id, "open", users.owner),
+      setPeriodStatus(farvardin.id, "open", users.owner),
     ).rejects.toThrow("fiscal_year_closed");
   });
 
   it("keeps the finalized-year rule in the database for direct writers too", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
+    await createYear(1404);
+    const [year] = await listYears();
     await softCloseAllPeriods(year.id);
-    await closingService.closeFiscalYear(biz.id, year.id, users.owner);
+    await closeYear(year.id, users.owner);
 
-    const [farvardin] = await fiscalService.listPeriods(biz.id, year.id);
+    const [farvardin] = await listPeriods(year.id);
     await expect(
       db.query("UPDATE fiscal_periods SET status = 'open' WHERE id = $1", [farvardin.id]),
     ).rejects.toThrow("fiscal_year_closed");

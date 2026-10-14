@@ -1,10 +1,8 @@
 /**
- * Audit F08 — fiscal-period readiness. The database deliberately lets an entry
- * land on a date no period covers; this proves the readiness service reports
- * that honestly (no year, uncovered count and range, today's coverage), that
- * the accounting review carries it as a finding, and that only *closing* is
- * tightened: closeFiscalYear refuses while earlier entries are uncovered,
- * and nothing — posting included — rejects, moves or re-dates an entry.
+ * Audit F08 and issue #834 — fiscal-period readiness. Legacy uncovered entries
+ * remain visible and retain their dates; once fiscal controls are adopted,
+ * uncovered new postings are rejected. Closing remains blocked until uncovered
+ * historical activity is covered, with no silent re-dating.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -12,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { fiscalYearSpec } from "../src/lib/fiscal-periods";
 import { jalaliYearOf } from "../src/lib/fiscal-readiness";
+import type { Role, SessionPayload } from "../src/lib/auth-edge";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -25,6 +24,7 @@ let fiscalService: typeof import("../src/lib/fiscal-periods-service");
 let closingService: typeof import("../src/lib/closing-service");
 let reviewService: typeof import("../src/lib/accounting-review-service");
 let dayService: typeof import("../src/lib/business-day-service");
+let authorization: typeof import("../src/lib/authorize");
 
 const biz = { id: "", owner: "", cash: "", revenue: "" };
 
@@ -55,6 +55,7 @@ beforeAll(async () => {
   closingService = await import("../src/lib/closing-service");
   reviewService = await import("../src/lib/accounting-review-service");
   dayService = await import("../src/lib/business-day-service");
+  authorization = await import("../src/lib/authorize");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -74,9 +75,12 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM businesses");
+  await db.query("COMMIT");
 
   const { rows } = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Fiscal Ready Co', $1) RETURNING id",
@@ -100,6 +104,51 @@ beforeEach(async () => {
     if (row.code === "4300") biz.revenue = row.id;
   }
 });
+
+function ownerSession(): SessionPayload {
+  return {
+    sub: biz.owner,
+    role: "owner" satisfies Role,
+    businessId: biz.id,
+    locationId: null,
+    fullName: "Owner",
+  };
+}
+
+async function withOwner<T>(fn: () => Promise<T>): Promise<T> {
+  return dbLib.withTenant(
+    biz.id,
+    () => authorization.withAuthorizationMemo(async () => {
+      await authorization.authorize(ownerSession(), {});
+      return fn();
+    }),
+    { userId: biz.owner },
+  );
+}
+
+async function createYear(year: number) {
+  return withOwner(() => fiscalService.createFiscalYear(biz.id, year, biz.owner));
+}
+
+async function listYears() {
+  return dbLib.withTenant(biz.id, () => fiscalService.listFiscalYears(biz.id));
+}
+
+async function listPeriods(yearId: string) {
+  return dbLib.withTenant(biz.id, () => fiscalService.listPeriods(biz.id, yearId));
+}
+
+async function setPeriodStatus(periodId: string, status: "open" | "soft_closed" | "locked") {
+  return withOwner(() => fiscalService.setPeriodStatus(biz.id, periodId, status, biz.owner));
+}
+
+async function closeYear(yearId: string) {
+  return withOwner(() => closingService.closeFiscalYear(biz.id, yearId, biz.owner));
+}
+
+async function readiness() {
+  return dbLib.withTenant(biz.id, () => fiscalService.getFiscalReadiness(biz.id));
+}
 
 /** A balanced sale entry on `entryDate`, written the way an import would — straight in. */
 async function postSale(entryDate: string, amount = 100_000): Promise<string> {
@@ -127,7 +176,7 @@ describe("getFiscalReadiness", () => {
     await postSale("2025-09-15");
     await postSale("2025-09-15");
 
-    const r = await fiscalService.getFiscalReadiness(biz.id);
+    const r = await readiness();
     expect(r.hasFiscalYear).toBe(false);
     expect(r.todayCovered).toBe(false);
     expect(r.ready).toBe(false);
@@ -140,12 +189,14 @@ describe("getFiscalReadiness", () => {
     const today = await dayService.businessToday(biz.id);
     const jy = jalaliYearOf(today)!;
     const previous = fiscalYearSpec(jy - 1);
-    await fiscalService.createFiscalYear(biz.id, jy);
+    // Seed the uncovered historical entry before the first year adopts fiscal
+    // controls; subsequent writes must be covered.
+    const legacy = await postSale(addDays(previous.startsOn, 10));
+    await createYear(jy);
 
     await postSale(today);
-    const legacy = await postSale(addDays(previous.startsOn, 10));
 
-    const r = await fiscalService.getFiscalReadiness(biz.id);
+    const r = await readiness();
     expect(r.hasFiscalYear).toBe(true);
     expect(r.todayCovered).toBe(true);
     expect(r.uncovered).toEqual({
@@ -158,8 +209,8 @@ describe("getFiscalReadiness", () => {
     expect(r.canClose).toBe(false);
 
     // Defining the earlier year covers it — without touching the entry.
-    await fiscalService.createFiscalYear(biz.id, jy - 1);
-    const covered = await fiscalService.getFiscalReadiness(biz.id);
+    await createYear(jy - 1);
+    const covered = await readiness();
     expect(covered.ready).toBe(true);
     expect(covered.uncovered.count).toBe(0);
     expect(covered.canClose).toBe(true);
@@ -175,10 +226,12 @@ describe("getFiscalReadiness", () => {
   it("flags today as uncovered when only a past year is defined", async () => {
     const today = await dayService.businessToday(biz.id);
     const jy = jalaliYearOf(today)!;
-    await fiscalService.createFiscalYear(biz.id, jy - 1);
-    await postSale(today);
+    // Existing future-dated legacy activity is allowed before adoption. It is
+    // later than the old year's end, so that year remains closable by coverage.
+    await postSale("2030-01-01");
+    await createYear(jy - 1);
 
-    const r = await fiscalService.getFiscalReadiness(biz.id);
+    const r = await readiness();
     expect(r.todayCovered).toBe(false);
     expect(r.issues).toEqual(["today_uncovered", "uncovered_entries"]);
     // Today's uncovered sale is after last year's end: last year may still close.
@@ -189,16 +242,18 @@ describe("getFiscalReadiness", () => {
 
 describe("closeFiscalYear with uncovered history", () => {
   it("refuses while an earlier entry is outside every period, and moves nothing", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
-    const [year] = await fiscalService.listFiscalYears(biz.id);
-    await postSale("2025-05-01"); // inside 1404
+    // The uncovered historical row predates adoption; it remains visible and
+    // blocks closing until its Jalali year is later defined.
     const legacy = await postSale("2024-12-01"); // 1403, never defined
+    await createYear(1404);
+    const [year] = await listYears();
+    await postSale("2025-05-01"); // inside 1404
 
-    for (const period of await fiscalService.listPeriods(biz.id, year.id)) {
-      await fiscalService.setPeriodStatus(biz.id, period.id, "soft_closed", biz.owner);
+    for (const period of await listPeriods(year.id)) {
+      await setPeriodStatus(period.id, "soft_closed");
     }
 
-    await expect(closingService.closeFiscalYear(biz.id, year.id, biz.owner)).rejects.toMatchObject({
+    await expect(closeYear(year.id)).rejects.toMatchObject({
       message: "uncovered_entries_before_close",
       status: 409,
       details: { uncovered: { count: 1, earliest: "2024-12-01", latest: "2024-12-01" } },
@@ -211,18 +266,23 @@ describe("closeFiscalYear with uncovered history", () => {
     );
     expect(entries.rows).toHaveLength(2);
     expect(entries.rows[0]).toEqual({ id: legacy, entry_date: "2024-12-01" });
-    const [stillOpen] = await fiscalService.listFiscalYears(biz.id);
+    const [stillOpen] = await listYears();
     expect(stillOpen.closedAt).toBeNull();
 
     // Covering the legacy date lets the same close go through.
-    await fiscalService.createFiscalYear(biz.id, 1403);
-    const result = await closingService.closeFiscalYear(biz.id, year.id, biz.owner);
-    expect(result.netIncome).toBe(100_000);
+    await createYear(1403);
+    const result = await closeYear(year.id);
+    expect(result.netIncome).toBe("100000");
   });
 
-  it("does not let posting depend on coverage: an uncovered date still posts", async () => {
-    await fiscalService.createFiscalYear(biz.id, 1404);
+  it("preserves pre-adoption history while rejecting a new uncovered post after adoption", async () => {
+    // No fiscal year means the old deployment has not adopted the control yet.
     await expect(postSale("2030-01-01")).resolves.toBeTruthy();
+    await createYear(1404);
+    await expect(postSale("2030-01-02")).rejects.toThrow("fiscal_period_not_defined");
+    // A back-dated new post is still new: only rows recorded before adoption
+    // retain legacy compatibility.
+    await expect(postSale("2000-01-01")).rejects.toThrow("fiscal_period_not_defined");
   });
 });
 
@@ -238,7 +298,7 @@ describe("the accounting review", () => {
     expect(finding?.title).toBe("سال مالی تعریف نشده");
     expect(finding?.detail).not.toContain("2025");
 
-    await fiscalService.createFiscalYear(biz.id, 1404);
+    await createYear(1404);
     const clean = await dbLib.withTenant(biz.id, () => reviewService.runAccountingReview(biz.id));
     expect(clean.findings.find((row) => row.code === "uncovered_fiscal_dates")).toBeUndefined();
   });

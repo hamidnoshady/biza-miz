@@ -39,6 +39,12 @@ export interface DrillDownTarget {
   dateTo?: string;
   /** `ledger.view` for the trial-balance page; otherwise the existing reports.view gate. */
   permissionScope?: "ledger" | "reports";
+  /**
+   * The scope the loaded statement was read at. The postings must cover the
+   * same rows the figure was computed from, so a consolidated statement
+   * drills down consolidated — and only for a member the route authorizes.
+   */
+  scope?: "branch" | "business-wide";
   /** The exact report cell this posting list should reconcile to. */
   amountBasis?: "debit" | "credit" | "closingDebit" | "closingCredit";
   expectedAmount?: string;
@@ -63,9 +69,10 @@ export function DrillDownPanel({ target, onClose }: { target: DrillDownTarget; o
     if (target.dateFrom) params.set("dateFrom", target.dateFrom);
     if (target.dateTo) params.set("dateTo", target.dateTo);
     if (target.permissionScope === "ledger") params.set("permissionScope", "ledger");
+    if (target.scope) params.set("scope", target.scope);
     if (offset > 0) params.set("offset", String(offset));
     return api<DrillDownResult>(`/api/reports/drill-down?${params}`, { signal });
-  }, [target.accountCode, target.dateFrom, target.dateTo, target.permissionScope]);
+  }, [target.accountCode, target.dateFrom, target.dateTo, target.permissionScope, target.scope]);
 
   useEffect(() => {
     setResult(null);

@@ -516,6 +516,7 @@ async function postEvent(event: EventRow): Promise<"posted" | "ignored"> {
           [entryId, accounts.get(line.code), String(line.debit), String(line.credit)],
         );
       }
+      await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
       await client.query(
         `INSERT INTO platform_company_accounting_postings
            (business_id, event_id, source_reference, journal_entry_id, posting_rule, amount_rial)

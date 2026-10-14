@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseReportOptions, parseReportQuery } from "./platform-report-request";
 import { buildReportQuery, standardReportsFor, reportViewsFor } from "./reports";
+import { branchScope } from "./report-scope";
 import { platformCan } from "./platform-admin";
 const valid = { view: "v_sales_by_day", metric: "total", dimension: "day", aggregation: "sum" };
 describe("platform reporting wire boundary", () => {
@@ -14,7 +15,7 @@ describe("platform reporting wire boundary", () => {
   it("bounds an otherwise unlimited query and retains parameterized filters", () => {
     const parsed = parseReportQuery(valid);
     expect(parsed.limit).toBe(1000);
-    const query = buildReportQuery(parsed, "business-a", "branch-a");
+    const query = buildReportQuery(parsed, "business-a", branchScope("branch-a"));
     expect(query.params).toEqual(["business-a", "branch-a", 1000]);
     expect(query.sql).not.toContain("business-a");
   });

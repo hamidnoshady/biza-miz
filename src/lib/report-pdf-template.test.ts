@@ -31,11 +31,13 @@ describe("renderReportTableHtml", () => {
     expect(html).toContain("از ۱۴۰۴/۰۱/۰۱ تا ۱۴۰۴/۰۱/۳۱");
   });
 
-  it("renders column headers and row cells", () => {
+  it("renders column headers and row cells with Shamsi date labels", () => {
     const html = renderReportTableHtml(baseData);
     expect(html).toContain("<th>روز</th>");
     expect(html).toContain("<th>جمع</th>");
-    expect(html).toContain("2026-01-01");
+    // Issue #819: a reporting view's date column is `YYYY-MM-DD` text, so the
+    // PDF showed Gregorian while the screen showed Shamsi.
+    expect(html).toContain("۱۴۰۴/۱۰/۱۱");
   });
 
   it("escapes HTML in cell values", () => {

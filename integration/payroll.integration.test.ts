@@ -109,6 +109,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM payroll_advances");
   await db.query("DELETE FROM payroll_run_lines");
   await db.query("DELETE FROM payroll_runs");
@@ -117,6 +119,7 @@ beforeEach(async () => {
   // Cascades to users, accounts, locations, commission_* and the append-only
   // payroll_pay_term_changes (whose guard lets the cascade of a business through).
   await db.query("DELETE FROM businesses");
+  await db.query("COMMIT");
 
   const bizRow = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Payroll Co', $1) RETURNING id",
@@ -484,7 +487,13 @@ describe("pay-term change audit (issue #835 §6)", () => {
     await change(32_000_000);
     await change(33_000_000);
     const { changes } = await history();
-    expect(changes.map((c) => [c.previousAmount, c.newAmount])).toEqual([
+    // Three writes in a row can share a database timestamp (Windows CI does), and
+    // the newest-first order between tied rows then falls to the random id. The
+    // chain is what this test is about; "newest first" is the pagination test's.
+    const chain = changes
+      .map((c) => [c.previousAmount, c.newAmount])
+      .sort((a, b) => Number(b[1]) - Number(a[1]));
+    expect(chain).toEqual([
       ["32000000", "33000000"],
       ["31000000", "32000000"],
       ["30000000", "31000000"],
@@ -570,7 +579,20 @@ describe("pay-term change audit (issue #835 §6)", () => {
   });
 
   it("paginates with a cursor, newest first", async () => {
-    for (let wage = 31; wage <= 35; wage++) await change(wage * 1_000_000);
+    // Five rows with explicit, distinct `changed_at` values. Written through the
+    // service they are stamped by the database clock, so two writes can share a
+    // timestamp, and the newest-first order between them then falls to the
+    // random id tie-break (CI failed on exactly that order once). The assertions
+    // below are unchanged: they test the keyset cursor, not clock resolution.
+    for (let wage = 31; wage <= 35; wage++) {
+      await db.query(
+        `INSERT INTO payroll_pay_term_changes
+           (business_id, user_id, employee_name_snapshot, term, previous_amount, new_amount, changed_at)
+         VALUES ($1, $2, 'Staff A', 'monthly_wage', $3, $4,
+                 '2026-01-01T00:00:00Z'::timestamptz + make_interval(mins => $5::int))`,
+        [biz.id, staff.a, (wage - 1) * 1_000_000, wage * 1_000_000, wage],
+      );
+    }
     const first = await history(staff.a, { limit: 2 });
     expect(first.changes.map((c) => c.newAmount)).toEqual(["35000000", "34000000"]);
     expect(first.nextCursor).not.toBeNull();
@@ -762,7 +784,9 @@ describe("accruePayroll", () => {
       ),
     ).toBe(0);
     // …and the period is not burned: the same period can be booked on another date.
-    const run = await accrue({ periodKey: "1404-01", accrualDate: "2030-01-01" });
+    // Payroll's operational period label may differ from the posting date, but
+    // the journal date still has to be covered after fiscal-year adoption.
+    const run = await accrue({ periodKey: "1404-01", accrualDate: "2025-05-01" });
     expect(run.periodKey).toBe("1404-01");
   });
 });

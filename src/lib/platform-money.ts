@@ -5,7 +5,7 @@
  *
  *   1 Toman = 10 Rial — never spell `value * 10` in a component again.
  */
-import { toPersianDigits } from "./digits";
+import { formatPersianNumber } from "./digits";
 
 export const RIAL_PER_TOMAN = 10;
 
@@ -142,14 +142,12 @@ export function tomanToRial(toman: number): number {
 
 /** Format integer Rial as a Persian-digit Toman string with «٬» grouping. */
 export function formatToman(rial: number): string {
-  return toPersianDigits(
-    rialToToman(rial).toLocaleString("en-US").replace(/,/g, "٬"),
-  );
+  return formatPersianNumber(rialToToman(rial));
 }
 
 /** Format integer Rial as a Persian-digit Rial string with «٬» grouping. */
 export function formatRial(rial: number): string {
-  return toPersianDigits(Math.floor(rial).toLocaleString("en-US").replace(/,/g, "٬"));
+  return formatPersianNumber(Math.floor(rial));
 }
 
 /** `«۱٬۲۰۰٬۰۰۰ تومان»` in one call — the console's standard money label. */

@@ -134,10 +134,19 @@ export interface McpResourceContent {
 export async function readMcpResource(
   uri: string,
   businessId: string,
+  pinnedLocationId?: string,
 ): Promise<McpResourceContent | null> {
   switch (uri) {
     case "pos://app/overview": {
-      const result = await runSystemReadTool("describe_app", {}, businessId);
+      const result = await runSystemReadTool(
+        "describe_app",
+        {},
+        businessId,
+        undefined,
+        undefined,
+        undefined,
+        pinnedLocationId,
+      );
       return {
         uri,
         mimeType: "application/json",

@@ -14,7 +14,7 @@ import {
   recordAuthSuccess,
 } from "@/lib/login-lockout-service";
 import { PLATFORM_LOCKOUT_POLICY } from "@/lib/login-lockout";
-import { verifyAndConfirmMfaCode } from "@/lib/mfa-verify";
+import { verifyExistingConfirmedMfaFactor } from "@/lib/mfa-verify";
 import { issueSmsMfaChallenge } from "@/lib/mfa-enrol";
 import { isRecentAuth } from "@/lib/recent-auth";
 import type { MfaMethod } from "@/lib/mfa";
@@ -68,10 +68,18 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     }
 
     if (body.action === "send_sms") {
+      /**
+       * Issue #854 — the purpose has to be the one the verification will look
+       * for. This call used to inherit `mfa_login` while the redemption below
+       * spends `step_up_sms`, so the platform administrator's SMS step-up could
+       * never succeed: the code that arrived was of the wrong transaction type,
+       * and the only way through was a different method.
+       */
       const challenge = await issueSmsMfaChallenge({
         subjectRealm: "platform_admin",
         subjectId: session.padmin,
         email: admin.email,
+        purpose: "step_up_sms",
       });
       if (!challenge.ok) {
         const status = challenge.error === "rate_limited" ? 429 : 400;
@@ -92,12 +100,21 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     } else if (typeof body.code === "string" && body.code.trim().length > 0) {
       const method: MfaMethod | null =
         body.method === "totp" || body.method === "sms_otp" ? body.method : "totp";
-      const detail = await verifyAndConfirmMfaCode({
+      /**
+       * Named, not flagged: step-up accepts **confirmed** factors only (issue
+       * #854 P1.11). `verifyAndConfirmMfaCode` defaults to this behaviour, but
+       * relying on a default is how the enrolment ceremony ended up on the
+       * strict path and the step-up path ended up one flag away from the loose
+       * one.
+       */
+      const detail = await verifyExistingConfirmedMfaFactor({
         subjectRealm: "platform_admin",
         subjectId: session.padmin,
         method,
         code: body.code,
         useRecoveryCode: Boolean(body.useRecoveryCode),
+        // Issue #854 (invariant 4) — the platform realm gets the same isolation.
+        smsPurposes: ["step_up_sms"],
       });
       verified = detail.outcome !== "rejected";
     } else {

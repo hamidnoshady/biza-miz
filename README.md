@@ -1099,8 +1099,9 @@ default) — and the correction is a real one, not a cosmetic change to `orders.
   report — they all filter on `status = 'completed'`.
 - Both are dated on **the day the order was sold**, not the day of the correction — the journal
   entries *and* the stock movements, so the two ledgers agree about which day the goods moved.
-  A locked or soft-closed fiscal period therefore refuses the amendment (migration 0024's
-  trigger) rather than silently moving it, and a business pushing daily summaries to a central
+  A locked or soft-closed fiscal period therefore refuses the amendment (the fiscal-period
+  database guard, originally migration 0024 and hardened in 0216) rather than silently moving it;
+  after fiscal-control adoption, an uncovered date is refused as well. A business pushing daily summaries to a central
   server (Phase 9) has its push high-water mark wound back to the amended day so central
   converges on the correction instead of keeping the stale figures.
 - Every amendment records a mandatory reason, a before/after snapshot of the bill, and an
@@ -1138,8 +1139,10 @@ A closed sale that was rung up wrongly is still corrected through the amendment 
 historical trading from another system is an import rather than a till action: the Holoo migration
 writes order-ticket sales through `src/lib/integrations/holoo/imported-sale-service.ts`, which
 dates `orders.opened_at`/`closed_at`, `payments.received_at`, `stock_movements.occurred_at` and
-`journal_entries.entry_date` to when the sale happened — so a closed fiscal period refuses the
-import (`fiscal_period_locked`) rather than absorbing it into the current one — while taking the
+`journal_entries.entry_date` to when the sale happened — so a locked/soft-closed period, or an
+uncovered date after fiscal-control adoption, refuses the import (`fiscal_period_locked`,
+`fiscal_period_soft_closed` or `fiscal_period_not_defined`) rather than absorbing it into the
+current one — while taking the
 order number off the branch's ordinary counter and never attaching a `table_id`.
 
 ## Feature Gating & Platform Hardening (Phase 17)

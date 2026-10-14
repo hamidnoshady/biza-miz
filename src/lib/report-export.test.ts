@@ -11,6 +11,13 @@
  *    did NOT do before. A report cell is attacker-influenced far more often
  *    than it looks (a customer name, an item name), and Excel executes such a
  *    cell on open.
+ *
+ * Since issue #819 a reporting view's `date` column — which PostgreSQL sends as
+ * `YYYY-MM-DD` text, not a JS Date, so the codec could not recognise it — is
+ * written in Shamsi like the screen and like every other export in the product
+ * (integration/data-transfer.integration.test.ts pins the rule for the data
+ * transfer engine). The screen and all three files therefore carry the same
+ * date label.
  */
 import { describe, expect, it } from "vitest";
 import { customReportTable, moneyColumnLabel, moneyExportCell, rowsToCsv, type ReportTable } from "./report-export";
@@ -33,9 +40,20 @@ describe("rowsToCsv", () => {
     const lines = csv.slice(1).replace(/\r\n$/, "").split("\r\n");
     expect(lines).toEqual([
       "روز,جمع",
-      "2026-01-01,220000",
-      "2026-01-02,150000",
+      "۱۴۰۴/۱۰/۱۱,220000",
+      "۱۴۰۴/۱۰/۱۲,150000",
     ]);
+  });
+
+  it("writes a date-column value in Shamsi, matching the screen", () => {
+    // Issue #819: the same row read «۱۴۰۴/۱۰/۱۱» on screen and
+    // «2026-01-01» in every file. A date that is only text never reached the
+    // codec's Date branch, so it is recognised here.
+    const table: ReportTable = {
+      columns: [{ key: "day", label: "روز" }],
+      rows: [{ day: "2026-01-01" }],
+    };
+    expect(rowsToCsv(table)).toContain("۱۴۰۴/۱۰/۱۱");
   });
 
   it("quotes cells containing commas, quotes, or newlines", () => {

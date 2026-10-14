@@ -161,7 +161,7 @@ export async function verifyUnattendedAuthority(input: {
               u.location_id,
               u.location_scope::text AS location_scope,
               b.status::text AS business_status,
-              CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE NULL END AS custom_role_permissions
+              CASE WHEN u.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END AS custom_role_permissions
          FROM users u
          JOIN businesses b ON b.id = u.business_id
          LEFT JOIN tenant_roles tr ON tr.id = u.custom_role_id AND tr.business_id = u.business_id

@@ -8,6 +8,7 @@
  * rather than fetching every business and slicing in the browser. Provisioning
  * lives in its own wizard dialog, not inline in the list body.
  */
+import { resolveBusinessSort, type BusinessSortKey } from "@/lib/business-sort";
 import { Suspense, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -90,6 +91,22 @@ function isPlaceholderSubdomain(subdomain: string): boolean {
   return /^biz-[0-9a-f]{8}$/i.test(subdomain);
 }
 
+/** Table column keys ⇄ canonical sort keys (`business-sort.ts`). */
+const SORT_COLUMN_KEYS: Record<BusinessSortKey, string> = {
+  created: "createdAt",
+  name: "name",
+  orders: "orderCount",
+  members: "memberCount",
+  activity: "lastActivityAt",
+};
+const COLUMN_TO_SORT: Record<string, BusinessSortKey> = {
+  createdAt: "created",
+  name: "name",
+  orderCount: "orders",
+  memberCount: "members",
+  lastActivityAt: "activity",
+};
+
 const DEFAULTS = {
   search: "",
   status: "",
@@ -101,6 +118,8 @@ const DEFAULTS = {
   from: "",
   to: "",
   sort: "newest",
+  // Explicit direction for the sortable columns; empty = the column's default.
+  dir: "",
   page: "1",
 };
 
@@ -121,10 +140,11 @@ function BusinessesInner() {
     if (values.from) params.set("from", values.from);
     if (values.to) params.set("to", values.to);
     if (values.sort) params.set("sort", values.sort);
+    if (values.dir === "asc" || values.dir === "desc") params.set("dir", values.dir);
     params.set("page", values.page || "1");
     params.set("pageSize", String(PAGE_SIZE));
     return `/api/platform/businesses?${params.toString()}`;
-  }, [debouncedSearch, values.status, values.plan, values.industry, values.activity, values.from, values.to, values.sort, values.page]);
+  }, [debouncedSearch, values.status, values.plan, values.industry, values.activity, values.from, values.to, values.sort, values.dir, values.page]);
 
   const query = usePlatformQuery<ListResponse>(url, [url]);
   const businesses = query.data?.businesses ?? null;
@@ -134,36 +154,16 @@ function BusinessesInner() {
   const rootDomain = query.data?.rootDomain ?? "";
   const page = Number(values.page) || 1;
 
-  const sortDir: SortDirection = values.sort === "oldest" ? "asc" : "desc";
-  const sortKey =
-    values.sort === "newest" || values.sort === "oldest"
-      ? "createdAt"
-      : values.sort === "orders"
-        ? "orderCount"
-        : values.sort === "members"
-          ? "memberCount"
-          : values.sort === "activity"
-            ? "lastActivityAt"
-            : values.sort === "name"
-              ? "name"
-              : "createdAt";
+  // The displayed key and direction are the ones the server applies
+  // (`resolveBusinessSort`), so the arrow never lies about the order.
+  const resolvedSort = resolveBusinessSort(values.sort, values.dir || null);
+  const sortDir: SortDirection = resolvedSort.dir;
+  const sortKey = SORT_COLUMN_KEYS[resolvedSort.key];
 
   function handleSort(key: string, dir: SortDirection) {
-    const mapped =
-      key === "createdAt"
-        ? dir === "asc"
-          ? "oldest"
-          : "newest"
-        : key === "orderCount"
-          ? "orders"
-          : key === "memberCount"
-            ? "members"
-            : key === "lastActivityAt"
-              ? "activity"
-              : key === "name"
-                ? "name"
-                : "newest";
-    set({ sort: mapped, page: "1" });
+    const sortKeyForColumn = COLUMN_TO_SORT[key];
+    if (!sortKeyForColumn) return;
+    set({ sort: sortKeyForColumn, dir, page: "1" });
   }
 
   const columns: Column<Business>[] = [
