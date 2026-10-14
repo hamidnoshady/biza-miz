@@ -13,16 +13,14 @@
  * the same primary Accounting application.
  */
 
-import Link from "next/link";
 import {
-  ArrowUpRightIcon,
   BarChart3Icon,
   ClipboardListIcon,
   PercentIcon,
   ScrollTextIcon,
   type LucideIcon,
 } from "lucide-react";
-import { SectionCard, cardClass } from "@/app/dashboard/page-chrome";
+import { DestinationCard, SectionCard } from "@/app/dashboard/page-chrome";
 import { accountingSectionHref } from "./accounting-routes";
 
 interface ReportLink {
@@ -72,24 +70,14 @@ const BUSINESS_REPORTS: ReportLink[] = [
 ];
 
 function ReportCard({ link }: { link: ReportLink }) {
-  const Icon = link.icon;
   return (
-    <Link
+    <DestinationCard
       href={link.href}
-      className={`${cardClass} flex gap-3 p-4 transition-colors hover:border-amber-300/70 hover:bg-amber-50/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10 dark:focus-visible:ring-amber-400/45`}
-    >
-      <Icon aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-amber-700 dark:text-amber-300" />
-      <span className="min-w-0">
-        <span className="flex items-center gap-1 font-semibold text-foreground">
-          {link.label}
-          {/* ↗ mirrors to ↖ in RTL — an anticlockwise quarter turn. Clockwise gave ↘. */}
-          {link.external ? (
-            <ArrowUpRightIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground rtl:-rotate-90" />
-          ) : null}
-        </span>
-        <span className="mt-1 block text-sm leading-6 text-muted-foreground">{link.description}</span>
-      </span>
-    </Link>
+      title={link.label}
+      description={link.description}
+      icon={link.icon}
+      external={link.external}
+    />
   );
 }
 

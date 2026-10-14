@@ -86,7 +86,9 @@ describe("AppSectionNav", () => {
     const markup = renderNav({ open: false });
 
     expect(markup).toContain('data-state="collapsed"');
-    expect(markup).toContain("group-data-[state=collapsed]/sidebar:hidden");
+    // Labels are visually hidden (sr-only) at the rail, not display:none, so the
+    // collapsed links keep their accessible names.
+    expect(markup).toContain("group-data-[state=collapsed]/sidebar:sr-only");
     expect(markup).toContain("rtl:rotate-180");
     // The links remain in the DOM (and keep their accessible labels/tooltips)
     // when the rail becomes an icon rail on a narrow workspace.

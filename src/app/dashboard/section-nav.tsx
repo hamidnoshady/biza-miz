@@ -44,7 +44,7 @@ export interface Section<K extends string> extends Tab<K> {
 }
 
 /** Optional headings over the entries, in the order they should appear. */
-export interface SectionGroup<K extends string> {
+interface SectionGroup<K extends string> {
   label: string;
   keys: readonly K[];
 }

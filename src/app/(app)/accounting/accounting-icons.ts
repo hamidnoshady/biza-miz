@@ -27,7 +27,15 @@ import {
 import type { AccountingSectionKey } from "./accounting-routes";
 
 export const ACCOUNTING_SECTION_ICONS: Record<AccountingSectionKey, LucideIcon> = {
+  // «داشبورد حسابداری» (`/accounting/overview`) keeps the layout glyph its
+  // sidebar row has always worn — the approved reference frame shows it. The
+  // bottom bar and its picker now read this same entry, so the page has one
+  // face everywhere. The app door (`/accounting`) is a separate identity and
+  // keeps the calculator.
   dashboard: LayoutDashboardIcon,
+  // «فضای کار حسابداری» wears the same calculator, so the ledger row is
+  // recognisable at the 4rem rail where its label is hidden.
+  ledger: CalculatorIcon,
   "trial-balance": CalculatorIcon,
   entries: ClipboardListIcon,
   manual: ClipboardListIcon,
