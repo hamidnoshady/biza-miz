@@ -1,12 +1,21 @@
 "use client";
 
 /**
- * Phase 13 — the team screen. Three cards plus the personnel files:
- *  1. Members — name, role, branches, login phone, status; the full editor
- *     (role, per-permission overrides, branches, default branch), credential
- *     resets, suspend, remove.
- *  2. Invitations — invite by email, show the link exactly once, revoke.
- *  3. Add staff — PIN-based cashier/waiter/kitchen, who have no email.
+ * Phase 13 — the team screen, in companion views (issue #947, TEAM-F08).
+ *
+ *  1. **اعضا** — the roster: filters, pagination, and one detail surface per member
+ *     (overview, access, login/sessions, personnel file, finance, history) whose
+ *     actions are the dialogs the API already accepts.
+ *  2. **دعوت و شروع کار** — one onboarding entry point with distinct modes: invite a
+ *     login user, create PIN staff with an explicit branch policy, or create *only* a
+ *     personnel file (no login) in the directory view.
+ *  3. **پروندهٔ کارکنان** — the personnel directory (`parties`, scope `team`).
+ *  4. **نقش‌ها** — custom roles and their capability summaries.
+ *
+ * The views are companions rather than one stack because every creation form used to sit
+ * under the roster: an owner looking for «which branches does this member hold» scrolled
+ * past three forms, and the roster itself had no detail view at all — its actions were a
+ * row of buttons whose meanings only made sense one at a time.
  *
  * The member row's actions map one-to-one onto what the API actually accepts
  * (`PATCH /api/team/:id` carries `fullName`, `role`, `permissions`,
@@ -34,6 +43,7 @@ import {
   PermissionEditor,
 } from "@/components/team/permission-editor";
 import { RolesManager } from "@/components/team/roles-manager";
+import { MemberDetailDialog } from "./member-detail-dialog";
 import { IamSyncCard } from "@/components/team/iam-sync-card";
 import { LocalToHybridGuide } from "@/components/team/local-to-hybrid-guide";
 import { SecurityConfirmDialog } from "@/components/auth/security-confirm-dialog";
@@ -48,7 +58,7 @@ import {
 } from "@/components/ui/dialog";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { LoadingSkeleton, SectionCard } from "../page-chrome";
+import { LoadingSkeleton, SectionCard, TabBar, TabPanel } from "../page-chrome";
 import { PartiesSection } from "../parties/parties-section";
 import {
   ErrorBox,
@@ -166,6 +176,52 @@ const MEMBER_STATUS_LABELS: Record<Member["status"], string> = {
 /** Which role options the editor offers — every assignable role, labelled once. */
 const ROLE_OPTIONS = ASSIGNABLE_ROLES.map((value) => ({ value, label: roleLabel(value) }));
 
+/**
+ * Issue #947 (TEAM-F08) — the four companion views of the Team tab.
+ *
+ * Declared as data so the tab strip, the panel and the tests read one list: a fifth
+ * view added by editing two of three places is how a tab that renders nothing appears.
+ */
+const TEAM_VIEWS = [
+  { key: "members", label: "اعضا" },
+  { key: "onboarding", label: "دعوت و شروع کار" },
+  { key: "files", label: "پروندهٔ کارکنان" },
+  { key: "roles", label: "نقش‌ها" },
+] as const;
+type TeamView = (typeof TEAM_VIEWS)[number]["key"];
+
+/**
+ * How many roster cards one page holds.
+ *
+ * The roster is one `GET /api/team` — the whole business — so paging is client-side and
+ * deliberately so: a round trip per page would be a slower way to slice an array that is
+ * already in memory, and the filter above it must keep matching across *all* members, not
+ * the visible page (filter-then-page is the only order that does not hide a match).
+ */
+const MEMBER_PAGE_SIZE = 25;
+
+/**
+ * How many file candidates the link picker requests per query.
+ *
+ * The picker is a type-ahead now (issue #947, TEAM-F08), so the page is what fits a
+ * dropdown readably rather than the old 200-row cap that silently truncated a larger
+ * directory. «چند پرونده پیدا شد» is printed under the field from the route's `total`.
+ */
+const FILE_LINK_PAGE_SIZE = 25;
+
+/**
+ * The modes of the one onboarding entry point (issue #947, TEAM-F08).
+ *
+ * The third mode is a *statement*, not a form: creating only a personnel file happens in
+ * the directory view, and the point of offering it here is that the person adding a
+ * colleague learns it exists before they invent an account to get one.
+ */
+const ONBOARDING_MODES = [
+  { key: "invite", label: "ورود با لینک دعوت" },
+  { key: "pin", label: "ورود با رمز عددی" },
+  { key: "file", label: "فقط پرونده، بدون ورود" },
+] as const;
+
 export function TeamManager({
   currentUserId,
   role,
@@ -207,7 +263,43 @@ export function TeamManager({
   const [fileLinkChoice, setFileLinkChoice] = useState("");
   const [fileLinkBusy, setFileLinkBusy] = useState(false);
   const [fileLinkError, setFileLinkError] = useState("");
+  /**
+   * Issue #947 (TEAM-F08) — the file picker searches on the server.
+   *
+   * It used to fetch one page of 200 Employee files and filter them in the browser, which
+   * meant a business with more files than that had a picker that could not find the very
+   * record the operator was looking at in the directory. The query goes to `?q=` now —
+   * the same search the directory uses (`searchParties`), so the two agree about what
+   * «پیدا شد» means — and the count under the select says how many matched, because a
+   * capped list that says nothing is how a missing file looks like a missing person.
+   */
+  const [fileLinkQuery, setFileLinkQuery] = useState("");
+  const [fileLinkTotal, setFileLinkTotal] = useState(0);
+  const [fileLinkLoading, setFileLinkLoading] = useState(false);
   const [memberStatus, setMemberStatus] = useState("");
+  /**
+   * Issue #947 (TEAM-F08) — which companion view is open, and which page of the roster.
+   *
+   * `view` starts on the roster because that is what the tab is for; the other three are
+   * one press away rather than three cards down. `memberPage` is reset whenever a filter
+   * changes: staying on page 3 of a result set that now has one page is the classic way a
+   * list looks empty while matching rows exist.
+   */
+  const [view, setView] = useState<TeamView>("members");
+  const [memberPage, setMemberPage] = useState(1);
+  /** The member whose detail surface is open (issue #947, TEAM-F08). */
+  const [detail, setDetail] = useState<Member | null>(null);
+  /**
+   * Issue #947 (TEAM-F08) — the one onboarding entry point, and which mode it is in.
+   *
+   * «Invite a colleague» and «create PIN staff» are different ceremonies with different
+   * credentials and different forms, and they were two separate cards here plus a third
+   * door in the directory — so an owner who wanted to add somebody had to know *which*
+   * door matched the person before they could start. The modes are named for the outcome
+   * («ورود با لینک دعوت» / «ورود با رمز عددی» / «فقط پرونده، بدون ورود»), and the third
+   * says out loud what it does not create.
+   */
+  const [onboardingMode, setOnboardingMode] = useState<"invite" | "pin" | "file">("invite");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [deploymentProfile, setDeploymentProfile] = useState<"cloud" | "hybrid" | "local">("cloud");
@@ -345,10 +437,47 @@ export function TeamManager({
         .includes(needle);
     });
   }, [members, memberSearch, memberStatus]);
+  /**
+   * The onboarding modes this member may open.
+   *
+   * The third mode is offered to everyone: it is a sentence plus a link into a view that
+   * gates itself, so hiding it from a read-only visitor would hide the explanation of why
+   * no account is being created.
+   */
+  const onboardingModes = useMemo(
+    () => ONBOARDING_MODES.filter((mode) => mode.key !== "pin" || canManage),
+    [canManage],
+  );
+
   const memberStatuses = useMemo(
     () => [...new Set(members.map((member) => member.status))],
     [members],
   );
+
+  /**
+   * The page of the filtered roster that is on screen, with the numbers the footer shows.
+   *
+   * `Math.min` on the last page is the clamp that matters: deleting a filter, offboarding
+   * the last member of page 3, or reloading after a save can shrink the result set under
+   * the current page, and an out-of-range page would render an empty card list with no way
+   * back except clearing the filters.
+   */
+  const memberPages = Math.max(1, Math.ceil(visibleMembers.length / MEMBER_PAGE_SIZE));
+  const currentMemberPage = Math.min(memberPage, memberPages);
+  const pagedMembers = useMemo(
+    () =>
+      visibleMembers.slice(
+        (currentMemberPage - 1) * MEMBER_PAGE_SIZE,
+        currentMemberPage * MEMBER_PAGE_SIZE,
+      ),
+    [visibleMembers, currentMemberPage],
+  );
+
+  /** A filter change puts the reader back on page one — the result set changed. */
+  function applyMemberFilter(next: () => void) {
+    next();
+    setMemberPage(1);
+  }
 
   /**
    * Open the «connect an existing file» dialog.
@@ -357,19 +486,28 @@ export function TeamManager({
    * only set that *can* be linked, since a taken one answers `employee_link_taken`. The
    * projection gives us what we need and nothing more (a nameless file cannot exist).
    */
-  async function openFileLink(member: Member) {
-    setFileLinkTarget(member);
-    setFileLinkChoice("");
-    setFileLinkError("");
-    setFileLinkOptions([]);
+  async function searchFileLinkCandidates(term: string) {
+    setFileLinkLoading(true);
+    const params = new URLSearchParams({
+      role: "Employee",
+      includeInactive: "1",
+      pageSize: String(FILE_LINK_PAGE_SIZE),
+    });
+    if (term.trim()) params.set("q", term.trim());
     const res = await api<{
       error?: string;
+      total?: number;
       parties?: { id: string; displayName: string; employeeUserId?: string | null; accountingCode?: string | null }[];
-    }>("/api/parties?role=Employee&includeInactive=1&pageSize=200");
+    }>(`/api/parties?${params.toString()}`);
+    setFileLinkLoading(false);
     if (!res.ok) {
       setFileLinkError(errorMessage(res.data.error));
+      setFileLinkOptions([]);
+      setFileLinkTotal(0);
       return;
     }
+    setFileLinkError("");
+    setFileLinkTotal(res.data.total ?? (res.data.parties ?? []).length);
     setFileLinkOptions(
       (res.data.parties ?? [])
         .filter((party) => !party.employeeUserId)
@@ -379,6 +517,32 @@ export function TeamManager({
         })),
     );
   }
+
+  async function openFileLink(member: Member) {
+    setFileLinkTarget(member);
+    setFileLinkChoice("");
+    setFileLinkError("");
+    setFileLinkOptions([]);
+    setFileLinkQuery("");
+    setFileLinkTotal(0);
+    await searchFileLinkCandidates("");
+  }
+
+  /**
+   * Type-ahead over the server, debounced.
+   *
+   * The debounce is 300 ms because the search is a real query against the directory, not
+   * an array filter: one request per keystroke is a request per keystroke in the
+   * database's logs and a race between replies that arrive out of order.
+   */
+  useEffect(() => {
+    if (!fileLinkTarget) return;
+    const timer = setTimeout(() => void searchFileLinkCandidates(fileLinkQuery), 300);
+    return () => clearTimeout(timer);
+    // The fetch is re-created per render on purpose (it closes over `api` alone), and
+    // depending on it would restart the timer on every keystroke's re-render. The two
+    // inputs that matter are the query and the open dialog.
+  }, [fileLinkQuery, fileLinkTarget]);
 
   /**
    * Attach the chosen file to this member.
@@ -448,6 +612,25 @@ export function TeamManager({
         </p>
       </div>
 
+      {/*
+        Issue #947 (TEAM-F08) — companion views instead of one stack.
+
+        Every creation form used to sit under the roster: the tab was «اعضا و دسترسی‌ها»,
+        and reaching the roles list, the invitations or the personnel directory meant
+        scrolling past the others. These are the four jobs this tab does, and they are
+        peers — a member of staff, the ceremonies that add one, the file that person has
+        in the ledger, and the roles that shape what they may do.
+      */}
+      <TabBar
+        idPrefix="team"
+        label="بخش‌های مدیریت تیم"
+        tabs={TEAM_VIEWS}
+        active={view}
+        onChange={setView}
+      />
+
+      <TabPanel idPrefix="team" active={view}>
+      {view === "members" ? (
       <SectionCard
         title={
           <div>
@@ -480,7 +663,7 @@ export function TeamManager({
                   type="search"
                   className={inputClass}
                   value={memberSearch}
-                  onChange={(event) => setMemberSearch(event.target.value)}
+                  onChange={(event) => applyMemberFilter(() => setMemberSearch(event.target.value))}
                   placeholder="جست‌وجوی نام، ایمیل، موبایل یا نقش…"
                 />
               </div>
@@ -488,7 +671,7 @@ export function TeamManager({
                 <Field label="وضعیت">
                   <SearchableSelect
                     value={memberStatus}
-                    onChange={setMemberStatus}
+                    onChange={(value) => applyMemberFilter(() => setMemberStatus(value))}
                     options={[
                       { value: "", label: "همهٔ وضعیت‌ها" },
                       ...memberStatuses.map((status) => ({
@@ -501,10 +684,12 @@ export function TeamManager({
               </div>
               {memberSearch || memberStatus ? (
                 <SecondaryButton
-                  onClick={() => {
-                    setMemberSearch("");
-                    setMemberStatus("");
-                  }}
+                  onClick={() =>
+                    applyMemberFilter(() => {
+                      setMemberSearch("");
+                      setMemberStatus("");
+                    })
+                  }
                 >
                   پاک‌کردن فیلترها
                 </SecondaryButton>
@@ -516,7 +701,7 @@ export function TeamManager({
               عضوی با این فیلتر پیدا نشد. فیلترها را پاک کنید یا نام دیگری را جست‌وجو کنید.
             </InfoBox>
           ) : null}
-          {visibleMembers.map((member) => (
+          {pagedMembers.map((member) => (
             <div key={member.id} className="rounded-xl border border-border/80 p-3 sm:p-4 transition-colors hover:bg-muted/60 dark:hover:bg-muted/50">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -604,6 +789,16 @@ export function TeamManager({
                   </p>
                 </div>
                 <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap">
+                  {/*
+                    Issue #947 (TEAM-F08) — one detail surface per member.
+
+                    The card's actions answer «change this»; they never answered «what is
+                    this member, exactly» — which role and capabilities, which branches,
+                    which credential, whether the personnel file exists and whether the
+                    platform still owes one. That question needed a place, and the row of
+                    buttons was standing in for it.
+                  */}
+                  <SecondaryButton onClick={() => setDetail(member)}>جزئیات</SecondaryButton>
                   {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton onClick={() => setEditing(member)}>ویرایش</SecondaryButton> : null}
                   {/*
                     Issue #947 (TEAM-F07) — the other half of the identity story: a
@@ -658,15 +853,161 @@ export function TeamManager({
               </div>
             </div>
           ))}
+          {/*
+            Issue #947 (TEAM-F08) — the roster is a page, not the whole business.
+
+            `visibleMembers.length` and the range are stated in Persian digits with the
+            total, so «چند نفر هست» is answered by the same line that pages them: before,
+            a forty-person business rendered forty cards and the only way to know the
+            count was to count.
+          */}
+          {visibleMembers.length > MEMBER_PAGE_SIZE ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <p className="text-xs text-muted-foreground">
+                نمایش {toPersianDigits(String((currentMemberPage - 1) * MEMBER_PAGE_SIZE + 1))}
+                {" تا "}
+                {toPersianDigits(
+                  String(Math.min(currentMemberPage * MEMBER_PAGE_SIZE, visibleMembers.length)),
+                )}{" "}
+                از {toPersianDigits(String(visibleMembers.length))} عضو
+              </p>
+              <div className="flex gap-2">
+                <SecondaryButton
+                  onClick={() => setMemberPage(Math.max(1, currentMemberPage - 1))}
+                  disabled={currentMemberPage <= 1}
+                >
+                  صفحهٔ قبل
+                </SecondaryButton>
+                <SecondaryButton
+                  onClick={() => setMemberPage(Math.min(memberPages, currentMemberPage + 1))}
+                  disabled={currentMemberPage >= memberPages}
+                >
+                  صفحهٔ بعد
+                </SecondaryButton>
+              </div>
+            </div>
+          ) : null}
         </div>
       </SectionCard>
+      ) : null}
 
-      <RolesManager
-        deploymentProfile={deploymentProfile}
-        canManagePermissions={canManagePermissions}
-      />
-      {deploymentProfile === "local" ? <LocalToHybridGuide members={members} /> : null}
-      {deploymentProfile === "hybrid" ? <IamSyncCard /> : null}
+      {/*
+        Issue #947 (TEAM-F08) — one onboarding entry point, three modes.
+
+        The chooser is a tab strip for the same reason the views are: it is a set of peers
+        with one selected, and the roles/arrow-key contract comes from the shared
+        component rather than a hand-rolled row of buttons. The mode cards below it render
+        the *same* forms as before — the ceremony itself is untouched; what changed is
+        that a person adding a colleague starts from «what kind of access», not from
+        whichever card they scrolled to first.
+      */}
+      {view === "onboarding" ? (
+        <div className="space-y-4">
+          <SectionCard
+            title={
+              <div>
+                <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">شروع کار همکار</p>
+                <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">افزودن همکار</h2>
+              </div>
+            }
+            description="یک نقطهٔ شروع برای افزودن همکار؛ بر اساس نوع ورود او حالت را انتخاب کنید."
+          >
+            <TabBar
+              idPrefix="team-onboarding"
+              label="حالت افزودن همکار"
+              tabs={onboardingModes}
+              active={onboardingMode}
+              onChange={setOnboardingMode}
+            />
+            <div className="mt-3 text-sm text-muted-foreground">
+              {onboardingMode === "invite" ? (
+                <p>
+                  برای همکاری که ایمیل دارد و خودش رمز می‌سازد: لینک دعوت یک‌بار ساخته و
+                  نمایش داده می‌شود و شما آن را برای او می‌فرستید (ارسال خودکار وجود
+                  ندارد). ورود دومرحله‌ای در همان مسیر دعوت اعمال می‌شود.
+                </p>
+              ) : onboardingMode === "pin" ? (
+                <p>
+                  برای همکاران صندوق و آشپزخانه که روی دستگاه مشترک با رمز عددی وارد
+                  می‌شوند و ایمیل ندارند. دسترسی شعبه در همین فرم و پیش از ساخت حساب
+                  انتخاب می‌شود.
+                </p>
+              ) : (
+                <p>
+                  برای کسی که فقط پروندهٔ حسابداری/پرسنلی دارد — بدون حساب کاربری و بدون
+                  ورود. چنین پرونده‌ای در فهرست «پروندهٔ کارکنان» ساخته می‌شود و در دورهٔ
+                  حقوق و دستمزد (که به حساب کاربری متصل است) نمی‌آید؛ اگر بعداً حساب ساختید،
+                  می‌توانید همین پرونده را از «جزئیات» عضو به او متصل کنید.
+                </p>
+              )}
+            </div>
+            {onboardingMode === "file" ? (
+              <div className="mt-4">
+                <PrimaryButton onClick={() => setView("files")}>
+                  رفتن به پروندهٔ کارکنان
+                </PrimaryButton>
+              </div>
+            ) : null}
+          </SectionCard>
+
+          {onboardingMode === "invite" ? (
+            <InviteSection
+              invitations={invitations}
+              locations={locations}
+              canManage={canManage}
+              canManagePermissions={canManagePermissions}
+              canManageOwners={isOwner}
+              deploymentProfile={deploymentProfile}
+              onChanged={load}
+              onError={setError}
+            />
+          ) : null}
+          {onboardingMode === "pin" ? (
+            canManage ? (
+              <AddStaffSection locations={locations} onChanged={load} onError={setError} />
+            ) : (
+              <InfoBox>
+                ایجاد حساب کارمند با رمز عددی به دسترسی «مدیریت تیم» نیاز دارد؛ با دسترسی
+                «مشاهدهٔ تیم» می‌توانید فهرست اعضا و پرونده‌ها را ببینید.
+              </InfoBox>
+            )
+          ) : null}
+        </div>
+      ) : null}
+
+      {view === "roles" ? (
+        <div className="space-y-4">
+          <RolesManager
+            deploymentProfile={deploymentProfile}
+            canManagePermissions={canManagePermissions}
+          />
+          {deploymentProfile === "local" ? <LocalToHybridGuide members={members} /> : null}
+          {deploymentProfile === "hybrid" ? <IamSyncCard /> : null}
+        </div>
+      ) : null}
+
+      {/*
+        Issue #947 (TEAM-F08) — the reading surface, opened from the card. Its buttons
+        hand off to the writers below rather than writing anything itself.
+      */}
+      {detail ? (
+        <MemberDetailDialog
+          member={detail}
+          locationName={(id) => locationName.get(id) ?? null}
+          drift={personnelDrift.find((row) => row.userId === detail.id) ?? null}
+          isSelf={detail.id === currentUserId}
+          canManage={canManage}
+          canManageOwners={isOwner}
+          permissions={granted}
+          onClose={() => setDetail(null)}
+          onEdit={() => setEditing(detail)}
+          onEditPhone={() => setPhoneEditing(detail)}
+          onEditCredentials={() => setCredentialsEditing(detail)}
+          onLinkFile={() => void openFileLink(detail)}
+          onOpenFiles={() => setView("files")}
+          onRehire={() => setRehiring(detail)}
+        />
+      ) : null}
 
       {editing ? (
         <MemberEditorDialog
@@ -702,18 +1043,6 @@ export function TeamManager({
         />
       ) : null}
 
-      <InviteSection
-        invitations={invitations}
-        locations={locations}
-        canManage={canManage}
-        canManagePermissions={canManagePermissions}
-        canManageOwners={isOwner}
-        deploymentProfile={deploymentProfile}
-        onChanged={load}
-        onError={setError}
-      />
-      {canManage ? <AddStaffSection locations={locations} onChanged={load} onError={setError} /> : null}
-
       {/*
         Personnel as parties (scope `team`): a staff member is a counterparty for
         payroll, advances and the phone number the shift lead calls, and those live on
@@ -727,7 +1056,8 @@ export function TeamManager({
         not include. The section is hidden rather than rendered into a 403, and
         the permission itself is not widened to avoid the error.
       */}
-      {canViewParties(role, permissions) ? (
+      {view === "files" ? (
+        canViewParties(role, permissions) ? (
         <div>
           <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-300">پروندهٔ کارکنان</p>
           {/*
@@ -744,9 +1074,17 @@ export function TeamManager({
           </p>
           <PartiesSection scope={partyScopeFor("team")} role={role} permissions={permissions} />
         </div>
+        ) : (
+          <InfoBox>
+            پروندهٔ کارکنان از مسیر «اشخاص» ساخته و ویرایش می‌شود و دسترسی «مشاهدهٔ اشخاص»
+            لازم دارد؛ دسترسی «مدیریت تیم» به‌تنهایی این فهرست را باز نمی‌کند.
+          </InfoBox>
+        )
       ) : null}
 
       {/* Issue #854 (P2.26) — suspension/offboarding confirmations. */}
+      </TabPanel>
+
       <SecurityConfirmDialog
         open={pendingSuspend !== null}
         title={pendingSuspend ? `تعلیق حساب «${pendingSuspend.fullName}»` : ""}
@@ -806,18 +1144,46 @@ export function TeamManager({
               حساب کاربری می‌آید. سایر اطلاعات پرونده (نشانی، کد ملی، یادداشت‌ها و اطلاعات حسابداری) دست‌نخورده
               می‌ماند.
             </p>
-            {fileLinkOptions.length > 0 ? (
-              <Field label="پروندهٔ بدون حساب کاربری">
-                <SearchableSelect
-                  value={fileLinkChoice}
-                  onChange={setFileLinkChoice}
-                  options={fileLinkOptions}
-                />
-              </Field>
+            <Field
+              label="جست‌وجوی پرونده"
+              hint="نام یا کد حسابداری کارمند بدون حساب کاربری را بنویسید؛ جست‌وجو روی پرونده‌های همین کسب‌وکار انجام می‌شود."
+            >
+              <input
+                className={inputClass}
+                type="search"
+                value={fileLinkQuery}
+                onChange={(event) => setFileLinkQuery(event.target.value)}
+                placeholder="نام یا کد حسابداری…"
+              />
+            </Field>
+            {fileLinkLoading ? (
+              // The design system's rule: a loading region reserves its final shape and
+              // carries the spoken label on the skeleton, never as a bare sentence.
+              <div role="status" aria-label="در حال جست‌وجوی پرونده‌ها">
+                <LoadingSkeleton rows={1} />
+              </div>
+            ) : fileLinkOptions.length > 0 ? (
+              <>
+                <Field label="پروندهٔ بدون حساب کاربری">
+                  <SearchableSelect
+                    value={fileLinkChoice}
+                    onChange={setFileLinkChoice}
+                    options={fileLinkOptions}
+                  />
+                </Field>
+                {fileLinkTotal > fileLinkOptions.length ? (
+                  <p className="text-xs text-muted-foreground">
+                    {toPersianDigits(String(fileLinkOptions.length))} پرونده از{" "}
+                    {toPersianDigits(String(fileLinkTotal))} پروندهٔ یافت‌شده نمایش داده می‌شود؛
+                    برای رسیدن به بقیه، جست‌وجو را دقیق‌تر کنید.
+                  </p>
+                ) : null}
+              </>
             ) : (
               <InfoBox>
-                پروندهٔ پرسنلی بدون حساب کاربری در این کسب‌وکار پیدا نشد. اگر کارمند را از همین صفحه بسازید،
-                پرونده‌اش خودکار ایجاد می‌شود.
+                {fileLinkQuery.trim()
+                  ? "پروندهٔ بدون حساب کاربری با این جست‌وجو پیدا نشد. نام یا کد دیگری را امتحان کنید."
+                  : "پروندهٔ پرسنلی بدون حساب کاربری در این کسب‌وکار پیدا نشد. اگر کارمند را از همین صفحه بسازید، پرونده‌اش خودکار ایجاد می‌شود."}
               </InfoBox>
             )}
             <ErrorBox>{fileLinkError}</ErrorBox>

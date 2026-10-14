@@ -346,3 +346,123 @@ describe("lifecycle-derived member actions (issue #854 pass 4, gap 4)", () => {
     expect(TEAM_MANAGER).toContain("بازگشت دوبارهٔ همین شخص با «بازگشت به کار»");
   });
 });
+
+describe("the team tab is companion views with one member detail surface (issue #947, TEAM-F08)", () => {
+  const DETAIL = here("./member-detail-dialog.tsx");
+
+  it("declares the views once and renders every one of them", () => {
+    /*
+     * The failure this forbids: a tab in the strip whose panel was never written, or a
+     * panel left behind by a rename. The list is data (`TEAM_VIEWS`), the strip renders it,
+     * and each key has a panel in the same file — so a fifth view added must be added in
+     * both places, which is the point of grepping the source here.
+     */
+    const views = TEAM_MANAGER.match(/const TEAM_VIEWS = \[([\s\S]*?)\] as const;/);
+    expect(views, "TEAM_VIEWS is declared").not.toBeNull();
+    const keys = [...views![1].matchAll(/key: "([a-z]+)"/g)].map((match) => match[1]);
+    expect(keys).toEqual(["members", "onboarding", "files", "roles"]);
+    expect(TEAM_MANAGER).toContain("tabs={TEAM_VIEWS}");
+    for (const key of keys) {
+      expect(TEAM_MANAGER, `view ${key} renders a panel`).toContain(`view === "${key}" ?`);
+    }
+  });
+
+  it("offers the three onboarding modes from one entry point", () => {
+    /*
+     * The modes are the outcomes the issue names: invite a login user, create PIN staff
+     * with an explicit branch policy, or create only a personnel file. The third must say
+     * what it does *not* create — no login, and no payroll row (wages live on the
+     * membership, see `listStaffWages`).
+     */
+    const modes = TEAM_MANAGER.match(/const ONBOARDING_MODES = \[([\s\S]*?)\] as const;/);
+    expect(modes).not.toBeNull();
+    const keys = [...modes![1].matchAll(/key: "([a-z]+)"/g)].map((match) => match[1]);
+    expect(keys).toEqual(["invite", "pin", "file"]);
+    expect(TEAM_MANAGER).toContain("tabs={onboardingModes}");
+    // The file-only mode states the absence out loud, and does not pretend to create
+    // something it cannot: it hands the reader to the directory that owns that record.
+    expect(TEAM_MANAGER).toContain("بدون حساب کاربری و بدون");
+    expect(TEAM_MANAGER).toContain("setView(\"files\")");
+    // Only a member who may create memberships is offered the PIN mode.
+    expect(TEAM_MANAGER).toContain('mode.key !== "pin" || canManage');
+  });
+
+  it("reads the member in one place: access, login, file, finance and history", () => {
+    // The six sections the issue names, in the surface (the overview carries the
+    // membership state and the personnel link state).
+    for (const heading of ["نمای کلی", "دسترسی", "ورود و اعتبارنامه", "پروندهٔ پرسنلی", "مالی", "تاریخچه"]) {
+      expect(DETAIL, `the detail surface has «${heading}»`).toContain(heading);
+    }
+    // The finance door is the accounting payroll screen and only appears with the key
+    // that screen enforces.
+    expect(DETAIL).toContain('accountingSectionHref("payroll")');
+    expect(DETAIL).toContain("PERMISSIONS.payrollView");
+    // Self-service is linked, not duplicated: profile owns the member's own number and
+    // sessions.
+    expect(DETAIL).toContain("پروفایل من");
+    // History points at the audit log the routes write.
+    expect(DETAIL).toContain("/settings/audit-log");
+    expect(TEAM_MANAGER).toContain("<MemberDetailDialog");
+  });
+
+  it("opens the existing writers instead of writing from the detail surface", () => {
+    /*
+     * A reading surface that grew its own PATCH would be a second validator. Every action
+     * here hands off to the dialog that already owns the write — pinned by the callbacks
+     * the Team screen passes in.
+     */
+    expect(DETAIL).not.toContain("fetch(");
+    expect(DETAIL).not.toContain("api<");
+    for (const handoff of ["onEdit(", "onEditPhone(", "onEditCredentials(", "onLinkFile(", "onRehire("]) {
+      expect(DETAIL).toContain(handoff);
+    }
+    expect(TEAM_MANAGER).toContain("onEdit={() => setEditing(detail)}");
+    expect(TEAM_MANAGER).toContain("onLinkFile={() => void openFileLink(detail)}");
+    expect(TEAM_MANAGER).toContain("onRehire={() => setRehiring(detail)}");
+  });
+
+  it("pages the roster, and filters across all of it", () => {
+    // Filter-then-page: the search must match every member, not the visible page, or a
+    // match on page 3 reads as «پیدا نشد».
+    expect(TEAM_MANAGER).toMatch(/const visibleMembers = useMemo/);
+    expect(TEAM_MANAGER).toMatch(/pagedMembers[\s\S]{0,200}visibleMembers\.slice/);
+    expect(TEAM_MANAGER).toContain("{pagedMembers.map((member) => (");
+    expect(TEAM_MANAGER).not.toContain("{visibleMembers.map((member) => (");
+    // A filter change returns to the first page, and the clamp keeps an out-of-range
+    // page from rendering an empty list.
+    expect(TEAM_MANAGER).toContain("setMemberPage(1)");
+    expect(TEAM_MANAGER).toMatch(/Math\.min\(memberPage, memberPages\)/);
+    // Both paging buttons exist and are disabled at the ends.
+    expect(TEAM_MANAGER).toContain("صفحهٔ قبل");
+    expect(TEAM_MANAGER).toContain("صفحهٔ بعد");
+  });
+
+  it("searches the personnel directory on the server, not the first 200 rows", () => {
+    /*
+     * The picker used to fetch `pageSize=200` and filter in the browser: for a business
+     * with more files, a record that existed in the directory could not be found here.
+     * The query now travels to the route that owns the search, and the count is stated.
+     */
+    expect(TEAM_MANAGER).not.toContain("pageSize=200");
+    expect(TEAM_MANAGER).toContain("params.set(\"q\", term.trim())");
+    expect(TEAM_MANAGER).toContain("setFileLinkTotal(res.data.total");
+    expect(TEAM_MANAGER).toContain("پروندهٔ یافت‌شده نمایش داده می‌شود");
+    // The candidate set is still the *unlinked* files: the ones the link route accepts.
+    expect(TEAM_MANAGER).toContain(".filter((party) => !party.employeeUserId)");
+    // And the search itself is the directory's own (`searchParties` reaches `listParties`).
+    const PARTIES_API = here("../../api/parties/route.ts");
+    expect(PARTIES_API).toContain("listParties");
+    expect(PARTIES_API).toContain("q,");
+  });
+
+  it("keeps contact fields LTR inside the RTL surface, and reduces motion by default", () => {
+    // Email, phone and the invitation link are latin: each input carries `dir="ltr"`, so a
+    // Persian sentence typed beside them cannot flip the field's direction.
+    for (const anchor of ["ایمیل", "شمارهٔ موبایل"]) {
+      expect(TEAM_MANAGER, `the ${anchor} field stays LTR`).toMatch(
+        new RegExp(`dir="ltr"[\\s\\S]{0,600}${anchor}`),
+      );
+    }
+    expect(DETAIL).toContain('dir="ltr"');
+  });
+});
