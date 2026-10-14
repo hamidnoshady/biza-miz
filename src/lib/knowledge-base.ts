@@ -119,6 +119,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
   ]),
   ...pageGroup("حسابداری", [
     ["/accounting/overview", "داشبورد حسابداری"],
+    ["/accounting/ledger", "فضای کار حسابداری"],
     ["/accounting/trial-balance", "تراز آزمایشی"],
     ["/accounting/entries", "دفتر روزنامه"],
     ["/accounting/manual", "ثبت سند دستی"],
