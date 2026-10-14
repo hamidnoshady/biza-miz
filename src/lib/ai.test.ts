@@ -556,6 +556,10 @@ describe("Phase C — party, campaign and receipt writes", () => {
     // Executor-backed since the parity batches (registry always_approve/high):
     // on-request with a human's confirmation, never tick-applied.
     expect(receipt.executor).toBeDefined();
+    // The destination requires a client idempotency key the model must not
+    // invent; the apply endpoint injects a stable proposal-derived one.
+    expect(receipt.needsIdempotencyKey).toBe(true);
+    expect(receipt.payloadHint).not.toContain("idempotencyKey");
   });
 
   it("leaves all four gap actions out of every unattended path", () => {

@@ -1,3 +1,4 @@
+import { isBusinessSortValue, parseSortDirection } from "@/lib/business-sort";
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformAdmin, requirePlatformCapability, platformAudit, withPlatformScope } from "@/lib/platform-auth";
 import {
@@ -19,7 +20,6 @@ import {
 import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
 
 const VALID_STATUS = new Set(["active", "suspended", "archived"]);
-const VALID_SORT = new Set(["newest", "oldest", "name", "orders", "members", "activity"]);
 const VALID_ACTIVITY = new Set(["active", "idle"]);
 
 /**
@@ -55,7 +55,8 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     createdFrom: sp.get("from") ?? undefined,
     createdTo: sp.get("to") ?? undefined,
     activity: activityParam && VALID_ACTIVITY.has(activityParam) ? (activityParam as BusinessQuery["activity"]) : undefined,
-    sort: sortParam && VALID_SORT.has(sortParam) ? (sortParam as BusinessQuery["sort"]) : undefined,
+    sort: isBusinessSortValue(sortParam) ? sortParam : undefined,
+    sortDir: parseSortDirection(sp.get("dir")),
     page: Number.isFinite(pageNum) && pageNum > 0 ? pageNum : undefined,
     pageSize: Number.isFinite(pageSizeNum) && pageSizeNum > 0 ? pageSizeNum : undefined,
   };

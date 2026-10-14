@@ -56,7 +56,12 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // The shifts register lists *other people's* clock-ins; per shift-service's
   // own read gate it is a leader's view, never a till's.
   list_shifts: PERMISSIONS.teamView,
-  get_branch_comparison: PERMISSIONS.reportsView,
+  // Consolidated across the business's own branches — the AI's view of the
+  // branch-comparison report, so it is gated by the same business-wide
+  // reporting capability as that screen and its export (issue #819). With just
+  // `reports.view` a branch-scoped member could ask the assistant for every
+  // other branch's revenue.
+  get_branch_comparison: PERMISSIONS.reportsBusinessWide,
   forecast_demand: PERMISSIONS.inventoryView,
   get_menu_item_details: PERMISSIONS.menuView,
   // Batch C reads (issue #883): menu tree + barcodes mirror the screens'
@@ -181,15 +186,15 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_items_without_barcode: PERMISSIONS.inventoryView,
   get_bill_split_preview: PERMISSIONS.ordersView,
   get_near_expiry_items: PERMISSIONS.inventoryView,
-  get_staff_commission: PERMISSIONS.payrollView,
+  get_staff_commission: PERMISSIONS.commissionView,
   get_repurchase_candidates: PERMISSIONS.crmView,
   run_accounting_review: PERMISSIONS.ledgerView,
   list_coworker_jobs: PERMISSIONS.aiAutomationsManage,
   find_items: PERMISSIONS.menuView,
   get_waste_history: PERMISSIONS.inventoryView,
   describe_app: PERMISSIONS.aiUse,
-  list_website_posts: PERMISSIONS.websiteView,
-  list_website_products: PERMISSIONS.websiteView,
+  list_website_posts: PERMISSIONS.cmsView,
+  list_website_products: PERMISSIONS.cmsView,
   get_website_status: PERMISSIONS.websiteView,
   list_message_templates: PERMISSIONS.campaignsView,
   list_message_campaigns: PERMISSIONS.campaignsView,

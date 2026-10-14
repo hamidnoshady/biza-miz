@@ -13,8 +13,11 @@
  * re-checks the *scope*, because that is the boundary RLS says nothing about.
  */
 import { query } from "../db";
-import { runReadTool } from "../ai-tools";
+import { runSystemReadTool } from "../ai-system-read";
 import { canUseAiTool } from "../ai-capabilities";
+import { memberAccessForUser } from "../member-access";
+import { resolveActiveLocationForUser } from "../setup-state";
+import type { Permission } from "../permissions";
 import { getBusinessIndustry } from "../industry-guard";
 import { INDUSTRY_LABELS } from "../industries";
 import { industryProfile, labelFor } from "../industry-profile";
@@ -161,6 +164,37 @@ function readIdempotencyKey(params: Record<string, unknown>): string | null {
   return trimmed.length > 0 && trimmed.length <= MAX_IDEMPOTENCY_KEY_LENGTH ? trimmed : null;
 }
 
+/**
+ * MCP's `pos.read` grant is the connection's consent, not a substitute for
+ * the tenant's live report capabilities. In particular, an integration
+ * connection does not turn a manager into a business-wide report reader.
+ * `authenticateMcp` already refuses a credential whose authorizer is gone, so
+ * there is no deleted-authorizer fallback here: an authorizer who is inactive
+ * or can no longer reach the credential's branch reads nothing.
+ */
+interface McpReadAuthority {
+  actorUserId: string;
+  permissions: ReadonlySet<Permission>;
+  pinnedLocationAccessible: boolean;
+}
+
+async function mcpReadAuthority(auth: McpAuthentication): Promise<McpReadAuthority> {
+  const member = await memberAccessForUser(auth.businessId, auth.authorizedByUserId, auth.locationId);
+  const pinnedLocation = member?.isActive
+    ? await resolveActiveLocationForUser(auth.businessId, auth.authorizedByUserId, auth.locationId)
+    : null;
+  const accessible = Boolean(member?.isActive) && pinnedLocation?.id === auth.locationId;
+  return {
+    actorUserId: auth.authorizedByUserId,
+    // Both halves are live: the membership's own set and the authorizer's set
+    // resolved at authentication. The intersection can only narrow.
+    permissions: accessible
+      ? new Set([...member!.permissions].filter((permission) => auth.permissions.has(permission)))
+      : new Set<Permission>(),
+    pinnedLocationAccessible: accessible,
+  };
+}
+
 async function callTool(
   auth: McpAuthentication,
   params: Record<string, unknown>,
@@ -236,18 +270,24 @@ async function callTool(
     // tool ignores the argument.
     // P0-1: the permission set is the authorizer's *current* set, resolved in
     // `authenticateMcp`, never the all-permissions SYSTEM read context — a
-    // connector reaches exactly what its authorizer's own session would.
-    const outcome = await runReadTool(
+    // connector reaches exactly what its authorizer's own session would — and
+    // it is emptied when the authorizer can no longer reach the credential's
+    // branch (`mcpReadAuthority`).
+    const authority = await mcpReadAuthority(auth);
+    const outcome = await runSystemReadTool(
       tool.binding.readToolName,
       args,
       auth.businessId,
       undefined,
-      auth.authorizedByUserId,
-      auth.permissions,
+      authority.actorUserId,
+      authority.permissions,
+      auth.locationId,
       // Issue #883 §1: the connection's branch consent, enforced at the
       // executor — a pinned tool resolves a consented branch instead of the
       // primary, a business-wide aggregate refused at the catalogue is also
       // refused here (registry + executor agree through ai-tools's own check).
+      // Consent only narrows: the consented branch must still pass the live
+      // authorizer's branch access inside the executor.
       { allowedBranchIds: mcpBrancheIds(auth.grants) },
     );
     return { result: boundedToolResult(outcome.data, !outcome.ok) };
@@ -343,7 +383,11 @@ export async function dispatchMcpMessage(
       if (!mcpResourcesFor(auth.permissions, auth.grants).some((resource) => resource.uri === uri)) {
         return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
       }
-      const content = await readMcpResource(uri, auth.businessId, auth.permissions);
+      const authority = await mcpReadAuthority(auth);
+      if (!authority.pinnedLocationAccessible) {
+        return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, "این اتصال دیگر به شعبهٔ مورد تأیید دسترسی ندارد.");
+      }
+      const content = await readMcpResource(uri, auth.businessId, authority.permissions, auth.locationId);
       if (!content) {
         return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
       }

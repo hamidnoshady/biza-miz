@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useMoney } from "@/components/money/money-context";
 import { formatJalali } from "@/lib/jalali";
@@ -171,9 +172,15 @@ function CompanyProjectsContent() {
               </tbody>
             </table>
             {projects !== null && projects.length === 0 ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                هنوز پروژه‌ای ساخته نشده است. از CRM یک معاملهٔ برنده را به پروژه تبدیل کنید.
-              </p>
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <p>هنوز پروژه‌ای ساخته نشده است. از CRM یک معاملهٔ برنده را به پروژه تبدیل کنید.</p>
+                <Link
+                  href="/platform/company/crm"
+                  className="rounded-lg border border-border px-3 py-1.5 text-foreground hover:bg-muted"
+                >
+                  رفتن به CRM
+                </Link>
+              </div>
             ) : null}
           </div>
           {!actualsIncluded ? (

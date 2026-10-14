@@ -20,6 +20,12 @@ export const EXEMPT_TABLES = new Set([
   // Its per-business counterpart, business_app_availability, is deliberately
   // absent from this list and is RLS-protected like every other tenant table.
   "app_availability",
+  // Migration 0216 — multicurrency's global half (issue #863). Same shape as
+  // app_availability: a deployment-wide catalogue (ISO code, name, symbol,
+  // minor-unit precision) every business reads, with no business_id column —
+  // the tenant halves (business_currencies, exchange_rates and the rest) are
+  // RLS-protected like every other table and stay in the export.
+  "currencies",
   "platform_admins",
   "platform_audit_log",
   // Phase 24 — Login lockout for password, platform and directory realms. The attempt
@@ -29,7 +35,17 @@ export const EXEMPT_TABLES = new Set([
   "auth_password_resets",
   "auth_admin_sessions",
   "mfa_enrolments",
-  "mfa_challenges",
+  // `mfa_challenges` is deliberately NOT here any more. It used to be exempt on
+  // the reasoning that a login challenge exists before any business is known,
+  // but migration 0215 gave the row `business_id` and `destination` (a member's
+  // phone number) so a phone-OTP code could be bound to the tenant it was
+  // issued for. That made it tenant data, and an exempt table is readable from
+  // any tenant-scoped connection — so business A could reach business B's
+  // challenge rows. Migration 0216 gives it the standard tenant policy
+  // instead. The platform realms leave `business_id` NULL and are reached only
+  // through `withoutTenantScope("platform", …)`, which bypasses the policy, so
+  // they are unaffected; the `employee_phone` realm reads under
+  // `withTenant(businessId, …)`, where the row's business is the one checked.
   "mfa_recovery_codes",
   "mfa_grace_periods",
   "platform_sms_config",

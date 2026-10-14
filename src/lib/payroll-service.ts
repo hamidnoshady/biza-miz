@@ -77,8 +77,9 @@ import {
 import { parseRialInput } from "./payroll-amounts";
 import { resolvePayoutAccount } from "./payroll-accounts";
 import { outstandingAdvances } from "./payroll-advances-service";
+import { standaloneCommissionOutstanding } from "./commission-settlement-service";
 import { asRial, clientRunner, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
-import { PayrollError } from "./payroll-errors";
+import { normalizeIdempotencyKey, PayrollError } from "./payroll-errors";
 import {
   decodePayTermCursor,
   decodeRunCursor,
@@ -89,7 +90,12 @@ import {
   type PayTermCursor,
   type RunCursor,
 } from "./payroll-history-query";
-import { payrollPeriodKeyForLabel, resolvePayrollPeriodFilter, resolvePayrollPeriodKey } from "./payroll-period";
+import {
+  defaultPayrollAccrualDate,
+  payrollPeriodKeyForLabel,
+  resolvePayrollPeriodFilter,
+  resolvePayrollPeriodKey,
+} from "./payroll-period";
 import type {
   PayrollCommissionPreview,
   PayrollLiability,
@@ -120,8 +126,6 @@ export type {
 /** The longest reason a pay-term change may carry. */
 const REASON_MAX = 500;
 
-/** Keys a client may attach to an accrual request: printable ASCII, no spaces, 8–128 characters. */
-const IDEMPOTENCY_KEY = /^[\x21-\x7e]{8,128}$/;
 
 const UNIQUE_VIOLATION = "23505";
 
@@ -265,6 +269,7 @@ export async function setStaffPayTerms(params: {
   const reason = parseReason(params.reason);
 
   return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
     const { rows } = await client.query<Record<string, string | null>>(
       `SELECT full_name, monthly_wage::text AS monthly_wage,
               monthly_taxable_allowance::text AS monthly_taxable_allowance,
@@ -617,7 +622,8 @@ async function mustGetRun(businessId: string, runId: string): Promise<PayrollRun
  * A run credits 2300 with the *net* wages it accrues; commission posts to 2300
  * when a sale does and a run settles it later. So the account's balance is the
  * sum of (a) runs accrued and not yet paid — net wages and commission both — and
- * (b) commission accruals no run has taken yet. This reports that decomposition
+ * (b) commission not yet paid that no payroll run has taken: accruals nobody has
+ * claimed, plus what a standalone settlement run has claimed or carried (#869). This reports that decomposition
  * next to the ledger balance; `difference` is what is left unexplained (a manual
  * journal on 2300, or commission paid outside payroll). A «پرداخت‌شده» run
  * therefore never hides an unsettled balance: the commission still owed shows up
@@ -641,13 +647,18 @@ export async function getPayrollLiability(businessId: string): Promise<PayrollLi
     ),
     query<{ total: string }>(
       `SELECT COALESCE(SUM(amount), 0)::text AS total
-         FROM commission_accruals WHERE business_id = $1 AND payroll_run_id IS NULL`,
+         FROM commission_accruals
+        WHERE business_id = $1 AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
       [businessId],
     ),
   ]);
+  // Commission a standalone settlement run has claimed but not paid, plus the
+  // balances closed runs carried forward (issue #869). Both are still owed by
+  // 2300, so they belong in the same «not yet paid» bucket as unclaimed rows.
+  const standalone = await standaloneCommissionOutstanding(businessId);
   const ledgerBalance = BigInt(ledger.rows[0].balance);
   const awaitingPayment = BigInt(awaiting.rows[0].total);
-  const unsettledCommission = BigInt(unsettled.rows[0].total);
+  const unsettledCommission = BigInt(unsettled.rows[0].total) + standalone;
   return {
     ledgerBalance: ledgerBalance.toString(),
     awaitingPayment: awaitingPayment.toString(),
@@ -704,7 +715,8 @@ async function collectCommission(
        FROM commission_accruals a
        JOIN users cu ON cu.id = a.employee_id AND cu.business_id = a.business_id
        LEFT JOIN journal_entries je ON je.id = a.entry_id
-      WHERE a.business_id = $1 AND a.payroll_run_id IS NULL
+      WHERE a.business_id = $1 AND a.payroll_run_id IS NULL AND a.settlement_run_id IS NULL
+        AND a.payroll_engine_run_id IS NULL -- issue #865: not reserved by the statutory engine
         AND COALESCE(je.entry_date, a.created_at::date) <= $2::date
       ORDER BY a.id
       ${options.lock ? "FOR UPDATE OF a" : ""}`,
@@ -743,16 +755,6 @@ async function collectCommission(
   return { members, total, claimIds };
 }
 
-/**
- * A run's accrual date when the caller states none: the last day of the month
- * (so a run for a closed month lands in it), or today while the month is still
- * running. `today` is the business's own (`businessToday`), the same value the
- * payment's default date uses, so «accrue, then pay today» can never be refused
- * as a payment before its accrual around midnight.
- */
-function defaultAccrualDate(period: { endsOn: string }, today: string): string {
-  return period.endsOn < today ? period.endsOn : today;
-}
 
 /**
  * The commission an accrual would settle, without claiming it — the screen's
@@ -769,7 +771,7 @@ export async function previewCommission(
   if (period && !period.ok) throw new PayrollError(period.error);
 
   const today = await businessToday(businessId);
-  const accrualDate = normalized.value ?? (period?.ok ? defaultAccrualDate(period.period, today) : today);
+  const accrualDate = normalized.value ?? (period?.ok ? defaultPayrollAccrualDate(period.period, today) : today);
   if (options.includeCommission === false) return { accrualDate, lines: [], total: "0" };
 
   const draft = await collectCommission(poolRunner, businessId, accrualDate, { lock: false });
@@ -815,14 +817,6 @@ async function findStandingRun(client: PoolClient, businessId: string, periodKey
   return legacy.find((r) => payrollPeriodKeyForLabel(r.period_label) === periodKey) ?? null;
 }
 
-function normalizeIdempotencyKey(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "string") throw new PayrollError("idempotency_key_invalid");
-  const key = value.trim();
-  if (key === "") return null;
-  if (!IDEMPOTENCY_KEY.test(key)) throw new PayrollError("idempotency_key_invalid");
-  return key;
-}
 
 /** One member's month on a run: the calculator's breakdown, plus identity and commission. */
 interface AccrualLine {
@@ -926,7 +920,7 @@ export async function accruePayroll(params: {
   const today = await businessToday(params.businessId);
   // A month that has not started yet cannot be accrued: its work has not been done.
   if (period.startsOn > today) throw new PayrollError("period_in_future");
-  const accrualDate = normalizedAccrual.value ?? defaultAccrualDate(period, today);
+  const accrualDate = normalizedAccrual.value ?? defaultPayrollAccrualDate(period, today);
 
   const overtime = parseOvertime(params.overtime);
   const settings = await getPayrollSettings(params.businessId);
@@ -960,6 +954,14 @@ export async function accruePayroll(params: {
 
       const standing = await findStandingRun(client, params.businessId, period.key);
       if (standing) throw periodTaken(standing);
+      // Issue #865: a month booked by the statutory payroll engine is not
+      // accrued a second time here (the engine refuses the converse).
+      const { rows: engineRuns } = await client.query<{ id: string }>(
+        `SELECT id FROM payroll_engine_runs
+          WHERE business_id = $1 AND period_key = $2 AND run_type = 'regular' AND status <> 'cancelled'`,
+        [params.businessId, period.key],
+      );
+      if (engineRuns[0]) throw new PayrollError("period_held_by_engine", 409, { runId: engineRuns[0].id });
 
       const lines = await buildAccrualLines(client, params.businessId, {
         accrualDate,
@@ -1045,7 +1047,8 @@ export async function accruePayroll(params: {
         // The rows are locked by this transaction, so all of them are still free.
         const claimed = await client.query(
           `UPDATE commission_accruals SET payroll_run_id = $1
-            WHERE business_id = $2 AND id = ANY($3::uuid[]) AND payroll_run_id IS NULL`,
+            WHERE business_id = $2 AND id = ANY($3::uuid[])
+              AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
           [runId, params.businessId, lines.claimIds],
         );
         if (claimed.rowCount !== lines.claimIds.length) throw new PayrollError("commission_already_settled", 409);

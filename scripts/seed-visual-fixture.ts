@@ -309,9 +309,257 @@ async function main() {
       }
     }
 
+    // ---- A receipt voucher, fully reversed ------------------------------------
+    // The «دریافت و پرداخت» register reads `ar_receipts` directly, so without
+    // a voucher row it photographs as its empty state — and the register's
+    // whole job (method + account, reference, status) would go uncovered.
+    // One bank receipt from سارا محمدی into بانک ملت, then its exact reversal:
+    // the pair nets to zero in every aggregation (her receivables balance,
+    // the trial balance, the journal totals), so no existing baseline moves.
+    const RECEIPT_VOUCHER_NUMBER = 7;
+    const RECEIPT_AMOUNT = 12_500_000;
+    const existingReceipt = await client.query(
+      "SELECT id FROM ar_receipts WHERE business_id = $1 AND voucher_number = $2",
+      [businessId, RECEIPT_VOUCHER_NUMBER],
+    );
+    if (!existingReceipt.rowCount) {
+      const receipt = await client.query(
+        `INSERT INTO ar_receipts
+           (business_id, location_id, customer_id, receipt_date, method, amount, memo,
+            created_by, idempotency_key, request_fingerprint, cash_account_id, bank_reference,
+            voucher_number, created_at)
+         VALUES ($1, $2, $3, '2026-03-11', 'bank', $4, 'بابت فاکتور ۱۲',
+                 NULL, 'visual-fixture-receipt-1',
+                 '9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e9f2c4a1e',
+                 $5, '1404-777', $6, '2026-03-11T08:30:00.000Z')
+         RETURNING id`,
+        [businessId, locationId, partyIds.get("سارا محمدی"), RECEIPT_AMOUNT, accountIds.get("1020"), RECEIPT_VOUCHER_NUMBER],
+      );
+      const receiptId = receipt.rows[0].id as string;
+      // The original posting and its mirror: same source_type/source_id (that
+      // is how the A/R attribution finds both sides), `*_reversal` kind.
+      const original = await client.query(
+        `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id, posting_kind, posted_at)
+         VALUES ($1, $2, '2026-03-11', 'بابت فاکتور ۱۲', 'ar_receipt', $3, 'ar_receipt', '2026-03-11T08:30:00.000Z')
+         RETURNING id`,
+        [businessId, locationId, receiptId],
+      );
+      for (const line of [
+        { code: "1020", debit: RECEIPT_AMOUNT, credit: 0 },
+        { code: "1200", debit: 0, credit: RECEIPT_AMOUNT },
+      ]) {
+        await client.query(
+          "INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4)",
+          [original.rows[0].id, accountIds.get(line.code), line.debit, line.credit],
+        );
+      }
+      const reversal = await client.query(
+        `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id, posting_kind, posted_at)
+         VALUES ($1, $2, '2026-03-16', 'برگشت دریافت — بابت فاکتور ۱۲', 'ar_receipt', $3, 'ar_receipt_reversal', '2026-03-16T08:30:00.000Z')
+         RETURNING id`,
+        [businessId, locationId, receiptId],
+      );
+      for (const line of [
+        { code: "1200", debit: RECEIPT_AMOUNT, credit: 0 },
+        { code: "1020", debit: 0, credit: RECEIPT_AMOUNT },
+      ]) {
+        await client.query(
+          "INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4)",
+          [reversal.rows[0].id, accountIds.get(line.code), line.debit, line.credit],
+        );
+      }
+      await client.query(
+        `UPDATE ar_receipts SET reversed_at = '2026-03-16T08:30:00.000Z', reversed_by = NULL, reversal_entry_id = $2
+          WHERE id = $1`,
+        [receiptId, reversal.rows[0].id],
+      );
+    }
+
+    // ---- Cheques -----------------------------------------------------------
+    /*
+     * The cheque register photographs its *lifecycle*, so the fixture has to
+     * contain one of each state the screen renders differently: the two
+     * on-hand receivables above, plus a cheque in collection, one endorsed to
+     * a supplier (the contingent-liability category), one returned, one
+     * returned-and-resolved together with the replacement issued against it,
+     * one cleared, and a payable the business issued.
+     *
+     * Everything sits in the seeded branch. A second location would be
+     * visible to any screen that lists branches — the expenses register is
+     * one — and a fixture for one screen must not redraw another.
+     *
+     * Deliberately **no journal entries**: these rows exist to exercise the
+     * register's own rendering, and posting them would move accounts 1200 and
+     * 1241, which the trial-balance and receivables baselines photograph. A
+     * fixture for one screen must not silently redraw another.
+     */
+    // The supplier *alias* an endorsement points at, linked to the canonical
+    // party so the detail view's supplier link resolves the way it does in
+    // production.
+    const SUPPLIER_NAME = "پخش مواد غذایی آریا";
+    const existingSupplier = await client.query(
+      "SELECT id FROM suppliers WHERE location_id = $1 AND name = $2",
+      [locationId, SUPPLIER_NAME],
+    );
+    const supplierId: string = existingSupplier.rowCount
+      ? existingSupplier.rows[0].id
+      : (
+          await client.query(
+            `INSERT INTO suppliers (location_id, name, phone, party_id, is_active)
+             VALUES ($1, $2, '02144440003', $3, true) RETURNING id`,
+            [locationId, SUPPLIER_NAME, partyIds.get(SUPPLIER_NAME)],
+          )
+        ).rows[0].id;
+
+    interface ChequeFixture {
+      serial: string;
+      direction: "receivable" | "payable";
+      status: string;
+      amount: number;
+      due: string;
+      counterparty: string;
+      customer?: string;
+      supplier?: boolean;
+      replaces?: string;
+      memo?: string;
+      /** `event`/`occurredOn` pairs, in order — the detail timeline. */
+      events: Array<[string, string]>;
+    }
+
+    const CHEQUES: ChequeFixture[] = [
+      {
+        serial: "۸۸۱۲۳۶",
+        direction: "receivable",
+        status: "in_collection",
+        amount: 21_000_000,
+        due: "2026-04-05",
+        counterparty: "سارا محمدی",
+        customer: "سارا محمدی",
+        events: [["received", "2026-03-08"], ["deposited", "2026-03-16"]],
+      },
+      {
+        serial: "۸۸۱۲۳۷",
+        direction: "receivable",
+        status: "endorsed",
+        amount: 9_800_000,
+        due: "2026-04-12",
+        counterparty: "رضا کریمی",
+        customer: "رضا کریمی",
+        supplier: true,
+        memo: "بابت تسویه فاکتور ۱۱۸",
+        events: [["received", "2026-03-09"], ["endorsed", "2026-03-17"]],
+      },
+      {
+        serial: "۸۸۱۲۳۸",
+        direction: "receivable",
+        status: "bounced",
+        amount: 6_400_000,
+        due: "2026-03-14",
+        counterparty: "رضا کریمی",
+        customer: "رضا کریمی",
+        events: [["received", "2026-03-06"], ["deposited", "2026-03-12"], ["bounced", "2026-03-14"]],
+      },
+      {
+        serial: "۸۸۱۲۳۹",
+        direction: "receivable",
+        status: "resolved",
+        amount: 12_000_000,
+        due: "2026-03-10",
+        counterparty: "سارا محمدی",
+        customer: "سارا محمدی",
+        events: [
+          ["received", "2026-03-02"],
+          ["bounced", "2026-03-10"],
+          ["restored", "2026-03-11"],
+        ],
+      },
+      {
+        serial: "۸۸۱۲۴۰",
+        direction: "receivable",
+        status: "on_hand",
+        amount: 12_000_000,
+        due: "2026-05-18",
+        counterparty: "سارا محمدی",
+        customer: "سارا محمدی",
+        replaces: "۸۸۱۲۳۹",
+        events: [["received", "2026-03-12"]],
+      },
+      {
+        serial: "۸۸۱۲۴۲",
+        direction: "receivable",
+        status: "cleared",
+        amount: 4_300_000,
+        due: "2026-03-05",
+        counterparty: "سارا محمدی",
+        customer: "سارا محمدی",
+        events: [["received", "2026-02-20"], ["deposited", "2026-03-01"], ["cleared", "2026-03-05"]],
+      },
+      {
+        serial: "۹۹۰۰۰۱",
+        direction: "payable",
+        status: "issued",
+        amount: 55_000_000,
+        due: "2026-04-28",
+        counterparty: SUPPLIER_NAME,
+        supplier: true,
+        events: [["issued", "2026-03-13"]],
+      },
+    ];
+
+    const chequeIds = new Map<string, string>();
+    for (const fixture of CHEQUES) {
+      const existing = await client.query(
+        "SELECT id FROM cheques WHERE business_id = $1 AND serial_number = $2",
+        [businessId, fixture.serial],
+      );
+      if (existing.rowCount) {
+        chequeIds.set(fixture.serial, existing.rows[0].id);
+        continue;
+      }
+      const inserted = await client.query(
+        `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name,
+                              amount, issue_date, due_date, counterparty_name, customer_id, supplier_id,
+                              memo, replaces_cheque_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'بانک ملت', $6, '2026-03-01', $7, $8, $9, $10, $11, $12, $13, $13)
+         RETURNING id`,
+        [
+          businessId,
+          locationId,
+          fixture.direction,
+          fixture.status,
+          fixture.serial,
+          fixture.amount,
+          fixture.due,
+          fixture.counterparty,
+          fixture.customer ? partyIds.get(fixture.customer) : null,
+          fixture.supplier ? supplierId : null,
+          fixture.memo ?? null,
+          fixture.replaces ? chequeIds.get(fixture.replaces) : null,
+          T0,
+        ],
+      );
+      chequeIds.set(fixture.serial, inserted.rows[0].id);
+
+      for (const [event, occurredOn] of fixture.events) {
+        await client.query(
+          `INSERT INTO cheque_events (business_id, cheque_id, event, occurred_on,
+                                      endorsed_to_supplier_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            businessId,
+            inserted.rows[0].id,
+            event,
+            occurredOn,
+            event === "endorsed" ? supplierId : null,
+            T0,
+          ],
+        );
+      }
+    }
+
     await client.query("COMMIT");
     console.log(
-      "Visual fixture ready: 6 accounts, 4 journal entries, 3 inventory items, 3 parties, 3 deals, 3 expenses, 2 receivables.",
+      "Visual fixture ready: 6 accounts, 6 journal entries, 3 inventory items, 3 parties, 3 deals, 3 expenses, 2 receivables, 1 reversed receipt, 7 cheques across the lifecycle.",
     );
   } catch (error) {
     await client.query("ROLLBACK");

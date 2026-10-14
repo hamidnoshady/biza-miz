@@ -392,6 +392,22 @@ export async function applySyncDomainHandler(context: SyncDomainContext): Promis
       const effectId = await applyShiftReplay(client, businessId, locationId, shift);
       return { effectType: context.definition.handler === "shift.closed" ? "shift_close" : "shift_open", effectId };
     }
+    // #869: a settlement event is written by the cloud after the money has moved.
+    // Applying it again would move the money again, so a copy that arrives as a
+    // replay is refused as a terminal domain error and recorded for administration.
+    // A desktop never gets this far: it acknowledges a pulled copy first
+    // (siteSkipsPulledEvent).
+    case "commission.payout.recorded":
+      // Validate the fields the event names before refusing it, like every handler.
+      requiredString(payload, "payoutId");
+      requiredString(payload, "runId");
+      requiredString(payload, "amount");
+      throw new SyncPayloadError("business_event_not_replayable");
+    case "commission.payout.reversed":
+      requiredString(payload, "reversalId");
+      requiredString(payload, "reversedPayoutId");
+      requiredString(payload, "amount");
+      throw new SyncPayloadError("business_event_not_replayable");
     default:
       throw new Error(`sync_handler_not_implemented:${context.definition.handler}`);
   }

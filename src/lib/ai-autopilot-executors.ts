@@ -261,7 +261,7 @@ import {
   setPricingConfig,
   type PricingConfig,
 } from "./pricing-service";
-import { setMfaPolicy } from "./mfa-policy";
+import { getMfaPolicy, setMfaPolicy } from "./mfa-policy";
 import { setOnlinePlatformsConfig } from "./online-platforms-service";
 import { MAX_ONLINE_PLATFORM_COMMISSION_PERCENT, validCommissionPercent } from "./online-platforms";
 import { validateAccounts, nextAccountLevel, type AccountLevel } from "./coa-template";
@@ -1454,7 +1454,7 @@ const partyRef = (payload: Record<string, unknown>): { customerId: string | null
 const arReceiptRecord: AutopilotExecutor = async (ctx) => {
   const customerId = str(ctx.payload.customerId) ?? str(ctx.payload.partyId);
   const amount = int(ctx.payload.amount);
-  const method = ctx.payload.method === "bank" ? "bank" : "cash";
+  const method = ctx.payload.method === "bank" || ctx.payload.method === "clearing" ? ctx.payload.method : "cash";
   if (!customerId || amount === null) return fail("invalid_payload");
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);
@@ -1468,6 +1468,7 @@ const arReceiptRecord: AutopilotExecutor = async (ctx) => {
       receiptDate: str(ctx.payload.receiptDate),
       memo: str(ctx.payload.memo),
       createdBy: actorOf(ctx),
+      idempotencyKey: str(ctx.payload.idempotencyKey) ?? crypto.randomUUID(),
       cashAccountId: str(ctx.payload.cashAccountId),
       bankReference: str(ctx.payload.bankReference),
     });
@@ -1573,12 +1574,9 @@ const chequeTransition: AutopilotExecutor = async (ctx) => {
   if (!chequeId || !action || !CHEQUE_ACTIONS.includes(action as (typeof CHEQUE_ACTIONS)[number])) {
     return fail("invalid_payload");
   }
-  const branch = await chosenLocation(ctx.businessId, null);
-  if ("error" in branch) return fail(branch.error);
   try {
     const cheque = await transitionCheque({
       businessId: ctx.businessId,
-      locationId: branch.locationId,
       chequeId,
       action: action as (typeof CHEQUE_ACTIONS)[number],
       endorsedToSupplierId: str(ctx.payload.endorsedToSupplierId),
@@ -4627,7 +4625,16 @@ const settingsOnlinePlatformsSave: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { ok: true } };
 };
 const settingsMfaPolicySave: AutopilotExecutor = async (ctx) => {
-  const policy = await setMfaPolicy(ctx.businessId, { requireForManagers: ctx.payload.requireForManagers === true });
+  // A payload that names only one knob keeps the other as it is stored.
+  const current = await getMfaPolicy(ctx.businessId);
+  const policy = await setMfaPolicy(ctx.businessId, {
+    requireForManagers:
+      typeof ctx.payload.requireForManagers === "boolean" ? ctx.payload.requireForManagers : current.requireForManagers,
+    requireForAccountants:
+      typeof ctx.payload.requireForAccountants === "boolean"
+        ? ctx.payload.requireForAccountants
+        : current.requireForAccountants,
+  });
   return { ok: true, result: { policy } };
 };
 // The chart-of-accounts swap is the route's own guarded transaction: any

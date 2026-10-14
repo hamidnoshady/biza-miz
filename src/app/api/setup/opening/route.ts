@@ -188,6 +188,7 @@ async function openingInventory(
        VALUES($1,$2,CURRENT_DATE,'موجودی افتتاحیه','opening_inventory',$3,$4,'inventory',$3) RETURNING id`,[businessId,location.id,eventId,userId]);
     await client.query(`INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES($1,$2,$3,0),($1,$4,0,$3)`,
       [entries[0].id,byCode.get(WELL_KNOWN_CODES.inventory),totalValue.toString(),byCode.get(WELL_KNOWN_CODES.openingEquity)]);
+    await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
     await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1",[eventId]);
     if (!costing.lockedAt) await client.query(
       `UPDATE settings SET value=jsonb_set(value,'{lockedAt}',to_jsonb(now()::text)),updated_at=now()
@@ -292,6 +293,7 @@ async function openingBalances(
         [entryId, l.accountId, l.debit, l.credit],
       );
     }
+    await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
     // Committed together with the entry it marks (issue #808 §6).
     const progress = await markStepDone(businessId, "opening", client);
     await client.query("COMMIT");

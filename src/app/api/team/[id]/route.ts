@@ -41,6 +41,13 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     permissions?: unknown;
     /** Phase 42 — set (or, with "", clear) the member's login phone. Stored unverified. */
     phone?: string;
+    /**
+     * Issue #854 (P2.4) — why this access change is being made. Required by the
+     * service whenever the write changes the role, the custom role or an
+     * override; the validation and the storage both live there, so this route
+     * only has to forward it honestly.
+     */
+    reason?: string;
   };
   try {
     body = await request.json();
@@ -77,9 +84,9 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   }>(
     `SELECT actor.role AS actor_role, actor.permissions AS actor_permissions,
             target.role AS target_role, target.permissions AS target_permissions,
-            CASE WHEN ar.is_active THEN ARRAY(SELECT jsonb_array_elements_text(ar.permissions)) END actor_custom_permissions,
-            CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END target_custom_permissions,
-            CASE WHEN sr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(sr.permissions)) END selected_custom_permissions
+            CASE WHEN actor.custom_role_id IS NULL THEN NULL WHEN ar.is_active THEN ARRAY(SELECT jsonb_array_elements_text(ar.permissions)) ELSE ARRAY[]::text[] END actor_custom_permissions,
+            CASE WHEN target.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END target_custom_permissions,
+            CASE WHEN $4::uuid IS NULL THEN NULL WHEN sr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(sr.permissions)) ELSE ARRAY[]::text[] END selected_custom_permissions
        FROM users actor
        JOIN users target ON target.id = $3 AND target.business_id = actor.business_id
        LEFT JOIN tenant_roles ar ON ar.id=actor.custom_role_id AND ar.business_id=actor.business_id
@@ -159,6 +166,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       defaultLocationId: body.defaultLocationId,
       locationScope: body.locationScope,
       overrides: body.permissions === undefined ? undefined : sanitizeOverrides(body.permissions),
+      reason: body.reason,
     });
     /*
      * Same best-effort party as on create, and here for the repair case: a member

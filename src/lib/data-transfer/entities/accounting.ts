@@ -20,7 +20,8 @@
  */
 
 import { query } from "../../db";
-import { AccountsError, createAccount, setAccountActive } from "../../accounts-service";
+import { AccountsError, createAccount, renameAccount, setAccountActive } from "../../accounts-service";
+import { ensureCurrencyEnabled, MulticurrencyError } from "../../multicurrency-service";
 import { MissingLedgerAccountError, recordExpense } from "../../expense-service";
 import { expenseErrorMessage } from "../../expense-errors";
 import { parseExpenseAmount, parseExpenseVatAmount } from "../../expense-input";
@@ -153,7 +154,7 @@ const accountsAdapter: EntityAdapter = {
     const { rows } = await query<Record<string, unknown>>(
       `SELECT a.id, a.code, a.name, a.type::text AS type, a.level::text AS level,
               parent.code AS "parentCode", a.normal_balance AS "normalBalance",
-              a.is_active AS "isActive"
+              a.is_active AS "isActive", a.currency_code AS "currencyCode"
          FROM accounts a
          LEFT JOIN accounts parent ON parent.id = a.parent_id
         WHERE ${where.join(" AND ")}
@@ -199,26 +200,44 @@ const accountsAdapter: EntityAdapter = {
       // Name and active flag only. Re-typing a code or re-parenting an account
       // reshapes every historical report built on it, and the chart screen
       // gates both behind their own confirmations for exactly that reason.
-      await query(
-        `UPDATE accounts SET name = $3 WHERE business_id = $1 AND id = $2`,
-        [context.businessId, existing.id, name],
-      );
+      // The rename goes through the canonical service, not a bare UPDATE: it is
+      // audited (`account.renamed`) in the same transaction and carries the
+      // actor. A bare UPDATE here left an import-driven rename with no trail.
+      await renameAccount(context.businessId, existing.id, name, context.actorUserId);
       if (values.isActive !== undefined) {
-        await setAccountActive(context.businessId, existing.id, values.isActive !== false);
+        await setAccountActive(context.businessId, existing.id, values.isActive !== false, context.actorUserId);
       }
       return { status: "updated", id: existing.id, warnings };
     }
 
     try {
+      const currencyCode = typeof values.currencyCode === "string" ? values.currencyCode : null;
+      if (currencyCode) {
+        // The imported chart may name a foreign currency the target business
+        // has not enabled yet — enabling it (tenant-local, idempotent) is part
+        // of importing the row, or the account would come back base-currency
+        // and its postings would no longer mean what the export said (issue
+        // #863 §import-side). Unknown/inactive/base currencies still reject.
+        try {
+          await ensureCurrencyEnabled(context.businessId, currencyCode);
+        } catch (err) {
+          if (err instanceof MulticurrencyError) throw new RowRejection(importCurrencyErrorMessage(err.message));
+          throw err;
+        }
+      }
       const created = await createAccount({
         businessId: context.businessId,
         code,
         name,
         type: String(values.type ?? "expense"),
         parentId,
+        actorId: context.actorUserId,
+        // Preserved on import so a foreign-currency financial account keeps
+        // the currency its postings are denominated in (issue #863).
+        currencyCode,
       });
       if (values.isActive === false) {
-        await setAccountActive(context.businessId, created.id, false);
+        await setAccountActive(context.businessId, created.id, false, context.actorUserId);
       }
       return { status: "created", id: created.id, warnings };
     } catch (error) {
@@ -250,6 +269,20 @@ function accountErrorMessage(code: string): string {
       return "حساب بالادست در پایین‌ترین سطح است و زیرمجموعه نمی‌پذیرد.";
     default:
       return `ثبت حساب ممکن نشد (${code}).`;
+  }
+}
+
+/** Why an imported account's currency could not be set up for this business. */
+function importCurrencyErrorMessage(code: string): string {
+  switch (code) {
+    case "currency_not_found":
+      return "ارز این حساب در فهرست ارزهای سامانه یافت نشد.";
+    case "currency_inactive":
+      return "ارز این حساب در سامانه غیرفعال است.";
+    case "base_currency_not_a_transaction_currency":
+      return "ارز پایهٔ کسب‌وکار نمی‌تواند ارز معاملهٔ یک حساب باشد.";
+    default:
+      return `فعال‌سازی ارز این حساب ممکن نشد (${code}).`;
   }
 }
 
@@ -618,10 +651,12 @@ const expensesAdapter: EntityAdapter = {
       // text, and the fiscal lock was mistaken for a closed period.
       throw new RowRejection(
         lockCode === "fiscal_period_locked"
-          ? "دورهٔ مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد."
+          ? "دورهٔ مالی این تاریخ قفل شده و امکان ثبت سند وجود ندارد."
           : lockCode === "fiscal_period_soft_closed"
-            ? "دورهٔ مالی این تاریخ بستهٔ موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند."
-            : (expenseErrorMessage(code) ?? `ثبت هزینه ممکن نشد (${code}).`),
+            ? "دورهٔ مالی این تاریخ بستهٔ موقت است؛ برای ثبت در آن، مجوز «بستن دورهٔ مالی» لازم است."
+            : lockCode === "fiscal_period_not_defined"
+              ? "این تاریخ در هیچ دورهٔ مالیِ تعریف‌شده‌ای قرار نمی‌گیرد. در حسابداری، بخش «سال‌ها و دوره‌های مالی»، سال شمسیِ مربوط را تعریف کنید؛ تا آن زمان ثبت سند پذیرفته نمی‌شود."
+              : (expenseErrorMessage(code) ?? `ثبت هزینه ممکن نشد (${code}).`),
       );
     }
   },

@@ -62,6 +62,14 @@
  *   (migration 0078) still holds afterwards. A batch line sold *before*
  *   allocations were persisted has nothing to restore into, and is still
  *   refused rather than silently desynchronised.
+ * - **Vehicle lines: refused here, reversed through the vehicle path.** A car
+ *   is one serialized unit with a sale occurrence, a frozen cost and a
+ *   lifecycle state (issue #839 §8); restoring `item_stock` would touch no
+ *   quantity row and leave the car marked sold with a live occurrence while
+ *   the books say it never sold. The reversal is `reverseVehicleSale`, which
+ *   needs `vehicles.sell` and runs this same engine with a vehicle-aware line
+ *   handler, so the invoice, its payments, commission and loyalty are undone
+ *   together with the car.
  * - **A line sold before this fix shipped: refused.** The per-line
  *   `ledgerEntryIds` this reversal needs did not exist before this session;
  *   there is no reliable way to re-derive them after the fact (see
@@ -94,6 +102,26 @@ export interface VoidRetailInvoiceInput {
   orderId: string;
   actorId: string | null;
   reason: string;
+}
+
+/**
+ * The vehicle half of an invoice reversal, supplied only by
+ * `reverseVehicleSale`. It runs after the line's own entries are mirrored and
+ * receives their reversal ids; it moves the car to `returned` and closes the
+ * sale occurrence. Without it, a vehicle line refuses the void.
+ */
+export type VehicleLineReversal = (line: {
+  orderItemId: string;
+  serialId: string | null;
+  reversalEntryIds: string[];
+}) => Promise<void>;
+
+export interface VoidRetailInvoiceOptions {
+  vehicleLineReversal?: VehicleLineReversal;
+  /** Date the reversal entries land on; defaults to the invoice's own close date. */
+  entryDate?: string;
+  /** Persian memo on the mirrored line entries. */
+  memo?: string;
 }
 
 export interface VoidRetailInvoiceResult {
@@ -179,6 +207,7 @@ export async function reverseLiveEntry(
 export async function voidRetailInvoice(
   client: PoolClient,
   params: VoidRetailInvoiceInput,
+  options: VoidRetailInvoiceOptions = {},
 ): Promise<VoidRetailInvoiceResult> {
   const { rows: orderRows } = await client.query<OrderRow>(
     `SELECT id, status::text AS status, type::text AS type, customer_id, closed_at::text AS closed_at,
@@ -229,6 +258,12 @@ export async function voidRetailInvoice(
         409,
       );
     }
+    if (snapshot.kind === "vehicle" && !options.vehicleLineReversal) {
+      throw new RetailInvoiceVoidError(
+        "این فاکتور شامل فروش خودرو است؛ برای برگشت آن از «برگشت فروش» در پروندهٔ همان خودرو استفاده کنید.",
+        409,
+      );
+    }
     if (snapshot.kind === "gold" || snapshot.kind === "watch") {
       throw new RetailInvoiceVoidError(
         "این فاکتور شامل کالای طلا/سریال‌دار است و به دلیل وضعیت نهایی فروش، ابطال خودکار امکان‌پذیر نیست.",
@@ -269,7 +304,8 @@ export async function voidRetailInvoice(
   // for the exact same reason: this *is* the deliberate, audited way to
   // touch a closed order's lines, not a bypass of the guard.
   await client.query("SET LOCAL app.order_amendment = 'on'");
-  const entryDate = order.closed_at?.slice(0, 10) || new Date().toISOString().slice(0, 10);
+  const entryDate =
+    options.entryDate || order.closed_at?.slice(0, 10) || new Date().toISOString().slice(0, 10);
   const beforeSnapshot = await snapshotOrder(client, params.orderId);
 
   const { rows: amendmentRows } = await client.query<{ id: string }>(
@@ -294,17 +330,34 @@ export async function voidRetailInvoice(
 
   for (const line of lineRows) {
     const snapshot = line.retail_snapshot!;
+    const lineReversalIds: string[] = [];
     for (const entryId of snapshot.ledgerEntryIds ?? []) {
       const reversedId = await reverseLiveEntry(client, {
         businessId: params.businessId,
         locationId: params.locationId,
         entryId,
         amendmentId,
-        memo: "برگشت فاکتور خرده‌فروشی باطل‌شده",
+        memo: options.memo ?? "برگشت فاکتور خرده‌فروشی باطل‌شده",
         entryDate,
         createdBy: params.actorId,
       });
-      if (reversedId) reversedEntryIds.push(reversedId);
+      if (reversedId) lineReversalIds.push(reversedId);
+    }
+    reversedEntryIds.push(...lineReversalIds);
+
+    if (snapshot.kind === "vehicle") {
+      // A car has no quantity to restore: the vehicle path returns the unit
+      // and closes its sale occurrence (validated as present above).
+      await options.vehicleLineReversal!({
+        orderItemId: line.id,
+        serialId: snapshot.serialId ?? null,
+        reversalEntryIds: lineReversalIds,
+      });
+      await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [
+        line.id,
+        params.reason,
+      ]);
+      continue;
     }
 
     // Restore the quantity this line consumed.

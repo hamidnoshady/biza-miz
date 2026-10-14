@@ -24,11 +24,11 @@ visible only to connections consented for every branch) and **291 write verbs**
 | `get_courier_performance` | pos | business_wide | `delivery.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `forecast_demand` | pos | business_wide | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_near_expiry_items` | pos | pinned (cosmetics businesses only) | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
-| `get_staff_commission` | pos | business_wide | `payroll.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_staff_commission` | pos | business_wide | `commission.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_waste_history` | pos | business_wide | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `find_items` | pos | pinned | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `describe_app` | pos | agnostic | `ai.use` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
-| `get_branch_comparison` | pos | business_wide | `reports.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `get_branch_comparison` | pos | business_wide | `reports.business_wide` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_coworker_jobs` | pos | agnostic | `ai.automations.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_ar_aging` | accounting | business_wide | `finance.receivables_manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_ap_upcoming` | accounting | business_wide | `finance.payables_manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -116,8 +116,8 @@ visible only to connections consented for every branch) and **291 write verbs**
 | `get_repurchase_candidates` | crm | pinned | `crm.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_message_templates` | growth | agnostic | `campaigns.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_message_campaigns` | growth | agnostic | `campaigns.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
-| `list_website_posts` | website | agnostic | `website.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
-| `list_website_products` | website | agnostic | `website.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_website_posts` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_website_products` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_website_status` | website | agnostic | `website.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cms_pages` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_cms_media` | website | agnostic | `cms.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |

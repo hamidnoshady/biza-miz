@@ -957,6 +957,13 @@ export interface ActionMeta {
    */
   alwaysConfirm?: true;
   /**
+   * The destination requires a client idempotency key the model must not
+   * invent: the apply endpoint injects a stable `ai-proposal:{auditId}` key,
+   * so a transport retry replays the original mutation instead of doubling it
+   * — and the key traces the ledger row back to the proposal that made it.
+   */
+  needsIdempotencyKey?: true;
+  /**
    * Phase F pt.2 — the action only makes sense inside a PROJECT: its endpoint
    * is addressed by an ambient project id the model never sees. It is kept out
    * of the default `propose_action` enum (like `coworkerOnly` keeps waste out)
@@ -2427,7 +2434,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     endpoint: "/api/settings/mfa-policy",
     method: "PUT",
     label: "سیاست ورود دومرحله‌ای — الزامی برای مدیران؟",
-    payloadHint: '{ requireForManagers: boolean }',
+    payloadHint: '{ requireForManagers?: boolean, requireForAccountants?: boolean }',
     executor: "settingsMfaPolicySave",
   },
   "settings.accounts.save": {
@@ -3545,9 +3552,10 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     method: "POST",
     label: "ثبت دریافت از مشتری",
     payloadHint:
-      '{ customerId: string /* از find_customers */, method: "cash"|"bank", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, cashAccountId?: string, bankReference?: string, locationId?: string, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد',
+      '{ customerId: string /* از find_customers */, method: "cash"|"bank"|"clearing", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, cashAccountId?: string, bankReference?: string, locationId?: string, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد. کلید idempotency را نفرست؛ خودکار افزوده می‌شود',
     executor: "arReceiptRecord",
     alwaysConfirm: true,
+    needsIdempotencyKey: true,
   },
   "project.memory.add": {
     type: "project.memory.add",
@@ -4545,7 +4553,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       function: {
         name: "list_website_posts",
         description:
-          "مطلب‌های وب‌سایت کسب‌وکار (پیش‌نویس و منتشرشده) با شناسه، عنوان، وضعیت و تاریخ. برای ویرایش یا انتشار یک مطلب، شناسه را از همین‌جا بگیر.",
+          "مطلب‌های وب‌سایت متصل به کل کسب‌وکار (پیش‌نویس و منتشرشده) با شناسه، عنوان، وضعیت و تاریخ؛ این محتوا به شعبهٔ POS محدود نیست. برای ویرایش یا انتشار یک مطلب، شناسه را از همین‌جا بگیر.",
         parameters: {
           type: "object",
           properties: {
@@ -4561,7 +4569,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       function: {
         name: "list_website_products",
         description:
-          "محصول‌های ثبت‌شده در وب‌سایت با شناسه، عنوان، کد، قیمت (ریال) و موجودی سایت. برای به‌روزرسانی یک محصول، remoteId را از همین‌جا بگیر.",
+          "محصول‌های کاتالوگ وب‌سایت متصل به کل کسب‌وکار با شناسه، عنوان، کد، قیمت (ریال) و موجودی سایت؛ این فهرست به شعبهٔ POS محدود نیست. برای به‌روزرسانی یک محصول، remoteId را از همین‌جا بگیر.",
         parameters: {
           type: "object",
           properties: { limit: { type: "number", description: "چند محصول، پیش‌فرض ۵۰ و حداکثر ۱۰۰" } },
@@ -4571,7 +4579,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     },
     noArgsTool(
       "get_website_status",
-      "وضعیت اتصال وب‌سایت: متصل است یا نه، دامنه، آخرین آزمایش، کلیدهای ارسال قیمت و موجودی، و صف ارسال (در انتظار/ناموفق/متوقف).",
+      "فرادادهٔ اتصال وب‌سایت و صف همگام‌سازی کل کسب‌وکار: اتصال، دامنه، آخرین آزمایش، کلیدهای ارسال قیمت و موجودی و شمار صف؛ گزارش شعبه‌ای نیست.",
     ),
     {
       type: "function",
@@ -4807,7 +4815,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       function: {
         name: "list_message_templates",
         description:
-          "قالب‌های پیام ذخیره‌شدهٔ کسب‌وکار با شناسه، کانال (پیامک/ایمیل)، نام و متن. برای ساختن کمپین، templateId را از همین‌جا بگیر.",
+          "قالب‌های پیام ذخیره‌شدهٔ کل کسب‌وکار (مشترک بین شعب) با شناسه، کانال (پیامک/ایمیل)، نام و متن. برای ساختن کمپین، templateId را از همین‌جا بگیر.",
         parameters: {
           type: "object",
           properties: {
@@ -4819,7 +4827,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     },
     noArgsTool(
       "list_message_campaigns",
-      "کمپین‌های پیام کسب‌وکار (پیش‌نویس، در حال ارسال، پایان‌یافته) با شناسه، نام، کانال، وضعیت و شمارش گیرنده/ارسال/تحویل/ناموفق.",
+      "کمپین‌های پیام کل کسب‌وکار (تجمیعی بین شعب؛ پیش‌نویس، در حال ارسال، پایان‌یافته) با شناسه، نام، کانال، وضعیت و شمارش گیرنده/ارسال/تحویل/ناموفق.",
     ),
     // Phase G — «میز کار من». Four reads, one per question the module was
     // built to answer. None of them takes a user id: «مالِ من» is resolved

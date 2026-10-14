@@ -41,6 +41,23 @@ describe("DataTableRow", () => {
     expect(row.tabIndex).toBe(0);
   });
 
+  it("lets a link inside the row do its own navigation, without also opening the row", () => {
+    const open = vi.fn();
+    render(
+      <table>
+        <tbody>
+          <DataTableRow onClick={open}>
+            <td>
+              <a href="#run-7">دورهٔ ۷</a>
+            </td>
+          </DataTableRow>
+        </tbody>
+      </table>,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "دورهٔ ۷" }));
+    expect(open).not.toHaveBeenCalled();
+  });
+
   it("opens from Enter and Space on the row, never from a key on an inner control", () => {
     const { open, row } = renderRow();
     fireEvent.keyDown(row, { key: "Enter" });

@@ -5,17 +5,15 @@ import { isValidIsoDate } from "@/lib/iso-date";
 import { getArAging } from "@/lib/ar-service";
 
 /**
- * A date parameter the report can actually use: `YYYY-MM-DD` and a real
- * calendar date. Anything else is a client bug, and answering it with an empty
- * report (the string compare in `getArAging` filters every line out) would look
- * like «هیچ بدهی بازی وجود ندارد» — a claim, not an error.
+ * Standard 30/60/90-day AR aging as of ?asOfDate= (defaults to today).
  *
- * The rule is `iso-date.ts`'s `isValidIsoDate`, shared with the other aging
- * route, bank reconciliation and «دفتر روزنامه» — the local copy this file
- * used to carry leaned on `Date.parse`, which reads `2026-02-31` as March.
+ * The date check is `isValidIsoDate` — the repo's one calendar-aware validator
+ * — rather than a local regex. A shape-only test plus `Date.parse` accepted
+ * «2026-02-30» (JS normalises it to March 2nd), so the report was computed for
+ * a day nobody asked for while `getArAging` compared strings against the date
+ * it was handed. Both layers now use the same helper, so the route and the
+ * service cannot disagree about what a usable date is.
  */
-
-/** Standard 30/60/90-day AR aging as of ?asOfDate= (defaults to today). */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;

@@ -13,6 +13,10 @@
  * link has to travel as the separate `supplierPartyId` the balances payload
  * carries. The aging payload names no party at all, so its rows open the
  * statement without the directory link rather than linking by a guess.
+ *
+ * A/P lines have no destination of their own: a purchase has no screen at the
+ * alias id, so `orderHrefFor` is deliberately absent and every line drills
+ * into its journal entry instead.
  */
 
 import { UNKNOWN_SUPPLIER_KEY } from "@/lib/aging";
@@ -45,6 +49,22 @@ interface AgingReport {
   totals: Omit<AgingRow, "supplierId" | "supplierName" | "locationName">;
 }
 
+interface ReconciliationSummaryPayload {
+  payableTotal: number;
+  advanceTotal: number;
+  netTotal: number;
+  controlBalance: number;
+  difference: number;
+  reconciles: boolean;
+}
+
+interface BalancesPayload {
+  suppliers?: SupplierBalance[];
+  total?: number;
+  nextOffset?: number | null;
+  summary?: ReconciliationSummaryPayload | null;
+}
+
 /** The payables side — shared with the directory's statement overlay (`ap-statement-panel.tsx`). */
 export const PAYABLES_SIDE: SubledgerSide = {
   eyebrow: "تعهدات تأمین‌کنندگان",
@@ -55,24 +75,41 @@ export const PAYABLES_SIDE: SubledgerSide = {
   agingCaption: "نمای سنی بدهی به تأمین‌کنندگان",
   emptyBalances: "هیچ حساب پرداختنی بازی وجود ندارد.",
   loadBalancesFailed: "بارگذاری مانده‌های پرداختنی ناموفق بود.",
+  noSearchMatches: "تأمین‌کننده‌ای با این جست‌وجو پیدا نشد.",
   agingTotalLabel: "جمع کل حساب‌های پرداختنی",
   directoryHref: accountingSuppliersHref(),
   directoryLinkLabel: "تأمین‌کنندگان در حسابداری",
-  unknownExplanation: "ماندهٔ «بدون تأمین‌کننده مشخص» یک استثنای تطبیق است، نه حساب یک تأمین‌کننده. ردیف‌ها در صورتحساب این بخش، همراه با منبع، وضعیت انتساب و پیوند دقیق به سند روزنامه بررسی می‌شوند.",
+  searchLabel: "جست‌وجوی تأمین‌کننده",
+  unknownExplanation: "ماندهٔ «بدون تأمین‌کننده مشخص» یک استثنای تطبیق است، نه حساب یک تأمین‌کننده. ردیف‌ها در صورت‌حساب این بخش، همراه با منبع، وضعیت انتساب و پیوند دقیق به سند روزنامه بررسی می‌شوند.",
 
   unknownKey: UNKNOWN_SUPPLIER_KEY,
   listEndpoint: "/api/ledger/ap/suppliers",
   agingEndpoint: "/api/ledger/ap/aging",
-  readParties: (raw) => {
-    const data = raw as { suppliers?: SupplierBalance[] };
-    return (data.suppliers ?? []).map((s) => ({
-      id: s.supplierId,
-      name: s.supplierId === UNKNOWN_SUPPLIER_KEY ? "استثنای تطبیق — بدون تأمین‌کننده" : s.supplierName,
-      phone: s.supplierPhone,
-      balance: s.balance,
-      partyId: s.supplierPartyId,
-      locationName: s.locationName,
-    }));
+  readBalances: (raw) => {
+    const data = raw as BalancesPayload;
+    const rows = data.suppliers ?? [];
+    return {
+      rows: rows.map((s) => ({
+        id: s.supplierId,
+        name: s.supplierId === UNKNOWN_SUPPLIER_KEY ? "استثنای تطبیق — بدون تأمین‌کننده" : s.supplierName,
+        phone: s.supplierPhone,
+        balance: s.balance,
+        partyId: s.supplierPartyId,
+        locationName: s.locationName,
+      })),
+      total: data.total ?? rows.length,
+      nextOffset: data.nextOffset ?? null,
+      summary: data.summary
+        ? {
+            primaryTotal: data.summary.payableTotal,
+            advanceTotal: data.summary.advanceTotal,
+            netTotal: data.summary.netTotal,
+            controlBalance: data.summary.controlBalance,
+            difference: data.summary.difference,
+            reconciles: data.summary.reconciles,
+          }
+        : null,
+    };
   },
   readAging: (raw) => {
     const data = raw as AgingReport;
@@ -99,6 +136,15 @@ export const PAYABLES_SIDE: SubledgerSide = {
   negativeSettleActionLabel: "افزودن پیش‌پرداخت",
   negativeTitlePrefix: "پیش‌پرداخت به ",
   negativeBalanceMessage: "ماندهٔ منفی یعنی پیش‌پرداخت یا بستانکاری شما نزد این تأمین‌کننده است، نه بدهی. پرداخت تازه، مبلغ پیش‌پرداخت را بیشتر می‌کند.",
+
+  summary: {
+    primaryLabel: "جمع بدهی به تأمین‌کنندگان",
+    advanceLabel: "پیش‌پرداخت به تأمین‌کنندگان",
+    netLabel: "خالص بدهی",
+    controlLabel: "مانده حساب کنترل پرداختنی",
+    reconciled: "با حساب کنترل مطابقت دارد",
+    difference: "تفاوت با حساب کنترل",
+  },
 
   settle: {
     actionLabel: "ثبت پرداخت",
@@ -128,13 +174,41 @@ export const PAYABLES_SIDE: SubledgerSide = {
     },
     caption: "گردش حساب این تأمین‌کننده",
     empty: "هنوز فعالیتی برای این تأمین‌کننده ثبت نشده است.",
-    failed: "بارگذاری صورتحساب این تأمین‌کننده ناموفق بود.",
+    failed: "بارگذاری صورت‌حساب این تأمین‌کننده ناموفق بود.",
     directoryLabel: "تأمین‌کنندگان در حسابداری",
     directoryHrefFor: (id, partyId) =>
       id !== UNKNOWN_SUPPLIER_KEY && partyId ? accountingSupplierHref(partyId) : null,
+    sourceColumnLabel: "منبع",
+    entryLinkLabel: "نمایش سند",
+    entryFailed: "بارگذاری سند حسابداری این ردیف ناموفق بود.",
+    /*
+     * Only A/P has an attribution contract to explain: a line with no supplier
+     * is either a deliberate control-account adjustment or a source that was
+     * added without an attribution rule, and the two must not look alike in a
+     * report whose job is reconciling to GL 2100.
+     */
+    attributionNoteFor: (status) => {
+      switch (status) {
+        case "intentional_unknown":
+          return "استثنای آگاهانه؛ بدون طرف معین";
+        case "automatic_missing":
+          return "خطای تطبیق؛ منبع خودکار بدون تأمین‌کننده";
+        case "conditional_missing":
+          return "نیازمند بررسی؛ انتساب مشروط پیدا نشد";
+        case "unclassified":
+          return "منبع هنوز در قرارداد انتساب دسته‌بندی نشده";
+        default:
+          return null;
+      }
+    },
   },
 };
 
-export function ApSection({ canSettle = false }: { canSettle?: boolean }) {
+/**
+ * The payables screen — `canSettle` is the member's effective
+ * `finance.payables_manage`, the permission `ap/payments` enforces. See
+ * `ar-section.tsx` for why it is a configuration value and not a check here.
+ */
+export function ApSection({ canSettle }: { canSettle: boolean }) {
   return <SubledgerSection side={PAYABLES_SIDE} canSettle={canSettle} />;
 }

@@ -17,10 +17,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toPersianDigits } from "@/lib/digits";
 import { uploadFiles } from "@/lib/media-uploader";
+import type { MediaKind } from "@/lib/media";
 import { cardClass, EmptyState, LoadingSkeleton } from "../page-chrome";
 import { api, ErrorBox, inputClass } from "../ui";
 
 const PAGE_SIZE = 40;
+const ACCEPTED_FILE_TYPES: Record<MediaKind, string> = {
+  image: "image/png,image/jpeg,image/webp",
+  video: "video/mp4,video/webm,video/quicktime",
+  document: ".pdf,.xlsx,.docx,.csv,.txt,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/csv,text/plain",
+};
 
 export interface PickedMedia {
   id: string;
@@ -42,10 +48,14 @@ export function MediaPickerDialog({
   title,
   onPick,
   onClose,
+  kind = "image",
+  canUpload = true,
 }: {
   title: string;
   onPick: (asset: PickedMedia) => void;
   onClose: () => void;
+  kind?: MediaKind;
+  canUpload?: boolean;
 }) {
   const [assets, setAssets] = useState<PickerAsset[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -73,7 +83,7 @@ export function MediaPickerDialog({
       const requestId = ++requestRef.current;
       if (append) setLoadingMore(true);
 
-      const params = new URLSearchParams({ kind: "image", limit: String(PAGE_SIZE), offset: String(offset) });
+      const params = new URLSearchParams({ kind, limit: String(PAGE_SIZE), offset: String(offset) });
       if (search) params.set("search", search);
       api<{ assets: PickerAsset[]; total: number; storage: { ready: boolean } }>(
         `/api/media?${params.toString()}`,
@@ -86,13 +96,13 @@ export function MediaPickerDialog({
           return;
         }
         setError("");
-        const usable = data.assets.filter((a) => a.mimeType !== "image/svg+xml");
+        const usable = data.assets.filter((asset) => kind !== "image" || asset.mimeType !== "image/svg+xml");
         setAssets((current) => (append && current ? [...current, ...usable] : usable));
         setTotal(data.total);
         setStorageReady(data.storage.ready);
       });
     },
-    [search],
+    [search, kind],
   );
 
   useEffect(() => {
@@ -147,23 +157,28 @@ export function MediaPickerDialog({
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="جست‌وجو در تصاویر کتابخانه…"
           />
-          <Button
-            variant="outline"
-            disabled={busy || !storageReady}
-            onClick={() => fileInput.current?.click()}
-          >
-            {busy ? "در حال بارگذاری…" : "بارگذاری تصویر"}
-          </Button>
-          <input
-            ref={fileInput}
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            className="hidden"
-            onChange={(e) => {
-              upload(e.target.files);
-              e.target.value = "";
-            }}
-          />
+          {canUpload ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy || !storageReady}
+                onClick={() => fileInput.current?.click()}
+              >
+                {busy ? "در حال بارگذاری…" : kind === "image" ? "بارگذاری تصویر" : "بارگذاری فایل"}
+              </Button>
+              <input
+                ref={fileInput}
+                type="file"
+                accept={ACCEPTED_FILE_TYPES[kind]}
+                className="hidden"
+                onChange={(e) => {
+                  upload(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+            </>
+          ) : null}
         </div>
 
         {!storageReady ? (
@@ -187,9 +202,14 @@ export function MediaPickerDialog({
                   className="group overflow-hidden rounded-xl border border-border transition-colors hover:border-ring"
                   title={asset.fileName}
                 >
-                  <span className="block aspect-square overflow-hidden bg-muted">
-                    { }
-                    <img src={mediaFileUrl(asset.id)} alt={asset.fileName} loading="lazy" className="size-full object-cover" />
+                  <span className="flex aspect-square items-center justify-center overflow-hidden bg-muted">
+                    {asset.mimeType.startsWith("image/") ? (
+                      <img src={mediaFileUrl(asset.id)} alt={asset.fileName} loading="lazy" className="size-full object-cover" />
+                    ) : asset.mimeType.startsWith("video/") ? (
+                      <video src={mediaFileUrl(asset.id)} aria-label={asset.fileName} muted preload="metadata" className="size-full object-cover" />
+                    ) : (
+                      <span aria-hidden="true" className="text-3xl">📄</span>
+                    )}
                   </span>
                   <span className="block truncate px-1.5 py-1 text-[11px] text-muted-foreground">{asset.fileName}</span>
                 </button>

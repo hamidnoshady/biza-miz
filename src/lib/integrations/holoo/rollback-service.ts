@@ -7,6 +7,7 @@
  * refused before any tenant data is touched.
  */
 import { getPool } from "../../db";
+import { AccountsError, lockChartOfAccounts, recordAccountAudit } from "../../accounts-service";
 
 interface RunMapping extends Record<string, unknown> {
   entity_type: string;
@@ -215,14 +216,68 @@ export async function rollbackImportRun(
       reverted.holoo_journal = rowCount ?? 0;
     }
 
-    // Accounts (journal_lines already gone; parent_id self-ref is SET NULL).
+    // Accounts. The chart lock is taken first, as every hierarchy writer does,
+    // so the children check below cannot race an editor. Two refusals keep the
+    // rollback from quietly damaging the chart:
+    //  - a child that is not part of this run (a user-added sub-account under
+    //    an imported parent) would otherwise be re-rooted by `parent_id`'s
+    //    ON DELETE SET NULL, keeping a non-group level at the top;
+    //  - a draft line referencing an account would fail the RESTRICT foreign key.
+    // The run is refused as a whole, so nothing else in the rollback is applied.
     const accountIds = ids("holoo_account");
     if (accountIds.length) {
-      const { rowCount } = await client.query(
-        `DELETE FROM accounts WHERE id = ANY($1::uuid[]) AND business_id = $2`,
+      await lockChartOfAccounts(client, businessId);
+      const { rows: postings } = await client.query(
+        `SELECT 1 FROM journal_lines WHERE account_id = ANY($1::uuid[]) LIMIT 1`,
+        [accountIds],
+      );
+      if (postings.length > 0) throw new AccountsError("account_has_postings", 409);
+      const { rows: drafts } = await client.query(
+        `SELECT 1 FROM journal_entry_draft_lines WHERE account_id = ANY($1::uuid[]) LIMIT 1`,
+        [accountIds],
+      );
+      if (drafts.length > 0) throw new AccountsError("account_has_draft_postings", 409);
+      const { rows: strays } = await client.query(
+        `SELECT 1 FROM accounts
+          WHERE business_id = $2 AND parent_id = ANY($1::uuid[]) AND NOT (id = ANY($1::uuid[]))
+          LIMIT 1`,
         [accountIds, businessId],
       );
-      reverted.holoo_account = rowCount ?? 0;
+      if (strays.length > 0) throw new AccountsError("account_has_children", 409);
+
+      const { rows: victims } = await client.query<{
+        id: string;
+        code: string;
+        name: string;
+        type: string;
+        level: string;
+        is_contra: boolean;
+      }>(
+        `SELECT id, code, name, type::text AS type, level::text AS level, is_contra
+           FROM accounts WHERE id = ANY($1::uuid[]) AND business_id = $2 ORDER BY code`,
+        [accountIds, businessId],
+      );
+      try {
+        // Every victim is in the set, so no child is orphaned by the delete.
+        for (const victim of victims) {
+          await client.query(`DELETE FROM accounts WHERE id = $1 AND business_id = $2`, [victim.id, businessId]);
+          await recordAccountAudit(client, businessId, null, "account.deleted", victim.id, {
+            code: victim.code,
+            name: victim.name,
+            type: victim.type,
+            level: victim.level,
+            isContra: victim.is_contra,
+            source: "holoo_rollback",
+            importRunId: runId,
+          });
+        }
+      } catch (err) {
+        if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23503") {
+          throw new AccountsError("account_has_postings", 409);
+        }
+        throw err;
+      }
+      reverted.holoo_account = victims.length;
     }
 
     // Goods — could be menu_items (food service) or items (retail).

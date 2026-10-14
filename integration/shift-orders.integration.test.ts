@@ -636,4 +636,57 @@ describe("getShiftOrdersReport", () => {
     expect(second!.orders.map((order) => order.orderNumber)).toEqual([1]);
     expect([...first!.orders, ...second!.orders].every((order) => order.customerName === "علی رضایی")).toBe(true);
   });
+
+  /**
+   * Issue #819: one «جمع» over every status added a voided bill and two open
+   * tables to real revenue. The headline is settled sales now, and the rest is
+   * kept beside it as context.
+   */
+  it("splits the headline by status instead of summing open, held and voided into sales", async () => {
+    await insertShift(mainId, "2026-08-12T06:00:00Z", null);
+
+    async function insertWithStatus(orderNumber: number, status: string, total: number) {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO orders (location_id, order_number, type, status, total, subtotal, opened_at, closed_at, closed_by)
+         VALUES ($1, $2, 'dine_in', $3::order_status, $4, $4, $5, $6, $7) RETURNING id`,
+        [
+          mainId,
+          orderNumber,
+          status,
+          total,
+          `2026-08-12T0${orderNumber + 6}:00:00Z`,
+          status === "completed" ? `2026-08-12T0${orderNumber + 6}:30:00Z` : null,
+          status === "completed" ? employeeId : null,
+        ],
+      );
+      return rows[0].id;
+    }
+
+    const completed = await insertWithStatus(1, "completed", 1_000_000);
+    await db.query(
+      `INSERT INTO payments (location_id, order_id, method, amount, received_by, received_at)
+       VALUES ($1, $2, 'cash', 1_000_000, $3, '2026-08-12T07:30:00Z')`,
+      [mainId, completed, employeeId],
+    );
+    await insertWithStatus(2, "open", 500_000);
+    await insertWithStatus(3, "held", 300_000);
+    await insertWithStatus(4, "voided", 800_000);
+
+    const report = await asBusiness(() => shiftOrders.getShiftOrdersReport(mainId));
+    expect(report!.summary).toEqual({
+      matchingCount: 4,
+      completedCount: 1,
+      completedAmount: 1_000_000,
+      openCount: 1,
+      openAmount: 500_000,
+      heldCount: 1,
+      heldAmount: 300_000,
+      voidedCount: 1,
+      voidedAmount: 800_000,
+    });
+    // The legacy face-value total still adds every matched order — it is what
+    // the export's row total was built from — but no screen calls it «جمع».
+    expect(report!.totalAmount).toBe(2_600_000);
+    expect(report!.totalCount).toBe(4);
+  });
 });

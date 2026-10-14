@@ -71,6 +71,17 @@ export interface ReceiptLine {
     warrantyMonths?: number | null;
     warrantyEndDate?: string | null;
   } | null;
+  /**
+   * Issue #839 §8 — a vehicle line's identity, printed so the customer's copy
+   * says exactly which car was sold (its stock number and, where it has one,
+   * its VIN/chassis/plate). Absent on every non-vehicle line.
+   */
+  vehicle?: {
+    stockNumber: string;
+    vin?: string | null;
+    chassisNumber?: string | null;
+    plateNumber?: string | null;
+  } | null;
 }
 
 /**

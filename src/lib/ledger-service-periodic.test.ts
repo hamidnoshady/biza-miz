@@ -40,6 +40,7 @@ function scriptedClient(accounts: Record<string, string> = ACCOUNTS) {
       }
       if (flat.includes("INSERT INTO journal_entries")) return { rows: [{ id: "entry-1" }] };
       if (flat.includes("INSERT INTO journal_lines")) return { rows: [] };
+      if (flat.includes("SELECT set_config('app.fiscal_constructing_entry_id'")) return { rows: [] };
       throw new Error(`unexpected query: ${flat}`);
     },
   } as unknown as PoolClient;

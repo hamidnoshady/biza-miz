@@ -120,6 +120,72 @@ export interface Party extends Record<string, unknown> {
   updatedAt?: string;
 }
 
+/**
+ * Issue #854 (pass 4, gap 5) — canonical identity ownership for a linked
+ * personnel file.
+ *
+ * A personnel party linked to a membership (`employee_user_id`) shares three
+ * fields with the membership row: the name, the email and the phone number.
+ * Ownership of those three is deliberately one-directional — the membership
+ * (and the global identity behind it) is the canonical owner of the login
+ * identity fields, while the party owns the HR-only columns (address, notes,
+ * national ID, accounting code, categories…). Before this rule, an edit to a
+ * linked party's email, phone or name wrote a second copy that could quietly
+ * disagree with the member's login identity — an identity drift no consumer
+ * downstream was positioned to notice.
+ *
+ * The rule: a write that would make one of the three shared fields *differ*
+ * from the membership is refused with a named error whose sentence sends the
+ * editor to the team screen that owns those fields. Writes that bring the
+ * party *in line* with the membership are allowed — that is the repair
+ * direction, and `ensureEmployeeParty` is how the fields travel
+ * (membership → party, never the other way round). Fields the write does not
+ * change are never the reason for a refusal, so pre-existing drift on one
+ * column cannot lock an unrelated edit on another.
+ */
+async function assertLinkedPartyFollowsCanonicalIdentity(
+  businessId: string,
+  args: {
+    employeeUserId: string;
+    next: { displayName: string; email: string | null; phoneE164: string | null };
+    /** The party's current values; null on creation, where everything is new. */
+    previous: { displayName: string; email: string | null; phoneE164: string | null } | null;
+  },
+): Promise<void> {
+  const { rows } = await query<{
+    full_name: string;
+    email: string | null;
+    phone_e164: string | null;
+  }>(
+    "SELECT full_name, email::text AS email, phone_e164 FROM users WHERE id = $1 AND business_id = $2",
+    [args.employeeUserId, businessId],
+  );
+  const member = rows[0];
+  // A dangling link (the membership is gone) owns nothing; the column's own
+  // ON DELETE SET NULL settles it, and there is no canonical value to defend.
+  if (!member) return;
+
+  const previous = args.previous ?? { displayName: "", email: null, phoneE164: null };
+  const memberEmail = member.email ?? null;
+  const memberPhone = member.phone_e164 ?? null;
+
+  // A blank name makes no identity claim (creation before the member is named);
+  // only a *named* write can disagree with the canonical one.
+  if (
+    args.next.displayName.trim() !== "" &&
+    args.next.displayName !== previous.displayName &&
+    args.next.displayName !== member.full_name
+  ) {
+    throw new PartyValidationError("identity_name_managed_by_membership", "displayName");
+  }
+  if ((args.next.email ?? null) !== previous.email && (args.next.email ?? null) !== memberEmail) {
+    throw new PartyValidationError("identity_email_managed_by_membership", "email");
+  }
+  if (args.next.phoneE164 !== previous.phoneE164 && args.next.phoneE164 !== memberPhone) {
+    throw new PartyValidationError("identity_phone_managed_by_membership", "phone");
+  }
+}
+
 /** A rejected write, named. The route turns the code into a 400 and a Persian message. */
 export class PartyValidationError extends Error {
   constructor(
@@ -1067,6 +1133,19 @@ export async function createParty(
   const phoneCols = phoneColumns(write.phone, dek);
   const identity = identityColumns(write.nationalId, write.economicCode, dek);
 
+  // Issue #854 (pass 4, gap 5) — even a creation may not link itself to a
+  // membership while carrying an identity that disagrees with it.
+  const linkedMembershipId = write.roles.includes("Employee")
+    ? (write.employeeUserId ?? null)
+    : null;
+  if (linkedMembershipId) {
+    await assertLinkedPartyFollowsCanonicalIdentity(businessId, {
+      employeeUserId: linkedMembershipId,
+      next: { displayName: write.displayName, email: write.email, phoneE164: phoneCols.e164 },
+      previous: null,
+    });
+  }
+
   // Three attempts at the code, then give up: a fourth collision means something
   // other than a race is wrong, and a clearer error beats a loop.
   let lastError: unknown = null;
@@ -1212,6 +1291,21 @@ export async function updateParty(
     await assertProfileImageAssetOwned(businessId, write.profileImageAssetId);
   }
 
+  const phoneCols = phoneColumns(write.phone, dek);
+  // Issue #854 (pass 4, gap 5) — a linked personnel file may not grow an
+  // identity that disagrees with its membership's login fields.
+  if (existing.employeeUserId) {
+    await assertLinkedPartyFollowsCanonicalIdentity(businessId, {
+      employeeUserId: existing.employeeUserId,
+      next: { displayName: write.displayName, email: write.email, phoneE164: phoneCols.e164 },
+      previous: {
+        displayName: existing.displayName,
+        email: existing.email,
+        phoneE164: phoneE164(existing.phone),
+      },
+    });
+  }
+
   const sets: string[] = [];
   const params: unknown[] = [businessId, id];
   function add(column: string, value: unknown) {
@@ -1248,7 +1342,6 @@ export async function updateParty(
   // ciphertext would leave a row the next reader silently reads from the stale
   // `_enc` value — the one failure mode of a dual-write window, and the reason
   // the 0137 trigger exists to catch the same mistake from the other side.
-  const phoneCols = phoneColumns(write.phone, dek);
   add("phone", write.phone);
   add("phone_enc", phoneCols.enc);
   add("phone_bidx", phoneCols.bidx);
@@ -1318,7 +1411,31 @@ export async function updateCustomer(
  * membership above and the personnel file below are two views of one person —
  * is only true if a rename travels to both. A caller that names no name (the
  * suspend button, a status flip) changes nothing but the party's existence.
+ *
+ * Issue #854 (pass 4, gap 5) — the same one-directional repair carries the
+ * login phone and email: the membership is the canonical owner of the login
+ * identity fields, and when it changes them (`setMemberPhone`, creation) this
+ * is the path that brings the personnel file back in line. The reverse
+ * direction — a party edit rewriting the identity — is refused by
+ * `assertLinkedPartyFollowsCanonicalIdentity`, so these three fields have
+ * exactly one writer: the membership.
  */
+/**
+ * The personnel file of one membership, or null while it does not exist yet.
+ * Issue #854 (pass 4, gap 5) — readers that need the file behind a member
+ * (the phone/identity sync, the team tab) all go through this one lookup.
+ */
+export async function getPartyByEmployee(
+  businessId: string,
+  userId: string,
+): Promise<Party | null> {
+  const { rows } = await query<{ id: string }>(
+    `SELECT id FROM parties WHERE business_id = $1 AND employee_user_id = $2`,
+    [businessId, userId],
+  );
+  return rows[0] ? getParty(businessId, rows[0].id) : null;
+}
+
 export async function ensureEmployeeParty(
   businessId: string,
   userId: string,
@@ -1330,8 +1447,14 @@ export async function ensureEmployeeParty(
   );
   const name = details.displayName?.trim() || null;
   if (rows[0]) {
-    if (!name) return getParty(businessId, rows[0].id);
-    return updateParty(businessId, rows[0].id, { displayName: name });
+    const patch: PartyInput = {};
+    if (name) patch.displayName = name;
+    if (details.phone !== undefined) patch.phone = details.phone;
+    if (details.email !== undefined) patch.email = details.email;
+    if (!name && details.phone === undefined && details.email === undefined) {
+      return getParty(businessId, rows[0].id);
+    }
+    return updateParty(businessId, rows[0].id, patch);
   }
   const created = await createParty(businessId, {
     role: "Employee",
@@ -1383,7 +1506,18 @@ export async function removeParty(businessId: string, id: string): Promise<Remov
        EXISTS (SELECT 1 FROM ar_receipts WHERE business_id = $1 AND customer_id = $2) AS has_receipts,
        EXISTS (SELECT 1 FROM customer_points WHERE business_id = $1 AND customer_id = $2) AS has_points,
        EXISTS (SELECT 1 FROM suppliers WHERE party_id = $2) AS has_supplier_rows,
-       EXISTS (SELECT 1 FROM parties p WHERE p.merged_into_id = $2) AS has_merges`,
+       EXISTS (SELECT 1 FROM parties p WHERE p.merged_into_id = $2) AS has_merges,
+       /*
+        * Issue #854 (P2.6): a personnel party linked to a membership is not
+        * disposable, whatever its other history says. employee_user_id
+        * points at the member with ON DELETE SET NULL, so nothing downstream
+        * would have stopped the hard delete — the check has to.
+        */
+       EXISTS (
+         SELECT 1 FROM parties mp
+           JOIN users u ON u.id = mp.employee_user_id
+          WHERE mp.business_id = $1 AND mp.id = $2
+       ) AS has_membership`,
     [businessId, id],
   );
   // A party with points (or store credit, which is only ever created for a party
@@ -1394,7 +1528,8 @@ export async function removeParty(businessId: string, id: string): Promise<Remov
     refRows[0]?.has_receipts ||
     refRows[0]?.has_points ||
     refRows[0]?.has_supplier_rows ||
-    refRows[0]?.has_merges;
+    refRows[0]?.has_merges ||
+    refRows[0]?.has_membership;
 
   if (hasHistory) {
     await query(`UPDATE parties SET is_active = false, updated_at = now() WHERE business_id = $1 AND id = $2`, [
