@@ -88,6 +88,27 @@ export interface WatchLineSnapshot extends RetailInvoiceLineSnapshotBase {
   } | null;
 }
 
+/**
+ * Issue #839 §8 — a car. The line identifies the *exact* vehicle (its stock
+ * number, VIN and chassis travel with the snapshot so a reprint can show which
+ * car was sold), the deposit the customer had already paid is recorded as
+ * applied rather than re-earned, and `frozenEffectiveCost` is the number COGS
+ * posted — kept so the margin on this line is reproducible years later even
+ * after the car's cost rows have moved on.
+ */
+export interface VehicleLineSnapshot extends RetailInvoiceLineSnapshotBase {
+  kind: "vehicle";
+  serialId: string;
+  serialNumber: string;
+  stockNumber: string;
+  vin: string | null;
+  chassisNumber: string | null;
+  plateNumber: string | null;
+  depositApplied: string;
+  reservationId: string | null;
+  frozenEffectiveCost: string;
+}
+
 export interface CosmeticLineSnapshot extends RetailInvoiceLineSnapshotBase {
   kind: "cosmetic";
   batchNumbers: string[];
@@ -106,6 +127,7 @@ export interface StockedLineSnapshot extends RetailInvoiceLineSnapshotBase {
 export type RetailInvoiceLineSnapshot =
   | GoldLineSnapshot
   | WatchLineSnapshot
+  | VehicleLineSnapshot
   | CosmeticLineSnapshot
   | AccessoryLineSnapshot
   | StockedLineSnapshot;

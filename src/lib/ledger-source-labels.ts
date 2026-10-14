@@ -31,6 +31,19 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   gold_buy_back: "خرید طلا از مشتری",
   gold_account_manual: "تعدیل حساب طلا",
   watch_sale: "فروش ساعت",
+  // Issue #839 — the automotive trade. `automotive_vehicle` is the shared
+  // source for the events that move the unit itself (acquisition, state
+  // changes, transfers and the sale's own entries): one car, one document
+  // series, so the journal does not grow a code per transition.
+  automotive_vehicle: "خودرو",
+  automotive_sale: "فروش خودرو",
+  automotive_vehicle_sale: "فروش خودرو",
+  automotive_vehicle_media: "رسانهٔ پروندهٔ خودرو",
+  automotive_vehicle_cost: "هزینهٔ خودرو",
+  automotive_vehicle_cost_void: "ابطال هزینهٔ خودرو",
+  automotive_vehicle_transfer: "انتقال خودرو بین شعب",
+  automotive_reservation_deposit: "بیعانهٔ رزرو خودرو",
+  automotive_reservation_deposit_refund: "بازگشت بیعانهٔ رزرو خودرو",
   custom_order_ticket: "سفارش ساخت",
   repair_ticket: "تعمیرات",
   serial_transfer: "انتقال دستگاه بین شعب",
@@ -81,6 +94,8 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   payroll_accrual_void: "ابطال تعهد حقوق",
   payroll_payment_void: "ابطال پرداخت حقوق",
   payroll_advance_void: "ابطال مساعده",
+  payroll_engine_accrual: "حقوق و دستمزد (موتور قانونی)",
+  payroll_engine_payment: "پرداخت حقوق (موتور قانونی)",
   // Commission settlement: a payout and the reversal of one (Growth → commission runs).
   commission_payout: "پرداخت پورسانت",
   commission_payout_reversal: "ابطال پرداخت پورسانت",

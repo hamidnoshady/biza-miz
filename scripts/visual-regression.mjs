@@ -63,6 +63,27 @@ const UPDATE = process.argv.includes("--update");
 const MAX_DIFF_RATIO = 0.005;
 
 /**
+ * The cheque register's own ceiling, by the owner's decision (2026-10-13).
+ * Its anchored frame is almost all small RTL table text, so it has more glyph
+ * edges per pixel than any other screen: CI measured 0.65% (light) and 0.52%
+ * (dark) on identical content against locally recorded baselines, text-edge
+ * rasterisation only. 1% absorbs that while a missing row, pill or callout
+ * still moves several percent. Prefer a per-screen field like this over
+ * raising MAX_DIFF_RATIO for every screen.
+ */
+const CHEQUE_REGISTER_MAX_DIFF_RATIO = 0.01;
+
+/**
+ * The browser's "now", frozen. A screen that counts days against today (the
+ * cheque register's «۱۸۸ روز گذشته» badges) otherwise renders a different
+ * number every day, and a baseline recorded on Monday fails on Thursday with
+ * nobody's code changed. The fixture's own dates are fixed (see
+ * scripts/seed-visual-fixture.ts), so the clock that reads them is too.
+ * Only `Date` is pinned; timers keep running, so loading still settles.
+ */
+const VISUAL_NOW = new Date("2026-10-10T08:30:00.000Z");
+
+/**
  * Per-channel colour tolerance for one pixel. CI's pinned Chromium is stable,
  * but GitHub runner font libraries still move edge antialiasing by more than
  * the old 12/255 threshold; 64 keeps glyph-edge noise out while black-vs-white
@@ -157,12 +178,14 @@ const SCREENS = [
     path: "/accounting/cheques",
     theme: "light",
     anchor: "table",
+    maxDiffRatio: CHEQUE_REGISTER_MAX_DIFF_RATIO,
   },
   {
     id: "accounting-cheques-dark",
     path: "/accounting/cheques",
     theme: "dark",
     anchor: "table",
+    maxDiffRatio: CHEQUE_REGISTER_MAX_DIFF_RATIO,
   },
   // — CRM —
   { id: "crm-overview", path: "/crm/overview", theme: "light" },
@@ -337,6 +360,7 @@ async function main() {
       (theme) => window.localStorage.setItem("theme", theme),
       screen.theme,
     );
+    await context.clock.setFixedTime(VISUAL_NOW);
     const page = await context.newPage();
     // NOT `networkidle`: this app holds an open WebSocket for live sync, so
     // the network is never idle and every navigation would time out. Wait for
@@ -443,7 +467,7 @@ async function main() {
     }
 
     const { mismatch, reason, diff, bounds } = comparePng(actual, readFileSync(baselinePath));
-    if (mismatch > MAX_DIFF_RATIO) {
+    if (mismatch > (screen.maxDiffRatio ?? MAX_DIFF_RATIO)) {
       mkdirSync(DIFF_DIR, { recursive: true });
       writeFileSync(join(DIFF_DIR, `${screen.id}.actual.png`), actual);
       if (diff) writeFileSync(join(DIFF_DIR, `${screen.id}.diff.png`), diff);

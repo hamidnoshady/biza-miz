@@ -21,6 +21,7 @@ const standaloneDir = path.join(nextDir, "standalone");
 const outDir = path.join(root, ".desktop-runtime");
 const require = createRequire(import.meta.url);
 const { nodeFileTrace } = require("next/dist/compiled/@vercel/nft");
+const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.cjs");
 
 function required(relativePath, explanation) {
   const absolute = path.join(root, relativePath);
@@ -143,6 +144,8 @@ async function main() {
   // Next's node-file-traced server dependency graph. This contains only the
   // runtime node_modules files reached by production routes, not root deps.
   await cp(standaloneDir, outDir, { recursive: true });
+  const removedTraceMetadata = await stripNextTraceMetadata(outDir);
+  console.log(`Removed ${removedTraceMetadata} build-only Next.js trace manifests from the desktop runtime`);
   await mkdir(path.join(outDir, ".next"), { recursive: true });
   await cp(path.join(nextDir, "static"), path.join(outDir, ".next", "static"), { recursive: true });
   await cp(path.join(root, "public"), path.join(outDir, "public"), { recursive: true });

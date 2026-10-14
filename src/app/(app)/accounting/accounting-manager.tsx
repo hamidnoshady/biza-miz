@@ -37,7 +37,7 @@ import { ReconciliationSection } from "./reconciliation-section";
 import { ChartOfAccountsSection } from "./chart-of-accounts-section";
 import { canEditChartOfAccounts } from "@/lib/coa-tree";
 import { ExpenseSection } from "./expense-section";
-import { PayrollSection } from "./payroll-section";
+import { PayrollWorkspace } from "./payroll-workspace";
 import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
@@ -468,7 +468,7 @@ export function AccountingManager({
             <ChartOfAccountsSection busy={busy} run={run} canEdit={canEditAccounts} />
           ) : null}
           {section === "payroll" ? (
-            <PayrollSection
+            <PayrollWorkspace
               busy={busy}
               run={run}
               refreshKey={refreshKey}

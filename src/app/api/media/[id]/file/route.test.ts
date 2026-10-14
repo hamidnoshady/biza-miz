@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import * as auth from "@/lib/auth";
 import * as mediaService from "@/lib/media-service";
 import * as mediaMirror from "@/lib/media-mirror";
+import * as automotiveAccess from "@/lib/automotive-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { GET } from "./route";
 
@@ -30,6 +31,11 @@ vi.mock("@/lib/media-service", () => ({
   isMediaStorageReady: vi.fn(() => true),
   readMediaObject: vi.fn(),
   getMediaAssetUsage: vi.fn(),
+  mediaAssetUsedByVehicleInLocations: vi.fn(),
+}));
+
+vi.mock("@/lib/automotive-access", () => ({
+  branchAccessForSession: vi.fn(),
 }));
 
 // A paired site's offline fallback: when the cloud bucket has no copy (or no
@@ -63,6 +69,11 @@ beforeEach(() => {
   vi.mocked(mediaService.isMediaStorageReady).mockReturnValue(true);
   vi.mocked(mediaService.readMediaObject).mockResolvedValue({ asset: IMAGE_ASSET, bytes: Buffer.from("x") } as never);
   vi.mocked(mediaService.getMediaAssetUsage).mockResolvedValue(EMPTY_USAGE as never);
+  vi.mocked(mediaService.mediaAssetUsedByVehicleInLocations).mockResolvedValue(false);
+  vi.mocked(automotiveAccess.branchAccessForSession).mockResolvedValue({
+    activeLocationId: "branch-1",
+    allowedLocationIds: ["branch-1"],
+  } as never);
   vi.mocked(mediaMirror.readMirroredMediaObject).mockResolvedValue(null);
 });
 
@@ -197,6 +208,29 @@ describe("GET /api/media/[id]/file — usage-based permission model", () => {
     // Documents never consult usage — "used by a catalogue item" does not
     // extend to reading a raw file kind that isn't image/video.
     expect(mediaService.getMediaAssetUsage).not.toHaveBeenCalled();
+  });
+
+  it("vehicles.view renders only assets attached to a vehicle in the member's allowed branches", async () => {
+    vi.mocked(auth.requireMember).mockResolvedValue({
+      session: SESSION,
+      membership: membershipWith(PERMISSIONS.vehiclesView),
+      error: null,
+    } as never);
+    vi.mocked(mediaService.mediaAssetUsedByVehicleInLocations)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    const inScope = await GET(req(), ctx());
+    expect(inScope.status).toBe(200);
+    expect(automotiveAccess.branchAccessForSession).toHaveBeenCalledWith(SESSION);
+    expect(mediaService.mediaAssetUsedByVehicleInLocations).toHaveBeenCalledWith(
+      "asset-1",
+      SESSION.businessId,
+      ["branch-1"],
+    );
+
+    const outsideScope = await GET(req(), ctx());
+    expect(outsideScope.status).toBe(403);
   });
 
   it("a member with none of the usage-granting permissions is refused an otherwise-used image", async () => {

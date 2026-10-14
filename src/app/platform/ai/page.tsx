@@ -585,6 +585,12 @@ export default function PlatformAiPage() {
                 <p>Gateway connection: <strong>{status ? (status.ok ? "آخرین آزمون موفق" : "آخرین آزمون ناموفق") : "آزمون نشده"}</strong></p>
                 <p>کلید مجازی: <strong>{branchReadiness?.virtualKeyRequired ? (branchReadiness.virtualKeyReady ? "آماده" : "نیازمند صدور/رفع خطا") : "الزامی نیست"}</strong></p>
                 <p>Runtime: <strong>{branchReadiness?.ready && branchReadiness.entitled ? "آماده" : "نیازمند تنظیم"}</strong></p>
+                {/* Audit F24: technical readiness is not commercial readiness. Affordability
+                    (wallet balance vs. the per-turn precheck) is a billing decision and is
+                    shown on the Billing tab, not inferred from this badge. */}
+                <p className="text-xs text-muted-foreground">
+                  «آماده» یعنی پیکربندی فنی کامل است؛ به‌معنای قابل‌پرداخت بودن برای کسب‌وکار نیست.
+                </p>
                 <p>منبع اعتبارنامه: <strong>{branchReadiness ? CREDENTIAL_SOURCE_FA[branchReadiness.credentialSource] : "—"}</strong></p>
                 <p>کلید کسب‌وکار: <strong>{branchReadiness?.businessHasKey ? "صادر شده" : "صادر نشده"}</strong></p>
                 {selectedLocationId ? (

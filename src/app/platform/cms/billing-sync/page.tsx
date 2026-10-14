@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { formatPersianNumber } from "@/lib/digits";
 import { api, Button, Card, ErrorBox, InfoBox, SkeletonRows, fmtDate } from "../../ui";
 import { cmsErrorText } from "../text";
+import { StructuredHealth } from "../structured-health";
 
 interface BillingSyncResponse {
   centralBillingHref?: string;
@@ -92,9 +93,7 @@ export default function CmsBillingSyncPage() {
         {data?.cmsHealthError ? (
           <ErrorBox>{cmsErrorText(data.cmsHealthError)}</ErrorBox>
         ) : data?.cmsHealth ? (
-          <pre className="max-h-64 overflow-auto rounded-lg bg-muted p-3 text-xs" dir="ltr">
-            {JSON.stringify(data.cmsHealth, null, 2)}
-          </pre>
+          <StructuredHealth data={data.cmsHealth} />
         ) : (
           <InfoBox>گزارش سلامت از سایت‌ساز در دسترس نیست.</InfoBox>
         )}

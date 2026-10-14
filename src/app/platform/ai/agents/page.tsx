@@ -113,6 +113,7 @@ export default function PlatformAiAgentsPage() {
   return (
     <div className="space-y-4">
       <AiConsoleNav />
+      <h1 className="text-xl font-bold">ایجنت‌های سیستمی</h1>
       <InfoBox>
         ایجنت‌های سیستمی فقط اینجا ساخته و نسخه‌گذاری می‌شوند؛ کسب‌وکار ایجنت نمی‌سازد و نمی‌گزیند. هر فهرست مجاز
         اینجا فقط می‌تواند «تنگ» کند: تقاطع ابزارهای پلتفرم با فهرست ایجنت، دسترسی بخش‌های کسب‌وکار، مجوزهای مؤثر
