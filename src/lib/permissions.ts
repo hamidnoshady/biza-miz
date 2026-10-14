@@ -344,6 +344,10 @@ export const PERMISSIONS = {
   rollupManage: "rollup.manage",
   // Phase 19: long-lived third-party credentials remain owner-only in V1.
   apiManage: "api.manage",
+  // Issue #883 P0-4: minting, narrowing, revoking and consenting to MCP
+  // connections — a machine credential with continuous read (and optional
+  // write) reach over a whole branch — is owner-only, exactly like api.manage.
+  mcpManage: "mcp.manage",
   /**
    * Issue #884 — seeing and revoking every Android installation registered
    * to the business, not only one's own. Not owner-only: a business that
@@ -495,6 +499,7 @@ export const PERMISSION_DEFINITIONS: readonly PermissionMetadata[] = ALL_PERMISS
     PERMISSIONS.backupConfigure,
     PERMISSIONS.backupExport,
     PERMISSIONS.backupRestore,
+    PERMISSIONS.mcpManage,
     PERMISSIONS.rollupManage,
   ]).has(key);
   const risk: PermissionRisk = ownerOnly ? "critical" : HIGH_RISK.has(key) ? "high" : "medium";
@@ -525,6 +530,7 @@ export const OWNER_ONLY_PERMISSIONS: readonly Permission[] = [
   PERMISSIONS.backupConfigure,
   PERMISSIONS.backupExport,
   PERMISSIONS.backupRestore,
+  PERMISSIONS.mcpManage,
   PERMISSIONS.rollupManage,
   // Issue #819 — the reporting-stack member of the cross-location trust
   // family, next to `rollup.manage` (cross-branch aggregation pushed between

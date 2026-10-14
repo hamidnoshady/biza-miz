@@ -27,7 +27,7 @@
  * parsing/valuation helpers below are covered in warehouse-document-service.test.ts.
  */
 import Decimal from "decimal.js";
-import { getPool, type PoolClient } from "./db";
+import { getPool, query, type PoolClient } from "./db";
 import {
   allocateRialByWeight,
   boundedRialText,
@@ -196,6 +196,63 @@ export interface CreateWarehouseDocumentParams {
  * Creates a warehouse document and posts it. Runs inside the caller's
  * transaction (`client`), exactly like `recordWasteInTransaction`.
  */
+export interface WarehouseDocumentListRow extends Record<string, unknown> {
+  id: string;
+  kind: WarehouseDocumentKind;
+  location_id: string;
+  location_name: string;
+  supplier_name: string | null;
+  recipient: string | null;
+  document_number: string | null;
+  note: string | null;
+  total_value_rial: string;
+  created_at: string;
+  created_by_name: string | null;
+  line_count: number;
+}
+
+/**
+ * The document list the warehouse screen paints — moved here verbatim from
+ * the route so GET and the MCP read share one definition (#883 batch L). The
+ * route keeps its 400 guards for malformed filters; the service assumes them
+ * already validated (uuid + kind).
+ */
+export async function listWarehouseDocuments(
+  businessId: string,
+  options: { kind?: WarehouseDocumentKind; locationId?: string; limit?: number } = {},
+): Promise<WarehouseDocumentListRow[]> {
+  const clauses = ["d.business_id = $1"];
+  const params: unknown[] = [businessId];
+  if (options.kind) {
+    params.push(options.kind);
+    clauses.push(`d.kind = $${params.length}`);
+  }
+  if (options.locationId) {
+    params.push(options.locationId);
+    clauses.push(`d.location_id = $${params.length}`);
+  }
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+  const { rows } = await query<WarehouseDocumentListRow>(
+    `SELECT d.id, d.kind, d.location_id, l.name AS location_name,
+            COALESCE(p.name, s.name) AS supplier_name,
+            d.recipient, d.document_number, d.note,
+            d.total_value_rial::text AS total_value_rial,
+            d.created_at, u.full_name AS created_by_name,
+            (SELECT count(*) FROM warehouse_document_lines l2
+              WHERE l2.document_id = d.id)::int AS line_count
+       FROM warehouse_documents d
+       JOIN locations l ON l.id = d.location_id
+       LEFT JOIN suppliers s ON s.id = d.supplier_id
+       LEFT JOIN parties p ON p.id = s.party_id AND p.business_id = $1
+       LEFT JOIN users u ON u.id = d.created_by
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY d.created_at DESC
+      LIMIT $${params.length + 1}`,
+    [...params, limit],
+  );
+  return rows;
+}
+
 export async function createWarehouseDocumentInTransaction(
   client: PoolClient,
   params: CreateWarehouseDocumentParams,
