@@ -356,7 +356,9 @@ describe("payroll workspace", () => {
     });
     // The PATCH lands before the calculate, never after.
     expect(requests.findIndex((r) => r.method === "PATCH")).toBeLessThan(requests.findIndex((r) => r.url.endsWith("/calculate")));
-    expect(await screen.findByText(/^بدهی/)).toBeTruthy();
+    // Anchored to the amount: the runs table's «بدهی کارکنان» header can still
+    // be mounted while the details render, and would make a bare /^بدهی/ ambiguous.
+    expect(await screen.findByText(/^بدهی\s*[۰-۹0-9]/)).toBeTruthy();
   });
 
   it("merges a typed edit without dropping an existing manual item or a hidden employee input", async () => {
