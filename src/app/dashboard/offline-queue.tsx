@@ -238,6 +238,41 @@ export interface ConnectionStatusSnapshot {
   deadLetters?: number;
   lastSuccessfulSyncAt?: string | null;
   error?: string | null;
+  /**
+   * Hybrid identity planes, reported separately from operational sync:
+   * memberships (`identitySync`) and the login-credential/PIN stage
+   * (`credentialSync`), plus the combined verdict. A membership snapshot can
+   * be healthy while a cloud-made staff PIN never arrived — the state this
+   * interface exists to keep visible.
+   */
+  identitySync?: {
+    state: string;
+    lastAttemptAt: string | null;
+    lastSuccessAt: string | null;
+    lastError: string | null;
+  } | null;
+  credentialSync?: {
+    state: string;
+    lastAttemptAt: string | null;
+    lastSuccessAt: string | null;
+    lastError: string | null;
+    membershipsExpected: number;
+    identitiesExpected: number;
+    identitiesLinked: number;
+    credentialsReceived: number;
+    pinsReceived: number;
+    pinsApplied: number;
+    /** Issue #850: staff PINs the cloud removed; the last pass revoked them here. */
+    pinsRevoked: number;
+    identitiesApplied: number;
+    pinMembersExpected: number;
+    pinMembersUsable: number;
+    pinMembersMissing: number;
+    missingIdentityBindings: number;
+    convergedAt: string | null;
+  } | null;
+  overallIdentity?: string;
+  identityError?: string | null;
 }
 
 export interface OfflineQueueState {

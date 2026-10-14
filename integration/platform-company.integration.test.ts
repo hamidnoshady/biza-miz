@@ -22,6 +22,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { createAppRole } from "../src/lib/create-app-role";
+import { workspaceAccessFlags } from "../src/lib/workspace-shared";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -1665,7 +1666,10 @@ describe("the internal company is excluded from the customer lifecycle", () => {
 describe("workspace reuse", () => {
   it("lists the internal company's projects through the shared engine", async () => {
     const list = await db.withTenant(internal.businessId, () =>
-      workspace.listWorkspaceProjects(internal.businessId, { limit: 20 }),
+      workspace.listWorkspaceProjects(
+        { businessId: internal.businessId, actorUserId: internal.userId, access: workspaceAccessFlags(new Set(["workspace.admin"])) },
+        { limit: 20 },
+      ),
     );
     expect(list.length).toBeGreaterThan(0);
     const fromDeal = list.find((project) => project.name === "پروژه استقرار");

@@ -87,7 +87,7 @@ logs for `Postgres is ready` → `Applying database migrations` →
 ### 4. First run
 
 Open `https://pos.example.com`. On an empty database it routes to `/welcome` to
-create the business + first Owner, then the 8-step setup wizard (see the README).
+create the business + first Owner, then the industry-shaped setup wizard (see the README).
 To skip the wizard with demo data instead, run a one-off `npm run db:seed`
 inside the app container (Komodo terminal / exec).
 

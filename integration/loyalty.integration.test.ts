@@ -74,6 +74,10 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // The order-item trigger requires a live open parent while cleaning up.
+  await db.query("UPDATE orders SET status = 'open'");
+  await db.query("DELETE FROM order_items");
+  await db.query("DELETE FROM orders");
   await db.query("DELETE FROM customer_points");
   await db.query("DELETE FROM loyalty_programs");
   await db.query("DELETE FROM domain_events");
@@ -411,5 +415,44 @@ describe("points", () => {
     });
     expect(updated).toMatchObject({ earnPointsPer100000: 0, pointValueRial: 2500, isDefault: true, isActive: true });
     expect(await loyaltyService.getDefaultProgram(biz.id)).toMatchObject({ id: updated.id, pointValueRial: 2500 });
+  });
+});
+
+describe("branch-scoped product repurchase", () => {
+  it("ignores order items attributed to a different location than the order", async () => {
+    const otherLocation = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Other') RETURNING id",
+      [biz.id],
+    );
+    const customerId = await createCustomer();
+    const product = await db.query<{ id: string }>(
+      "INSERT INTO menu_items (location_id, name, price) VALUES ($1, 'Repeat purchase', 1000) RETURNING id",
+      [biz.locationId],
+    );
+
+    // Only the first purchase belongs to this branch. The other two rows point
+    // at its orders but carry a different location_id; without the same-branch
+    // join they manufacture a regular, overdue purchase cadence.
+    const dates = ["2024-01-01", "2024-01-31", "2024-03-01"];
+    for (const [index, date] of dates.entries()) {
+      const order = await db.query<{ id: string }>(
+        `INSERT INTO orders (location_id, order_number, customer_id)
+         VALUES ($1, $2, $3) RETURNING id`,
+        [biz.locationId, index + 1, customerId],
+      );
+      await db.query(
+        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, status)
+         VALUES ($1, $2, $3, 'Repeat purchase', 1000, 'served')`,
+        [index === 0 ? biz.locationId : otherLocation.rows[0].id, order.rows[0].id, product.rows[0].id],
+      );
+      await db.query("UPDATE orders SET status = 'completed', closed_at = $2::timestamptz WHERE id = $1", [
+        order.rows[0].id,
+        `${date}T12:00:00Z`,
+      ]);
+    }
+
+    await expect(
+      loyaltyService.customersDueForRepurchase(biz.id, biz.locationId, "2024-04-10"),
+    ).resolves.toEqual([]);
   });
 });

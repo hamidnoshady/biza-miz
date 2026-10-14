@@ -108,7 +108,7 @@ app.prepare().then(async () => {
   type HostEnv = import("./src/lib/host").HostEnv;
   const { runRollupSyncTick } = await import("./src/lib/rollup-service");
   const { ROLLUP_SYNC_INTERVAL_MS } = await import("./src/lib/rollup");
-  const { runBackupTick } = await import("./src/lib/backup-service");
+  const { runBackupTick, runTenantSnapshotTick } = await import("./src/lib/backup-service");
   const { BACKUP_TICK_INTERVAL_MS } = await import("./src/lib/backup");
   const {
     runServerSyncTick,
@@ -143,7 +143,12 @@ app.prepare().then(async () => {
   const { runHolooPushTick, HOLOO_PUSH_TICK_INTERVAL_MS } = await import("./src/lib/integrations/holoo/push-service");
   const { runHolooReconciliationTick, HOLOO_RECONCILIATION_TICK_INTERVAL_MS } = await import("./src/lib/integrations/holoo/reconciliation-service");
   const { runNotificationTick, NOTIFICATION_TICK_INTERVAL_MS } = await import("./src/lib/notifications-service");
-  const { runLowStockScanTick, LOW_STOCK_SCAN_INTERVAL_MS } = await import("./src/lib/notification-scans");
+  const {
+    runLowStockScanTick,
+    LOW_STOCK_SCAN_INTERVAL_MS,
+    runAecOverdueScanTick,
+    AEC_OVERDUE_SCAN_INTERVAL_MS,
+  } = await import("./src/lib/notification-scans");
   // OpenObserve integration (docs/openobserve.md): taps console.* and
   // records errors/slow requests. No-op unless OPENOBSERVE_URL +
   // OPENOBSERVE_USER/PASSWORD are set — an install without a collector
@@ -237,19 +242,35 @@ app.prepare().then(async () => {
     runRollupSyncTick().catch((err) => console.error("rollup sync tick failed:", err));
   scheduleSiteTick(rollupTick, ROLLUP_SYNC_INTERVAL_MS, 30_000);
 
-  // Phase 10: scheduled backups. The tick just checks whether a schedule
-  // slot passed without a run (and re-nudges failed cloud uploads); failures
-  // land in backup_runs and surface as the dashboard alert.
-  const backupTick = () =>
+  // Phase 10 + issue #807: scheduled tenant backups, on a role-specific worker.
+  //
+  // The two deployment roles back a tenant up in two different ways, and the
+  // audit's critical finding was that one generic tick let the *physical*
+  // worker — a privileged whole-database `pg_dump` — run on central, where it
+  // captures every other tenant too. So the workers are separate and each is
+  // gated on the role *here*, at startup, in addition to the server-side guard
+  // inside backup-service:
+  //
+  //   site     → `runBackupTick`          physical `pg_dump` of the local DB
+  //   central  → `runTenantSnapshotTick`  logical, RLS-scoped tenant snapshots
+  //
+  // Neither worker depends on UI state, feature flags or business config for
+  // this boundary — only on the process's own resolved deployment role.
+  const siteBackupTick = () =>
     runBackupTick().catch((err) => console.error("backup tick failed:", err));
-  scheduleBackgroundTick(backupTick, BACKUP_TICK_INTERVAL_MS, 45_000);
+  scheduleSiteTick(siteBackupTick, BACKUP_TICK_INTERVAL_MS, 45_000);
+
+  const tenantSnapshotTick = () =>
+    runTenantSnapshotTick().catch((err) => console.error("tenant snapshot tick failed:", err));
+  scheduleCentralTick(tenantSnapshotTick, BACKUP_TICK_INTERVAL_MS, 45_000);
 
   // Migration 0132: the platform's own whole-database backup, on the schedule the
   // super-admin set in the console. Deliberately a second timer rather than a
   // step inside runBackupTick: the tenant loop is per-business and skips anything
   // whose own backup is disabled, and a deployment whose businesses all have
   // backups switched off must still be backed up — that install is exactly the
-  // one where the operator's copy is the only copy.
+  // one where the operator's copy is the only copy. Central-only by design: a
+  // site's own local dump is the site worker above.
   const { runPlatformBackupTick } = await import("./src/lib/platform-backup-service");
   const platformBackupTick = () =>
     runPlatformBackupTick().catch((err) => console.error("platform backup tick failed:", err));
@@ -326,6 +347,14 @@ app.prepare().then(async () => {
   const wooSyncTick = () =>
     runWooCommerceSyncTick().catch((err) => console.error("woocommerce sync tick failed:", err));
   scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 90_000);
+
+  // Issue #866: taxpayer invoices. Central, like the Woo outbox: the books are
+  // authoritative there. Each pass sends due records, inquires the ones awaiting
+  // an answer, and recovers any send whose lease ran out (never by resending).
+  const { runTaxInvoiceTick, TAX_INVOICE_TICK_INTERVAL_MS } = await import("./src/lib/tax-invoice-service");
+  const taxInvoiceTick = () =>
+    runTaxInvoiceTick().catch((err) => console.error("tax invoice tick failed:", err));
+  scheduleCentralTick(taxInvoiceTick, TAX_INVOICE_TICK_INTERVAL_MS, 110_000);
 
   // Phase 38 (issue #381): push product/stock/price changes to the business's
   // website through website_outbox — the WooCommerce tick's shape exactly
@@ -461,6 +490,14 @@ app.prepare().then(async () => {
   const lowStockScan = () =>
     runLowStockScanTick().catch((err) => console.error("low-stock scan failed:", err));
   scheduleBackgroundTick(lowStockScan, LOW_STOCK_SCAN_INTERVAL_MS, 120_000);
+
+  // Issue #799 §29 (Wave 6): the two constructed-world reminders, «RFI overdue»
+  // and «submittal overdue». Same reason as low stock for scanning rather than
+  // being told — a record becomes overdue by the passage of a date, not by a
+  // write — and the same engine for delivering it, per the issue's own rule.
+  const aecOverdueScan = () =>
+    runAecOverdueScanTick().catch((err) => console.error("AEC overdue scan failed:", err));
+  scheduleBackgroundTick(aecOverdueScan, AEC_OVERDUE_SCAN_INTERVAL_MS, 240_000);
 
   // Phase 37: drain the SMS/email marketing outbox. Producers only enqueue —
   // an owner clicking "send" must never wait on (or fail because of) an SMTP or

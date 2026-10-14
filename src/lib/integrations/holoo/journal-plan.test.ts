@@ -5,13 +5,13 @@ describe("normalizeLine", () => {
   it("nets a two-sided line to a single side", () => {
     expect(normalizeLine({ accountCode: "1100", debitRial: 100n, creditRial: 30n })).toEqual({
       accountCode: "1100",
-      debit: 70,
-      credit: 0,
+      debit: 70n,
+      credit: 0n,
     });
     expect(normalizeLine({ accountCode: "2100", debitRial: 30n, creditRial: 100n })).toEqual({
       accountCode: "2100",
-      debit: 0,
-      credit: 70,
+      debit: 0n,
+      credit: 70n,
     });
   });
 });
@@ -28,7 +28,7 @@ describe("normalizeVoucher", () => {
     };
     const n = normalizeVoucher(v);
     expect(n.balanced).toBe(true);
-    expect(n.difference).toBe(0);
+    expect(n.difference).toBe(0n);
   });
 
   it("flags an unbalanced voucher with the difference", () => {
@@ -42,7 +42,24 @@ describe("normalizeVoucher", () => {
     };
     const n = normalizeVoucher(v);
     expect(n.balanced).toBe(false);
-    expect(n.difference).toBe(10);
+    expect(n.difference).toBe(10n);
+  });
+
+  it("preserves exact Rial above Number.MAX_SAFE_INTEGER and rejects unsafe numeric inputs", () => {
+    const exact = "9007199254740993";
+    const voucher: HolooVoucher = {
+      remoteId: "exact",
+      entryDate: "2024-01-01",
+      lines: [
+        { accountCode: "1100", debitRial: exact },
+        { accountCode: "2100", creditRial: exact },
+      ],
+    };
+    expect(normalizeVoucher(voucher).lines[0].debit).toBe(9007199254740993n);
+    expect(() => normalizeLine({ accountCode: "1100", debitRial: Number.MAX_SAFE_INTEGER + 1 })).toThrow("invalid_holoo_amount");
+    expect(() => normalizeLine({ accountCode: "1100", debitRial: -1n })).toThrow("invalid_holoo_amount");
+    expect(() => normalizeVoucher({ ...voucher, entryDate: "2024-02-30" })).toThrow("invalid_holoo_date");
+    expect(() => planJournalImport([voucher, { ...voucher }])).toThrow("duplicate_holoo_remote_id:journal");
   });
 });
 

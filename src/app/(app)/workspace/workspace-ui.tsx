@@ -11,11 +11,12 @@
  * that is not already in `page-chrome.tsx`.
  */
 
-import { useMemo } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/app/dashboard/page-chrome";
-import { Field, inputClass, errorMessageOrRaw } from "@/app/dashboard/ui";
+import { Field, inputClass, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import {
@@ -51,13 +52,30 @@ const ERROR_TRANSLATIONS: Record<string, string> = {
   document_not_found: "سند پیدا نشد.",
   approval_not_found: "درخواست تأیید پیدا نشد.",
   approval_not_pending: "این درخواست پیش‌تر تعیین‌تکلیف شده است.",
+  subject_not_found: "موردی که به آن اشاره شده پیدا نشد یا به آن دسترسی ندارید.",
+  insufficient_project_role: "نقش شما در این پروژه اجازهٔ این کار را نمی‌دهد.",
+  not_the_approver: "این درخواست به شخص دیگری برای تأیید سپرده شده است.",
+  not_the_requester: "فقط درخواست‌کننده می‌تواند این درخواست را لغو کند.",
+  self_approval_forbidden: "نمی‌توانید درخواستی را که خودتان داده‌اید تأیید کنید.",
+  transfer_ownership_first: "این شخص مالک پروژه است؛ ابتدا مالکیت را به شخص دیگری منتقل کنید.",
+  phase_not_found: "فاز پیدا نشد.",
+  phase_not_in_project: "این فاز متعلق به پروژهٔ این وظیفه نیست.",
+  task_project_mismatch: "وظیفهٔ انتخاب‌شده متعلق به این پروژه نیست.",
+  contract_project_mismatch: "قرارداد انتخاب‌شده متعلق به این پروژه نیست.",
+  journal_entry_not_found: "سند حسابداری پیدا نشد.",
+  journal_entry_project_mismatch: "سند حسابداری برای پروژهٔ دیگری ثبت شده است.",
+  approval_project_mismatch: "پروژهٔ درخواست با پروژهٔ موضوع آن یکی نیست.",
+  media_not_found: "فایل انتخاب‌شده در کتابخانهٔ رسانه پیدا نشد.",
+  invalid_time: "ساعت واردشده معتبر نیست.",
+  invalid_contract_transition: "این اقدام در وضعیت فعلی قرارداد ممکن نیست؛ صفحه را تازه کنید.",
+  extension_not_later: "تاریخ تمدید باید بعد از پایان فعلی قرارداد باشد.",
+  end_date_required: "تاریخ پایان دورهٔ جدید را انتخاب کنید.",
   template_not_found: "قالب پیدا نشد.",
   party_not_found: "طرف حساب انتخاب‌شده معتبر نیست.",
   user_not_found: "کاربر انتخاب‌شده فعال نیست.",
-  not_a_project_member: "شما عضو این پروژه نیستید.",
-  insufficient_project_role: "نقش شما در این پروژه اجازهٔ این کار را نمی‌دهد.",
   last_owner_cannot_be_removed: "آخرین مالک پروژه را نمی‌توان حذف کرد.",
   dependency_cycle: "این وابستگی حلقه ایجاد می‌کند.",
+  dependency_unresolved: "تا وظایفی که این کار منتظر آن‌هاست انجام نشده‌اند، نمی‌توان آن را انجام‌شده زد.",
   dependency_across_projects: "وابستگی فقط میان وظایف یک پروژه ممکن است.",
   end_before_start: "تاریخ پایان نمی‌تواند پیش از تاریخ شروع باشد.",
   project_name_required: "نام پروژه الزامی است.",
@@ -310,6 +328,75 @@ export function PickerField({
 }
 
 /* ---------------------------------------------------------------------------
+ * Phone-width tables
+ * ------------------------------------------------------------------------- */
+
+/**
+ * A `DataTable`'s `tableClassName` that turns each row into a card below the
+ * `sm` breakpoint (#761 §20 — "do not shrink desktop tables"): the first cell
+ * is the card's title, every other cell a «label — value» line whose label is
+ * the cell's own `data-label`. Desktop is untouched; the header stays in the
+ * accessibility tree. A real matrix (the role-permission grid) keeps scrolling.
+ */
+export const stackedTableClass = [
+  "max-sm:block max-sm:[&_thead]:sr-only max-sm:[&_tbody]:block",
+  "max-sm:[&_tr]:block max-sm:[&_tr]:px-4 max-sm:[&_tr]:py-3",
+  "max-sm:[&_td]:flex max-sm:[&_td]:items-baseline max-sm:[&_td]:justify-between max-sm:[&_td]:gap-3 max-sm:[&_td]:px-0 max-sm:[&_td]:py-1",
+  "max-sm:[&_td]:before:shrink-0 max-sm:[&_td]:before:text-xs max-sm:[&_td]:before:text-muted-foreground max-sm:[&_td]:before:content-[attr(data-label)]",
+  "max-sm:[&_td:first-child]:block max-sm:[&_td:first-child]:pb-2 max-sm:[&_td:first-child]:font-semibold max-sm:[&_td:first-child]:before:hidden",
+].join(" ");
+
+/* ---------------------------------------------------------------------------
+ * Form dialog
+ * ------------------------------------------------------------------------- */
+
+const DIALOG_WIDTH = { lg: "sm:max-w-lg", xl: "sm:max-w-xl", "2xl": "sm:max-w-2xl" } as const;
+
+/**
+ * The one create/edit/decide dialog shell every section uses (#761 §24) — the
+ * platform's Radix `Dialog`, so it is a labelled modal that traps focus,
+ * closes on Escape and hands focus back to whatever opened it — a button or a
+ * table row (there is no `DialogTrigger`, so Radix alone would drop focus on
+ * <body>). A click outside does NOT close it: a half-filled form must not
+ * vanish on a stray tap.
+ */
+export function WorkspaceFormDialog({
+  title,
+  width = "2xl",
+  onClose,
+  children,
+}: {
+  title: ReactNode;
+  width?: keyof typeof DIALOG_WIDTH;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const [opener] = useState(() =>
+    typeof document === "undefined" ? null : (document.activeElement as HTMLElement | null),
+  );
+  return (
+    <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
+      <DialogContent
+        aria-describedby={undefined}
+        onInteractOutside={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => {
+          if (opener?.isConnected) {
+            event.preventDefault();
+            opener.focus();
+          }
+        }}
+        className={cn("gap-0 p-0", DIALOG_WIDTH[width])}
+      >
+        <DialogHeader className="border-b border-border/80 p-4 pe-12">
+          <DialogTitle className="text-base font-semibold">{title}</DialogTitle>
+        </DialogHeader>
+        {children}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ---------------------------------------------------------------------------
  * Misc
  * ------------------------------------------------------------------------- */
 
@@ -351,6 +438,35 @@ export function TagList({ tags }: { tags: readonly string[] }) {
           {tag}
         </span>
       ))}
+    </div>
+  );
+}
+
+/**
+ * The footer of a paginated list: how many of the server's filter-aware total
+ * are on screen, and the button that loads the next page. Renders nothing once
+ * everything is loaded.
+ */
+export function LoadMoreFooter({
+  loaded,
+  page,
+  loading,
+  onLoadMore,
+}: {
+  loaded: number;
+  page: { total: number; hasMore: boolean } | null;
+  loading: boolean;
+  onLoadMore: () => void;
+}) {
+  if (!page?.hasMore) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-border/80 px-4 py-3 text-sm text-muted-foreground">
+      <span>
+        {toPersianDigits(String(loaded))} از {toPersianDigits(String(page.total))}
+      </span>
+      <SecondaryButton onClick={onLoadMore} disabled={loading}>
+        {loading ? "در حال بارگذاری…" : "نمایش بیشتر"}
+      </SecondaryButton>
     </div>
   );
 }

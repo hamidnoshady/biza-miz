@@ -589,10 +589,14 @@ describe("the accounting review", () => {
     void comped;
   });
 
-  // reconciliation-service.ts reconciles cash (1100) and bank-clearing (1120).
-  // The review used to look at 1110 — the business's own bank account, which no
-  // reconciliation can ever clear — and skipped 1100 entirely, so it counted
-  // lines nobody could act on while missing the ones they could.
+  // The review counts the lines «تطبیق بانکی و صندوق» can actually clear, taken
+  // from the same `RECONCILABLE_ACCOUNT_CODES` the reconciliation service reads.
+  // It has drifted twice: first it looked at 1110 + 1120 and skipped the till,
+  // then it was "corrected" to 1100 + 1120 on the reasoning that no
+  // reconciliation could ever clear the business's own bank account. Phase 30
+  // made that false — a cheque clears *into* 1110 — so a cheque-taking business
+  // accumulated unclaimed bank movements this check reported as clean (issue
+  // #830). All three accounts, one list.
   it("counts exactly the lines the reconciliation screen can clear", async () => {
     const review = await import("../src/lib/accounting-review-service");
 
@@ -619,9 +623,11 @@ describe("the accounting review", () => {
 
     const result = await dbLib.withTenant(shop.businessId, () => review.runAccountingReview(shop.businessId));
     const finding = result.findings.find((row) => row.code === "unreconciled_bank_lines");
-    // Cash + card-clearing, and not the untouchable bank line.
-    expect(finding?.count).toBe(2);
-    expect(finding?.amountRial).toBe(400_000);
+    // Cash + bank + card-clearing: every account the screen can reconcile, and
+    // the finding says so by name rather than listing two of the three.
+    expect(finding?.count).toBe(3);
+    expect(finding?.amountRial).toBe(600_000);
+    expect(finding?.detail).toContain("بانک");
 
     await db.query("DELETE FROM journal_lines WHERE entry_id = $1", [entry.rows[0].id]);
     await db.query("DELETE FROM journal_entries WHERE id = $1", [entry.rows[0].id]);

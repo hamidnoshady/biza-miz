@@ -24,17 +24,29 @@ import {
   WORKSPACE_SECTIONS,
   WORKSPACE_SECTION_LABELS,
   addDays,
+  allowedContractActions,
+  contractLifecycleChange,
+  approvalDecisionError,
   builtinTemplate,
   compareTasksForList,
   completionPercent,
   contractNeedsReminder,
+  effectiveProjectRole,
+  intervalOrdered,
+  projectCapabilities,
+  workspaceAccessFlags,
   daysUntil,
   deadlineTone,
+  dependencyBlocksStatus,
+  planTemplateApplication,
+  projectHealth,
+  weekStartSaturday,
   dependenciesSatisfied,
   isWorkspaceSection,
   normalizeTags,
   phasesFromTemplate,
   roleAtLeast,
+  templatesForIndustry,
   roleCan,
   wouldCreateDependencyCycle,
 } from "./workspace-shared";
@@ -261,6 +273,47 @@ describe("templates", () => {
     expect(builtinTemplate("nope")).toBeNull();
   });
 
+  it("keeps the industry's own blueprints out of every other trade (#799 §4)", () => {
+    const generic = templatesForIndustry(BUILTIN_TEMPLATES, "food_service");
+    const aec = templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction");
+    const aecKeys = new Set(aec.map((t) => t.key));
+
+    // All six of the issue's AEC sequences are present for the AEC industry
+    // and absent for a café — the one-directional rule that keeps a
+    // restaurant from being offered «پیمانکاری عمومی».
+    for (const key of [
+      "aec_architecture_design",
+      "aec_civil_structural",
+      "aec_general_contractor",
+      "aec_design_build",
+      "aec_interior_renovation",
+      "aec_consulting_supervision",
+    ]) {
+      expect(aecKeys.has(key), key).toBe(true);
+      expect(generic.some((t) => t.key === key), key).toBe(false);
+    }
+    // …and the generic families survive in both.
+    expect(generic.some((t) => t.key === "construction")).toBe(true);
+    expect(aecKeys.has("construction")).toBe(true);
+  });
+
+  it("recommends a profile's blueprints first without hiding the others", () => {
+    const contractor = templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction", "contractor");
+    const recommended = contractor.filter((t) => t.recommended);
+    expect(recommended.map((t) => t.key)).toContain("aec_general_contractor");
+    // Filtering, not gating: the fit-out blueprint is still offered.
+    expect(contractor.some((t) => t.key === "aec_interior_renovation")).toBe(true);
+    // Recommended first, and the flag is honest about which are which.
+    expect(contractor.slice(0, recommended.length).every((t) => t.recommended)).toBe(true);
+    expect(templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction", null).every((t) => !t.recommended)).toBe(true);
+  });
+
+  it("treats an unknown industry as generic-only", () => {
+    const unknown = templatesForIndustry(BUILTIN_TEMPLATES, null);
+    expect(unknown.some((t) => t.industry)).toBe(false);
+    expect(unknown.length).toBeGreaterThan(0);
+  });
+
   it("expands into ordered phases, undated when the project has no start", () => {
     const template = builtinTemplate("software");
     expect(template).not.toBeNull();
@@ -291,5 +344,206 @@ describe("templates", () => {
     // The second phase begins where the first ended — the cursor carries.
     expect(phases[1].startDate).toBe("2026-03-11");
     expect(phases[1].endDate).toBe("2026-03-16");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * #761 — the access model's pure half
+ * ------------------------------------------------------------------------- */
+
+describe("workspaceAccessFlags", () => {
+  it("never treats workspace.view or workspace.manage as an override", () => {
+    expect(workspaceAccessFlags(new Set(["workspace.view", "workspace.manage"])).override).toBeNull();
+  });
+  it("gives workspace.admin the administer override and ledger.view the read one", () => {
+    expect(workspaceAccessFlags(new Set(["workspace.admin"])).override).toBe("administer");
+    expect(workspaceAccessFlags(new Set(["ledger.view"])).override).toBe("read");
+    expect(workspaceAccessFlags(new Set(["ledger.view"])).canViewFinancials).toBe(true);
+    expect(workspaceAccessFlags(new Set()).canViewFinancials).toBe(false);
+  });
+});
+
+describe("effectiveProjectRole", () => {
+  it("takes the stronger of membership and override, and null with neither", () => {
+    expect(effectiveProjectRole(null, null)).toBeNull();
+    expect(effectiveProjectRole("viewer", "administer")).toBe("manager");
+    expect(effectiveProjectRole("owner", "administer")).toBe("owner");
+    expect(effectiveProjectRole(null, "read")).toBe("viewer");
+    expect(effectiveProjectRole("editor", "read")).toBe("editor");
+  });
+});
+
+describe("projectCapabilities", () => {
+  const flags = (perms: string[]) => workspaceAccessFlags(new Set(perms));
+  it("intersects the project role with the platform permission", () => {
+    // An editor on the project without workspace.manage still cannot write.
+    const caps = projectCapabilities("editor", flags(["workspace.view"]));
+    expect(caps.canView).toBe(true);
+    expect(caps.canEdit).toBe(false);
+    expect(projectCapabilities("editor", flags(["workspace.manage"])).canEdit).toBe(true);
+    expect(projectCapabilities("viewer", flags(["workspace.manage"])).canEdit).toBe(false);
+    expect(projectCapabilities(null, flags(["workspace.manage"])).canView).toBe(false);
+  });
+  it("shows spend only to a ledger reader", () => {
+    expect(projectCapabilities("owner", flags(["workspace.manage"])).canViewFinancials).toBe(false);
+    expect(projectCapabilities("viewer", flags(["ledger.view"])).canViewFinancials).toBe(true);
+  });
+});
+
+describe("approvalDecisionError", () => {
+  const base = {
+    actorUserId: "me", requestedBy: "them", approverUserId: null,
+    isAdministrator: false, canManageSubject: false,
+  } as const;
+  it("forbids deciding your own request, even as administrator", () => {
+    expect(approvalDecisionError({ ...base, decision: "approved", requestedBy: "me", isAdministrator: true }))
+      .toBe("self_approval_forbidden");
+  });
+  it("reserves a named request for its approver or an administrator", () => {
+    expect(approvalDecisionError({ ...base, decision: "approved", approverUserId: "x", canManageSubject: true }))
+      .toBe("not_the_approver");
+    expect(approvalDecisionError({ ...base, decision: "rejected", approverUserId: "me" })).toBeNull();
+    expect(approvalDecisionError({ ...base, decision: "changes_requested", approverUserId: "x", isAdministrator: true }))
+      .toBeNull();
+  });
+  it("lets a project manager decide an unassigned request", () => {
+    expect(approvalDecisionError({ ...base, decision: "approved" })).toBe("insufficient_project_role");
+    expect(approvalDecisionError({ ...base, decision: "approved", canManageSubject: true })).toBeNull();
+  });
+  it("lets only the requester (or an administrator) withdraw", () => {
+    expect(approvalDecisionError({ ...base, decision: "cancelled" })).toBe("not_the_requester");
+    expect(approvalDecisionError({ ...base, decision: "cancelled", requestedBy: "me" })).toBeNull();
+  });
+});
+
+describe("intervalOrdered", () => {
+  it("accepts open ends and equal bounds, refuses a reversed interval", () => {
+    expect(intervalOrdered(null, "2026-01-01")).toBe(true);
+    expect(intervalOrdered("2026-01-01", "2026-01-01")).toBe(true);
+    expect(intervalOrdered("2026-02-01", "2026-01-01")).toBe(false);
+    expect(intervalOrdered("10:00", "09:30")).toBe(false);
+  });
+});
+
+describe("projectHealth", () => {
+  const base = {
+    today: "2026-06-01", startDate: "2026-01-01", endDate: "2026-12-31", completed: false,
+    taskCount: 10, doneTaskCount: 5, overdueTaskCount: 0, budgetRial: 1000, spentRial: 100,
+    pendingApprovals: 0, expiringContracts: 0,
+  };
+  it("is on track when progress keeps pace with time", () => {
+    expect(projectHealth(base)).toMatchObject({ health: "on_track", reasons: [] });
+  });
+  it("flags trailing progress as at risk, then off track", () => {
+    expect(projectHealth({ ...base, doneTaskCount: 3 }).health).toBe("at_risk");
+    expect(projectHealth({ ...base, doneTaskCount: 1 })).toMatchObject({
+      health: "off_track", reasons: ["behind_schedule"],
+    });
+  });
+  it("puts severe reasons first and never judges budget without the ledger", () => {
+    const r = projectHealth({ ...base, spentRial: 1200, overdueTaskCount: 2 });
+    expect(r.health).toBe("off_track");
+    expect(r.reasons).toEqual(["over_budget", "overdue_tasks"]);
+    expect(projectHealth({ ...base, spentRial: null }).reasons).not.toContain("over_budget");
+    expect(projectHealth({ ...base, spentRial: 950 }).reasons).toContain("budget_nearly_spent");
+  });
+  it("treats a passed deadline with open work as off track, and a completed project as fine", () => {
+    expect(projectHealth({ ...base, today: "2027-01-05" }).reasons).toContain("past_deadline");
+    expect(projectHealth({ ...base, today: "2027-01-05", completed: true }).health).toBe("on_track");
+  });
+  it("does not judge schedule before the start date", () => {
+    expect(projectHealth({ ...base, today: "2025-12-01", doneTaskCount: 0 }).reasons).toEqual([]);
+  });
+});
+
+describe("dependencyBlocksStatus", () => {
+  it("refuses done with open blockers, allows everything else", () => {
+    expect(dependencyBlocksStatus("done", 1)).toBe(true);
+    expect(dependencyBlocksStatus("done", 0)).toBe(false);
+    expect(dependencyBlocksStatus("in_progress", 3)).toBe(false);
+  });
+});
+
+describe("weekStartSaturday", () => {
+  it("snaps any day to the Saturday that opens its Persian week", () => {
+    expect(weekStartSaturday("2026-10-03")).toBe("2026-10-03"); // a Saturday
+    expect(weekStartSaturday("2026-10-09")).toBe("2026-10-03"); // the Friday after
+    expect(weekStartSaturday("2026-10-02")).toBe("2026-09-26"); // the Friday before
+  });
+});
+
+describe("contract lifecycle", () => {
+  const today = "2026-06-01";
+  const active = { status: "active" as const, startDate: "2026-01-01", endDate: "2026-12-31" };
+  it("offers only the transitions a status allows", () => {
+    expect(allowedContractActions("active")).toEqual(["complete", "terminate", "extend"]);
+    expect(allowedContractActions("completed")).toEqual(["renew"]);
+    expect(allowedContractActions("terminated")).toEqual([]);
+    expect(contractLifecycleChange("renew", active, { today, endDate: "2027-12-31" })).toEqual({
+      ok: false, error: "invalid_contract_transition",
+    });
+  });
+  it("terminates as of today, never in the future", () => {
+    expect(contractLifecycleChange("terminate", active, { today })).toMatchObject({
+      ok: true, status: "terminated", endDate: today,
+    });
+  });
+  it("extends only to a later date", () => {
+    expect(contractLifecycleChange("extend", active, { today, endDate: "2026-10-01" })).toEqual({
+      ok: false, error: "extension_not_later",
+    });
+    expect(contractLifecycleChange("extend", active, { today, endDate: "2027-03-01" })).toMatchObject({
+      ok: true, status: "active", endDate: "2027-03-01",
+    });
+  });
+  it("renews a finished contract for a new term after the old one", () => {
+    const done = { status: "completed" as const, startDate: "2025-01-01", endDate: "2025-12-31" };
+    expect(contractLifecycleChange("renew", done, { today, endDate: "2027-05-31" })).toEqual({
+      ok: true, status: "active", startDate: today, endDate: "2027-05-31",
+    });
+    const fresh = { status: "expired" as const, startDate: "2026-01-01", endDate: "2026-07-01" };
+    expect(contractLifecycleChange("renew", fresh, { today, endDate: "2027-07-01" })).toMatchObject({
+      startDate: "2026-07-02",
+    });
+    expect(contractLifecycleChange("renew", done, { today })).toEqual({ ok: false, error: "end_date_required" });
+  });
+});
+
+describe("planTemplateApplication", () => {
+  const templatePhases = [
+    { name: "طراحی", displayOrder: 0, startDate: null, endDate: null },
+    { name: "اجرا", displayOrder: 1, startDate: null, endDate: null },
+  ];
+  const existingPhases = [
+    { id: "a", name: "طراحی", displayOrder: 0, taskCount: 2 },
+    { id: "b", name: "قدیمی خالی", displayOrder: 1, taskCount: 0 },
+    { id: "c", name: "قدیمی پر", displayOrder: 2, taskCount: 1 },
+  ];
+  it("merges only what is missing, ordered after what exists", () => {
+    const plan = planTemplateApplication({
+      existingPhases, existingTaskTitles: ["خرید"], templatePhases,
+      defaultTasks: ["خرید", "بازدید"], mode: "merge",
+    });
+    expect(plan.addPhases).toEqual([{ name: "اجرا", displayOrder: 4, startDate: null, endDate: null }]);
+    expect(plan.keptPhases).toEqual(["طراحی"]);
+    expect(plan.addTasks).toEqual(["بازدید"]);
+    expect(plan.removePhases).toEqual([]);
+  });
+  it("replace removes only empty phases the template does not name", () => {
+    const plan = planTemplateApplication({
+      existingPhases, existingTaskTitles: [], templatePhases, defaultTasks: [], mode: "replace",
+    });
+    expect(plan.removePhases).toEqual([{ id: "b", name: "قدیمی خالی" }]);
+  });
+  it("is a no-op the second time", () => {
+    const plan = planTemplateApplication({
+      existingPhases: [
+        { id: "a", name: "طراحی", displayOrder: 0, taskCount: 0 },
+        { id: "d", name: "اجرا", displayOrder: 1, taskCount: 0 },
+      ],
+      existingTaskTitles: ["بازدید"], templatePhases, defaultTasks: ["بازدید"], mode: "merge",
+    });
+    expect(plan.addPhases).toEqual([]);
+    expect(plan.addTasks).toEqual([]);
   });
 });

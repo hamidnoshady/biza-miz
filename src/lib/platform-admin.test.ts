@@ -13,6 +13,7 @@ import {
   MAX_IMPERSONATION_MINUTES,
   DEFAULT_IMPERSONATION_MINUTES,
   PLATFORM_ADMIN_ROLES,
+  businessDestructivePhrase,
 } from "./platform-admin";
 
 describe("platformCan — role → capability presets", () => {
@@ -95,6 +96,47 @@ describe("platformCan — role → capability presets", () => {
     // restore button would appear for someone who cannot see a backup to pick.
     for (const role of PLATFORM_ADMIN_ROLES) {
       if (platformCan(role, "backup.restore")) expect(platformCan(role, "backup.manage"), role).toBe(true);
+    }
+  });
+
+  it("spells the #807 backup split out role by role", () => {
+    // The audit's table, asserted literally: read is everyone's, run+verify is
+    // operations, and custody of the destination, of the tenants' data
+    // (sharing/peers) and of a destructive restore is owner-only.
+    const READ_ONLY = ["backup.read", "system.read", "businesses.read"] as const;
+    const OPERATIONS = ["backup.run", "backup.verify", "backup.manage"] as const;
+    const OWNER_ONLY = [
+      "backup.configure",
+      "backup.share",
+      "backup.peer.manage",
+      "backup.restore",
+    ] as const;
+
+    for (const cap of READ_ONLY) expect(platformCan("support", cap), cap).toBe(true);
+    for (const cap of OPERATIONS) {
+      expect(platformCan("support", cap), `support ${cap}`).toBe(false);
+      expect(platformCan("engineer", cap), `engineer ${cap}`).toBe(true);
+      expect(platformCan("owner", cap), `owner ${cap}`).toBe(true);
+    }
+    for (const cap of OWNER_ONLY) {
+      expect(platformCan("support", cap), `support ${cap}`).toBe(false);
+      expect(platformCan("engineer", cap), `engineer ${cap}`).toBe(false);
+      expect(platformCan("owner", cap), `owner ${cap}`).toBe(true);
+    }
+
+    // Nothing may hold a specific backup capability without also holding the
+    // read half — that is the invariant that keeps the console's buttons and
+    // the API's guards from disagreeing.
+    for (const role of PLATFORM_ADMIN_ROLES) {
+      for (const cap of CAPABILITIES_FOR(role).filter((c) => c.startsWith("backup."))) {
+        expect(platformCan(role, "backup.read"), `${role} ${cap}`).toBe(true);
+      }
+    }
+    // An engineer's operational alias never silently grows into the owner's
+    // half: `backup.manage` is read+run+verify, spelled out here so a future
+    // preset edit cannot widen it by accident.
+    for (const cap of OWNER_ONLY) {
+      expect(CAPABILITIES_FOR("engineer")).not.toContain(cap);
     }
   });
 
@@ -188,6 +230,31 @@ describe("clampImpersonationMinutes — short, bounded windows", () => {
     expect(clampImpersonationMinutes(1)).toBe(1);
     expect(clampImpersonationMinutes(MAX_IMPERSONATION_MINUTES)).toBe(
       MAX_IMPERSONATION_MINUTES,
+    );
+  });
+});
+
+describe("businessDestructivePhrase — action- and target-specific confirmation", () => {
+  it("names the action verb and the exact tenant slug", () => {
+    expect(businessDestructivePhrase("reset", "cafe-alpha")).toBe("RESET cafe-alpha");
+    expect(businessDestructivePhrase("delete", "cafe-alpha")).toBe("DELETE cafe-alpha");
+  });
+
+  it("never lets one action's phrase stand in for the other", () => {
+    expect(businessDestructivePhrase("reset", "cafe-alpha")).not.toBe(
+      businessDestructivePhrase("delete", "cafe-alpha"),
+    );
+  });
+
+  it("never lets one tenant's phrase stand in for another", () => {
+    expect(businessDestructivePhrase("reset", "cafe-alpha")).not.toBe(
+      businessDestructivePhrase("reset", "cafe-beta"),
+    );
+  });
+
+  it("is stable and deterministic for a given action and slug", () => {
+    expect(businessDestructivePhrase("delete", "doomed-123")).toBe(
+      businessDestructivePhrase("delete", "doomed-123"),
     );
   });
 });

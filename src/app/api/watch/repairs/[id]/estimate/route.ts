@@ -25,7 +25,7 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
   const ticket = await ownedTicket(session, id);
   if (!ticket) return NextResponse.json({ error: "ticket_not_found" }, { status: 404 });
 
-  let body: { laborRial?: number; partsRial?: number };
+  let body: { laborRial?: number; partsRial?: number; discountRial?: number };
   try {
     body = await request.json();
   } catch {
@@ -36,6 +36,7 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
     const estimate = await setRepairEstimate(id, {
       laborRial: Number(body.laborRial ?? 0),
       partsRial: Number(body.partsRial ?? 0),
+      discountRial: Number(body.discountRial ?? 0),
     });
     return NextResponse.json({ ok: true, estimate });
   } catch (err) {

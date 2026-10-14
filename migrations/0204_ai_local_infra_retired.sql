@@ -1,0 +1,37 @@
+-- ============================================================================
+-- 0204_ai_local_infra_retired.sql — issue #812 §1 and §2.
+--
+-- The application no longer runs its own semantic answer cache or its own
+-- tenant pgvector RAG/reindex stack. This migration removes the two tables
+-- those subsystems owned, and it is ordered AFTER the code that read them is
+-- gone (migration 0203 + the same change set): nothing in the application
+-- queries `ai_answer_cache` or `ai_embeddings` any more, so there is no reader
+-- left to break.
+--
+-- What is safe to drop, and why
+--   `ai_answer_cache` — derived data only. Every row is a cached *answer* that
+--     can be rebuilt by asking the question again. No source business record
+--     lives here.
+--   `ai_embeddings` — a derived vector copy of slow-moving text (item
+--     descriptions, names, project notes). The SOURCE rows stay exactly where
+--     they were: `inventory_items`, `menu_items`, `parties`, workspace project
+--     notes. Dropping the vector copy loses nothing the business owns; the
+--     knowledge runtime now lives behind the configured LiteLLM/AI
+--     infrastructure integration (`platform_ai_gateway.knowledge_*`, migration
+--     0203), which owns chunking, embeddings, indexes and retrieval.
+--
+-- Deliberately NOT dropped here
+--   `ai_prompt_templates` (migration 0112) is superseded by `ai_prompt_versions`
+--   (migration 0203) but is left in place until an operator has confirmed no
+--   deployment still has a published override worth carrying across. Its
+--   reader was already dead code before this issue; the table is inert.
+--   `ai_custom_agents` (the tenant agent builder) is retired by the code change
+--   that removes the tenant routes. Its rows are NOT migrated into
+--   `ai_system_agents`: a tenant-built lens and a platform-versioned system
+--   agent do not have provably equivalent semantics (issue #812 §28), so the
+--   table is left for a documented, separate cleanup rather than being
+--   transformed silently.
+-- ============================================================================
+
+DROP TABLE IF EXISTS ai_answer_cache;
+DROP TABLE IF EXISTS ai_embeddings;

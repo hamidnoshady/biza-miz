@@ -1,5 +1,6 @@
 /**
- * «میز کار من» adapters — projects, tasks, contracts and documents.
+ * «میز کار من» adapters — projects, tasks, contracts, documents and (issue
+ * #799 §7) the BOQ's measured rows.
  *
  * The schema names are `ai_projects` / `ai_project_tasks`: migration 0167
  * renamed the *module* and not the tables, deliberately, because renaming them
@@ -14,6 +15,7 @@
 
 import { query } from "../../db";
 import { postgresDateToIso } from "../../jalali";
+import * as boq from "../../aec-boq-service";
 import {
   registerAdapter,
   RowRejection,
@@ -456,9 +458,133 @@ const documentsAdapter: EntityAdapter = {
   },
 };
 
+/**
+ * Issue #799 §7 — a BOQ row, written through the estimating service rather
+ * than by hand: the service is the one writer of these tables, so an import
+ * gets the same validation, the same chapter handling and the same
+ * "a non-draft revision cannot be changed" refusal an editor does.
+ *
+ * ## Where an imported row lands
+ *
+ *   * the project is named by the file. It must already exist — a BOQ row is
+ *     not a reason to create a project (`onMissing: "skip"` in the registry),
+ *     and the row comes back with the reason.
+ *   * the estimate is named too, defaulting to «برآورد اصلی». It is created if
+ *     the project has none, because the alternative is telling somebody to go
+ *     and click a button before their spreadsheet can be read.
+ *   * the revision: a row may name one. A named revision that is NOT a draft is
+ *     refused (`aec-boq-service`'s own rule, surfaced here as a skipped row
+ *     rather than a failed import), and a row naming none goes to the current
+ *     draft — which is created if the estimate has no draft yet.
+ *
+ * The import therefore never touches an approved revision, which is the whole
+ * of §7's "never overwrite an approved historical estimate".
+ */
+const boqItemsAdapter: EntityAdapter = {
+  entity: "workspace.boq_items",
+  async read(context, options) {
+    const where = ["i.business_id = $1"];
+    const params: unknown[] = [context.businessId];
+    if (options.ids && options.ids.length > 0) {
+      params.push([...options.ids]);
+      where.push(`i.id = ANY($${params.length}::uuid[])`);
+    }
+    if (typeof options.filters.projectId === "string" && options.filters.projectId) {
+      params.push(options.filters.projectId);
+      where.push(`e.project_id = $${params.length}::uuid`);
+    }
+    params.push(options.limit);
+    const { rows } = await query<Record<string, unknown>>(
+      `SELECT i.id, p.name AS "projectName", e.title AS "estimateTitle",
+              v.version_no AS "versionNo", s.code AS "sectionCode", s.title AS "sectionTitle",
+              i.item_code AS "itemCode", i.description, i.unit, i.quantity::text AS quantity,
+              i.material_rate_rial AS "materialRateRial", i.labor_rate_rial AS "laborRateRial",
+              i.equipment_rate_rial AS "equipmentRateRial",
+              i.subcontract_rate_rial AS "subcontractRateRial",
+              i.waste_percent::text AS "wastePercent", i.overhead_percent::text AS "overheadPercent",
+              i.markup_percent::text AS "markupPercent", i.unit_price_rial AS "unitPriceRial",
+              i.total_rial AS "totalRial", i.work_package AS "workPackage",
+              party.name AS "partyName", i.notes, i.created_at AS "createdAt"
+         FROM aec_boq_items i
+         JOIN aec_estimate_versions v ON v.id = i.version_id
+         JOIN aec_estimates e ON e.id = v.estimate_id
+         JOIN ai_projects p ON p.id = e.project_id
+         LEFT JOIN aec_boq_sections s ON s.id = i.section_id
+         LEFT JOIN parties party ON party.id = i.party_id
+        WHERE ${where.join(" AND ")}
+        ORDER BY v.version_no DESC, i.display_order
+        LIMIT $${params.length}`,
+      params,
+    );
+    return rows.map((row) => ({
+      ...row,
+      quantity: String(row.quantity ?? "0"),
+      materialRateRial: Number(row.materialRateRial ?? 0),
+      laborRateRial: Number(row.laborRateRial ?? 0),
+      equipmentRateRial: Number(row.equipmentRateRial ?? 0),
+      subcontractRateRial: Number(row.subcontractRateRial ?? 0),
+      wastePercent: String(row.wastePercent ?? "0"),
+      overheadPercent: String(row.overheadPercent ?? "0"),
+      markupPercent: String(row.markupPercent ?? "0"),
+      unitPriceRial: Number(row.unitPriceRial ?? 0),
+      totalRial: Number(row.totalRial ?? 0),
+      createdAt: isoDate(row.createdAt),
+    }));
+  },
+  async write(context, values, options) {
+    const description = text(values.description);
+    if (!description) throw new RowRejection("شرح ردیف الزامی است.");
+    const projectName = text(values.projectName);
+    if (!projectName) throw new RowRejection("نام پروژه الزامی است.");
+
+    // A party that is not found is a warning, not a refusal: the line is still
+    // a legitimate measurement, it just is not priced against a named supplier.
+    const warnings: string[] = [];
+    let partyId: string | null = null;
+    const partyName = text(values.partyName);
+    if (partyName) {
+      const party = await findParty(context.businessId, partyName);
+      if (party) partyId = party.id;
+      else warnings.push(`«${partyName}» در پرونده‌ها پیدا نشد و ردیف بدون آن ثبت شد.`);
+    }
+
+    const estimateTitle = text(values.estimateTitle) ?? "برآورد اصلی";
+    const result = await boq.importBoqItem(context, {
+      projectName,
+      estimateTitle,
+      versionNo: values.versionNo === null || values.versionNo === undefined || values.versionNo === ""
+        ? null
+        : Number(values.versionNo),
+      sectionCode: text(values.sectionCode) ?? "",
+      sectionTitle: text(values.sectionTitle),
+      itemCode: text(values.itemCode) ?? "",
+      description,
+      unit: text(values.unit) ?? "",
+      quantity: values.quantity ?? 0,
+      materialRateRial: values.materialRateRial ?? 0,
+      laborRateRial: values.laborRateRial ?? 0,
+      equipmentRateRial: values.equipmentRateRial ?? 0,
+      subcontractRateRial: values.subcontractRateRial ?? 0,
+      wastePercent: values.wastePercent ?? 0,
+      overheadPercent: values.overheadPercent ?? 0,
+      markupPercent: values.markupPercent ?? 0,
+      workPackage: text(values.workPackage) ?? "",
+      partyId,
+      notes: text(values.notes) ?? "",
+      duplicateStrategy: options.duplicateStrategy,
+    });
+
+    if (result.status === "skipped") {
+      return { status: "skipped", id: result.id, reason: result.reason ?? "ردیف ثبت نشد." };
+    }
+    return { status: result.status, id: result.id ?? "", warnings };
+  },
+};
+
 export function registerWorkspaceAdapters(): void {
   registerAdapter(projectsAdapter);
   registerAdapter(tasksAdapter);
   registerAdapter(contractsAdapter);
   registerAdapter(documentsAdapter);
+  registerAdapter(boqItemsAdapter);
 }

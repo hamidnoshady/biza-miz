@@ -85,6 +85,34 @@ export const NOTIFICATION_EVENT_KEYS = [
   "ai.coworker.failed",
   "ai.automation.pending",
   "ai.automation.failed",
+  // Issue #799 §29 (Wave 6). The issue asks for two reminders — «RFI overdue»
+  // and «submittal overdue» — through *this* engine rather than a second one,
+  // which is why they are two keys and a scan here instead of a scheduler of
+  // their own.
+  "aec.rfi_overdue",
+  "aec.submittal_overdue",
+  // Issue #799 §29 (Wave 7) — «inspection due» and «snag overdue», the two the
+  // issue names for the site. One scan produces all four AEC reminders (a
+  // record becomes late by a date passing, not by a write); they are separate
+  // keys because they are separate events to switch off.
+  "aec.inspection_due",
+  "aec.snag_overdue",
+  // Issue #799 §29 (Wave 8) — the commercial four: «payment certificate
+  // pending», «client payment overdue», «guarantee expiry» and «insurance
+  // expiry». They join the same hourly scan as the register reminders above —
+  // they are all facts that become true by a date passing, not by a write — and
+  // they are four keys rather than one because they are four different things
+  // to switch off.
+  "aec.payment_certificate_pending",
+  "aec.client_payment_overdue",
+  "aec.guarantee_expiring",
+  "aec.insurance_expiring",
+  // Issue #799 §29 (Wave 9) — «procurement delivery delay», the one reminder the
+  // section names for the procurement flow. A delivery becomes late by a date
+  // passing, so it rides the same hourly scan as the rest rather than a
+  // scheduler of its own, and it is one key because it is one thing to switch
+  // off.
+  "aec.procurement_delivery_delay",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -94,12 +122,15 @@ export function isNotificationEventKey(value: unknown): value is NotificationEve
 }
 
 /** Grouping for the settings screen only — it has no effect on delivery. */
-export type NotificationGroup = "operations" | "money" | "inventory" | "system" | "ai";
+export type NotificationGroup = "operations" | "money" | "inventory" | "projects" | "system" | "ai";
 
 export const NOTIFICATION_GROUP_LABELS: Record<NotificationGroup, string> = {
   operations: "شیفت و روز کاری",
   money: "فروش و صندوق",
   inventory: "انبار",
+  // «میز کار من» — the project registers. Its own group because the settings
+  // screen groups by trading area, and «نقشه و سابمیتال» is not inventory.
+  projects: "پروژه‌ها و میز کار",
   system: "سلامت سامانه",
   ai: "همکار هوشمند",
 };
@@ -275,6 +306,119 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     defaultSeverity: "important",
     defaultRoles: ["owner"],
     perLocation: true,
+    hasAmount: false,
+  },
+  "aec.rfi_overdue": {
+    key: "aec.rfi_overdue",
+    group: "projects",
+    label: "استعلام بی‌پاسخ از مهلت گذشته (RFI)",
+    description:
+      "وقتی استعلامی هنوز پاسخ نگرفته و مهلت پاسخش گذشته است. روزی یک بار برای هر استعلام، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // The two roles that chase answers: a project manager and the owner. An
+    // engineer or a document controller is not told by default — they are
+    // looking at the RFI tab anyway — and anyone can turn it on for themselves.
+    defaultRoles: ["owner", "manager"],
+    // An RFI belongs to a project, not to a branch: a construction business's
+    // registers have no location to scope by.
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.submittal_overdue": {
+    key: "aec.submittal_overdue",
+    group: "projects",
+    label: "سابمیتال معطل‌مانده از مهلت گذشته",
+    description:
+      "وقتی بازنگری‌ای ارسال شده و بازبین هنوز پاسخش را نداده و مهلت گذشته است. روزی یک بار برای هر بازنگری.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.inspection_due": {
+    key: "aec.inspection_due",
+    group: "projects",
+    label: "بازرسی سررسیدشده",
+    description:
+      "وقتی یک درخواست بازرسی یا بازرسی کیفیت تا مهلتش نتیجه نگرفته است. روزی یک بار برای هر مورد، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // The same two roles §29's other AEC reminders go to: whoever chases the
+    // site, plus the owner. A supervisor or a QA engineer can switch it on for
+    // themselves from the settings screen.
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.snag_overdue": {
+    key: "aec.snag_overdue",
+    group: "projects",
+    label: "نقص یا عدم‌انطباق عقب‌افتاده",
+    description:
+      "وقتی نقص (پانچ)، عدم‌انطباق یا اقدام اصلاحی از مهلت گذشته و هنوز بسته نشده است. روزی یک بار برای هر مورد.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.payment_certificate_pending": {
+    key: "aec.payment_certificate_pending",
+    group: "projects",
+    label: "صورت‌وضعیت در انتظار تأیید",
+    description:
+      "وقتی یک صورت‌وضعیت یا گواهی پیشرفت ارسال شده و بیش از دو هفته است که تأیید یا رد نشده. روزی یک بار برای هر صورت‌وضعیت، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // §24's commercial figures are the owner's and the manager's business; a
+    // quantity surveyor can switch it on for themselves from the settings.
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    // The claim has an amount, and a reminder that leads with it is the one an
+    // accountant acts on.
+    hasAmount: true,
+  },
+  "aec.client_payment_overdue": {
+    key: "aec.client_payment_overdue",
+    group: "projects",
+    label: "تأخیر در وصول صورت‌وضعیت",
+    description:
+      "وقتی صورت‌وضعیت تأییدشده‌ای بیش از یک ماه است که تأیید شده و وصول آن هنوز در حسابداری بررسی نشده. این یادآور «بررسی وصول» است، نه ثبت دریافت: دریافتی‌ها فقط در حسابداری ثبت می‌شوند.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: true,
+  },
+  "aec.guarantee_expiring": {
+    key: "aec.guarantee_expiring",
+    group: "projects",
+    label: "ضمانت‌نامه نزدیک به انقضا",
+    description:
+      "وقتی ضمانت‌نامه یا تضمین قراردادی تا دو ماه آینده منقضی می‌شود. روزی یک بار برای هر قرارداد.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: true,
+  },
+  "aec.procurement_delivery_delay": {
+    key: "aec.procurement_delivery_delay",
+    group: "projects",
+    label: "تأخیر تحویل سفارش خرید",
+    description:
+      "وقتی سفارش خرید یا پیمان جزئی از تاریخ تحویل مورد انتظار گذشته و هنوز تحویل نشده است. روزی یک بار برای هر تعهد، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // The commitment is a money obligation, so the owner and the manager hear
+    // about it; a site engineer can switch it on for themselves.
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: true,
+  },
+  "aec.insurance_expiring": {
+    key: "aec.insurance_expiring",
+    group: "projects",
+    label: "بیمه‌نامه نزدیک به انقضا",
+    description:
+      "وقتی بیمه‌نامهٔ قرارداد تا دو ماه آینده منقضی می‌شود. روزی یک بار برای هر قرارداد.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
     hasAmount: false,
   },
   "system.test": {

@@ -61,11 +61,15 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   mfa_required: "دسترسی کامل به ورود دومرحله‌ای تأییدشده نیاز دارد.",
   invalid_plan: "این پلن در فهرست پلن‌ها وجود ندارد.",
   invalid_timezone: "منطقهٔ زمانی معتبر نیست.",
-  reset_confirmation_required: "برای ریست، عبارت تأیید را دقیق وارد کنید.",
-  reset_not_possible: "ریست ممکن نیست؛ این کسب‌وکار مالک فعال و قابل ورود ندارد.",
-  reset_failed: "ریست انجام نشد و هیچ داده‌ای تغییر نکرد. دوباره تلاش کنید.",
+  protected_internal_business:
+    "این کسب‌وکار داخلیِ خود سکو است؛ بازنشانی یا حذف آن از این مسیر مجاز نیست.",
+  reset_confirmation_required: "برای بازنشانی، عبارت تأیید را دقیق وارد کنید.",
+  reset_not_possible: "بازنشانی ممکن نیست؛ این کسب‌وکار مالک فعال و قابل ورود ندارد.",
+  reset_failed: "بازنشانی انجام نشد و هیچ داده‌ای تغییر نکرد. دوباره تلاش کنید.",
   delete_confirmation_required: "برای حذف، عبارت تأیید را دقیق وارد کنید.",
   delete_failed: "حذف انجام نشد و هیچ داده‌ای تغییر نکرد. دوباره تلاش کنید.",
+  delete_blocked:
+    "حذف به‌دلیل یک وابستگی رکوردی انجام نشد؛ هیچ داده‌ای تغییر نکرد. وابستگی گزارش‌شده را بررسی کنید یا به تیم فنی اطلاع دهید.",
   no_location: "این کسب‌وکار هنوز شعبه‌ای ندارد؛ ابتدا یک شعبه بسازید.",
   code_not_found: "کد اتصال پیدا نشد.",
   code_expired: "این کد منقضی شده است.",
@@ -122,6 +126,12 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   peer_unreachable: "سرور مقابل در دسترس نیست.",
   peer_auth_failed: "کلید این سرور در آن سمت پذیرفته نشد (لغو یا منقضی شده است؟).",
   bad_manifest: "پاسخ سرور مقابل معتبر نیست.",
+  // A live chart that cannot take the new industry's accounts. The change is
+  // rolled back as a whole, so the business keeps its old type and chart.
+  parent_archived:
+    "تغییر نوع کسب‌وکار انجام نشد: یکی از سرفصل‌های جدید زیر یک حساب بایگانی‌شدهٔ موجود قرار می‌گیرد. حساب را فعال یا جابه‌جا کنید، سپس دوباره تلاش کنید.",
+  parent_type_mismatch:
+    "تغییر نوع کسب‌وکار انجام نشد: نوع یکی از حساب‌های موجود با نوع سرفصل جدید زیر آن یکی نیست. حساب را اصلاح کنید، سپس دوباره تلاش کنید.",
 };
 
 /**

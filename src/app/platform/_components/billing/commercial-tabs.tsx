@@ -17,6 +17,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { platformFetch } from "@/lib/platform-client";
+import { platformErrorText } from "@/lib/platform-errors";
 
 interface MeterRow {
   key: string;
@@ -462,6 +463,8 @@ interface SingleSpendPayload {
   };
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function BillingSpendTab() {
   const listQuery = usePlatformQuery<SpendListPayload>("/api/platform/billing/spend");
   const [businessId, setBusinessId] = useState("");
@@ -471,6 +474,8 @@ export function BillingSpendTab() {
   const [currentSpend, setCurrentSpend] = useState<SingleSpendPayload["spend"] | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  // Busy state blocks duplicate submits while a policy write is in flight.
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!businessId.trim()) {
@@ -513,8 +518,13 @@ export function BillingSpendTab() {
             event.preventDefault();
             setError("");
             setMessage("");
+            if (saving) return;
             if (!businessId.trim()) {
               setError("لطفاً یک کسب‌وکار را انتخاب یا شناسهٔ آن را وارد کنید.");
+              return;
+            }
+            if (!UUID_PATTERN.test(businessId.trim())) {
+              setError("شناسهٔ کسب‌وکار باید یک UUID معتبر باشد.");
               return;
             }
             const parsedBudget = parseOptionalSafeIntInput(budget, { min: 0 });
@@ -527,6 +537,7 @@ export function BillingSpendTab() {
               setError("آستانه‌های هشدار باید اعداد بین ۱ تا ۱۰۰ (جداشده با ویرگول) باشند.");
               return;
             }
+            setSaving(true);
             void platformFetch<SingleSpendPayload>("/api/platform/billing/spend", {
               method: "PUT",
               body: {
@@ -536,12 +547,14 @@ export function BillingSpendTab() {
                 actionAtLimit: action,
               },
             }).then((result) => {
+              setSaving(false);
               if (result.ok) {
                 setMessage("سیاست سقف هزینه ذخیره شد.");
                 if (result.data?.spend) setCurrentSpend(result.data.spend);
                 listQuery.refetch();
               } else {
-                setError("ذخیرهٔ سیاست سقف هزینه انجام نشد.");
+                const reason = result.code ? platformErrorText(result.code) : "";
+                setError(`ذخیرهٔ سیاست سقف هزینه انجام نشد.${reason ? ` ${reason}` : ""}`);
               }
             });
           }}
@@ -636,7 +649,9 @@ export function BillingSpendTab() {
             </div>
           )}
 
-          <Button type="submit">ذخیرهٔ سیاست سقف هزینه</Button>
+          <Button type="submit" disabled={saving} aria-busy={saving || undefined}>
+            {saving ? "در حال ذخیره…" : "ذخیرهٔ سیاست سقف هزینه"}
+          </Button>
         </form>
       </Card>
 

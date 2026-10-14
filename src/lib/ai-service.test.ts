@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig, toolDefinitions } from "./ai";
-import { runAgentTurn, validateOpenAiTools } from "./ai-service";
+import { accruedUsageOf, runAgentTurn, validateOpenAiTools } from "./ai-service";
 
 const config = {
   ...defaultConfig("litellm"),
@@ -606,5 +606,103 @@ describe("Phase F pt.2 — project-scoped action gating in runAgentTurn", () => 
       (tool: { function: { name: string } }) => tool.function.name === "propose_action",
     );
     expect(propose.function.parameters.properties.type.enum).not.toContain("project.memory.add");
+  });
+});
+
+describe("issue #812 §16 — provider cost survives a failed round", () => {
+  it("carries the accrued usage/cost of the rounds that already succeeded", async () => {
+    // Round 1 answers a read tool (so tokens and a gateway cost are booked),
+    // then round 2 fails at the provider. The failure must leave carrying what
+    // round 1 cost, or the business is undercharged for real spend.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerReply({
+          content: null,
+          tool_calls: [
+            {
+              id: "call-1",
+              type: "function",
+              function: { name: "find_items", arguments: JSON.stringify({ query: "نان" }) },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("upstream exploded", { status: 500 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const readTool = vi.fn(async () => ({ ok: true as const, data: { results: [] } }));
+    let thrown: unknown;
+    try {
+      await runAgentTurn({
+        config,
+        mode: "dashboard",
+        businessId: "biz-1",
+        promptContext: { mode: "dashboard" },
+        messages: [{ role: "user", content: "چقدر نان مانده؟" }],
+        executeReadTool: readTool,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeDefined();
+    const accrued = accruedUsageOf(thrown);
+    expect(accrued).not.toBeNull();
+    // Round 1's real usage — 10 prompt + 5 completion tokens — is preserved.
+    expect(accrued!.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+    expect(accrued!.costUsd).toBeNull();
+    // The tool really did run before the failure, so the cost is genuine.
+    expect(readTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the accrual even when the tool runner itself blows up", async () => {
+    // The provider round succeeded and was billed; the executor then failed.
+    // The turn is lost but the money is not.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerReply({
+          content: null,
+          tool_calls: [
+            {
+              id: "call-1",
+              type: "function",
+              function: { name: "find_items", arguments: JSON.stringify({ query: "نان" }) },
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    let thrown: unknown;
+    try {
+      await runAgentTurn({
+        config,
+        mode: "dashboard",
+        businessId: "biz-1",
+        promptContext: { mode: "dashboard" },
+        messages: [{ role: "user", content: "چقدر نان مانده؟" }],
+        executeReadTool: async () => {
+          throw new Error("tool_exploded");
+        },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(accruedUsageOf(thrown)?.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+  });
+
+  it("accruedUsageOf ignores a value that is not a usage figure", () => {
+    expect(accruedUsageOf(null)).toBeNull();
+    expect(accruedUsageOf(new Error("plain"))).toBeNull();
+    expect(accruedUsageOf({ accruedUsage: { usage: "nope", costUsd: 1 } })).toBeNull();
+    expect(accruedUsageOf({ accruedUsage: { usage: { inputTokens: 1, outputTokens: 2 } } })).toEqual({
+      usage: { inputTokens: 1, outputTokens: 2 },
+      costUsd: null,
+    });
   });
 });

@@ -1,4 +1,12 @@
-# Phase 18 — AI Platform Administration & Credit Billing
+# Phase 18 — AI Platform Administration & Credit Billing (historical scope)
+
+> This document records the original Phase 18 proposal and early implementation. It is not the
+> current provider, console-route, or billing specification: the design later converged on
+> LiteLLM-only connections, Plan/Billing as the money control plane, and the current `/platform/ai/*`
+> subpages. `/dashboard/ai` provider/credit settings described here are retired compatibility
+> URLs, not active screens. For current ownership, routes and the required AI-secret migration
+> rollout, see [Phase 39](Phase-39-LiteLLM-Only-AI-Platform.md) and
+> [the AI subsystem architecture](../ai-subsystem-architecture.md).
 
 **Project:** Cafe/Restaurant POS
 **Depends on:** Phase 15 (Super-Admin Console), Phase 17 (Feature Gating & Platform Hardening), and
@@ -12,21 +20,15 @@ usage against a priced package.
 
 ---
 
-## Context: what exists today
+## Context at the original Phase 18 writing (historical)
 
-The assistant (floating chat widget, wizard/dashboard modes, `propose_action` confirm-before-apply
-loop) is real and working, but its access model is entirely per-business self-service: each business's
-owner/manager opens `/dashboard/ai`, picks a provider (OpenRouter or ArvanCloud AI), and pastes in
-their own API key, stored under that business's `settings` row (`ai.config`). The only platform-level
-control that already touches it is generic: `ai_assistant` is one row in the Phase 12 `feature_flags`
-catalogue, so a platform admin can already flip it on/off per business from the existing
-`business_features` override mechanism (Phase 15's "Feature flags & plans" console, enforced by Phase
-17's `withTenantScope` gate). There is no metering, no shared provider, and no billing — Phase 15
-explicitly put "billing, invoicing, payment collection" out of scope at the time ("plans are assigned
-by hand").
-
-This phase reverses that scoping decision, but only for AI usage specifically — everything else about
-plan assignment stays hand-assigned, unchanged.
+At that point the assistant (floating chat widget, wizard/dashboard modes, `propose_action`
+confirm-before-apply loop) used per-business self-service: an owner/manager opened `/dashboard/ai`,
+picked OpenRouter or ArvanCloud AI and entered a key in the business `settings` row. Phase 15's
+`ai_assistant` feature flag was the only platform-level switch; there was no metering or shared
+provider yet. That early design was superseded: today there is no direct-provider mode or tenant
+provider/key form, and billing lives in Plan/Billing. This historical context is retained to explain
+the original scope below, not to describe the present application.
 
 ## Scope
 
@@ -138,14 +140,16 @@ plan assignment stays hand-assigned, unchanged.
 
 4. **Suspended businesses cannot drain AI credit.** The existing requireManager/tenant guard blocks suspended memberships before /api/ai/chat reaches the billing reservation. No parallel suspension switch was introduced.
 
-## Implementation map
+## Original implementation map (historical paths)
 
-- migrations/0039_ai_platform_billing.sql creates the singleton provider config, global catalogues, tenant-scoped billing/ledger/top-up tables, forced RLS policies, and removes obsolete settings.ai.config rows.
-- src/lib/ai-config.ts, src/lib/ai-billing.ts, src/lib/ai-billing-service.ts, and src/lib/ai-service.ts provide the global connection, actual-usage settlement, atomic reservation/refund, top-up approval, and monthly subscription renewal.
-- /platform/ai and /api/platform/ai/gateway are the capability-gated technical LiteLLM console/API. ai.read covers diagnostics; ai.config.manage is owner-only for LiteLLM secrets and virtual keys. Billing.manage covers plans, pricing, grants and wallet operations.
-- /dashboard/ai and /api/ai/billing are business-facing credits surfaces only. Provider/model/key inputs are removed; no business API response includes them.
-- server.ts runs the idempotent monthly-credit renewal tick, and the RLS/exempt-table tests cover the new schema classes.
+- `migrations/0039_ai_platform_billing.sql` introduced the singleton connection config, global catalogues, tenant-scoped billing/ledger/top-up tables and forced RLS policies.
+- `src/lib/ai-config.ts`, the AI billing services and `src/lib/ai-service.ts` established the global connection and reservation/settlement flow.
+- `/platform/ai` and `/api/platform/ai/gateway` remain the technical console/API family, but the console now has separate current subpages for modes, prompts, agents, research and widgets.
+- The former `/dashboard/ai` credit/provider surface was superseded by the consolidated dashboard and Plan/Billing control plane. Do not use the early route descriptions above as a current route map.
 
-## Status: implemented
+## Historical status
 
-The Phase 18 code is complete pending the standard migration, unit, integration, type-check, and production-build verification. Before enabling the service in production, the platform owner must enter the real LiteLLM connection on `/platform/ai` and create the intended credit packages/plans in Plan/Billing.
+The original Phase 18 scope shipped and was later refactored. Its historical status does not establish
+that the current application passes checks or that the production AI-secret cutover has occurred.
+The production backfill, decrypt verification and runtime-read prerequisites are documented in
+[Phase 39](Phase-39-LiteLLM-Only-AI-Platform.md).

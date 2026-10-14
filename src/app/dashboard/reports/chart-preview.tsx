@@ -39,9 +39,11 @@ export function ChartPreview({
     const total = data.reduce((sum, datum) => sum + datum.value, 0);
     return <NumberCard label={label} value={formatValue(total)} />;
   }
-  if (chartType === "line") return <LineChart data={data} height={260} formatValue={formatValue} />;
-  if (chartType === "pie") return <PieChart data={data} height={260} formatValue={formatValue} />;
-  return <BarChart data={data} height={260} formatValue={formatValue} />;
+  return <figure aria-label={label}>
+    {chartType === "line" ? <LineChart data={data} height={260} formatValue={formatValue} /> :
+      chartType === "pie" ? <PieChart data={data} height={260} formatValue={formatValue} /> :
+      <BarChart data={data} height={260} formatValue={formatValue} />}
+  </figure>;
 }
 
 /**

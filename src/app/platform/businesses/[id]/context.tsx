@@ -29,6 +29,13 @@ export interface Business {
   plan: string;
   timezone: string;
   industry: Industry;
+  /**
+   * `platform_internal` is the platform's own protected operating company
+   * (migration 0191). The server refuses destructive actions against it;
+   * the danger section reads this so it shows a protected state instead of
+   * controls that can only fail (issue #822).
+   */
+  ownershipKind: "customer" | "platform_internal";
   createdAt: string;
   suspendedAt: string | null;
   archivedAt: string | null;

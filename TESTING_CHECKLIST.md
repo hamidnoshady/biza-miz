@@ -68,6 +68,49 @@ real-world verification yet — prioritize these first.
 - [ ] Attempt pairing against an unreachable remote URL; confirm
       "server unreachable" is shown, not a stack trace or infinite spinner.
 
+### 2b. Hybrid login credentials at pairing **[NEW — issue #843]**
+
+The regression: a paired desktop reached login showing only the owner created
+during setup, even though cloud staff with PINs existed — because membership
+metadata had synced while the credential/PIN plane had not. The automated
+coverage lives in `integration/hybrid-credential-sync.integration.test.ts`;
+this is the packaged-desktop pass of the same scenario.
+
+- [ ] On the cloud, create a business with an owner, a manager and three PIN
+      staff (cashier, waiter, kitchen), each with a PIN.
+- [ ] Pair a **fresh** Windows desktop (empty database) with that business and
+      finish the owner's device-local offline PIN step.
+- [ ] Reach `/login` **immediately**: the quick-login roster must already show
+      all three PIN staff — not just the owner — and each cloud PIN must sign
+      its member in on the desktop.
+- [ ] Confirm the manager (password role, no PIN) is **not** forced into the
+      staff roster, and that the owner's offline PIN still works.
+- [ ] Restart the app; the roster still shows all three staff. Then disable the
+      network and sign in with the same cloud PIN — offline login must work.
+- [ ] Change the cashier's PIN on the cloud, run Settings → اتصال و
+      همگام‌سازی → «همگام‌سازی دوباره»; the old PIN must fail locally and the
+      new one must work.
+- [ ] Suspend the waiter on the cloud, sync again; the waiter must disappear
+      from the roster and any existing desktop session must be invalidated.
+- [ ] Offboard the kitchen member on the cloud and sync: the member disappears
+      from the roster, any desktop session ends, and their replicated PIN is
+      revoked rather than merely hidden (reactivating them without a cloud PIN
+      must not let the old PIN back in).
+- [ ] Delete a PIN on the cloud while the membership stays active, then sync:
+      that member's old PIN must stop working on the desktop and the settings
+      row must report the revoked count.
+- [ ] Simulate a credential failure (point the desktop at a cloud whose
+      `/api/iam/login-credentials` returns 500, or stop it mid-pairing):
+      Settings must show «رمز و پین ورود کارکنان: نیازمند بررسی» with the
+      count of unready PIN accounts, the login screen must show
+      «برخی حساب‌های کارکنان هنوز برای ورود آفلاین همگام نشده‌اند», and neither
+      may claim the installation is fully healthy. «همگام‌سازی دوباره» must
+      repair it once the cloud answers again.
+- [ ] With the cashier's credential deliberately not yet converged, try
+      «ورود با حساب ابری» for a password-role member: the desktop must refuse
+      with the identity-sync-pending message rather than signing them in
+      (that session would sit outside the cloud's token-version revocation).
+
 ## 3. Authentication flow — Choose Login Type **[NEW]**
 
 - [ ] On first visit to `/login` on a fresh browser profile, confirm the
@@ -151,6 +194,56 @@ real-world verification yet — prioritize these first.
 - [ ] Separately, confirm the **browser/cloud** version still requires and
       correctly uses the connector (unchanged by this audit) — this is a
       regression check, not a new feature check.
+
+### 5.1 The unified pipeline (issue #815) — real Windows + real hardware
+
+> These are the acceptance items for the printing unification itself. Each one
+> is covered by unit/API tests as far as logic goes; the items below need the
+> real machine.
+
+- [ ] **A saved custom template actually prints.** In «قالب‌ها», duplicate the
+      80mm receipt, change something visible (e.g. a custom text line), save it
+      as the default for «رسید فروش» (or select it in «قوانین چاپ»), then sell
+      something at the till: confirm the printed slip shows the CHANGE, not the
+      built-in layout. This is the regression the audit exists for — a saved
+      template used to be silently ignored.
+- [ ] **Rules screen routing.** In «قوانین چاپ», set a rule for «فاکتور» to the
+      A4 printer with the A5/other printer as fallback; confirm the «اکنون:»
+      line names the template revision and printer. Turn that printer off in
+      Windows and print again: confirm the job goes to the FALLBACK printer and
+      the history row says `جانشین` (fallback) with the replaced printer's name.
+- [ ] **Incompatible printers are not offered.** Confirm a page (A4) printer is
+      absent from the receipt rule's printer list, and that a receipt printer
+      is absent from the invoice rule's — and, with a hand-crafted PUT to
+      `/api/settings/print-rules`, that the API refuses with
+      `incompatible_printer`.
+- [ ] **Document and label purposes end to end.** Pair an A4 Windows queue as
+      «فاکتور (A4/A5)» and print an invoice from the retail invoice detail
+      modal («چاپ فاکتور») — confirm a real page comes out with the branch's
+      logo/legal identity. Then pair a label printer (or a thermal roll) as
+      «برچسب», choose it as the label rule, and print a shelf label from
+      «موجودی → بارکدها»: confirm the barcode scans with a real scanner.
+- [ ] **Receipt and invoice are separate actions.** From one sale, confirm
+      «چاپ رسید» produces a thermal receipt and «چاپ فاکتور» produces the A4
+      invoice — and that neither one changes the other's routing.
+- [ ] **Preview equals print.** In the designer, place the logo, the legal name
+      and a footer; print the same template to the real printer («چاپ نمونه»)
+      and compare: the paper should match the preview, including the logo, the
+      branch address/phone and the footer.
+- [ ] **Failures are recorded, not hidden.** With the printer switched off,
+      print a receipt: confirm the progress modal ends on the error sentence,
+      the POS still keeps the sale, and «فعالیت اخیر» shows the job as
+      «ناموفق» with a canonical code — never left showing «در حال ارسال».
+- [ ] **Template versioning is visible.** Print, then edit the same template
+      again and print once more: the two history rows must name different
+      template versions (`… · v1` vs `… · v2`).
+- [ ] **No arbitrary HTML reaches the server's Chromium.** Post
+      `{"job":{"type":"document","html":"<h1>x</h1>"}}` to
+      `/api/printing/print` with a valid session and confirm 400 — the endpoint
+      only accepts intent job types.
+- [ ] **Kitchen tickets carry the branch name.** Print a kitchen ticket from a
+      second branch (or after renaming the branch): confirm the ticket header
+      shows the branch that sent it.
 
 ## 6. Backup system
 

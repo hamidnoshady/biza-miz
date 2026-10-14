@@ -516,6 +516,7 @@ async function postEvent(event: EventRow): Promise<"posted" | "ignored"> {
           [entryId, accounts.get(line.code), String(line.debit), String(line.credit)],
         );
       }
+      await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
       await client.query(
         `INSERT INTO platform_company_accounting_postings
            (business_id, event_id, source_reference, journal_entry_id, posting_rule, amount_rial)
@@ -748,8 +749,8 @@ export async function billingReconciliation(
  * Queue one failed event again.
  *
  * The attempt counter is reset so the exponential backoff restarts: an operator
- * who has just created the missing account should not wait out the eight-step
- * ladder a previous failure built up.
+ * who has just created the missing account should not wait out the whole
+ * backoff ladder a previous failure built up.
  */
 export async function retryBillingEvent(businessId: string, eventId: string): Promise<boolean> {
   const { rows } = await withoutTenantScope("platform", () => query<{ id: string }>(

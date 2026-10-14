@@ -21,6 +21,7 @@ interface PlatformLoginResponse {
   mfaRequired?: boolean;
   mfaToken?: string;
   mfaMethod?: MfaMethod | null;
+  availableMethods?: MfaMethod[];
   mfaState?: "grace" | "required";
   graceDaysLeft?: number | null;
 }
@@ -42,7 +43,11 @@ export default function PlatformLoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** The `mfa_pending` token an admin past their grace window receives. */
-  const [pending, setPending] = useState<{ token: string; method: MfaMethod | null } | null>(null);
+  const [pending, setPending] = useState<{
+    token: string;
+    method: MfaMethod | null;
+    availableMethods: MfaMethod[];
+  } | null>(null);
   /** Grace: the session is already set: this is a nag with a countdown, not a gate. */
   const [graceDaysLeft, setGraceDaysLeft] = useState<number | null | undefined>(undefined);
 
@@ -72,7 +77,11 @@ export default function PlatformLoginPage() {
     }
 
     if (ok && data.mfaRequired && data.mfaToken) {
-      setPending({ token: data.mfaToken, method: data.mfaMethod ?? null });
+      setPending({
+        token: data.mfaToken,
+        method: data.mfaMethod ?? null,
+        availableMethods: data.availableMethods ?? [],
+      });
       return;
     }
 
@@ -103,6 +112,7 @@ export default function PlatformLoginPage() {
           <MfaStep
             mfaToken={pending.token}
             mfaMethod={pending.method}
+            availableMethods={pending.availableMethods}
             theme={PLATFORM_MFA_THEME}
             endpoints={{
               challenge: "/api/platform/auth/mfa/challenge",
@@ -130,7 +140,7 @@ export default function PlatformLoginPage() {
             <button
               type="button"
               onClick={() => {
-                router.push("/platform/security");
+                router.push("/platform/account");
                 router.refresh();
               }}
               className="h-10 w-full rounded-lg bg-sky-500 text-sm font-semibold text-foreground transition-colors hover:bg-sky-400"

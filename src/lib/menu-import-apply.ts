@@ -20,6 +20,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { getPool } from "./db";
+import { businessIdForLocation } from "./plan-limits";
+import { changeMenuItemPriceWith, clientExecutor } from "./menu-price-service";
 import type { ImportResult } from "./menu-import";
 
 export interface MenuImportCounts {
@@ -79,11 +81,13 @@ export async function applyMenuImport(
   locationId: string,
   result: ImportResult,
   defaultTaxRate: number,
+  /** The member who chose the file, recorded on price history (issue #844). */
+  actorUserId?: string | null,
 ): Promise<MenuImportCounts> {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    const counts = await applyInTransaction(client, locationId, result, defaultTaxRate);
+    const counts = await applyInTransaction(client, locationId, result, defaultTaxRate, actorUserId);
     await client.query("COMMIT");
     return counts;
   } catch (err) {
@@ -100,6 +104,7 @@ export async function applyInTransaction(
   locationId: string,
   result: ImportResult,
   defaultTaxRate: number,
+  actorUserId?: string | null,
 ): Promise<MenuImportCounts> {
   const counts: MenuImportCounts = {
     createdCategories: 0,
@@ -240,21 +245,39 @@ export async function applyInTransaction(
     }
 
     if (updates.length > 0) {
+      // description/sku still land in one set-based statement. The price does
+      // NOT: it travels through the canonical price-change service so every
+      // actual change appends immutable history + the shared audit event with
+      // `source = 'import'`, inside this very transaction (issue #844). A row
+      // whose price is unchanged writes no history at all.
       await client.query(
         `UPDATE menu_items
-            SET price = i.price,
-                description = COALESCE(i.description, menu_items.description),
+            SET description = COALESCE(i.description, menu_items.description),
                 sku = COALESCE(i.sku, menu_items.sku),
                 updated_at = now()
-           FROM unnest($1::uuid[], $2::bigint[], $3::text[], $4::text[]) AS i(id, price, description, sku)
+           FROM unnest($1::uuid[], $2::text[], $3::text[]) AS i(id, description, sku)
           WHERE menu_items.id = i.id`,
-        [
-          updates.map((u) => u.id),
-          updates.map((u) => u.price),
-          updates.map((u) => u.description),
-          updates.map((u) => u.sku),
-        ],
+        [updates.map((u) => u.id), updates.map((u) => u.description), updates.map((u) => u.sku)],
       );
+
+      const exec = {
+        query: <T extends Record<string, unknown>>(text: string, params?: unknown[]) =>
+          client.query<T>(text, params as never),
+      };
+      const businessId = await businessIdForLocation(locationId, exec);
+      if (!businessId) throw new Error("location_without_business");
+      for (const update of updates) {
+        const change = await changeMenuItemPriceWith(clientExecutor(client), {
+          businessId,
+          locationId,
+          menuItemId: update.id,
+          newPrice: update.price,
+          source: "import",
+          changedBy: actorUserId ?? null,
+          sourceRef: "menu-import",
+        });
+        if (!change.ok) throw new Error(change.error);
+      }
       counts.updatedItems = updates.length;
     }
 

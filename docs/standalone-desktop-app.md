@@ -161,6 +161,18 @@ than treating `navigator.onLine` as proof that the local service is reachable.
 
 ## Build and verification
 
+The `shadcn` component-generation CLI is a **development dependency**. Its
+`shadcn/tailwind.css` import is compiled into the application styles at build
+time; neither the production server nor the installed desktop runs the CLI.
+Keep its code-generation/glob dependency graph marked development-only in the
+lockfile. Both desktop CI workflows retain the unchanged
+`npm audit --omit=dev --audit-level=high` production vulnerability gate.
+
+PR/branch installer builds use unique `X.Y.Z-ci.<run>` preview versions and do
+not publish release tags. They may still build when `desktop-vX.Y.Z` was
+released after their branch was created. Stable tag-collision checks apply to
+main/manual release builds, where rebuilding a shipped version remains blocked.
+
 From the repository root:
 
 ```bash
@@ -196,6 +208,19 @@ passed end to end:
 | NSIS installer | 131.4 MiB | 350 MiB |
 | Unpacked installed payload | 504.9 MiB | 600 MiB |
 | Positively staged runtime (local Linux build) | 153.9 MiB | 200 MiB |
+
+**Current configured budgets (2026-10-13; maintainer acceptance undecided).** The
+installer gate is 175 MiB and the workflow currently checks an unpacked payload
+limit of **640 MiB**. The issue #834 Windows package measured 620.2 MiB
+([run 38165434904](https://github.com/hamidnoshady/biza-miz/actions/runs/38165434904));
+the merged multicurrency/auth-hardening build on main measured 620.4 MiB on
+2026-10-11. Both exceed the former 620 MiB detector. The configured 640 MiB value
+is not yet accepted by the maintainer and is not a claim that either result meets
+the former 620 MiB policy. The AEC document-control wave took the traced runtime
+from 599.8 MiB to 600.6 MiB. The detector is intended to catch accidental
+inclusion of `node_modules`, build caches or source maps, not to freeze normal
+application growth. The component report shows the dominant term: roughly 103 MiB
+of *unminified* `.next/server` chunks; compile minification is tracked separately.
 
 The uploaded installer artifact is 136,405,815 bytes as a GitHub artifact and
 has digest

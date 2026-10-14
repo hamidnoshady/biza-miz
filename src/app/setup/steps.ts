@@ -12,6 +12,13 @@ export interface StepMeta {
 /** Every step that exists, in wizard order — filter with `stepsFor` for the sequence one business actually walks. */
 export const STEPS: StepMeta[] = [
   { id: "business", path: "/setup/business", title: "اطلاعات کسب‌وکار", short: "کسب‌وکار" },
+  {
+    id: "aec_profile",
+    path: "/setup/aec-profile",
+    title: "پروفایل کسب‌وکار",
+    short: "پروفایل",
+    optional: true,
+  },
   { id: "accounts", path: "/setup/accounts", title: "سرفصل حساب‌ها", short: "حساب‌ها" },
   { id: "costing", path: "/setup/costing", title: "روش قیمت‌گذاری موجودی", short: "قیمت‌گذاری" },
   { id: "tax", path: "/setup/tax", title: "تنظیم مالیات", short: "مالیات" },

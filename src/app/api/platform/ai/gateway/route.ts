@@ -6,14 +6,24 @@
  * allowances and tenant monetization belong strictly to Plan/Billing.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getAiRuntimeReadiness, getPlatformAiConfig, type AiRuntimeReadiness } from "@/lib/ai-config";
+import { getAiRuntimeReadiness, type AiRuntimeReadiness } from "@/lib/ai-config";
+import { platformCan } from "@/lib/platform-admin";
+import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
+import {
+  listAiGatewayFleetPage,
+  listAiGatewayLocationPage,
+  type FleetQueryRow,
+  type LocationQueryRow,
+} from "@/lib/platform-ai-gateway-pagination";
 import { decorateAiConfigWithState } from "@/lib/ai-runtime";
 import {
   BusinessLocationMismatchError,
   GatewayProvisioningError,
   getAiGatewayConfig,
+  getAiGatewayRuntimeSettings,
+  getAnyBusinessGatewayWithKey,
   getBusinessGateway,
-  listBusinessGateways,
+  listBusinessGatewaysForConsole,
   locationBelongsToBusiness,
   mergeGatewayConfig,
   probeGateway,
@@ -32,14 +42,6 @@ import {
   type BusinessGateway,
   type AiGatewayInput,
 } from "@/lib/ai-gateway";
-
-/** The fleet-table status filter/vocabulary (issue #748 P1-6). */
-type FleetStatus =
-  | "ready"
-  | "missing_key"
-  | "key_sync_error"
-  | "entitlement_disabled"
-  | "gateway_unavailable";
 
 const FLEET_STATUS_FILTERS = new Set([
   "all",
@@ -62,32 +64,41 @@ const GATEWAY_LEVEL_REASONS = new Set([
   "configuration_load_failed",
 ]);
 
+const MAX_PAGINATION_INT = 2_147_483_647;
+const MAX_SEARCH_LENGTH = 100;
+
 /**
- * The worst-first status a fleet row shows in the console table. A row with
- * a branch override is flagged as such only once nothing worse applies —
- * "has a branch override" is informational, not itself a problem.
+ * Keep values passed to PostgreSQL's integer casts finite and bounded. A zero
+ * or missing value retains the route's historical default; negative values
+ * become the first page, and oversized finite values are clamped before they
+ * reach `$n::int`. Non-finite values are invalid input and use the default.
  */
-function deriveFleetStatus(input: {
-  readiness: AiRuntimeReadiness;
-  entitled: boolean;
-  syncError: string | null;
-}): FleetStatus {
-  if (input.syncError) return "key_sync_error";
-  if (input.readiness.reason === "tenant_virtual_key_missing") return "missing_key";
-  if (!input.entitled) return "entitlement_disabled";
-  if (input.readiness.reason && GATEWAY_LEVEL_REASONS.has(input.readiness.reason)) return "gateway_unavailable";
-  return "ready";
+function paginationInteger(raw: string | null, fallback: number, maximum: number): number {
+  if (raw === null) return fallback;
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return fallback;
+  const integer = Math.trunc(numeric);
+  if (integer === 0) return fallback;
+  return Math.min(maximum, Math.max(1, integer));
 }
-import { platformCan } from "@/lib/platform-admin";
-import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
-import { query, withoutTenantScope } from "@/lib/db";
 
 /** Technical LiteLLM gateway status, models, readiness and virtual keys. */
 export const GET = withPlatformScope(async (request: NextRequest) => {
   const { session, error } = await requirePlatformCapability("ai.read");
   if (error) return error;
 
-  const platform = await getPlatformAiConfig();
+  // The platform and gateway views are mapped from the same singleton read.
+  let gateway: Awaited<ReturnType<typeof getAiGatewayRuntimeSettings>>["gateway"];
+  let platform: Awaited<ReturnType<typeof getAiGatewayRuntimeSettings>>["platform"];
+  try {
+    ({ gateway, platform } = await getAiGatewayRuntimeSettings());
+  } catch (err) {
+    console.error("platform AI gateway snapshot unavailable", err);
+    return NextResponse.json(
+      { error: "ai_configuration_load_failed", runtimeReadiness: { ready: false, reason: "configuration_load_failed" } },
+      { status: 503 },
+    );
+  }
   const platformReadiness = getAiRuntimeReadiness(platform);
   if (platformReadiness.reason === "configuration_load_failed") {
     return NextResponse.json(
@@ -97,92 +108,113 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
   }
 
   const params = request.nextUrl.searchParams;
-  const search = (params.get("search") ?? "").trim().toLowerCase();
-  const statusParamRaw = params.get("status") ?? "all";
-  const statusFilter = FLEET_STATUS_FILTERS.has(statusParamRaw) ? statusParamRaw : "all";
-  const page = Math.max(1, Math.trunc(Number(params.get("page")) || 1));
-  const pageSize = Math.min(100, Math.max(1, Math.trunc(Number(params.get("pageSize")) || 20)));
-  // The exact (businessId, locationId) the console has selected for the
-  // "manage this business/branch" panel — resolved independently of the
-  // fleet table's pagination, so a business found via the picker's own
-  // search works even when it is not on the fleet table's current page
-  // (issue #748 P1-5).
-  const focusBusinessId = params.get("businessId")?.trim() || null;
-  const focusLocationId = params.get("locationId")?.trim() || null;
+  const rawSearch = (params.get("search") ?? "").trim().slice(0, MAX_SEARCH_LENGTH);
+  const escapedSearch = rawSearch.replace(/[!%_]/g, "!$&");
+  const searchPattern = escapedSearch ? `%${escapedSearch}%` : "";
+  const statusRaw = params.get("status") ?? "all";
+  const statusFilter = FLEET_STATUS_FILTERS.has(statusRaw) ? statusRaw : "all";
+  const pageSize = paginationInteger(params.get("pageSize"), 20, 100);
+  const requestedPage = paginationInteger(params.get("page"), 1, MAX_PAGINATION_INT);
+  const focusBusinessId = params.get("businessId")?.trim() || "";
+  const focusLocationId = params.get("locationId")?.trim() || "";
 
-  // Issue #748 P1-6: the platform gateway singleton and every business/branch
-  // key row are each loaded exactly ONCE here, then every business's
-  // readiness is derived from these two already-loaded results in memory
-  // (`decorateAiConfigWithState`) — no more one `resolveAiConfigFor` (and its
-  // own gateway + business-row queries) per business.
-  const [gateway, gateways, locationsRes, businessesRes] = await Promise.all([
-    getAiGatewayConfig(),
-    listBusinessGateways(),
-    withoutTenantScope("platform", () =>
-      query<{ id: string; business_id: string; name: string }>(
-        `SELECT id, business_id, name FROM locations ORDER BY name`,
-      ),
-    ),
-    withoutTenantScope("platform", () =>
-      query<{ id: string; name: string; ai_entitled: boolean }>(
-        `SELECT b.id, b.name,
-                COALESCE(bf.enabled, ff.default_enabled, false) AS ai_entitled
-           FROM businesses b
-           LEFT JOIN feature_flags ff ON ff.key = 'ai_assistant'
-           LEFT JOIN business_features bf ON bf.business_id = b.id AND bf.flag_key = ff.key
-          WHERE b.status <> 'archived' ORDER BY b.name`,
-      ),
-    ),
-  ]);
+  // The global credential is optional when tenant virtual keys are enforced:
+  // an existing tenant key can still authenticate, but each business must
+  // have its own key. Every other gateway-level readiness failure applies to
+  // the whole fleet and can therefore be pushed into the paginated SQL query.
+  const gatewayUnavailable = Boolean(
+    platformReadiness.reason &&
+      GATEWAY_LEVEL_REASONS.has(platformReadiness.reason) &&
+      !(platformReadiness.reason === "missing_runtime_credential" && gateway.virtualKeysEnabled),
+  );
 
-  const runtimeReadiness = getAiRuntimeReadiness(platform);
-
-  const businessRowByBusiness = new Map<string, BusinessGateway>();
-  const branchRowsByBusiness = new Map<string, BusinessGateway[]>();
-  const branchRowByKey = new Map<string, BusinessGateway>();
-  for (const row of gateways) {
-    if (!row.locationId) {
-      businessRowByBusiness.set(row.businessId, row);
-      continue;
-    }
-    branchRowByKey.set(`${row.businessId}:${row.locationId}`, row);
-    const list = branchRowsByBusiness.get(row.businessId) ?? [];
-    list.push(row);
-    branchRowsByBusiness.set(row.businessId, list);
-  }
-
-  const fleet = businessesRes.rows.map((business) => {
-    const businessRow = businessRowByBusiness.get(business.id) ?? null;
-    const decorated = decorateAiConfigWithState(platform, gateway, businessRow, null, business.id);
-    const readiness = getAiRuntimeReadiness(decorated);
-    const hasBranchOverride = (branchRowsByBusiness.get(business.id)?.length ?? 0) > 0;
-    const status = deriveFleetStatus({ readiness, entitled: business.ai_entitled, syncError: businessRow?.syncError ?? null });
-    return { business, readiness, hasBranchOverride, status };
+  // Entitlement, branch-override presence, and sync status are aggregated in
+  // one DB query. Search, status filtering, count and pagination happen before
+  // rows leave Postgres; a focused business is appended separately so its
+  // details remain accessible even when outside the current fleet page/filter.
+  const fleetQuery = await listAiGatewayFleetPage({
+    gatewayVirtualKeysEnabled: gateway.virtualKeysEnabled,
+    gatewayUnavailable,
+    masterKeyConfigured: Boolean(gateway.masterKey),
+    searchPattern,
+    statusFilter,
+    focusBusinessId,
+    pageSize,
+    requestedPage,
   });
 
-  let filtered = fleet;
-  if (search) filtered = filtered.filter(({ business }) => business.name.toLowerCase().includes(search));
-  if (statusFilter === "branch_override") filtered = filtered.filter((row) => row.hasBranchOverride);
-  else if (statusFilter !== "all") filtered = filtered.filter((row) => row.status === statusFilter);
+  const firstFleetRow = fleetQuery.rows[0];
+  const pagination = {
+    page: Number(firstFleetRow?.page ?? 1),
+    pageSize,
+    total: Number(firstFleetRow?.total ?? 0),
+    totalPages: Number(firstFleetRow?.total_pages ?? 1),
+  };
+  const fleetRows = fleetQuery.rows.filter(
+    (row): row is FleetQueryRow & { business_id: string; business_name: string; ai_entitled: boolean } =>
+      Boolean(row.business_id && row.business_name !== null && row.ai_entitled !== null),
+  );
+  const visibleBusinessIds = fleetRows.map((row) => row.business_id);
+  const locationSearch = (params.get("locationSearch") ?? "").trim().slice(0, MAX_SEARCH_LENGTH);
+  const locationPageSize = paginationInteger(params.get("locationPageSize"), 50, 100);
+  const requestedLocationPage = paginationInteger(params.get("locationPage"), 1, MAX_PAGINATION_INT);
+  const locationPattern = locationSearch
+    ? `%${locationSearch.replace(/[!%_]/g, "!$&")}%`
+    : "";
 
-  const total = filtered.length;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const pageStart = (Math.min(page, totalPages) - 1) * pageSize;
-  const pageItems = filtered.slice(pageStart, pageStart + pageSize);
-
-  // The selected business/branch's own row must be present in the response
-  // even when it fell outside the current page or the active filter — the
-  // console's detail panel and the fleet table share one payload.
-  const visibleBusinessIds = new Set(pageItems.map((row) => row.business.id));
-  if (focusBusinessId && !visibleBusinessIds.has(focusBusinessId)) {
-    const focusRow = fleet.find((row) => row.business.id === focusBusinessId);
-    if (focusRow) {
-      pageItems.push(focusRow);
-      visibleBusinessIds.add(focusBusinessId);
-    }
+  let responseLocations: { id: string; businessId: string; name: string }[] = [];
+  let locationPagination = { page: 1, pageSize: locationPageSize, total: 0, totalPages: 1 };
+  if (focusBusinessId && visibleBusinessIds.includes(focusBusinessId)) {
+    const locationQuery = await listAiGatewayLocationPage({
+      businessId: focusBusinessId,
+      searchPattern: locationPattern,
+      focusLocationId,
+      pageSize: locationPageSize,
+      requestedPage: requestedLocationPage,
+    });
+    const firstLocationRow = locationQuery.rows[0];
+    locationPagination = {
+      page: Number(firstLocationRow?.page ?? 1),
+      pageSize: locationPageSize,
+      total: Number(firstLocationRow?.total ?? 0),
+      totalPages: Number(firstLocationRow?.total_pages ?? 1),
+    };
+    responseLocations = locationQuery.rows
+      .filter((row): row is LocationQueryRow & { id: string; business_id: string; name: string } =>
+        Boolean(row.id && row.business_id && row.name !== null),
+      )
+      .map((row) => ({ id: row.id, businessId: row.business_id, name: row.name }));
   }
 
-  let branchReadiness: {
+  const focusedLocationIsValid = !focusLocationId || responseLocations.some((row) => row.id === focusLocationId);
+  const branchRows = await listBusinessGatewaysForConsole(
+    visibleBusinessIds,
+    focusBusinessId && focusLocationId && focusedLocationIsValid
+      ? { businessId: focusBusinessId, locationId: focusLocationId }
+      : null,
+  );
+  const businessRowByBusiness = new Map<string, BusinessGateway>();
+  const branchRowByKey = new Map<string, BusinessGateway>();
+  for (const row of branchRows) {
+    if (!row.locationId) businessRowByBusiness.set(row.businessId, row);
+    else branchRowByKey.set(`${row.businessId}:${row.locationId}`, row);
+  }
+
+  const tenantReadiness = fleetRows.map((row) => {
+    const businessRow = businessRowByBusiness.get(row.business_id) ?? null;
+    const decorated = decorateAiConfigWithState(platform, gateway, businessRow, null, row.business_id);
+    const readiness = getAiRuntimeReadiness(decorated);
+    return {
+      businessId: row.business_id,
+      entitled: row.ai_entitled,
+      hasBranchOverride: Boolean(row.has_branch_override),
+      hasBranchSyncError: Boolean(row.has_branch_sync_error),
+      status: row.fleet_status ?? "ready",
+      ...readiness,
+    };
+  });
+
+  let branchReadiness: ({
     businessId: string;
     locationId: string | null;
     entitled: boolean;
@@ -192,57 +224,67 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     inheritedFromBusiness: boolean;
     effectiveModel: string;
     lastVerifiedAt: string | null;
+    businessSyncError: string | null;
+    branchSyncError: string | null;
     syncError: string | null;
-  } & AiRuntimeReadiness | null = null;
-  if (focusBusinessId) {
-    const businessMeta = businessesRes.rows.find((r) => r.id === focusBusinessId);
-    if (businessMeta) {
-      const businessRow = businessRowByBusiness.get(focusBusinessId) ?? null;
-      const branchRow = focusLocationId ? (branchRowByKey.get(`${focusBusinessId}:${focusLocationId}`) ?? null) : null;
-      const decorated = decorateAiConfigWithState(platform, gateway, businessRow, branchRow, focusBusinessId);
-      const readiness = getAiRuntimeReadiness(decorated);
-      const credentialSource: "branch" | "business" | "master" | "none" = branchRow?.virtualKey
-        ? "branch"
+  } & AiRuntimeReadiness) | null = null;
+
+  const focusBusiness = fleetRows.find((row) => row.business_id === focusBusinessId);
+  if (focusBusiness && focusedLocationIsValid) {
+    const businessRow = businessRowByBusiness.get(focusBusinessId) ?? null;
+    const branchRow = focusLocationId
+      ? branchRowByKey.get(`${focusBusinessId}:${focusLocationId}`) ?? null
+      : null;
+    const decorated = decorateAiConfigWithState(platform, gateway, businessRow, branchRow, focusBusinessId);
+    const readiness = getAiRuntimeReadiness(decorated);
+    const businessHasKey = Boolean(businessRow?.virtualKey);
+    const branchHasKey = focusLocationId ? Boolean(branchRow?.virtualKey) : null;
+    const credentialSource: "branch" | "business" | "master" | "none" = !isGatewayActive(gateway)
+      ? "none"
+      : gateway.virtualKeysEnabled
+        ? branchRow?.virtualKey
+          ? "branch"
+          : businessRow?.virtualKey
+            ? "business"
+            : "none"
+        : gateway.masterKey
+          ? "master"
+          : "none";
+    const credentialRow = !isGatewayActive(gateway) || !gateway.virtualKeysEnabled
+      ? null
+      : branchRow?.virtualKey
+        ? branchRow
         : businessRow?.virtualKey
-          ? "business"
-          : gateway.masterKey
-            ? "master"
-            : "none";
-      const effective = branchRow ?? businessRow;
-      branchReadiness = {
-        businessId: focusBusinessId,
-        locationId: focusLocationId,
-        entitled: businessMeta.ai_entitled,
-        ...readiness,
-        credentialSource,
-        businessHasKey: Boolean(businessRow?.virtualKey),
-        branchHasKey: focusLocationId ? Boolean(branchRow?.virtualKey) : null,
-        inheritedFromBusiness: Boolean(focusLocationId) && !branchRow?.virtualKey && Boolean(businessRow?.virtualKey),
-        effectiveModel: resolveChatModel({ platformModel: platform.model, gateway, business: businessRow, branch: branchRow }),
-        lastVerifiedAt: effective?.syncedAt ?? null,
-        syncError: effective?.syncError ?? null,
-      };
-    }
+          ? businessRow
+          : null;
+    const businessSyncError = businessRow?.syncError ?? null;
+    const branchSyncError = branchRow?.syncError ?? null;
+    branchReadiness = {
+      businessId: focusBusinessId,
+      locationId: focusLocationId || null,
+      entitled: focusBusiness.ai_entitled,
+      ...readiness,
+      credentialSource,
+      businessHasKey,
+      branchHasKey,
+      inheritedFromBusiness:
+        gateway.virtualKeysEnabled && Boolean(focusLocationId) && !branchHasKey && businessHasKey,
+      effectiveModel: resolveChatModel({ platformModel: platform.model, gateway, business: businessRow, branch: branchRow }),
+      lastVerifiedAt: credentialRow?.syncedAt ?? null,
+      businessSyncError,
+      branchSyncError,
+      syncError: branchSyncError ?? businessSyncError,
+    };
   }
 
-  // The public gateway shape (base URL, aliases, virtual-key toggle,
-  // hasMasterKey) is already secret-safe — see toPublicGatewayConfig — so
-  // every `ai.read` holder gets it, not only owners. Mutations stay gated
-  // server-side by `ai.config.manage` on PUT/POST; the console itself hides
-  // the edit controls from a read-only viewer, but that is a UI convenience,
-  // not the security boundary.
   const canManage = platformCan(session.role, "ai.config.manage");
   const wantsProbe = params.get("probe") === "1";
-  const firstVirtualKey = gateways.find((row) => Boolean(row.virtualKey))?.virtualKey ?? null;
+  const probeKey = canManage && wantsProbe ? await getAnyBusinessGatewayWithKey() : null;
   const status = canManage && wantsProbe
-    ? await probeGateway(gateway, { platformModel: platform.model, virtualKey: firstVirtualKey })
+    ? await probeGateway(gateway, { platformModel: platform.model, virtualKey: probeKey?.virtualKey ?? null })
     : null;
 
-  const responseGateways = gateways.filter(
-    (row) => visibleBusinessIds.has(row.businessId) && (row.locationId === null || row.businessId === focusBusinessId),
-  );
-  const responseLocations = locationsRes.rows.filter((r) => visibleBusinessIds.has(r.business_id));
-
+  const responseGateways = branchRows.map((row) => toPublicBusinessGateway(row, gateway, platform.model));
   return NextResponse.json({
     gateway: toPublicAiGatewayConfig(gateway),
     canManage,
@@ -250,28 +292,19 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     platformModel: platform.model,
     platformBaseUrl: gateway.baseUrl,
     providerIsGateway: true,
-    active: runtimeReadiness.ready,
-    runtimeReadiness,
-    tenantReadiness: pageItems.map(({ business, readiness, hasBranchOverride, status: fleetStatus }) => ({
-      businessId: business.id,
-      entitled: business.ai_entitled,
-      hasBranchOverride,
-      status: fleetStatus,
-      ...readiness,
-    })),
+    active: platformReadiness.ready,
+    runtimeReadiness: platformReadiness,
+    tenantReadiness,
     branchReadiness,
-    pagination: { page: Math.min(page, totalPages), pageSize, total, totalPages },
+    pagination,
+    locationPagination,
     status,
-    gateways: responseGateways.map((row) => toPublicBusinessGateway(row, gateway, platform.model)),
-    locations: responseLocations.map((r) => ({
-      id: r.id,
-      businessId: r.business_id,
-      name: r.name,
-    })),
-    businesses: pageItems.map(({ business }) => ({
-      businessId: business.id,
-      businessName: business.name,
-      aiEntitled: business.ai_entitled,
+    gateways: responseGateways,
+    locations: responseLocations,
+    businesses: fleetRows.filter((row) => !row.is_focused).map((row) => ({
+      businessId: row.business_id,
+      businessName: row.business_name,
+      aiEntitled: row.ai_entitled,
     })),
   });
 });
@@ -294,11 +327,12 @@ export const PUT = withPlatformScope(async (request: NextRequest) => {
     if (!draft || typeof draft !== "object") {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
-    const current = await getAiGatewayConfig();
+    const { gateway: current, platform } = await getAiGatewayRuntimeSettings();
     const merged = mergeGatewayConfig(draft as AiGatewayInput, current);
-    const [platform, gatewayRows] = await Promise.all([getPlatformAiConfig(), listBusinessGateways()]);
-    const firstVirtualKey = gatewayRows.find((row) => Boolean(row.virtualKey))?.virtualKey ?? null;
-    return NextResponse.json({ status: await probeGateway(merged, { platformModel: platform.model, virtualKey: firstVirtualKey }) });
+    const firstVirtualKey = await getAnyBusinessGatewayWithKey();
+    return NextResponse.json({
+      status: await probeGateway(merged, { platformModel: platform.model, virtualKey: firstVirtualKey?.virtualKey ?? null }),
+    });
   }
 
   if (body.action === "config") {
@@ -356,8 +390,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "ai_gateway_location_business_mismatch" }, { status: 400 });
   }
 
-  const platform = await getPlatformAiConfig();
-  const gateway = await getAiGatewayConfig();
+  const { platform, gateway } = await getAiGatewayRuntimeSettings();
 
   if (body.action === "sync_key") {
     if (!isGatewayActive(gateway)) {

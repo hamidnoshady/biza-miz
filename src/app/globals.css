@@ -95,7 +95,8 @@
   --secondary: oklch(0.97 0.003 70);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0.003 70);
-  --muted-foreground: oklch(0.556 0.006 60);
+  /* Small text must clear 4.5:1 on both the warm canvas and muted surfaces. */
+  --muted-foreground: oklch(0.54 0.006 60);
   --accent: oklch(0.97 0.003 70);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
@@ -122,6 +123,16 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0.004 60);
   --sidebar-ring: oklch(0.708 0 0);
+}
+
+/*
+ * Phase 46 — a cloud page inside the desktop's cloud pane. The desktop draws
+ * the menu, so the page's own sidebar goes. The marker on <html> is set by an
+ * inline script in the root layout from navigator.userAgent (src/lib/cloud-embed.ts
+ * explains why the server-side check alone misses service-worker navigations).
+ */
+html[data-cloud-embed] [data-workspace-sidebar] {
+  display: none;
 }
 
 .dark {
@@ -361,4 +372,23 @@
 }
 .dark .ai-chat-scroll::-webkit-scrollbar-thumb:hover {
   background: rgb(255 255 255 / 0.3);
+}
+
+/* ---------------------------------------------------------------------------
+ * Print sheets (issue #820): reports that own a paper presentation portal a
+ * dedicated sheet onto <body> under `#print-sheet-root`. On paper the app
+ * chrome disappears and only the sheet is laid out, so a printed trial balance
+ * is the report — not the sidebar, rail and filter panel around it. On screen
+ * this rule matches nothing (it lives inside @media print), and the sheet's own
+ * module keeps it `display: none` there.
+ * ------------------------------------------------------------------------- */
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 12mm;
+  }
+
+  body > *:not(#print-sheet-root) {
+    display: none !important;
+  }
 }

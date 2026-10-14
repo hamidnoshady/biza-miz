@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { withPlatformCompany } from "@/lib/platform-company";
 import { withPlatformScope } from "@/lib/platform-auth";
 import { listWorkspaceProjects } from "@/lib/workspace";
+import { workspaceAccessFlags } from "@/lib/workspace-shared";
 
 export interface CompanyProjectSummary {
   id: string;
@@ -44,7 +45,10 @@ export interface CompanyProjectSummary {
  */
 export const GET = withPlatformScope(async (): Promise<NextResponse> => {
   const result = await withPlatformCompany(PERMISSIONS.workspaceView, async (actor) => {
-    const projects = await listWorkspaceProjects(actor.businessId, { limit: 100 });
+    const projects = await listWorkspaceProjects(
+      { businessId: actor.businessId, actorUserId: actor.userId, access: workspaceAccessFlags(actor.permissions) },
+      { limit: 100 },
+    );
     const ids = projects.map((project) => project.id);
     const links = new Map<string, { linkKind: string; linkedId: string }[]>();
     if (ids.length) {

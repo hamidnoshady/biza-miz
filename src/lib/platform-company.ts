@@ -25,6 +25,7 @@ import {
   type PlatformCompanyState,
   type PlatformCompanyStatus,
   type PlatformCompanyMemberSummary,
+  type CompanyAppKey,
 } from "./platform-company-types";
 
 export { COMPANY_ACCESS_PRESET_KEYS };
@@ -157,6 +158,24 @@ export interface PlatformCompanyResult<T> {
  *   company permission → replace platform bypass with internal tenant scope →
  *   execute app operation
  */
+/**
+ * The work area that owns a permission. Routes that carry one of these
+ * permissions are only reachable while the company is entitled to that area
+ * (audit F17): the nav and home hide the area, and this makes the API refuse
+ * it too. Team/permission management is not an app and is always available to
+ * members who hold it.
+ */
+const PERMISSION_APP: Partial<Record<Permission, CompanyAppKey>> = {
+  [PERMISSIONS.workspaceView]: "workspace",
+  [PERMISSIONS.workspaceManage]: "workspace",
+  [PERMISSIONS.ledgerView]: "accounting",
+  [PERMISSIONS.ledgerPost]: "accounting",
+  [PERMISSIONS.crmView]: "crm",
+  [PERMISSIONS.growthView]: "growth",
+  [PERMISSIONS.websiteView]: "websites",
+  [PERMISSIONS.websiteManage]: "websites",
+};
+
 export async function withPlatformCompany<T>(
   permission: Permission,
   operation: (actor: PlatformCompanyActor) => Promise<T>,
@@ -166,6 +185,10 @@ export async function withPlatformCompany<T>(
   const actor = await mappedActor(guard.session);
   if (!actor) return { ok: false, status: 404, error: "platform_company_not_provisioned_or_not_member" };
   if (!actor.permissions.has(permission)) return { ok: false, status: 403, error: "company_permission_denied" };
+  const app = PERMISSION_APP[permission];
+  if (app && !(await companyAppEnabled(actor.businessId, app))) {
+    return { ok: false, status: 403, error: "company_app_disabled" };
+  }
   const value = await withTenant(actor.businessId, () => operation(actor), { userId: actor.userId });
   return { ok: true, status: 200, value, actor };
 }
@@ -401,6 +424,10 @@ async function provisionInternalCompany(session: PlatformSessionPayload) {
       industry: "service_saas",
       subdomain: "platform-company",
       seedChartOfAccounts: true,
+      // The platform's own company workspace is provisioned ready to use, not
+      // onboarded: it must not be routed through the tenant wizard either
+      // (issue #808 §4).
+      completeSetup: true,
       ownershipKind: "platform_internal",
       createdBy: session.padmin,
     });

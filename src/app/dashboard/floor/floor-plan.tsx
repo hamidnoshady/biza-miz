@@ -293,8 +293,16 @@ export function FloorPlan({ canEdit }: { canEdit: boolean }) {
             ) : null}
           </div>
 
+          {/*
+            On a 360px phone the legend scrolls sideways and holds no control,
+            so it has to take focus itself or a keyboard user can never reach
+            the statuses past the edge (axe scrollable-region-focusable). The
+            role makes the aria-label something a screen reader announces.
+          */}
           <div
-            className="mt-3 flex min-h-11 gap-2 overflow-x-auto pb-1"
+            role="group"
+            tabIndex={0}
+            className="mt-3 flex min-h-11 gap-2 overflow-x-auto rounded-xl pb-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
             aria-label="راهنمای وضعیت میزها"
           >
             {LEGEND.map((status) => {

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { normalizeNumericText } from "@/lib/digits";
-import { DEFAULT_TAX_PERCENTAGE, taxPercentageOf } from "@/lib/parties";
+import { taxPercentageOf } from "@/lib/parties";
 
 /**
  * The «اشخاص» directory's fixed defects, pinned so they stay fixed.
@@ -43,12 +43,12 @@ describe("the tax rate a party is saved with", () => {
    * `Number(digits.replace(/[^\d.]/g, ""))`. Every case below silently wrote a
    * wrong VAT rate onto a counterparty — the field the invoices then use.
    */
-  it("reads a cleared field as the default rate, never as zero", () => {
+  it("reads a cleared field as «follows the business rate», never as zero", () => {
     // The original bug: `Number("")` is 0, and 0% is a rate a business really
     // charges, so nothing downstream could tell a cleared field from a
     // deliberate exemption.
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: "" } })).toBe(DEFAULT_TAX_PERCENTAGE);
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: "   " } })).toBe(DEFAULT_TAX_PERCENTAGE);
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: "" } })).toBeNull();
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: "   " } })).toBeNull();
   });
 
   it("still honours a deliberate zero", () => {
@@ -322,17 +322,18 @@ describe("the statement the directory can open", () => {
      * a statement reading «رکوردی نیست», which looks like lost data. The map
      * built from `?scope=directory` is the translation.
      */
-    expect(SECTION_SOURCE).toMatch(/supplierId=\{supplierAliases\[statement\.id\] \?\? statement\.id\}/);
+    expect(SECTION_SOURCE).toMatch(/supplierId=\{supplierAliases\[statement\.id\]\?\.supplierId \?\? statement\.id\}/);
     expect(SECTION_SOURCE).toMatch(/supplierPartyId=\{statement\.id\}/);
+    expect(SECTION_SOURCE).toMatch(/supplierLocationName=\{supplierAliases\[statement\.id\]\?\.locationName\}/);
     // The directory scope is the one that lists every supplier, not only those
     // carrying a nonzero balance — a settled supplier still has a statement.
     expect(SECTION_SOURCE).toMatch(/ap\/suppliers\?scope=directory/);
   });
 
-  it("withholds the A/P button when this branch has no supplier row for the party", () => {
-    // No alias means the payables ledger has nothing filed under them; better
-    // no button than one that opens an empty panel.
+  it("withholds the A/P button when the alias is absent or ambiguous across branches", () => {
     expect(SECTION_SOURCE).toMatch(/if \(kind === "ap" && !supplierAliases\[party\.id\]\) return null;/);
+    expect(SECTION_SOURCE).toMatch(/uniqueSupplierAliasByParty\(data\.suppliers \?\? \[\]\)/);
+    expect(SECTION_SOURCE).toMatch(/rather than choosing one arbitrarily/);
   });
 
   it("does not request the supplier map for members who cannot open a statement", () => {

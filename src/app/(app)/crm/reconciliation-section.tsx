@@ -49,6 +49,7 @@ import { formatPersianNumber } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { formatPhoneDisplay } from "@/lib/phone";
 import { crmCustomerHref } from "./crm-routes";
+import { CrmTodayQueues } from "./today-queues";
 
 interface Candidate {
   partyId: string;
@@ -185,6 +186,10 @@ export function ReconciliationSection() {
 
   return (
     <div className="min-w-0 space-y-4">
+
+      {/* This screen's own queue, above the list: the count is the answer to
+          «چقدر کار روی زمین مانده؟» and each row opens the record it names. */}
+      <CrmTodayQueues section="reconciliation" title="هویت‌های تازه برای تطبیق" />
       <ErrorBox>{error}</ErrorBox>
       {info ? <InfoBox>{info}</InfoBox> : null}
 

@@ -25,7 +25,10 @@
  * UI needs the field list, and it must not drag `pg` in with it.
  */
 
+import type { Industry } from "../industries";
 import { PERMISSIONS } from "../permissions";
+import { EXPENSE_DUPLICATE_RULES } from "../expense-import";
+import { EXPENSE_SETTLEMENT_LABELS, EXPENSE_SETTLEMENTS } from "../payables-input";
 import type { DataModuleKey, EntityDefinition, EntityField } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -639,6 +642,31 @@ const POS_PRODUCTS: EntityDefinition = {
       exportDefault: true,
     },
     { key: "description", label: "توضیحات", type: "longtext", aliases: ["توضیح"], exportDefault: true },
+    {
+      key: "imageUrl",
+      label: "لینک تصویر",
+      type: "text",
+      aliases: ["تصویر", "عکس", "image", "img"],
+      validation: { maxLength: 2000 },
+      exportDefault: true,
+    },
+    {
+      key: "imageMediaId",
+      label: "شناسهٔ رسانهٔ تصویر",
+      type: "text",
+      aliases: ["رسانه", "media id", "image_media_id"],
+      hint:
+        "شناسهٔ دارایی در کتابخانهٔ رسانه. در ورود، اگر در این کسب‌وکار موجود نباشد با هشدار نادیده گرفته می‌شود.",
+      exportDefault: true,
+    },
+    {
+      key: "targetMarginPercent",
+      label: "حاشیهٔ سود هدف (٪)",
+      type: "number",
+      aliases: ["حاشیه سود", "margin", "حاشیه"],
+      validation: { min: 0, max: 100 },
+      exportDefault: true,
+    },
     { key: "sortOrder", label: "ترتیب", type: "integer" },
     ACTIVE_FIELD,
     CREATED_AT_FIELD,
@@ -647,6 +675,68 @@ const POS_PRODUCTS: EntityDefinition = {
     { key: "sku", label: "کد کالا", fields: ["sku"] },
     { key: "name_category", label: "نام و دسته", fields: ["name", "categoryName"] },
     { key: "name", label: "نام آیتم", fields: ["name"] },
+  ],
+};
+
+/**
+ * Item ↔ modifier-group attachments (issue #844 parity): per-item min/max
+ * overrides, per-item link order and the link's own active state — the facts
+ * a flat items/modifiers export could not represent.
+ */
+const POS_ITEM_MODIFIER_GROUPS: EntityDefinition = {
+  key: "pos.item_modifier_groups",
+  module: "pos",
+  label: "اتصال افزودنی به آیتم",
+  description:
+    "کدام گروه افزودنی به کدام آیتم وصل است، با حداقل/حداکثر اختصاصی، ترتیب نمایش و وضعیت پیوند.",
+  exportPermission: PERMISSIONS.menuView,
+  importPermission: PERMISSIONS.menuEdit,
+  locationScoped: true,
+  requiresModule: "menu",
+  fields: [
+    {
+      key: "itemName",
+      label: "نام آیتم",
+      type: "text",
+      required: true,
+      aliases: ["آیتم", "محصول", "item", "نام محصول"],
+      exportDefault: true,
+    },
+    {
+      key: "itemSku",
+      label: "کد کالا",
+      type: "text",
+      aliases: ["کد", "sku"],
+      exportDefault: true,
+      hint: "در صورت وجود، مرجع اصلی آیتم است؛ در غیر این صورت از نام استفاده می‌شود.",
+    },
+    {
+      key: "groupName",
+      label: "گروه افزودنی",
+      type: "text",
+      required: true,
+      aliases: ["گروه", "افزودنی", "modifier group"],
+      exportDefault: true,
+    },
+    {
+      key: "minSelectOverride",
+      label: "حداقل انتخاب (اختصاصی)",
+      type: "integer",
+      aliases: ["حداقل", "min"],
+      validation: { min: 0 },
+    },
+    {
+      key: "maxSelectOverride",
+      label: "حداکثر انتخاب (اختصاصی)",
+      type: "integer",
+      aliases: ["حداکثر", "max"],
+      validation: { min: 0 },
+    },
+    { key: "sortOrder", label: "ترتیب نمایش در آیتم", type: "integer", exportDefault: true },
+    ACTIVE_FIELD,
+  ],
+  duplicateRules: [
+    { key: "item_group", label: "آیتم و گروه", fields: ["itemName", "groupName"] },
   ],
 };
 
@@ -1014,13 +1104,36 @@ const ACCOUNTING_PAYMENTS: EntityDefinition = {
   ],
 };
 
+/**
+ * The two settlements of audit F11, in the words the A/P screens and the expense
+ * form already use. Declared from `payables-input` rather than restated: the
+ * engine's `enum` coercion accepts a value *or* its label, so the only thing this
+ * adds is the Persian spelling an operator types into a cell — and if the service
+ * ever renames a settlement, the label here follows it instead of drifting.
+ */
+const EXPENSE_SETTLEMENT_OPTIONS = EXPENSE_SETTLEMENTS.map((value) => ({
+  value,
+  label: EXPENSE_SETTLEMENT_LABELS[value],
+}));
+
 const ACCOUNTING_EXPENSES: EntityDefinition = {
   key: "accounting.expenses",
   module: "accounting",
   label: "هزینه‌ها",
-  description: "هزینه‌های ثبت‌شده: سرفصل، مبلغ، تاریخ و طرف حساب.",
+  description:
+    "هزینه‌های ثبت‌شده: سرفصل، مبلغ، تاریخ، طرف حساب، مالیات قابل استرداد و نحوهٔ تسویه.",
   exportPermission: PERMISSIONS.ledgerView,
-  importPermission: PERMISSIONS.ledgerPost,
+  /*
+   * `ledger.post` was a second, unintended door to the same business act: a
+   * custom role holding `data.import` + `ledger.post` but *not*
+   * `finance.expenses_manage` could create paid expenses in bulk while being
+   * refused by `POST /api/ledger/expenses` (issue #832 §4). One capability now
+   * means "may create paid operating expenses", wherever the row comes from —
+   * the route, the importer, the assistant. (`data.import` is still required on
+   * top of it by every `/api/data/**` route; `importPermission` decides which
+   * entities a member may write through that door.)
+   */
+  importPermission: PERMISSIONS.financeExpensesManage,
   fields: [
     ID_FIELD,
     {
@@ -1037,11 +1150,17 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
       },
       exportDefault: true,
     },
+    /*
+     * Required of a **paid** row only. `parseExpenseSettlement` — the parser the
+     * form and the API use — is what decides, in the adapter, because a credit row
+     * has no payment account of its own: its credit is the Accounts Payable control
+     * account, derived from the chart. A cell that names a *different* account on
+     * an owed row is refused rather than ignored.
+     */
     {
       key: "paymentAccountCode",
       label: "حساب پرداخت",
       type: "reference",
-      required: true,
       aliases: ["از حساب", "حساب بانکی", "صندوق"],
       relation: {
         entity: "accounting.accounts",
@@ -1049,6 +1168,7 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
         onMissing: "skip",
         label: "حساب پرداخت",
       },
+      hint: "برای «پرداخت‌شده» الزامی است؛ برای «پرداخت بعدی» خالی بگذارید (بستانکار، حساب‌های پرداختنی است).",
       exportDefault: true,
     },
     {
@@ -1056,8 +1176,34 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
       label: "مبلغ",
       type: "money",
       required: true,
-      aliases: ["مبلغ هزینه", "amount"],
-      validation: { min: 1 },
+      /*
+       * The two unit spellings are the export's own headers: `buildExport` names a
+       * money column «مبلغ (تومان)», and a sheet the register wrote has to be a
+       * sheet the register can read back — otherwise the first column an operator
+       * copies from an export is the one the mapper drops. (The suffix is a rule of
+       * the export layer, so every entity's money columns have this gap; only the
+       * expense one is closed here, and closing it engine-wide is a change to
+       * `suggestMapping` rather than to this list.)
+       */
+      aliases: ["مبلغ هزینه", "amount", "مبلغ (تومان)", "مبلغ (ریال)"],
+      // `integral` because the ledger stores whole Rial: a Toman file whose cell
+      // carries a fraction is refused by name, not rounded into a posting nobody
+      // wrote (the same rule `parseExpenseAmount` applies to the API).
+      validation: { min: 1, integral: true },
+      exportDefault: true,
+    },
+    {
+      key: "vatAmount",
+      label: "مالیات قابل استرداد",
+      type: "money",
+      aliases: [
+        "مالیات",
+        "مالیات بر ارزش افزوده",
+        "مالیات قابل استرداد (تومان)",
+        "مالیات قابل استرداد (ریال)",
+      ],
+      validation: { min: 0, integral: true },
+      hint: "بخشی از مبلغ کل، در حساب ۱۲۲۰ بدهکار می‌شود؛ خالی یعنی بدون مالیات.",
       exportDefault: true,
     },
     {
@@ -1068,16 +1214,56 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
       aliases: ["تاریخ هزینه", "date"],
       exportDefault: true,
     },
-    { key: "vendor", label: "طرف حساب", type: "text", aliases: ["فروشنده", "تأمین‌کننده"], exportDefault: true },
-    { key: "memo", label: "شرح", type: "longtext", aliases: ["توضیحات", "بابت"], exportDefault: true },
-  ],
-  duplicateRules: [
     {
-      key: "date_amount_account",
-      label: "تاریخ، مبلغ و سرفصل",
-      fields: ["expenseDate", "amount", "accountCode"],
+      key: "settlement",
+      label: "نحوهٔ تسویه",
+      type: "enum",
+      options: EXPENSE_SETTLEMENT_OPTIONS,
+      hint: "خالی یعنی «پرداخت‌شده». «پرداخت بعدی» بدهی را در «حساب‌های پرداختنی» همان تأمین‌کننده می‌نشیند.",
+      exportDefault: true,
     },
+    {
+      key: "supplier",
+      label: "تأمین‌کننده",
+      type: "text",
+      aliases: ["فروشنده", "حساب تأمین‌کننده"],
+      // Resolved by the adapter through `listSupplierDirectory` — the same
+      // tenant-scoped list the screen's picker reads — by id, exact name or phone.
+      hint: "فقط برای «پرداخت بعدی»؛ نام، شمارهٔ تماس یا شناسهٔ تأمین‌کننده در «حساب‌های پرداختنی».",
+      exportDefault: true,
+    },
+    {
+      key: "dueDate",
+      label: "سررسید پرداخت",
+      type: "date",
+      aliases: ["تاریخ سررسید", "سررسید"],
+      hint: "فقط برای «پرداخت بعدی»؛ برای «تأخیر» در همان فهرست.",
+      exportDefault: true,
+    },
+    {
+      key: "party",
+      label: "شخص (فهرست اشخاص)",
+      type: "text",
+      aliases: ["شخص", "اشخاص"],
+      // Resolved through `searchParties`, so the encrypted columns, the inactive
+      // flag and a merged-away record are all handled by the directory rather
+      // than re-implemented here; an ambiguous name is refused, not guessed.
+      hint: "نام دقیق یا شمارهٔ تماس شخص در «فهرست اشخاص»؛ خالی یعنی بدون پیوند.",
+      exportDefault: true,
+    },
+    // The free-text name the row carries even after the person is deleted (§12) —
+    // hence its own column, and why «تأمین‌کننده» is no longer an alias of it:
+    // with a real supplier column, one header spelling may not name two fields.
+    { key: "vendor", label: "طرف حساب", type: "text", aliases: ["نام طرف حساب"], exportDefault: true },
+    { key: "memo", label: "شرح", type: "longtext", aliases: ["توضیحات", "بابت"], exportDefault: true },
+    // Read-only facts: they travel in an export so a sheet can be tied back to the
+    // ledger, and the engine excludes read-only fields from the mapping, so a
+    // re-import can never overwrite a document number or invent one.
+    { key: "reference", label: "شمارهٔ سند", type: "text", readOnly: true, exportDefault: true },
   ],
+  // Defined once, in `src/lib/expense-import.ts`, because the database-side
+  // lookup the adapter runs has to match the in-file rule the preview promises.
+  duplicateRules: EXPENSE_DUPLICATE_RULES,
 };
 
 // ---------------------------------------------------------------------------
@@ -1397,6 +1583,148 @@ const WORKSPACE_DOCUMENTS: EntityDefinition = {
   ],
 };
 
+/**
+ * Issue #799 §7 — the BOQ's measured rows, importable through this engine
+ * rather than a parser of its own ("do not create an isolated BOQ CSV parser").
+ *
+ * The flat shape a spreadsheet actually has: one row per measured item, with
+ * its chapter, its project and — optionally — the revision it belongs to. A
+ * row that names a revision which is no longer a draft is refused rather than
+ * written, because an approved revision is a historical record; a row that
+ * names no revision lands in the project's current draft, and one is created
+ * the first time somebody imports into a project that has no estimate yet.
+ */
+const WORKSPACE_BOQ_ITEMS: EntityDefinition = {
+  key: "workspace.boq_items",
+  module: "workspace",
+  label: "ردیف‌های متره و برآورد",
+  description:
+    "متره و برآورد پروژه‌های عمرانی: فصل، شرح، واحد، مقدار و نرخ‌های تشکیل‌دهندهٔ قیمت. نرخ‌ها به ریال خوانده می‌شوند.",
+  exportPermission: PERMISSIONS.workspaceView,
+  importPermission: PERMISSIONS.workspaceManage,
+  fields: [
+    ID_FIELD,
+    {
+      key: "projectName",
+      label: "پروژه",
+      type: "reference",
+      required: true,
+      aliases: ["پروژه", "project"],
+      relation: {
+        entity: "workspace.projects",
+        lookupFields: ["name"],
+        // A BOQ row for a project that does not exist is a mistake in the file,
+        // not an instruction to create a project: the row is skipped with the
+        // reason, and the operator fixes the sheet.
+        onMissing: "skip",
+        label: "پروژه",
+      },
+      exportDefault: true,
+    },
+    {
+      key: "estimateTitle",
+      label: "برآورد",
+      type: "text",
+      aliases: ["برآورد", "متره", "BOQ", "عنوان برآورد"],
+      hint: "خالی بماند، «برآورد اصلی» استفاده می‌شود.",
+      validation: { maxLength: 200 },
+      exportDefault: true,
+    },
+    {
+      key: "versionNo",
+      label: "شمارهٔ نسخه",
+      type: "integer",
+      aliases: ["نسخه", "ورژن", "revision"],
+      hint: "فقط نسخهٔ پیش‌نویس قابل ورود است؛ خالی بماند، نسخهٔ پیش‌نویس جاری انتخاب می‌شود.",
+      exportDefault: true,
+    },
+    {
+      key: "sectionCode",
+      label: "کد فصل",
+      type: "text",
+      aliases: ["فصل", "کد فصل", "بخش"],
+      validation: { maxLength: 40 },
+      exportDefault: true,
+    },
+    {
+      key: "sectionTitle",
+      label: "عنوان فصل",
+      type: "text",
+      aliases: ["شرح فصل", "عنوان بخش"],
+      validation: { maxLength: 200 },
+      exportDefault: true,
+    },
+    {
+      key: "itemCode",
+      label: "کد ردیف",
+      type: "text",
+      aliases: ["کد", "ردیف", "کد آیتم", "item"],
+      validation: { maxLength: 40 },
+      exportDefault: true,
+    },
+    {
+      key: "description",
+      label: "شرح ردیف",
+      type: "text",
+      required: true,
+      aliases: ["شرح", "شرح آیتم", "description"],
+      validation: { maxLength: 500 },
+      exportDefault: true,
+    },
+    {
+      key: "unit",
+      label: "واحد",
+      type: "text",
+      aliases: ["واحد اندازه‌گیری", "unit"],
+      validation: { maxLength: 20 },
+      exportDefault: true,
+    },
+    { key: "quantity", label: "مقدار", type: "number", aliases: ["مقدار", "متره"], exportDefault: true },
+    { key: "materialRateRial", label: "نرخ مصالح", type: "money", exportDefault: true },
+    { key: "laborRateRial", label: "نرخ دستمزد", type: "money", exportDefault: true },
+    { key: "equipmentRateRial", label: "نرخ ماشین‌آلات", type: "money", exportDefault: true },
+    { key: "subcontractRateRial", label: "نرخ پیمانکار جزء", type: "money", exportDefault: true },
+    { key: "wastePercent", label: "ضریب پرت (٪)", type: "number", aliases: ["پرت", "ضایعات"], exportDefault: true },
+    { key: "overheadPercent", label: "سربار (٪)", type: "number", exportDefault: true },
+    { key: "markupPercent", label: "سود (٪)", type: "number", aliases: ["سود", "markup"], exportDefault: true },
+    {
+      key: "workPackage",
+      label: "بستهٔ کاری",
+      type: "text",
+      aliases: ["رشته", "دیسیپلین", "work package"],
+      validation: { maxLength: 120 },
+      exportDefault: true,
+    },
+    {
+      key: "partyName",
+      label: "تأمین‌کننده/پیمانکار",
+      type: "reference",
+      aliases: ["تأمین‌کننده", "پیمانکار", "supplier"],
+      relation: {
+        entity: "crm.customers",
+        lookupFields: ["name", "phone"],
+        onMissing: "warn",
+        label: "تأمین‌کننده/پیمانکار",
+      },
+      exportDefault: true,
+    },
+    { key: "notes", label: "توضیحات", type: "longtext" },
+    // Computed by the database, exported so a round trip is checkable and never
+    // importable: the two columns a wrong file would otherwise be able to fake.
+    { key: "unitPriceRial", label: "قیمت واحد", type: "money", readOnly: true, exportDefault: true },
+    { key: "totalRial", label: "جمع ردیف", type: "money", readOnly: true, exportDefault: true },
+    CREATED_AT_FIELD,
+  ],
+  duplicateRules: [
+    {
+      key: "item",
+      label: "کد/شرح ردیف در همان پروژه",
+      fields: ["projectName", "estimateTitle", "versionNo", "itemCode", "description"],
+    },
+  ],
+  requiresIndustry: "architecture_construction",
+};
+
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
@@ -1420,6 +1748,7 @@ export const DATA_ENTITIES: readonly EntityDefinition[] = [
   // POS
   POS_PRODUCTS,
   POS_CATEGORIES,
+  POS_ITEM_MODIFIER_GROUPS,
   POS_MODIFIERS,
   POS_ORDERS,
   // Inventory
@@ -1440,9 +1769,23 @@ export const DATA_ENTITIES: readonly EntityDefinition[] = [
   WORKSPACE_TASKS,
   WORKSPACE_CONTRACTS,
   WORKSPACE_DOCUMENTS,
+  WORKSPACE_BOQ_ITEMS,
 ];
 
 const BY_KEY = new Map(DATA_ENTITIES.map((entity) => [entity.key, entity]));
+
+/**
+ * The entities a business may even see, before permissions narrow them further.
+ *
+ * One function so the catalogue route and any future caller cannot disagree
+ * about which trade an entity belongs to — and so the answer is unit-testable
+ * without a database.
+ */
+export function entitiesForIndustry(industry: Industry | null | undefined): EntityDefinition[] {
+  return DATA_ENTITIES.filter(
+    (entity) => !entity.requiresIndustry || entity.requiresIndustry === industry,
+  );
+}
 
 /** The entity a key names, or null. Never throws — a key comes from a URL. */
 export function findEntity(key: string | null | undefined): EntityDefinition | null {

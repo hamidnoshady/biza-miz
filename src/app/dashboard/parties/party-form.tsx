@@ -25,7 +25,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ACCOUNTING_CODE_MODES,
   ACCOUNTING_CODE_MODE_LABELS,
-  DEFAULT_TAX_PERCENTAGE,
   MAX_PARTY_DISPLAY_NAME,
   MAX_PARTY_NAME_PART,
   MAX_PARTY_NOTES,
@@ -41,6 +40,7 @@ import {
   hasPartyRole,
   resetPartyForm,
   taxPercentageOf,
+  taxPercentageText,
   togglePartyRole,
   validatePartyForm,
   withPartyRoles,
@@ -175,7 +175,7 @@ export function PartyFormDialog({
    * under their caret. So the input holds text and commits on blur.
    */
   const [taxInput, setTaxInput] = useState(() =>
-    String(taxPercentageOf(formStateFromParty(initial ?? null))),
+    taxPercentageText(formStateFromParty(initial ?? null)),
   );
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -207,7 +207,7 @@ export function PartyFormDialog({
       const hydrated = formStateFromParty(data.party);
       setState(hydrated);
       setBaseline(hydrated);
-      setTaxInput(String(taxPercentageOf(hydrated)));
+      setTaxInput(taxPercentageText(hydrated));
     });
     return () => controller.abort();
   }, [partyId, initial]);
@@ -459,7 +459,7 @@ export function PartyFormDialog({
       return;
     }
     setState(draft.state);
-    setTaxInput(String(taxPercentageOf(draft.state)));
+    setTaxInput(taxPercentageText(draft.state));
     rememberDraft(draft.id);
     setErrors({});
     setShowDrafts(false);
@@ -924,7 +924,7 @@ export function PartyFormDialog({
                   </span>
                 ) : (
                   <span className="mt-1 block text-xs text-muted-foreground">
-                    خالی گذاشتن این فیلد یعنی نرخ پیش‌فرض {toPersianDigits(String(DEFAULT_TAX_PERCENTAGE))}٪.
+                    خالی گذاشتن این فیلد یعنی همان نرخ «تنظیمات مالیات» کسب‌وکار؛ برای معافیت عدد ۰ را وارد کنید.
                   </span>
                 )}
               </Field>
@@ -1187,7 +1187,7 @@ export function PartyFormDialog({
                 }
                 const fresh = withPartyRoles(resetPartyForm(), openingRoles);
                 setState(fresh);
-                setTaxInput(String(taxPercentageOf(fresh)));
+                setTaxInput(taxPercentageText(fresh));
                 rememberDraft(null);
                 setErrors({});
                 setFormError("");

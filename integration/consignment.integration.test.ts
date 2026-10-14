@@ -240,6 +240,17 @@ describe("sellWeightedItem: consigned pieces", () => {
     );
     // Exactly one event -- no gold.sale_cogs at all for a consignment sale.
     expect(events.rows.map((r) => r.event_type)).toEqual(["gold.consignment_sale_revenue"]);
+    // #810: the batch reporting path must equal the original detail statement,
+    // including payouts and held stock, without a read per consignor.
+    await makeConsignedBracelet(consignor.id);
+    await db.query(`INSERT INTO domain_events (business_id, location_id, event_type, source_type, source_id, payload)
+      VALUES ($1, $2, 'consignment.payout', 'test', $3, $4)`,
+      [biz.id, biz.locationId, randomUUID(), JSON.stringify({ consignorId: consignor.id, amount: 500000 })]);
+    const statement = (await consignmentService.getConsignorStatement(biz.id, consignor.id))!;
+    const summary = (await consignmentService.getConsignorSummaries(biz.id)).find((row) => row.consignorId === consignor.id)!;
+    expect(summary).toEqual({ consignorId: consignor.id, name: statement.consignor.name,
+      itemsOnHand: statement.itemsOnHand.length, totalOwed: statement.totalOwed,
+      totalPaid: statement.totalPaid, balance: statement.balance });
   });
 
   it("refuses to sell an unconsigned item with no cost basis (the ordinary Wave 3 rule still applies)", async () => {

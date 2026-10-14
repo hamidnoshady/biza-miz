@@ -42,11 +42,27 @@ export async function issueDeviceLoginCode(input: {
  * device the code was minted for can redeem it. Answers the member and a
  * fresh session code for the desktop's embedded cloud pane.
  */
+export interface RedeemedDeviceLogin {
+  userId: string;
+  sessionCode: string;
+  /**
+   * The global identity this membership signs in through, when the cloud
+   * account has one. The desktop checks these against its own replicated rows
+   * before minting a local session: a membership that arrived without its
+   * credentials (the IAM snapshot is metadata-only) must not produce a local
+   * session that sits outside the cloud's token-version revocation chain.
+   * `null` for a PIN-only membership with no platform account — that
+   * distinction is legitimate and preserved.
+   */
+  platformUserId: string | null;
+  tokenVersion: number | null;
+}
+
 export async function redeemDeviceLoginCode(input: {
   businessId: string;
   siteDeviceId: string;
   code: string;
-}): Promise<{ userId: string; sessionCode: string } | null> {
+}): Promise<RedeemedDeviceLogin | null> {
   const claimed = await query<{ user_id: string }>(
     `UPDATE desktop_login_codes c SET used_at = now()
        FROM users u
@@ -64,7 +80,18 @@ export async function redeemDeviceLoginCode(input: {
      VALUES ($1, 'session', $2, $3, now() + make_interval(secs => $4))`,
     [input.businessId, hashLoginCode(sessionCode), userId, LOGIN_CODE_TTL_SECONDS],
   );
-  return { userId, sessionCode };
+  const identity = await query<{ platform_user_id: string | null; token_version: number | null }>(
+    `SELECT u.platform_user_id, pu.token_version
+       FROM users u LEFT JOIN platform_users pu ON pu.id = u.platform_user_id AND pu.is_active
+      WHERE u.id = $1`,
+    [userId],
+  );
+  return {
+    userId,
+    sessionCode,
+    platformUserId: identity.rows[0]?.platform_user_id ?? null,
+    tokenVersion: identity.rows[0]?.token_version ?? null,
+  };
 }
 
 export interface DesktopSessionMember {

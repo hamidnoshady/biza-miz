@@ -80,6 +80,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     activeLocationId: body.locationId,
     fullName: session.fullName,
     platformUserId: session.platformUserId ?? null,
+    tokenVersion: session.tokenVersion,
+    employeeSessionId: session.employeeSessionId,
+    mfaVerified: session.mfaVerified,
+    recentAuthAt: session.recentAuthAt,
+    imp: session.imp,
   });
 
   const res = NextResponse.json({ ok: true, locationId: body.locationId });

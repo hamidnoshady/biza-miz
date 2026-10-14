@@ -11,7 +11,6 @@ export const SETTINGS_TAB_KEYS = [
   "payment-methods",
   "accounts",
   "team",
-  "menu",
   "printers",
   "cloud-sync",
   "branch-management",
@@ -123,23 +122,24 @@ export const SETTINGS_TABS: SettingsTab[] = [
   {
     key: "accounts",
     label: "حسابداری",
-    description: "سرفصل‌ها، حساب‌های سیستمی، گردش حساب و تاریخچهٔ تغییرات",
+    description: "پیوند به صفحهٔ مدیریت سرفصل حساب‌ها در برنامهٔ حسابداری",
     requiredAnyPermission: [PERMISSIONS.accountsEdit],
   },
   {
     key: "team",
     label: "کاربران و دسترسی‌ها",
     description: "اعضا، دعوت‌ها و مجوزهای اختصاصی",
-    requiredAnyPermission: [PERMISSIONS.teamManage],
-  },
-  {
-    key: "menu",
-    label: "منو و ورود فایل",
-    description: "مدیریت منو و ورود گروهی از CSV یا Excel",
-    requiredAnyPermission: [PERMISSIONS.settingsManage],
-    // `menu_items` is the F&B catalogue; the retail industries keep theirs on
-    // Phase 21's `items` model, managed from their own dashboard page.
-    module: "menu",
+    /**
+     * Issue #854 (P2.1) — `team.view` reaches this tab now.
+     *
+     * `team.view` existed in the registry, was granted to every manager preset,
+     * and led nowhere: the only entry to the roster demanded `team.manage`, so a
+     * member who could legitimately see who works here had no navigation that
+     * showed them. The screen renders read-only for that member (`TeamManager`'s
+     * `canManage`), and every mutation still demands `team.manage` — or
+     * `team.permissions.manage` — server-side.
+     */
+    requiredAnyPermission: [PERMISSIONS.teamView, PERMISSIONS.teamManage],
   },
   {
     key: "printers",

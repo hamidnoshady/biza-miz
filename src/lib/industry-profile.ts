@@ -56,6 +56,11 @@ export const MODULE_KEYS = [
   "wholesale",
   "tools_fittings",
   "haberdashery",
+  // Issue #839 — the automotive trade's own manager («خودروها»: vehicle stock,
+  // acquisition, expenses, holds and sales). Like `jewelry`/`watch` it is a
+  // trade page over the shared `items`/`item_serials` primitives, so the
+  // module gates a screen and an API prefix, never a second stock engine.
+  "automotive",
   "stock",
   "ledger",
   "integrations",
@@ -154,9 +159,11 @@ export interface IndustryProfile {
    * override layer (item/category/industry/business, per the product brief)
    * still resolves down to this industry default at the bottom — it is not
    * built yet, so this is honestly the *only* tier today.
+   *
+   * VAT is deliberately *not* here (audit F05): it is a fact about the
+   * business, not the trade — read it from `tax.config` through `vat-policy.ts`.
    */
   retailDefaults?: {
-    vatPercent: number;
     /** Jewelry only — the گروه اجرت percent a fresh gold line proposes. */
     goldMakingChargePercent?: number;
     /** Jewelry only — the سود percent a fresh gold line proposes. */
@@ -179,6 +186,40 @@ const RETAIL_LABELS: Partial<Record<LabelKey, string>> = {
   sellScreen: "فروش و فاکتور",
   catalogue: "کالاها",
   catalogueItem: "کالا",
+};
+
+/**
+ * Issue #799 — AEC's nouns. A design office or a contractor does not sell a
+ * menu (F&B) and does not have a «فاکتور فروش» counter (retail): what leaves
+ * the business is a statement of professional work — a study, a drawing set,
+ * a supervision period, a progress certificate. The words follow that, and
+ * the *screen* those words land on is Accounting's, never a new one.
+ */
+const AEC_LABELS: Partial<Record<LabelKey, string>> = {
+  saleDocument: "صورتحساب",
+  saleDocumentPlural: "صورتحساب‌ها",
+  sellScreen: "صورتحساب و دریافت",
+  catalogue: "خدمات مهندسی",
+  catalogueItem: "خدمت مهندسی",
+};
+
+/**
+ * Issue #839 — the automotive trade's nouns. A dealership does not sell a menu
+ * and does not have a «کالاها» shelf: what it sells is a car, one physical
+ * vehicle at a time, and the document handed over is a فروش خودرو invoice. The
+ * words follow that, and they are not café words borrowed for the occasion.
+ */
+const AUTOMOTIVE_LABELS: Partial<Record<LabelKey, string>> = {
+  // The retail canon's *document* words, deliberately not re-invented: this
+  // label is spliced into titles («فاکتور جدید») where a longer noun would not
+  // parse, and `industry-profile.test.ts` pins a retail sale as a فاکتور for
+  // every retail trade. What is automotive here is the counter and the goods,
+  // not the word for the paper.
+  saleDocument: "فاکتور",
+  saleDocumentPlural: "فاکتورها",
+  sellScreen: "فروش خودرو",
+  catalogue: "خودروها",
+  catalogueItem: "خودرو",
 };
 
 /**
@@ -276,7 +317,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     // `repairs` (Wave 10): repair_tickets is already generic (item_description,
     // nullable serial_id), so a jeweller uses the same workflow a watch shop does.
     capabilities: ["barcode", "repairs"],
-    retailDefaults: { vatPercent: 9, goldMakingChargePercent: 7, goldProfitPercent: 7 },
+    retailDefaults: { goldMakingChargePercent: 7, goldProfitPercent: 7 },
   },
   watch: {
     brandTitle: "ساعت",
@@ -286,7 +327,6 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode", "repairs"],
-    retailDefaults: { vatPercent: 9 },
   },
   accessories: {
     brandTitle: "بدلیجات",
@@ -296,7 +336,6 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
-    retailDefaults: { vatPercent: 9 },
   },
   cosmetics: {
     brandTitle: "آرایشی و بهداشتی",
@@ -306,7 +345,6 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["batch_expiry", "barcode"],
-    retailDefaults: { vatPercent: 9 },
   },
   wholesale: {
     brandTitle: "عمده‌فروشی",
@@ -318,7 +356,6 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     // business also has no tables, kitchen, reservations or delivery flow.
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
-    retailDefaults: { vatPercent: 9 },
   },
   tools_fittings: {
     brandTitle: "ابزار و یراق‌آلات",
@@ -328,7 +365,6 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
-    retailDefaults: { vatPercent: 9 },
   },
   haberdashery: {
     brandTitle: "خرازی",
@@ -338,7 +374,6 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
-    retailDefaults: { vatPercent: 9 },
   },  service_saas: {
     brandTitle: "شرکت خدمات و نرم‌افزار",
     brandSubtitle: "مدیریت مشتری، پروژه و درآمد اشتراکی",
@@ -356,6 +391,87 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: [],
   },
+  /**
+   * Issue #799 — Architecture, Civil Engineering & Construction.
+   *
+   * Deliberately the *core* module set and nothing else, exactly as the issue
+   * specifies: no restaurant operations (`orders`, `tables`, `waiter`,
+   * `kitchen`, `reservations`, `delivery`, `menu`), no retail selling (`pos`,
+   * `stock`) and none of the trade-goods catalogs. An AEC tenant's operational
+   * centre is **My Workspace** — projects, phases, tasks, documents,
+   * approvals, events and project financials, all of which already exist and
+   * are gated by the workspace shell rather than by a module key (there is
+   * intentionally no `workspace`/`projects` key; see the MODULE_KEYS note).
+   *
+   * The trade still gets the whole commercial platform it needs: Accounting
+   * (ledger, reports, journal, cheques, payroll, fixed assets), CRM and its
+   * parties — a client company, a consultant and a subcontractor are all
+   * `parties` — Growth & Marketing, Website, the media library and the
+   * assistant. That is the issue's architecture line exactly:
+   *
+   *    architecture_construction → operating profile → enabled capabilities
+   *    → My Workspace + Accounting + CRM + Growth + Website + AI
+   *
+   * `salesModel` stays `retail_invoice` because this trade bills from the
+   * accounting suite's statement screen, never from a counter: progress
+   * certificates and service invoices arrive as Accounting documents in a
+   * later wave, not as a POS with a cart.
+   *
+   * Restaurant-only feature flags are seeded off at provision time
+   * (`defaultDisabledFeatures`), the same industry-default-not-prohibition
+   * mechanism every other non-F&B profile uses. `inventory` here is F&B's
+   * recipe-costed raw-material store; AEC material tracking is a later wave's
+   * project-scoped capability, not the café warehouse. `multi_location` and
+   * friends stay at their catalogue default — several branches of an
+   * engineering firm are perfectly ordinary.
+   */
+  architecture_construction: {
+    brandTitle: "عمران، معماری و پیمانکاری",
+    brandSubtitle: "مدیریت پروژه، طراحی، اجرا و امور مالی",
+    modules: [...CORE_MODULES],
+    labels: AEC_LABELS,
+    salesModel: "retail_invoice",
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
+    capabilities: [],
+  },
+  /**
+   * Issue #839 — car dealerships and vehicle traders (خودرو و نمایشگاه اتومبیل).
+   *
+   * The trade is a *retail counter over individually tracked units*: it keeps
+   * the whole commercial platform (`CORE_MODULES`), sells from the retail
+   * invoice screen (`pos`, `retail_invoice`) and holds stock in
+   * `items`/`item_stock` (`stock`), which is exactly the jewellery/watch shape
+   * — a car is a unit whose identity is a VIN rather than a serial number.
+   *
+   * What it must never inherit is the café: there is no `tables`, `waiter`,
+   * `kitchen`, `reservations`, `delivery`, `inventory` or `menu` here, and
+   * `industry-profile.test.ts` asserts that for every non-F&B trade at once.
+   * The F&B feature flags behind those modules are seeded off at provision
+   * time like every other retail profile — note `reservations` there is F&B's
+   * *table* reservation flag; a vehicle hold is the automotive module's own
+   * (`automotive_vehicle_holds`, `/api/automotive/reservations`) and is never
+   * gated by it.
+   *
+   * `capabilities` carries `barcode` because a VIN is printed as a barcode on
+   * the registration card and the plate/stock number are scanned at the gate;
+   * it deliberately does not carry `repairs` (a dealership's workshop is a
+   * later wave, and claiming the capability would offer it the repair tickets
+   * of a watchmaker).
+   */
+  automotive: {
+    brandTitle: "خودرو و نمایشگاه اتومبیل",
+    brandSubtitle: "مدیریت موجودی خودرو، خرید، فروش و مشتریان",
+    modules: [...CORE_MODULES, "pos", "automotive", ...RETAIL_STOCK_MODULES],
+    labels: AUTOMOTIVE_LABELS,
+    salesModel: "retail_invoice",
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
+    capabilities: ["barcode"],
+    // No `retailDefaults`: the only field that interface still has is the
+    // گروه اجرت pair, which is jewellery's. VAT is deliberately absent from it
+    // (audit F05, main's #855) — a rate is a fact about the business, not the
+    // trade, and the automotive sale path reads it from `tax.config` through
+    // `vat-policy.ts` like every other line does.
+  },
 };
 
 export function industryProfile(industry: Industry): IndustryProfile {
@@ -370,11 +486,6 @@ export function hasModule(industry: Industry, module: ModuleKey): boolean {
 /** Whether this trade has a Phase 27 capability switched on (batch expiry, barcode, repairs, …). */
 export function hasCapability(industry: Industry, capability: CapabilityKey): boolean {
   return INDUSTRY_PROFILES[industry].capabilities.includes(capability);
-}
-
-/** The VAT percent a fresh retail line proposes for this industry (9 if the profile has no opinion). */
-export function defaultRetailVatPercent(industry: Industry): number {
-  return INDUSTRY_PROFILES[industry].retailDefaults?.vatPercent ?? 9;
 }
 
 /** Jewelry's default اجرت percent — the one place this number is defined. */
@@ -426,9 +537,16 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   ["/accounting/reservations", "reservations"],
   ["/accounting/delivery", "delivery"],
   ["/accounting/inventory", "inventory"],
-  ["/settings/menu", "menu"],
+  // The menu manager lives under Accounting → «فروش و درآمد» (issue #844);
+  // `/settings/menu` 308s to it in middleware before this table is consulted.
+  ["/accounting/menu", "menu"],
   ["/accounting/jewelry", "jewelry"],
   ["/accounting/watch", "watch"],
+  // Issue #839 — the automotive trade's manager («خودروها»): vehicle stock,
+  // acquisition, expenses, holds and sales all hang off this one prefix, so
+  // the whole path is gated by the trade's own module exactly as jewellery
+  // and watch are.
+  ["/accounting/automotive", "automotive"],
   // The products workspace is the catalogue door every retail trade-goods
   // industry shares; anchored on `stock`, the module all five of those
   // profiles carry, so a trade without the variant board never sees it.
@@ -544,12 +662,21 @@ const API_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // must follow the tab's menu gate rather than the broader settings module;
   // longer prefixes stay before the catch-all because first match wins.
   ["/api/settings/pricing", "menu"],
+  // SnapFood commission and online delivery configuration belong to the
+  // delivery module, not shared settings; withTenantScope enforces this even
+  // for a direct URL from a trade without delivery.
+  ["/api/settings/online-platforms", "delivery"],
   ["/api/settings", "settings"],
   // The per-industry data routes. See the note above: the stricter
   // `requireIndustryForApi` check at each handler stays; this row is what lets
   // the availability guard refuse them with the rest of operations.
   ["/api/jewelry", "jewelry"],
   ["/api/watch", "watch"],
+  // Issue #839 — the automotive module's data routes (vehicle stock,
+  // acquisition, expenses, holds, sales and reports). The row exists so the
+  // availability guard can refuse them with the rest of operations; each
+  // handler still keeps its stricter `requireIndustryForApi` check.
+  ["/api/automotive", "automotive"],
   // Phase 42 — the shared products-workspace routes; the handlers re-check
   // the industry set themselves (requireProductWorkspaceForApi).
   ["/api/products", "stock"],

@@ -71,6 +71,18 @@ fi
 echo "Applying database migrations ..."
 $TSX scripts/migrate.ts
 
+# Issue #757: the runtime reads AI gateway keys from ciphertext only, so any
+# key still stored only as plaintext is unreadable until it is backfilled.
+# Write and decrypt-verify the missing ciphertext with this container's own
+# encryption key; plaintext is kept (clearing it, and migration 0209's column
+# drop, stay operator steps — see docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md).
+# Idempotent, a no-op once 0209 has applied, and never fatal: an AI key that
+# cannot be encrypted must not keep the rest of the platform from starting.
+echo "Backfilling AI gateway key ciphertext ..."
+if ! $TSX scripts/encrypt-ai-gateway-secrets.ts --keep-plaintext; then
+  echo "WARNING: AI gateway key backfill failed (see error above); the assistant may be unable to reach LiteLLM until 'npm run db:encrypt-ai-secrets' succeeds." >&2
+fi
+
 echo "Resolving the server's runtime database connection ..."
 RUNTIME_DATABASE_URL_RESOLVED="$($TSX scripts/derive-runtime-database-url.ts)"
 if [ -z "$RUNTIME_DATABASE_URL_RESOLVED" ]; then

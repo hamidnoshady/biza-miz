@@ -97,14 +97,168 @@ export function withPlatformScope<Args extends unknown[]>(
 async function activePlatformAdmin(
   session: PlatformSessionPayload,
 ): Promise<PlatformSessionPayload | null> {
-  const { rows } = await query<{ role: PlatformAdminRole; is_active: boolean, token_version: number }>(
+  const { rows } = await query<{ role: PlatformAdminRole; is_active: boolean; token_version: number }>(
     `SELECT role, is_active, token_version FROM platform_admins WHERE id = $1`,
     [session.padmin],
   );
   const admin = rows[0];
   if (!admin || !admin.is_active) return null;
-  if (session.tokenVersion && admin.token_version !== session.tokenVersion) return null;
-  return { ...session, role: admin.role };
+  const presentedVersion = session.tokenVersion ?? 1;
+  if (admin.token_version !== presentedVersion) return null;
+  if (session.sessionId) {
+    const { rows: sessionRows } = await query<{ id: string }>(
+      `UPDATE auth_admin_sessions
+          SET last_seen_at = now()
+        WHERE id = $1 AND admin_id = $2 AND revoked_at IS NULL AND expires_at > now()
+        RETURNING id`,
+      [session.sessionId, session.padmin],
+    );
+    if (!sessionRows[0]) return null;
+  }
+  return { ...session, role: admin.role, tokenVersion: admin.token_version };
+}
+
+export interface PlatformAdminSessionSummary {
+  id: string;
+  adminId: string;
+  tokenVersion: number;
+  mfaVerified: boolean;
+  deviceLabel: string | null;
+  ipAddress: string | null;
+  issuedAt: string;
+  expiresAt: string;
+  lastSeenAt: string | null;
+  isCurrent: boolean;
+}
+
+export async function createPlatformAdminSession(options: {
+  adminId: string;
+  tokenVersion: number;
+  mfaVerified: boolean;
+  deviceLabel?: string | null;
+  ipAddress?: string | null;
+}): Promise<string> {
+  const expiresAt = new Date(Date.now() + platformSessionHours() * 60 * 60 * 1000);
+  const { rows } = await query<{ id: string }>(
+    `INSERT INTO auth_admin_sessions
+       (admin_id, token_version, mfa_verified, device_label, ip_address, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id`,
+    [
+      options.adminId,
+      options.tokenVersion,
+      options.mfaVerified,
+      options.deviceLabel ? options.deviceLabel.slice(0, 120) : null,
+      options.ipAddress ? options.ipAddress.slice(0, 64) : null,
+      expiresAt,
+    ],
+  );
+  return rows[0].id;
+}
+
+export async function listPlatformAdminSessions(
+  adminId: string,
+  currentSessionId?: string | null,
+): Promise<PlatformAdminSessionSummary[]> {
+  const { rows } = await query<{
+    id: string;
+    admin_id: string;
+    token_version: number;
+    mfa_verified: boolean;
+    device_label: string | null;
+    ip_address: string | null;
+    issued_at: Date;
+    expires_at: Date;
+    last_seen_at: Date | null;
+  }>(
+    `SELECT s.id, s.admin_id, s.token_version, s.mfa_verified, s.device_label, s.ip_address,
+            s.issued_at, s.expires_at, s.last_seen_at
+       FROM auth_admin_sessions s
+       JOIN platform_admins pa ON pa.id = s.admin_id AND pa.token_version = s.token_version
+      WHERE s.admin_id = $1 AND s.revoked_at IS NULL AND s.expires_at > now()
+      ORDER BY s.issued_at DESC`,
+    [adminId],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    adminId: r.admin_id,
+    tokenVersion: r.token_version,
+    mfaVerified: r.mfa_verified,
+    deviceLabel: r.device_label,
+    ipAddress: r.ip_address,
+    issuedAt: r.issued_at.toISOString(),
+    expiresAt: r.expires_at.toISOString(),
+    lastSeenAt: r.last_seen_at ? r.last_seen_at.toISOString() : null,
+    isCurrent: Boolean(currentSessionId && r.id === currentSessionId),
+  }));
+}
+
+export async function revokePlatformAdminSession(
+  adminId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const { rowCount } = await query(
+    `UPDATE auth_admin_sessions
+        SET revoked_at = now()
+      WHERE id = $1 AND admin_id = $2 AND revoked_at IS NULL`,
+    [sessionId, adminId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function revokeOtherPlatformAdminSessions(
+  adminId: string,
+  keepSessionId?: string | null,
+): Promise<{ tokenVersion: number; revokedSessions: number }> {
+  const { rows: adminRows } = await query<{ token_version: number }>(
+    `SELECT token_version FROM platform_admins WHERE id = $1`,
+    [adminId],
+  );
+  const { rowCount } = keepSessionId
+    ? await query(
+        `UPDATE auth_admin_sessions
+            SET revoked_at = now()
+          WHERE admin_id = $1 AND id <> $2 AND revoked_at IS NULL`,
+        [adminId, keepSessionId],
+      )
+    : await query(
+        `UPDATE auth_admin_sessions
+            SET revoked_at = now()
+          WHERE admin_id = $1 AND revoked_at IS NULL`,
+        [adminId],
+      );
+  return {
+    tokenVersion: adminRows[0]?.token_version ?? 1,
+    revokedSessions: rowCount ?? 0,
+  };
+}
+
+export async function revokeAllPlatformAdminSessions(
+  adminId: string,
+): Promise<{ tokenVersion: number; revokedSessions: number }> {
+  const { rows } = await query<{ token_version: number }>(
+    `UPDATE platform_admins
+        SET token_version = token_version + 1
+      WHERE id = $1
+      RETURNING token_version`,
+    [adminId],
+  );
+  const { rowCount } = await query(
+    `UPDATE auth_admin_sessions
+        SET revoked_at = now()
+      WHERE admin_id = $1 AND revoked_at IS NULL`,
+    [adminId],
+  );
+  await query(
+    `UPDATE impersonation_grants
+        SET revoked_at = now()
+      WHERE platform_admin_id = $1 AND ended_at IS NULL AND revoked_at IS NULL`,
+    [adminId],
+  );
+  return {
+    tokenVersion: rows[0]?.token_version ?? 1,
+    revokedSessions: rowCount ?? 0,
+  };
 }
 
 type Guarded =

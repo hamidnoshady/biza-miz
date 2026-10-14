@@ -13,13 +13,18 @@ import { samplePrintDocument } from "./print-sample";
 const data = samplePrintDocument();
 
 describe("built-in templates", () => {
-  it("ships five templates covering every paper the app supports", () => {
-    expect(BUILT_IN_TEMPLATES).toHaveLength(5);
+  it("ships a template for every document type the app prints", () => {
+    // Receipt and kitchen on both roll widths, invoice on both sheets, and the
+    // shelf label — one label template replaces the legacy private renderer.
+    expect(BUILT_IN_TEMPLATES).toHaveLength(6);
     const papers = new Set(BUILT_IN_TEMPLATES.map((t) => t.paper));
     expect(papers).toContain("thermal58");
     expect(papers).toContain("thermal80");
     expect(papers).toContain("a4");
     expect(papers).toContain("a5");
+    expect(papers).toContain("label57x40");
+    const docTypes = new Set(BUILT_IN_TEMPLATES.map((t) => t.docType));
+    expect([...docTypes].sort()).toEqual(["invoice", "kitchen", "label", "receipt"]);
   });
 
   it("gives every template a unique key and a Persian name", () => {
@@ -47,9 +52,22 @@ describe("built-in templates", () => {
       expect(html.startsWith("<!doctype html>")).toBe(true);
       expect(html).toContain('dir="rtl"');
       expect(html).toContain(`width: ${PAPERS[template.paper].widthMm}mm`);
-      // Every template shows the items it was given.
-      expect(html).toContain("قهوه اسپرسو دوبل");
+      if (template.docType === "label") {
+        // A label is not a bill: it carries the branch, a title and bars.
+        expect(html).toContain("کافه نمونه");
+        expect(html).toContain("برچسب");
+      } else {
+        // Every bill-like template shows the items it was given.
+        expect(html).toContain("قهوه اسپرسو دوبل");
+      }
     }
+  });
+
+  it("prints a label template that a saved row can be seeded from", () => {
+    const label = builtInTemplate("label57x40-label")!;
+    const html = renderPrintTemplate(label, { ...data, title: "کالای نمونه", labelFields: [{ label: "قیمت", value: "۱۰۰٬۰۰۰" }] });
+    expect(html).toContain("کالای نمونه");
+    expect(html).toContain("۱۰۰٬۰۰۰");
   });
 });
 

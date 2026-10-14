@@ -2,8 +2,21 @@ import type { Permission } from "./permissions";
 
 export const SYNC_EVENT_REGISTRY_VERSION = 1 as const;
 
-type LocationRule = "event_location" | "business_transfer";
-type EffectClass = "order" | "payment" | "refund" | "journal_reversal" | "inventory" | "transfer" | "shift";
+/**
+ * `business`: the event belongs to no location (a business-wide money action such as a
+ * commission payout, #869). It is recorded with business scope and reaches only
+ * business-wide consumers, never a location-bound site.
+ */
+type LocationRule = "event_location" | "business_transfer" | "business";
+type EffectClass =
+  | "order"
+  | "payment"
+  | "refund"
+  | "journal_reversal"
+  | "inventory"
+  | "transfer"
+  | "shift"
+  | "commission_settlement";
 
 export interface SyncEventDefinition {
   type: string;
@@ -39,7 +52,14 @@ export interface SyncEventDefinition {
  * supplier the desktop does not have) and showed them as «در انتظار پیش‌نیاز».
  * A desktop acknowledges a pulled event of these classes without applying it.
  */
-const CLOUD_OWNED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set(["inventory", "transfer", "journal_reversal"]);
+const CLOUD_OWNED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set([
+  "inventory",
+  "transfer",
+  "journal_reversal",
+  // #869: a commission payout moves money the cloud already moved; a desktop has
+  // no run to apply it to.
+  "commission_settlement",
+]);
 
 /** Whether a desktop (runtime role `site`) acknowledges this pulled cloud event instead of applying it. */
 export function siteSkipsPulledEvent(definition: Pick<SyncEventDefinition, "effectClass">): boolean {
@@ -52,6 +72,9 @@ const REFUND_PERMISSION = "payments.refund" as const;
 const INVENTORY_PERMISSION = "inventory.adjust" as const;
 /** The permission `/api/shifts/start` already requires to clock in. */
 const SHIFT_PERMISSION = "orders.create" as const;
+/** #869: the keys that pay a commission run out and reverse a payout. */
+const COMMISSION_PAYOUT_PERMISSION = "commission.payout" as const;
+const COMMISSION_REVERSE_PERMISSION = "commission.reverse" as const;
 
 /**
  * Authoritative, machine-readable sync event catalogue.
@@ -74,6 +97,17 @@ export const SYNC_EVENT_REGISTRY = [
   { type: "order.payment.completed", schemaVersion: 1, handler: "order.payment.completed", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found"], payloadFields: ["orderId", "method", "reference", "customerId", "tipAmount", "businessDate"] },
   { type: "order.payment.completed", schemaVersion: 2, handler: "order.payment.completed.v2", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found", "customer_required"], payloadFields: ["orderId", "tenders", "customerId", "tipAmount", "businessDate", "entryDate"] },
   { type: "order.customer_return.created", schemaVersion: 1, handler: "order.customer_return.created", permission: REFUND_PERMISSION, effectClass: "refund", locationRule: "event_location", dependencyErrors: ["completed_order_not_found", "order_item_not_found", "historical_cogs_unavailable"], payloadFields: ["orderId", "refundMethod", "refundAmount", "reason", "lines"] },
+  // The cloud owns the ledger (Phase 45; the one authority model, shared with
+  // data-ownership.ts and replication-catalogue.ts). A site reversing a manual
+  // entry sends this event *up*; the cloud applies it and a desktop
+  // acknowledges it on the way down rather than re-applying. The draft →
+  // approve → reject workflow has no events of its own on purpose — it is
+  // cloud-only, not replicated state.
+  //
+  // `locationRule: "event_location"` is honoured by the emitter: the event is
+  // tagged with the *reversed entry's* branch, not the caller's current one, so
+  // reversing branch A's document from branch B cannot deliver a branch-A
+  // ledger effect inside a branch-B envelope.
   { type: "accounting.manual_journal.reversed", schemaVersion: 1, handler: "accounting.manual_journal.reversed", permission: "ledger.approve", effectClass: "journal_reversal", locationRule: "event_location", dependencyErrors: ["entry_not_found"], payloadFields: ["entryId", "memo", "entryDate"] },
 
   { type: "inventory.purchase.created", schemaVersion: 1, handler: "inventory.purchase.created", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["supplier_not_found", "item_not_found"], payloadFields: ["purchaseId", "supplierId", "note", "purchaseDate", "items"] },
@@ -101,6 +135,12 @@ export const SYNC_EVENT_REGISTRY = [
   // shift reports; the row travels whole and replays idempotently by id.
   { type: "shift.opened", schemaVersion: 1, handler: "shift.opened", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
   { type: "shift.closed", schemaVersion: 1, handler: "shift.closed", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
+  // #869: a commission run's payout and the reversal of one. Business-scope: a run
+  // covers every branch, so neither event names a location. The cloud writes each in
+  // the same transaction as its journal entry. No replay applies one again (see
+  // sync-domain-handlers.ts), and a desktop acknowledges a pulled copy.
+  { type: "commission.payout.recorded", schemaVersion: 1, handler: "commission.payout.recorded", permission: COMMISSION_PAYOUT_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["payoutId", "runId", "runNumber", "amount", "paidDate", "method", "entryId", "allocations"] },
+  { type: "commission.payout.reversed", schemaVersion: 1, handler: "commission.payout.reversed", permission: COMMISSION_REVERSE_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedPayoutId", "runId", "runNumber", "amount", "entryId"] },
 ] as const satisfies readonly SyncEventDefinition[];
 
 export type SyncEventType = (typeof SYNC_EVENT_REGISTRY)[number]["type"];

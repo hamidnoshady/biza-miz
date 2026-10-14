@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requirePermissions } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool } from "@/lib/db";
 import { requireCapabilityForApi } from "@/lib/industry-guard";
@@ -10,9 +10,16 @@ import type { SettlementMethod } from "@/lib/ledger";
 
 const PAYMENT_METHODS: SettlementMethod[] = ["cash", "bank", "credit"];
 
-/** Delivers and bills a repair: revenue + parts cost posted together, in one transaction with the status change. */
+/**
+ * Delivers and bills a repair: revenue + parts cost posted together, in one transaction with the status change.
+ *
+ * Issue #795 Phase 1 (item 8) — closing settles money (cash/bank/A-R,
+ * revenue, VAT), so operational inventory authority alone is not enough:
+ * the caller needs `payments.take` on top of `inventory.adjust`, the same
+ * split the shared retail POS enforces (POS_REQUIRED_PERMISSIONS).
+ */
 export const POST = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryAdjust);
+  const { session, error } = await requirePermissions(PERMISSIONS.inventoryAdjust, PERMISSIONS.paymentsTake);
   if (error) return error;
   const capabilityError = await requireCapabilityForApi(session, "repairs");
   if (capabilityError) return capabilityError;

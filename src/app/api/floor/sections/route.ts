@@ -7,7 +7,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 
 /** Create a floor section (a zone on the map, optionally owned by a waiter). */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.tablesManage);
+  const { session, error } = await requirePermission(PERMISSIONS.tablesEdit);
   if (error) return error;
 
   let body: { name?: string; color?: string | null; assignedWaiterId?: string | null };

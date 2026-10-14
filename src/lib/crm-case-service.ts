@@ -42,93 +42,34 @@ import {
   type CaseStatus,
 } from "./crm-shared";
 import { isUuid } from "./uuid";
-
-/** Statuses where the team owes the customer something. */
-const ACTIVE_STATUSES: readonly CaseStatus[] = ["open", "in_progress"];
-
-/** The status that means the clock is paused because we are waiting on them. */
-const WAITING_STATUS: CaseStatus = "waiting";
-
-/** Statuses where the case is finished and no clock runs at all. */
-const CLOSED_STATUSES: readonly CaseStatus[] = ["resolved", "closed"];
-
-export interface CaseSla {
-  /** Target for this case's priority, in hours. */
-  targetHours: number;
-  /**
-   * Seconds the case has been the team's responsibility — elapsed time minus
-   * everything spent waiting on the customer.
-   */
-  activeSeconds: number;
-  /** True once activeSeconds exceeds the target and no response has been made. */
-  breached: boolean;
-  /** Seconds left before breach; negative once breached. */
-  remainingSeconds: number;
-  /** Seconds from opening to first response, excluding waiting. Null if none yet. */
-  firstResponseSeconds: number | null;
-  /** True while the customer owes us something — the clock is paused. */
-  waitingOnCustomer: boolean;
-}
+import {
+  CASE_ACTIVE_STATUSES,
+  CASE_CLOSED_STATUSES,
+  CASE_WAITING_STATUS,
+  caseClock,
+  type CaseClock,
+} from "./crm-case-clock";
 
 /**
- * Compute a case's SLA position.
- *
- * Pure, and exported, so the rule is unit-testable without a database and the
- * UI can recompute a countdown locally without asking the server every second.
+ * Statuses where the team owes the customer something. Defined in
+ * `crm-case-clock.ts` so the SQL breach predicate, the badge and the summary
+ * cannot disagree about which ones run a clock.
  */
-export function caseSla(input: {
-  priority: CasePriority;
-  status: CaseStatus;
-  openedAt: string;
-  firstResponseAt: string | null;
-  resolvedAt: string | null;
-  waitingSeconds: number;
-  waitingSince: string | null;
-  now?: Date;
-}): CaseSla {
-  const now = input.now ?? new Date();
-  const targetHours = CASE_PRIORITY_TARGET_HOURS[input.priority] ?? 72;
-  const opened = new Date(input.openedAt).getTime();
+const ACTIVE_STATUSES = CASE_ACTIVE_STATUSES;
 
-  // The clock stops at resolution. A case resolved in two hours did not become
-  // a breach because nobody closed the tab for a week.
-  const endpoint = input.resolvedAt ? new Date(input.resolvedAt).getTime() : now.getTime();
+const WAITING_STATUS = CASE_WAITING_STATUS;
 
-  // Accumulated waiting, plus the stretch currently in progress if the case is
-  // waiting right now — `waiting_seconds` is only closed out on the way back
-  // to an active status, so an in-flight wait is not in it yet.
-  let waiting = Math.max(0, Number(input.waitingSeconds) || 0);
-  if (input.status === WAITING_STATUS && input.waitingSince) {
-    waiting += Math.max(0, (endpoint - new Date(input.waitingSince).getTime()) / 1000);
-  }
+/** Statuses where the case is finished and no clock runs at all. */
+const CLOSED_STATUSES = CASE_CLOSED_STATUSES;
 
-  const elapsed = Math.max(0, (endpoint - opened) / 1000);
-  const activeSeconds = Math.max(0, Math.round(elapsed - waiting));
-  const targetSeconds = targetHours * 3600;
+/**
+ * A case's SLA position. The rule itself lives in `crm-case-clock.ts` — pure,
+ * shared with the list's badge and with the SQL filter — and this name is kept
+ * because it is what the SLA readers import.
+ */
+export type CaseSla = CaseClock;
 
-  let firstResponseSeconds: number | null = null;
-  if (input.firstResponseAt) {
-    // Waiting before the first response is unusual but possible — the team can
-    // ask a clarifying question without that counting as a substantive reply.
-    // Subtracting it keeps this consistent with activeSeconds.
-    const responded = new Date(input.firstResponseAt).getTime();
-    const waitBeforeResponse = Math.min(waiting, Math.max(0, (responded - opened) / 1000));
-    firstResponseSeconds = Math.max(0, Math.round((responded - opened) / 1000 - waitBeforeResponse));
-  }
-
-  return {
-    targetHours,
-    activeSeconds,
-    // A case that has been responded to is not breaching its *response* target
-    // any more, even if it is still open — the promise it measures was kept.
-    breached: firstResponseSeconds === null
-      ? activeSeconds > targetSeconds && !CLOSED_STATUSES.includes(input.status)
-      : firstResponseSeconds > targetSeconds,
-    remainingSeconds: targetSeconds - activeSeconds,
-    firstResponseSeconds,
-    waitingOnCustomer: input.status === WAITING_STATUS,
-  };
-}
+export const caseSla = caseClock;
 
 export interface CaseStatusChange {
   ok: boolean;

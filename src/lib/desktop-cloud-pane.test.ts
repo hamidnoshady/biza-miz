@@ -1,9 +1,19 @@
 // src/lib/desktop-cloud-pane.test.ts
 import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
+import { CLOUD_EMBED_UA_TOKEN } from "./cloud-embed";
 
 const require = createRequire(import.meta.url);
-const { cloudTarget, guardCloudPane, hardenCloudPane } = require("../../electron/cloud-pane.js");
+const {
+  EMBED_UA_TOKEN,
+  HIDE_CLOUD_SIDEBAR_CSS,
+  cloudTarget,
+  embedAgent,
+  guardCloudPane,
+  hardenCloudPane,
+  hideCloudSidebar,
+  stampEmbedAgent,
+} = require("../../electron/cloud-pane.js");
 
 type Handler = (...args: unknown[]) => void;
 
@@ -113,5 +123,65 @@ describe("guardCloudPane", () => {
     contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/settings/subscription", true);
     expect(shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/subscription");
     expect(contents.loaded.at(-1)).toBe("https://cafe.example.com/crm/deals?tab=open");
+  });
+});
+
+describe("stampEmbedAgent", () => {
+  type Listener = (
+    details: { url: string; requestHeaders: Record<string, string> },
+    callback: (response: { requestHeaders?: Record<string, string> }) => void,
+  ) => void;
+
+  function stamped(origin = "https://cafe.example.com", userAgent = "Mozilla/5.0 Electron/44") {
+    let listener: Listener | null = null;
+    const ses = {
+      setUserAgent: vi.fn(),
+      webRequest: { onBeforeSendHeaders: (fn: Listener) => (listener = fn) },
+    };
+    stampEmbedAgent(ses, origin, userAgent);
+    const send = (url: string, requestHeaders: Record<string, string>) => {
+      let response: { requestHeaders?: Record<string, string> } | null = null;
+      listener!({ url, requestHeaders }, (r) => (response = r));
+      return response!;
+    };
+    return { ses, send };
+  }
+
+  it("uses the same token the cloud looks for", () => {
+    expect(EMBED_UA_TOKEN).toBe(CLOUD_EMBED_UA_TOKEN);
+    expect(embedAgent("Mozilla/5.0")).toBe(`Mozilla/5.0 ${CLOUD_EMBED_UA_TOKEN}`);
+    expect(embedAgent(`Mozilla/5.0 ${CLOUD_EMBED_UA_TOKEN}`)).toBe(`Mozilla/5.0 ${CLOUD_EMBED_UA_TOKEN}`);
+  });
+
+  it("puts the token on every request to the cloud, a service-worker navigation's default agent included", () => {
+    const { ses, send } = stamped();
+    expect(ses.setUserAgent).toHaveBeenCalledWith(`Mozilla/5.0 Electron/44 ${CLOUD_EMBED_UA_TOKEN}`);
+    const response = send("https://cafe.example.com/dashboard", {
+      "user-agent": "Mozilla/5.0 Electron/44",
+      Accept: "text/html",
+    });
+    expect(response.requestHeaders).toEqual({
+      "User-Agent": `Mozilla/5.0 Electron/44 ${CLOUD_EMBED_UA_TOKEN}`,
+      Accept: "text/html",
+    });
+  });
+
+  it("leaves every other origin's requests untouched", () => {
+    const { send } = stamped();
+    expect(send("https://video.example.org/embed", { "User-Agent": "Mozilla/5.0" })).toEqual({});
+    expect(send("https://cafe.example.com.evil.org/", { "User-Agent": "Mozilla/5.0" })).toEqual({});
+  });
+});
+
+describe("hideCloudSidebar", () => {
+  it("hides the workspace sidebar on every document the pane loads", () => {
+    const contents = new FakeContents() as FakeContents & { insertCSS: ReturnType<typeof vi.fn> };
+    contents.insertCSS = vi.fn(async () => "key");
+    hideCloudSidebar(contents);
+    contents.handlers.get("dom-ready")!();
+    contents.handlers.get("dom-ready")!();
+    expect(contents.insertCSS).toHaveBeenCalledTimes(2);
+    expect(contents.insertCSS).toHaveBeenCalledWith(HIDE_CLOUD_SIDEBAR_CSS);
+    expect(HIDE_CLOUD_SIDEBAR_CSS).toContain('aside[data-slot="sidebar"]');
   });
 });

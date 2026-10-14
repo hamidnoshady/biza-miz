@@ -5,17 +5,13 @@ import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { toPersianDigits } from "@/lib/digits";
-import type { KitchenTicketData } from "@/lib/kitchen-ticket-template";
 import { useMoney } from "@/components/money/money-context";
 import {
   ORDER_ITEM_STATUS_LABELS,
   type OrderItemStatus,
 } from "@/lib/order-item-status";
 import { printKitchenTicket } from "@/lib/printing/client";
-import {
-  modifierNamesLabel,
-  type DisplayModifier,
-} from "@/lib/modifier-display";
+import type { DisplayModifier } from "@/lib/modifier-display";
 import { MAX_ORDER_LINE_QUANTITY } from "@/lib/order-quantity";
 import {
   buildRestaurantMenuIndex,
@@ -318,24 +314,18 @@ export function TableOrderPanel({
     // the offline queue's own clientEventId owns retrying a queued one from
     // here, so the next "send to kitchen" is a new attempt and needs a fresh id.
     clientRequestIdRef.current = null;
-    const kitchenRequestId = `kitchen:${table.id}:${crypto.randomUUID()}`;
-    {
-      const ticket: KitchenTicketData = {
-        label: table.name,
-        orderTypeLabel: "حضوری",
-        sentAt: new Date().toISOString(),
-        lines: cart.map((l) => ({
-          name: l.name,
-          quantity: l.quantity,
-          modifiersLabel: modifierNamesLabel(l.modifiers) || null,
-          note: l.note || null,
-        })),
-      };
-      void printKitchenTicket(null, ticket, { requestId: kitchenRequestId, entityId: table.id }).then((result) => {
+    // The ticket is the server's document: it loads the order the items were
+    // just written to (the same rows this panel is showing) and prints what is
+    // on it. `table.order_id` is the pair of this table, created on demand.
+    const ticketOrderId = table.order_id;
+    if (ticketOrderId) {
+      const kitchenRequestId = `kitchen:${ticketOrderId}:${crypto.randomUUID()}`;
+      const issue = (requestId: string) => printKitchenTicket(null, ticketOrderId, { requestId });
+      void issue(kitchenRequestId).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("سفارش ثبت شد اما ارسال به چاپگر آشپزخانه ناموفق بود.", {
             duration: Infinity,
-            action: { label: "تلاش دوباره", onClick: () => void printKitchenTicket(null, ticket, { requestId: `${kitchenRequestId}:retry`, entityId: table.id }) },
+            action: { label: "تلاش دوباره", onClick: () => void issue(`${kitchenRequestId}:retry`) },
           });
         }
       });

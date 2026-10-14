@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { approveDraft, ManualJournalError } from "@/lib/manual-journal-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { isUuid } from "@/lib/uuid";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -20,6 +21,11 @@ export const POST = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   if (error) return error;
 
   const { id } = await ctx.params;
+  // A non-UUID cannot name a draft, and `WHERE id = $2` against a `uuid`
+  // column answers `invalid input syntax for type uuid` — a 500 and a generic
+  // «خطای غیرمنتظره» — rather than the 404 it is. See `isUuid`.
+  if (!isUuid(id)) return NextResponse.json({ error: "draft_not_found" }, { status: 404 });
+
   const location = await resolveActiveLocation(session);
 
   try {

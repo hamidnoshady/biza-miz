@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  ArrowDownIcon,
   HistoryIcon,
   MessageSquarePlusIcon,
   PanelLeftIcon,
@@ -30,6 +31,7 @@ import { useFeatureLocked } from "@/components/feature-lock";
 import { ChatComposer } from "@/components/ai/chat-composer";
 import { ChatBubble } from "@/components/ai/chat-bubble";
 import { animateFloat, animateStaggerIn } from "@/components/ai/chat-animations";
+import { useStickyScroll } from "@/components/ai/use-sticky-scroll";
 import { SUGGESTED_PROMPTS, taskById, taskSuggestions } from "@/lib/ai-tasks";
 import {
   AI_PANEL_PARAM,
@@ -37,7 +39,11 @@ import {
   type AiPanelSectionKey,
 } from "@/lib/ai-panel";
 import { useAiChat, type AiAppFocus } from "@/components/ai/use-ai-chat";
-import { AI_REASONING_MODES, AI_MODE_LABELS, isAiReasoningMode, type AiReasoningMode } from "@/lib/ai-reasoning";
+import {
+  isAiRuntimeMode,
+  normalizeAiRuntimeMode,
+  type AiRuntimeMode,
+} from "@/lib/ai-runtime-modes-shared";
 import { AiManagementSheet } from "./ai-management-sheet";
 import { AiConversationsSidebar } from "./ai-conversations-sidebar";
 import { AiWorkspaceWidgets } from "./ai-workspace-widgets";
@@ -57,7 +63,13 @@ export function AiChatHub({
   const router = useRouter();
   const searchParams = useSearchParams();
   const focusFromUrl = searchParams.get("focus");
-  const reasoningFromUrl = searchParams.get("reasoning");
+  // Issue #812 §7 — the runtime mode lives at `?mode=`. The old `?reasoning=`
+  // value named a four-mode picker that no longer exists; a bookmark carrying it
+  // still opens the chat, on the default mode.
+  const modeFromUrl = searchParams.get("mode") ?? searchParams.get("reasoning");
+  // Issue #812 §6 — whether Superadmin has Deep Research switched on for this
+  // platform. It decides whether the mode picker offers it at all.
+  const [deepResearchEnabled, setDeepResearchEnabled] = useState(false);
   const [appFocus, setAppFocus] = useState<AiAppFocus>(() =>
     ["all", "accounting", "growth", "crm", "website", "workspace"].includes(focusFromUrl ?? "")
       ? (focusFromUrl as AiAppFocus)
@@ -70,7 +82,7 @@ export function AiChatHub({
     mode: "dashboard",
     projectId: searchParams.get("project"),
     appFocus,
-    reasoningMode: isAiReasoningMode(reasoningFromUrl) && reasoningFromUrl !== "deep_research" ? reasoningFromUrl : "auto",
+    runtimeMode: normalizeAiRuntimeMode(modeFromUrl),
     onConversationIdChange: (id) => {
       const params = new URLSearchParams(searchParams.toString());
       if (id) params.set("conversation", id);
@@ -114,7 +126,11 @@ export function AiChatHub({
     });
   }, [replaceParams]);
   const money = useMoney();
-  const scrollRef = useRef<HTMLDivElement>(null);
+  // Issue #812 §18 — sticky scrolling: the thread follows new content only
+  // while the reader is already at the bottom, and never yanks them down while
+  // they are reading an earlier answer.
+  const { containerRef: scrollRef, atBottom: atThreadBottom, scrollToBottom, jumpToLatest, onScroll: onThreadScroll } =
+    useStickyScroll();
   const heroRef = useRef<HTMLDivElement>(null);
   const orbLeftRef = useRef<HTMLDivElement>(null);
   const orbRightRef = useRef<HTMLDivElement>(null);
@@ -146,38 +162,35 @@ export function AiChatHub({
     setTask,
     customTask,
     setCustomTask,
-    reasoningMode,
-    setReasoningMode,
-    agentId,
-    setAgentId,
+    runtimeMode,
+    setRuntimeMode,
     ensureGreeting,
     startNewConversation,
     loadConversation,
     sendMessage,
     cancelGeneration,
-    askAgain,
     applyProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,
   } = chat;
 
-  const updateReasoningMode = useCallback((value: AiReasoningMode) => {
-    setReasoningMode(value);
+  const updateRuntimeMode = useCallback((value: AiRuntimeMode) => {
+    setRuntimeMode(value);
     replaceParams((params) => {
-      if (value === "auto") params.delete("reasoning");
-      else params.set("reasoning", value);
+      if (value === "auto") params.delete("mode");
+      else params.set("mode", value);
     });
-  }, [replaceParams, setReasoningMode]);
+  }, [replaceParams, setRuntimeMode]);
 
   useEffect(() => {
     if (["all", "accounting", "growth", "crm", "website", "workspace"].includes(focusFromUrl ?? "")) {
       setAppFocus(focusFromUrl as AiAppFocus);
     }
-    if (isAiReasoningMode(reasoningFromUrl) && reasoningFromUrl !== "deep_research") {
-      setReasoningMode(reasoningFromUrl);
+    if (isAiRuntimeMode(modeFromUrl)) {
+      setRuntimeMode(modeFromUrl);
     }
-  }, [focusFromUrl, reasoningFromUrl, setReasoningMode]);
+  }, [focusFromUrl, modeFromUrl, setRuntimeMode]);
 
   const changeProject = useCallback((nextProjectId: string | null) => {
     if (nextProjectId === searchParams.get("project")) return;
@@ -188,6 +201,14 @@ export function AiChatHub({
       params.delete("conversation");
     });
   }, [replaceParams, searchParams, startNewConversation]);
+
+  useEffect(() => {
+    if (!initialized.current) return;
+    // Switching threads (or starting a new one) is an explicit jump, so the
+    // newest message is shown regardless of where the reader had scrolled to.
+    scrollToBottom({ force: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
 
   useEffect(() => {
     if (initialized.current) return;
@@ -205,9 +226,11 @@ export function AiChatHub({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // §18 — follow new content only when the reader is already pinned to the
+  // bottom. A conversation switch forces the jump (that IS the new content).
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, busy]);
+    scrollToBottom({ smooth: true });
+  }, [messages, scrollToBottom]);
 
   // The history list re-reads when a conversation becomes active (a new thread
   // was just created) and when a turn finishes on one (its thread jumped to
@@ -300,10 +323,10 @@ export function AiChatHub({
           <Button
             variant={panelSection ? "secondary" : "outline"}
             size="sm"
-            onClick={() => openPanel(panelSection ?? "agents")}
+            onClick={() => openPanel(panelSection ?? "memory")}
             aria-expanded={panelSection !== null}
             aria-label="مدیریت دستیار"
-            title="مدیریت دستیار: ایجنت‌ها، همکاران، اتوماسیون‌ها، دانش و مصرف"
+            title="مدیریت دستیار: حافظه، همکاران، اتوماسیون‌ها، پژوهش و مصرف"
             className="gap-1.5 px-2.5 sm:px-3"
           >
             <Settings2Icon className="size-4 shrink-0" aria-hidden="true" />
@@ -323,8 +346,9 @@ export function AiChatHub({
       <AiWorkspaceContext
         appFocus={appFocus}
         onAppFocusChange={updateAppFocus}
-        reasoningMode={reasoningMode}
-        onReasoningModeChange={updateReasoningMode}
+        runtimeMode={runtimeMode}
+        onRuntimeModeChange={updateRuntimeMode}
+        deepResearchEnabled={deepResearchEnabled}
         projectId={searchParams.get("project")}
         onProjectChange={changeProject}
       />
@@ -336,7 +360,11 @@ export function AiChatHub({
         onClose={closePanel}
       />
 
-      <div ref={scrollRef} className="ai-chat-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4 pt-4 sm:px-6">
+      <div
+        ref={scrollRef}
+        onScroll={onThreadScroll}
+        className="ai-chat-scroll relative min-h-0 flex-1 overflow-y-auto px-2 pb-4 pt-4 sm:px-6"
+      >
         {loadingConversation ? (
           <LoadingSkeleton
             rows={6}
@@ -408,22 +436,29 @@ export function AiChatHub({
                   dismissProposal={dismissProposal}
                   submitInputRequest={submitInputRequest}
                   dismissInputRequest={dismissInputRequest}
-                  onAskAgain={
-                    message.cacheNotice
-                      ? () => {
-                          const question = messages
-                            .slice(0, Math.max(0, index))
-                            .reverse()
-                            .find((item) => item.role === "user")?.content;
-                          if (question) void askAgain(question);
-                        }
-                      : undefined
-                  }
                 />
               );
             })}
           </div>
         )}
+
+        {/* Issue #812 §18 — «برو به آخرین پیام». Shown only once the reader has
+            scrolled up past the sticky threshold, so the thread stops fighting
+            them without losing the way back. */}
+        {!atThreadBottom && messages.length > 1 ? (
+          <div className="pointer-events-none sticky bottom-2 z-10 flex justify-center">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={jumpToLatest}
+              className="pointer-events-auto gap-1.5 rounded-full border-border bg-card/95 shadow-[0_1px_2px_rgb(41_37_36/0.035)] backdrop-blur"
+            >
+              <ArrowDownIcon className="size-3.5" aria-hidden />
+              برو به آخرین پیام
+            </Button>
+          </div>
+        ) : null}
       </div>
 
       <div className="border-t border-border/80 bg-card/80 px-2 py-2 backdrop-blur sm:px-4 sm:py-3">
@@ -441,8 +476,6 @@ export function AiChatHub({
             onTaskChange={setTask}
             customTask={customTask}
             onCustomTaskChange={setCustomTask}
-            agentId={agentId}
-            onAgentChange={setAgentId}
             actionsAllowed={actionsAllowed}
             setActionsAllowed={setActionsAllowed}
             loadConversation={loadConversation}

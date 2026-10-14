@@ -28,8 +28,10 @@
 import type { PoolClient } from "pg";
 import { sellWeightedItem } from "./gold-sales-service";
 import { sellSerializedUnit } from "./watch-sales-service";
+import { attachVehicleSaleLine, sellVehicle } from "./automotive-sales-service";
 import { getStock, sellAccessoryUnits } from "./accessories-service";
 import { sellCosmeticUnits } from "./cosmetics-service";
+import { recordOrderItemBatchAllocations, type BatchAllocation } from "./retail-batch-inventory";
 import { sellTradeGoodsUnits } from "./trade-goods-service";
 import { isTradeGoodsIndustry } from "./trade-goods";
 import { getItem } from "./items-service";
@@ -69,6 +71,22 @@ export type RetailInvoiceLineInput =
       discount?: number;
       vatPercent: number;
       warrantyMonths?: number;
+    }
+  | {
+      /**
+       * Issue #839 §8 — a specific car (`item_serials.id` of a vehicle unit).
+       * Sold through `sellVehicle` (automotive-sales-service.ts) so the line
+       * carries §3's identity: one exact vehicle, its VIN/stock number, its
+       * frozen effective cost, and a live hold that either belongs to this
+       * invoice's customer or refuses the sale.
+       */
+      kind: "vehicle";
+      serialId: string;
+      price: number;
+      discount?: number;
+      vatPercent: number;
+      /** Only when the caller holds `vehicles.override_min_price`. */
+      overrideMinPrice?: boolean;
     }
   | {
       kind: "accessory";
@@ -159,6 +177,25 @@ export interface RetailInvoice {
 const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["kind"][]> = {
   service_saas: [],
   food_service: [],
+  // Issue #799 — an AEC business writes statements for professional work, not
+  // invoices for stock lines, so it has no line kinds here. Its commercial
+  // documents are Accounting's (and, from Wave 8, project progress
+  // certificates), exactly like the service-company profile above; the
+  // counter's retail-invoice path is never reachable because the trade has no
+  // `pos` module (industry-profile.ts).
+  architecture_construction: [],
+  // Issue #839 — a dealership sells cars, but *not* through the generic
+  // stocked-line path: §3's identity ("one serialized unit = one car, one VIN")
+  // and §8 ("the line identifies the exact vehicle; no double sale; COGS frozen
+  // at the effective cost; the reservation closes with the sale") are
+  // invariants this line kind would have to carry, and the `stocked` kind
+  // decrements a quantity instead of naming a serial. Until the vehicle line
+  // kind lands with the sale path (§8, Wave 4 of the issue), the empty list is
+  // the honest fail-closed answer: the counter refuses a vehicle invoice
+  // («این نوع کالا در این کسب‌وکار قابل فروش نیست.») rather than selling a car
+  // as anonymous stock. Wave 4 replaces this with ["vehicle"] and that is the
+  // only edit this entry should ever need.
+  automotive: ["vehicle"],
   jewelry: ["gold"],
   watch: ["watch"],
   accessories: ["accessory"],
@@ -199,10 +236,20 @@ export async function createRetailInvoice(
     throw new RetailInvoiceError("برای فروش نسیه، انتخاب مشتری الزامی است.");
   }
   let tenderQueue: RetailTenderQueueEntry[];
-  try {
-    tenderQueue = buildTenderQueue(input.tenders);
-  } catch (err) {
-    throw new RetailInvoiceError(err instanceof Error ? err.message : "پرداخت نامعتبر است.");
+  if (input.tenders.length === 0) {
+    // The only zero-cash checkout is a vehicle fully covered by its already-
+    // received reservation deposit. `sellVehicle` verifies that balance inside
+    // this transaction and refuses if any amount remains due.
+    if (input.lines.some((line) => line.kind !== "vehicle")) {
+      throw new RetailInvoiceError("حداقل یک روش پرداخت لازم است.");
+    }
+    tenderQueue = [];
+  } else {
+    try {
+      tenderQueue = buildTenderQueue(input.tenders);
+    } catch (err) {
+      throw new RetailInvoiceError(err instanceof Error ? err.message : "پرداخت نامعتبر است.");
+    }
   }
   const allowed = LINE_KINDS_BY_INDUSTRY[input.industry];
   for (const line of input.lines) {
@@ -236,6 +283,9 @@ export async function createRetailInvoice(
   const orderId = orderRows[0].id;
 
   const lines: RetailInvoiceLine[] = [];
+  // Reservation deposits the vehicle lines applied. That money was collected
+  // when the car was reserved, so it is not part of what the tenders pay today.
+  let depositAppliedTotal = 0n;
 
   // Phase 27 Wave 6 — the shared promotion engine, evaluated over the retail
   // cart exactly as order-totals.ts evaluates it over an F&B cart. Promotions
@@ -259,7 +309,7 @@ export async function createRetailInvoice(
 
   for (let lineIndex = 0; lineIndex < input.lines.length; lineIndex++) {
     const line = input.lines[lineIndex];
-    const settled = await settleLine(client, input, line, promotionDiscounts[lineIndex] ?? 0, tenderQueue);
+    const settled = await settleLine(client, input, line, promotionDiscounts[lineIndex] ?? 0, tenderQueue, orderId);
 
     const { rows: itemRows } = await client.query<{ id: string }>(
       `INSERT INTO order_items
@@ -286,6 +336,45 @@ export async function createRetailInvoice(
         JSON.stringify(settled.snapshot),
       ],
     );
+
+    // Batch-tracked cosmetics: the exact allocation this line consumed is
+    // persisted against the line, in the same transaction, so a later
+    // return/refund/void can restore the SAME lots instead of guessing from
+    // the current shelf state. Legacy lines (sold before this table existed)
+    // simply have no rows and are treated as legacy by the reversal paths.
+    // Issue #839 §8 — the invoice line that sold one exact car. `sold_order_item_id`
+    // is 0212's structural "sold once" guarantee, and it is only knowable once
+    // the line row exists; stamping it here keeps the car and the invoice
+    // inseparable in one transaction.
+    if (line.kind === "vehicle") {
+      if (settled.snapshot.kind === "vehicle") {
+        depositAppliedTotal += rialBigInt(rialText(settled.snapshot.depositApplied));
+      }
+      if (settled.vehicleSaleId == null || settled.vehicleSaleVatPercent == null) {
+        throw new RetailInvoiceError("سابقهٔ فروش خودرو ساخته نشد.");
+      }
+      await attachVehicleSaleLine(client, {
+        businessId: input.businessId,
+        serialId: line.serialId,
+        saleId: settled.vehicleSaleId,
+        orderId,
+        orderItemId: itemRows[0].id,
+        saleEntryIds: settled.snapshot.ledgerEntryIds ?? [],
+        vatRatePercent: settled.vehicleSaleVatPercent,
+      });
+    }
+
+    if (settled.batchAllocations && settled.batchAllocations.length > 0) {
+      await recordOrderItemBatchAllocations(client, {
+        orderItemId: itemRows[0].id,
+        orderId,
+        locationId: input.locationId,
+        itemId: settled.itemId,
+        sourceType: "retail_invoice",
+        sourceId: orderId,
+        allocations: settled.batchAllocations,
+      });
+    }
 
     lines.push({
       orderItemId: itemRows[0].id,
@@ -369,7 +458,12 @@ export async function createRetailInvoice(
   // checkout can write more than one live positive row — each slice of this
   // invoice's settlement is stamped 1..N here, exactly like the café's own
   // split-payment insert in api/orders/[id]/pay/route.ts.
-  const resolvedTenders = resolveTenderAmounts(input.tenders, total);
+  //
+  // An open slice resolves against what is collected *now*: the invoice total
+  // less any reservation deposit a vehicle line applied. Resolving it against
+  // the full total would record the deposit as today's cash a second time.
+  const collectedNow = rialText((rialBigInt(total) - depositAppliedTotal).toString());
+  const resolvedTenders = resolveTenderAmounts(input.tenders, collectedNow);
   let settlementSeq = 0;
   for (let i = 0; i < input.tenders.length; i++) {
     const amount = resolvedTenders[i].amount;
@@ -431,6 +525,16 @@ interface SettledLine {
   profit?: RialText;
   batchNumbers?: string[];
   expiryDate?: string | null;
+  /**
+   * Batch-tracked cosmetics only: the exact batches this line consumed. The
+   * invoice writes them to `order_item_batch_allocations` right after it
+   * inserts the `order_items` row, so the allocation and the line share one
+   * transaction and a later return/void has something exact to reverse.
+   */
+  batchAllocations?: BatchAllocation[];
+  /** Posting identity and canonical VAT rate for a vehicle sale-occurrence record. */
+  vehicleSaleId?: string;
+  vehicleSaleVatPercent?: number;
   /**
    * The full sold-line snapshot for `order_items.retail_snapshot` (migration
    * 0174) — everything `getRetailInvoiceDetail`/`getRetailInvoicePrintData`
@@ -505,6 +609,7 @@ async function settleLine(
   line: RetailInvoiceLineInput,
   promotionDiscount: number,
   tenderQueue: RetailTenderQueueEntry[],
+  orderId: string,
 ): Promise<SettledLine> {
   if (line.kind === "gold") {
     const item = await getItem(line.itemId, client);
@@ -569,6 +674,81 @@ async function settleLine(
     };
   }
 
+  if (line.kind === "vehicle") {
+    const { rows } = await client.query<{
+      item_id: string;
+      name: string;
+      brand_id: string | null;
+      stock_number: string;
+      vin: string | null;
+      chassis_number: string | null;
+      plate_number: string | null;
+      state: string;
+    }>(
+      `SELECT s.item_id, i.name, i.brand_id, v.stock_number, v.vin, v.chassis_number,
+              v.plate_number, v.state
+         FROM automotive_vehicle_attributes v
+         JOIN item_serials s ON s.id = v.serial_id
+         JOIN items i ON i.id = s.item_id
+        WHERE v.serial_id = $1 AND v.business_id = $2 AND v.location_id = $3`,
+      [line.serialId, input.businessId, input.locationId],
+    );
+    if (!rows[0]) throw new RetailInvoiceError("خودرو یافت نشد.");
+    const vehicleRow = rows[0];
+
+    const sale = await sellVehicle(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      serialId: line.serialId,
+      price: line.price,
+      discount: (line.discount ?? 0) + promotionDiscount,
+      vatPercent: line.vatPercent,
+      tenders: tenderQueue,
+      customerId: input.customerId ?? null,
+      orderId,
+      overrideMinPrice: line.overrideMinPrice === true,
+      createdBy: input.createdBy ?? null,
+    });
+
+    return {
+      itemId: vehicleRow.item_id,
+      // The stock number is what identifies the car sold; a reprint has to show it.
+      name: `${vehicleRow.name} — ${vehicleRow.stock_number}`,
+      quantity: "1",
+      gross: rialText(String(Math.round(line.price))),
+      discount: rialText(String(Math.round((line.discount ?? 0) + promotionDiscount))),
+      net: sale.net,
+      vat: sale.vat,
+      total: sale.total,
+      cost: sale.frozenEffectiveCost,
+      vehicleSaleId: sale.saleId,
+      vehicleSaleVatPercent: sale.vatPercent,
+      brandId: vehicleRow.brand_id,
+      snapshot: {
+        kind: "vehicle",
+        quantity: "1",
+        unitPrice: rialText(String(Math.round(line.price))),
+        gross: rialText(String(Math.round(line.price))),
+        manualDiscount: rialText(String(Math.max(0, Math.round(line.discount ?? 0)))),
+        promotionDiscount: rialText(String(Math.max(0, Math.round(promotionDiscount)))),
+        discount: sale.discount ?? rialText("0"),
+        vat: sale.vat,
+        net: sale.net,
+        total: sale.total,
+        serialId: line.serialId,
+        serialNumber: vehicleRow.stock_number,
+        stockNumber: vehicleRow.stock_number,
+        vin: vehicleRow.vin,
+        chassisNumber: vehicleRow.chassis_number,
+        plateNumber: vehicleRow.plate_number,
+        depositApplied: sale.depositApplied,
+        reservationId: sale.reservationId,
+        frozenEffectiveCost: sale.frozenEffectiveCost,
+        ledgerEntryIds: [sale.revenueEntryId, sale.cogsEntryId].filter((id): id is string => id != null),
+      },
+    };
+  }
+
   if (line.kind === "watch") {
     const { rows } = await client.query<{
       item_id: string;
@@ -596,6 +776,9 @@ async function settleLine(
       vatPercent: line.vatPercent,
       tenders: tenderQueue,
       warrantyMonths: line.warrantyMonths,
+      // A reserved unit sells only on this customer's invoice (issue #795
+      // item 20) — the sale converts the hold inside the same transaction.
+      customerId: input.customerId ?? null,
       createdBy: input.createdBy ?? null,
     });
     const { breakdown, cost, warranty } = watchSale;
@@ -750,6 +933,7 @@ async function settleLine(
     brandId: item.brandId,
     batchNumbers: cosmeticSale?.batchNumbers,
     expiryDate: cosmeticSale?.expiryDate,
+    batchAllocations: cosmeticSale?.batchAllocations,
     snapshot:
       line.kind === "cosmetic"
         ? { kind: "cosmetic", ...baseSnapshot, batchNumbers: cosmeticSale?.batchNumbers ?? [], expiryDate: cosmeticSale?.expiryDate ?? null }

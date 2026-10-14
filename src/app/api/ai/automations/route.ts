@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
+import { requirePermission } from "@/lib/auth";
 import {
   AUTOMATION_EVENT_KINDS,
   AUTOMATION_FIELDS,
@@ -20,7 +21,7 @@ import { createAutomation, listAutomations } from "@/lib/ai-automations-service"
  * live vocabulary rather than a hard-coded copy that could drift.
  */
 export const GET = withTenantScope(async () => {
-  const guard = await requireManager();
+  const guard = await requirePermission(PERMISSIONS.aiAutomationsManage);
   if (guard.error) return guard.error;
   return NextResponse.json({
     automations: await listAutomations(guard.session.businessId),
@@ -32,7 +33,7 @@ export const GET = withTenantScope(async () => {
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requirePermission(PERMISSIONS.aiAutomationsManage);
   if (guard.error) return guard.error;
 
   let body: AutomationInput;

@@ -24,7 +24,15 @@ export const PATCH = withApiKeyScope(
       validateMenuItemPatch(body);
     if (!input.ok) return NextResponse.json({ error: input.error }, { status: 400 });
 
-    const result = await updateMenuItem(apiKey.locationId, id, input.value, apiKey.businessId);
+    // An API key is an external system writing over HTTP: a price change
+    // through this door is recorded as `integration` history, not as a
+    // person's manual edit (issue #844 — one canonical service, every writer
+    // naming its own path).
+    const result = await updateMenuItem(apiKey.locationId, id, input.value, apiKey.businessId, {
+      changedBy: null,
+      source: "integration",
+      sourceRef: "api-key",
+    });
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
     return NextResponse.json({ ok: true });
   },

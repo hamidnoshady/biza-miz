@@ -6,6 +6,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { getRepairTicket } from "@/lib/repairs-service";
 import { repairEstimateText } from "@/lib/watch-crm-service";
+import { businessToday } from "@/lib/business-day-service";
 
 /** The printable, signable estimate document for a ticket's current estimate. */
 export const GET = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -23,9 +24,11 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
 
   try {
     const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(session.businessId, SETTING_KEYS.businessPrefs);
+    // Issue #795 (item 21) — the estimate is dated in the business's own
+    // local day, not the UTC calendar day.
     const text = await repairEstimateText(
       id,
-      new Date().toISOString().slice(0, 10),
+      await businessToday(session.businessId),
       prefs?.currencyDisplay === "rial" ? "rial" : "toman",
     );
     return new NextResponse(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });

@@ -65,11 +65,54 @@ async function listReportShiftOptions(locationId: string, filters: ReportOrderFi
   return selected && !options.some((s) => s.id === selected.id) ? [selected, ...options] : options;
 }
 
+/**
+ * What the list actually covers (audit F18), so the screen can say it:
+ * one shift; every order; only orders outside every shift; or every order
+ * because the branch has never recorded a shift — the case that used to
+ * answer «شیفت پیدا نشد» to a shop that sells only online.
+ */
+export type ShiftOrdersScope = "shift" | "all_shifts" | "unassigned" | "no_shift_recorded";
+
+/**
+ * The headline numbers, split by what they actually mean (issue #819).
+ *
+ * `totalAmount` was everything the filter matched — open, held, completed and
+ * voided orders added together — and the screen called it «جمع», so a shift
+ * with a voided bill and two open tables read as if that money had been taken.
+ * A voided order keeps its historical total, so the sum of `o.total` over
+ * mixed statuses is not sales at any point in the order's life.
+ *
+ * Three questions, three answers:
+ *   matchingCount  — how many orders the filters matched (face value).
+ *   completed*     — settled sales: the only figure that is revenue.
+ *   open/held*     — order value still on the floor, not yet taken.
+ *   voided*        — value that never happened, kept for loss review.
+ */
+export interface ShiftOrdersSummary {
+  matchingCount: number;
+  completedCount: number;
+  completedAmount: number;
+  openCount: number;
+  openAmount: number;
+  heldCount: number;
+  heldAmount: number;
+  voidedCount: number;
+  voidedAmount: number;
+}
+
 export interface ShiftOrdersReport {
   shift: ShiftOption | null;
+  scope: ShiftOrdersScope;
   shifts: ShiftOption[];
   orders: ShiftOrder[];
+  summary: ShiftOrdersSummary;
+  /** How many orders the filter matched — same as `summary.matchingCount`. */
   totalCount: number;
+  /**
+   * Face value of every matched order, whatever its status. Kept because the
+   * export and older callers read it, but no screen labels it «جمع» any more;
+   * use `summary.completedAmount` for settled sales.
+   */
   totalAmount: number;
   page: number;
   pageSize: number;
@@ -103,8 +146,14 @@ function escapedLike(value: string): string {
  */
 type ShiftSpecificOrdersReport = Omit<ShiftOrdersReport, "shift"> & { shift: ShiftOption };
 
-export async function getShiftOrdersReport(locationId: string, shiftId?: string): Promise<ShiftSpecificOrdersReport | null>;
-export async function getShiftOrdersReport(locationId: string, filters: ReportOrderFilters): Promise<ShiftOrdersReport | null>;
+/** Orders opened outside every shift window of the branch. */
+const OPENED_OUTSIDE_EVERY_SHIFT = `NOT EXISTS (
+  SELECT 1 FROM employee_shifts s
+   WHERE (s.location_id = o.location_id OR s.location_id IS NULL)
+     AND o.opened_at >= s.started_at AND (s.ended_at IS NULL OR o.opened_at <= s.ended_at))`;
+
+export async function getShiftOrdersReport(locationId: string, shiftId: string): Promise<ShiftSpecificOrdersReport | null>;
+export async function getShiftOrdersReport(locationId: string, filters?: ReportOrderFilters): Promise<ShiftOrdersReport | null>;
 export async function getShiftOrdersReport(
   locationId: string,
   shiftIdOrFilters?: string | ReportOrderFilters,
@@ -112,9 +161,19 @@ export async function getShiftOrdersReport(
   const filters: ReportOrderFilters = typeof shiftIdOrFilters === "string" ? { shiftId: shiftIdOrFilters } : (shiftIdOrFilters ?? {});
   const page = Math.max(1, Math.floor(filters.page ?? 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(filters.pageSize ?? 25)));
-  // undefined means the existing newest-shift behaviour; null explicitly means all shifts.
+  // undefined means the newest shift; null explicitly means all shifts. A
+  // branch that has never recorded a shift has no newest one, so the default
+  // falls back to every order and says so, rather than reporting the absent
+  // shift as missing.
   const selected = filters.shiftId === null ? null : await resolveShift(locationId, filters.shiftId);
-  if (filters.shiftId !== null && !selected) return null;
+  if (typeof filters.shiftId === "string" && !selected) return null;
+  const scope: ShiftOrdersScope = selected
+    ? "shift"
+    : filters.unassigned
+      ? "unassigned"
+      : filters.shiftId === undefined
+        ? "no_shift_recorded"
+        : "all_shifts";
   const shifts = await listReportShiftOptions(locationId, filters, selected);
 
   const params: unknown[] = [locationId];
@@ -127,6 +186,7 @@ export async function getShiftOrdersReport(
     add(selected.endedAt);
     where.push(ORDER_OPENED_IN_WINDOW);
   }
+  if (scope === "unassigned") where.push(OPENED_OUTSIDE_EVERY_SHIFT);
   const zone = filters.timeZone ?? "Asia/Tehran";
   if (filters.dateFrom) {
     const value = add(filters.dateFrom); const tz = add(zone);
@@ -148,14 +208,48 @@ export async function getShiftOrdersReport(
   const limit = add(pageSize); const offset = add((page - 1) * pageSize);
   const [{ rows: idRows }, { rows: totals }] = await Promise.all([
     query<{ id: string }>(`SELECT o.id FROM orders o LEFT JOIN parties c ON c.id = o.customer_id WHERE ${predicate} ORDER BY o.opened_at DESC, o.id DESC LIMIT ${limit} OFFSET ${offset}`, params),
-    query<{ total_count: string; total_amount: string }>(`SELECT count(*)::text AS total_count, coalesce(sum(o.total), 0)::text AS total_amount FROM orders o LEFT JOIN parties c ON c.id = o.customer_id WHERE ${predicate}`, params.slice(0, -2)),
+    query<{
+      total_count: string; total_amount: string;
+      completed_count: string; completed_amount: string;
+      open_count: string; open_amount: string;
+      held_count: string; held_amount: string;
+      voided_count: string; voided_amount: string;
+    }>(
+      // One pass over the matched set, split by status with FILTER. The
+      // headline a cashier reads is `completed_amount`; the rest is context
+      // (what is still on the floor, what was voided) rather than one mixed
+      // «جمع» that adds a voided bill to real revenue (issue #819).
+      `SELECT count(*)::text AS total_count,
+              coalesce(sum(o.total), 0)::text AS total_amount,
+              count(*) FILTER (WHERE o.status = 'completed')::text AS completed_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'completed'), 0)::text AS completed_amount,
+              count(*) FILTER (WHERE o.status = 'open')::text AS open_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'open'), 0)::text AS open_amount,
+              count(*) FILTER (WHERE o.status = 'held')::text AS held_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'held'), 0)::text AS held_amount,
+              count(*) FILTER (WHERE o.status = 'voided')::text AS voided_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'voided'), 0)::text AS voided_amount
+         FROM orders o LEFT JOIN parties c ON c.id = o.customer_id WHERE ${predicate}`,
+      params.slice(0, -2),
+    ),
   ]);
   const ids = idRows.map((row) => row.id);
   const totalCount = Number(totals[0]?.total_count ?? 0);
   const totalAmount = Number(totals[0]?.total_amount ?? 0);
-  if (ids.length === 0) return { shift: selected, shifts, orders: [], totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  const summary: ShiftOrdersSummary = {
+    matchingCount: totalCount,
+    completedCount: Number(totals[0]?.completed_count ?? 0),
+    completedAmount: Number(totals[0]?.completed_amount ?? 0),
+    openCount: Number(totals[0]?.open_count ?? 0),
+    openAmount: Number(totals[0]?.open_amount ?? 0),
+    heldCount: Number(totals[0]?.held_count ?? 0),
+    heldAmount: Number(totals[0]?.held_amount ?? 0),
+    voidedCount: Number(totals[0]?.voided_count ?? 0),
+    voidedAmount: Number(totals[0]?.voided_amount ?? 0),
+  };
+  if (ids.length === 0) return { shift: selected, scope, shifts, orders: [], summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 
-  const [{ rows }, { rows: paymentRows }] = await Promise.all([
+  const [{ rows }, { rows: paymentRows }, { rows: onlineRows }] = await Promise.all([
     query<ShiftOrderItemRow>(
       `SELECT o.id AS order_id, o.order_number, o.type, o.status, dt.name AS table_name, o.guest_count,
               c.name AS customer_name, o.opened_at, o.closed_at, ou.full_name AS opened_by_name,
@@ -174,7 +268,11 @@ export async function getShiftOrdersReport(
          FROM payments p JOIN orders o ON o.id=p.order_id LEFT JOIN users u ON u.id=p.received_by
          LEFT JOIN payment_methods pm ON pm.id=p.payment_method_id
         WHERE o.location_id=$1 AND o.id=ANY($2::uuid[]) ORDER BY p.received_at,p.id`, [locationId, ids]),
+    query<{ order_id: string }>(
+      `SELECT order_id FROM online_order_documents WHERE location_id=$1 AND order_id=ANY($2::uuid[])
+       UNION SELECT order_id FROM online_sale_lines WHERE location_id=$1 AND order_id=ANY($2::uuid[])`, [locationId, ids]),
   ]);
+  const online = new Set(onlineRows.map((row) => row.order_id));
 
   const inputs: ShiftOrderItemInput[] = rows.map((row) => ({
     orderId: row.order_id,
@@ -194,5 +292,9 @@ export async function getShiftOrdersReport(
   const payments: ShiftOrderPaymentInput[] = paymentRows.map((row) => ({ orderId: row.order_id, method: row.method,
     methodName: row.method_name, amount: Number(row.amount), reference: row.reference,
     receivedAt: row.received_at.toISOString(), receivedByName: row.received_by_name }));
-  return { shift: selected, shifts, orders: groupShiftOrders(inputs, payments), totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  const orders = groupShiftOrders(inputs, payments).map((order) => ({
+    ...order,
+    channel: online.has(order.id) ? ("online" as const) : ("in_store" as const),
+  }));
+  return { shift: selected, scope, shifts, orders, summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 }

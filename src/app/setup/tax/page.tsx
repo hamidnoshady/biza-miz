@@ -50,19 +50,22 @@ export default function TaxStep() {
     e.preventDefault();
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>("/api/setup/tax", {
-      method: "POST",
-      body: JSON.stringify({
-        defaultRate: parseRate(defaultRate),
-        categories: categories.map((c) => ({ id: c.id, taxRate: parseRate(c.rate) })),
-      }),
-    });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    try {
+      const { ok, data, status } = await api<{ error?: string }>("/api/setup/tax", {
+        method: "POST",
+        body: JSON.stringify({
+          defaultRate: parseRate(defaultRate),
+          categories: categories.map((c) => ({ id: c.id, taxRate: parseRate(c.rate) })),
+        }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      router.push(nextPath("tax"));
+    } finally {
+      setBusy(false);
     }
-    router.push(nextPath("tax"));
   }
 
   if (!loaded) return <SetupDataSkeleton rows={4} />;

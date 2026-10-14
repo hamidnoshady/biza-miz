@@ -57,22 +57,27 @@ export function BarChart({
   formatValue?: ChartValueFormatter;
 }) {
   if (data.length === 0) return <EmptyChart height={height} />;
-  const max = Math.max(...data.map((d) => Math.abs(d.value)), 1);
+  const min = Math.min(...data.map((d) => d.value), 0);
+  const max = Math.max(...data.map((d) => d.value), 0);
+  const range = max - min || 1;
+  const zero = (-min / range) * 100;
   const rowH = Math.max(22, Math.min(32, height / data.length));
 
   return (
     <div className="flex flex-col gap-1.5 overflow-y-auto" style={{ maxHeight: height }}>
       {data.map((d, i) => {
-        const pct = (Math.abs(d.value) / max) * 100;
+        const pct = (Math.abs(d.value) / range) * 100;
+        const left = ((Math.min(d.value, 0) - min) / range) * 100;
         return (
           <div key={i} className="flex items-center gap-2" style={{ height: rowH }}>
             <span className="w-20 shrink-0 truncate text-xs text-muted-foreground" title={d.label}>
               {d.label}
             </span>
-            <div className="relative h-4 flex-1 rounded-full bg-muted">
+            <div className="relative h-4 flex-1 rounded-full bg-muted" dir="ltr">
+              {min < 0 && <span aria-hidden="true" className="absolute inset-y-0 border-s border-border" style={{ left: `${zero}%` }} />}
               <div
-                className="h-4 rounded-full"
-                style={{ width: `${pct}%`, background: PALETTE[0] }}
+                className="absolute h-4 rounded-full"
+                style={{ left: `${left}%`, width: `${pct}%`, background: PALETTE[0] }}
                 title={`${d.label}: ${formatValue(d.value)}`}
               />
             </div>
@@ -140,7 +145,11 @@ export function PieChart({
   formatValue?: ChartValueFormatter;
 }) {
   if (data.length === 0) return <EmptyChart height={height} />;
-  const total = data.reduce((s, d) => s + Math.abs(d.value), 0) || 1;
+  // Signed values are not parts of a whole. Never turn a loss into a
+  // positive pie slice; keep the signed bar scale and the same result set.
+  if (data.some((d) => d.value < 0)) return <BarChart data={data} height={height} formatValue={formatValue} />;
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return <EmptyChart height={height} />;
   const size = 160;
   const r = 60;
   const cx = size / 2;

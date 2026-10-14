@@ -12,6 +12,7 @@
  */
 import { query, withoutTenantScope, withTenant } from "../db";
 import { getBusinessIndustry } from "../industry-guard";
+import { hasSellableCatalogue } from "../industries";
 import { getConnection, wooClientFor } from "./connections-service";
 import { isWooCommerce } from "./provider-registry";
 import { listMappings, setLastPushedPayload } from "./mapping-service";
@@ -69,6 +70,11 @@ interface DesiredState {
 /** What should currently be pushed for one mapped product. */
 async function desiredState(connection: ConnectionRow, locationId: string, localId: string): Promise<DesiredState> {
   const industry = await getBusinessIndustry(connection.business_id);
+
+  // A trade with no sellable catalogue has no local state to push: the mapping
+  // cannot exist in the first place (product sync skips), so this is the safe
+  // answer rather than a query against a table the business does not fill.
+  if (!hasSellableCatalogue(industry)) return { stock: null, priceRial: null };
 
   if (industry === "food_service") {
     const { rows } = await query<{ price: string }>(
@@ -352,6 +358,7 @@ async function localPriceRial(connection: ConnectionRow, remoteId: string): Prom
   if (!localId) return "0";
 
   const industry = await getBusinessIndustry(connection.business_id);
+  if (!hasSellableCatalogue(industry)) return "0";
   if (industry === "food_service") {
     const locationId = await resolveLocationId(connection);
     const { rows: item } = await query<{ price: string }>(

@@ -84,7 +84,7 @@ describe("موجودی انبار (Stock Levels UI Logic)", () => {
       expect(classifyStockLevel("3", "10")).toBe("low");
       expect(classifyStockLevel("0", "10")).toBe("out");
       expect(classifyStockLevel("-1", "10")).toBe("out");
-      expect(classifyStockLevel("0", null)).toBe("ok");
+      expect(classifyStockLevel("0", null)).toBe("out");
     });
   });
 

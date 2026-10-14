@@ -4,10 +4,10 @@
  * A fiscal year is the Jalali year (فروردین–اسفند; no configurable start
  * month for now — see docs/phases/Phase-16-Accounting-Suite.md's resolved
  * open questions), divided into its twelve Jalali months as periods. This
- * module computes those boundaries as ISO dates; migration 0024's
- * fiscal_years/fiscal_periods tables store the result, and its trigger on
- * journal_entries is what actually enforces a period's lock — this file only
- * decides what a fiscal year's periods *are*, not what enforcing them means.
+ * module computes those boundaries as ISO dates; the fiscal_years and
+ * fiscal_periods tables store the result. Database triggers enforce period
+ * locks, authorization at soft-close, and (from adoption onward) date coverage;
+ * this file defines the Jalali calendar, not those enforcement rules.
  */
 import { JALALI_MONTHS, jalaliMonthLength, jalaliToIsoDate } from "./jalali";
 
@@ -72,22 +72,22 @@ export function canTransitionPeriod(from: FiscalPeriodStatus, to: FiscalPeriodSt
   return ALLOWED_TRANSITIONS[from].includes(to);
 }
 
-/** Roles allowed to post into a soft-closed period, or to change any period's status. Owner is checked separately (see permissions.ts: owner is a rule, not a list). */
-export const FISCAL_PERIOD_MANAGER_ROLES = ["owner", "accountant"] as const;
-
-const LOCK_ERROR_CODES = ["fiscal_period_locked", "fiscal_period_soft_closed"] as const;
-export type FiscalPeriodLockErrorCode = (typeof LOCK_ERROR_CODES)[number];
+const POSTING_CONTROL_ERROR_CODES = [
+  "fiscal_period_locked",
+  "fiscal_period_soft_closed",
+  "fiscal_period_not_defined",
+] as const;
+export type FiscalPeriodPostingErrorCode = (typeof POSTING_CONTROL_ERROR_CODES)[number];
 
 /**
- * Whether `err` is migration 0024's trigger rejecting an insert into
- * journal_entries because the entry's date falls in a locked (or, for a
- * non-owner/accountant caller, soft-closed) fiscal period. node-postgres
- * surfaces a `RAISE EXCEPTION 'code'` as an Error whose `.message` is exactly
- * that code, so this is a plain string match rather than an error-code lookup.
+ * Whether `err` is a database posting-control rejection (locked, soft-closed,
+ * or outside the adopted fiscal calendar). PostgreSQL surfaces a
+ * `RAISE EXCEPTION 'code'` as an Error whose `.message` is exactly that code,
+ * so this is a plain string match rather than an error-code lookup.
  */
-export function fiscalPeriodLockErrorCode(err: unknown): FiscalPeriodLockErrorCode | null {
+export function fiscalPeriodLockErrorCode(err: unknown): FiscalPeriodPostingErrorCode | null {
   if (!(err instanceof Error)) return null;
-  return (LOCK_ERROR_CODES as readonly string[]).includes(err.message)
-    ? (err.message as FiscalPeriodLockErrorCode)
+  return (POSTING_CONTROL_ERROR_CODES as readonly string[]).includes(err.message)
+    ? (err.message as FiscalPeriodPostingErrorCode)
     : null;
 }

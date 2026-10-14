@@ -1,6 +1,6 @@
 {
   "name": "business-suite-desktop",
-  "version": "1.0.12",
+  "version": "1.0.48",
   "buildCommit": "unknown",
   "buildId": "development",
   "releaseChannel": "stable",
@@ -40,6 +40,7 @@
       "preload.js",
       "app-paths.js",
       "backend-manager.js",
+      "embedded-postgres-exit.js",
       "certificate-manager.js",
       "firewall-manager.js",
       "gateway-manager.js",

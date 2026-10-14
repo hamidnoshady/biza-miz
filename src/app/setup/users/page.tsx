@@ -52,28 +52,31 @@ export default function UsersStep() {
     e.preventDefault();
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>("/api/setup/users", {
-      method: "POST",
-      body: JSON.stringify({
-        role,
-        fullName,
-        // Phase 42 — optional login phone for both shapes: managers get it
-        // next to email+password, PIN roles next to the PIN. Stored unverified.
-        phone: phone.trim() || undefined,
-        ...(needsEmail ? { email, password } : { pin }),
-      }),
-    });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    try {
+      const { ok, data, status } = await api<{ error?: string }>("/api/setup/users", {
+        method: "POST",
+        body: JSON.stringify({
+          role,
+          fullName,
+          // Phase 42 — optional login phone for both shapes: managers get it
+          // next to email+password, PIN roles next to the PIN. Stored unverified.
+          phone: phone.trim() || undefined,
+          ...(needsEmail ? { email, password } : { pin }),
+        }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      setFullName("");
+      setEmail("");
+      setPassword("");
+      setPin("");
+      setPhone("");
+      load();
+    } finally {
+      setBusy(false);
     }
-    setFullName("");
-    setEmail("");
-    setPassword("");
-    setPin("");
-    setPhone("");
-    load();
   }
 
   if (!loaded) return <SetupDataSkeleton rows={4} />;

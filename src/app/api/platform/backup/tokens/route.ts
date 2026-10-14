@@ -7,10 +7,15 @@ import {
   listPlatformBackupTokens,
 } from "@/lib/platform-backup-service";
 import { generateSyncToken } from "@/lib/sync-token";
+import { requireRecentAuth } from "@/lib/recent-auth";
 
 /**
  * The credentials other servers present to this one's `/api/peer/backup/*`
  * endpoints (migration 0132).
+ *
+ * Needs `backup.share` (issue #807): a token is custody of a full copy of every
+ * tenant's data, handed to another machine. An engineer runs and verifies
+ * backups; only an owner decides who else may pull one.
  *
  * A token is generated here and shown exactly once: the row keeps only its
  * sha256, so a database dump — or a screenshot of this page — cannot hand over
@@ -20,7 +25,7 @@ import { generateSyncToken } from "@/lib/sync-token";
  * importer" when it is time to revoke one.
  */
 export const GET = withPlatformScope(async () => {
-  const { error } = await requirePlatformCapability("backup.manage");
+  const { error } = await requirePlatformCapability("backup.share");
   if (error) return error;
   const [tokens, config] = await Promise.all([listPlatformBackupTokens(), getPlatformBackupConfig()]);
   return NextResponse.json({ tokens, servingEnabled: config.servingEnabled });
@@ -33,8 +38,10 @@ export const GET = withPlatformScope(async () => {
  * server to generate one for the peer to be given.
  */
 export const POST = withPlatformScope(async (request: NextRequest) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.share");
   if (error) return error;
+  const recentError = requireRecentAuth(session);
+  if (recentError) return recentError;
 
   let body: Record<string, unknown>;
   try {

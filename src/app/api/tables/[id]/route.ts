@@ -14,17 +14,7 @@ import { broadcast } from "@/lib/realtime";
  * cashiers/waiters may drive those without full edit rights.
  */
 export const PATCH = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.tablesManage);
-  if (error) return error;
   const { id } = await context.params;
-
-  const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
-  const { rows: existing } = await query<{ id: string; status: TableStatus }>(
-    "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2",
-    [id, location.id],
-  );
-  if (existing.length === 0) return NextResponse.json({ error: "table_not_found" }, { status: 404 });
 
   let body: {
     name?: string;
@@ -45,7 +35,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const isEdit =
+  const isStructuralEdit =
     body.name !== undefined ||
     body.zone !== undefined ||
     body.sectionId !== undefined ||
@@ -56,10 +46,31 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     body.width !== undefined ||
     body.height !== undefined ||
     body.shape !== undefined;
-  if (isEdit) {
-    const editGuard = await requirePermission(PERMISSIONS.tablesEdit);
-    if (editGuard.error) return editGuard.error;
+  const isOperationalStatusChange = body.status !== undefined;
+  if (!isStructuralEdit && !isOperationalStatusChange) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+
+  // Structure and operations are separate capabilities. A request that mixes
+  // both kinds of mutation must hold both permissions; status-only changes
+  // remain available to cashiers and waiters with `tables.manage`.
+  const firstGuard = await requirePermission(
+    isStructuralEdit ? PERMISSIONS.tablesEdit : PERMISSIONS.tablesManage,
+  );
+  if (firstGuard.error) return firstGuard.error;
+  if (isStructuralEdit && isOperationalStatusChange) {
+    const operationalGuard = await requirePermission(PERMISSIONS.tablesManage);
+    if (operationalGuard.error) return operationalGuard.error;
+  }
+  const session = firstGuard.session;
+
+  const location = await resolveActiveLocation(session);
+  if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
+  const { rows: existing } = await query<{ id: string; status: TableStatus }>(
+    "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2",
+    [id, location.id],
+  );
+  if (existing.length === 0) return NextResponse.json({ error: "table_not_found" }, { status: 404 });
 
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -132,7 +143,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
 
 /** Delete (deactivate) a table. Blocked while it holds an active session. */
 export const DELETE = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.tablesManage);
+  const { session, error } = await requirePermission(PERMISSIONS.tablesEdit);
   if (error) return error;
   const { id } = await context.params;
 

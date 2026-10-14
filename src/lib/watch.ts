@@ -110,6 +110,43 @@ export function validateRepairStatusTransition(from: RepairStatus, to: RepairSta
   return null;
 }
 
+/**
+ * Issue #795 Phase 1 — where a consumed repair part came from. `stock` is a
+ * part the shop pulled from its own inventory (relieved from the industry's
+ * inventory account when the ticket closes); `external` is a part bought
+ * outside for this one job or supplied by the customer, whose cost is
+ * recorded by the purchase/expense that acquired it — closing the ticket
+ * must not credit the shop's inventory for something that was never in it.
+ */
+export type RepairPartSource = "stock" | "external";
+export const REPAIR_PART_SOURCES: RepairPartSource[] = ["stock", "external"];
+
+/** Mirrors repair_ticket_parts.source's CHECK (migration 0199). */
+export function validateRepairPartSource(source: string): string | null {
+  if (!(REPAIR_PART_SOURCES as string[]).includes(source)) {
+    return "منبع قطعه نامعتبر است (از انبار یا خرید بیرونی).";
+  }
+  return null;
+}
+
+/**
+ * Issue #795 Phase 1 — the warranty billing invariant, enforced in the
+ * service layer (not the UI): an under-warranty ticket bills the customer
+ * nothing, unless the shop has recorded an explicit out-of-coverage reason
+ * (`repair_tickets.non_covered_reason`) agreed with the customer. A
+ * warranty flag must never silently coexist with an ordinary customer bill.
+ */
+export function validateWarrantyCharge(
+  underWarranty: boolean,
+  charge: number,
+  nonCoveredReason: string | null | undefined,
+): string | null {
+  if (!underWarranty) return null;
+  if (charge <= 0) return null;
+  if (nonCoveredReason?.trim()) return null;
+  return "این تیکت در گارانتی است؛ دریافت مبلغ از مشتری فقط با ثبت «علت خارج از پوشش گارانتی» مجاز است.";
+}
+
 export interface RepairPartInput {
   description: string;
   quantity: string;
@@ -117,6 +154,8 @@ export interface RepairPartInput {
   unitCost: number;
   /** What the customer is billed for it (Rial, whole) — zero on a warranty repair. */
   charge: number;
+  /** Where the part came from; omitted means `stock` (the pre-0199 behavior). */
+  source?: RepairPartSource;
 }
 
 export type ConditionGrade = "new" | "like_new" | "good" | "fair" | "poor";
@@ -177,6 +216,10 @@ export function validateRepairPart(input: RepairPartInput): string[] {
   }
   if (!Number.isInteger(input.charge) || input.charge < 0) {
     errors.push("مبلغ دریافتی بابت قطعه باید یک عدد صحیح غیرمنفی (ریال) باشد.");
+  }
+  if (input.source != null) {
+    const sourceError = validateRepairPartSource(input.source);
+    if (sourceError) errors.push(sourceError);
   }
   return errors;
 }

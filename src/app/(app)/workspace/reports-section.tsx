@@ -10,6 +10,7 @@
  * rather than a misleading zero.
  */
 
+import { InsightsPanel } from "./insights-panel";
 import { useEffect, useMemo, useState } from "react";
 import { BarChart3Icon } from "lucide-react";
 import {
@@ -44,6 +45,7 @@ import {
   ProgressBar,
   ProjectStatusBadge,
   workspaceError,
+  stackedTableClass,
 } from "./workspace-ui";
 
 interface ReportRow {
@@ -56,7 +58,8 @@ interface ReportRow {
   startDate: string | null;
   endDate: string | null;
   budgetRial: number | null;
-  spentRial: number;
+  /** Null when the member may not read the ledger (ledger.view). */
+  spentRial: number | null;
   contractValueRial: number;
   taskCount: number;
   doneTaskCount: number;
@@ -87,18 +90,24 @@ export function ReportsSection() {
     let spent = 0;
     let contracts = 0;
     let overdue = 0;
+    // The server sends null spend to a member who may not read the books, so
+    // the screen says "not available" rather than "nothing spent".
+    const financials = visible.some((row) => row.spentRial !== null);
     for (const row of visible) {
       budget += row.budgetRial ?? 0;
-      spent += row.spentRial;
+      spent += row.spentRial ?? 0;
       contracts += row.contractValueRial;
       overdue += row.overdueTaskCount;
     }
-    return { budget, spent, contracts, overdue };
+    return { budget, spent, contracts, overdue, financials };
   }, [visible]);
 
   return (
     <div className="flex flex-col gap-4">
       {error ? <ErrorBox>{error}</ErrorBox> : null}
+
+      {/* Questions first (#761 §15); the full table stays below for the power user. */}
+      <InsightsPanel />
 
       <KpiRow>
         <KpiCard
@@ -109,12 +118,12 @@ export function ReportsSection() {
         />
         <KpiCard
           label="هزینهٔ ثبت‌شده"
-          value={money.format(totals.spent)}
-          hint="از دفتر روزنامهٔ حسابداری"
+          value={totals.financials ? money.format(totals.spent) : "—"}
+          hint={totals.financials ? "از دفتر روزنامهٔ حسابداری" : "نیازمند دسترسی به دفاتر حسابداری"}
         />
         <KpiCard
           label="مانده نسبت به بودجه"
-          value={money.format(totals.budget - totals.spent)}
+          value={totals.financials ? money.format(totals.budget - totals.spent) : "—"}
           hint={totals.budget ? undefined : "بودجه‌ای ثبت نشده است"}
         />
         <KpiCard
@@ -153,7 +162,7 @@ export function ReportsSection() {
             پس از ساخت پروژه و ثبت هزینه‌ها، وضعیت مالی و پیشرفت هر پروژه اینجا جمع می‌شود.
           </EmptyState>
         ) : (
-          <DataTable caption="گزارش سلامت و سودآوری پروژه‌ها" frame={false}>
+          <DataTable caption="گزارش سلامت و سودآوری پروژه‌ها" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
               <tr>
                 <Th>پروژه</Th>
@@ -169,10 +178,11 @@ export function ReportsSection() {
             <DataTableBody>
               {visible.map((row) => {
                 const percent = completionPercent(row.doneTaskCount, row.taskCount);
-                const remaining = row.budgetRial === null ? null : row.budgetRial - row.spentRial;
+                const remaining =
+                  row.budgetRial === null || row.spentRial === null ? null : row.budgetRial - row.spentRial;
                 return (
                   <DataTableRow key={row.projectId}>
-                    <Td>
+                    <Td data-label="پروژه">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="font-medium">{row.name}</span>
                         <PriorityBadge priority={row.priority} />
@@ -181,7 +191,7 @@ export function ReportsSection() {
                         {[row.ownerName, row.partyName].filter(Boolean).join(" • ") || "—"}
                       </div>
                     </Td>
-                    <Td>
+                    <Td data-label="وضعیت">
                       <ProjectStatusBadge status={row.status} />
                       {row.openApprovals > 0 ? (
                         <div className="text-xs text-muted-foreground">
@@ -189,7 +199,7 @@ export function ReportsSection() {
                         </div>
                       ) : null}
                     </Td>
-                    <Td>
+                    <Td data-label="پیشرفت">
                       <ProgressBar percent={percent} label={`پیشرفت ${row.name}`} />
                       <div className="text-xs text-muted-foreground">
                         {toPersianDigits(String(row.doneTaskCount))} از{" "}
@@ -199,17 +209,21 @@ export function ReportsSection() {
                           : ""}
                       </div>
                     </Td>
-                    <Td>
+                    <Td data-label="بودجه">
                       {row.budgetRial === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
                         <span className="tabular-nums">{money.format(row.budgetRial)}</span>
                       )}
                     </Td>
-                    <Td>
-                      <span className="tabular-nums">{money.format(row.spentRial)}</span>
+                    <Td data-label="هزینه">
+                      {row.spentRial === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <span className="tabular-nums">{money.format(row.spentRial)}</span>
+                      )}
                     </Td>
-                    <Td>
+                    <Td data-label="مانده">
                       {remaining === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
@@ -224,10 +238,10 @@ export function ReportsSection() {
                         </span>
                       )}
                     </Td>
-                    <Td>
+                    <Td data-label="قراردادها">
                       <span className="tabular-nums">{money.format(row.contractValueRial)}</span>
                     </Td>
-                    <Td>
+                    <Td data-label="مهلت پایان">
                       <DateCell date={row.endDate} />
                     </Td>
                   </DataTableRow>

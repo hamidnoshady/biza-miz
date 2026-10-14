@@ -19,21 +19,31 @@ import {
   PROJECT_ACTION_TYPES,
 } from "./ai";
 import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
+import { listExpenseCategoryAccounts } from "./expense-service";
 import { validateInputRequest, type InputRequestSpec } from "./ai-input-protocol";
 import { estimateTokens, type AiTokenUsage } from "./ai-billing";
 import { parseResponseCostHeader } from "./ai-gateway";
 import { normalizeProviderError, tenantProviderErrorMessage, type NormalizedProviderError } from "./ai-provider-errors";
-import { clampRetrievalLimit, formatRetrievalForPrompt, isRetrievalAvailable, retrieveKnowledge } from "./ai-rag";
-import { embedOne, isEmbeddingAvailable } from "./ai-embeddings";
+import {
+  formatKnowledgeForPrompt,
+  knowledgeReadyFor,
+  retrieveTenantKnowledge,
+  type KnowledgeGatewaySettings,
+  type KnowledgeScope,
+} from "./ai-knowledge-gateway";
 import {
   allowedAiActions,
   filterAiToolsByPermissions,
 } from "./ai-capabilities";
 import type { Permission } from "./permissions";
+import type { AppKey } from "./apps";
+import { routeTools } from "./ai-tool-routing";
 import {
+  buildReceiptExtractionPrompt,
   parseReceiptExtractionReply,
   RECEIPT_EXTRACTION_SYSTEM_PROMPT,
   RECEIPT_EXTRACTION_USER_PROMPT,
+  type ReceiptAccountCandidate,
   type ReceiptDraftFields,
 } from "./ai-receipt";
 
@@ -51,17 +61,15 @@ export interface AgentReply {
   inputRequest: InputRequestSpec | null;
   usage: AiTokenUsage;
   /**
-   * Phase 38b — the gateway's own cost figure for this turn, summed across
-   * every provider round (USD). Null whenever the responder did not report
-   * one — a direct vendor, or a proxy with cost tracking off — which the
-   * settlement reads as "price from the token rates instead", never as free.
+   * LiteLLM's reported cost for this turn, summed across every response round
+   * (USD). Null when the proxy omitted cost; settlement then uses the configured
+   * non-gateway cost fallback rather than treating the turn as free.
    */
   costUsd: number | null;
   /**
-   * Phase 36 Wave 7 — every tool this turn invoked, with the date range it was
-   * given, so the caller can build the semantic cache's tool signature and
-   * decide whether the turn was read-only. Empty for a turn that answered
-   * without tools.
+   * Every app-owned function tool this turn invoked, with the date range it
+   * read when applicable. Stored as conversation/audit trace; the retired
+   * app-owned semantic answer cache no longer consumes this shape.
    */
   toolCalls: AgentToolCallTrace[];
 }
@@ -427,10 +435,10 @@ async function callProvider(
       // in place for gateways that omit it.
       body.stream_options = { include_usage: true };
     }
-    // Some OpenAI-compatible providers reject an explicit empty tools array.
-    // MCP and per-request LiteLLM fallbacks are intentionally not merged here:
-    // routing/fallback/provider tools are gateway policy, and optional MCP must
-    // never make ordinary tenant chat invalid.
+    // Some OpenAI-compatible gateways reject an explicit empty tools array.
+    // The app sends its own permission-filtered OpenAI function tools only;
+    // LiteLLM routing/fallback is configured proxy-side, and the independent
+    // POS `/api/mcp` connector is not registered as a proxy tool.
     if (tools.length > 0) {
       body.tools = tools;
       body.tool_choice = "auto";
@@ -504,6 +512,18 @@ function textOf(content: ProviderMessage["content"]): string {
 }
 
 export class AiError extends Error {
+  /**
+   * Phase 6 of issue #812 — provider usage/cost already incurred before this
+   * failure. A multi-round turn pays the provider on every round, so a
+   * timeout, network break or cancellation after round N has already spent
+   * real money. Losing that figure undercharges the business/platform ledger.
+   *
+   * The value is attached by `runAgentTurn` as the failure propagates out of
+   * the loop, so a caller can settle exactly what was incurred and no more.
+   * `settleAiTurn` is idempotent per request id, so settling here and then
+   * settling the same id again can never double-charge.
+   */
+  public accruedUsage?: AiTurnAccrual;
   constructor(
     public code: string,
     message: string,
@@ -514,6 +534,33 @@ export class AiError extends Error {
     super(message);
     this.name = "AiError";
   }
+}
+
+/** Usage/cost a failed turn had already incurred with the provider. */
+export interface AiTurnAccrual {
+  usage: AiTokenUsage;
+  costUsd: number | null;
+}
+
+/**
+ * Reads the accrual off any thrown value. Only `runAgentTurn` writes it, so a
+ * failure raised before the provider was ever reached (validation, an unknown
+ * tool) answers null and the caller settles nothing.
+ */
+export function accruedUsageOf(err: unknown): AiTurnAccrual | null {
+  if (!err || typeof err !== "object") return null;
+  const accrued = (err as { accruedUsage?: unknown }).accruedUsage;
+  if (!accrued || typeof accrued !== "object") return null;
+  const usage = (accrued as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return null;
+  const inputTokens = Number((usage as { inputTokens?: unknown }).inputTokens);
+  const outputTokens = Number((usage as { outputTokens?: unknown }).outputTokens);
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return null;
+  const costUsd = (accrued as { costUsd?: unknown }).costUsd;
+  return {
+    usage: { inputTokens, outputTokens },
+    costUsd: typeof costUsd === "number" && Number.isFinite(costUsd) ? costUsd : null,
+  };
 }
 
 function parseArgs(raw: string | undefined): Record<string, unknown> {
@@ -589,9 +636,18 @@ interface ReceiptExtractionResult {
  * request rather than folding the image into the main conversation loop —
  * that would resend the image bytes on every later tool round.
  */
-async function extractReceiptDraft(config: AiConfig, dataUrl: string, signal?: AbortSignal): Promise<ReceiptExtractionResult> {
+async function extractReceiptDraft(
+  config: AiConfig,
+  dataUrl: string,
+  signal?: AbortSignal,
+  expenseAccounts?: ReceiptAccountCandidate[],
+): Promise<ReceiptExtractionResult> {
+  // The tenant's own expense chart is the only vocabulary the model may answer
+  // with, and its reply is filtered by the same list (issue #832 §13) — a
+  // hard-coded F&B code set categorises nothing for a customised chart.
+  const systemPrompt = expenseAccounts ? buildReceiptExtractionPrompt(expenseAccounts) : RECEIPT_EXTRACTION_SYSTEM_PROMPT;
   const convo: ProviderMessage[] = [
-    { role: "system", content: RECEIPT_EXTRACTION_SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     {
       role: "user",
       content: [
@@ -603,71 +659,15 @@ async function extractReceiptDraft(config: AiConfig, dataUrl: string, signal?: A
   try {
     const result = await callProvider(config, convo, [], undefined, undefined, signal);
     return {
-      fields: parseReceiptExtractionReply(textOf(result.message.content)),
+      fields: parseReceiptExtractionReply(
+        textOf(result.message.content),
+        expenseAccounts?.map((account) => account.code),
+      ),
       usage: result.usage,
       costUsd: result.costUsd,
     };
   } catch {
     return { fields: null, usage: { inputTokens: 0, outputTokens: 0 }, costUsd: null };
-  }
-}
-
-/** Both halves of Wave 6 availability, cached per process; never throws. */
-async function isRetrievalEnabledForTurn(config: AiConfig): Promise<boolean> {
-  try {
-    return (await isRetrievalAvailable()) && (await isEmbeddingAvailable(config));
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Whether this mode's turn will declare the retrieval tool — exported so a
- * caller resolving the system prompt through the prompt manager can build the
- * same context `runAgentTurn` would (the fallback prompt's retrieval line
- * depends on it). Probes are cached per process, so the double call is free.
- */
-export async function retrievalReadyForMode(
-  config: AiConfig,
-  mode: AgentMode,
-  businessId?: string,
-): Promise<boolean> {
-  return mode === "dashboard" && Boolean(businessId) && (await isRetrievalEnabledForTurn(config));
-}
-
-/**
- * Phase 36 Wave 6 — the `search_business_knowledge` executor. Embeds the
- * question over the shared platform connection (its tokens are metered into
- * the same turn, exit criterion 5), retrieves the nearest knowledge rows, and
- * hands the model prose whose every line names its source. Any failure —
- * provider, dimensions, SQL — is a missing hint, never a failed answer.
- */
-async function runKnowledgeSearch(
-  config: AiConfig,
-  businessId: string,
-  args: Record<string, unknown>,
-  messages: InboundMessage[],
-  usage: AiTokenUsage,
-): Promise<ToolResult> {
-  const fallbackQuestion = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  const query = typeof args.query === "string" && args.query.trim() ? args.query : fallbackQuestion;
-  if (!query.trim()) {
-    return { ok: false, data: { error: "عبارت جست‌وجو خالی است." } };
-  }
-  try {
-    const embedded = await embedOne(config, query);
-    usage.inputTokens += embedded.inputTokens;
-    const limit = clampRetrievalLimit(typeof args.limit === "number" ? args.limit : undefined);
-    const results = await retrieveKnowledge(businessId, embedded.vector, { limit });
-    if (results.length === 0) {
-      return {
-        ok: true,
-        data: { results: [], note: "چیزی نزدیک این عبارت در دانش ثبت‌شدهٔ کسب‌وکار پیدا نشد." },
-      };
-    }
-    return { ok: true, data: { count: results.length, knowledge: formatRetrievalForPrompt(results) } };
-  } catch {
-    return { ok: false, data: { error: "جست‌وجوی دانش کسب‌وکار در دسترس نیست." } };
   }
 }
 
@@ -716,6 +716,16 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    * (`buildSystemPrompt`) is used.
    */
   systemPrompt?: string;
+  /**
+   * Issue #812 §2 — the managed-knowledge integration settings and this turn's
+   * tenant scope. When absent or unconfigured the knowledge tool is not
+   * declared at all, which is the whole degradation story: no local vector
+   * table, no local fallback.
+   */
+  knowledge?: {
+    settings: KnowledgeGatewaySettings;
+    scope: KnowledgeScope;
+  };
   messages: InboundMessage[];
   /** Wave 5 (issue #145) — a receipt/invoice image attached to this turn only. */
   attachment?: ChatAttachment;
@@ -742,6 +752,18 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    */
   toolAllowlist?: string[];
   /**
+   * Issue #812 §11 — App Focus. When the member has focused the turn on one
+   * app, the live tool catalogue is narrowed to that app's tools plus the
+   * always-on set, through the same `routeTools` the routing module exports.
+   *
+   * This is the narrowing the issue asks for and it has to be real: a prompt
+   * line saying "focus on Accounting" is guidance the model may ignore, while a
+   * catalogue without the CRM tools is a fact it cannot. `undefined`/`null`
+   * means "no focus" and sends everything, which is what a turn with no app
+   * context does today.
+   */
+  appFocus?: AppKey | null;
+  /**
    * Phase F pt.2 — the turn's conversation belongs to a project, so
    * project-scoped actions (project.memory.add) join `propose_action`'s enum.
    * The ambient project id is injected by the caller, never by the model.
@@ -753,12 +775,14 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   const attachments = normalizeAttachments(opts.attachments, opts.attachment);
   const hasAttachment = attachments.length > 0;
 
-  // Phase 36 Wave 6 — the retrieval tool is declared only when the whole chain
-  // can actually serve it: pgvector + the 0113 table (isRetrievalAvailable)
-  // and a platform connection that answers /embeddings. Both probes cache per
-  // process, and neither ever throws — a probe that fails means "off", and off
-  // is exactly the pre-wave behaviour. Desktop installs keep the assistant.
-  const retrievalReady = await retrievalReadyForMode(config, mode, businessId);
+  // Issue #812 §2 — the knowledge tool is declared only when the configured
+  // AI-infrastructure knowledge integration is switched on and this turn
+  // actually belongs to a tenant. There is no local probe and no local
+  // fallback: "off" means exactly one thing, and it is not an error.
+  const knowledge = opts.knowledge;
+  const retrievalReady = Boolean(
+    knowledge && knowledgeReadyFor(knowledge.settings, knowledge.scope.businessId),
+  );
 
   const permissionActionTypes = opts.permissions
     ? allowedAiActions(
@@ -772,13 +796,22 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     retrieval: retrievalReady,
     toolAllowlist: opts.toolAllowlist,
     projectScoped: opts.projectScoped,
+    // Issue #808 §8 — the wizard surface follows the business's own step list.
+    industry: promptContext.industry,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
+  // Issue #812 §11 — App Focus narrows the catalogue the model can see, not
+  // just the prompt. `routeTools` returns null for "no focus", so an unfocused
+  // turn is byte-for-byte what it was before.
+  const appRouted = opts.appFocus ? routeTools(catalogue.map((tool) => tool.function.name), [opts.appFocus]) : null;
+  const appNarrowed = appRouted
+    ? catalogue.filter((tool) => appRouted.includes(tool.function.name))
+    : catalogue;
   // Filtering happens before provider serialization and again in the executor.
   // A newly-added tool without a registry entry therefore cannot accidentally
   // become available to a tenant member.
   const tools = opts.permissions
-    ? filterAiToolsByPermissions(catalogue, opts.permissions)
-    : catalogue;
+    ? filterAiToolsByPermissions(appNarrowed, opts.permissions)
+    : appNarrowed;
   const allowedActionTypes = permissionActionTypes ? new Set<string>(permissionActionTypes) : null;
   const canPropose = tools.some((tool) => tool.function.name === "propose_action");
   const canRequestInput = tools.some((tool) => tool.function.name === "request_input");
@@ -806,7 +839,32 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     ...messages.map((m) => ({ role: m.role, content: m.content })),
   ];
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+  // Issue #812 §16 — every round bills the provider before the next one
+  // starts, so the accruals must survive a failure in any later round. The
+  // loop is wrapped once, here, rather than at each call site: whatever throws
+  // leaves carrying what it cost, and `settleAiTurn`'s per-request-id
+  // idempotency keeps the eventual settlement single.
+  try {
+    return await runToolLoop();
+  } catch (err) {
+    if (usage.inputTokens > 0 || usage.outputTokens > 0 || costUsd !== null) {
+      const accrual: AiTurnAccrual = { usage: { ...usage }, costUsd };
+      if (err instanceof AiError) {
+        err.accruedUsage = accrual;
+      } else {
+        try {
+          (err as { accruedUsage?: AiTurnAccrual }).accruedUsage = accrual;
+        } catch {
+          // A frozen/sealed error object cannot carry the figure; the caller
+          // then settles nothing, exactly as before this change.
+        }
+      }
+    }
+    throw err;
+  }
+
+  async function runToolLoop(): Promise<AgentReply> {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const result = await callProvider(config, convo, tools, opts.stream, opts.requestId, opts.signal);
     usage.inputTokens += result.usage.inputTokens;
     usage.outputTokens += result.usage.outputTokens;
@@ -888,7 +946,27 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
           (item) => item.kind === "pdf" && typeof item.extractedText === "string" && item.extractedText,
         );
         if (image) {
-          const extraction = await extractReceiptDraft(config, image.dataUrl!, opts.signal);
+          /*
+           * The tenant's own expense accounts are the model's only vocabulary
+           * (issue #832 §13). Reading them is a database round trip that has
+           * nothing to do with reading the receipt, so a failure here degrades to
+           * "no list" — which the prompt spells out as *make no suggestion*
+           * rather than falling back to the old hard-coded F&B codes. Extraction
+           * is metered work the person already paid for; it must not be lost to a
+           * chart read.
+           */
+          let expenseAccounts: ReceiptAccountCandidate[] | undefined;
+          if (opts.businessId) {
+            try {
+              expenseAccounts = await listExpenseCategoryAccounts(opts.businessId);
+            } catch {
+              // A chart that could not be read is an empty vocabulary: the model is
+              // told to propose no code, rather than being handed the old fixed
+              // list to guess from (§13's whole point).
+              expenseAccounts = [];
+            }
+          }
+          const extraction = await extractReceiptDraft(config, image.dataUrl!, opts.signal, expenseAccounts);
           usage.inputTokens += extraction.usage.inputTokens;
           usage.outputTokens += extraction.usage.outputTokens;
           if (extraction.costUsd !== null) costUsd = (costUsd ?? 0) + extraction.costUsd;
@@ -925,9 +1003,38 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         call.function.name === KNOWLEDGE_TOOL_NAME &&
         allowedReadToolNames.has(call.function.name) &&
         retrievalReady &&
-        businessId
+        knowledge
       ) {
-        result = await runKnowledgeSearch(config, businessId, callArgs, messages, usage);
+        // Issue #812 §2/§3 — the tenant is named by the server, never by the
+        // model and never by the request body. Retrieval is confined to this
+        // business's namespace; app/project/source are secondary filters that
+        // can only narrow it.
+        const fallbackQuestion = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+        const searchQuery =
+          typeof callArgs.query === "string" && callArgs.query.trim() ? callArgs.query : fallbackQuestion;
+        if (!searchQuery.trim()) {
+          result = { ok: false, data: { error: "عبارت جست‌وجو خالی است." } };
+        } else {
+          const retrieval = await retrieveTenantKnowledge(
+            knowledge.settings,
+            knowledge.scope,
+            searchQuery,
+            { limit: callArgs.limit, signal: opts.signal },
+          );
+          // The retrieval's own tokens and gateway cost belong to this turn's
+          // settlement, exactly as a provider round's do.
+          usage.inputTokens += retrieval.inputTokens;
+          if (retrieval.costUsd !== null) costUsd = (costUsd ?? 0) + retrieval.costUsd;
+          result = retrieval.hits.length === 0
+            ? {
+                ok: true,
+                data: { results: [], note: "چیزی نزدیک این عبارت در دانش این کسب‌وکار پیدا نشد." },
+              }
+            : {
+                ok: true,
+                data: { count: retrieval.hits.length, knowledge: formatKnowledgeForPrompt(retrieval.hits) },
+              };
+        }
       } else if (allowedReadToolNames.has(call.function.name) && toolRunner) {
         result = await toolRunner(call.function.name, callArgs);
       } else {
@@ -942,14 +1049,15 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         content: JSON.stringify(result.data),
       });
     }
-  }
+    }
 
-  return {
-    content: "برای پاسخ به این درخواست به مراحل زیادی نیاز بود. لطفاً سؤال را ساده‌تر بپرسید.",
-    proposedAction: null,
-    inputRequest: null,
-    usage,
-    costUsd,
-    toolCalls: toolTrace,
-  };
+    return {
+      content: "برای پاسخ به این درخواست به مراحل زیادی نیاز بود. لطفاً سؤال را ساده‌تر بپرسید.",
+      proposedAction: null,
+      inputRequest: null,
+      usage,
+      costUsd,
+      toolCalls: toolTrace,
+    };
+  }
 }

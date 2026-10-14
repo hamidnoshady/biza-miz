@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  labelFieldsForTrade,
-  renderLabelHtml,
-  renderLabelSheetHtml,
-  type LabelItem,
-  type LabelTrade,
-} from "./label-template";
+import { labelFieldsForTrade, type LabelItem } from "./label-template";
+import { labelToPrintDocument } from "./printing/document-bridge";
+import { builtInTemplate, renderPrintTemplate } from "./print-template";
 
 const baseItem: LabelItem = { name: "کالای نمونه", price: 1_250_000 };
 
@@ -42,82 +38,61 @@ describe("labelFieldsForTrade", () => {
   });
 });
 
-describe("renderLabelHtml", () => {
-  const trades: LabelTrade[] = ["jewelry", "watch", "accessories", "cosmetics"];
+describe("a label renders through the general template pipeline", () => {
+  const label = builtInTemplate("label57x40-label")!;
+  const labelHtml = () =>
+    renderPrintTemplate(
+      label,
+      labelToPrintDocument({
+        businessName: "فروشگاه نمونه",
+        itemName: "رژ لب",
+        code: "2000000000015", // minted internal code, valid check digit
+        fields: labelFieldsForTrade("cosmetics", { ...baseItem, shade: "قرمز آتشین", expiryDate: "2027-03-01" }),
+      }),
+    );
 
-  it.each(trades)("renders a %s label with its trade fields", (trade) => {
-    const item: LabelItem =
-      trade === "cosmetics"
-        ? { name: "رژ لب", price: 800_000, shade: "قرمز", expiryDate: "2027-01-01" }
-        : trade === "jewelry"
-          ? { name: "انگشتر", price: 50_000_000, purity: "۱۸", weight: "۲٫۵ گرم" }
-          : trade === "watch"
-            ? { name: "ساعت مچی", price: 30_000_000, model: "S5", serial: "1001" }
-            : { name: "دستبند", price: 400_000, size: "سایز ۵۵" };
-
-    const html = renderLabelHtml({
-      businessName: "فروشگاه نمونه",
-      itemName: item.name,
-      code: "2000000000016",
-      fields: labelFieldsForTrade(trade, item),
-    });
-
-    expect(html).toContain(item.name);
-    expect(html).toContain("2000000000016");
-    for (const field of labelFieldsForTrade(trade, item)) {
+  it("carries the branch, the item and the trade's own fields", () => {
+    const html = labelHtml();
+    expect(html).toContain("فروشگاه نمونه");
+    expect(html).toContain("رژ لب");
+    for (const field of labelFieldsForTrade("cosmetics", { ...baseItem, shade: "قرمز آتشین", expiryDate: "2027-03-01" })) {
       expect(html).toContain(field.label);
       expect(html).toContain(field.value);
     }
   });
 
-  it("escapes HTML in the item name and field values", () => {
-    const html = renderLabelHtml({
-      businessName: "فروشگاه",
-      itemName: "<script>alert(1)</script>",
-      code: "2000000000016",
-      fields: [{ label: "رنگ", value: '<img src="x">' }],
-    });
+  it("draws real scannable bars (SVG) for a valid EAN-13 code, digits included", () => {
+    // Digits alone cannot be read by a laser/CCD scanner — the label must
+    // carry actual bars or the scan-driven count never works.
+    const html = labelHtml();
+    expect(html).toContain("<svg");
+    expect(html).toContain("2000000000015");
+  });
+
+  it("keeps the text-only block for codes in other shapes", () => {
+    const html = renderPrintTemplate(
+      label,
+      labelToPrintDocument({ businessName: "انبار", itemName: "قلم", code: "ABC-001", fields: [] }),
+    );
+    expect(html).not.toContain("<svg");
+    expect(html).toContain("ABC-001");
+  });
+
+  it("escapes markup in an item name or a field value", () => {
+    const html = renderPrintTemplate(
+      label,
+      labelToPrintDocument({
+        businessName: "فروشگاه",
+        itemName: "<script>alert(1)</script>",
+        code: "2000000000015",
+        fields: [{ label: "رنگ", value: '<img src="x">' }],
+      }),
+    );
     expect(html).not.toContain("<script>");
     expect(html).not.toContain('<img src="x">');
   });
 
-  it("draws real scannable bars (SVG) for a valid EAN-13 code", () => {
-    // Digits alone cannot be read by a laser/CCD scanner — the label must
-    // carry actual bars or the scan-driven count never works.
-    const html = renderLabelHtml({
-      businessName: "انبار",
-      itemName: "آرد",
-      code: "2000000000015", // minted internal code, valid check digit
-      fields: [{ label: "واحد", value: "کیلوگرم" }],
-    });
-    expect(html).toContain("<svg");
-    expect(html).toContain('viewBox="0 0 190 64"'); // 95 modules × 2px
-    expect(html).toContain("2000000000015"); // human-readable digits stay
-  });
-
-  it("keeps the text-only block for codes in other shapes", () => {
-    const html = renderLabelHtml({
-      businessName: "انبار",
-      itemName: "قلم",
-      code: "ABC-001",
-      fields: [],
-    });
-    expect(html).not.toContain("<svg");
-    expect(html).toContain("ABC-001");
-  });
-});
-
-describe("renderLabelSheetHtml", () => {
-  it("renders every label as its own page in one document", () => {
-    const html = renderLabelSheetHtml([
-      { businessName: "انبار", itemName: "آرد", code: "2000000000015", fields: [] },
-      { businessName: "انبار", itemName: "شکر", code: "2000000000022", fields: [] },
-    ]);
-    expect(html.match(/<div class="label-page">/g)?.length).toBe(2);
-    expect(html).toContain("آرد");
-    expect(html).toContain("شکر");
-    expect(html).toContain("page-break-after: always");
-    // Both labels carry their scannable bars.
-    expect(html.match(/<svg/g)?.length).toBe(2);
+  it("prints the label at the label roll's own width", () => {
+    expect(labelHtml()).toContain("width: 57mm");
   });
 });

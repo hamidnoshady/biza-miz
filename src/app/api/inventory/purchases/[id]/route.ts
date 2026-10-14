@@ -21,6 +21,8 @@ import {
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { enqueueHolooPurchase } from "@/lib/integrations/holoo/outbox-producer";
 import { receivePurchaseInTransaction } from "@/lib/purchase-receive-service";
+import { PurchaseServiceError, SUPPLIER_INVOICE_DUE_DATE_SQL, supplierInvoiceOrError } from "@/lib/purchase-service";
+import type { SupplierInvoiceInput } from "@/lib/payables-input";
 
 const SETTLEMENT_METHODS = ["cash", "bank", "credit"] as const;
 type SettlementMethod = (typeof SETTLEMENT_METHODS)[number];
@@ -86,7 +88,14 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-  let body: { supplierId?: string | null; note?: string; purchaseDate?: string | null; items?: PurchaseItemInput[] };
+  let body: {
+    supplierId?: string | null;
+    note?: string;
+    purchaseDate?: string | null;
+    items?: PurchaseItemInput[];
+    /** Audit F11 — the supplier invoice block; omitted = leave the stored one alone. */
+    invoice?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -104,11 +113,13 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
   let lines: PurchaseLine[];
   let total: string;
   let purchaseDate: string | null;
+  let invoice: SupplierInvoiceInput | null = null;
   try {
     purchaseDate = purchaseDateOrNull(body.purchaseDate);
     ({ lines, total } = await preparePurchaseLines(body.items ?? [], location.id));
+    if (body.invoice !== undefined) invoice = supplierInvoiceOrError(body.invoice);
   } catch (err) {
-    if (err instanceof PurchaseLineError) {
+    if (err instanceof PurchaseLineError || err instanceof PurchaseServiceError) {
       return NextResponse.json({ error: err.code }, { status: err.status });
     }
     throw err;
@@ -144,6 +155,18 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
         WHERE id = $1 AND location_id = $5`,
       [id, body.supplierId || null, body.note?.trim() || null, total, location.id, purchaseDate],
     );
+    if (invoice) {
+      // A received purchase is refused above, so the VAT stored here is always
+      // the one its receipt will post.
+      await client.query(
+        `UPDATE purchases
+            SET supplier_invoice_number = $2, supplier_invoice_date = $3::date, vat_amount = $4,
+                payment_terms_days = $5::integer,
+                payment_due_date = ${SUPPLIER_INVOICE_DUE_DATE_SQL("$6", "$5", "$3", "purchase_date")}
+          WHERE id = $1`,
+        [id, invoice.invoiceNumber, invoice.invoiceDate, invoice.vatAmount, invoice.paymentTermsDays, invoice.dueDate],
+      );
+    }
     await client.query("DELETE FROM purchase_items WHERE purchase_id = $1", [id]);
     for (const line of lines) {
       await client.query(

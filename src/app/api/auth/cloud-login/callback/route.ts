@@ -11,6 +11,8 @@ import {
 import { desktopCloudLoginContext } from "@/lib/desktop-cloud-login-local";
 import { createSession } from "@/lib/employee-service";
 import { requestHost } from "@/lib/host";
+import { cloudLoginIdentityReadiness, type IdentityReadiness } from "@/lib/iam/identity-readiness";
+import { syncHybridLoginCredentials } from "@/lib/iam/login-credential-sync";
 
 const COOKIE_PATH = "/api/auth/cloud-login";
 
@@ -18,9 +20,17 @@ const COOKIE_PATH = "/api/auth/cloud-login";
  * Phase 46, on the desktop: Electron loads this with the code and state the
  * cloud handed back through businesssuite://. The state must match this
  * window's cookie (a link nobody here asked for signs nobody in); the code is
- * redeemed server-to-server with the install's own credential. The member is
- * then signed in locally — IAM sync gives desktop users the cloud's ids — and
- * the cloud pane's single-use session code waits in a short httpOnly cookie.
+ * redeemed server-to-server with the install's own credential.
+ *
+ * The local session is then minted **only** once identity convergence is
+ * proven. A membership can be replicated while its login credentials have not
+ * arrived (the IAM snapshot is metadata-only), and signing that member in
+ * without `platformUserId`/`tokenVersion` would put the session outside the
+ * cloud's token-version revocation chain — a cloud password change could not
+ * end it. So when the cloud reports a global identity, this route requires the
+ * local replica to be bound to it, reconciling credentials once and otherwise
+ * failing closed with `identity_not_synced` (an actionable, retryable state).
+ * PIN-only memberships legitimately have no cloud identity and keep working.
  */
 export async function GET(request: NextRequest) {
   const relative = (path: string) => {
@@ -37,7 +47,7 @@ export async function GET(request: NextRequest) {
   const context = await desktopCloudLoginContext(requestHost(request.headers));
   if (!context) return fail("unavailable");
 
-  let redeemed: { userId?: unknown; sessionCode?: unknown };
+  let redeemed: { userId?: unknown; sessionCode?: unknown; platformUserId?: unknown; tokenVersion?: unknown };
   try {
     const res = await fetch(`${context.remoteUrl.replace(/\/+$/, "")}/api/server-sync/desktop-login`, {
       method: "POST",
@@ -52,9 +62,14 @@ export async function GET(request: NextRequest) {
   }
   const userId = typeof redeemed.userId === "string" ? redeemed.userId : null;
   if (!userId) return fail("refused");
+  // Older clouds do not report the expected identity; `undefined` keeps the
+  // legacy behaviour (bind when local data allows, otherwise sign in).
+  const expectedPlatformUserId =
+    typeof redeemed.platformUserId === "string" ? redeemed.platformUserId : null;
 
   const businessId = context.businessId;
-  const signed = await withTenant(businessId, async () => {
+
+  const readLocal = () => withTenant(businessId, async () => {
     const { rows } = await query<{
       id: string;
       role: Role;
@@ -75,8 +90,36 @@ export async function GET(request: NextRequest) {
         WHERE u.id = $1 AND u.business_id = $2 AND u.is_active`,
       [userId, businessId],
     );
-    const user = rows[0];
-    if (!user) return null;
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      row,
+      readiness: cloudLoginIdentityReadiness({
+        expectedPlatformUserId,
+        local: { platformUserId: row.platform_user_id, tokenVersion: row.token_version },
+      }),
+    };
+  });
+
+  let local = await readLocal();
+  if (!local) return fail("not_synced");
+  if (!local.readiness.ok) {
+    // Membership-only convergence. Reconcile the credential plane once (this
+    // is the same call the sync tick and the repair action use) and re-check;
+    // only then, if the expected global identity is still missing, refuse the
+    // hand-back instead of minting an unbound session.
+    if (local.readiness.issue === "identity_binding_missing" || local.readiness.issue === "identity_binding_mismatch") {
+      await syncHybridLoginCredentials(businessId).catch(() => null);
+      local = await readLocal();
+      if (!local) return fail("not_synced");
+    }
+    if (!local.readiness.ok) return fail("identity_not_synced");
+  }
+  const readiness = local.readiness as Extract<IdentityReadiness, { ok: true }>;
+  const resolved = local;
+
+  const signed = await withTenant(businessId, async () => {
+    const user = resolved.row;
     const { session } = await createSession(user.id, businessId, {
       locationId: user.location_id,
       deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? null,
@@ -89,13 +132,11 @@ export async function GET(request: NextRequest) {
       businessSubdomain: user.business_subdomain,
       locationId: user.location_id,
       fullName: user.full_name,
-      platformUserId: user.platform_user_id && user.token_version !== null ? user.platform_user_id : null,
-      ...(user.platform_user_id && user.token_version !== null ? { tokenVersion: user.token_version } : {}),
+      platformUserId: readiness.platformUserId,
+      ...(readiness.platformUserId && readiness.tokenVersion !== null ? { tokenVersion: readiness.tokenVersion } : {}),
       employeeSessionId: session.id,
     });
   });
-  // The member exists on the cloud but has not reached this desktop yet.
-  if (!signed) return fail("not_synced");
 
   const response = relative("/dashboard");
   response.cookies.set(SESSION_COOKIE, signed, sessionCookieOptions());

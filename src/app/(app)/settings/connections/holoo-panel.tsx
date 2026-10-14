@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ErrorBox, errorMessageOrRaw, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 import { SectionCard } from "@/app/dashboard/page-chrome";
+import { HOLOO_DATA_TRANSFER_PROFILE } from "@/lib/data-transfer/providers/holoo/profile";
 
 interface Connection {
   id: string;
@@ -35,6 +36,7 @@ interface HolooSettings {
   writeMode: "none" | "web_service" | "direct_sql";
   directSqlArmedAt: string | null;
   directSqlProfileKey: string | null;
+  directSqlSupported: boolean;
   companionActivatedAt: string | null;
   hasSqlCredentials: boolean;
   hasWebServiceCredentials: boolean;
@@ -145,15 +147,41 @@ export function HolooPanel() {
   async function test(id: string) {
     setTesting(id);
     setTestResult((prev) => ({ ...prev, [id]: "" }));
-    const res = await api<{ ok: boolean; error?: string; version?: string; profile?: { label: string } | null }>(
-      `/api/integrations/connections/${id}/test`,
-      { method: "POST" },
-    );
+    const res = await api<{
+      ok: boolean;
+      error?: string;
+      version?: string;
+      profile?: { key: string; profileVersion: number; label: string } | null;
+      fingerprint?: { productVersion: string; edition: string; productLevel: string; databaseCollation: string | null };
+      diagnostics?: { code: string; table?: string; column?: string }[];
+      migrationReady?: boolean;
+    }>(`/api/integrations/connections/${id}/test`, { method: "POST" });
     if (!res.ok) {
       setTestResult((prev) => ({ ...prev, [id]: `خطا: ${errorMessageOrRaw(res.data.error)}` }));
     } else if (res.data.ok) {
-      const profile = res.data.profile ? `، پروفایل: ${res.data.profile.label}` : "، پروفایل ناشناخته";
-      setTestResult((prev) => ({ ...prev, [id]: `نسخهٔ ${res.data.version ?? "نامشخص"}${profile}` }));
+      const issues = (res.data.diagnostics ?? []).slice(0, 4).map((issue) => {
+        const label = ({
+          missing_table: "جدول مفقود",
+          missing_column: "ستون مفقود",
+          incompatible_column_type: "نوع ستون ناسازگار",
+          nullable_required_column: "شناسهٔ تهی‌پذیر",
+          primary_key_mismatch: "کلید اصلی ناسازگار",
+          unsupported_sql_server_version: "نسخهٔ SQL پشتیبانی‌نشده",
+          unsupported_edition: "ویرایش پشتیبانی‌نشده",
+          unsupported_product_level: "سطح به‌روزرسانی پشتیبانی‌نشده",
+          unsupported_database_collation: "کدگذاری پایگاه پشتیبانی‌نشده",
+          invalid_date_sample: "قالب تاریخ ناسازگار",
+        } as Record<string, string>)[issue.code] ?? issue.code;
+        return `${label}${issue.table ? ` · ${issue.table}` : ""}${issue.column ? `.${issue.column}` : ""}`;
+      });
+      const fingerprint = res.data.fingerprint;
+      const profile = res.data.profile
+        ? `پروفایل ${res.data.profile.key} (نسخهٔ ${res.data.profile.profileVersion}) شناسایی شد.`
+        : `اتصال برقرار است، اما ساختار برای مهاجرت پشتیبانی نمی‌شود؛ فقط تشخیص خواندنی در دسترس است${issues.length ? `: ${issues.join("، ")}` : ""}.`;
+      const edition = fingerprint?.edition ? ` · ${fingerprint.edition}` : "";
+      const level = fingerprint?.productLevel ? ` · ${fingerprint.productLevel}` : "";
+      const collation = fingerprint?.databaseCollation ? ` · ${fingerprint.databaseCollation}` : "";
+      setTestResult((prev) => ({ ...prev, [id]: `نسخهٔ SQL Server ${fingerprint?.productVersion ?? res.data.version ?? "نامشخص"}${edition}${level}${collation} · ${profile}` }));
     } else {
       setTestResult((prev) => ({ ...prev, [id]: `خطا: ${errorMessageOrRaw(res.data.error)}` }));
     }
@@ -216,7 +244,7 @@ export function HolooPanel() {
               <select className={inputClass} value={writeMode} onChange={(e) => setWriteMode(e.target.value as "none" | "web_service" | "direct_sql")}>
                 <option value="none">بدون نوشتن</option>
                 <option value="web_service">وب‌سرویس هلو</option>
-                <option value="direct_sql">SQL مستقیم</option>
+                <option value="direct_sql" disabled>SQL مستقیم (در پروفایل فعلی غیرفعال)</option>
               </select>
             </label>
           </div>
@@ -258,6 +286,9 @@ export function HolooPanel() {
                     ) : null}
                   </div>
                 ) : null}
+                {c.settings && c.settings.schemaProfile !== HOLOO_DATA_TRANSFER_PROFILE.profileKey ? (
+                  <div className="mt-2"><InfoBox>پروفایل نسخه‌دار شناخته‌شده‌ای برای این پایگاه داده تأیید نشده است. مهاجرت و ارسال متصل غیرفعال می‌ماند؛ «تست اتصال» تشخیص ساختار را فقط‌خواندنی اجرا می‌کند.</InfoBox></div>
+                ) : null}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <Button type="button" size="sm" variant="outline" disabled={testing === c.id} onClick={() => test(c.id)}>
                     {testing === c.id ? "در حال تست…" : "تست اتصال"}
@@ -269,18 +300,22 @@ export function HolooPanel() {
                   {testResult[c.id] ? <span className="text-xs text-muted-foreground">{testResult[c.id]}</span> : null}
                 </div>
                 {c.settings?.writeMode === "direct_sql" ? (
-                  <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 p-3 sm:flex-row sm:items-center">
-                    <input
-                      className={inputClass}
-                      placeholder="برای مسلح‌سازی بنویسید: holoo-direct-sql"
-                      value={directSqlConfirmation[c.id] ?? ""}
-                      onChange={(e) => setDirectSqlConfirmation((prev) => ({ ...prev, [c.id]: e.target.value }))}
-                      dir="ltr"
-                    />
-                    <Button type="button" size="sm" variant="outline" disabled={actionBusy === `${c.id}:direct`} onClick={() => armDirectSql(c.id)}>
-                      مسلح‌سازی SQL مستقیم
-                    </Button>
-                  </div>
+                  c.settings.directSqlSupported ? (
+                    <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 p-3 sm:flex-row sm:items-center">
+                      <input
+                        className={inputClass}
+                        placeholder="برای مسلح‌سازی بنویسید: holoo-direct-sql"
+                        value={directSqlConfirmation[c.id] ?? ""}
+                        onChange={(e) => setDirectSqlConfirmation((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                        dir="ltr"
+                      />
+                      <Button type="button" size="sm" variant="outline" disabled={actionBusy === `${c.id}:direct`} onClick={() => armDirectSql(c.id)}>
+                        مسلح‌سازی SQL مستقیم
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="mt-3"><InfoBox>پروفایل شناسایی‌شده مجوز نوشتن مستقیم SQL ندارد؛ ارسال متصل فقط از مسیر وب‌سرویس انجام می‌شود. SQL مستقیم مسلح یا اجرا نخواهد شد.</InfoBox></div>
+                  )
                 ) : null}
               </div>
             ))}

@@ -19,12 +19,14 @@ import { getConnection } from "../connections-service";
 import { getHolooSettingsRow, holooSqlConfigFor, holooWebServiceConfigFor, type HolooSettingsRow } from "./connection-service";
 import { backoffDelayMs, isDeadAfterAttempts, OUTBOX_MAX_ATTEMPTS } from "../retry";
 import { armDirectSql, buildDirectSqlPreview, isPinnedProfile, type HolooDocument } from "./direct-sql";
-import { connectHolooSqlWriter, createHolooWebServiceClient } from "./client";
-import { profileForKey } from "./schema-profile";
+import { connectHolooSql, connectHolooSqlWriter, createHolooWebServiceClient } from "./client";
+import { diagnoseProfile, profileForKey } from "./schema-profile";
+import { probeHolooSchema } from "./schema-probe";
 import { writeIntegrationAudit } from "../audit";
 
 export const HOLOO_PUSH_TICK_INTERVAL_MS = 60 * 1000;
-const DRAIN_BATCH = 25;
+export const HOLOO_PUSH_DRAIN_BATCH = 25;
+const DRAIN_BATCH = HOLOO_PUSH_DRAIN_BATCH;
 
 export type HolooOutboxKind = "holoo_sale" | "holoo_receipt" | "holoo_purchase";
 
@@ -45,27 +47,41 @@ interface DueEvent extends Record<string, unknown> {
  * statements are rendered (dry-run) and executed one transaction per document,
  * with a `holoo.write` audit row per statement.
  */
-export async function pushForConnection(businessId: string, connectionId: string): Promise<number> {
+export async function pushForConnection(businessId: string, connectionId: string): Promise<{ attempted: number; sent: number }> {
   const settings = await getHolooSettingsRow(businessId, connectionId);
-  if (!settings) return 0;
+  if (!settings) return { attempted: 0, sent: 0 };
 
+  // Claim each batch atomically. Manual sends and the scheduled tick can race;
+  // SELECT+UPDATE in separate pool queries could otherwise send one document
+  // twice. Expired processing leases are reclaimable after a crashed worker.
   const { rows } = await query<DueEvent>(
-    `SELECT id, entity_type, local_id, payload, attempts
-       FROM integration_outbox_events
-      WHERE connection_id = $1 AND status IN ('pending', 'failed') AND next_attempt_at <= now()
-      ORDER BY next_attempt_at
-      LIMIT $2`,
+    `WITH due AS (
+       SELECT id
+         FROM integration_outbox_events
+        WHERE connection_id = $1
+          AND (
+            (status IN ('pending', 'failed') AND next_attempt_at <= now())
+            OR (status = 'processing' AND (leased_until IS NULL OR leased_until <= now()))
+          )
+        ORDER BY next_attempt_at, created_at, id
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE integration_outbox_events AS event
+        SET status = 'processing', leased_until = now() + interval '5 minutes', updated_at = now()
+       FROM due
+      WHERE event.id = due.id
+     RETURNING event.id, event.entity_type, event.local_id, event.payload, event.attempts`,
     [connectionId, DRAIN_BATCH],
   );
 
   let pushed = 0;
   for (const event of rows) {
-    await query(`UPDATE integration_outbox_events SET status = 'processing' WHERE id = $1`, [event.id]);
     try {
       const document = event.payload as HolooDocument & { sourceId: string };
       const holooDocumentNumber = await writeDocument(settings, event.entity_type, document);
       await query(
-        `UPDATE integration_outbox_events SET status = 'sent', sent_at = now(), last_error = NULL, updated_at = now()
+        `UPDATE integration_outbox_events SET status = 'sent', sent_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()
           WHERE id = $1`,
         [event.id],
       );
@@ -83,7 +99,7 @@ export async function pushForConnection(businessId: string, connectionId: string
       const attempts = event.attempts + 1;
       if (isDeadAfterAttempts(attempts, OUTBOX_MAX_ATTEMPTS)) {
         await query(
-          `UPDATE integration_outbox_events SET status = 'dead', attempts = $2, last_error = $3, updated_at = now()
+          `UPDATE integration_outbox_events SET status = 'dead', attempts = $2, last_error = $3, leased_until = NULL, updated_at = now()
             WHERE id = $1`,
           [event.id, attempts, (err as Error).message],
         );
@@ -98,7 +114,7 @@ export async function pushForConnection(businessId: string, connectionId: string
         const delay = backoffDelayMs(attempts);
         await query(
           `UPDATE integration_outbox_events
-              SET status = 'failed', attempts = $2, last_error = $3,
+              SET status = 'failed', attempts = $2, last_error = $3, leased_until = NULL,
                   next_attempt_at = now() + ($4 || ' milliseconds')::interval, updated_at = now()
             WHERE id = $1`,
           [event.id, attempts, (err as Error).message, delay],
@@ -106,7 +122,61 @@ export async function pushForConnection(businessId: string, connectionId: string
       }
     }
   }
-  return pushed;
+  return { attempted: rows.length, sent: pushed };
+}
+
+/**
+ * Manually drain the already-produced integration outbox from Data Transfer.
+ * This deliberately creates no documents and has no second HTTP/SQL client;
+ * it delegates to the same retry-safe push worker used by scheduled sync.
+ */
+export async function sendPendingHolooOutbox(businessId: string, connectionId: string): Promise<{
+  attempted: number;
+  sent: number;
+  remainingDue: number;
+  retryScheduled: number;
+  inFlight: number;
+  deadLettered: number;
+}> {
+  const settings = await getHolooSettingsRow(businessId, connectionId);
+  if (!settings) throw new Error("holoo_connection_not_found");
+  if (settings.write_mode !== "web_service") throw new Error("holoo_web_service_required");
+  if (!settings.companion_activated_at) throw new Error("holoo_companion_not_active");
+  if (!settings.web_service_base_url || !settings.ws_user_ciphertext || !settings.ws_password_ciphertext) {
+    throw new Error("holoo_web_service_credentials_missing");
+  }
+
+  const drain = await pushForConnection(businessId, connectionId);
+  const [{ rows: afterRows }, { rows: scheduledRows }, { rows: processingRows }, { rows: deadRows }] = await Promise.all([
+    query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM integration_outbox_events
+        WHERE connection_id = $1 AND status IN ('pending', 'failed') AND next_attempt_at <= now()`,
+      [connectionId],
+    ),
+    query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM integration_outbox_events
+        WHERE connection_id = $1 AND status IN ('pending', 'failed') AND next_attempt_at > now()`,
+      [connectionId],
+    ),
+    query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM integration_outbox_events
+        WHERE connection_id = $1 AND status = 'processing' AND leased_until > now()`,
+      [connectionId],
+    ),
+    query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM integration_outbox_events
+        WHERE connection_id = $1 AND status = 'dead'`,
+      [connectionId],
+    ),
+  ]);
+  return {
+    attempted: drain.attempted,
+    sent: drain.sent,
+    remainingDue: Number(afterRows[0]?.count ?? 0),
+    retryScheduled: Number(scheduledRows[0]?.count ?? 0),
+    inFlight: Number(processingRows[0]?.count ?? 0),
+    deadLettered: Number(deadRows[0]?.count ?? 0),
+  };
 }
 
 /** Write one document through the configured mode; returns the Holoo doc number. */
@@ -155,6 +225,20 @@ async function writeDirectSql(settings: HolooSettingsRow, kind: HolooOutboxKind,
   // catalogued must never be written to).
   if (!profile) {
     throw new Error("holoo_direct_sql_unknown_profile");
+  }
+  if (!profile.capabilities.directSqlWrite) {
+    throw new Error("holoo_direct_sql_profile_read_only");
+  }
+  // A stored key is not proof that the external database still has that
+  // structure. Re-probe immediately before opening the write-capable client.
+  const probeClient = await connectHolooSql(holooSqlConfigFor(settings));
+  try {
+    const current = diagnoseProfile(await probeHolooSchema(probeClient)).profile;
+    if (!current || current.key !== profile.key) {
+      throw new Error("holoo_direct_sql_schema_changed");
+    }
+  } finally {
+    await probeClient.close();
   }
   // Armed only via the typed confirmation phrase (armDirectSqlFor below), and
   // the exact probed profile must still match the profile pinned at arming.
@@ -206,10 +290,25 @@ export async function armDirectSqlFor(
   connectionId: string,
   confirmation: string,
   armedBy: string,
-): Promise<{ ok: true } | { ok: false; error: "confirmation_mismatch" | "not_found" | "unknown_profile" }> {
+): Promise<{
+  ok: true;
+} | { ok: false; error: "confirmation_mismatch" | "not_found" | "unknown_profile" | "direct_sql_not_supported" | "schema_changed" }> {
   const settings = await getHolooSettingsRow(businessId, connectionId);
   if (!settings) return { ok: false, error: "not_found" };
-  if (!settings.schema_profile || !profileForKey(settings.schema_profile)) return { ok: false, error: "unknown_profile" };
+  const profile = settings.schema_profile ? profileForKey(settings.schema_profile) : null;
+  if (!profile) return { ok: false, error: "unknown_profile" };
+  if (!profile.capabilities.directSqlWrite) return { ok: false, error: "direct_sql_not_supported" };
+
+  // Pin only a live, exact structural match. A stale test result must never
+  // arm SQL writes after the remote database has changed.
+  const probeClient = await connectHolooSql(holooSqlConfigFor(settings));
+  try {
+    const current = diagnoseProfile(await probeHolooSchema(probeClient)).profile;
+    if (!current || current.key !== profile.key) return { ok: false, error: "schema_changed" };
+  } finally {
+    await probeClient.close();
+  }
+
   const result = armDirectSql(confirmation);
   if (!result.ok) return result;
   await query(
@@ -219,7 +318,7 @@ export async function armDirectSqlFor(
       WHERE business_id = $1 AND connection_id = $2`,
     [businessId, connectionId, armedBy],
   );
-  await writeIntegrationAudit({ businessId, connectionId, action: "holoo.direct_sql_armed", payload: { profile: settings.schema_profile } });
+  await writeIntegrationAudit({ businessId, connectionId, action: "holoo.direct_sql_armed", payload: { profile: settings.schema_profile, profileVersion: profile.profileVersion } });
   return { ok: true };
 }
 

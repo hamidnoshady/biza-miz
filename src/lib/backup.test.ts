@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   backupPassphrase,
@@ -15,9 +16,16 @@ import {
   isPlainArtifactName,
   latestSlotBefore,
   LOCAL_RETRY_MS,
+  artifactRunToken,
+  artifactScopeTag,
+  isLogicalArtifactName,
+  isPhysicalArtifactName,
   makeArtifactName,
+  parseArtifactName,
   parseArtifactTimestamp,
+  reserveArtifactName,
   selectPrunable,
+  selectPrunableInScope,
   toWallClock,
   validateBackupConfig,
   type BackupAlertInput,
@@ -187,6 +195,119 @@ describe("artifact naming", () => {
     // upload, so a blind append would ship `.dump.enc.enc`.
     expect(cloudKeyFor("pos/", "file.dump")).toBe("pos/file.dump.enc");
     expect(cloudKeyFor("pos/", "file.dump.enc")).toBe("pos/file.dump.enc");
+  });
+});
+
+describe("scoped artifact names (issue #807)", () => {
+  const businessId = "0B6E5A2C-1111-4222-8333-444455556666";
+  const tag = artifactScopeTag(businessId); // lowercased, separators stripped
+  const at = new Date("2026-07-21T03:30:05.123Z");
+  const runId = "abcdef01-2345-4678-9abc-def012345678";
+
+  it("encodes scope, run id, format and encryption, and parses them all back", () => {
+    const name = makeArtifactName(at, { scope: businessId, runId, format: "sql", encrypted: true });
+    expect(name).toBe(`pos-backup-${tag}-20260721-033005-abcdef01.sql.enc`);
+    expect(parseArtifactName(name)).toEqual({
+      name,
+      scope: tag,
+      timestamp: "2026-07-21T03:30:05Z",
+      runId: "abcdef01",
+      format: "sql",
+      encrypted: true,
+    });
+    expect(isLogicalArtifactName(name)).toBe(true);
+    expect(isPhysicalArtifactName(name)).toBe(false);
+  });
+
+  it("parses a pre-#807 name as legacy: no scope, no run id", () => {
+    const parsed = parseArtifactName("pos-backup-20260721-033005.dump");
+    expect(parsed).toMatchObject({ scope: null, runId: null, format: "dump", encrypted: false });
+    expect(isPhysicalArtifactName("pos-backup-20260721-033005.dump")).toBe(true);
+  });
+
+  it("refuses a name whose scope tag is too long or whose run token is not hex", () => {
+    expect(parseArtifactName("pos-backup-this-tag-is-way-too-long-20260721-033005-abcdef01.dump")).toBeNull();
+    expect(parseArtifactName("pos-backup-abcdef01-20260721-033005-ABCDEF01.dump")).toBeNull();
+    expect(parseArtifactName("pos-backup-abcdef01-20260721-033005.sql.exe")).toBeNull();
+  });
+
+  it("derives the same tag in every process, from the business id alone", () => {
+    expect(artifactScopeTag(businessId)).toBe("0b6e5a2c11114222");
+    expect(artifactScopeTag("0b6e5a2c11114222")).toBe("0b6e5a2c11114222");
+    expect(artifactScopeTag("---")).toBe("default");
+    expect(artifactRunToken(runId)).toBe("abcdef01");
+    expect(artifactRunToken("zzz")).toBe("zzz00000");
+  });
+
+  it("makes two runs in the same second collide-free by construction", () => {
+    const a = makeArtifactName(at, { scope: businessId, runId: "11111111-2222-3333-4444-555555555555" });
+    const b = makeArtifactName(at, { scope: businessId, runId: "99999999-8888-7777-6666-555555555555" });
+    expect(a).not.toBe(b);
+    expect(parseArtifactName(a)?.timestamp).toBe(parseArtifactName(b)?.timestamp);
+  });
+
+  it("reserves a name by retrying, and gives up rather than overwriting", async () => {
+    const taken = new Set(["pos-backup-x-20260721-033005-11111111.dump"]);
+    let attempt = 0;
+    const free = await reserveArtifactName(
+      "somewhere",
+      () => ["pos-backup-x-20260721-033005-11111111.dump", "pos-backup-x-20260721-033005-22222222.dump"][
+        Math.min(attempt++, 1)
+      ],
+      // `path.basename`, not split("/"): on Windows `path.join` produces `\`.
+      async (filePath) => taken.has(path.basename(filePath)),
+    );
+    expect(free).toBe("pos-backup-x-20260721-033005-22222222.dump");
+    await expect(
+      reserveArtifactName("somewhere", () => "pos-backup-x-20260721-033005-11111111.dump", async () => true),
+    ).rejects.toThrow("artifact_name_collision");
+  });
+});
+
+describe("retention never crosses scopes (issue #807)", () => {
+  const scopeA = "aaaa1111-2222-4333-8444-555555555555";
+  const scopeB = "bbbb1111-2222-4333-8444-555555555555";
+  const tagA = artifactScopeTag(scopeA);
+  const tagB = artifactScopeTag(scopeB);
+  const name = (scope: string, day: number, run: string) =>
+    `pos-backup-${scope}-202607${String(day).padStart(2, "0")}-033005-${run}.dump`;
+  const legacy = "pos-backup-20260601-033005.dump";
+
+  const names = [
+    name(tagA, 1, "11111111"),
+    name(tagA, 2, "22222222"),
+    name(tagA, 3, "33333333"),
+    name(tagB, 1, "44444444"),
+    name(tagB, 2, "55555555"),
+    legacy,
+    "notes.txt",
+  ];
+
+  it("considers only this scope's artifacts, newest-first beyond the keep count", () => {
+    const pruned = selectPrunableInScope(names, 1, scopeA);
+    expect(pruned).toEqual([name(tagA, 2, "22222222"), name(tagA, 1, "11111111")]);
+    // The other tenant's files are not candidates, no matter how many there are.
+    expect(pruned.some((n) => n.includes(tagB))).toBe(false);
+    expect(pruned).not.toContain(legacy);
+  });
+
+  it("adopts a legacy unscoped name only when the caller asks (a site install)…", () => {
+    const adopted = selectPrunableInScope([...names, "pos-backup-20260602-033005.dump"], 0, scopeA, {
+      adoptUnscoped: true,
+    });
+    expect(adopted).toContain(legacy);
+    expect(adopted).toContain("pos-backup-20260602-033005.dump");
+    expect(adopted.some((n) => n.includes(tagB))).toBe(false);
+  });
+
+  it("…and never on a central scope, where every artifact is tagged", () => {
+    const pruned = selectPrunableInScope([legacy], 0, scopeA);
+    expect(pruned).toEqual([]);
+  });
+
+  it("keeps everything when the retention count still covers it", () => {
+    expect(selectPrunableInScope(names, 5, scopeA)).toEqual([]);
+    expect(selectPrunableInScope([], 0, scopeA)).toEqual([]);
   });
 });
 

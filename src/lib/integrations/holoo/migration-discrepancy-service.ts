@@ -14,6 +14,8 @@ import type { OpeningBalanceLine } from "./journal-import-service";
 
 export interface MigrationDiscrepancyManifest {
   base?: BaseImportInput;
+  /** Limit base-data comparisons to the domains selected in this migration. */
+  selectedScopes?: readonly string[];
   transactions?: HolooTransaction[];
   journals?: HolooVoucher[];
   openingBalance?: OpeningBalanceLine[];
@@ -52,6 +54,19 @@ async function mappingCount(businessId: string, connectionId: string, entityType
   return Number(rows[0]?.count ?? 0);
 }
 
+async function openingInventoryMappingCount(businessId: string, connectionId: string): Promise<number> {
+  const { rows } = await query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM integration_mappings m
+       JOIN inventory_events event
+         ON event.id = m.local_id::uuid AND event.business_id = m.business_id
+      WHERE m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'holoo_stock'
+        AND event.event_type = 'opening' AND event.source_type = 'holoo_import'`,
+    [businessId, connectionId],
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
 function transactionTotal(transactions: readonly HolooTransaction[] | undefined, type: HolooTransaction["type"]): bigint {
   return (transactions ?? [])
     .filter((tx) => tx.type === type)
@@ -86,7 +101,10 @@ function holooTrialBalance(manifest: MigrationDiscrepancyManifest): Map<string, 
     totals.set(code, current);
   };
   for (const voucher of manifest.journals ?? []) {
-    for (const line of voucher.lines) add(line.accountCode, toBigInt(line.debitRial), toBigInt(line.creditRial));
+    for (const line of voucher.lines) {
+      const net = toBigInt(line.debitRial) - toBigInt(line.creditRial);
+      add(line.accountCode, net > 0n ? net : 0n, net < 0n ? -net : 0n);
+    }
   }
   for (const line of manifest.openingBalance ?? []) add(line.accountCode, toBigInt(line.debitRial), toBigInt(line.creditRial));
   return totals;
@@ -97,50 +115,84 @@ export async function buildMigrationDiscrepancyReport(
   connectionId: string,
   manifest: MigrationDiscrepancyManifest,
 ): Promise<MigrationDiscrepancyReport> {
-  const comparisons: EntityComparison[] = [
-    {
-      entityType: "goods",
-      holooCount: manifest.base?.goods.length ?? 0,
-      appCount: await mappingCount(businessId, connectionId, "holoo_goods"),
+  const comparisons: EntityComparison[] = [];
+  const selected = manifest.selectedScopes ? new Set(manifest.selectedScopes) : null;
+  const includesScope = (scope: string) => !selected || selected.has(scope);
+
+  if (manifest.base) {
+    if (includesScope("goods")) {
+      comparisons.push({
+        entityType: "goods",
+        holooCount: manifest.base.goods.length,
+        appCount: await mappingCount(businessId, connectionId, "holoo_goods"),
+        holooBalanceRial: 0n,
+        appBalanceRial: 0n,
+      });
+    }
+    if (includesScope("persons")) {
+      comparisons.push({
+        entityType: "persons",
+        holooCount: manifest.base.persons.length,
+        appCount: await mappingCount(businessId, connectionId, "holoo_customer"),
+        holooBalanceRial: 0n,
+        appBalanceRial: 0n,
+      });
+    }
+    if (includesScope("accounts")) {
+      comparisons.push({
+        entityType: "accounts",
+        holooCount: manifest.base.accounts.length,
+        appCount: await mappingCount(businessId, connectionId, "holoo_account"),
+        holooBalanceRial: 0n,
+        appBalanceRial: 0n,
+      });
+    }
+    if (manifest.base.openingInventory && includesScope("openingInventory")) {
+      comparisons.push({
+        entityType: "openingInventory",
+        holooCount: manifest.base.openingInventory.length,
+        appCount: await openingInventoryMappingCount(businessId, connectionId),
+        holooBalanceRial: 0n,
+        appBalanceRial: 0n,
+      });
+    }
+  }
+
+  if (manifest.journals && includesScope("journal")) {
+    comparisons.push({
+      entityType: "journals",
+      holooCount: manifest.journals.length,
+      appCount: await mappingCount(businessId, connectionId, "holoo_journal"),
       holooBalanceRial: 0n,
       appBalanceRial: 0n,
-    },
-    {
-      entityType: "persons",
-      holooCount: manifest.base?.persons.length ?? 0,
-      appCount: await mappingCount(businessId, connectionId, "holoo_customer"),
-      holooBalanceRial: 0n,
-      appBalanceRial: 0n,
-    },
-    {
-      entityType: "accounts",
-      holooCount: manifest.base?.accounts.length ?? 0,
-      appCount: await mappingCount(businessId, connectionId, "holoo_account"),
-      holooBalanceRial: 0n,
-      appBalanceRial: 0n,
-    },
-    {
-      entityType: "sales",
-      holooCount: (manifest.transactions ?? []).filter((tx) => tx.type === "sale").length,
-      appCount: await mappingCount(businessId, connectionId, "holoo_invoice"),
-      holooBalanceRial: transactionTotal(manifest.transactions, "sale"),
-      appBalanceRial: await appDocumentTotal(businessId, connectionId, "holoo_invoice"),
-    },
-    {
-      entityType: "purchases",
-      holooCount: (manifest.transactions ?? []).filter((tx) => tx.type === "purchase").length,
-      appCount: await mappingCount(businessId, connectionId, "holoo_purchase"),
-      holooBalanceRial: transactionTotal(manifest.transactions, "purchase"),
-      appBalanceRial: await appDocumentTotal(businessId, connectionId, "holoo_purchase"),
-    },
-    {
-      entityType: "receipts_payments",
-      holooCount: (manifest.transactions ?? []).filter((tx) => tx.type === "receipt" || tx.type === "payment").length,
-      appCount: await mappingCount(businessId, connectionId, "holoo_receipt"),
-      holooBalanceRial: transactionTotal(manifest.transactions, "receipt") + transactionTotal(manifest.transactions, "payment"),
-      appBalanceRial: await appDocumentTotal(businessId, connectionId, "holoo_receipt"),
-    },
-  ];
+    });
+  }
+
+  if (manifest.transactions) {
+    comparisons.push(
+      {
+        entityType: "sales",
+        holooCount: manifest.transactions.filter((tx) => tx.type === "sale").length,
+        appCount: await mappingCount(businessId, connectionId, "holoo_invoice"),
+        holooBalanceRial: transactionTotal(manifest.transactions, "sale"),
+        appBalanceRial: await appDocumentTotal(businessId, connectionId, "holoo_invoice"),
+      },
+      {
+        entityType: "purchases",
+        holooCount: manifest.transactions.filter((tx) => tx.type === "purchase").length,
+        appCount: await mappingCount(businessId, connectionId, "holoo_purchase"),
+        holooBalanceRial: transactionTotal(manifest.transactions, "purchase"),
+        appBalanceRial: await appDocumentTotal(businessId, connectionId, "holoo_purchase"),
+      },
+      {
+        entityType: "receipts_payments",
+        holooCount: manifest.transactions.filter((tx) => tx.type === "receipt" || tx.type === "payment").length,
+        appCount: await mappingCount(businessId, connectionId, "holoo_receipt"),
+        holooBalanceRial: transactionTotal(manifest.transactions, "receipt") + transactionTotal(manifest.transactions, "payment"),
+        appBalanceRial: await appDocumentTotal(businessId, connectionId, "holoo_receipt"),
+      },
+    );
+  }
 
   const holoo = holooTrialBalance(manifest);
   const accountCodes = [...holoo.keys()];

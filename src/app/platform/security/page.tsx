@@ -337,151 +337,49 @@ function AccountTable({
  * account better, whatever their role. This is where the login screen's grace
  * nag lands.
  */
-function SelfEnrolmentCard({ self, onChanged }: { self: SelfStatus | null; onChanged: () => void }) {
-  const [phone, setPhone] = useState("");
-  const [showPhone, setShowPhone] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [handover, setHandover] = useState<{
-    totpSecret?: string | null;
-    totpQr?: string | null;
-    recoveryCodes?: string[];
-  } | null>(null);
-
-  async function post(body: Record<string, unknown>) {
-    setBusy(true);
-    setError(null);
-    const { ok, data } = await api<{
-      error?: string;
-      totpSecret?: string | null;
-      totpQr?: string | null;
-      recoveryCodes?: string[];
-    }>("/api/platform/mfa", { method: "POST", body: JSON.stringify(body) });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
-    }
-    setHandover({
-      totpSecret: data.totpSecret ?? null,
-      totpQr: data.totpQr ?? null,
-      recoveryCodes: data.recoveryCodes ?? [],
-    });
-    onChanged();
-  }
-
-  if (handover) {
-    return (
-      <Card title="ورود دومرحله‌ای شما — فقط یک بار نمایش داده می‌شود">
-        {handover.totpQr ? (
-          <div className="mb-4 flex justify-center">
-            { }
-            <img
-              src={handover.totpQr}
-              alt="کد QR ورود دومرحله‌ای"
-              className="size-48 rounded-lg bg-card p-2"
-            />
-          </div>
-        ) : null}
-        {handover.totpSecret ? (
-          <p
-            dir="ltr"
-            className="mb-4 rounded-lg border border-border bg-muted px-3 py-2 font-mono text-sm tracking-wider text-foreground"
-          >
-            {handover.totpSecret}
-          </p>
-        ) : null}
-        {handover.recoveryCodes && handover.recoveryCodes.length > 0 ? (
-          <>
-            <p className="mb-2 text-sm text-muted-foreground">
-              ۱۰ کد بازیابی یک‌بارمصرف. اگر گوشی‌تان را از دست بدهید، تنها راه ورود به کنسول
-              همین‌ها و اسکریپت reset-platform-mfa است.
-            </p>
-            <div
-              dir="ltr"
-              className="mb-4 grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted px-3 py-2 font-mono text-sm tracking-wider text-foreground"
-            >
-              {handover.recoveryCodes.map((c) => (
-                <span key={c}>{c}</span>
-              ))}
-            </div>
-          </>
-        ) : null}
-        <Button onClick={() => setHandover(null)}>ذخیره کردم</Button>
-      </Card>
-    );
-  }
-
+function SelfEnrolmentCard({ self }: { self: SelfStatus | null; onChanged: () => void }) {
   const enrolled = (self?.methods.length ?? 0) > 0;
 
   return (
-    <Card title="ورود دومرحله‌ای حساب شما">
-      <ErrorBox>{error}</ErrorBox>
+    <Card title="وضعیت ورود دومرحله‌ای و امنیت حساب شما">
       {self === null ? (
         <SkeletonRows rows={1} />
-      ) : enrolled ? (
-        <div className="space-y-3 text-sm text-foreground">
-          <p>
-            روش فعال:{" "}
-            {self.methods
-              .map((m) => `${METHOD_LABELS[m.method] ?? m.method}${m.phoneHint ? ` (${m.phoneHint})` : ""}`)
-              .join(" + ")}
-          </p>
-          <p>
-            کدهای بازیابی باقی‌مانده: {toPersianDigits(String(self.recoveryCodesRemaining))}
-            {self.recoveryCodesRemaining <= 2 ? " — بهتر است مجموعهٔ تازه‌ای بسازید." : ""}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {!self.methods.some((m) => m.method === "totp") ? (
-              <Button variant="ghost" disabled={busy} onClick={() => post({ action: "enrol", method: "totp" })}>
-                افزودن برنامهٔ رمزساز
-              </Button>
-            ) : null}
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={() => post({ action: "regenerate_recovery_codes" })}
-            >
-              ساخت کدهای بازیابی تازه
-            </Button>
-          </div>
-        </div>
       ) : (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            {self.requirement === "required"
-              ? "مهلت فعال‌سازی تمام شده است؛ ورود بعدی شما تا فعال‌سازی مسدود می‌شود."
-              : self.graceDaysLeft !== null
-                ? `${toPersianDigits(String(self.graceDaysLeft))} روز تا اجباری‌شدن باقی مانده است.`
-                : "هنوز روش دومرحله‌ای فعال نکرده‌اید."}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button disabled={busy} onClick={() => post({ action: "enrol", method: "totp" })}>
-              برنامهٔ رمزساز
-            </Button>
-            <Button variant="ghost" disabled={busy} onClick={() => setShowPhone((v) => !v)}>
-              پیامک یک‌بارمصرف
-            </Button>
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-foreground">
+          <div className="space-y-1">
+            {enrolled ? (
+              <>
+                <p>
+                  روش‌های فعال:{" "}
+                  {self.methods
+                    .map(
+                      (m) =>
+                        `${METHOD_LABELS[m.method] ?? m.method}${m.isPrimary ? " (روش اصلی)" : ""}${
+                          m.phoneHint ? ` (${m.phoneHint})` : ""
+                        }`,
+                    )
+                    .join(" + ")}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  کدهای بازیابی باقی‌مانده: {toPersianDigits(String(self.recoveryCodesRemaining))}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {self.requirement === "required"
+                  ? "مهلت فعال‌سازی تمام شده است؛ ورود بعدی شما تا فعال‌سازی مسدود می‌شود."
+                  : self.graceDaysLeft !== null
+                    ? `${toPersianDigits(String(self.graceDaysLeft))} روز تا اجباری‌شدن باقی مانده است.`
+                    : "هنوز روش دومرحله‌ای تأییدشده‌ای فعال نکرده‌اید."}
+              </p>
+            )}
           </div>
-          {showPhone ? (
-            <div className="max-w-xs">
-              <Field label="شمارهٔ موبایل">
-                <input
-                  dir="ltr"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="09121234567"
-                  className={inputClass}
-                />
-              </Field>
-              <Button
-                disabled={busy || phone.trim().length === 0}
-                onClick={() => post({ action: "enrol", method: "sms_otp", phone: phone.trim() })}
-              >
-                ثبت شماره
-              </Button>
-            </div>
-          ) : null}
+          <a
+            href="/platform/account"
+            className="rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-foreground transition hover:bg-sky-400"
+          >
+            مدیریت حساب و امنیت من
+          </a>
         </div>
       )}
     </Card>

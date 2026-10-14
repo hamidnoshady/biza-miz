@@ -4,10 +4,13 @@ import {
   isWarrantyActive,
   serviceDueDate,
   validateRepairPart,
+  validateRepairPartSource,
   validateRepairStatusTransition,
   validateSerialUnitCost,
   validateServiceIntervalMonths,
+  validateWarrantyCharge,
   validateWarrantyMonths,
+  type RepairPartSource,
 } from "./watch";
 
 describe("validateSerialUnitCost", () => {
@@ -125,6 +128,40 @@ describe("validateRepairPart", () => {
     expect(validateRepairPart({ ...valid, quantity: "0" }).length).toBe(1);
     expect(validateRepairPart({ ...valid, unitCost: -1 }).length).toBe(1);
     expect(validateRepairPart({ ...valid, charge: 1.5 }).length).toBe(1);
+  });
+
+  it("accepts both part sources and rejects an unknown one", () => {
+    expect(validateRepairPart({ ...valid, source: "stock" })).toEqual([]);
+    expect(validateRepairPart({ ...valid, source: "external" })).toEqual([]);
+    expect(validateRepairPart({ ...valid, source: "magic" as RepairPartSource }).length).toBe(1);
+  });
+});
+
+describe("validateRepairPartSource", () => {
+  it("mirrors the DB CHECK", () => {
+    expect(validateRepairPartSource("stock")).toBeNull();
+    expect(validateRepairPartSource("external")).toBeNull();
+    expect(validateRepairPartSource("other")).not.toBeNull();
+  });
+});
+
+describe("validateWarrantyCharge — issue #795's server-side warranty billing invariant", () => {
+  it("allows any charge on a non-warranty job", () => {
+    expect(validateWarrantyCharge(false, 5_000_000, null)).toBeNull();
+  });
+
+  it("allows a zero charge on a warranty job — the covered case", () => {
+    expect(validateWarrantyCharge(true, 0, null)).toBeNull();
+  });
+
+  it("refuses a charge on a warranty job without an explicit out-of-coverage reason", () => {
+    expect(validateWarrantyCharge(true, 1, null)).not.toBeNull();
+    expect(validateWarrantyCharge(true, 1, undefined)).not.toBeNull();
+    expect(validateWarrantyCharge(true, 1, "   ")).not.toBeNull();
+  });
+
+  it("allows a charge on a warranty job once the out-of-coverage reason is recorded", () => {
+    expect(validateWarrantyCharge(true, 3_000_000, "آب‌خوردگی — خارج از پوشش، با تأیید مشتری")).toBeNull();
   });
 });
 

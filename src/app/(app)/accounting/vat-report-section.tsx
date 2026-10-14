@@ -20,10 +20,11 @@ interface VatReport {
 
 /**
  * Output vs input VAT and the net payable position. Output VAT is
- * auto-posted (every order); input VAT is whatever's been recorded via a
- * manual journal entry against "مالیات بر ارزش افزوده خرید" (see the "ثبت
- * سند دستی" tab) — this is a read-only summary of both control accounts'
- * movements, not a new place to enter anything.
+ * auto-posted (every order); input VAT is posted by a received purchase whose
+ * supplier invoice carries VAT (audit F11), plus anything recorded by a manual
+ * journal entry against "مالیات بر ارزش افزوده خرید" — this is a read-only
+ * summary of both control accounts' movements, not a new place to enter
+ * anything.
  */
 export function VatReportSection({ refreshKey }: { refreshKey: number }) {
   const money = useMoney();

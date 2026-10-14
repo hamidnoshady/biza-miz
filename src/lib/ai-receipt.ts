@@ -1,12 +1,35 @@
 /**
- * AI Hub Wave 5 (issue #145) — pure helpers for the "attach a receipt photo"
- * flow. The image is a client-supplied data URL used for exactly one provider
- * call (see `draft_expense_from_receipt` in ai-service.ts) and is never
- * written to any table or object storage — no new migration, no upload
- * endpoint, no storage-lifecycle question to answer. This mirrors the
- * decision to reuse the single existing OpenAI-compatible provider connection
- * (Phase 18's `platform_ai_config`, already vision-capable for both
- * providers' default models) instead of integrating a separate OCR vendor.
+ * Pure helpers for the "attach a receipt photo" flow: the prompt, its parser,
+ * and the image's shape limits. Nothing here touches the database or the object
+ * store, which is what lets both AI receipt channels share one definition.
+ *
+ * ## Where the image goes (issue #832 §14 — the documented decision)
+ *
+ * The two channels are deliberately different, and both are honest about it:
+ *
+ *   - **AI Chat's `draft_expense_from_receipt`** (`ai-service.ts`): the data URL
+ *     is used for exactly one provider call and is never written anywhere. No
+ *     row, no object, no lifecycle question.
+ *   - **Accounting's `POST /api/ai/receipt-ocr`**: the photo becomes a real
+ *     Media Library asset *before* the expense is recorded, and **stays there if
+ *     the person abandons the form** — option 1 of the three the audit named.
+ *     It is a user upload by a member holding `finance.expenses_manage`, into
+ *     their own library, deduplicated by the tenant-scoped SHA-256 the manual
+ *     upload path uses, owned by `media_assets` and browsable in `/media`; there
+ *     is no second file store and no temporary bucket to leak into.
+ *
+ * Why not "temporary until confirmed": that would need a promotion step, a
+ * sweeper for whatever is never promoted, and — worst — it would throw away both
+ * the asset and the metered provider call that read it when the only thing that
+ * went wrong was that somebody got interrupted mid-form. An abandoned upload costs
+ * storage and is deletable in the library; a receipt that vanishes from behind an
+ * expense that still points at it is the failure mode this avoids, which is also
+ * why 0177's `receipt_asset_id` is `ON DELETE SET NULL` and why 0211 snapshots the
+ * file name beside it.
+ *
+ * The provider is the platform's single OpenAI-compatible connection (Phase 18's
+ * `platform_ai_config`, vision-capable on both defaults), not a second OCR
+ * vendor.
  */
 
 /** ~5MB of original file bytes: generous for a phone photo of a receipt. */
@@ -45,16 +68,28 @@ export interface ReceiptDraftFields {
   vendor: string | null;
   /** ISO date (YYYY-MM-DD), best-effort. */
   expenseDate: string | null;
-  /** Integer Rial, best-effort. */
+  /** Integer Rial, best-effort — the *gross* total on the receipt. */
   amount: number | null;
+  /**
+   * The VAT part of `amount`, when the receipt shows one (issue #832 §11). A
+   * suggestion only: the person can see and change it before anything posts.
+   */
+  vatAmount: number | null;
   memo: string;
-  /** One of the expense account codes (5xxx range), best-effort. */
+  /**
+   * A code from the *caller's* list of this business's own expense accounts
+   * (issue #832 §13) — never a code invented from a fixed table, and `null`
+   * when the list was empty or the model named something outside it.
+   */
   suggestedAccountCode: string | null;
 }
 
 const DEFAULT_MEMO = "هزینهٔ استخراج‌شده از تصویر پیوست — پیش از تأیید بررسی شود";
 const FENCE_RE = /^```(?:json)?\s*([\s\S]*?)\s*```$/;
-const ACCOUNT_CODE_RE = /^5\d{3}$/;
+// Any numeric chart code — 4-digit, 5-digit, a business that numbers its accounts
+// differently. What *narrows* it to a real account is `allowedAccountCodes`
+// below, never a pattern.
+const ACCOUNT_CODE_RE = /^\d{3,10}$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
@@ -63,8 +98,16 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  * being asked for raw JSON) and never throws — an unparseable or
  * wrong-shaped reply returns null so the caller can tell the user extraction
  * failed instead of proposing an expense with made-up numbers.
+ *
+ * `allowedAccountCodes` is the tenant's own expense accounts. When it is given,
+ * a suggestion outside it becomes `null`: the model proposes, this narrows, and
+ * the chart still decides at write time. When it is absent the shape check above
+ * is all there is — the caller is expected to validate before anything posts.
  */
-export function parseReceiptExtractionReply(raw: string): ReceiptDraftFields | null {
+export function parseReceiptExtractionReply(
+  raw: string,
+  allowedAccountCodes?: readonly string[],
+): ReceiptDraftFields | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const unfenced = FENCE_RE.exec(trimmed)?.[1]?.trim() ?? trimmed;
@@ -79,28 +122,67 @@ export function parseReceiptExtractionReply(raw: string): ReceiptDraftFields | n
   const obj = parsed as Record<string, unknown>;
 
   const amount = Number(obj.amount);
+  const vat = Number(obj.vatAmount);
   const expenseDate = typeof obj.expenseDate === "string" ? obj.expenseDate.slice(0, 10) : "";
+  const suggested = typeof obj.suggestedAccountCode === "string" ? obj.suggestedAccountCode.trim() : "";
+  const suggestedOk =
+    ACCOUNT_CODE_RE.test(suggested) &&
+    (allowedAccountCodes === undefined || allowedAccountCodes.includes(suggested));
 
   return {
     vendor: typeof obj.vendor === "string" && obj.vendor.trim() ? obj.vendor.trim().slice(0, 200) : null,
     expenseDate: ISO_DATE_RE.test(expenseDate) ? expenseDate : null,
     amount: Number.isFinite(amount) && amount > 0 ? Math.round(amount) : null,
+    // Never more than the gross it belongs to: a receipt whose VAT line was
+    // misread as bigger than its total must not become an impossible expense.
+    vatAmount: Number.isFinite(vat) && vat > 0 && (amount === null || Math.round(vat) < Math.round(amount))
+      ? Math.round(vat)
+      : null,
     memo: typeof obj.memo === "string" && obj.memo.trim() ? obj.memo.trim().slice(0, 300) : DEFAULT_MEMO,
-    suggestedAccountCode:
-      typeof obj.suggestedAccountCode === "string" && ACCOUNT_CODE_RE.test(obj.suggestedAccountCode)
-        ? obj.suggestedAccountCode
-        : null,
+    suggestedAccountCode: suggestedOk ? suggested : null,
   };
 }
 
-/** System prompt for the isolated, single-purpose extraction call. */
-export const RECEIPT_EXTRACTION_SYSTEM_PROMPT =
-  "تو یک استخراج‌کنندهٔ اطلاعات فاکتور/رسید هستی. فقط یک شیء JSON معتبر و خام برگردان، بدون توضیح یا متن اضافه:" +
-  ' {"vendor": string|null, "expenseDate": string|null (YYYY-MM-DD میلادی), "amount": number|null (مبلغ کل به ریال، عدد صحیح),' +
-  ' "memo": string (توضیح کوتاه فارسی), "suggestedAccountCode": string|null (یکی از این کدهای هزینه در صورت تناسب: ' +
-  "5100 بهای تمام‌شده مواد، 5150 ضایعات، 5160 کسری/مغایرت شمارش، 5170 کاهش ارزش موجودی، 5200 حقوق و دستمزد، " +
-  '5300 اجاره، 5400 آب/برق/گاز، 5500 ملزومات مصرفی، 5600 بازاریابی، 5900 سایر هزینه‌ها)}. ' +
-  "اگر مقداری از تصویر قابل تشخیص نیست، null بگذار؛ هرگز عدد یا تاریخ حدسی جعل نکن.";
+/** One entry of the tenant's expense-account list handed to the model. */
+export interface ReceiptAccountCandidate {
+  code: string;
+  name: string;
+}
+
+/**
+ * The extraction prompt, built from *this business's* expense accounts.
+ *
+ * It used to name a fixed list of codes («5100 بهای تمام‌شده مواد، 5300 اجاره…»)
+ * that only exists in the default F&B chart: a customised chart, another
+ * industry, or a business that added a «تعمیرات» subaccount could not be
+ * categorised by the assistant at all, and the model was invited to answer with
+ * a code the tenant does not own (issue #832 §13). The chart is now the
+ * vocabulary, so the suggestion is a code the server can genuinely validate.
+ */
+export function buildReceiptExtractionPrompt(accounts: readonly ReceiptAccountCandidate[]): string {
+  const list = accounts
+    .slice(0, 60)
+    .map((account) => `${account.code} ${account.name}`)
+    .join(" | ");
+  const accountInstruction = list
+    ? ` "suggestedAccountCode": string|null (یکی از این کدهای حسابِ هزینهٔ *همین کسب‌وکار* در صورت تناسب: ${list}. اگر هیچ‌کدام متناسب نیست، null بگذار و کد دیگری نساز.)`
+    : ' "suggestedAccountCode": null (این کسب‌وکار فهرست حساب هزینهٔ قابل استفاده ندارد؛ هر کدی نساز.)';
+  return (
+    "تو یک استخراج‌کنندهٔ اطلاعات فاکتور/رسید هستی. فقط یک شیء JSON معتبر و خام برگردان، بدون توضیح یا متن اضافه:" +
+    ' {"vendor": string|null, "expenseDate": string|null (YYYY-MM-DD میلادی), "amount": number|null (مبلغ کل به ریال، عدد صحیح),' +
+    ' "vatAmount": number|null (مالیات بر ارزش افزودهٔ همین فاکتور به ریال، عدد صحیح؛ اگر در فاکتور قید نشده null),' +
+    ' "memo": string (توضیح کوتاه فارسی),' +
+    `${accountInstruction}. ` +
+    "اگر مقداری از تصویر قابل تشخیص نیست، null بگذار؛ هرگز عدد یا تاریخ حدسی جعل نکن."
+  );
+}
+
+/**
+ * The prompt when no chart was supplied — kept for callers that extract without
+ * an expense-account list. `buildReceiptExtractionPrompt([])` says the same
+ * thing, and it is one definition rather than a second, drift-prone copy.
+ */
+export const RECEIPT_EXTRACTION_SYSTEM_PROMPT = buildReceiptExtractionPrompt([]);
 
 /** User-facing instruction paired with the image content part. */
 export const RECEIPT_EXTRACTION_USER_PROMPT =

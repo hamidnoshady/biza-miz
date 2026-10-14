@@ -359,27 +359,62 @@ export async function listBusinessDayClosures(
 
 
 /**
- * The business's current business date, from its primary active branch — the
+ * The branch a business-wide «today» is taken from, and the day it is keeping.
+ *
+ * Every business-wide reader — the CRM queues, the queue cards' own «دیدن همه»
+ * links, the cross-server rollup — has a business but no branch in hand, and
+ * each of them is really asking *what day is it here*. Answering that with a
+ * bare date was half an answer, and the missing half is what this carries: a
+ * date is only a day once you say where it begins. The branch's timezone (and,
+ * for a branch that configured one, its business-day start) decides that — not
+ * the database session's timezone, which is UTC on a server and therefore
+ * already tomorrow for three and a half hours of every Tehran evening.
+ *
+ * So a reader that compares timestamps against «today» takes the whole context
+ * and does the comparison in the shop's own zone (`crm-queues.ts`,
+ * `crm-service.listActivities`), while a reader that only needs to print the
+ * date keeps calling `businessToday`.
+ */
+export interface BusinessDayContext {
+  /** The branch the day was taken from; null when the business has no active branch. */
+  locationId: string | null;
+  /** That branch's zone, or `Asia/Tehran` for the fallback. */
+  timeZone: string;
+  /** Minutes after local midnight, or null when it runs calendar days. */
+  startMinutes: number | null;
+  /** The trading day in progress there, as an ISO date. */
+  businessDate: string;
+}
+
+/**
+ * The business's current business day, from its primary active branch — the
  * business-wide counterpart of `getBusinessDayStatus`, for the callers that
- * have a business but no particular branch in hand (the cross-server rollup,
- * the AI assistant's default date range).
+ * have a business but no particular branch in hand.
  *
  * "Primary" is the oldest active branch, which is the same branch the rollup
  * has always taken its timezone from; a business whose branches keep different
  * hours gets that one's trading day, exactly as it already got that one's
  * timezone. Falls back to Asia/Tehran and the calendar day when a business has
- * no active branch at all, so a caller always gets a usable date.
+ * no active branch at all, so a caller always gets a usable day.
  */
-export async function businessToday(businessId: string): Promise<string> {
-  const { rows } = await query<{ today: string }>(
-    `SELECT app_business_date(
+export async function businessDayContext(businessId: string): Promise<BusinessDayContext> {
+  const { rows } = await query<{
+    location_id: string | null;
+    timezone: string;
+    business_day_start_minutes: number | null;
+    today: string;
+  }>(
+    `SELECT l.id AS location_id,
+            coalesce(l.timezone, 'Asia/Tehran') AS timezone,
+            l.business_day_start_minutes,
+            app_business_date(
               now(),
               coalesce(l.timezone, 'Asia/Tehran'),
               l.business_day_start_minutes
             )::text AS today
        FROM (SELECT 1) one
        LEFT JOIN LATERAL (
-         SELECT timezone, business_day_start_minutes
+         SELECT id, timezone, business_day_start_minutes
            FROM locations
           WHERE business_id = $1 AND is_active
           ORDER BY created_at
@@ -387,5 +422,72 @@ export async function businessToday(businessId: string): Promise<string> {
        ) l ON true`,
     [businessId],
   );
-  return rows[0].today;
+  const row = rows[0];
+  return {
+    locationId: row.location_id,
+    timeZone: row.timezone,
+    startMinutes: row.business_day_start_minutes,
+    businessDate: row.today,
+  };
+}
+
+/**
+ * The business day in progress, as a date — the date half of the context above,
+ * for the callers that print it rather than compare against it.
+ */
+export async function businessToday(businessId: string): Promise<string> {
+  return (await businessDayContext(businessId)).businessDate;
+}
+
+/**
+ * The zone `businessToday` reads the calendar in for this business's primary
+ * branch — the same coalesced column value, exposed so callers that bucket
+ * *stored* timestamps by calendar day can cast in the zone that produced the
+ * day they compare against.
+ *
+ * Why that matters: `due_at::date` casts in the SESSION zone, while the day it
+ * is compared to comes from here. Tehran is UTC+3:30 with no DST, so for the
+ * 20:30–24:00 UTC slice of every day the two dates disagree, and a follow-up
+ * due at tonight's 23:00 satisfies `due_at::date < today` — «عقب‌افتاده»
+ * gaining a row that «امروز» simultaneously loses. Casts that must agree with
+ * the business date take their zone from this function, not from the session.
+ *
+ * The zone half of `businessDayContext`, which reads the same branch in the
+ * same query — a caller that needs the start of the day as well (`app_business_date`
+ * buckets by zone *and* `business_day_start_minutes`, so a branch trading
+ * 18:00→03:00 has a day boundary this zone alone does not describe) takes the
+ * whole context rather than pairing this with a second read of `locations`.
+ */
+export async function businessTimeZone(businessId: string): Promise<string> {
+  return (await businessDayContext(businessId)).timeZone;
+}
+
+/**
+ * «امروز» for one specific branch — the business date *that* branch's own
+ * timezone and day-start produce, not the primary branch's.
+ *
+ * Why this exists: a manual journal draft is stored with the branch it will
+ * post to (`journal_entry_drafts.location_id`), and the form says «خالی یعنی
+ * تاریخ امروز». Resolving that "today" against the primary branch instead of
+ * the draft's own branch is how a Tehran head office's late-night entry got
+ * filed under a different calendar day than the branch it belongs to — and
+ * unlike a receipt, a draft's date is not re-derived at approval time, so the
+ * wrong day was the day that posted.
+ *
+ * A branch that cannot be resolved (an unknown id, a branch archived since the
+ * draft was written, a business with none) still gets a usable date: the
+ * business-wide `businessToday` is the last resort, never `CURRENT_DATE`.
+ */
+export async function locationBusinessToday(
+  businessId: string,
+  locationId: string | null | undefined,
+): Promise<string> {
+  if (!locationId) return businessToday(businessId);
+  const { rows } = await query<{ today: string }>(
+    `SELECT app_business_date(now(), l.timezone, l.business_day_start_minutes)::text AS today
+       FROM locations l
+      WHERE l.id = $1 AND l.business_id = $2`,
+    [locationId, businessId],
+  );
+  return rows[0]?.today ?? (await businessToday(businessId));
 }

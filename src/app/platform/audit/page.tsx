@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { Button } from "@/components/ui/button";
 import {
   PlatformPageHeader,
@@ -165,21 +165,21 @@ function AuditInner() {
             ))}
           </SelectContent>
         </Select>
-        <Input
-          type="date"
+        {/* Jalali pickers: a native <input type="date"> opens a Gregorian calendar.
+            The value stays ISO (YYYY-MM-DD) in the URL and on the wire. */}
+        <JalaliDatePicker
           value={values.from}
-          onChange={(e) => set({ from: e.target.value, page: "1" })}
-          aria-label="از تاریخ"
-          className="w-auto"
-          dir="ltr"
+          onChange={(iso) => set({ from: iso, page: "1" })}
+          ariaLabel="از تاریخ"
+          placeholder="از تاریخ"
+          popoverClass="border-border bg-popover text-foreground"
         />
-        <Input
-          type="date"
+        <JalaliDatePicker
           value={values.to}
-          onChange={(e) => set({ to: e.target.value, page: "1" })}
-          aria-label="تا تاریخ"
-          className="w-auto"
-          dir="ltr"
+          onChange={(iso) => set({ to: iso, page: "1" })}
+          ariaLabel="تا تاریخ"
+          placeholder="تا تاریخ"
+          popoverClass="border-border bg-popover text-foreground"
         />
       </PlatformFilterBar>
 

@@ -46,6 +46,32 @@ export const CRM_SOURCES = [
 
 export type CrmSource = (typeof CRM_SOURCES)[number];
 
+/**
+ * The label each source is shown with.
+ *
+ * Added when the automations screen needed to *name* a source in a select: the
+ * vocabulary existed and the keys were English identifiers, so every screen that
+ * showed one would have had to invent its own wording — which is how one source
+ * ends up «وب‌سایت» on one screen and «فرم سایت» on the next.
+ */
+export const CRM_SOURCE_LABELS: Record<CrmSource, string> = {
+  pos: "صندوق فروش",
+  woocommerce: "فروشگاه آنلاین",
+  website_form: "فرم وب‌سایت",
+  instagram: "اینستاگرام",
+  telegram: "تلگرام",
+  whatsapp: "واتس‌اپ",
+  phone: "تماس تلفنی",
+  walk_in: "مراجعهٔ حضوری",
+  referral: "معرفی دیگران",
+  campaign: "کمپین بازاریابی",
+  event: "رویداد",
+  marketplace: "بازارگاه",
+  import: "ورود داده",
+  manual: "ورود دستی",
+  other: "دیگر",
+};
+
 export function isCrmSource(value: unknown): value is CrmSource {
   return typeof value === "string" && (CRM_SOURCES as readonly string[]).includes(value);
 }

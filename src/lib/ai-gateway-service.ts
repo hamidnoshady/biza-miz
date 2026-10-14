@@ -50,7 +50,12 @@ import {
   type PublicBusinessGateway,
   type AiGatewayTurnPricing,
 } from "./ai-gateway";
-import { getPlatformAiConfig } from "./ai-config";
+import {
+  defaultPlatformConfig,
+  getPlatformAiConfig,
+  platformAiConfigFromGatewayRow,
+  type PlatformAiGatewayRow,
+} from "./ai-config";
 import { chatCompletionsUrl } from "./ai";
 import { normalizeProviderError, providerErrorReason } from "./ai-provider-errors";
 import { decryptSecret, encryptSecret, resolveEncryptionKey } from "./integrations/secrets";
@@ -59,16 +64,12 @@ import { decryptSecret, encryptSecret, resolveEncryptionKey } from "./integratio
 const MANAGEMENT_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
-// Secrets at rest (issue #748 / migration 0183)
+// Secrets at rest (issue #748 / migrations 0183 and 0209)
 //
-// `platform_ai_gateway.master_key` and `ai_business_gateway.virtual_key` are
-// live bearer credentials. From here on they are only ever WRITTEN encrypted
-// (AES-256-GCM, `src/lib/integrations/secrets.ts` — the same scheme already
-// used for `platform_cms_config.api_key_ciphertext`). Reads prefer the
-// ciphertext column and fall back to the legacy plaintext column so an
-// un-migrated row (or a deployment mid-cutover) keeps working; `npm run
-// db:encrypt-ai-secrets` backfills the ciphertext column so the plaintext one
-// can eventually be dropped in a follow-up migration.
+// LiteLLM master and tenant virtual keys are read and written only as
+// AES-256-GCM ciphertext. Migration 0209 drops their legacy plaintext columns
+// after a guarded backfill; the separate knowledge API key still has its own
+// legacy read fallback until its cutover.
 // ---------------------------------------------------------------------------
 
 /** Encrypt a secret for storage, or `null` for "nothing to store". */
@@ -79,16 +80,16 @@ function encryptForStorage(value: string | null | undefined): string | null {
 }
 
 /**
- * Decrypt a stored secret, preferring the ciphertext column. Falls back to
- * the legacy plaintext column when no ciphertext has been written yet (a row
- * created before migration 0183, or before `db:encrypt-ai-secrets` ran).
+ * Decrypt a stored secret. The optional plaintext argument remains only for
+ * the managed-knowledge credential, whose separate migration has not yet
+ * retired its legacy column. Master and virtual keys pass no plaintext value.
  *
  * A ciphertext that fails to decrypt (rotated `INTEGRATIONS_ENCRYPTION_KEY` /
- * `JWT_SECRET`) is treated as absent rather than thrown: the operator can see
- * `hasMasterKey`/`hasVirtualKey` go false and re-enter the credential, which
- * is a recoverable state, instead of every AI request throwing.
+ * `JWT_SECRET`) is treated as absent rather than thrown: the operator sees a
+ * missing-key state and can re-enter the credential instead of every AI
+ * request throwing.
  */
-function decryptFromStorage(ciphertext: string | null | undefined, plaintext: string | null | undefined): string {
+function decryptFromStorage(ciphertext: string | null | undefined, plaintext?: string | null): string {
   if (ciphertext) {
     try {
       return decryptSecret(ciphertext, resolveEncryptionKey(process.env));
@@ -119,20 +120,24 @@ function textOr(value: string | null | undefined, fallback: string): string {
 // The deployment-wide gateway row
 // ---------------------------------------------------------------------------
 
-type GatewayRow = {
-  enabled: boolean;
-  base_url: string;
-  master_key: string | null;
-  master_key_ciphertext: string | null;
-  chat_model: string;
+type GatewayRow = PlatformAiGatewayRow & {
   embedding_model: string;
   virtual_keys_enabled: boolean;
-  usd_rial_rate: string | null;
-  gateway_costing_enabled: boolean;
-  input_cost_rial_per_million: string | number;
-  output_cost_rial_per_million: string | number;
-  revenue_margin_percent: string | number | null;
-  max_turn_rial: string | number | null;
+  // Issue #812 — managed knowledge + Deep Research (migration 0203).
+  knowledge_enabled: boolean;
+  knowledge_base_url: string;
+  knowledge_api_key: string | null;
+  knowledge_api_key_ciphertext: string | null;
+  knowledge_model: string;
+  knowledge_max_results: number;
+  research_enabled: boolean;
+  research_model_alias: string;
+  research_max_rounds: number;
+  research_max_context_bytes: number;
+  research_ttl_hours: number;
+  research_max_spend_rial: number;
+  research_external_web: boolean;
+  research_min_data_readiness: number;
 };
 
 function rowToGateway(row: GatewayRow): AiGatewayConfig {
@@ -140,7 +145,7 @@ function rowToGateway(row: GatewayRow): AiGatewayConfig {
   return {
     enabled: row.enabled,
     baseUrl: textOr(row.base_url, fallback.baseUrl),
-    masterKey: decryptFromStorage(row.master_key_ciphertext, row.master_key),
+    masterKey: decryptFromStorage(row.master_key_ciphertext),
     chatModel: row.chat_model ?? "",
     embeddingModel: row.embedding_model ?? "",
     virtualKeysEnabled: row.virtual_keys_enabled,
@@ -150,21 +155,63 @@ function rowToGateway(row: GatewayRow): AiGatewayConfig {
     outputCostRialPerMillion: numberValue(row.output_cost_rial_per_million),
     revenueMarginPercent: Math.max(0, numberValue(row.revenue_margin_percent)),
     maxTurnRial: Math.max(0, numberValue(row.max_turn_rial)),
+    knowledgeEnabled: row.knowledge_enabled === true,
+    knowledgeBaseUrl: textOr(row.knowledge_base_url, ""),
+    knowledgeApiKey: decryptFromStorage(row.knowledge_api_key_ciphertext, row.knowledge_api_key),
+    knowledgeModel: textOr(row.knowledge_model, ""),
+    knowledgeMaxResults: Math.max(1, Math.min(50, numberValue(row.knowledge_max_results) || 8)),
+    researchEnabled: row.research_enabled === true,
+    researchModelAlias: textOr(row.research_model_alias, ""),
+    researchMaxRounds: Math.max(1, Math.min(200, numberValue(row.research_max_rounds) || 12)),
+    researchMaxContextBytes: Math.max(1024, numberValue(row.research_max_context_bytes) || 2_000_000),
+    researchTtlHours: Math.max(1, Math.min(720, numberValue(row.research_ttl_hours) || 24)),
+    researchMaxSpendRial: Math.max(0, numberValue(row.research_max_spend_rial)),
+    researchExternalWeb: row.research_external_web === true,
+    researchMinDataReadiness: Math.max(1, numberValue(row.research_min_data_readiness) || 1),
   };
 }
 
-/** The gateway settings, or a switched-off default when the row has never been written. */
+const GATEWAY_ROW_SELECT = `
+  SELECT enabled, base_url, master_key_ciphertext, chat_model, embedding_model,
+         virtual_keys_enabled, temperature, max_output_tokens,
+         usd_rial_rate, gateway_costing_enabled,
+         input_cost_rial_per_million, output_cost_rial_per_million,
+         revenue_margin_percent, max_turn_rial,
+         knowledge_enabled, knowledge_base_url, knowledge_api_key, knowledge_api_key_ciphertext,
+         knowledge_model, knowledge_max_results,
+         research_enabled, research_model_alias, research_max_rounds,
+         research_max_context_bytes, research_ttl_hours, research_max_spend_rial,
+         research_external_web, research_min_data_readiness
+    FROM platform_ai_gateway
+   WHERE id = true`;
+
+function gatewayDefaultsFromEnvironment(): AiGatewayConfig {
+  const envDefaults = Object.fromEntries(
+    Object.entries(envGatewayConfig()).filter(([, value]) => value !== undefined),
+  ) as Partial<AiGatewayInput>;
+  return { ...defaultGatewayConfig(), ...envDefaults };
+}
+
+/** The gateway settings, or explicit LITELLM_* bootstrap defaults if no row exists. */
 export async function getAiGatewayConfig(): Promise<AiGatewayConfig> {
-  const { rows } = await query<GatewayRow>(
-    `SELECT enabled, base_url, master_key, master_key_ciphertext, chat_model, embedding_model,
-            virtual_keys_enabled,
-            usd_rial_rate, gateway_costing_enabled,
-            input_cost_rial_per_million, output_cost_rial_per_million,
-            revenue_margin_percent, max_turn_rial
-       FROM platform_ai_gateway
-      WHERE id = true`,
-  );
-  return rows[0] ? rowToGateway(rows[0]) : defaultGatewayConfig();
+  const { rows } = await query<GatewayRow>(GATEWAY_ROW_SELECT);
+  return rows[0] ? rowToGateway(rows[0]) : gatewayDefaultsFromEnvironment();
+}
+
+/**
+ * Read the runtime and gateway view of the singleton together. The platform
+ * console uses this to avoid selecting `platform_ai_gateway` twice just to
+ * render the same readiness response.
+ */
+export async function getAiGatewayRuntimeSettings(): Promise<{
+  gateway: AiGatewayConfig;
+  platform: Awaited<ReturnType<typeof getPlatformAiConfig>>;
+}> {
+  const { rows } = await query<GatewayRow>(GATEWAY_ROW_SELECT);
+  const row = rows[0];
+  return row
+    ? { gateway: rowToGateway(row), platform: platformAiConfigFromGatewayRow(row) }
+    : { gateway: gatewayDefaultsFromEnvironment(), platform: defaultPlatformConfig() };
 }
 
 export function toPublicAiGatewayConfig(config: AiGatewayConfig): PublicAiGatewayConfig {
@@ -202,6 +249,23 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
     outputCostRialPerMillion: current.outputCostRialPerMillion,
     revenueMarginPercent: current.revenueMarginPercent,
     maxTurnRial: current.maxTurnRial,
+    // Issue #812 — the managed-knowledge and research pointers ARE accepted
+    // from `/platform/ai`: they are technical infrastructure settings (where
+    // the integration lives, what its limits are), not product pricing.
+    knowledgeEnabled: draft.knowledgeEnabled ?? current.knowledgeEnabled,
+    knowledgeBaseUrl: (draft.knowledgeBaseUrl ?? current.knowledgeBaseUrl).trim(),
+    // An empty submission means "unchanged", exactly like the master key.
+    knowledgeApiKey: draft.knowledgeApiKey?.trim() || current.knowledgeApiKey,
+    knowledgeModel: (draft.knowledgeModel ?? current.knowledgeModel).trim(),
+    knowledgeMaxResults: draft.knowledgeMaxResults ?? current.knowledgeMaxResults,
+    researchEnabled: draft.researchEnabled ?? current.researchEnabled,
+    researchModelAlias: (draft.researchModelAlias ?? current.researchModelAlias).trim(),
+    researchMaxRounds: draft.researchMaxRounds ?? current.researchMaxRounds,
+    researchMaxContextBytes: draft.researchMaxContextBytes ?? current.researchMaxContextBytes,
+    researchTtlHours: draft.researchTtlHours ?? current.researchTtlHours,
+    researchMaxSpendRial: draft.researchMaxSpendRial ?? current.researchMaxSpendRial,
+    researchExternalWeb: draft.researchExternalWeb ?? current.researchExternalWeb,
+    researchMinDataReadiness: draft.researchMinDataReadiness ?? current.researchMinDataReadiness,
   };
 }
 
@@ -217,23 +281,30 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
   if (errors.length > 0) throw new Error(errors[0]);
   // An empty submission means "unchanged" (the console always renders the
   // master key masked); a new value is encrypted before it ever reaches a
-  // parameter binding. The legacy plaintext column is written NULL from here
-  // on — see migration 0183's header for the read-fallback/backfill story.
+  // parameter binding. Migration 0209 removes the plaintext storage column.
   const masterKey = input.masterKey?.trim() || current.masterKey || "";
   const masterKeyCiphertext = encryptForStorage(masterKey);
+  const knowledgeApiKey = input.knowledgeApiKey?.trim() || current.knowledgeApiKey || "";
+  const knowledgeApiKeyCiphertext = encryptForStorage(knowledgeApiKey);
   await query(
     `INSERT INTO platform_ai_gateway
-       (id, enabled, base_url, master_key, master_key_ciphertext, chat_model, embedding_model,
+       (id, enabled, base_url, master_key_ciphertext, chat_model, embedding_model,
         virtual_keys_enabled,
         usd_rial_rate, gateway_costing_enabled, input_cost_rial_per_million, output_cost_rial_per_million,
-        revenue_margin_percent, max_turn_rial, updated_at)
+        revenue_margin_percent, max_turn_rial, updated_at,
+        knowledge_enabled, knowledge_base_url, knowledge_api_key, knowledge_api_key_ciphertext,
+        knowledge_model, knowledge_max_results,
+        research_enabled, research_model_alias, research_max_rounds,
+        research_max_context_bytes, research_ttl_hours, research_max_spend_rial,
+        research_external_web, research_min_data_readiness)
      VALUES
-       (true, $1, $2, NULL, $3, $4, $5, $6,
-        $7, $8, $9, $10, $11, $12, now())
+       (true, $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10, $11, $12, now(),
+        $13, $14, NULL, $15, $16, $17,
+        $18, $19, $20, $21, $22, $23, $24, $25)
      ON CONFLICT (id)
      DO UPDATE SET enabled = EXCLUDED.enabled,
                    base_url = EXCLUDED.base_url,
-                   master_key = NULL,
                    master_key_ciphertext = EXCLUDED.master_key_ciphertext,
                    chat_model = EXCLUDED.chat_model,
                    embedding_model = EXCLUDED.embedding_model,
@@ -244,6 +315,20 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
                    output_cost_rial_per_million = EXCLUDED.output_cost_rial_per_million,
                    revenue_margin_percent = EXCLUDED.revenue_margin_percent,
                    max_turn_rial = EXCLUDED.max_turn_rial,
+                   knowledge_enabled = EXCLUDED.knowledge_enabled,
+                   knowledge_base_url = EXCLUDED.knowledge_base_url,
+                   knowledge_api_key = NULL,
+                   knowledge_api_key_ciphertext = EXCLUDED.knowledge_api_key_ciphertext,
+                   knowledge_model = EXCLUDED.knowledge_model,
+                   knowledge_max_results = EXCLUDED.knowledge_max_results,
+                   research_enabled = EXCLUDED.research_enabled,
+                   research_model_alias = EXCLUDED.research_model_alias,
+                   research_max_rounds = EXCLUDED.research_max_rounds,
+                   research_max_context_bytes = EXCLUDED.research_max_context_bytes,
+                   research_ttl_hours = EXCLUDED.research_ttl_hours,
+                   research_max_spend_rial = EXCLUDED.research_max_spend_rial,
+                   research_external_web = EXCLUDED.research_external_web,
+                   research_min_data_readiness = EXCLUDED.research_min_data_readiness,
                    updated_at = now()`,
     [
       input.enabled ?? current.enabled,
@@ -258,6 +343,19 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
       current.outputCostRialPerMillion,
       current.revenueMarginPercent,
       Math.round(current.maxTurnRial),
+      input.knowledgeEnabled ?? current.knowledgeEnabled,
+      (input.knowledgeBaseUrl ?? current.knowledgeBaseUrl).trim(),
+      knowledgeApiKeyCiphertext,
+      (input.knowledgeModel ?? current.knowledgeModel).trim(),
+      input.knowledgeMaxResults ?? current.knowledgeMaxResults,
+      input.researchEnabled ?? current.researchEnabled,
+      (input.researchModelAlias ?? current.researchModelAlias).trim(),
+      input.researchMaxRounds ?? current.researchMaxRounds,
+      input.researchMaxContextBytes ?? current.researchMaxContextBytes,
+      input.researchTtlHours ?? current.researchTtlHours,
+      input.researchMaxSpendRial ?? current.researchMaxSpendRial,
+      input.researchExternalWeb ?? current.researchExternalWeb,
+      input.researchMinDataReadiness ?? current.researchMinDataReadiness,
     ],
   );
   return getAiGatewayConfig();
@@ -369,7 +467,6 @@ type BusinessGatewayRow = {
   id?: string;
   business_id: string;
   location_id: string | null;
-  virtual_key: string | null;
   virtual_key_ciphertext: string | null;
   key_alias: string | null;
   spend_usd: string | null;
@@ -378,10 +475,10 @@ type BusinessGatewayRow = {
 };
 
 const BUSINESS_GATEWAY_COLUMNS =
-  "id, business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, spend_usd, synced_at, sync_error";
+  "id, business_id, location_id, virtual_key_ciphertext, key_alias, spend_usd, synced_at, sync_error";
 
 function rowToBusinessGateway(row: BusinessGatewayRow): BusinessGateway {
-  const virtualKey = decryptFromStorage(row.virtual_key_ciphertext, row.virtual_key);
+  const virtualKey = decryptFromStorage(row.virtual_key_ciphertext);
   return {
     id: row.id,
     businessId: row.business_id,
@@ -473,6 +570,47 @@ export async function listBusinessGateways(
 }
 
 /**
+ * Batch-read only the key rows needed by one paginated console response:
+ * one business-default row per visible business plus the selected branch row.
+ * It deliberately does not decrypt keys for every tenant in the fleet.
+ */
+export async function listBusinessGatewaysForConsole(
+  businessIds: string[],
+  focusedBranch: { businessId: string; locationId: string } | null = null,
+): Promise<BusinessGateway[]> {
+  const uniqueBusinessIds = [...new Set(businessIds)];
+  if (uniqueBusinessIds.length === 0 && !focusedBranch) return [];
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<BusinessGatewayRow>(
+      `SELECT ${BUSINESS_GATEWAY_COLUMNS}
+         FROM ai_business_gateway
+        WHERE (business_id = ANY($1::uuid[]) AND location_id IS NULL)
+           OR ($2::text <> '' AND $3::text <> ''
+               AND business_id::text = $2 AND location_id::text = $3)
+        ORDER BY business_id, location_id NULLS FIRST`,
+      [uniqueBusinessIds, focusedBranch?.businessId ?? "", focusedBranch?.locationId ?? ""],
+    );
+    return rows.map(rowToBusinessGateway);
+  });
+}
+
+/** Return one decryptable virtual key for the optional operator gateway probe. */
+export async function getAnyBusinessGatewayWithKey(): Promise<BusinessGateway | null> {
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<BusinessGatewayRow>(
+      `SELECT ${BUSINESS_GATEWAY_COLUMNS}
+         FROM ai_business_gateway
+        WHERE virtual_key_ciphertext IS NOT NULL
+          AND btrim(virtual_key_ciphertext) <> ''
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+    );
+    const row = rows[0] ? rowToBusinessGateway(rows[0]) : null;
+    return row?.virtualKey ? row : null;
+  });
+}
+
+/**
  * Ensure an identity-only row exists for a business or branch, without
  * minting a virtual key. Used by callers that need a tracked row to attach
  * a key to later; model/budget/rate-limit policy is never part of this row —
@@ -506,11 +644,10 @@ async function storeVirtualKey(input: {
   return withoutTenantScope("platform", async () => {
     await query(
       `INSERT INTO ai_business_gateway
-         (business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, synced_at, sync_error, updated_at)
-       VALUES ($1, $2, NULL, $3, $4, CASE WHEN $5::text IS NULL THEN now() ELSE NULL END, $5, now())
+         (business_id, location_id, virtual_key_ciphertext, key_alias, synced_at, sync_error, updated_at)
+       VALUES ($1, $2, $3, $4, CASE WHEN $5::text IS NULL THEN now() ELSE NULL END, $5, now())
        ON CONFLICT (business_id, location_id)
-       DO UPDATE SET virtual_key = NULL,
-                     virtual_key_ciphertext = EXCLUDED.virtual_key_ciphertext,
+       DO UPDATE SET virtual_key_ciphertext = EXCLUDED.virtual_key_ciphertext,
                      key_alias = EXCLUDED.key_alias,
                      synced_at = CASE WHEN $5::text IS NULL THEN now() ELSE ai_business_gateway.synced_at END,
                      sync_error = EXCLUDED.sync_error,
@@ -544,11 +681,10 @@ async function recordNoValidKey(input: {
   return withoutTenantScope("platform", async () => {
     await query(
       `INSERT INTO ai_business_gateway
-         (business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, synced_at, sync_error, updated_at)
-       VALUES ($1, $2, NULL, NULL, $3, NULL, $4, now())
+         (business_id, location_id, virtual_key_ciphertext, key_alias, synced_at, sync_error, updated_at)
+       VALUES ($1, $2, NULL, $3, NULL, $4, now())
        ON CONFLICT (business_id, location_id)
-       DO UPDATE SET virtual_key = NULL,
-                     virtual_key_ciphertext = NULL,
+       DO UPDATE SET virtual_key_ciphertext = NULL,
                      key_alias = COALESCE(EXCLUDED.key_alias, ai_business_gateway.key_alias),
                      synced_at = NULL,
                      sync_error = EXCLUDED.sync_error,

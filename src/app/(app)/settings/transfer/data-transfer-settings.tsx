@@ -10,15 +10,16 @@
  * the same list.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SectionCard, TabBar, type Tab } from "@/app/dashboard/page-chrome";
-import { ErrorBox } from "@/app/dashboard/ui";
+import { ErrorBox, api } from "@/app/dashboard/ui";
 import { DataTransferSkeleton, useDataCatalogue } from "./data-transfer-ui";
 import { ExportSection } from "./export-section";
 import { HistorySection } from "./history-section";
 import { ImportSection } from "./import-section";
+import { HolooTransferSection } from "./holoo-transfer-section";
 
-type PanelKey = "import" | "export" | "history";
+type PanelKey = "import" | "export" | "history" | "holoo";
 
 export function DataTransferSettings() {
   const { entities, canImport, error } = useDataCatalogue();
@@ -27,11 +28,25 @@ export function DataTransferSettings() {
   const [revision, setRevision] = useState(0);
   const bump = useCallback(() => setRevision((current) => current + 1), []);
   const [panel, setPanel] = useState<PanelKey>("import");
+  const [holooPermitted, setHolooPermitted] = useState(false);
+
+  useEffect(() => {
+    if (entities === null) {
+      setHolooPermitted(false);
+      return;
+    }
+    let mounted = true;
+    void api<Record<string, unknown>>("/api/data/providers/holoo").then((result) => {
+      if (mounted) setHolooPermitted(result.ok);
+    });
+    return () => { mounted = false; };
+  }, [entities]);
 
   const tabs: Tab<PanelKey>[] = [
     ...(canImport ? [{ key: "import" as const, label: "ورود اطلاعات" }] : []),
     { key: "export", label: "خروجی گرفتن" },
     { key: "history", label: "تاریخچه" },
+    ...(holooPermitted ? [{ key: "holoo" as const, label: "انتقال هلو" }] : []),
   ];
   const active = tabs.some((tab) => tab.key === panel) ? panel : (tabs[0]?.key ?? "export");
 
@@ -59,6 +74,7 @@ export function DataTransferSettings() {
       {active === "history" ? (
         <HistorySection canImport={canImport} revision={revision} />
       ) : null}
+      {active === "holoo" && holooPermitted ? <HolooTransferSection /> : null}
     </div>
   );
 }

@@ -16,11 +16,11 @@ import { appendSyncOutboxEvent } from "@/lib/sync-outbox";
 type Context = { params: Promise<{ id: string }> };
 
 /**
- * Conditions someone can go and fix, rather than bugs. `fiscal_period_locked`
- * and `fiscal_period_soft_closed` come from migration 0024's trigger, which
- * fires on the *back-dated* entries this route posts — an amendment lands on
- * the day the order was sold, so a closed month refuses it here rather than
- * letting the correction silently move into the current one.
+ * Conditions someone can go and fix, rather than bugs. Fiscal-period failures
+ * come from the database's current fiscal-control triggers, which fire on the
+ * *back-dated* entries this route posts — an amendment lands on the day the
+ * order was sold, so an inadmissible period refuses it here rather than letting
+ * the correction silently move into the current one.
  */
 const KNOWN_FAILURES: Record<string, number> = {
   order_not_found: 404,
@@ -36,6 +36,7 @@ const KNOWN_FAILURES: Record<string, number> = {
   consumption_reversal_inconsistent: 409,
   fiscal_period_locked: 409,
   fiscal_period_soft_closed: 409,
+  fiscal_period_not_defined: 409,
   negative_ingredient_requirement: 400,
 };
 

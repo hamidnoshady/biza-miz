@@ -3,12 +3,19 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { listCases, upsertCase } from "@/lib/crm-service";
 import { caseSlaSummary } from "@/lib/crm-case-service";
+import { isUuid } from "@/lib/uuid";
 import {
   isCasePriority,
   isCaseStatus,
   type CasePriority,
   type CaseStatus,
 } from "@/lib/crm-shared";
+import { listAssignableMembers } from "@/lib/crm-ownership";
+import {
+  caseViewListOptions,
+  caseViewQuery,
+  parseCaseViewFilters,
+} from "@/lib/crm-case-views";
 
 /**
  * Service cases — complaints and requests (Phase 36).
@@ -34,18 +41,46 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   const search = request.nextUrl.searchParams;
-  const status = search.get("status");
+
+  // The desk's own vocabulary, parsed by the desk's own parser
+  // (`crm-case-views.ts`) and not read a second time here: the filter a saved
+  // view stores, the chips it renders and the rows the server returns are then
+  // three readings of one document rather than three opinions.
+  const { filters, error: filterError } = parseCaseViewFilters(search);
+  if (filterError) {
+    return NextResponse.json({ error: "bad_filter", field: filterError }, { status: 400 });
+  }
+
+  // The translation from the reader's document to the query — including that
+  // `mine` means the session's member id — lives in `crm-case-views.ts`, so the
+  // rows a queue card links to and the rows this route returns are one reading
+  // of one document. What stays here is what is not translation: permissions,
+  // and the legacy `customerId` parameter a timeline link passes.
+  const options = caseViewListOptions(filters, session.sub);
   const cases = await listCases(session.businessId, {
+    ...options,
     customerId: search.get("customerId") ?? undefined,
-    status: status && isCaseStatus(status) ? (status as CaseStatus) : undefined,
-    openOnly: search.get("open") === "1",
   });
+
+  // The filters actually applied, echoed in the vocabulary the screen sent, so
+  // the chips can be rendered from the answer rather than from local state and
+  // can never name a filter that was dropped on the way.
+  const applied = caseViewQuery(filters);
+  const members = (await listAssignableMembers(session.businessId)).map((member) => ({
+    id: member.id,
+    name: member.name,
+    isActive: member.isActive,
+  }));
+
   return NextResponse.json({
     cases,
     // Alongside the list, because the list alone cannot show it: the SLA
     // position depends on accumulated waiting time, which no single row
-    // renders.
+    // renders. Computed by the same rule the rows and the `breached` filter
+    // use, so the panel and the list cannot disagree.
     sla: await caseSlaSummary(session.businessId),
+    applied,
+    members,
   });
 });
 
@@ -58,6 +93,9 @@ interface CaseBody {
   priority?: string;
   category?: string;
   orderId?: string | null;
+  /** The handler as a member id; `""` unassigns. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy clients — resolved server-side, never trusted. */
   assignedTo?: string;
   resolution?: string;
 }
@@ -81,6 +119,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (body.priority !== undefined && !isCasePriority(body.priority)) {
     return NextResponse.json({ error: "case_priority_invalid" }, { status: 400 });
   }
+  // A handler is a member of this business or nobody: a non-uuid cannot name
+  // one, and asking Postgres would answer with a cast error instead.
+  if (body.assigneeUserId != null && body.assigneeUserId !== "" && !isUuid(body.assigneeUserId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   const record = await upsertCase(session.businessId, {
     id: body.id,
@@ -95,9 +138,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     // every edit from a client that doesn't know about orders unlink the
     // ticket from the order the complaint was about.
     orderId: body.orderId,
+    assigneeUserId: body.assigneeUserId ?? null,
     assignedTo: body.assignedTo,
     resolution: body.resolution,
     createdBy: session.fullName,
+    createdById: session.sub,
   });
   return NextResponse.json({ case: record }, { status: body.id ? 200 : 201 });
 });
