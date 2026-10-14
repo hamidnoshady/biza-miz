@@ -410,7 +410,7 @@ suite is run on the push).
 
 | Workflow | Run | Result |
 |---|---|---|
-| `test.yml` | **38626207933** (`11dd6aa3`, the code head) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅ (the seven new rendered tests included), `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅**, `design checks` ✅, **`integration tests (real database)` ✅**, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
+| `test.yml` | **38626207933** (`11dd6aa3`, the code head) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅ (the seven new rendered tests included), `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116066571641`: `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Record visual baselines (manual, opt-in)` **skipped**, `Upload diffs` **skipped**), `design checks` ✅, **`integration tests (real database)` ✅**, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
 | `test.yml` | 38618945936 (`a2f78cf0`) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅, `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116041317692`: `Build` ✅, `Start the production server` ✅, `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Publish visual regression summary` ✅; `Record visual baselines (manual, opt-in)` and `Upload diffs` **skipped** — the first is the opt-in recording step, the second is skipped precisely because there were no diffs), `design checks` ✅, `integration tests (real database)` ✅, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
 | `test.yml` | 38617346093 (`7a3e1cb5`) | **cancelled by the next push**, not a failure: 8 of its 10 jobs had already passed (`type check`, `unit tests`, `ESLint`, `API guard`, **`visual regression`**, `design checks`, `production build`, `data transfer engine`); `integration tests (real database)` was cancelled mid-flight and the aggregate `all checks passed` therefore failed. Not counted as a red check. |
 | `android-build` | 38617346091 (`7a3e1cb5`) | ✅ success |
@@ -481,6 +481,12 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 - **The #854 invitation lifecycle** (MFA-before-acceptance, replica authority,
   `stampPhoneVerified`, profile self-service) is untouched by design; this branch's
   contract doc records what #947 relies on and what it does not own.
+- **The Team screen has no browser-level gate.** The visual harness renders fourteen
+  screens and `/settings/team` is not one of them, so the surface is held by the rendered
+  jsdom test (`member-detail-dialog.test.tsx`), the source-contract test, CI's design
+  checks and CI's subledger keyboard/WCAG script — but not by a pixel baseline. Adding one
+  means recording a new baseline, which the brief puts behind separate design approval, so
+  it is recorded here rather than done unilaterally.
 - **Browser/visual gates and the production build do not fit this sandbox** (3.9 GB, no
   swap): `npm run build` is killed at 3000 MB, `tsc --noEmit` aborts at 3072 MB, and
   `npm run test:visual` needs the build's server. CI is where those gates are meaningful,
