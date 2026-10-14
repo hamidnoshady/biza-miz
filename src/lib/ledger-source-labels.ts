@@ -94,6 +94,8 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   payroll_accrual_void: "ابطال تعهد حقوق",
   payroll_payment_void: "ابطال پرداخت حقوق",
   payroll_advance_void: "ابطال مساعده",
+  payroll_engine_accrual: "حقوق و دستمزد (موتور قانونی)",
+  payroll_engine_payment: "پرداخت حقوق (موتور قانونی)",
   // Commission settlement: a payout and the reversal of one (Growth → commission runs).
   commission_payout: "پرداخت پورسانت",
   commission_payout_reversal: "ابطال پرداخت پورسانت",
