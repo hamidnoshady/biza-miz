@@ -93,6 +93,20 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     note: "landed on main after this map's batch; no MCP verb yet",
   },
   {
+    id: "accounting.opening-balances",
+    module: "Accounting",
+    entity: "Opening balances & fiscal carry-forward",
+    routes: ["ledger/opening-balances"],
+    note: "landed on main after this map's batch; no MCP verb yet — approving and posting an opening document stays a human act",
+  },
+  {
+    id: "accounting.vouchers",
+    module: "Accounting",
+    entity: "Voucher numbering, gaps, renumbering & summary vouchers",
+    routes: ["ledger/vouchers", "ledger/summary-vouchers"],
+    note: "landed on main after this map's batch; no MCP verb yet — renumbering is a fiscal-year act for a person",
+  },
+  {
     id: "accounting.tax_invoices",
     module: "Accounting",
     entity: "Taxpayer invoices (سامانه مودیان)",
