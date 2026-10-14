@@ -1,0 +1,142 @@
+name: android-build
+
+# Builds, lints and unit-tests the Android Trusted Web Activity shell, and runs the web side of
+# the native bridge (issue #884). It runs only when a file that can change either of them is
+# touched. The signed staging and production paths are separate, manual workflows.
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'config/android-environments.json'
+      - 'config/native-bridge-contract.json'
+      - 'public/.well-known/assetlinks.json'
+      - 'src/lib/native/**'
+      - 'src/components/native/**'
+      - '.github/workflows/android-build.yml'
+  push:
+    branches:
+      - main
+      - 'arena/**'
+    paths:
+      - 'android/**'
+      - 'config/android-environments.json'
+      - 'config/native-bridge-contract.json'
+      - 'public/.well-known/assetlinks.json'
+      - 'src/lib/native/**'
+      - 'src/components/native/**'
+      - '.github/workflows/android-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  web-bridge-tests:
+    name: web native bridge tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx vitest run src/lib/native src/components/native
+
+  android-debug:
+    name: android development debug
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android platform 36 and build-tools 36.0.0
+        run: |
+          set -euo pipefail
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          { yes || true; } | "$sdkmanager" --licenses > /dev/null
+          "$sdkmanager" "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # The NON-PRODUCTION label is part of the artifact name on purpose: this build points at
+      # https://app.invalid and is signed with the throwaway debug key.
+      # The full Gradle output is kept in android/gradle-run.log. It is uploaded on failure, and the
+      # step after this one repeats the error lines as annotations, which the API can read.
+      - name: Lint, unit tests and assemble the development debug APK
+        working-directory: android
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon :app:lintDevelopmentDebug :app:testDevelopmentDebugUnitTest :app:assembleDevelopmentDebug 2>&1 | tee gradle-run.log
+
+      - name: Repeat the Gradle error lines as annotations when the build fails
+        if: failure()
+        working-directory: android
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          path = pathlib.Path("gradle-run.log")
+          if path.exists():
+              lines = path.read_text(errors="replace").splitlines()
+          else:
+              lines = ["Gradle wrote no log: the failure happened before the build started."]
+          pattern = re.compile(r"^e: |^w: .*error|What went wrong|^> |Could not |Caused by|Execution failed|BUILD FAILED|error:|Exception|FAILURE")
+          keep = [line for line in lines if pattern.search(line)]
+          body = "\n".join(keep[:80]) or "\n".join(lines[-60:])
+          body = body[:6000]
+          encoded = body.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print("::error title=Gradle failure::" + encoded)
+          PY
+
+      # The release guard is only worth having if it fires. This asks for a staging release with no
+      # origin and no signing, and fails the job unless Gradle refuses it with the guard's message.
+      - name: Check that a staging release is refused without an origin and signing
+        working-directory: android
+        run: |
+          set +e
+          ./gradlew --no-daemon :app:assembleStagingRelease > release-guard.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "A staging release built without a web origin or signing." >&2
+            exit 1
+          fi
+          if ! grep -q "Cannot build staging release" release-guard.log; then
+            echo "The release build failed, but not because of the release guard:" >&2
+            tail -n 40 release-guard.log >&2
+            exit 1
+          fi
+          echo "The release guard refused the staging release, as intended."
+
+      - name: Upload the development debug APK (NON-PRODUCTION)
+        uses: actions/upload-artifact@v7
+        with:
+          name: biza-miz-android-development-debug-NON-PRODUCTION
+          path: android/app/build/outputs/apk/development/debug/app-development-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Gradle reports when the job fails
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-debug-reports
+          path: |
+            android/gradle-run.log
+            android/app/build/reports/
+            android/app/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

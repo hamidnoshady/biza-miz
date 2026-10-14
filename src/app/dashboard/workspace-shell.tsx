@@ -31,6 +31,7 @@ import { DashboardMain } from "./dashboard-main";
 import { AppAvailabilityGate } from "./app-availability-gate";
 import { DeploymentCapabilityGate } from "./deployment-capability-gate";
 import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
+import { NativeDeviceRegistrar } from "@/components/native/native-device-registrar";
 import { OfflineQueueProvider } from "./offline-queue";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
@@ -467,6 +468,14 @@ export async function WorkspaceShell({
   return (
     <LockProvider fullName={session.fullName}>
       <MoneyProvider unit={currencyDisplay}>
+        {/*
+          Issue #884 — registers this Android installation once the native
+          bridge connects. Mounted here, not in the root layout, because by
+          this point a session and a business are both already known; the
+          root layout also wraps the public/marketing pages, which have
+          neither (see the component's own header comment).
+        */}
+        <NativeDeviceRegistrar />
         <OfflineQueueProvider>
         <BugReportProvider>
         {/*

@@ -396,6 +396,13 @@ export async function withTenantTransaction<T>(
  *     the same timing constraint `checkImpersonation`'s `activeGrant` lookup
  *     already has, just for a PIN login's session record instead of an
  *     impersonation grant.
+ *   - **native-device-auth** — re-checking a `native_app_devices` row (issue
+ *     #884) is still active, from `getSession()`, which runs this check
+ *     before `enterTenantScope` has been called for the request — the same
+ *     timing constraint `checkEmployeeSession`'s `employee_sessions` lookup
+ *     already has, just for an Android installation's device-binding claim
+ *     instead of a PIN login's session record;
+ *
  *   - **pairing-redeem** — resolving a one-time desktop pairing code to the
  *     business it was issued for (and reading that business's configuration to
  *     build the snapshot) happens before any tenant has been chosen, the same

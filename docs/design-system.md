@@ -335,6 +335,45 @@ inline-end of the selected option. Empty: `px-2.5 py-2 text-sm text-muted-foregr
 - Tables live edge-to-edge in a `flush` `SectionCard`, or inside an inner
   `overflow-hidden rounded-xl border border-stone-200/80` panel. Never bare on the canvas.
 
+#### Mobile card fallback
+
+A table that scrolls horizontally on a phone is not a mobile-native list — it is a desktop
+table a thumb can drag (issue #884 acceptance criterion #10). Every "major" list/table should
+declare its columns once with `DataCardTable` (`@/app/dashboard/data-table`), not spell out a
+`<table>` by hand: a column says how to render a cell, how it aligns, and whether it is
+`desktopOnly` (kept out of the card — a figure that only makes sense beside others, like a
+running balance), and that single declaration renders *both* the desktop `<table>` and the
+phone's stacked `<ul>` of cards, so a column can never appear in one and not the other.
+
+```tsx
+<DataCardTable
+  caption="فهرست سرنخ‌ها"
+  rowKey={(lead) => lead.id}
+  columns={[
+    { key: "name", header: "نام", cell: (lead) => lead.name },
+    { key: "status", header: "وضعیت", cell: (lead) => <StatusBadge>…</StatusBadge> },
+    { key: "balance", header: "مانده", align: "end", numeric: true, cell: (lead) => … },
+  ]}
+  rows={leads}
+/>
+```
+
+On a phone, the first column becomes the card's bold heading (or pass `cardTitle` when the
+first column's cell is not self-explanatory on its own); every other column becomes a
+`dt`/`dd` label/value pair under it, in the same order as the table's headers. `footer` renders
+as a `<tfoot>` row on the desktop table and a summary card on the phone. The switch is CSS only
+(`breakpoint` — `sm` by default, `lg` for a table with so many columns it still cramps on a
+small tablet) — no `matchMedia`, no client-only state, so the same markup serves both a browser
+tab and the Android TWA shell.
+
+This was `ReportTable` (`src/app/dashboard/reports/report-table.tsx`), independently reinvented
+by the reports screens before it converged on one definition; it is now the shared primitive
+for every module, with `ReportTable` kept as a thin, compatible wrapper over it so reports did
+not need to change. `src/app/(app)/crm/leads-section.tsx` is the first adopter outside reports.
+Most other `DataTable` call sites still render a bare, horizontally-scrolling table on a phone —
+`ISSUE_884_PLAN.md`'s acceptance-criteria table tracks adoption as ongoing, mechanical follow-up
+work, not a design question.
+
 ### Status badges and live pills
 
 `StatusBadge`: `inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium`
