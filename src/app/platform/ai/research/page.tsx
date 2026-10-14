@@ -70,6 +70,7 @@ export default function PlatformAiResearchPage() {
   return (
     <div className="space-y-4">
       <AiConsoleNav />
+      <h1 className="text-xl font-bold">پژوهش عمیق</h1>
       <InfoBox>
         پژوهش عمیق یک کار جداگانه و هزینه‌دار است: محیط اختصاصی خودش را دارد، سقف هزینهٔ هر اجرا را بعد از هر دور
         بررسی می‌کند، منقضی می‌شود و نتیجه را همراه منابع نگه می‌دارد. تا وقتی «فعال» خاموش است، حالت پژوهش عمیق

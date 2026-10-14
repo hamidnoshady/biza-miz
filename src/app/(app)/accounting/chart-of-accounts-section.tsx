@@ -509,14 +509,7 @@ export function ChartOfAccountsSection({
         </InfoBox>
       )}
 
-      <SectionCard
-        description={
-          filtering
-            ? `${formatPersianNumber(matchCount)} حساب از ${formatPersianNumber(accounts.length)} حساب با این فیلتر پیدا شد.`
-            : `${formatPersianNumber(accounts.length)} حساب، به ترتیب ساختار درختی گروه ← کل ← معین ← تفصیلی.`
-        }
-        bodyClassName="p-0"
-      >
+      <SectionCard bodyClassName="p-0">
         {!canEdit && localError ? <div className="px-4 pt-4 sm:px-5"><ErrorBox>{localError}</ErrorBox></div> : null}
         {notice ? (
           <div className="px-4 pt-4 sm:px-5">
@@ -566,6 +559,14 @@ export function ChartOfAccountsSection({
               ))}
             </div>
           </div>
+          {/* The count lives under the search, not in a card header: the page
+              header owns the title, and a SectionCard draws its description
+              only beside a title, so a header-less card would drop it. */}
+          <p className="mt-3 text-xs text-muted-foreground" aria-live="polite">
+            {filtering
+              ? `${formatPersianNumber(matchCount)} حساب از ${formatPersianNumber(accounts.length)} حساب با این فیلتر پیدا شد.`
+              : `${formatPersianNumber(accounts.length)} حساب، به ترتیب ساختار درختی گروه ← کل ← معین ← تفصیلی.`}
+          </p>
         </div>
         <div className="p-4 sm:p-5">
           {rows.length === 0 ? (

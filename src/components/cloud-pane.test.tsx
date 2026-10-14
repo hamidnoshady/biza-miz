@@ -45,8 +45,13 @@ describe("CloudPane", () => {
     guest.executeJavaScript = executeJavaScript;
     guest.getURL = () => "https://cafe.example.com/reports";
 
-    guest.dispatchEvent(new Event("dom-ready"));
-    expect(executeJavaScript).toHaveBeenLastCalledWith(cloudThemeScript("dark"));
+    // The pane becomes `embedded` asynchronously (outside act), so the webview can
+    // be in the DOM a tick before the passive effect that listens for dom-ready
+    // has run. Fire dom-ready until that listener answers, instead of racing it.
+    await waitFor(() => {
+      guest.dispatchEvent(new Event("dom-ready"));
+      expect(executeJavaScript).toHaveBeenLastCalledWith(cloudThemeScript("dark"));
+    });
 
     theme.resolvedTheme = "light";
     rerender(<CloudPane pathAndQuery="/reports" cloudUrl="https://cafe.example.com" />);

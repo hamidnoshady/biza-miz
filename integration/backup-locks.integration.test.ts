@@ -46,8 +46,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await other?.end().catch(() => {});
-  await dbLib?.closeDatabasePool().catch(() => {});
+  try {
+    await other?.end().catch(() => {});
+    await dbLib?.closeDatabasePool().catch(() => {});
+  } finally {
+    // This integration project uses one worker for the full database suite.
+    // Keep the maintenance-DB connection string local to this file so the next
+    // suite doesn't inherit it after its own pool has been closed.
+    if (rootDatabaseUrl) process.env.DATABASE_URL = rootDatabaseUrl;
+    else delete process.env.DATABASE_URL;
+  }
 });
 
 /** `pg_try_advisory_lock` as the other session sees it. */

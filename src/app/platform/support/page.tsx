@@ -21,7 +21,7 @@ import {
   TICKET_PRIORITIES,
   TICKET_PRIORITY_LABELS,
   TICKET_STATUSES,
-  TICKET_STATUS_LABELS,
+  ticketStatusLabel,
 } from "@/lib/support-tickets";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -95,6 +95,8 @@ const DEFAULTS = {
   priority: "",
   category: "",
   mine: "",
+  queue: "",
+  unassigned: "",
   page: "1",
 };
 
@@ -110,10 +112,21 @@ function SupportInner() {
     if (values.priority) params.set("priority", values.priority);
     if (values.category) params.set("category", values.category);
     if (values.mine === "1") params.set("assignedToMe", "true");
+    if (values.queue === "open") params.set("queue", "open");
+    if (values.unassigned === "true") params.set("unassigned", "true");
     params.set("page", values.page || "1");
     params.set("pageSize", String(PAGE_SIZE));
     return `/api/platform/support/tickets?${params.toString()}`;
-  }, [debouncedSearch, values.status, values.priority, values.category, values.mine, values.page]);
+  }, [
+    debouncedSearch,
+    values.status,
+    values.priority,
+    values.category,
+    values.mine,
+    values.queue,
+    values.unassigned,
+    values.page,
+  ]);
 
   const query = usePlatformQuery<ListResponse>(url, [url]);
   const tickets = query.data?.tickets ?? null;
@@ -211,7 +224,7 @@ function SupportInner() {
             <SelectItem value="__all__">همهٔ وضعیت‌ها</SelectItem>
             {TICKET_STATUSES.map((v) => (
               <SelectItem key={v} value={v}>
-                {TICKET_STATUS_LABELS[v]}
+                {ticketStatusLabel(v, "operator")}
               </SelectItem>
             ))}
           </SelectContent>

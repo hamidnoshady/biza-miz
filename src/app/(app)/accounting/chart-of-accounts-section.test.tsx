@@ -265,5 +265,7 @@ describe("issue #824 §13: heading ownership", () => {
     // The PageHeader (ACCOUNTING_HEADINGS) owns «سرفصل حساب‌ها»; the nested
     // SectionCard must not draw a second one.
     expect(screen.queryByText("سرفصل حساب‌ها")).toBeNull();
+    // Without a card title the count must still be shown, under the search.
+    expect(screen.getByText(/حساب، به ترتیب ساختار درختی/)).not.toBeNull();
   });
 });

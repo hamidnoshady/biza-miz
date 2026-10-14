@@ -1,11 +1,14 @@
 import { createRequire } from "node:module";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { assertSecurePosture } from "./deployment-posture";
 
 const require = createRequire(import.meta.url);
+const { stripNextTraceMetadata } = require("../../scripts/desktop/strip-next-trace-metadata.cjs") as {
+  stripNextTraceMetadata: (runtimeDirectory: string) => Promise<number>;
+};
 const { desktopServerEnvironment, postgresStartStrategy, pgCtlStartArguments } = require(
   "../../electron/backend-manager.js",
 ) as {
@@ -47,6 +50,31 @@ describe("packaged desktop production posture", () => {
     });
     expect(runtimeBuilder).toContain('target: "node24"');
     expect(runtimeBuilder).toContain('engines: { node: ">=24" }');
+  });
+
+  it("strips only build-time Next trace manifests from the staged runtime", async () => {
+    const runtime = mkdtempSync(path.join(os.tmpdir(), "desktop-trace-metadata-"));
+    const nextServer = path.join(runtime, ".next", "server", "app", "api", "example");
+    const productionDependency = path.join(runtime, "node_modules", "sample-package");
+
+    try {
+      mkdirSync(nextServer, { recursive: true });
+      mkdirSync(productionDependency, { recursive: true });
+      writeFileSync(path.join(nextServer, "route.js.nft.json"), "build-time trace");
+      writeFileSync(path.join(runtime, "server.js.nft.json"), "standalone trace");
+      writeFileSync(path.join(runtime, ".next", "server", "required-server-files.json"), "runtime manifest");
+      writeFileSync(path.join(nextServer, "route.js"), "runtime route");
+      writeFileSync(path.join(productionDependency, "package.nft.json"), "dependency metadata");
+
+      expect(await stripNextTraceMetadata(runtime)).toBe(2);
+      expect(existsSync(path.join(nextServer, "route.js.nft.json"))).toBe(false);
+      expect(existsSync(path.join(runtime, "server.js.nft.json"))).toBe(false);
+      expect(existsSync(path.join(runtime, ".next", "server", "required-server-files.json"))).toBe(true);
+      expect(existsSync(path.join(nextServer, "route.js"))).toBe(true);
+      expect(existsSync(path.join(productionDependency, "package.nft.json"))).toBe(true);
+    } finally {
+      rmSync(runtime, { recursive: true, force: true });
+    }
   });
 
   it("keeps component-generation tooling out of the production dependency graph", () => {
