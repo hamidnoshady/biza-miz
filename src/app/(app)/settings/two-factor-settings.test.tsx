@@ -291,3 +291,78 @@ describe("Issue #854 P2.25 — the limiter's own answer drives the cooldown", ()
     await screen.findByText(/تعداد درخواست‌ها بیش از حد مجاز است/);
   });
 });
+
+describe("#854 follow-up F11 — a read-only factor set offers no actionable form", () => {
+  const readOnlySurface = {
+    field: "totp_secret" as const,
+    editable: false,
+    readOnly: true,
+    notice: "این مورد در نسخهٔ ابری مدیریت می‌شود.",
+  };
+
+  it("does not resume a pending SMS enrolment, and offers no confirm or resend", async () => {
+    server.get.data = baseStatus({
+      methods: [],
+      methodNames: [],
+      primaryMethod: null,
+      pendingMethods: ["sms_otp"],
+      pendingSmsPhone: "+989121110009",
+      phone: "***0009",
+      smsChallengeRequestedAt: new Date().toISOString(),
+      smsChallengeExpiresAt: new Date(Date.now() + 120_000).toISOString(),
+      loginManagedByCloud: true,
+      credential: { editable: false, readOnly: true },
+    });
+    render(<TwoFactorSettings isOwner surface={readOnlySurface} />);
+
+    await screen.findByText(/یک فعال‌سازی نیمه‌تمام در حساب شما ثبت شده است/);
+    expect(screen.queryByPlaceholderText("123456")).toBeNull();
+    expect(screen.queryByRole("button", { name: /ارسال مجدد کد/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /تأیید شماره/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "فعال‌سازی" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "ادامهٔ تأیید پیامکی" })).toBeNull();
+    // Nothing was ever posted on the member's behalf.
+    expect(recorded.some((r) => r.method === "POST")).toBe(false);
+  });
+
+  it("describes a pending TOTP enrolment without a confirm form", async () => {
+    server.get.data = baseStatus({
+      methods: [],
+      methodNames: [],
+      primaryMethod: null,
+      pendingMethods: ["totp"],
+      credential: { editable: false, readOnly: true },
+    });
+    render(<TwoFactorSettings isOwner surface={readOnlySurface} />);
+    await screen.findByText(/یک فعال‌سازی نیمه‌تمام در حساب شما ثبت شده است/);
+    expect(screen.queryByText(/گام ۲: اسکن کد QR/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "ادامهٔ فعال‌سازی" })).toBeNull();
+  });
+
+  it("follows the server's credential surface when no prop is passed", async () => {
+    server.get.data = baseStatus({
+      pendingMethods: ["sms_otp"],
+      pendingSmsPhone: "+989121110009",
+      credential: { editable: false, readOnly: true, notice: "این مورد در نسخهٔ ابری مدیریت می‌شود." },
+    });
+    render(<TwoFactorSettings isOwner />);
+    await screen.findByText(/روش‌های تأییدشدهٔ حساب شما در همین صفحه نمایش داده می‌شوند/);
+    expect(screen.queryByPlaceholderText("123456")).toBeNull();
+    expect(screen.queryByRole("button", { name: "حذف" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "تغییر شمارهٔ دریافت" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "ساخت کدهای جدید" })).toBeNull();
+  });
+
+  it("an editable surface still resumes the same pending enrolment (no regression of P2.21)", async () => {
+    server.get.data = baseStatus({
+      methods: [],
+      methodNames: [],
+      primaryMethod: null,
+      pendingMethods: ["sms_otp"],
+      pendingSmsPhone: "+989121110009",
+    });
+    render(<TwoFactorSettings isOwner />);
+    expect(await screen.findByPlaceholderText("123456")).toBeTruthy();
+    expect(screen.queryByText(/یک فعال‌سازی نیمه‌تمام در حساب شما ثبت شده است/)).toBeNull();
+  });
+});

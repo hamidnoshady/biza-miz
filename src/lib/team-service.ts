@@ -1500,8 +1500,16 @@ export async function setPin(
    * unlocked terminal is not enough to take the credential over. `null` means
    * "this caller is not rotating their own PIN"; `undefined` means "self-service
    * without proof", which is refused before any write.
+   *
+   * `beforeCommit` (#854 follow-up F07) runs on the rotation's own client after
+   * every write and before COMMIT, so a caller can add its own audit row to the
+   * same unit — a throw rolls the rotation back with it.
    */
-  options: { selfService?: boolean; currentPinVerified?: boolean } = {},
+  options: {
+    selfService?: boolean;
+    currentPinVerified?: boolean;
+    beforeCommit?: (client: PoolClient) => Promise<void>;
+  } = {},
 ): Promise<void> {
   const profile = (await readDeploymentProfile(businessId)).profile;
   const eventOrigin = profile === "cloud" ? "cloud" : "local";
@@ -1531,6 +1539,36 @@ export async function setPin(
       [userId, businessId],
     );
     if (!member.rowCount) throw new TeamError("not_found", 404);
+
+    /**
+     * Issue #854 follow-up (F07): a self-service rotation must actually rotate.
+     * Checked against *this* member's own active PIN only — under the
+     * membership lock, in the same transaction as the swap, so a concurrent
+     * rotation cannot slip between the comparison and the write — and with
+     * bcrypt, never a plaintext comparison. Other members' PINs are not
+     * consulted: since migration 0221 identical PINs across employees are
+     * allowed (#953), and refusing one would reveal a colleague's PIN. An
+     * administrator reset is not a rotation, so it is not refused here.
+     */
+    if (options.selfService) {
+      const { rows: current } = await client.query<{ pin_hash: string | null }>(
+        `SELECT coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+           FROM users u
+           LEFT JOIN LATERAL (
+             SELECT secret_hash FROM employee_credentials
+              WHERE employee_id = u.id AND business_id = u.business_id
+                AND credential_type = 'pin' AND status = 'active'
+              ORDER BY created_at DESC LIMIT 1
+           ) ec ON true
+          WHERE u.id = $1 AND u.business_id = $2`,
+        [userId, businessId],
+      );
+      const currentHash = current[0]?.pin_hash;
+      if (currentHash && (await bcrypt.compare(pin, currentHash))) {
+        throw new TeamError("pin_unchanged", 400);
+      }
+    }
+
     await client.query(
       `INSERT INTO employees (id, business_id) VALUES ($1, $2)
        ON CONFLICT (id) DO NOTHING`,
@@ -1587,6 +1625,7 @@ export async function setPin(
       action: options.selfService ? "team.self_pin_changed" : "team.pin_changed",
       targetUserId: userId,
     });
+    if (options.beforeCommit) await options.beforeCommit(client);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

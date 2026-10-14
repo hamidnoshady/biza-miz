@@ -42,7 +42,7 @@
  * separation the cookies and JWT realms have — and `recordSecurityAudit` takes
  * the realm from the caller rather than guessing it from the ids.
  */
-import { query } from "./db";
+import { isPinnedToTransaction, query } from "./db";
 
 /**
  * The minimum a writer needs from a connection.
@@ -122,6 +122,11 @@ const ALLOWED_FACT_KEYS: ReadonlySet<string> = new Set([
   // "the credential row" — an id or kind, never its secret.
   "credentialid",
   "credentialtype",
+  // "the session generation is now 7" — a revocation counter that invalidates
+  // older cookies. It cannot sign or replay anything without the realm secret,
+  // and it is what lets an operator line a password change up with the
+  // sessions it ended (#854 F04 — the row used to bypass this check entirely).
+  "tokenversion",
 ]);
 
 /**
@@ -234,6 +239,30 @@ export async function recordSecurityAudit(
 }
 
 /**
+ * The executor for "this audit row commits with the surrounding transaction".
+ *
+ * Inside `withTenantTransaction` / `withoutTenantScopeTransaction`, ambient
+ * `query()` is pinned to the transaction's client, so routing the audit write
+ * through it makes the row part of the same COMMIT — and a failed write rolls
+ * the mutation back with it (policy 1 above). It deliberately *refuses* to run
+ * outside a transaction: handing this to `recordSecurityAudit` there would
+ * silently turn "atomic with the change" into "one unretried autocommit", which
+ * is the weakest of the three outcomes and exactly what a caller asking for
+ * this executor is trying to avoid.
+ */
+export function transactionAuditExecutor(): AuditExecutor {
+  if (!isPinnedToTransaction()) {
+    throw new Error(
+      "transactionAuditExecutor() must be called inside a database transaction; " +
+        "use recordSecurityAudit(entry) without an executor for a post-commit write",
+    );
+  }
+  return {
+    query: (text: string, params?: unknown[]) => query(text, params),
+  };
+}
+
+/**
  * Retry once, then fail loudly. Never swallow.
  *
  * The single retry is for the transient class (a dropped pooled connection, a
@@ -285,3 +314,21 @@ export const SECURITY_AUDIT_ACTIONS = {
 
 export type SecurityAuditAction =
   (typeof SECURITY_AUDIT_ACTIONS)[keyof typeof SECURITY_AUDIT_ACTIONS];
+
+/**
+ * The self-service credential surfaces of `/settings/profile` and the tenant
+ * step-up door (#854 follow-up F03/F04/F05/F07).
+ *
+ * The strings predate this map and are kept verbatim — existing audit rows and
+ * the tenant audit screen already use them. What changed is *how* they are
+ * written: each one now goes through `recordSecurityAudit` (secret check,
+ * durability policy) instead of a raw `INSERT … .catch(() => {})`.
+ */
+export const SELF_CREDENTIAL_AUDIT_ACTIONS = {
+  passwordChangedSelf: "user.password_changed_self",
+  phoneChangedSelf: "auth.self_phone_changed",
+  phoneVerifiedSelf: "auth.self_phone_verified",
+  pinChangedSelf: "auth.self_pin_changed",
+  stepUp: "auth.step_up",
+  stepUpFailed: "auth.step_up_failed",
+} as const;

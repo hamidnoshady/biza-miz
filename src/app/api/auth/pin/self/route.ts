@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
-import { query } from "@/lib/db";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { describeCredentialSurface } from "@/lib/credential-authority";
 import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
@@ -10,6 +9,7 @@ import { readSelfCredentialState, verifySelfPin } from "@/lib/self-credentials";
 import { auditLoginFailure, checkLoginLockout } from "@/lib/employee-service";
 import { setPin, TeamError } from "@/lib/team-service";
 import { toLatinDigits } from "@/lib/digits";
+import { SELF_CREDENTIAL_AUDIT_ACTIONS, recordSecurityAudit } from "@/lib/security-audit";
 
 /**
  * Issue #854 (P1.7) — changing *your own* PIN from `/settings/profile`.
@@ -35,7 +35,11 @@ import { toLatinDigits } from "@/lib/digits";
  *  - **deployment authority** from the shared table: Hybrid and Local may
  *    originate a staff PIN (a till must be able to issue one while the uplink is
  *    down); a `apply`-only deployment may not, and says so with the shared
- *    notice.
+ *    notice;
+ *  - **an actual rotation** (#854 follow-up F07): the new PIN must differ from
+ *    the member's *own* current one (`pin_unchanged`) — checked here against
+ *    the PIN just verified, and again inside `setPin` against the stored hash,
+ *    atomically with the swap. Never against other members' PINs (#953).
  */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requireMember();
@@ -143,12 +147,45 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         { status: 401 },
       );
     }
+
+    // The cheap half of F07: the PIN just proven is the current one, so an
+    // identical new PIN is no rotation. `setPin` re-checks against the stored
+    // hash under the membership lock.
+    if (newPin === offered) {
+      return NextResponse.json(
+        {
+          error: AUTH_ERROR_CODES.pinUnchanged,
+          message: authErrorMessage(AUTH_ERROR_CODES.pinUnchanged),
+        },
+        { status: 400 },
+      );
+    }
   }
 
   try {
     await setPin(session.businessId, session.sub, newPin, session.sub, {
       selfService: true,
       currentPinVerified: true,
+      /**
+       * The rotation itself is audited inside `setPin` (`team.self_pin_changed`);
+       * this row records the *surface* it came through, so the trail
+       * distinguishes a Profile rotation from a Team-screen one when an incident
+       * is reconstructed (#854 P2.22). It used to be written after the commit
+       * with `.catch(() => {})`; it now commits with the rotation or not at all.
+       */
+      beforeCommit: (client) =>
+        recordSecurityAudit(
+          {
+            realm: "tenant",
+            businessId: session.businessId,
+            actorUserId: session.sub,
+            action: SELF_CREDENTIAL_AUDIT_ACTIONS.pinChangedSelf,
+            entity: "user",
+            entityId: session.sub,
+            payload: { surface: "settings/profile", hadPin: hasExistingPin },
+          },
+          client,
+        ),
     });
   } catch (err) {
     if (err instanceof TeamError) {
@@ -162,23 +199,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         { status: err.status },
       );
     }
-    throw err;
+    // The rotation and both audit rows rolled back together; say so instead of
+    // a bare 500. The reason is logged, never the PIN.
+    console.error(
+      "self PIN change rolled back:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.credentialChangeFailed,
+        message: authErrorMessage(AUTH_ERROR_CODES.credentialChangeFailed),
+      },
+      { status: 500 },
+    );
   }
-
-  // The rotation itself is audited inside `setPin` (`team.self_pin_changed`);
-  // this row records the *surface* it came through, so the trail distinguishes
-  // a Profile rotation from a door-screen one when an incident is reconstructed
-  // (#854 P2.22).
-  await query(
-    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-     VALUES ($1, $2, 'auth.self_pin_changed', 'user', $3, $4)`,
-    [
-      session.businessId,
-      session.sub,
-      session.sub,
-      JSON.stringify({ surface: "settings/profile", hadPin: hasExistingPin }),
-    ],
-  ).catch(() => {});
 
   return NextResponse.json({
     ok: true,

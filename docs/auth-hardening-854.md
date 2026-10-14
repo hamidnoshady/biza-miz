@@ -265,6 +265,47 @@ The full finding-by-finding table with file:line evidence and test names is
 kept in the pull request description so review can check it against this
 document.
 
+## Follow-up audit (2026-10-11): the Profile security surface, F01–F13
+
+The issue's follow-up comment re-audited the Profile page after PR #889 and listed
+thirteen findings. Each was reproduced against `main` (`916df45`) before it was
+changed — all thirteen were still reachable — and the new tests were run
+against that base as well as the fix (35 of the 43 database cases and most of the
+component cases fail on `916df45`; the rest guard behaviour that must not
+regress). The guiding rule matches the rest of this page: one policy, applied by
+the server, with the screen reading the server's answer instead of guessing.
+
+| Finding | Fix | Proof |
+|---|---|---|
+| **F01** ending one session had no recent-auth bar | `revoke_one` in `src/app/api/sessions/self/route.ts` now needs recent authentication unless the target is the caller's *current* session (ending that one is a sign-out and clears the cookie). The check runs before the lookup, so a stale session cannot probe ids; a malformed id is `session_not_found` instead of a 500; the UPDATE and its `self.session_revoked` audit row share one tenant transaction. `revoke_others` (this business) and `revoke_all` (every business of the identity) are unchanged. The sessions card routes a `recent_auth_required` through the step-up prompt and retries the same session | `integration/profile-security-854.integration.test.ts` «F01» (stale/fresh, current-session exemption, another member's / another tenant's / malformed id, audit rollback, bulk scopes across two businesses of one identity); `profile-section.test.tsx` «F01» |
+| **F02** biometric offered to roles the API refuses | One rule, `src/lib/webauthn-policy.ts` (client-safe), resolved server-side by `src/lib/webauthn-access.ts`: every member may **list and remove** their own authenticators; only the PIN roles (`cashier`, `waiter`, `kitchen`) may **enrol**, and only where the deployment surface is writable. Both registration routes, the list and the delete route ask it; `GET /api/auth/webauthn/credentials` returns `canRegister`/`canRemove`/`registerBlockedBy`; the Profile page shows the card only if the role may enrol or already holds an authenticator. PIN-role biometric login and the P0.6 MFA gate are untouched — no privileged role gains a WebAuthn door | `webauthn-policy.test.ts` (all seven roles); integration «F02 / F12» (seven roles × Cloud/Hybrid/Local: page prop ⇔ route answer; a held authenticator stays listed and removable for every role; another member's / tenant's credential is 404) |
+| **F03** step-up advertised WebAuthn but verified a text code | `VERIFIABLE_STEP_UP_METHODS` in `src/lib/auth-contracts.ts` drops `webauthn` until a real challenge/response step-up exists: `GET /api/auth/step-up` never advertises it, `POST` answers `unsupported_method`, `challengeToken`/`hasWebauthn` are gone, and the prompt renders only verifiable methods. The success audit is written *before* the recent-auth cookie (a failed audit grants nothing); audits go through `recordSecurityAudit` | `auth-contracts.test.ts`, `step-up-prompt.test.tsx` «F03»; integration «F03» (a passkey holder is offered PIN only; PIN with Persian digits, password and confirmed TOTP still verify; audit failure ⇒ no cookie) |
+| **F04** password committed, then an audit failure lost the refreshed cookie | `changeOwnPassword` (`src/lib/password-reset.ts`) runs bcrypt outside and everything else inside one identity transaction: a compare-and-swap on the verified hash, the token-version bump, every other session's revocation (all businesses of the identity), the lockout reset and — through `beforeCommit` — the route's audit row and token signing. Any failure rolls all of it back and answers `500 credential_change_failed`; success returns `{ ok, tokenVersion }` and the cookie together | integration «F04» (injected audit failure ⇒ same hash, same token version, no session revoked, old cookie still valid; success ⇒ both businesses' sessions revoked, caller's kept, old cookie dead, new one valid); `security-audit.test.ts` |
+| **F05** phone audits swallowed by `.catch(() => {})` | `stampPhoneVerified({ audit })` (`src/lib/phone-otp.ts`) writes the stamp and its `auth.self_phone_changed` / `auth.self_phone_verified` row in one tenant transaction; the route answers `409 phone_taken` for the unique-index race and `500 credential_change_failed` otherwise, logging only the error message. OTP purpose and destination binding are unchanged; the audit carries the masked number only | integration «F05» (injected failure ⇒ number unchanged, no row; then both commit; payload has no full number or code) |
+| **F06** resend after a reload targeted the old number | The ceremony is the server's challenge row: `action: "resend"` re-sends to the live challenge's candidate under its own purpose (a `phone` in the body is ignored), `action: "cancel"` burns the self-service codes (no step-up needed — it only removes capability), a fresh send burns the other self purpose, and a re-verification whose number changed meanwhile is `409 code_wrong_phone`. The card renders from `pendingChallenge` and names nothing but the code on verify | integration «F06» (reload+resend, single use/replay, cancel, expiry, one ceremony at a time, admin-changed number); `profile-section.test.tsx` «F06» |
+| **F07** the current PIN accepted as the new one | `setPin` in `src/lib/team-service.ts`, for `selfService` only, bcrypt-compares the member's **own** active PIN under the membership lock and throws `pin_unchanged`; it also accepts a `beforeCommit` so `/api/auth/pin/self` writes its audit inside the rotation. An administrator's reset and a colleague's identical PIN stay allowed — #953 supersedes the comment's request to refuse other members' duplicates | integration «F07» (route + service layer, Persian digits, #953 shared PIN, audit rollback) |
+| **F08** PINs readable on screen | `PIN_INPUT_PROPS` (`type="password"`, `inputMode="numeric"`, `autoComplete="off"`) on all three Profile PIN fields; the step-up PIN field is masked too; `normalizeSecurityDigits` still maps Persian/Arabic-Indic digits | `profile-section.test.tsx` «F08 / F07», `step-up-prompt.test.tsx` «F08» |
+| **F09** a failed WebAuthn removal stranded the card | removal uses `api()` inside `try/finally`; busy is always released, the list stays, the error is explained and the action can be retried; a stale session goes through step-up | `webauthn-manager.test.tsx` «F09» |
+| **F10** sign-out reported success on failure | `src/components/auth/sign-out.ts` (`requestSignOut`) succeeds only on a 2xx; the card stays put on a server or network failure, says the member may still be signed in, and offers a retry | `sign-out.test.ts`, `profile-section.test.tsx` «F10» |
+| **F11** read-only credentials still had pending forms | `two-factor-settings.tsx` no longer adopts a pending enrolment when the factor set is read-only and guards every enrol/confirm/resend form; the phone card renders no pending verification when the login phone is read-only. The routes already refused (`409 login_managed_by_cloud`) — now the screen agrees | `two-factor-settings.test.tsx` «F11»; integration «F11» (Cloud/Hybrid/Local: every surface the page marks read-only is refused by its route, including a code requested before pairing and MFA confirm/resend; cancel and the staff PIN stay available) |
+| **F12** unsupported browser hid registered devices | browser support gates only *registration*; the list and removal follow `canRemove` | `webauthn-manager.test.tsx` «F12» |
+| **F13** hard-coded branch | `settings/profile/page.tsx` resolves the active branch (`resolveActiveLocation`) and the member's home branch under the tenant scope; `describeProfileBranches` (`src/lib/profile-branch.ts`, pure) sends only id and name; the card shows «شعبهٔ فعال» and, when different, «شعبهٔ اصلی» | `profile-branch.test.ts`, `profile-section.test.tsx` «F13», integration «F13» (another tenant's branch in the session is never shown) |
+
+**Shared seams with #947.** The phone-change transaction ends where #947's
+`ensurePersonnelFileForMembership` begins: that hook is designed to run after the
+commit, so on merge it belongs after `stampPhoneVerified`'s transaction (at the
+"post-commit" comment), never inside it. The `setPin` change is confined to the
+self-service branch; #947's Team doors (`createMembership`, `updateMembership`,
+`rehireMembership`, `setMemberPhone`, invitation acceptance) are untouched, and
+`/settings/team` is not modified.
+
+**Still open, deliberately.** The logout route itself still swallows a failed
+session revocation (the Profile card now reports a failed *request*, not a failed
+revocation inside a 200), and the sidebar/notice sign-out buttons keep their old
+pattern; WebAuthn *login* for privileged roles off-cloud stays behind the P0.6
+MFA gate as before. A WebAuthn step-up needs a real assertion ceremony before
+`webauthn` can return to `VERIFIABLE_STEP_UP_METHODS`.
+
 ## Gate results in this workspace
 
 | Step | Result |

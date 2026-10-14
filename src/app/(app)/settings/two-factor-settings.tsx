@@ -162,6 +162,9 @@ export function TwoFactorSettings({
     phone: string;
   } | null>(null);
 
+  /** A primitive, so a re-rendered parent passing a fresh object does not refetch. */
+  const surfaceReadOnly = surface?.readOnly;
+
   const load = useCallback(async () => {
     if (scope === "policy") {
       const { ok, data } = await api<{
@@ -185,6 +188,16 @@ export function TwoFactorSettings({
       setStatus(data);
       seedFromRequestedAt(data.smsChallengeRequestedAt);
       /**
+       * #854 follow-up (F11): a deployment that only *applies* the cloud's
+       * factors resumes nothing — a confirm form here would be a form the
+       * backend refuses. Any panel already open is closed with it.
+       */
+      if ((surfaceReadOnly ?? data.credential?.readOnly) === true) {
+        setPendingSetup(null);
+        setSmsFormOpen(false);
+        return;
+      }
+      /**
        * Issue #854 (P2.21) — resume a fresh-enrolment ceremony a reload left
        * mid-flight: the pending row names the number being proven, so the
        * confirm panel comes back with its destination and binding intact.
@@ -204,7 +217,7 @@ export function TwoFactorSettings({
     } else {
       setError(selfErrorMessage(data.error));
     }
-  }, [scope, isOwner, seedFromRequestedAt]);
+  }, [scope, isOwner, seedFromRequestedAt, surfaceReadOnly]);
 
   useEffect(() => {
     void load();
@@ -627,8 +640,20 @@ export function TwoFactorSettings({
             )}
           </div>
 
+          {/*
+            #854 follow-up (F11): with the factor set read-only, a half-finished
+            enrolment is described, never offered — completing or resending it
+            belongs to the deployment that owns the factors.
+          */}
+          {readOnly && (pendingTotp || pendingSms) ? (
+            <InfoBox>
+              یک فعال‌سازی نیمه‌تمام در حساب شما ثبت شده است؛ تکمیل یا لغو آن فقط از نسخهٔ ابری
+              ممکن است.
+            </InfoBox>
+          ) : null}
+
           {/* Pending TOTP confirmation */}
-          {pendingSetup?.method === "totp" ? (
+          {!readOnly && pendingSetup?.method === "totp" ? (
             <form
               onSubmit={confirmFactor}
               className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-4"
@@ -753,7 +778,7 @@ export function TwoFactorSettings({
               )}
             </div>
 
-            {smsFormOpen && !replacingSms ? (
+            {!readOnly && smsFormOpen && !replacingSms ? (
               <form onSubmit={startSms} className="flex flex-wrap items-end gap-2 pt-2">
                 <div className="min-w-56 flex-1">
                   <Field label={hasSms ? "شمارهٔ جدید برای دریافت کدها" : "شمارهٔ موبایل"}>
@@ -778,14 +803,14 @@ export function TwoFactorSettings({
                 </PrimaryButton>
               </form>
             ) : null}
-            {hasSms && !replacingSms ? (
+            {!readOnly && hasSms && !replacingSms ? (
               <p className="text-xs text-muted-foreground">
                 برای تغییر شماره، شمارهٔ جدید را وارد کنید؛ کد تأیید به شمارهٔ تازه می‌رود و تا
                 تأیید نهایی، همین شمارهٔ فعلی فعال می‌ماند.
               </p>
             ) : null}
 
-            {pendingSetup?.method === "sms_otp" ? (
+            {!readOnly && pendingSetup?.method === "sms_otp" ? (
               <form
                 onSubmit={confirmFactor}
                 className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-3"

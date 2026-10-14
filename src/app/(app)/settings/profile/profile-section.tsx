@@ -33,6 +33,8 @@ import {
   useResendCooldown,
 } from "@/components/auth/use-resend-cooldown";
 import { WebAuthnManager } from "@/components/auth/webauthn-manager";
+import { requestSignOut, signOutFailureMessage } from "@/components/auth/sign-out";
+import type { ProfileBranchInfo } from "@/lib/profile-branch";
 import { TwoFactorSettings } from "../two-factor-settings";
 
 export interface ProfileSectionProps {
@@ -51,6 +53,16 @@ export interface ProfileSectionProps {
   canUseMfa?: boolean;
   /** `apply`-only deployments render the cloud-owned cards read-only (P1.15). */
   credentialSurfaces?: Partial<Record<CredentialFieldName, CredentialSurface>>;
+  /** #854 follow-up (F13): active vs home branch, server-resolved. */
+  branch?: ProfileBranchInfo | null;
+  /**
+   * #854 follow-up (F02): whether the biometric card is shown at all —
+   * server-computed from `webauthn-policy.ts` (the role may enrol) or from the
+   * member already holding an authenticator they must be able to see and
+   * remove. A manager with no authenticator is not offered a ceremony the
+   * registration routes refuse.
+   */
+  showBiometric?: boolean;
 }
 
 type CredentialFieldName =
@@ -75,14 +87,31 @@ export function ProfileSection({
   isOwner,
   canUseMfa = true,
   credentialSurfaces = {},
+  branch = null,
+  showBiometric = true,
 }: ProfileSectionProps) {
   const router = useRouter();
   const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
 
+  /**
+   * #854 follow-up (F10): leave only once the server has confirmed the
+   * sign-out. The old handler ignored the response, so a 5xx or a dropped
+   * connection still navigated to /login and looked like success while the
+   * session stayed open on the server and in this browser.
+   */
   async function signOut() {
     setSigningOut(true);
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/login");
+    setSignOutError(null);
+    const result = await requestSignOut();
+    if (!result.ok) {
+      setSigningOut(false);
+      setSignOutError(signOutFailureMessage(result.reason));
+      return;
+    }
+    // The cookie is gone; `replace` keeps Back from returning to a page that
+    // now belongs to nobody, and `refresh` drops the cached server tree.
+    router.replace("/login");
     router.refresh();
   }
 
@@ -117,12 +146,40 @@ export function ProfileSection({
               </dd>
             </div>
           ) : null}
+          {branch?.active ? (
+            <div className="flex items-center justify-between gap-4 py-3">
+              <dt className="text-muted-foreground">شعبهٔ فعال</dt>
+              <dd className="font-semibold text-foreground">
+                {branch.active.name}
+                {!branch.home ? (
+                  <span className="ms-2 text-xs font-normal text-muted-foreground">
+                    (شعبهٔ اصلی شما)
+                  </span>
+                ) : null}
+              </dd>
+            </div>
+          ) : null}
+          {branch?.home ? (
+            <div className="flex items-center justify-between gap-4 py-3">
+              <dt className="text-muted-foreground">شعبهٔ اصلی</dt>
+              <dd className="font-semibold text-foreground">{branch.home.name}</dd>
+            </div>
+          ) : null}
         </dl>
+        {branch?.active && branch.canSwitch ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            شعبهٔ فعال را از انتخابگر شعبه در بالای صفحه تغییر دهید؛ شعبهٔ اصلی را مدیر کسب‌وکار
+            تعیین می‌کند.
+          </p>
+        ) : null}
 
-        <div className="mt-4 flex justify-end border-t border-border pt-4">
-          <SecondaryButton onClick={signOut} disabled={signingOut}>
-            {signingOut ? "در حال خروج…" : "خروج از حساب"}
-          </SecondaryButton>
+        <div className="mt-4 space-y-3 border-t border-border pt-4">
+          <ErrorBox>{signOutError}</ErrorBox>
+          <div className="flex justify-end">
+            <SecondaryButton onClick={() => void signOut()} disabled={signingOut}>
+              {signingOut ? "در حال خروج…" : signOutError ? "تلاش دوباره برای خروج" : "خروج از حساب"}
+            </SecondaryButton>
+          </div>
         </div>
       </SectionCard>
 
@@ -157,15 +214,19 @@ export function ProfileSection({
         Issue #854 (P2.28) — the canonical WebAuthn/biometric surface. It used
         to live only in the sidebar's overlay panel (unreachable from this
         page); the profile page now owns it, and the sidebar shortcut links
-        here. Available to every role: biometric login is per-device
-        self-service, not a business configuration.
+        here. #854 follow-up (F02): shown to the roles `webauthn-policy.ts`
+        lets enrol, and to anyone who already holds an authenticator (they
+        must be able to see and remove it) — never as an offer the
+        registration routes then refuse.
       */}
-      <SectionCard
-        title="ورود بیومتریک (اثر انگشت / چهره)"
-        description="دستگاه‌های ثبت‌شده برای ورود بیومتریک این حساب."
-      >
-        <WebAuthnManager surface={credentialSurfaces.webauthn_credential} />
-      </SectionCard>
+      {showBiometric ? (
+        <SectionCard
+          title="ورود بیومتریک (اثر انگشت / چهره)"
+          description="دستگاه‌های ثبت‌شده برای ورود بیومتریک این حساب."
+        >
+          <WebAuthnManager surface={credentialSurfaces.webauthn_credential} />
+        </SectionCard>
+      ) : null}
 
       <SelfSessionsCard
         onSignedOutEverywhere={() => {
@@ -326,7 +387,18 @@ function SelfPasswordCard({ surface }: { surface?: CredentialSurface }) {
  *
  * The step-up prompt is the shared one, so a PIN-only member is offered the PIN
  * door instead of a password box for an account that has no password (P1.6).
+ *
+ * #854 follow-up (F01): ending a single other session now needs the same
+ * recent authentication as the bulk actions, so «خاتمه دادن» goes through the
+ * step-up prompt on `recent_auth_required` and then retries that exact session
+ * — it used to report the refusal as a generic failure.
  */
+
+/** A revocation waiting behind the step-up prompt — one session, or a bulk action. */
+type RevokeRetry =
+  | { action: "revoke_one"; sessionId: string }
+  | { action: Exclude<SessionRevokeAction, "revoke_one"> };
+
 function SelfSessionsCard({
   onSignedOutEverywhere,
 }: {
@@ -337,8 +409,8 @@ function SelfSessionsCard({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [stepUpOpen, setStepUpOpen] = useState(false);
-  const [pending, setPending] = useState<SessionRevokeAction | null>(null);
-  const [retryAfterStepUp, setRetryAfterStepUp] = useState<SessionRevokeAction | null>(null);
+  const [pending, setPending] = useState<Exclude<SessionRevokeAction, "revoke_one"> | null>(null);
+  const [retryAfterStepUp, setRetryAfterStepUp] = useState<RevokeRetry | null>(null);
 
   const load = useCallback(async () => {
     const { ok, data } = await api<{ sessions?: SelfSessionView[] }>("/api/sessions/self");
@@ -357,20 +429,38 @@ function SelfSessionsCard({
     setBusy(true);
     setError(null);
     setNotice(null);
-    const { ok, data } = await api<{ error?: string }>("/api/sessions/self", {
-      method: "DELETE",
-      body: JSON.stringify({ action: "revoke_one", sessionId }),
-    });
+    const { ok, status, data } = await api<{ error?: string; signedOut?: boolean }>(
+      "/api/sessions/self",
+      {
+        method: "DELETE",
+        body: JSON.stringify({ action: "revoke_one", sessionId }),
+      },
+    );
     setBusy(false);
     if (!ok) {
-      setError(authErrorMessage(data.error) || "خاتمه دادن به نشست ممکن نشد.");
+      if (status === 403 && data.error === "recent_auth_required") {
+        setRetryAfterStepUp({ action: "revoke_one", sessionId });
+        setStepUpOpen(true);
+        return;
+      }
+      setError(
+        status === 0
+          ? "ارتباط با سرور برقرار نشد و نشست بسته نشد؛ دوباره تلاش کنید."
+          : authErrorMessage(data.error) || "خاتمه دادن به نشست ممکن نشد.",
+      );
+      // Already gone (ended elsewhere, or expired): show the list as it is now.
+      if (status === 404) await load();
+      return;
+    }
+    if (data.signedOut) {
+      onSignedOutEverywhere();
       return;
     }
     setNotice("نشست انتخاب‌شده خاتمه یافت.");
     await load();
   }
 
-  async function runAction(action: SessionRevokeAction) {
+  async function runAction(action: Exclude<SessionRevokeAction, "revoke_one">) {
     setPending(null);
     setBusy(true);
     setError(null);
@@ -382,11 +472,15 @@ function SelfSessionsCard({
     setBusy(false);
     if (!ok) {
       if (status === 403 && data.error === "recent_auth_required") {
-        setRetryAfterStepUp(action);
+        setRetryAfterStepUp({ action });
         setStepUpOpen(true);
         return;
       }
-      setError(authErrorMessage(data.error) || "خاتمه دادن به نشست‌ها ممکن نشد.");
+      setError(
+        status === 0
+          ? "ارتباط با سرور برقرار نشد و نشست‌ها بسته نشدند؛ دوباره تلاش کنید."
+          : authErrorMessage(data.error) || "خاتمه دادن به نشست‌ها ممکن نشد.",
+      );
       return;
     }
     if (action === "revoke_all") {
@@ -419,9 +513,11 @@ function SelfSessionsCard({
         }}
         onVerified={() => {
           setStepUpOpen(false);
-          const action = retryAfterStepUp;
+          const retry = retryAfterStepUp;
           setRetryAfterStepUp(null);
-          if (action) void runAction(action);
+          if (!retry) return;
+          if (retry.action === "revoke_one") void revokeOne(retry.sessionId);
+          else void runAction(retry.action);
         }}
       />
 
@@ -668,22 +764,35 @@ function SelfNativeDevicesCard() {
   );
 }
 
+interface SelfPhonePendingChallenge {
+  maskedPhone: string | null;
+  purpose: "change_login_phone" | "verify_login_phone";
+  /** When the code was sent — the resend cooldown counts from here (P2.25). */
+  requestedAt: string;
+  expiresAt: string;
+}
+
 interface SelfPhoneStatus {
   phone: string | null;
   phoneState: "none" | "unverified" | "verified";
   otpWindowOpen?: boolean;
   recentAuth?: boolean;
   /** A live challenge, so a reload can resume the verification (P2.19). */
-  pendingChallenge?: {
-    maskedPhone: string | null;
-    purpose: "change_login_phone" | "verify_login_phone";
-    /** When the code was sent — the resend cooldown counts from here (P2.25). */
-    requestedAt: string;
-    expiresAt: string;
-  } | null;
+  pendingChallenge?: SelfPhonePendingChallenge | null;
   credential?: CredentialSurface;
   error?: string;
   message?: string;
+}
+
+/** `POST /api/auth/phone/self` — every action answers in this shape. */
+interface SelfPhoneActionResult {
+  status?: "sent" | "verified" | "cancelled";
+  maskedPhone?: string;
+  purpose?: SelfPhonePendingChallenge["purpose"];
+  expiresInSeconds?: number;
+  error?: string;
+  message?: string;
+  retryAfterMs?: number;
 }
 
 const PHONE_ERROR_MESSAGES: Record<string, string> = {
@@ -693,19 +802,50 @@ const PHONE_ERROR_MESSAGES: Record<string, string> = {
   rate_limited: "تعداد درخواست‌ها بیش از حد مجاز است؛ کمی صبر کنید.",
   sms_dispatch_failed: "ارسال پیامک ممکن نشد. کمی بعد دوباره تلاش کنید.",
   recent_auth_required: "برای تغییر شمارهٔ موبایل ورود، ابتدا هویت خود را مجدداً تأیید کنید.",
+  network_error: "ارتباط با سرور برقرار نشد؛ اتصال را بررسی کنید و دوباره تلاش کنید.",
 };
 
+/** The server's verdicts that mean "this code is finished; start again". */
+const PHONE_RESTART_ERRORS = new Set(["challenge_expired", "code_wrong_phone", "phone_taken"]);
+
+function phoneErrorMessage(data: { error?: string; message?: string }, fallback: string): string {
+  return (
+    data.message ||
+    (data.error && PHONE_ERROR_MESSAGES[data.error]) ||
+    (data.error ? authErrorMessage(data.error) : null) ||
+    fallback
+  );
+}
+
+/**
+ * The member's login phone (Phase 42 / #854 P1.16 / P2.19 / P2.25).
+ *
+ * #854 follow-up:
+ *  - **F06** — the verification in flight is the *server's* challenge
+ *    (`pendingChallenge` from `GET`), never the browser's memory of a number.
+ *    After a reload the card used to know only a masked string, so «ارسال مجدد
+ *    کد» sent no number and the server re-sent to the number *on file* under
+ *    the verify purpose — the code for the new number never came again. Resend
+ *    is now `action: "resend"` (the server re-sends to the challenge's own
+ *    candidate), cancel is `action: "cancel"` (the server burns the code), and
+ *    verify names nothing but the code.
+ *  - **F11** — with the login phone read-only (Hybrid), no form is rendered at
+ *    all, including a pending verification adopted from the server.
+ */
 function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
   const [status, setStatus] = useState<SelfPhoneStatus | null>(null);
   const [editing, setEditing] = useState(false);
   const [phoneInput, setPhoneInput] = useState("");
   const [codeInput, setCodeInput] = useState("");
-  const [maskedSentTo, setMaskedSentTo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [stepUpOpen, setStepUpOpen] = useState(false);
   const [retryAfterStepUp, setRetryAfterStepUp] = useState<(() => void) | null>(null);
+
+  const readOnly = (surface ?? status?.credential)?.readOnly === true;
+  /** The verification in flight — the server's copy, or nothing (F06/F11). */
+  const pending = readOnly ? null : (status?.pendingChallenge ?? null);
 
   /**
    * Issue #854 (P2.25) — the resend cooldown, seeded from the challenge's
@@ -719,113 +859,158 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
     applyRetryAfterMs,
     clear: clearCooldown,
   } = useResendCooldown(60);
-  const nowTick = useNowTick(Boolean(maskedSentTo && status?.pendingChallenge?.expiresAt));
+  const nowTick = useNowTick(Boolean(pending?.expiresAt));
+  const expired = Boolean(pending && new Date(pending.expiresAt).getTime() <= nowTick);
 
   const load = useCallback(async () => {
     const { ok, data } = await api<SelfPhoneStatus>("/api/auth/phone/self");
     if (ok) {
+      // The error box is left alone: a refresh that follows a refused action
+      // must not wipe the explanation of why it was refused.
       setStatus(data);
-      /** Reopen a verification that was already in flight. */
-      if (data.pendingChallenge && !maskedSentTo) {
-        setMaskedSentTo(data.pendingChallenge.maskedPhone);
-        setEditing(data.pendingChallenge.purpose === "change_login_phone");
-        seedFromRequestedAt(data.pendingChallenge.requestedAt);
-      }
+      if (data.pendingChallenge) seedFromRequestedAt(data.pendingChallenge.requestedAt);
     } else {
       setError(
         (data.error && PHONE_ERROR_MESSAGES[data.error]) ||
           "بارگذاری شمارهٔ موبایل ممکن نشد.",
       );
     }
-    // `maskedSentTo` is intentionally not a dependency: this effect must run
-    // once, and reading it only decides whether an in-flight challenge is
-    // adopted on first load. `seedFromRequestedAt` is a stable hook callback.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedFromRequestedAt]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  async function sendOtp(e?: React.FormEvent) {
-    if (e) e.preventDefault();
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    const { ok, status: httpStatus, data } = await api<{
-      status?: string;
-      maskedPhone?: string;
-      error?: string;
-      message?: string;
-      retryAfterMs?: number;
-    }>("/api/auth/phone/self", {
-      method: "POST",
-      body: JSON.stringify({
-        action: "send",
-        phone: editing ? phoneInput.trim() : undefined,
-      }),
-    });
-    setBusy(false);
-    if (!ok) {
-      if (httpStatus === 403 && data.error === "recent_auth_required") {
-        setRetryAfterStepUp(() => () => void sendOtp());
-        setStepUpOpen(true);
-        return;
-      }
-      // Issue #854 (P2.25) — the limiter's own answer drives the countdown.
-      if (httpStatus === 429) applyRetryAfterMs(data.retryAfterMs);
-      setError(
-        data.message ||
-          (data.error && PHONE_ERROR_MESSAGES[data.error]) ||
-          "ارسال کد تأیید ممکن نشد.",
-      );
-      return;
-    }
-    setMaskedSentTo(data.maskedPhone ?? phoneInput.trim());
+  /** Forget the local half of a finished or abandoned ceremony. */
+  function resetCeremony() {
+    setCodeInput("");
+    clearCooldown();
+  }
+
+  /**
+   * Adopt a code the server just sent, without waiting for the next `GET`:
+   * the response names the purpose and the masked destination, and the
+   * follow-up `load()` replaces this with the challenge row itself.
+   */
+  function adoptSentChallenge(data: SelfPhoneActionResult) {
+    const now = Date.now();
+    setStatus((current) =>
+      current && data.purpose
+        ? {
+            ...current,
+            pendingChallenge: {
+              maskedPhone: data.maskedPhone ?? null,
+              purpose: data.purpose,
+              requestedAt: new Date(now).toISOString(),
+              expiresAt: new Date(now + (data.expiresInSeconds ?? 300) * 1000).toISOString(),
+            },
+          }
+        : current,
+    );
     setCodeInput("");
     startCooldown();
   }
 
-  async function verifyOtp(e: React.FormEvent) {
-    e.preventDefault();
+  /** POST one action; owns the busy flag, the step-up hand-off and the 429 countdown. */
+  async function post(
+    body: Record<string, unknown>,
+    retry: () => void,
+  ): Promise<{ ok: boolean; data: SelfPhoneActionResult; stepUp: boolean }> {
     setBusy(true);
     setError(null);
-    const { ok, status: httpStatus, data } = await api<{
-      status?: string;
-      error?: string;
-      message?: string;
-    }>("/api/auth/phone/self", {
-      method: "POST",
-      body: JSON.stringify({
-        action: "verify",
-        code: codeInput.trim(),
-        phone: editing ? phoneInput.trim() : undefined,
-      }),
-    });
+    const { ok, status: httpStatus, data } = await api<SelfPhoneActionResult>(
+      "/api/auth/phone/self",
+      { method: "POST", body: JSON.stringify(body) },
+    );
     setBusy(false);
+    if (!ok && httpStatus === 403 && data.error === "recent_auth_required") {
+      setRetryAfterStepUp(() => retry);
+      setStepUpOpen(true);
+      return { ok, data, stepUp: true };
+    }
+    // Issue #854 (P2.25) — the limiter's own answer drives the countdown.
+    if (!ok && httpStatus === 429) applyRetryAfterMs(data.retryAfterMs);
+    return { ok, data, stepUp: false };
+  }
+
+  /** A first code — to the typed candidate while editing, else to the number on file. */
+  async function sendOtp(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    setNotice(null);
+    const typed = editing ? phoneInput.trim() : "";
+    const { ok, data, stepUp } = await post(
+      { action: "send", phone: typed || undefined },
+      () => void sendOtp(),
+    );
+    if (stepUp) return;
     if (!ok) {
-      if (httpStatus === 403 && data.error === "recent_auth_required") {
-        setRetryAfterStepUp(() => () => void verifyOtp(e));
-        setStepUpOpen(true);
-        return;
-      }
-      setError(
-        data.message ||
-          (data.error && PHONE_ERROR_MESSAGES[data.error]) ||
-          "تأیید کد پیامکی ممکن نشد.",
-      );
+      setError(phoneErrorMessage(data, "ارسال کد تأیید ممکن نشد."));
       return;
     }
-    setMaskedSentTo(null);
+    adoptSentChallenge(data);
+    void load();
+  }
+
+  /** Re-send the code in flight — the server picks the number and the purpose (F06). */
+  async function resendOtp() {
+    setNotice(null);
+    const { ok, data, stepUp } = await post({ action: "resend" }, () => void resendOtp());
+    if (stepUp) return;
+    if (!ok) {
+      setError(phoneErrorMessage(data, "ارسال مجدد کد ممکن نشد."));
+      if (data.error && PHONE_RESTART_ERRORS.has(data.error)) {
+        resetCeremony();
+        await load();
+      }
+      return;
+    }
+    adoptSentChallenge(data);
+    setNotice("کد تأیید دوباره ارسال شد.");
+    void load();
+  }
+
+  async function verifyOtp(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    setNotice(null);
+    const { ok, data, stepUp } = await post(
+      { action: "verify", code: codeInput.trim() },
+      () => void verifyOtp(),
+    );
+    if (stepUp) return;
+    if (!ok) {
+      setError(phoneErrorMessage(data, "تأیید کد پیامکی ممکن نشد."));
+      if (data.error && PHONE_RESTART_ERRORS.has(data.error)) {
+        resetCeremony();
+        await load();
+      }
+      return;
+    }
+    resetCeremony();
     setEditing(false);
-    setCodeInput("");
-    clearCooldown();
-    setNotice("شمارهٔ موبایل ورود شما با موفقیت تأیید شد.");
+    setPhoneInput("");
+    setNotice(
+      data.purpose === "change_login_phone"
+        ? "شمارهٔ موبایل ورود شما تغییر کرد و تأیید شد."
+        : "شمارهٔ موبایل ورود شما با موفقیت تأیید شد.",
+    );
+    await load();
+  }
+
+  /** Cancel burns the code on the server, so a reload cannot bring it back (F06). */
+  async function cancelOtp() {
+    setNotice(null);
+    const { ok, data } = await post({ action: "cancel" }, () => void cancelOtp());
+    if (!ok) {
+      setError(phoneErrorMessage(data, "لغو کد ممکن نشد؛ دوباره تلاش کنید."));
+      return;
+    }
+    resetCeremony();
+    setEditing(false);
+    setPhoneInput("");
     await load();
   }
 
   const verified = status?.phoneState === "verified";
-  const readOnly = surface?.readOnly === true;
 
   return (
     <SectionCard
@@ -835,7 +1020,7 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
 
-      <CloudManagedNotice surface={surface} />
+      <CloudManagedNotice surface={surface ?? status?.credential} />
 
       <StepUpPrompt
         open={stepUpOpen}
@@ -856,58 +1041,74 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
 
       {!status ? (
         <LoadingSkeleton rows={2} />
-      ) : maskedSentTo ? (
+      ) : pending ? (
         <form onSubmit={verifyOtp} className="space-y-3">
           <p className="text-xs text-muted-foreground">
-            کد ۶ رقمی ارسال‌شده به {toPersianDigits(maskedSentTo)} را وارد کنید:
+            {pending.purpose === "change_login_phone"
+              ? "کد ۶ رقمی ارسال‌شده به شمارهٔ جدید"
+              : "کد ۶ رقمی ارسال‌شده به"}{" "}
+            <span dir="ltr">{toPersianDigits(pending.maskedPhone ?? "")}</span> را وارد کنید:
           </p>
           {/*
             Issue #854 (P2.25) — the challenge has a deadline; say how long is
             left instead of letting a correct-looking code fail unexplained.
           */}
-          {status.pendingChallenge?.expiresAt ? (
-            <p className="text-xs text-muted-foreground">
-              {smsChallengeExpiryMessage(status.pendingChallenge.expiresAt, nowTick)}
-            </p>
-          ) : null}
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="min-w-44 flex-1">
-              <input
-                dir="ltr"
-                inputMode="numeric"
-                maxLength={6}
-                required
-                value={codeInput}
-                onChange={(e) => setCodeInput(normalizeSecurityDigits(e.target.value, 6))}
-                placeholder="123456"
-                className={inputClass}
-              />
+          <p className="text-xs text-muted-foreground" aria-live="polite">
+            {expired
+              ? "اعتبار این کد تمام شده است؛ برای ادامه، کد تازه‌ای درخواست کنید."
+              : smsChallengeExpiryMessage(pending.expiresAt, nowTick)}
+          </p>
+          {expired ? (
+            <div className="flex flex-wrap gap-2">
+              <PrimaryButton
+                type="button"
+                onClick={() => {
+                  // The server has already let the code lapse; start over from
+                  // the right place — the number field for a change, the
+                  // «ارسال کد تأیید» button for a re-verification.
+                  resetCeremony();
+                  setEditing(pending.purpose === "change_login_phone");
+                  setPhoneInput("");
+                  void load();
+                }}
+                disabled={busy}
+              >
+                درخواست کد تازه
+              </PrimaryButton>
             </div>
-            <PrimaryButton type="submit" disabled={busy || codeInput.trim().length < 6}>
-              تأیید کد
-            </PrimaryButton>
-            <SecondaryButton
-              type="button"
-              onClick={() => void sendOtp()}
-              disabled={busy || coolingDown}
-            >
-              {coolingDown
-                ? `ارسال مجدد کد (${toPersianDigits(resendWait)})`
-                : "ارسال مجدد کد"}
-            </SecondaryButton>
-            <SecondaryButton
-              type="button"
-              onClick={() => {
-                // Cancellation sends no mutation; the in-flight challenge
-                // simply expires on the server's own clock.
-                setMaskedSentTo(null);
-                clearCooldown();
-              }}
-              disabled={busy}
-            >
-              انصراف
-            </SecondaryButton>
-          </div>
+          ) : (
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-44 flex-1">
+                <input
+                  dir="ltr"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  aria-label="کد ۶ رقمی تأیید"
+                  maxLength={6}
+                  required
+                  value={codeInput}
+                  onChange={(e) => setCodeInput(normalizeSecurityDigits(e.target.value, 6))}
+                  placeholder="123456"
+                  className={inputClass}
+                />
+              </div>
+              <PrimaryButton type="submit" disabled={busy || codeInput.trim().length < 6}>
+                تأیید کد
+              </PrimaryButton>
+              <SecondaryButton
+                type="button"
+                onClick={() => void resendOtp()}
+                disabled={busy || coolingDown}
+              >
+                {coolingDown
+                  ? `ارسال مجدد کد (${toPersianDigits(resendWait)})`
+                  : "ارسال مجدد کد"}
+              </SecondaryButton>
+              <SecondaryButton type="button" onClick={() => void cancelOtp()} disabled={busy}>
+                انصراف
+              </SecondaryButton>
+            </div>
+          )}
         </form>
       ) : (
         <div className="space-y-4">
@@ -967,6 +1168,7 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
                   <input
                     dir="ltr"
                     inputMode="tel"
+                    autoComplete="tel"
                     required
                     value={phoneInput}
                     onChange={(e) => setPhoneInput(e.target.value)}
@@ -1015,7 +1217,28 @@ const PIN_ERROR_MESSAGES: Record<string, string> = {
  * one should not have to ask an admin (and tell them the moment it changed).
  * The route behind this card verifies the current PIN and requires the session's
  * recent-authentication window, so an unlocked terminal is not enough.
+ *
+ * #854 follow-up:
+ *  - **F07** — `pin_unchanged` is refused server-side (against the member's
+ *    own PIN only) and said in Persian here;
+ *  - **F08** — all three PIN fields are masked (`type="password"`) while still
+ *    opening the numeric keyboard and normalising Persian/Arabic digits, so a
+ *    PIN typed at a shared till is not readable over a shoulder;
+ *  - a `recent_auth_required` refusal now retries the same change after the
+ *    step-up instead of making the member submit the form again.
  */
+
+/** Shared attributes of a masked numeric secret field (#854 F08). */
+const PIN_INPUT_PROPS = {
+  type: "password",
+  dir: "ltr",
+  inputMode: "numeric",
+  // Not "new-password": a password manager's generated suggestion is never a PIN.
+  autoComplete: "off",
+  maxLength: 12,
+  required: true,
+} as const;
+
 function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
   const [status, setStatus] = useState<SelfPinStatus | null>(null);
   const [open, setOpen] = useState(false);
@@ -1040,8 +1263,16 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
 
   const readOnly = (surface ?? status?.credential)?.readOnly === true;
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  async function submit(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    if (confirmPin !== newPin) {
+      setError(PIN_ERROR_MESSAGES.pin_confirmation_mismatch);
+      return;
+    }
+    if (status?.hasPin && currentPin === newPin) {
+      setError(PIN_ERROR_MESSAGES.pin_unchanged);
+      return;
+    }
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -1059,14 +1290,17 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
     setBusy(false);
     if (!ok) {
       if (httpStatus === 403 && data.error === "recent_auth_required") {
-        setRetryAfterStepUp(() => () => undefined);
+        // Same values, same request, once the session is fresh again.
+        setRetryAfterStepUp(() => () => void submit());
         setStepUpOpen(true);
         return;
       }
       setError(
         data.message ||
           (data.error && PIN_ERROR_MESSAGES[data.error]) ||
-          "تغییر رمز عددی ممکن نشد.",
+          (httpStatus === 0
+            ? "ارتباط با سرور برقرار نشد و رمز عددی تغییر نکرد؛ دوباره تلاش کنید."
+            : "تغییر رمز عددی ممکن نشد."),
       );
       return;
     }
@@ -1129,10 +1363,7 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
               {status.hasPin ? (
                 <Field label="رمز عددی فعلی">
                   <input
-                    dir="ltr"
-                    inputMode="numeric"
-                    maxLength={12}
-                    required
+                    {...PIN_INPUT_PROPS}
                     value={currentPin}
                     onChange={(e) => setCurrentPin(normalizeSecurityDigits(e.target.value, 12))}
                     className={inputClass}
@@ -1142,10 +1373,7 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="رمز عددی جدید" hint={status.pinPolicyHint}>
                   <input
-                    dir="ltr"
-                    inputMode="numeric"
-                    maxLength={12}
-                    required
+                    {...PIN_INPUT_PROPS}
                     value={newPin}
                     onChange={(e) => setNewPin(normalizeSecurityDigits(e.target.value, 12))}
                     className={inputClass}
@@ -1153,10 +1381,7 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
                 </Field>
                 <Field label="تکرار رمز عددی جدید">
                   <input
-                    dir="ltr"
-                    inputMode="numeric"
-                    maxLength={12}
-                    required
+                    {...PIN_INPUT_PROPS}
                     value={confirmPin}
                     onChange={(e) => setConfirmPin(normalizeSecurityDigits(e.target.value, 12))}
                     className={inputClass}
@@ -1166,11 +1391,20 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
               <div className="flex gap-2">
                 <PrimaryButton
                   type="submit"
-                  disabled={busy || !newPin || (status.hasPin && !currentPin)}
+                  disabled={busy || !newPin || !confirmPin || (status.hasPin && !currentPin)}
                 >
                   {busy ? "در حال ذخیره…" : "ذخیرهٔ رمز عددی"}
                 </PrimaryButton>
-                <SecondaryButton onClick={() => setOpen(false)} disabled={busy}>
+                <SecondaryButton
+                  onClick={() => {
+                    setOpen(false);
+                    setCurrentPin("");
+                    setNewPin("");
+                    setConfirmPin("");
+                    setError(null);
+                  }}
+                  disabled={busy}
+                >
                   انصراف
                 </SecondaryButton>
               </div>

@@ -102,7 +102,10 @@ export interface SessionRevokeResponse {
 }
 
 export const SESSION_REVOKE_ACTIONS = [
-  /** End one named session in this business. */
+  /**
+   * End one named session in this business. Requires recent auth unless it is
+   * the caller's *current* session — ending that one is a sign-out (#854 F01).
+   */
   "revoke_one",
   /** End every other session in this business. Requires recent auth. */
   "revoke_others",
