@@ -395,7 +395,9 @@ async function run() {
     const landed = await until(async () => page.url().includes("/accounting/") || page.url().endsWith("/accounting"));
     check("the accounting door lands inside the workspace", Boolean(landed), page.url());
     const body = await until(async () => {
-      const text = await page.evaluate(() => document.body?.innerText ?? "");
+      // /accounting forwards to a section client-side; a read that lands
+      // mid-navigation loses its context, so treat it as "not painted yet".
+      const text = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
       return text.length > 200 ? text : null;
     });
     check("the workspace paints real content", Boolean(body), "empty body");
