@@ -286,7 +286,10 @@ async function eligibleItemOrThrow(
     );
   }
   if (item.tracking === "serial") {
-    throw new RetailWarehouseDocumentError("کالای سریالی از مسیر «سریال دستگاه» ثبت می‌شود.");
+    // Issue #795 — serialized intake with accounting is the purchase receipt
+    // (receiveItemPurchase with exact serials); a warehouse adjustment
+    // document on a one-row-per-unit serial would bypass that chain.
+    throw new RetailWarehouseDocumentError("کالای سریالی از مسیر «دریافت خرید» با سریال دقیق ثبت می‌شود.");
   }
   if (item.tracking === "weight") {
     throw new RetailWarehouseDocumentError("کالای وزنی از مسیر وزن/عیار ثبت می‌شود.");

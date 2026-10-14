@@ -26,7 +26,7 @@ import {
 import { ACCOUNTING_NAV_GROUPS, ACCOUNTING_SECTIONS } from "@/app/(app)/accounting/accounting-nav";
 import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
 import { CRM_NAV_ITEMS } from "@/app/(app)/crm/crm-nav";
-import { crmSectionHref } from "@/app/(app)/crm/crm-routes";
+import { CRM_SECTION_KEYS, crmSectionHref } from "@/app/(app)/crm/crm-routes";
 import { GROWTH_NAV_ITEMS } from "@/app/(app)/growth/growth-nav";
 import { growthSectionHref } from "@/app/(app)/growth/growth-routes";
 import { CMS_NAV_ITEMS, WP_NAV_ITEMS } from "@/app/(app)/websites/website-nav";
@@ -122,9 +122,19 @@ describe("what each app owns", () => {
   });
 
   it("keeps the CRM's own records in the CRM", () => {
-    const keys = CRM_NAV_ITEMS.map((item) => item.key);
+    // The CRM's *sections*, not just its rail: «اشخاص تکراری» is reached inside
+    // the «کیفیت داده» workspace now, and a sub-section is still a section this
+    // app owns — its route, its gate and its data live here. (What must not
+    // happen is Growth growing its own copy, which the half below checks.)
+    const keys = [...CRM_SECTION_KEYS];
     for (const owned of ["activities", "cases", "deals", "segments", "duplicates", "consent"]) {
       expect(keys).toContain(owned);
+    }
+    // The destinations themselves stay on the rail for the ones that are not
+    // sub-sections.
+    const navKeys = CRM_NAV_ITEMS.map((item) => item.key);
+    for (const owned of ["activities", "cases", "deals", "segments", "consent"]) {
+      expect(navKeys).toContain(owned);
     }
     // ...and Growth does not grow a second copy of them.
     const growthKeys = GROWTH_NAV_ITEMS.map((item) => item.key) as string[];

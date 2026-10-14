@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requirePlatformAdmin, requirePlatformCapability, platformAudit, withPlatformScope } from "@/lib/platform-auth";
-import { listPayments } from "@/lib/wallet-service";
+import { getPaymentById, listPayments } from "@/lib/wallet-service";
 import { listPlatformMessageTopUpRequests, reviewMessageTopUpRequest } from "@/lib/messaging-billing";
 import { reviewManualPayment } from "@/lib/billing-service";
 import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
@@ -8,9 +8,7 @@ import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
 /**
  * The ONE manual payment review queue (migration 0176): bank-transfer payments
  * awaiting super-admin approval AND messaging credit top-up requests, side by
- * side in `/platform/billing`'s payments tab. The app consoles no longer carry
- * their own review UIs — approval and rejection live only here, through the
- * same canonical services the automatic flows use.
+ * side in `/platform/billing`'s payments tab.
  */
 export const GET = withPlatformScope(async (req: Request) => {
   const { error } = await requirePlatformAdmin();
@@ -18,13 +16,16 @@ export const GET = withPlatformScope(async (req: Request) => {
   const url = new URL(req.url);
   const pendingOnly = url.searchParams.get("pendingOnly") !== "0";
   const [payments, topUps] = await Promise.all([
-    listPayments({ status: pendingOnly ? "pending" : undefined, limit: 100 }),
+    listPayments({ limit: 100 }),
     listPlatformMessageTopUpRequests(pendingOnly),
   ]);
   return NextResponse.json({
-    // Only payments that actually need a human: the manual gateway's pending
-    // rows, or a gateway payment stuck pending (webhook recovery).
-    manualPayments: payments.filter((p) => p.gateway === "manual" || p.status === "pending"),
+    manualPayments: payments.filter((p) => {
+      if (pendingOnly) {
+        return p.status === "pending" || (p.status === "verified" && p.fulfilmentStatus === "failed");
+      }
+      return p.gateway === "manual" || p.status === "pending" || p.fulfilmentStatus === "failed";
+    }),
     messageTopUps: topUps,
   });
 });
@@ -45,8 +46,11 @@ export const POST = withPlatformScope(async (req: Request) => {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  if (body.action !== "approve" && body.action !== "reject") {
+    return NextResponse.json({ error: "invalid_action" }, { status: 400 });
+  }
+  const action = body.action;
   const kind = body.kind === "message_topup" ? "message_topup" : "payment";
-  const action = body.action === "reject" ? "reject" : "approve";
   const id = String(body.id ?? "");
   if (!id) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
 
@@ -80,14 +84,25 @@ export const POST = withPlatformScope(async (req: Request) => {
       action,
       platformAdminId: guard.session.padmin,
     });
+    const updated = await getPaymentById(id);
     await platformAudit({
       adminId: guard.session.padmin,
-      action: action === "approve" ? "manual_payment.approved" : "manual_payment.rejected",
+      businessId: updated?.businessId,
+      action:
+        action === "approve"
+          ? "manual_payment.approved"
+          : status === "failed"
+            ? "manual_payment.rejected"
+            : "manual_payment.reject_noop_verified",
       entity: "billing_payments",
       entityId: id,
-      payload: { kind: "payment", action },
+      payload: { kind: "payment", action, status },
     });
-    return NextResponse.json({ ok: true, status });
+    return NextResponse.json({
+      ok: true,
+      status,
+      fulfilmentStatus: updated?.fulfilmentStatus ?? "succeeded",
+    });
   } catch (err) {
     if (err instanceof GatewayError) {
       return NextResponse.json(

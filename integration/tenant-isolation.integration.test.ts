@@ -125,6 +125,11 @@ beforeAll(async () => {
 
   Object.assign(alpha, await seedBusiness("Alpha Cafe", "alpha"));
   Object.assign(beta, await seedBusiness("Beta Cafe", "beta"));
+  await ownerClient.query(
+    `INSERT INTO dashboard_widget_layout_state (business_id, role)
+     VALUES ($1, 'owner'), ($2, 'owner')`,
+    [alpha.businessId, beta.businessId],
+  );
 
   appClient = new Client({
     connectionString: urlFor(databaseName, { name: APP_ROLE, password: APP_PASSWORD }),
@@ -243,6 +248,12 @@ describe("every tenant table is protected", () => {
     expect([...EXEMPT_TABLES].filter((t) => t.startsWith("platform_")).sort()).toEqual([
       "platform_admins",
       "platform_ai_gateway",
+      // Issue #812 — the Superadmin AI control plane's global half. The runtime
+      // mode → LiteLLM alias map is a platform catalogue every business reads the
+      // same published rows of, so it carries no business_id. Its tenant-facing
+      // counterparts (ai_agent_assignments, ai_memory, ai_research_runs,
+      // ai_research_sources) are RLS-protected and absent from this list.
+      "platform_ai_modes",
       "platform_audit_log",
       // Migration 0132 — the console's whole-system backup. Its config, run
       // history, hashed peer tokens, the peers this install may restore from, and
@@ -356,6 +367,7 @@ describe("reads are confined to the current business", () => {
       expect(await countIn("businesses")).toBe(1);
       expect(await countIn("locations")).toBe(1);
       expect(await countIn("menu_categories")).toBe(1);
+      expect(await countIn("dashboard_widget_layout_state")).toBe(1);
 
       const { rows } = await appClient.query<{ name: string }>("SELECT name FROM menu_categories");
       expect(rows[0].name).toBe("category-alpha");
@@ -364,6 +376,7 @@ describe("reads are confined to the current business", () => {
     await asBusiness(beta.businessId, async () => {
       const { rows } = await appClient.query<{ name: string }>("SELECT name FROM menu_categories");
       expect(rows[0].name).toBe("category-beta");
+      expect(await countIn("dashboard_widget_layout_state")).toBe(1);
     });
   });
 
@@ -384,6 +397,22 @@ describe("reads are confined to the current business", () => {
     });
   });
 
+  it("cannot read or create another business's role-default layout state", async () => {
+    await asBusiness(alpha.businessId, async () => {
+      const foreign = await appClient.query(
+        "SELECT * FROM dashboard_widget_layout_state WHERE business_id = $1",
+        [beta.businessId],
+      );
+      expect(foreign.rowCount).toBe(0);
+
+      await expect(appClient.query(
+        `INSERT INTO dashboard_widget_layout_state (business_id, role)
+         VALUES ($1, 'manager')`,
+        [beta.businessId],
+      )).rejects.toMatchObject({ code: "42501" });
+    });
+  });
+
   it("reads nothing at all with no tenant context — fail closed, not fail open", async () => {
     await appClient.query("SELECT set_config('app.business_id', '', false)");
     await appClient.query("SELECT set_config('app.rls_bypass', '', false)");
@@ -392,6 +421,7 @@ describe("reads are confined to the current business", () => {
     expect(await countIn("locations")).toBe(0);
     expect(await countIn("menu_categories")).toBe(0);
     expect(await countIn("orders")).toBe(0);
+    expect(await countIn("dashboard_widget_layout_state")).toBe(0);
     expect(await countIn("users")).toBe(0);
   });
 

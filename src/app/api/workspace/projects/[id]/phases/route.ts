@@ -25,7 +25,7 @@ export const GET = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "view", true);
+      await requireProjectCapability(owner, id, "view");
       return NextResponse.json({ phases: await listPhases(id) });
     } catch (err) {
       return handleWorkspaceError(err);
@@ -40,14 +40,21 @@ export const POST = withTenantScope(
     const { id } = await context.params;
     const body = await readBody(request);
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       if (typeof body.templateKey === "string" && body.templateKey) {
         const templates = await listTemplates(owner.businessId);
         const template = templates.find((t) => t.key === body.templateKey);
         if (!template) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
         const project = await getWorkspaceProject(owner.businessId, id);
-        await applyTemplate(owner, id, template, project?.startDate ?? null);
-        return NextResponse.json({ phases: await listPhases(id) }, { status: 201 });
+        // `mode`: merge (default — adds only what is missing, so re-applying
+        // never duplicates) or replace (also removes EMPTY phases the template
+        // does not name). `dryRun` returns the exact plan without writing —
+        // the preview the member approves is the change that lands.
+        const mode = body.mode === "replace" ? "replace" : "merge";
+        const dryRun = body.dryRun === true;
+        const plan = await applyTemplate(owner, id, template, project?.startDate ?? null, { mode, dryRun });
+        if (dryRun) return NextResponse.json({ plan });
+        return NextResponse.json({ phases: await listPhases(id), plan }, { status: 201 });
       }
       const phases = await addPhase(owner, id, {
         name: String(body.name ?? ""),
@@ -68,7 +75,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     const body = await readBody(request);
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       const phases = await updatePhase(owner, id, String(body.phaseId ?? ""), {
         name: body.name as string | undefined,
         status: body.status as string | undefined,
@@ -90,7 +97,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     const phaseId = new URL(request.url).searchParams.get("phaseId") ?? "";
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       return NextResponse.json({ phases: await deletePhase(id, phaseId) });
     } catch (err) {
       return handleWorkspaceError(err);

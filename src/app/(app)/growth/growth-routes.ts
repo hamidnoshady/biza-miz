@@ -6,34 +6,20 @@
  * its own **main** menu in the dashboard's app slot (src/lib/app-shells.ts),
  * rather than a second menu drawn inside the page next to the accounting nav.
  *
- * These keys are the single source of truth for that menu (`growth-nav.ts`
- * labels them) and for the server-side role gate: a cashier may open only
- * `loyalty`, the one floor surface the old flat pages gave them; the management
- * dashboard and the compensation data stay owner/manager, exactly the way the
- * ledger's payroll tab draws its line.
+ * The section keys and their permission gate come from the capability
+ * contract in `src/lib/growth-access.ts` (issue #764): one key per section,
+ * the same key the section's data endpoints check. A cashier opens loyalty and
+ * the gift-card lookup; the management dashboard and the compensation data
+ * need `growth.view` / `commission.view`, which no floor preset carries.
  */
 
-export const GROWTH_SECTION_KEYS = [
-  "overview",
-  // Growth's own customers screen: the shared record with Growth's columns,
-  // managed here — not a second customer system, and not a redirect to CRM.
-  "customers",
-  "campaigns",
-  // Phase 37b — consent-aware SMS/email templates, outbox campaigns and
-  // message-credit statements. It stays in Growth, beside its audience work.
-  "messaging",
-  "gift-cards",
-  "loyalty",
-  "commission",
-  // Growth's *own* settings. `/settings` is the platform settings area;
-  // `/growth/settings` configures this app (campaign defaults, loyalty rules,
-  // messaging senders) and is a different route with a different component.
-  "settings",
-] as const;
-
-export type GrowthSectionKey = (typeof GROWTH_SECTION_KEYS)[number];
-
 import type { Permission } from "@/lib/permissions";
+import { canViewGrowthSection, GROWTH_SECTION_KEYS, type GrowthSectionKey } from "@/lib/growth-access";
+
+// The keys and the gate live in the framework-free capability contract
+// (src/lib/growth-access.ts, issue #764) so the launcher in `apps.ts`, the
+// API handlers and this menu all read one definition.
+export { canOpenGrowth, canViewGrowthSection, GROWTH_SECTION_KEYS, type GrowthSectionKey } from "@/lib/growth-access";
 
 /** Growth's own settings page — never the platform settings page. */
 export const GROWTH_SETTINGS_HREF = "/growth/settings";
@@ -41,20 +27,6 @@ export const GROWTH_SETTINGS_HREF = "/growth/settings";
 /** The route for a section. The overview is the app root; the rest nest under it. */
 export function growthSectionHref(key: GrowthSectionKey): string {
   return key === "overview" ? "/growth/overview" : `/growth/${key}`;
-}
-
-const GROWTH_SECTION_PERMISSIONS: Record<GrowthSectionKey, readonly Permission[]> = {
-  overview: ["marketing.configure"], customers: ["marketing.configure", "ledger.view"], campaigns: ["campaigns.manage"],
-  messaging: ["campaigns.manage"], "gift-cards": ["marketing.configure"], loyalty: ["loyalty.view"],
-  commission: ["marketing.configure"], settings: ["marketing.configure"],
-};
-
-export function canViewGrowthSection(permissions: ReadonlySet<Permission>, key: GrowthSectionKey): boolean {
-  return GROWTH_SECTION_PERMISSIONS[key].some((permission) => permissions.has(permission));
-}
-
-export function canOpenGrowth(permissions: ReadonlySet<Permission>): boolean {
-  return GROWTH_SECTION_KEYS.some((key) => canViewGrowthSection(permissions, key));
 }
 
 export function growthFallbackHref(permissions: ReadonlySet<Permission>): string {

@@ -83,6 +83,9 @@ export const WELL_KNOWN_CODES = {
   bank: "1110",
   bankClearing: "1120",
   accountsReceivable: "1200",
+  // Audit F11 — salary advances (مساعده) paid to staff, recovered by a later
+  // payroll run. An asset until recovered (migration 0214).
+  staffAdvances: "1260",
   supplierReceivable: "1210",
   vatReceivable: "1220",
   // Issue #160 §4 — the last of Wave 4's three deferrals. What SnapFood owes
@@ -102,6 +105,16 @@ export const WELL_KNOWN_CODES = {
   accountsPayable: "2100",
   vatPayable: "2200",
   salariesPayable: "2300",
+  // Audit F11 — gross-to-net payroll (migration 0214). The withholdings a run
+  // credits beside net salary payable: insurance (employee + employer +
+  // unemployment shares, all owed to the same insurer), income tax withheld,
+  // and any other fixed deduction the business withholds for a third party.
+  // 2460/2470 were seeded by 0094 as headings for manual entries; a run posts
+  // to them automatically now, which is why they are well-known (never
+  // archived from under the posting).
+  insurancePayable: "2460",
+  payrollTaxPayable: "2470",
+  otherPayrollDeductionsPayable: "2490",
   // Tip capture (issue #160 §4) — a pass-through liability owed to staff,
   // not revenue. See migrations/0059_tip_capture.sql for the product
   // decisions this rests on.
@@ -141,6 +154,9 @@ export const WELL_KNOWN_CODES = {
   periodicPurchases: "5105",
   wasteExpense: "5150",
   salariesExpense: "5200",
+  // Audit F11 — the employer's insurance (and unemployment) share is a cost
+  // on top of gross pay, not part of it (migration 0214).
+  employerInsuranceExpense: "5220",
   // Phase 27 Wave 7 — sales-staff commission, posted as a payroll liability
   // (Debit this, Credit salariesPayable) through the domain-event engine.
   commissionExpense: "5210",
@@ -172,6 +188,15 @@ export const WELL_KNOWN_CODES = {
   // is stock sent out without a sale (other expense).
   otherIncome: "4900",
   otherExpense: "5900",
+  // Issue #863 — multicurrency. Realized = settling a foreign receivable/
+  // payable at a later rate than it was booked at; unrealized = the optional
+  // end-of-period revaluation of foreign-currency accounts. The posting
+  // service looks these up by code like every other well-known account, so
+  // they can never be archived out from under an FX posting.
+  fxRealizedGain: "4930",
+  fxUnrealizedGain: "4935",
+  fxRealizedLoss: "5870",
+  fxUnrealizedLoss: "5875",
   // Phase 22 Wave 4 — cost of using a third-party online-ordering platform
   // (e.g. a delivery marketplace's cut of the sale). Settled via the manual-
   // journal workflow, the same "new well-known account, not deep posting-path
@@ -183,6 +208,14 @@ export const WELL_KNOWN_CODES = {
   // fixed-asset line it's parented under.
   accumulatedDepreciation: "1510",
   depreciationExpense: "5700",
+  // Issue #833 — the fixed-asset lifecycle's own accounts. fixedAssets is the
+  // 1500–1599 block's root («اثاثه و تجهیزات» in every industry template),
+  // the fallback an asset's cost is credited out of at disposal when the
+  // register hasn't recorded a more specific asset_account_id. The gain and
+  // loss accounts are what a sale above/below net book value realises into.
+  fixedAssets: "1500",
+  gainOnAssetSale: "4920",
+  lossOnAssetSale: "5750",
   // Phase 21 Wave 3 — jewelry (JEWELRY_COA_TEMPLATE below), not seeded for
   // an F&B business. goldSalesRevenue and makingChargeRevenue are kept as
   // two separate accounts (not folded into one "gold sales" line) because
@@ -277,6 +310,65 @@ export const WELL_KNOWN_CODES = {
   // platform for message credits actually consumed. A liability every trade
   // carries, because metered messaging is cross-industry.
   platformMessageCreditPayable: "2455",
+  // Issue #799 — AEC (مهندسی عمران، معماری و پیمانکاری). The trade does not
+  // sell goods, so it has no single «فروش» account: an engineering office's
+  // income, a supervision contract's fee and a contractor's progress billing
+  // are three different revenues an owner reads separately, exactly the way
+  // F&B splits its channels and jewellery splits metal from اجرت. 4610 is the
+  // *default* account a statement posts to (see accounting-posting-rules.ts);
+  // the other two exist so the split is available from day one rather than
+  // being a later migration.
+  aecDesignRevenue: "4610",
+  aecSupervisionRevenue: "4620",
+  aecConstructionRevenue: "4630",
+  // Retention (حسن انجام کار): a client withholds a percentage of every
+  // certificate until the defects-liability period ends. It is the AEC
+  // business's single most-asked "where is my money" question, so it gets its
+  // own receivable per project rather than hiding in 1200 — and its payable
+  // twin, because a contractor withholds the same from its subcontractors.
+  aecRetentionReceivable: "1250",
+  aecRetentionPayable: "2440",
+  // Work performed on uncompleted contracts, carried as an asset until the
+  // contract is billed. Wave 8's progress certificates are what will post
+  // here; the account is seeded now so the chart a business is *given* is the
+  // chart its trade actually uses.
+  aecContractWorkInProgress: "1380",
+  // Subcontractors and consultants are settled separately from material
+  // suppliers: an engineer reconciling a site wants "what do we owe the
+  // pیمانکاران" apart from "what do we owe the merchants".
+  aecSubcontractorPayable: "2130",
+  // Cost of sales for a contractor is direct project cost. The three accounts
+  // split it the way a project manager does — what was built with, what was
+  // subcontracted, what was hired — while `costOfSalesCodesForIndustry` lists
+  // them together so gross profit stays a project margin and not an
+  // accounting artefact.
+  aecProjectDirectCost: "5191",
+  aecSubcontractorExpense: "5192",
+  aecEquipmentExpense: "5193",
+  // Issue #839 — automotive (خودرو و نمایشگاه اتومبیل). A car is finished goods
+  // bought and resold, so the trade needs the usual inventory/revenue/COGS
+  // triple and nothing exotic — but three of its codes are genuinely its own:
+  //
+  //   * 1375 is the *landed-cost clearing* account. Freight, customs, the
+  //     pre-delivery inspection and reconditioning are paid before or while a
+  //     vehicle is brought in, and the model's explicit decision (see
+  //     `automotive-vehicle-costs.ts` / the domain service) is: costs marked
+  //     `capitalized` debit the vehicle's own inventory; costs marked
+  //     `period_expense` debit 5195. 1375 exists so a transport/customs bill
+  //     that arrives before its vehicle can be parked somewhere honest rather
+  //     than guessed at.
+  //   * 5194/5195 split cost of sales from period reconditioning, which is the
+  //     "do not silently mix both models" decision §5 of the issue demands.
+  //   * 2465 is the trade-in obligation: what the dealership owes the customer
+  //     for the car it accepted, until it is cleared against the sale invoice
+  //     or paid out. Nothing posts to it in Wave 1-4; it is seeded so the
+  //     second-wave trade-in flow has the account its trade actually uses.
+  vehicleInventory: "1370",
+  vehicleLandedCostClearing: "1375",
+  vehicleSalesRevenue: "4590",
+  vehicleCogs: "5194",
+  vehicleReconditioningExpense: "5195",
+  vehicleTradeInPayable: "2465",
 } as const;
 
 /**
@@ -308,12 +400,36 @@ const COST_OF_SALES_CODES_BY_INDUSTRY: Record<Industry, readonly string[]> = {
     WELL_KNOWN_CODES.periodicPurchases,
     WELL_KNOWN_CODES.inventoryWriteDownExpense,
   ],
+  // Issue #799 — a contractor's cost of sales is *direct project cost*, not
+  // goods bought for resale. The three accounts are its material/execution,
+  // subcontracting and plant-hire sides; listing them together is what keeps
+  // gross profit meaning "project margin" instead of collapsing every project
+  // cost into overhead.
+  architecture_construction: [
+    WELL_KNOWN_CODES.aecProjectDirectCost,
+    WELL_KNOWN_CODES.aecSubcontractorExpense,
+    WELL_KNOWN_CODES.aecEquipmentExpense,
+    WELL_KNOWN_CODES.periodicPurchases,
+  ],
   food_service: [
     WELL_KNOWN_CODES.cogs,
     WELL_KNOWN_CODES.wasteExpense,
     WELL_KNOWN_CODES.inventoryCountExpense,
     WELL_KNOWN_CODES.inventoryWriteDownExpense,
     WELL_KNOWN_CODES.periodicPurchases,
+  ],
+  // Issue #839 — a dealership's cost of sales is the vehicle it delivered at
+  // its frozen effective cost, plus the write-down of a unit that will not
+  // sell. Reconditioning that was *capitalized* never appears here (it is
+  // already inside the unit's cost); only reconditioning deliberately posted
+  // as a period expense does — and that one is deliberately NOT in this list,
+  // because it is overhead by the business's own decision, exactly as
+  // `appliedConversionCost` is for F&B.
+  automotive: [
+    WELL_KNOWN_CODES.vehicleCogs,
+    WELL_KNOWN_CODES.inventoryWriteDownExpense,
+    WELL_KNOWN_CODES.periodicPurchases,
+    WELL_KNOWN_CODES.retailCountShortageExpense,
   ],
   jewelry: [
     WELL_KNOWN_CODES.goldCogs,
@@ -405,6 +521,8 @@ const SHARED_ASSET_ACCOUNTS: TemplateAccount[] = [
   { code: "1241", name: "چک‌های نزد صندوق", type: "asset", parentCode: "1240" },
   { code: "1242", name: "چک‌های در جریان وصول", type: "asset", parentCode: "1240" },
   { code: "1244", name: "چک‌های برگشتی", type: "asset", parentCode: "1240" },
+  // Salary advances, recovered by the next payroll run (audit F11, 0214).
+  { code: "1260", name: "مساعده و علی‌الحساب کارکنان", type: "asset", parentCode: "1000" },
 ];
 
 const SHARED_LIABILITY_ACCOUNTS: TemplateAccount[] = [
@@ -414,11 +532,12 @@ const SHARED_LIABILITY_ACCOUNTS: TemplateAccount[] = [
   { code: "2121", name: "چک‌های صادرشده در جریان", type: "liability", parentCode: "2120" },
   { code: "2122", name: "چک‌های پرداختنی برگشتی", type: "liability", parentCode: "2120" },
   { code: "2430", name: "پیش‌دریافت از مشتری", type: "liability", parentCode: "2000" },
-  // Payroll withholdings. `accruePayroll` posts gross wages today (5200/2300);
-  // these are the headings the deductions belong in when it learns to split
-  // them, and the ones a manual payroll entry needs meanwhile.
+  // Payroll withholdings. A gross-to-net run (audit F11) credits 2460/2470
+  // with the insurance and income tax it withheld and 2490 with any other
+  // fixed deduction; only net pay goes to 2300.
   { code: "2460", name: "بیمه پرداختنی", type: "liability", parentCode: "2300" },
   { code: "2470", name: "مالیات حقوق پرداختنی", type: "liability", parentCode: "2300" },
+  { code: "2490", name: "سایر کسور حقوق پرداختنی", type: "liability", parentCode: "2300" },
   { code: "2480", name: "مالیات بر درآمد (عملکرد) پرداختنی", type: "liability", parentCode: "2000" },
   // Phase 37 Wave 4 — what the business owes the platform for message credits
   // actually consumed. Metered messaging is cross-industry, so the heading is
@@ -439,16 +558,25 @@ const SHARED_REVENUE_ACCOUNTS: TemplateAccount[] = [
   // business recording a discount by hand has somewhere honest to put it.
   { code: "4350", name: "تخفیفات فروش", type: "revenue", parentCode: "4000", isContra: true },
   { code: "4920", name: "سود فروش دارایی ثابت", type: "revenue", parentCode: "4000" },
+  // Multicurrency (issue #863) — seeded with every chart, and backfilled onto
+  // every existing business by migration 0216.
+  { code: "4930", name: "سود تسعیر ارز (تحقق‌یافته)", type: "revenue", parentCode: "4000" },
+  { code: "4935", name: "سود تسعیر تسویه‌نشده ارز (تحقق‌نیافته)", type: "revenue", parentCode: "4000" },
 ];
 
 const SHARED_EXPENSE_ACCOUNTS: TemplateAccount[] = [
   // Periodic-system purchases (سیستم ادواری) — see WELL_KNOWN_CODES.periodicPurchases.
   { code: "5105", name: "خرید طی دوره (سیستم ادواری)", type: "expense", parentCode: "5000" },
+  // The employer's insurance and unemployment shares (audit F11, 0214).
+  { code: "5220", name: "بیمه سهم کارفرما", type: "expense", parentCode: "5000" },
   { code: "5750", name: "زیان فروش دارایی ثابت", type: "expense", parentCode: "5000" },
   { code: "5800", name: "کارمزد بانکی و درگاه پرداخت", type: "expense", parentCode: "5000" },
   { code: "5810", name: "کسری و اضافه صندوق", type: "expense", parentCode: "5000" },
   { code: "5850", name: "هزینه مالی (سود تسهیلات)", type: "expense", parentCode: "5000" },
   { code: "5860", name: "هزینه چک برگشتی و جرایم بانکی", type: "expense", parentCode: "5000" },
+  // Multicurrency (issue #863) — the FX loss side, sibling to the gains under 4000.
+  { code: "5870", name: "زیان تسعیر ارز (تحقق‌یافته)", type: "expense", parentCode: "5000" },
+  { code: "5875", name: "زیان تسعیر تسویه‌نشده ارز (تحقق‌نیافته)", type: "expense", parentCode: "5000" },
   { code: "5950", name: "هزینه مالیات بر درآمد", type: "expense", parentCode: "5000" },
 ];
 
@@ -976,7 +1104,127 @@ export const SERVICE_SAAS_COA_TEMPLATE: TemplateAccount[] = [
   { code: "5670", name: "هزینه میزبانی، ذخیره‌سازی و پیام", type: "expense", parentCode: "5000" },
 ];
 
+/**
+ * Issue #799 — AEC (مهندسی عمران، معماری و پیمانکاری) chart of accounts.
+ *
+ * Built by *subtracting* from the F&B chart, exactly as `SERVICE_SAAS_COA_TEMPLATE`
+ * is, and for the same two reasons: every shared Iranian accounting control
+ * (cheques, payroll, VAT, penalties, fixed assets, marketing) stays present by
+ * construction, while the café's own lines are removed by an explicit list
+ * rather than by copying 60 rows and hoping nothing drifts. The list below is
+ * therefore the "no restaurant concept leaks into this trade" rule made
+ * executable — and `coa-template.test.ts` asserts it, so re-adding a
+ * hospitality account to the F&B template cannot silently reappear here.
+ *
+ * Removed: the three food/beverage revenue channels and the service charge, the
+ * channel-specific online-platform commission (an AEC business is not on
+ * delivery marketplaces), the recipe/inventory machinery that only makes sense
+ * for a kitchen (بهای تمام‌شده مواد، ضایعات مواد، کسری شمارش، هزینهٔ تبدیل
+ * جذب‌شده، کالای در جریان ساخت). What replaces them is the trade's own
+ * vocabulary: three revenues, retention on both sides, contract work in
+ * progress, subcontractor payable, and direct project cost.
+ *
+ * There is deliberately no `pos`/`stock` module in this industry's profile
+ * (industry-profile.ts), so nothing here is a "selling counter" chart: the
+ * accounts exist for Accounting's own documents — a manual journal, a receipt,
+ * a supplier invoice, and Wave 8's progress certificates.
+ */
+export const ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE: TemplateAccount[] = [
+  ...FNB_COA_TEMPLATE.filter(
+    (account) =>
+      ![
+        // Hospitality revenue channels and the service charge.
+        "4100", "4200", "4310", "4320", "4330", "4360",
+        // Delivery-marketplace commission: a café's channel, not a project's cost.
+        "5650",
+        // Kitchen inventory machinery — recipe costing, waste, count variance
+        // and the production conversion account.
+        "5100", "5150", "5160", "5180", "1310",
+      ].includes(account.code),
+  ),
+  // --- the trade's own assets and liabilities -------------------------------
+  { code: "1250", name: "حسن انجام کار (نگهداشت وجه‌الضمان)", type: "asset", parentCode: "1000" },
+  { code: "1380", name: "کار در جریان قراردادهای پیمانکاری", type: "asset", parentCode: "1000" },
+  { code: "2130", name: "حساب‌های پرداختنی پیمانکاران و مشاوران", type: "liability", parentCode: "2000" },
+  { code: "2440", name: "حسن انجام کار پرداختنی", type: "liability", parentCode: "2000" },
+  // --- the trade's own revenues --------------------------------------------
+  { code: "4610", name: "درآمد خدمات طراحی و مهندسی", type: "revenue", parentCode: "4000" },
+  { code: "4620", name: "درآمد نظارت و مشاوره", type: "revenue", parentCode: "4000" },
+  { code: "4630", name: "درآمد پیمانکاری و اجرا", type: "revenue", parentCode: "4000" },
+  // --- direct project cost (the trade's cost of sales) ---------------------
+  { code: "5191", name: "بهای تمام‌شدهٔ پروژه‌ها (مصالح، دستمزد و اجرا)", type: "expense", parentCode: "5000" },
+  { code: "5192", name: "هزینهٔ پیمانکاران جزء و مشاوران", type: "expense", parentCode: "5000" },
+  { code: "5193", name: "اجاره و هزینهٔ ماشین‌آلات و تجهیزات اجرایی", type: "expense", parentCode: "5000" },
+];
+
+
 export const ACCOUNT_TYPES: AccountType[] = ["asset", "liability", "equity", "revenue", "expense"];
+/**
+ * Issue #839 — automotive (خودرو و نمایشگاه اتومبیل) chart of accounts.
+ *
+ * The generic skeleton every retail chart reuses (cash, bank, AR, AP, VAT,
+ * prepayments, fixed assets, salaries, the shared cheque/deposit/equity
+ * headings) plus this trade's own five accounts: «موجودی خودرو» (1370), the
+ * landed-cost clearing heading (1375), «فروش خودرو» (4590), «بهای تمام‌شده
+ * خودروی فروخته‌شده» (5194) and «هزینه بازسازی و آماده‌سازی خودرو» (5195).
+ *
+ * 2430 «پیش‌دریافت از مشتری» is the *shared* customer-advance liability and is
+ * NOT restated here: a reservation deposit is that concept, not a second one,
+ * which is what §7 of the issue asks for ("reuse an existing customer
+ * advance/liability concept; do not invent duplicate accounting semantics").
+ */
+export const AUTOMOTIVE_COA_TEMPLATE: TemplateAccount[] = [
+  { code: "1000", name: "دارایی‌ها", type: "asset" },
+  { code: "1100", name: "صندوق", type: "asset", parentCode: "1000" },
+  { code: "1110", name: "بانک", type: "asset", parentCode: "1000" },
+  { code: "1120", name: "کارت‌خوان (در راه)", type: "asset", parentCode: "1000" },
+  { code: "1200", name: "حساب‌های دریافتنی", type: "asset", parentCode: "1000" },
+  { code: "1220", name: "مالیات بر ارزش افزوده خرید (قابل استرداد)", type: "asset", parentCode: "1000" },
+  { code: "1370", name: "موجودی خودرو", type: "asset", parentCode: "1000" },
+  { code: "1375", name: "هزینه‌های حمل و ترخیص خودرو (واسط)", type: "asset", parentCode: "1000" },
+  { code: "1360", name: "کالای در راه", type: "asset", parentCode: "1000" },
+  { code: "1400", name: "پیش‌پرداخت‌ها", type: "asset", parentCode: "1000" },
+  { code: "1500", name: "اثاثه و تجهیزات", type: "asset", parentCode: "1000" },
+
+  ...RETAIL_ASSET_ACCOUNTS,
+  ...SHARED_ASSET_ACCOUNTS,
+
+  { code: "2000", name: "بدهی‌ها", type: "liability" },
+  { code: "2100", name: "حساب‌های پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2200", name: "مالیات بر ارزش افزوده پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2300", name: "حقوق پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2410", name: "اعتبار فروشگاهی", type: "liability", parentCode: "2000" },
+  { code: "2420", name: "کارت هدیه", type: "liability", parentCode: "2000" },
+  { code: "2465", name: "تعهد بابت معاوضه خودرو", type: "liability", parentCode: "2000" },
+
+  ...SHARED_LIABILITY_ACCOUNTS,
+
+  { code: "3000", name: "حقوق صاحبان سرمایه", type: "equity" },
+  { code: "3100", name: "سرمایه", type: "equity", parentCode: "3000" },
+  { code: "3800", name: "سود (زیان) انباشته", type: "equity", parentCode: "3000" },
+  { code: "3900", name: "تراز افتتاحیه", type: "equity", parentCode: "3000" },
+
+  ...SHARED_EQUITY_ACCOUNTS,
+
+  { code: "4000", name: "درآمدها", type: "revenue" },
+  { code: "4590", name: "فروش خودرو", type: "revenue", parentCode: "4000" },
+  { code: "4900", name: "سایر درآمدها", type: "revenue", parentCode: "4000" },
+  { code: "4400", name: "برگشت از فروش", type: "revenue", parentCode: "4000", isContra: true },
+
+  ...RETAIL_REVENUE_ACCOUNTS,
+  ...SHARED_REVENUE_ACCOUNTS,
+
+  { code: "5000", name: "هزینه‌ها", type: "expense" },
+  { code: "5194", name: "بهای تمام‌شده خودروی فروخته‌شده", type: "expense", parentCode: "5000" },
+  { code: "5195", name: "هزینه بازسازی و آماده‌سازی خودرو", type: "expense", parentCode: "5000" },
+  { code: "5210", name: "پورسانت فروش", type: "expense", parentCode: "5000" },
+  { code: "5300", name: "اجاره", type: "expense", parentCode: "5000" },
+  { code: "5400", name: "آب، برق و گاز", type: "expense", parentCode: "5000" },
+  { code: "5600", name: "بازاریابی و تبلیغات", type: "expense", parentCode: "5000" },
+  { code: "5900", name: "سایر هزینه‌ها", type: "expense", parentCode: "5000" },
+  ...RETAIL_EXPENSE_ACCOUNTS,
+  ...SHARED_EXPENSE_ACCOUNTS,
+];
 
 /**
  * The seed chart of accounts an industry starts from. One place, because
@@ -990,6 +1238,8 @@ export function coaTemplateForIndustry(industry: Industry): readonly TemplateAcc
   switch (industry) {
     case "service_saas":
       return SERVICE_SAAS_COA_TEMPLATE;
+    case "architecture_construction":
+      return ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE;
     case "jewelry":
       return JEWELRY_COA_TEMPLATE;
     case "watch":
@@ -1004,6 +1254,8 @@ export function coaTemplateForIndustry(industry: Industry): readonly TemplateAcc
       return TOOLS_FITTINGS_COA_TEMPLATE;
     case "haberdashery":
       return HABERDASHERY_COA_TEMPLATE;
+    case "automotive":
+      return AUTOMOTIVE_COA_TEMPLATE;
     case "food_service":
       return FNB_COA_TEMPLATE;
   }
@@ -1027,12 +1279,20 @@ export function validateAccounts(accounts: TemplateAccount[]): string[] {
     if (!a.name?.trim()) errors.push(`حساب با کد «${a.code}» نام ندارد.`);
     if (!ACCOUNT_TYPES.includes(a.type)) errors.push(`نوع حساب «${a.code}» نامعتبر است.`);
   }
+  // The type rule the editor enforces (issue #824 §2): a child's type must
+  // match its parent's. Checked here too, so a user-edited list is refused in
+  // the wizard, not only at the editor. Every industry template passes this
+  // (coa-template.test.ts and industry-coverage.test.ts validate each one).
+  const typeByCode = new Map(accounts.map((a) => [a.code, a.type]));
   for (const a of accounts) {
     if (a.parentCode && !codes.has(a.parentCode)) {
       errors.push(`حساب والد «${a.parentCode}» برای «${a.code}» وجود ندارد.`);
     }
     if (a.parentCode === a.code) {
       errors.push(`حساب «${a.code}» نمی‌تواند والد خودش باشد.`);
+    }
+    if (a.parentCode && codes.has(a.parentCode) && typeByCode.get(a.parentCode) !== a.type) {
+      errors.push(`نوع حساب «${a.code}» با نوع حساب والد «${a.parentCode}» یکسان نیست.`);
     }
   }
   return errors;

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
+import { requirePermission } from "@/lib/auth";
 import { automationErrorMessage, type AutomationInput } from "@/lib/ai-automations";
 import {
   deleteAutomation,
@@ -10,7 +11,7 @@ import {
 
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requirePermission(PERMISSIONS.aiAutomationsManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
     const automation = await getAutomation(guard.session.businessId, id);
@@ -21,7 +22,7 @@ export const GET = withTenantScope(
 
 export const PUT = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requirePermission(PERMISSIONS.aiAutomationsManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
 
@@ -55,7 +56,7 @@ export const PUT = withTenantScope(
 
 export const DELETE = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requirePermission(PERMISSIONS.aiAutomationsManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
     const removed = await deleteAutomation(guard.session.businessId, id);

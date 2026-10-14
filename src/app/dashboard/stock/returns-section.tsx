@@ -72,17 +72,35 @@ function ReturnForm({
   const [itemId, setItemId] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [reason, setReason] = useState("");
+  // Issue #795 — a serialized return names the exact physical unit (the
+  // operator scans/types its serial number); quantity is always 1.
+  const [serialNumber, setSerialNumber] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const selectedItem = items.find((i) => i.id === itemId) ?? null;
+  const isSerialItem = selectedItem?.tracking === "serial";
+
   async function submit() {
-    if (!itemId || !quantity.trim() || !reason.trim()) return;
+    if (!itemId || !reason.trim()) return;
+    if (isSerialItem && !serialNumber.trim()) {
+      onError("برای برگشت کالای سریالی، شماره سریال دستگاه را وارد کنید.");
+      return;
+    }
+    if (!isSerialItem && !quantity.trim()) return;
     setBusy(true);
     onError("");
     const { ok, data } = await api<{ error?: string; message?: string }>(
       "/api/stock/returns",
       {
         method: "POST",
-        body: JSON.stringify({ reason, lines: [{ itemId, quantity }] }),
+        body: JSON.stringify({
+          reason,
+          lines: [
+            isSerialItem
+              ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
+              : { itemId, quantity },
+          ],
+        }),
       },
     );
     setBusy(false);
@@ -90,6 +108,7 @@ function ReturnForm({
     else {
       setItemId("");
       setQuantity("1");
+      setSerialNumber("");
       setReason("");
       onDone("برگشت به تأمین‌کننده ثبت شد.");
     }
@@ -115,15 +134,27 @@ function ReturnForm({
             ariaLabel="انتخاب کالا برای برگشت"
           />
         </Field>
+        {isSerialItem ? (
+          <Field label="شماره سریال دستگاه" hint="برگشت کالای سریالی دستگاه‌به‌دستگاه است.">
+            <input
+              className={inputClass}
+              dir="ltr"
+              value={serialNumber}
+              onChange={(e) => setSerialNumber(e.target.value)}
+              placeholder="SN-…"
+            />
+          </Field>
+        ) : null}
         <div className="grid grid-cols-2 gap-2">
-          <Field label="تعداد">
+          <Field label="تعداد" hint={isSerialItem ? "برای کالای سریالی همیشه ۱ است." : undefined}>
             <PersianNumberInput
               inputMode="decimal"
               allowNegative={false}
               className={inputClass}
               dir="ltr"
-              value={quantity}
+              value={isSerialItem ? "1" : quantity}
               onChange={(e) => setQuantity(e.target.value)}
+              disabled={isSerialItem}
             />
           </Field>
           <Field label="دلیل">

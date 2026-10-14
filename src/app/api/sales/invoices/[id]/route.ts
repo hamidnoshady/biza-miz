@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { redactVehicleCostSensitive } from "@/lib/automotive";
+import { holdsPermission } from "@/app/api/automotive/guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { getRetailInvoiceDetail } from "@/lib/retail-invoice/read-service";
 import { getRetailInvoicePrintData } from "@/lib/retail-invoice/print-data";
@@ -32,5 +34,10 @@ export const GET = withTenantScope(async (request: NextRequest, context: { param
 
   const invoice = await getRetailInvoiceDetail(session.businessId, location.id, id);
   if (!invoice) return NextResponse.json({ error: "invoice_not_found" }, { status: 404 });
-  return NextResponse.json({ invoice });
+  const canSeeVehicleCost = await holdsPermission(session, PERMISSIONS.vehiclesCostView);
+  if (canSeeVehicleCost) return NextResponse.json({ invoice });
+  const visibleLines = invoice.lines.map((line) =>
+    line.kind === "vehicle" ? redactVehicleCostSensitive(line) : line,
+  );
+  return NextResponse.json({ invoice: { ...invoice, lines: visibleLines } });
 });

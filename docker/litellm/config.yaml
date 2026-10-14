@@ -1,195 +1,74 @@
-# LiteLLM proxy configuration — Phase 37.
+# LiteLLM proxy configuration.
 #
-# This is a *starting point*, not a tuned production config. Every credential
-# is an env reference so nothing secret lives in this file; add your upstream
-# keys to .env (or your orchestrator's secret store) and never commit them.
+# This file is the bundled proxy's deployment configuration. Keep upstream
+# credentials in the deployment environment/secret store; never commit them.
+# Start the bundled proxy with `docker compose --profile ai up -d litellm`.
 #
-# Run it with:
-#   docker compose --profile ai up -d litellm
+# Ownership boundary:
+# - This file/LiteLLM owns upstream deployments, model aliases, routing,
+#   retries, fallbacks, provider-side rate limits and any gateway-side budgets.
+# - The application stores the default chat/embedding aliases in
+#   platform_ai_gateway and the runtime-mode-to-alias mapping in
+#   platform_ai_modes. Configure those aliases here too.
+# - The application owns its prompt versions, permission-filtered function
+#   tools, and Rial billing. It does not send LiteLLM prompt IDs or proxy MCP
+#   declarations, and it has no local fallback/model/MCP policy mirror.
+# - LiteLLM's proxy MCP feature and the POS's independent `/api/mcp` connector
+#   are not wired together by this template.
 #
-# The proxy is bound to the compose network only. It is never published to the
-# host and never exposed through Traefik: it holds every upstream vendor API
-# key, and its management API can mint keys and read spend.
-#
-# Model names below are *aliases* (model_name); a business only ever asks for
-# the alias, so which vendor actually serves it stays a platform decision that
-# can change without touching this application. The application's own aliases
-# live in /platform/ai and must match these.
-#
-# The console values this file expects (super-admin → /platform/ai):
-#
-#   نشانی دروازه            http://litellm:4000/v1
-#   کلید مدیر                $LITELLM_MASTER_KEY   (same secret as below)
-#   مدل گفت‌وگو              pos-chat
-#   مدل بردارسازی            pos-embed
-#
-# That is the entire console surface: base URL, master key and the two model
-# aliases, plus the per-business/per-branch virtual-key lifecycle. There is no
-# fallback-chain field and no selectable-model list in the app anymore — the
-# platform console never mirrored routing/model policy in the first place, and
-# the last vestigial fields for it (`fallbackModels`, `publishedModels`,
-# `allowBusinessModels`) were deleted from the schema, not just hidden
-# (migration 0168 stopped the console from writing them; issue #757 dropped
-# the columns). Routing, per-model RPM/TPM and per-key budgets are configured
-# HERE and only here — this file is the single home of the proxy's own
-# settings.
-#
-# A routing strategy only has something to do when an alias has more than one
-# deployment behind it. Each alias below has exactly one, so today the router's
-# job is failover between *aliases* (`fallbacks`), not load balancing within
-# one. To let the router balance, add a second deployment under the same
-# model_name — same alias, different vendor or key:
-#
-#   - model_name: pos-chat
-#     litellm_params:
-#       model: anthropic/claude-3-5-haiku-20241022
-#       api_key: os.environ/ANTHROPIC_API_KEY
-#       rpm: 60
-#       tpm: 40000        # set tpm as well: with rpm/tpm present,
-#                         # simple-shuffle becomes a *weighted* pick
+# The old application-side policy mirror columns were removed by migration
+# 0184. Change routing/provider policy here, not on a per-business key row.
 
 model_list:
-  # Primary chat model. Point this at whichever vendor you have contracted.
+  # Primary chat alias. Point this at the provider/model you have contracted.
   - model_name: pos-chat
     litellm_params:
       model: openai/gpt-4o-mini
       api_key: os.environ/OPENAI_API_KEY
       rpm: 60
 
-  # Failover: a different vendor entirely, so a single provider outage stops
-  # being a platform-wide outage. The application no longer sends request-level
-  # `fallbacks`; the proxy/router policy below is the source of truth.
+  # Example failover alias. The proxy router below applies it to pos-chat.
   - model_name: pos-cheap
     litellm_params:
       model: openai/gpt-4.1-nano
       api_key: os.environ/OPENAI_API_KEY
       rpm: 120
 
-  # Embeddings can come from a different vendor than chat. This is what makes
-  # the assistant's knowledge search (Phase 36) work at all on a gateway whose
-  # chat provider does not serve embedding models.
+  # Embeddings can use a different upstream deployment from chat.
   - model_name: pos-embed
     litellm_params:
       model: openai/text-embedding-3-small
       api_key: os.environ/OPENAI_API_KEY
 
-# ---------------------------------------------------------------------------
-# Prompt management (Phase 38b).
-#
-# The platform binds agent surfaces (wizard, dashboard, floor, proactive,
-# autopilot, platform) to prompt_ids here; a bound turn sends `prompt_id` +
-# `prompt_variables` instead of its own system message, so re-engineering a
-# prompt is an edit in this directory, not a deploy of the application.
-#
-# The GitOps shape: dotprompt files in a mounted directory. A template MUST
-# render `{{system_context}}` — that variable carries the application's
-# system prompt for the turn, including the confirm-before-write rules; a
-# template that drops it drops the guardrails. `{{business_name}}`,
-# `{{user_name}}` and `{{mode}}` are also provided.
-#
-# prompts:
-#   - prompt_id: pos-dashboard
-#     litellm_params:
-#       prompt_id: pos-dashboard
-#       prompt_integration: dotprompt
-#
-# litellm_settings:
-#   global_prompt_directory: "/app/prompts"   # mount ./prompts there
-#
-# Store prompts in the DB as well when you want them editable through the
-# proxy API rather than files on disk (requires the database above):
-#
+# MUST be set. This management credential is also entered/stored encrypted in
+# the platform_ai_gateway row; it is never sent to a browser.
 general_settings:
-  # MUST be set. Without a master key the proxy accepts unauthenticated
-  # requests, and anyone who can reach port 4000 can create keys and read
-  # every prompt that has passed through it.
   master_key: os.environ/LITELLM_MASTER_KEY
-  # Required for virtual keys, per-key spend and budgets.
+  # LiteLLM's own DB for virtual keys, provider-side budgets and spend logs.
+  # It is separate from the POS application's database.
   database_url: os.environ/LITELLM_DATABASE_URL
-  # Do not let a virtual key rewrite the gateway's own configuration.
+  # Tenant virtual keys may not alter the proxy's deployment catalogue.
   disable_add_model_via_api: true
 
-# ---------------------------------------------------------------------------
-# MCP servers (Phase 38b).
-#
-# This proxy config is the only place MCP servers are registered — the
-# platform console has no MCP roster field (the old `mcpEnabled`/`mcpServers`
-# mirror columns were dead stubs and were dropped, issue #757). A chat turn
-# may arrive with `tools: [{type: "mcp", server_url:
-# "litellm_proxy/<name>/mcp", server_label: "<name>", require_approval:
-# "never"}]`, and the proxy transforms that server's tools into OpenAI
-# function tools and executes the calls the model makes before answering. Any
-# server name the application's assistant code references (`<name>` above)
-# must exist below — a name the proxy does not know is a 404 mid-turn.
-#
-# The POS's own MCP connector (Phase 34) can be listed like any server, which
-# makes the proxy the hub for both directions: external MCP clients dial the
-# app's /api/mcp directly with their own OAuth token, while the assistant
-# reaches third-party MCP tools through this proxy.
-#
-# mcp_servers:
-#   pos_mcp:
-#     url: "os.environ/POS_MCP_URL"          # e.g. http://app:3000/api/mcp
-#     transport: "http"
-#     auth_type: "bearer_token"              # a connector token the app issued
-#     bearer_token: "os.environ/POS_MCP_TOKEN"
-#   github_mcp:
-#     url: "https://api.githubcopilot.com/mcp"
-#     transport: "http"
-#     auth_type: "oauth2"
-#     oauth2_flow: "authorization_code"
-#     client_id: "os.environ/GITHUB_OAUTH_CLIENT_ID"
-#     client_secret: "os.environ/GITHUB_OAUTH_CLIENT_SECRET"
-
 litellm_settings:
-  # Retry a failing deployment before falling back to the next model group.
   num_retries: 3
   request_timeout: 120
-  # Drop parameters the target provider does not understand rather than
-  # rejecting the call — this is what makes one client work across vendors.
+  # Ignore parameters unsupported by a selected upstream rather than rejecting
+  # otherwise-valid OpenAI-compatible requests.
   drop_params: true
 
 router_settings:
-  # The router's own choice of deployment when an alias has several. This is a
-  # proxy-side setting only: LiteLLM has no endpoint that changes it at
-  # runtime (`GET /router/settings` is read-only), and the platform console
-  # has no matching field for it — the console's "بررسی ارتباط" ("probe")
-  # checks that the configured base URL/master key/model aliases actually
-  # answer, not routing policy. Edit routing strategy here only.
-  #
-  # simple-shuffle is LiteLLM's documented production default: it is the only
-  # strategy under which weighted in-group failover applies, and the
-  # usage-based strategies add a Redis round-trip to every request.
+  # Proxy-side routing policy; it is not changed by /platform/ai.
   routing_strategy: simple-shuffle
-
-  # Check a request against the deployment's context window *before* paying for
-  # it, and enforce the router's concurrency limits. Required for
-  # context-window routing and context_window_fallbacks to do anything.
   enable_pre_call_checks: true
-
-  # The automatic part of the router: a deployment that keeps failing is put on
-  # cooldown and traffic moves to its peers without anyone being paged.
   allowed_fails: 3
   cooldown_time: 30
 
-  # Tried in order. This is gateway policy and is not mirrored by /platform/ai.
+  # Fail over between alias groups when the primary group has no healthy
+  # deployment. A second deployment can also be added under one alias for
+  # within-group balancing.
   fallbacks:
     - pos-chat:
         - pos-cheap
-
-  # The same chain for any model group with no rule of its own, so a new alias
-  # added to model_list is not silently left without a failover target.
   default_fallbacks:
     - pos-cheap
-
-  # Per-alias strategies, once one alias has several deployments and different
-  # surfaces want different behaviour from it. Aliases not claimed by a group
-  # fall through to routing_strategy above.
-  #
-  # routing_groups:
-  #   - group_name: assistant-hot-path
-  #     models: [pos-chat]
-  #     routing_strategy: latency-based-routing
-  #     routing_strategy_args:
-  #       ttl: 60
-  #       lowest_latency_buffer: 0.2

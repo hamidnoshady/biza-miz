@@ -13,7 +13,7 @@
  * integration/retail-invoice.integration.test.ts (historical-fidelity suite).
  */
 import { query } from "../db";
-import { PAYMENT_METHOD_LABELS } from "../receipt-template";
+import { paymentMethodLabel } from "../receipt-template";
 import { getSetting, SETTING_KEYS } from "../settings";
 import type { BusinessPrefs } from "../setup-state";
 import type {
@@ -158,7 +158,7 @@ export async function getRetailInvoiceDetail(
   const mappedPayments: RetailInvoicePayment[] = payments.map((p) => ({
     id: p.id,
     method: p.method,
-    methodLabel: p.payment_method_name ?? PAYMENT_METHOD_LABELS[p.method] ?? p.method,
+    methodLabel: p.payment_method_name ?? paymentMethodLabel(p.method),
     amount: Number(p.amount),
     reference: p.reference,
     paymentMethodId: p.payment_method_id,

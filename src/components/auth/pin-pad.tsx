@@ -2,22 +2,29 @@
 
 import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
+import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin-policy";
 
 /**
  * The numeric entry pad shared by the login screen's PIN step (Phase 20
  * Wave 2's employee picker) and the dashboard lock screen — one keypad, two
  * callers, so a tweak to either doesn't drift out of sync with the other.
  *
- * Phase 42 — the PIN grew from exactly four digits to 4–12 (team.ts owns the
- * bounds). A fixed length can no longer auto-submit "when the last dot
- * fills", because the pad cannot know the member's length: the dots now grow
- * as digits land (up to twelve — compacting past eight so a long PIN still
- * fits the card), a «تأیید» button submits (enabled from four digits on),
- * and reaching twelve submits by itself — the one length the pad can still
- * know for certain.
+ * Phase 42 — the PIN grew from exactly four digits to 4–12. A fixed length can
+ * no longer auto-submit "when the last dot fills", because the pad cannot know
+ * the member's length: the dots now grow as digits land (up to twelve —
+ * compacting past eight so a long PIN still fits the card), a «تأیید» button
+ * submits (enabled from four digits on), and reaching twelve submits by itself
+ * — the one length the pad can still know for certain.
+ *
+ * Issue #885 — the bounds are imported, not restated. This file repeated the
+ * 4 and 12 as local constants while `pin-policy.ts` already exported them for
+ * exactly this reason: it imports nothing from Node, so a `"use client"`
+ * component can share the server's rule. Two copies of a security-relevant
+ * bound is how one of them gets changed without the other, and the pad is the
+ * component that decides when a PIN is complete enough to submit.
  */
-const MIN_DIGITS = 4;
-const MAX_DIGITS = 12;
+const MIN_DIGITS = PIN_MIN_LENGTH;
+const MAX_DIGITS = PIN_MAX_LENGTH;
 
 export function PinPad({
   onComplete,

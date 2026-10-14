@@ -25,6 +25,10 @@ const ZERO = "0" as RialText;
 const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   service_saas: WELL_KNOWN_CODES.inventory,
   food_service: WELL_KNOWN_CODES.inventory,
+  // Issue #799 — kept in step with accounting-posting-rules.ts, whose copy of
+  // this mapping the settings panel reads (the pairing is asserted in
+  // accounting-posting-rules.test.ts).
+  architecture_construction: WELL_KNOWN_CODES.inventory,
   jewelry: WELL_KNOWN_CODES.goldInventory,
   watch: WELL_KNOWN_CODES.watchInventory,
   accessories: WELL_KNOWN_CODES.accessoryInventory,
@@ -32,6 +36,10 @@ const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #839 — a vehicle is this trade's stock; the purchase receipt, the
+  // count and the transfer rules all relieve «موجودی خودرو» (1370) like any
+  // other trade's finished goods.
+  automotive: WELL_KNOWN_CODES.vehicleInventory,
 };
 
 /**

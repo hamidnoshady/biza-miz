@@ -14,6 +14,7 @@ import {
   deliverCloudExceptions,
   pullCloudExceptionResponses,
 } from "@/lib/cloud-exception-relay";
+import { readHybridIdentityStatus } from "@/lib/iam/login-credential-sync";
 
 /**
  * Authenticated, credential-free connection model shared by the global status
@@ -62,6 +63,10 @@ export const GET = withTenantScope(async () => {
       ...state,
       cloudSync: "not_applicable",
       error: null,
+      identitySync: null,
+      credentialSync: null,
+      overallIdentity: "not_configured",
+      identityError: null,
       supportRelay: exceptionRelay,
     });
   }
@@ -89,6 +94,10 @@ export const GET = withTenantScope(async () => {
       ...state,
       cloudSync: "not_configured",
       error: null,
+      identitySync: null,
+      credentialSync: null,
+      overallIdentity: "not_configured",
+      identityError: null,
       supportRelay: exceptionRelay,
     });
   }
@@ -108,11 +117,11 @@ export const GET = withTenantScope(async () => {
          count(*) FILTER (WHERE se.origin='remote' AND se.applied_at IS NULL)::text AS inbound,
          (SELECT count(*) FROM sync_domain_effects WHERE business_id=$1 AND status='deferred')::text AS deferred,
          (SELECT count(*) FROM sync_events se2 JOIN locations l2 ON l2.id=se2.location_id
-            WHERE l2.business_id=$1 AND se2.error='conflict')::text AS conflicts,
+            WHERE l2.business_id=$1 AND se2.scope='location' AND se2.error='conflict')::text AS conflicts,
          (SELECT count(*) FROM sync_event_dead_letters WHERE business_id=$1 AND status='open')::text AS dead_letters
        FROM sync_events se
        JOIN locations l ON l.id=se.location_id
-       WHERE l.business_id=$1
+       WHERE l.business_id=$1 AND se.scope='location'
          AND EXISTS (SELECT 1 FROM users u WHERE u.id=$3 AND u.business_id=$1 AND u.is_active)
          AND (se.origin='remote' AND se.applied_at IS NULL
               OR se.origin='local' AND se.id > $2)`,
@@ -129,25 +138,37 @@ export const GET = withTenantScope(async () => {
       .at(-1) ?? null;
   // A converged point needs a successful push and pull; it is bounded by the
   // older direction, not the most recent one-way contact.
+  // With nothing waiting to go up, the last pull alone is a converged point
+  // (an idle push contacts nobody, so its timestamp stays where it was).
+  const outboundPending = Number(row?.outbound ?? 0);
   const lastConvergedAt =
-    lastSuccessfulPushAt && lastSuccessfulPullAt
-      ? [lastSuccessfulPushAt, lastSuccessfulPullAt].sort()[0]
-      : null;
+    outboundPending === 0 && lastSuccessfulPullAt
+      ? lastSuccessfulPullAt
+      : lastSuccessfulPushAt && lastSuccessfulPullAt
+        ? [lastSuccessfulPushAt, lastSuccessfulPullAt].sort()[0]
+        : null;
   // The IAM reconciliation gates every operational tick (runServerSyncTick
   // skips master data, push and pull while it fails), and it records its
   // failure only in iam_sync_state. Without reading it here, a blocked site
   // had no push/pull error and no success either, and showed «در حال اتصال»
-  // indefinitely instead of saying sync was stopped.
+  // indefinitely instead of saying sync was stopped. Identity health alone is
+  // not enough though: the login-credential plane can be broken while every
+  // membership is present (the owner-only roster), so both are read and
+  // reported separately, and the overall verdict may not be green while
+  // required PIN credentials are missing.
+  const identityStatus = config?.enabled && config.siteDeviceId
+    ? await readHybridIdentityStatus(session.businessId, { config })
+    : null;
   let iamError: string | null = null;
-  if (config?.enabled && config.siteDeviceId) {
-    const iam = await query<{ status: string; last_error: string | null }>(
-      `SELECT status, last_error FROM iam_sync_state WHERE business_id=$1 AND site_device_id=$2`,
-      [session.businessId, config.siteDeviceId],
-    );
-    const row = iam.rows[0];
-    if (row && row.status !== "healthy" && row.status !== "syncing" && row.last_error) {
-      iamError = `iam_sync_blocked: ${row.last_error}`;
-    }
+  if (identityStatus?.identity && identityStatus.identity.state !== "healthy" && identityStatus.identity.state !== "syncing") {
+    iamError = `iam_sync_blocked: ${identityStatus.identity.lastError ?? identityStatus.identity.state}`;
+  }
+  let identityError: string | null = null;
+  if (identityStatus?.configured && identityStatus.overall === "degraded") {
+    // Membership metadata may be fine; the login plane is not. The connection
+    // badge must not be green, but the operational pipes are still up, so this
+    // rides as its own signal rather than as "cloud unreachable".
+    identityError = `identity_sync_degraded: ${identityStatus.reason ?? "unknown"}`;
   }
   const siteProfile = await getSetting<SiteProfileState>(session.businessId, SETTING_KEYS.siteProfileState);
   const errorText = syncState.lastPushError || syncState.lastPullError || iamError;
@@ -177,7 +198,7 @@ export const GET = withTenantScope(async () => {
     cloud,
     sync,
     externalServices: cloud,
-    outboundPending: Number(row?.outbound ?? 0),
+    outboundPending,
     inboundPending: Number(row?.inbound ?? 0),
     deferred: Number(row?.deferred ?? 0),
     conflicts: Number(row?.conflicts ?? 0),
@@ -201,6 +222,45 @@ export const GET = withTenantScope(async () => {
             ? "paused"
             : "not_configured",
     error: errorText ? "remote_unreachable" : null,
+    // The two identity planes, side by side with the operational state above,
+    // plus the combined verdict. A UI that renders a single green badge reads
+    // `overallIdentity`; a UI with room for detail renders `identitySync` and
+    // `credentialSync` as separate rows (Settings → اتصال و همگام‌سازی).
+    identitySync: identityStatus?.configured
+      ? {
+          state: identityStatus.identity?.state ?? "snapshot_required",
+          lastAttemptAt: identityStatus.identity?.lastAttemptAt ?? null,
+          lastSuccessAt: identityStatus.identity?.lastSuccessAt ?? null,
+          lastError: identityStatus.identity?.lastError ?? null,
+        }
+      : null,
+    credentialSync: identityStatus?.configured
+      ? {
+          state: identityStatus.credentials?.status ?? "pending",
+          lastAttemptAt: identityStatus.credentials?.lastAttemptAt ?? null,
+          lastSuccessAt: identityStatus.credentials?.lastSuccessAt ?? null,
+          lastError: identityStatus.credentials?.lastError ?? null,
+          // Item 11 of issue #843: the shape of the identity plane, so
+          // "memberships expected vs identities linked" is visible next to
+          // "PIN memberships expected vs usable".
+          membershipsExpected: identityStatus.memberships.expected,
+          identitiesExpected: identityStatus.memberships.passwordRoles,
+          identitiesLinked: identityStatus.memberships.linkedIdentities,
+          credentialsReceived: identityStatus.credentials?.credentialsReceived ?? 0,
+          pinsReceived: identityStatus.credentials?.pinsReceived ?? 0,
+          pinsApplied: identityStatus.credentials?.pinsApplied ?? 0,
+          // Issue #850: PINs the cloud removed and this site revoked.
+          pinsRevoked: identityStatus.credentials?.pinsRevoked ?? 0,
+          identitiesApplied: identityStatus.credentials?.identitiesApplied ?? 0,
+          pinMembersExpected: identityStatus.pinGap.expected,
+          pinMembersUsable: identityStatus.pinGap.usable,
+          pinMembersMissing: identityStatus.pinGap.missing,
+          missingIdentityBindings: identityStatus.missingIdentityBindings,
+          convergedAt: identityStatus.credentials?.convergedAt ?? null,
+        }
+      : null,
+    overallIdentity: identityStatus?.overall ?? "not_configured",
+    identityError,
     supportRelay: exceptionRelay,
   });
 });

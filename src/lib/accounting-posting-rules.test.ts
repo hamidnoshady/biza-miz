@@ -31,6 +31,7 @@ import { INDUSTRIES, type Industry } from "./industries";
 const POSTING_ENGINE_INVENTORY_CODES: Record<Industry, string> = {
   service_saas: WELL_KNOWN_CODES.inventory,
   food_service: WELL_KNOWN_CODES.inventory,
+  architecture_construction: WELL_KNOWN_CODES.inventory,
   jewelry: WELL_KNOWN_CODES.goldInventory,
   watch: WELL_KNOWN_CODES.watchInventory,
   accessories: WELL_KNOWN_CODES.accessoryInventory,
@@ -38,6 +39,7 @@ const POSTING_ENGINE_INVENTORY_CODES: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  automotive: WELL_KNOWN_CODES.vehicleInventory,
 };
 
 /** Every bare 4-digit code a rule names, with the `a / b / c` alternatives split out. */
@@ -165,6 +167,15 @@ describe("postingRulesFor", () => {
   });
 
   describe("the payroll rule", () => {
+    it("says a bank payment leaves the business's own bank account, not card money in transit", () => {
+      const payroll = postingRulesFor({ industry: "food_service" }).find((rule) => rule.key === "payroll")!;
+      const payment = payroll.lines.find((line) => line.side === "debit" && line.code === WELL_KNOWN_CODES.salariesPayable)!;
+      expect(payment.note).toContain(WELL_KNOWN_CODES.bank);
+      expect(payment.note).toContain(`نه ${WELL_KNOWN_CODES.bankClearing}`);
+      // …and that the same payment settles commission, which already sits in 2300.
+      expect(payment.note).toContain("پورسانت");
+    });
+
     it("accrues to wages payable and settles from it, as accruePayroll does", () => {
       const payroll = postingRulesFor({ industry: "food_service" }).find((rule) => rule.key === "payroll")!;
       expect(payroll.lines).toEqual(

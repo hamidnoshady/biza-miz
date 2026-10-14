@@ -19,7 +19,7 @@ const outputDir = path.resolve(value("output-dir", path.join(os.tmpdir(), "busin
 fs.mkdirSync(outputDir, { recursive: true });
 const logger = { info() {}, warn() {}, error() {}, path: path.join(outputDir, "fixture.log") };
 const certificates = createCertificateManager(outputDir, logger);
-const certificate = certificates.ensureLeaf([certificateAddress]);
+const certificateReady = certificates.ensureLeaf([certificateAddress]);
 const reportPath = path.join(outputDir, "browser-result.json");
 const metadataPath = path.join(outputDir, "fixture.json");
 let httpsSeen = false;
@@ -38,7 +38,10 @@ function writeResult() {
   }, null, 2)}\n`);
 }
 
-const server = https.createServer(certificates.tlsOptions(), (request, response) => {
+let server = null;
+// The certificate is generated (async) before the server reads it.
+certificateReady.then((certificate) => {
+server = https.createServer(certificates.tlsOptions(), (request, response) => {
   const url = new URL(request.url || "/", `https://${certificateAddress}:${port}`);
   if (url.pathname === "/acceptance") {
     platform = url.searchParams.get("platform") || "unknown";
@@ -87,7 +90,8 @@ server.listen(port, bindAddress, () => {
   writeResult();
   console.log(`Mobile trust fixture listening on ${bindAddress}:${port} for certificate address ${certificateAddress}`);
 });
+});
 
-function stop() { server.close(() => process.exit(0)); }
+function stop() { if (server) server.close(() => process.exit(0)); else process.exit(0); }
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);

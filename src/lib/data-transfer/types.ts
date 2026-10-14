@@ -17,6 +17,7 @@
  */
 
 import type { Permission } from "../permissions";
+import type { Industry } from "../industries";
 
 /** Which app a registered entity belongs to. Purely a grouping for the UI. */
 export const DATA_MODULES = [
@@ -101,6 +102,15 @@ export interface FieldRelation {
 export interface FieldValidation {
   min?: number;
   max?: number;
+  /**
+   * Money only: the file's value must land on a whole Rial. The codec's Toman
+   * conversion rounds (`۱۵/۷۵` → 1508), which is right for a price list and
+   * wrong for a ledger row — an accounting amount nobody typed is an amount that
+   * will not reconcile. A field that stores integer Rial exactly — an expense's
+   * `amount` and its `vatAmount` — opts in, and the row is refused with its
+   * column named instead of being rounded into the books.
+   */
+  integral?: boolean;
   minLength?: number;
   maxLength?: number;
   /** Source form of a regular expression; compiled once by the validator. */
@@ -182,9 +192,82 @@ export interface EntityDefinition {
   locationScoped?: boolean;
   /** The industry module this entity needs; absent ⇒ every trade has it. */
   requiresModule?: string;
+  /**
+   * The one industry this entity belongs to; absent ⇒ every trade has it.
+   *
+   * Issue #799 §7 — the BOQ's measured rows are an AEC idea: a café has no
+   * chapters, no measured quantities and no rate build-up, so offering it their
+   * import would be a piece of another trade's vocabulary on their screen. The
+   * catalogue route hides such an entity, and the adapter refuses it anyway, so
+   * a hand-made request cannot write BOQ rows into a restaurant either.
+   *
+   * (Deliberately a separate axis from `requiresModule` above, which names a
+   * module key within a trade and is — as of this wave — still unread: wiring
+   * that one up changes which entities three existing POS imports offer, which
+   * is the cleanup wave's decision, not this one's.)
+   */
+  requiresIndustry?: Industry;
 }
 
 /** A parsed file, before any mapping has been applied. */
+/**
+ * A versioned external-system contract. Provider files may be relational and
+ * document-oriented, so they sit beside (rather than masquerade as) generic
+ * one-row/one-entity imports. Adapters declare data and closed transforms;
+ * they never execute profile-provided code.
+ */
+export type ProviderDirection = "import" | "export" | "both";
+export type ProviderSourceFormat = "csv" | "xlsx" | "json" | "pdf" | "connected_sql" | "web_service";
+
+export interface ProviderProfileColumn {
+  key: string;
+  externalName: string;
+  label: string;
+  type: FieldType;
+  required: boolean;
+  identity?: boolean;
+  aliases?: readonly string[];
+  /** Exact provider-safe fallback emitted for an absent export value. */
+  exportDefaultValue?: string;
+  transform?: TransformRule;
+}
+
+export interface ProviderProfileSheet {
+  scope: string;
+  sheetName: string;
+  tableName: string;
+  dependencies: readonly string[];
+  identityFields: readonly string[];
+  columns: readonly ProviderProfileColumn[];
+  /** A declared capability, not a promise that a generic row import is safe. */
+  importSupported: boolean;
+  exportSupported: boolean;
+}
+
+export interface DataTransferProviderProfile {
+  provider: string;
+  profileKey: string;
+  profileVersion: number;
+  label: string;
+  directions: readonly ProviderDirection[];
+  sourceFormats: readonly ProviderSourceFormat[];
+  dateRepresentation: "native_sql_date" | "gregorian_iso" | "jalali_text";
+  moneyRepresentation: "connection_setting" | "rial" | "toman";
+  sheets: readonly ProviderProfileSheet[];
+  capabilities: {
+    /** Scopes the connected SQL reader supports. */
+    readScopes: readonly string[];
+    /** Versioned XLSX import scopes (may exceed the connected SQL reader). */
+    workbookImportScopes: readonly string[];
+    exportScopes: readonly string[];
+    connectedWriteScopes: readonly string[];
+    directSqlWrite: boolean;
+    rollback: boolean;
+  };
+  /** Existing integration service responsible for domain writes. */
+  applyService: string;
+}
+
 export interface ParsedSheet {
   /** The header row, trimmed. */
   columns: string[];
@@ -301,6 +384,8 @@ export interface ExportColumn {
 }
 
 export type ExportFormat = "csv" | "xlsx" | "pdf" | "json";
+/** A connected provider send is a job, not a downloadable codec file. */
+export type ExportJobFormat = ExportFormat | "provider";
 
 export const EXPORT_FORMAT_LABELS: Record<ExportFormat, string> = {
   csv: "CSV",
@@ -309,7 +394,28 @@ export const EXPORT_FORMAT_LABELS: Record<ExportFormat, string> = {
   json: "JSON",
 };
 
+export interface ProviderJobMetadata {
+  provider: string;
+  direction?: "import" | "export";
+  sourceFormat: string;
+  connectionId: string;
+  connectionName?: string;
+  locationId?: string | null;
+  profileKey: string;
+  profileVersion: number;
+  selectedScopes: string[];
+  outcome?: "completed" | "partial_failure" | "failed";
+  migrationRunId?: string | null;
+  rollbackState?: string | null;
+  discrepancyCount?: number | null;
+  trialBalanceDiscrepancyCount?: number | null;
+  journalSummary?: unknown;
+  counts?: unknown;
+}
+
 export type ImportFormat = "csv" | "xlsx" | "json" | "pdf";
+/** Jobs created by a provider adapter share generic history, without pretending a connection is a user-uploaded codec format. */
+export type ImportJobFormat = ImportFormat | "provider";
 
 export const IMPORT_FORMAT_LABELS: Record<ImportFormat, string> = {
   csv: "CSV",

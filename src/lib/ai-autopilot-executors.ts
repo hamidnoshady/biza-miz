@@ -21,7 +21,10 @@ import { updateMenuItem } from "./menu-service";
 import { createStockCount, reverseStockCount } from "./stock-count-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
-import { recordExpense, ExpenseError } from "./expense-service";
+import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
+import { resolveBranchRef } from "./branch-service";
+import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
+import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
 import { createDraft, deleteDraft, ManualJournalError } from "./manual-journal-service";
 import { updateCustomer } from "./parties-service";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
@@ -59,8 +62,15 @@ export interface AutopilotReverterContext {
 
 export type AutopilotReverter = (ctx: AutopilotReverterContext) => Promise<AutopilotExecutionResult>;
 
-/** Every row an executor creates says so, so an automated write never reads as typed by hand. */
-export const AUTOPILOT_NOTE_PREFIX = "ثبت خودکار دستیار — ";
+/**
+ * Every row an executor creates says so, so an automated write never reads as
+ * typed by hand. The string itself lives in the framework-free
+ * `ai-provenance.ts`, because a screen that wants to show *who* drafted
+ * something cannot import this module (it opens a database pool) — re-exported
+ * here so no existing importer has to change.
+ */
+export { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
+import { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
 
 function fail(errorCode: string): AutopilotExecutionResult {
   return { ok: false, result: { error: errorCode }, errorCode };
@@ -120,13 +130,31 @@ async function locationOfInventoryItems(itemIds: string[]): Promise<string | nul
   return rows[0].location_id;
 }
 
-/** For rows whose location_id is nullable (expenses, journal drafts). */
-async function defaultLocation(businessId: string): Promise<string | null> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM locations WHERE business_id = $1 AND is_active ORDER BY created_at LIMIT 1`,
-    [businessId],
-  );
-  return rows[0]?.id ?? null;
+/**
+ * The branch an automated write should file under: the one the payload named — by
+ * id or by a name that belongs to exactly one of *this* business's active
+ * branches — and otherwise the default `branch-service` states (oldest active).
+ *
+ * This file used to answer that question with a private copy of the query
+ * `defaultBranchId` is. Two statements of one rule is how a later change lands in
+ * only one of them, so both writing actions now go through the resolver, and the
+ * fallback that is left is the one a person sees when they open the register.
+ *
+ * The expense action had no choice at all until now, so «اجارهٔ شعبهٔ شمال» was
+ * recorded against whichever branch happened to be oldest: a request and a ledger
+ * disagreeing quietly, which is the failure this whole issue is about, arriving
+ * from the assistant's side. A wrong or ambiguous name is refused *here* rather
+ * than passed on for `recordExpense` to reject, because the service's refusal is
+ * right but arrives after the executor has already echoed a branch id back in its
+ * result.
+ */
+async function chosenLocation(
+  businessId: string,
+  requested: string | null,
+): Promise<{ locationId: string | null } | { error: string }> {
+  const resolved = await resolveBranchRef(businessId, requested);
+  if (resolved.ok) return { locationId: resolved.locationId };
+  return { error: resolved.reason === "ambiguous" ? "ambiguous_location" : "invalid_location" };
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +185,13 @@ const menuItemPatch: AutopilotExecutor = async (ctx) => {
   }
   if (patch.price === undefined && patch.isActive === undefined) return fail("invalid_payload");
 
-  const updated = await updateMenuItem(locationId, menuItemId, patch);
+  // A price inside this patch becomes canonical price history recorded as
+  // `ai` — autopilot and MCP share this executor, and both are the assistant
+  // acting on the owner's authorization (issue #844).
+  const updated = await updateMenuItem(locationId, menuItemId, patch, ctx.businessId, {
+    changedBy: ctx.authorizedByUserId,
+    source: "ai",
+  });
   if (!updated.ok) return fail(updated.error);
   return {
     ok: true,
@@ -176,8 +210,18 @@ const stockCount: AutopilotExecutor = async (ctx) => {
   if (locationId === "mixed") return fail("autopilot_mixed_location");
   if (!locationId) return fail("not_found");
 
+  // On hand is derived from the append-only stock ledger, which is the only
+  // place a quantity lives: `inventory_items` carries cost and settings, never
+  // a quantity column. Reading a stale/nonexistent `inventory_items.quantity`
+  // here would snapshot the wrong "before" figure for the count.
   const { rows: before } = await query<{ id: string; name: string; quantity: string }>(
-    `SELECT id, name, quantity::text AS quantity FROM inventory_items WHERE id = ANY($1::uuid[])`,
+    `SELECT i.id, i.name,
+            trim_scale(COALESCE(sm.total, 0))::text AS quantity
+       FROM inventory_items i
+       LEFT JOIN LATERAL (
+         SELECT sum(quantity) AS total FROM stock_movements WHERE inventory_item_id = i.id
+       ) sm ON true
+      WHERE i.id = ANY($1::uuid[])`,
     [itemIds],
   );
 
@@ -263,26 +307,88 @@ const orderDiscount: AutopilotExecutor = async (ctx) => {
 const expense: AutopilotExecutor = async (ctx) => {
   const accountId = str(ctx.payload.accountId);
   const paymentAccountId = str(ctx.payload.paymentAccountId);
-  const amount = int(ctx.payload.amount);
+  // The amount rule of the channel, not this file's generic integer reader: a
+  // model that hands over ۱۵۰/۷ تومان gets the same refusal the API gives, and a
+  // figure whose ×10 landed on a float artefact is read as the Rial it is (§5).
+  const amount = parseExpenseAmount(ctx.payload.amount);
   const memo = str(ctx.payload.memo);
-  if (!accountId || !paymentAccountId || amount === null || !memo) return fail("invalid_payload");
+  if (!accountId || amount === null || !memo) return fail("invalid_payload");
+  /*
+   * The settlement is read through the same parser the form and the service use,
+   * so an owed expense is not refused for the wrong reason here — a `paymentAccountId`
+   * belongs to a paid expense, and a model that omits it for «پرداخت بعدی» is
+   * right, not malformed (issue #832 §15: one rule, every channel).
+   */
+  let settlement: ExpenseSettlementInput;
+  try {
+    settlement = parseExpenseSettlement({
+      settlement: ctx.payload.settlement,
+      supplierId: ctx.payload.supplierId,
+      dueDate: ctx.payload.dueDate,
+    });
+  } catch (err) {
+    if (err instanceof PayablesInputError) return fail(err.code);
+    throw err;
+  }
+  if (settlement.settlement === "paid" && !paymentAccountId) return fail("invalid_payload");
+
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
 
   try {
     const created = await recordExpense({
       businessId: ctx.businessId,
-      locationId: await defaultLocation(ctx.businessId),
+      locationId: branch.locationId,
       accountId,
-      paymentAccountId,
+      paymentAccountId: settlement.settlement === "credit" ? null : paymentAccountId,
+      settlement: settlement.settlement,
+      supplierId: settlement.supplierId,
+      dueDate: settlement.dueDate,
       amount,
       expenseDate: str(ctx.payload.expenseDate),
       vendor: str(ctx.payload.vendor),
+      partyId: str(ctx.payload.partyId),
+      vatAmount: parseExpenseVatAmount(ctx.payload.vatAmount ?? 0),
       memo: `${AUTOPILOT_NOTE_PREFIX}${memo}`,
       createdBy: ctx.authorizedByUserId,
     });
     return { ok: true, result: { expenseId: created.id, amount } };
   } catch (err) {
     if (err instanceof ExpenseError) return fail(err.message);
+    if (err instanceof MissingLedgerAccountError) {
+      // `POST /api/ledger/expenses` answers 409 `ledger_account_missing` for this
+      // fact. Unmapped, the action reported the bare account code as its failure
+      // reason — a number where the model should have read «this chart has no
+      // Accounts Payable account to credit».
+      return fail("ledger_account_missing");
+    }
     return fail(err instanceof Error ? err.message : "expense_failed");
+  }
+};
+
+/**
+ * Undo an automated expense the way the register undoes any other: a mirrored
+ * reversal, never a deletion (issue #832 §1, §15). Before 0211 there was no
+ * honest one-click undo to offer for `expense.categorize` — `reverseEntry`
+ * accepts only `source_type='manual'` — which is why the action advertised
+ * itself as irreversible; it now shares the accountant's own correction path
+ * rather than an automation-only one.
+ */
+const revertExpense: AutopilotReverter = async (ctx) => {
+  const expenseId = str(ctx.result?.expenseId) ?? str(ctx.payload.expenseId);
+  if (!expenseId) return fail("no_prior_state");
+  if (!ctx.authorizedByUserId) return fail("no_authorizing_user");
+  try {
+    await reverseExpense({
+      businessId: ctx.businessId,
+      expenseId,
+      actorId: ctx.authorizedByUserId,
+      memo: `${AUTOPILOT_NOTE_PREFIX}ابطال هزینهٔ خودکار`,
+    });
+    return { ok: true, result: { expenseId, reversed: true } };
+  } catch (err) {
+    if (err instanceof ExpenseError) return fail(err.message);
+    throw err;
   }
 };
 
@@ -295,9 +401,11 @@ const journalDraft: AutopilotExecutor = async (ctx) => {
   try {
     // createDraft only — the entry lands in Phase 16's approval queue and a
     // human still approves it. Never approveDraft (Decision 1).
+    const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+    if ("error" in branch) return fail(branch.error);
     const created = await createDraft({
       businessId: ctx.businessId,
-      locationId: await defaultLocation(ctx.businessId),
+      locationId: branch.locationId,
       entryDate: str(ctx.payload.entryDate),
       memo: `${AUTOPILOT_NOTE_PREFIX}${memo}`,
       lines: lines.map((line) => ({
@@ -567,6 +675,53 @@ const triggeredMessageCampaign: AutopilotExecutor = async (ctx) => {
   }
 };
 
+/**
+ * Issue #812 §13 — the branch an executor will write into, resolved from the
+ * payload BEFORE the write runs, so the central authority gate can check the
+ * authorizing member's CURRENT branch scope against it.
+ *
+ * Returns null when the executor's target is business-wide rather than
+ * branch-local (a website draft, a customer note), in which case there is no
+ * branch scope to check. Never throws: an unresolvable target is a
+ * business-wide write as far as scope is concerned, and the executor's own
+ * resolution is still the authority on whether the row exists.
+ */
+export async function executorTargetLocation(
+  executorKey: AutopilotExecutorKey | undefined,
+  payload: Record<string, unknown>,
+): Promise<string | null> {
+  if (!executorKey) return null;
+  const menuItemId = str(payload.menuItemId);
+  const orderId = str(payload.orderId);
+  const inventoryItemId = str(payload.inventoryItemId);
+  try {
+    switch (executorKey) {
+      case "menuItemPatch":
+        return menuItemId ? await locationOfMenuItem(menuItemId) : null;
+      case "orderDiscount":
+        return orderId ? await locationOfOrder(orderId) : null;
+      case "stockCount":
+      case "draftPurchase":
+      case "wasteLog":
+      case "productionRun": {
+        const ids = Array.isArray(payload.lines)
+          ? (payload.lines as Record<string, unknown>[])
+              .map((line) => str(line.inventoryItemId))
+              .filter((id): id is string => Boolean(id))
+          : [];
+        if (ids.length === 0 && inventoryItemId) ids.push(inventoryItemId);
+        if (ids.length === 0) return null;
+        const location = await locationOfInventoryItems(ids);
+        return location === "mixed" ? null : location;
+      }
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,
   stockCount,
@@ -605,7 +760,13 @@ const revertMenuItemPatch: AutopilotReverter = async (ctx) => {
   if (typeof prior.isActive === "boolean") patch.isActive = prior.isActive;
   if (patch.price === undefined && patch.isActive === undefined) return fail("no_prior_state");
 
-  const updated = await updateMenuItem(locationId, menuItemId, patch);
+  // The revert writes history too (source `ai`): it IS a real price change
+  // back to the previous value, and history rows are never rewritten.
+  const updated = await updateMenuItem(locationId, menuItemId, patch, ctx.businessId, {
+    changedBy: ctx.authorizedByUserId,
+    source: "ai",
+    sourceRef: "revert",
+  });
   if (!updated.ok) return fail(updated.error);
   return { ok: true, result: { menuItemId, restored: patch } };
 };
@@ -746,4 +907,5 @@ export const AUTOPILOT_REVERTERS: Partial<Record<AutopilotExecutorKey, Autopilot
   customerTag: revertCustomerTag,
   crmCustomerNote: revertCrmCustomerNote,
   productionRun: revertProductionRun,
+  expense: revertExpense,
 };

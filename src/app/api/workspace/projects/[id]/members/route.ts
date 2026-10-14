@@ -17,7 +17,7 @@ export const GET = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "view", true);
+      await requireProjectCapability(owner, id, "view");
       return NextResponse.json({ members: await listMembers(id) });
     } catch (err) {
       return handleWorkspaceError(err);
@@ -32,7 +32,7 @@ export const PUT = withTenantScope(
     const { id } = await context.params;
     const body = await readBody(request);
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       const members = await setMember(owner, id, String(body.userId ?? ""), String(body.role ?? "viewer"));
       return NextResponse.json({ members });
     } catch (err) {
@@ -48,7 +48,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     const userId = new URL(request.url).searchParams.get("userId") ?? "";
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       return NextResponse.json({ members: await removeMember(owner, id, userId) });
     } catch (err) {
       return handleWorkspaceError(err);

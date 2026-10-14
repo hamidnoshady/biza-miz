@@ -4,7 +4,9 @@ import * as aiConfig from "@/lib/ai-config";
 import * as aiRuntime from "@/lib/ai-runtime";
 import * as aiWalletBilling from "@/lib/ai-wallet-billing";
 import * as invoiceOcrService from "@/lib/ai-invoice-ocr-service";
+import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 import * as mediaService from "@/lib/media-service";
 import { POST } from "./route";
 
@@ -20,6 +22,9 @@ import { POST } from "./route";
  */
 
 vi.mock("@/lib/auth", () => ({
+  // Issue #812 §11 — the route now names its capability explicitly instead of
+  // relying on `requireManager()`'s default, so the mock has to expose it.
+  requirePermission: vi.fn(),
   withTenantScope: (handler: (...args: unknown[]) => Promise<Response>) => handler,
 }));
 
@@ -75,7 +80,7 @@ beforeEach(() => {
   // reset these explicitly so an earlier test's override can't leak in.
   vi.mocked(aiConfig.isPlatformAiConfigured).mockReturnValue(true);
   vi.mocked(mediaService.isMediaStorageReady).mockReturnValue(true);
-  vi.mocked(setupState.requireManager).mockResolvedValue({ session: SESSION, error: null } as never);
+  vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null, membership: { permissions: new Set() } } as never);
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue(LOCATION as never);
   vi.mocked(mediaService.getMediaConfig).mockResolvedValue({} as never);
   vi.mocked(mediaService.findMediaAssetByHash).mockResolvedValue(null);
@@ -201,6 +206,9 @@ describe("POST /api/ai/invoice-ocr", () => {
     const badRequest = { json: () => Promise.reject(new Error("bad")) } as unknown as NextRequest;
     const res = await POST(badRequest);
     expect(res.status).toBe(400);
-    expect(setupState.requireManager).toHaveBeenCalled();
+    // Issue #812 §11 — the guard is now the named capability, not the
+    // compatibility wrapper's default. Asserting the call is what keeps a later
+    // edit from quietly re-defaulting the route to `settings.manage`.
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.aiManage);
   });
 });

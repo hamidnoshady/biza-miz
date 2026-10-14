@@ -18,7 +18,7 @@ interface Ctx {
  * which is exactly when it matters.
  */
 export const POST = withPlatformScope(async (_request: NextRequest, ctx: Ctx) => {
-  const { error } = await requirePlatformCapability("backup.manage");
+  const { error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
 
   const { id } = await ctx.params;

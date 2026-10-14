@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { api, ErrorBox, errorMessage, PrimaryButton, SetupDataSkeleton } from "../ui";
+import { catalogueHrefFor } from "@/lib/wizard-steps";
 import { stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
 
@@ -35,17 +36,25 @@ export default function FinishPage() {
   async function complete() {
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string; messages?: string[] }>("/api/setup/complete", {
-      method: "POST",
-    });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error, data.messages));
-      load();
-      return;
+    try {
+      const { ok, data, status } = await api<{ error?: string; messages?: string[] }>(
+        "/api/setup/complete",
+        { method: "POST" },
+      );
+      if (!ok) {
+        // `incomplete` (409) means readiness regressed between this page's
+        // read and the press — the reload below refreshes the checklist and
+        // the reason list. A transport failure (status 0) reads as a
+        // connection problem without pretending anything about the data.
+        setError(errorMessage(data?.error, data?.messages, status));
+        load();
+        return;
+      }
+      setCompleted(true);
+      router.replace("/settings");
+    } finally {
+      setBusy(false);
     }
-    setCompleted(true);
-    router.replace("/settings");
   }
 
   if (state === null) return <SetupDataSkeleton rows={5} />;
@@ -54,6 +63,11 @@ export default function FinishPage() {
   // The backup-destination step only exists on a standalone install, so don't
   // review a row that would always read as incomplete on a connected one.
   const steps = stepsFor(industry).filter((s) => s.id !== "backup" || state?.localOnly);
+  // Non-F&B trades have no menu step: their catalogue lives in the products
+  // workspace / their trade's own items page, and this points at it.
+  const catalogueHref = catalogueHrefFor(industry);
+  const catalogueLabel =
+    industry === "jewelry" || industry === "watch" ? "صفحهٔ کالاهای همین صنف" : "پنل محصولات";
 
   return (
     <div>
@@ -71,7 +85,7 @@ export default function FinishPage() {
           <p className="mb-2 text-2xl">🎉</p>
           <p className="mb-1 font-bold text-emerald-800 dark:text-emerald-200">راه‌اندازی کامل شد!</p>
           <p className="mb-4 text-sm text-emerald-700 dark:text-emerald-300">
-            کسب‌وکار شما آمادهٔ ثبت سفارش است. امکانات فروش در فاز ۲ فعال می‌شود.
+            کسب‌وکار شما آمادهٔ ثبت فروش است.
           </p>
           <Link
             href="/dashboard"
@@ -124,6 +138,27 @@ export default function FinishPage() {
               {missing.map((m, i) => (
                 <p key={i}>• {m}</p>
               ))}
+            </div>
+          ) : null}
+
+          {/*
+            Non-F&B trades have no menu step by design: their catalogue is the
+            products workspace (or the trade's own items page), which is the one
+            door for it. Point at that door instead of leaving a retail owner to
+            discover it — the wizard's answer to "where do I enter my goods?"
+            (issue #808 §8).
+          */}
+          {catalogueHref ? (
+            <div className="mb-6 rounded-lg border border-border bg-muted/40 p-4 text-sm">
+              <p className="mb-1 font-semibold">ثبت کالاها و موجودی</p>
+              <p className="text-muted-foreground">
+                کالاهای قابل فروش این کسب‌وکار از{" "}
+                <Link href={catalogueHref} className="text-primary hover:underline">
+                  {catalogueLabel}
+                </Link>{" "}
+                ثبت می‌شوند؛ راه‌اندازی برای آن‌ها مرحلهٔ جداگانه‌ای ندارد و بعد از پایان
+                راه‌اندازی هم از همان مسیر ادامه می‌دهید.
+              </p>
             </div>
           ) : null}
 

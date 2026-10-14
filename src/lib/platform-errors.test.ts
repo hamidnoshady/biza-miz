@@ -37,4 +37,27 @@ describe("platform-errors", () => {
     expect(isKnownPlatformError("nope")).toBe(false);
     expect(isKnownPlatformError(null)).toBe(false);
   });
+
+  it("maps every danger-zone code to useful Persian text (issue #822)", () => {
+    // None of the known safety conditions may fall through to the generic
+    // "unexpected error" message — each has its own operator-facing text.
+    for (const code of [
+      "protected_internal_business",
+      "reset_confirmation_required",
+      "reset_not_possible",
+      "reset_failed",
+      "delete_confirmation_required",
+      "delete_failed",
+      "delete_blocked",
+      "not_found",
+      "forbidden",
+    ] as const) {
+      expect(isKnownPlatformError(code), code).toBe(true);
+      expect(platformErrorText(code), code).not.toBe("خطای غیرمنتظره. دوباره تلاش کنید.");
+    }
+    // Reset and delete keep distinguishable wording.
+    expect(platformErrorText("reset_confirmation_required")).toContain("بازنشانی");
+    expect(platformErrorText("delete_confirmation_required")).toContain("حذف");
+    expect(platformErrorText("protected_internal_business")).toContain("داخلی");
+  });
 });

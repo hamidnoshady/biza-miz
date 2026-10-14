@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { BranchError, createBranch } from "@/lib/branch-service";
+import { stockNeedsAttentionSql } from "@/lib/retail-stock";
 
 /**
  * Phase 42b — the retail warehouse module's view of the business's branches.
@@ -44,8 +45,7 @@ export const GET = withTenantScope(async () => {
            FROM items i
            LEFT JOIN item_stock s ON s.item_id = i.id
           WHERE i.location_id = l.id AND i.is_active AND i.kind <> 'variant_parent'
-            AND COALESCE(s.reorder_point, 0) > 0
-            AND COALESCE(s.quantity, 0) <= s.reorder_point)::text AS low_stock_count,
+            AND ${stockNeedsAttentionSql("COALESCE(s.quantity, 0)", "COALESCE(s.reorder_point, 0)")})::text AS low_stock_count,
         (SELECT max(s.updated_at) FROM item_stock s JOIN items i ON i.id = s.item_id
           WHERE i.location_id = l.id AND i.is_active AND i.kind <> 'variant_parent') AS last_movement_at
        FROM locations l

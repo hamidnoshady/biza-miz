@@ -315,6 +315,13 @@ describe("the peer download client", () => {
   let served: { body: Buffer; sha256: string; artifact: string } | null = null;
 
   beforeAll(async () => {
+    // The test's peer is `http://127.0.0.1:<port>` — a loopback, plain-HTTP
+    // address. Issue #807 refuses both by default (metadata/link-local are
+    // never allowed; private and insecure need an explicit opt-in), so the
+    // operator's two switches are turned on here exactly as a real LAN restore
+    // would require. The pair of tests below the fixture prove the default
+    // really does refuse it.
+    await setConfig({ allowInsecurePeers: true, allowPrivatePeers: true });
     const run = await svc.runPlatformLocalBackup("manual", null);
     if (run.status !== "ok") throw new Error("no artifact to serve");
     const body = await fs.readFile(path.join(svc.platformBackupDir(), run.artifact));
@@ -344,6 +351,21 @@ describe("the peer download client", () => {
 
   afterAll(async () => {
     await new Promise<void>((resolve) => server?.close(() => resolve()));
+  });
+
+  it("refuses a loopback/insecure peer unless the operator has allowed it", async () => {
+    // Default-deny, both halves: with the two switches off, the very same URL
+    // the rest of this describe uses is a blocked address, refused before a
+    // connection is made.
+    await setConfig({ allowInsecurePeers: false, allowPrivatePeers: false });
+    try {
+      const blocked = await svc.downloadPeerArtifact({ url: `${serverUrl}/download/x.dump`, token: "" });
+      expect(blocked.ok).toBe(false);
+      // @ts-expect-error the failure shape carries `error`
+      expect(blocked.error).toMatch(/peer_unreachable:(https_required|blocked_address)/);
+    } finally {
+      await setConfig({ allowInsecurePeers: true, allowPrivatePeers: true });
+    }
   });
 
   it("verifies the checksum the source declared, and stops when it does not match", async () => {
@@ -400,6 +422,7 @@ describe("restoring a platform artifact", () => {
       source: "local" as const,
       artifact: run.artifact,
       mode: "verify" as const,
+      objectKey: null,
       peerId: null,
       url: null,
       passphrase: "",
@@ -442,7 +465,7 @@ describe("restoring a platform artifact", () => {
     await setConfig({ passphrase: "" });
 
     const res = await svc.restorePlatformFromPlan(
-      { ok: true, source: "local", artifact: enc.artifact, mode: "verify", peerId: null, url: null, passphrase: "" },
+      { ok: true, source: "local", artifact: enc.artifact, mode: "verify", objectKey: null, peerId: null, url: null, passphrase: "" },
       null,
     );
     expect(res.status).toBe("failed");
@@ -461,13 +484,14 @@ describe("restoring a platform artifact", () => {
         source: "local",
         artifact: (await svc.listPlatformLocalArtifacts())[0].artifact,
         mode: "verify",
+        objectKey: null,
         peerId: null,
         url: null,
         passphrase: "correct horse battery",
       },
       null,
     );
-    expect(res.status).toBe("verified");
+    expect(res.status === "verified" ? "verified" : JSON.stringify(res)).toBe("verified");
   });
 
   it("reports a checksum it cannot satisfy rather than restoring an unknown file", async () => {
@@ -475,7 +499,7 @@ describe("restoring a platform artifact", () => {
     const name = "pos-backup-29991231-235959.dump";
     await fs.writeFile(path.join(dir, name), "POSSTUB1\n", "utf8");
     const res = await svc.restorePlatformFromPlan(
-      { ok: true, source: "local", artifact: name, mode: "verify", peerId: null, url: null, passphrase: "" },
+      { ok: true, source: "local", artifact: name, mode: "verify", objectKey: null, peerId: null, url: null, passphrase: "" },
       null,
     );
     // An orphan file with no run row behind it still restores — there is no
@@ -498,15 +522,23 @@ describe("the peer HTTP surface", () => {
   let downloadRoute: typeof import("../src/app/api/peer/backup/download/route");
   let token = "";
   let artifact = "";
+  let plainArtifact = "";
   let bytes: Buffer;
 
   beforeAll(async () => {
     manifestRoute = await import("../src/app/api/peer/backup/manifest/route");
     downloadRoute = await import("../src/app/api/peer/backup/download/route");
+    // A plaintext artifact exists on disk for the operator, but peers must never
+    // receive it (audit F03). The peer-facing artifact is therefore encrypted.
     await setConfig({ servingEnabled: true, encryptLocal: false, passphrase: "", localRetention: 5 });
+    const plain = await svc.runPlatformLocalBackup("manual", null);
+    if (plain.status !== "ok") throw new Error("no plaintext artifact to refuse");
+    plainArtifact = plain.artifact;
+    await setConfig({ encryptLocal: true, passphrase: "correct horse battery" });
     const run = await svc.runPlatformLocalBackup("manual", null);
     if (run.status !== "ok") throw new Error("no artifact to serve");
     artifact = run.artifact;
+    expect(artifact.endsWith(".enc")).toBe(true);
     bytes = await fs.readFile(path.join(svc.platformBackupDir(), artifact));
     const created = await svc.createPlatformBackupToken({
       label: "http test peer",
@@ -550,6 +582,13 @@ describe("the peer HTTP surface", () => {
     const listed = body.artifacts.find((a) => a.artifact === artifact)!;
     expect(listed.sha256).toBe(sha(bytes));
     expect(listed.sizeBytes).toBe(bytes.length);
+  });
+
+  it("never streams a plaintext artifact, even one the peer names exactly", async () => {
+    const res = await get("download", `?artifact=${plainArtifact}`);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).not.toContain("POSSTUB1");
   });
 
   it("streams the artifact with the checksum and length a peer verifies", async () => {

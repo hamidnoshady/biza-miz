@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenant } from "@/lib/db";
 import { resolveDeviceId } from "@/lib/device-service";
 import { requestHost } from "@/lib/host";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { loginRoster, resolveLoginBusinessId } from "@/lib/employee-service";
+import { readHybridIdentityStatus } from "@/lib/iam/login-credential-sync";
 import { phoneOtpEnforcementFor } from "@/lib/phone-otp";
+import { readTrustedDeviceToken, resolveTrustedDeviceSubject } from "@/lib/trusted-device";
 
 /**
  * Phase 20 Wave 2 — the name-then-PIN login redesign's first step: who is
@@ -38,10 +41,28 @@ export async function GET(request: NextRequest) {
 
   return withTenant(businessId, async () => {
     const deviceId = await resolveDeviceId(params.get("deviceToken"), businessId);
-    const [employees, enforcement] = await Promise.all([
-      loginRoster(businessId, params.get("locationId"), deviceId),
+    // Issue #885 — the one member this device may greet as trusted. Resolved
+    // from the trust cookie rather than from any member-wide stamp, so the
+    // door's routing hint agrees with what `pin-login` will actually decide:
+    // a second till is not trusted just because the first one verified.
+    const trusted = await resolveTrustedDeviceSubject({
+      businessId,
+      token: readTrustedDeviceToken(request),
+    });
+    const [employees, enforcement, deployment] = await Promise.all([
+      loginRoster(businessId, params.get("locationId"), deviceId, trusted?.userId ?? null),
       phoneOtpEnforcementFor(businessId),
+      readDeploymentProfile(businessId),
     ]);
+    // Hybrid only: the roster above silently omits a member whose replicated
+    // PIN has not arrived (loginRoster lists only members a PIN can sign in),
+    // which reads to the operator as "this business has one employee". Report
+    // the credential plane next to the roster so the login screen can say the
+    // list is incomplete, offer a retry and link to the connection panel —
+    // counts and names only, never a credential.
+    const health = deployment.profile === "hybrid"
+      ? await readHybridIdentityStatus(businessId)
+      : null;
     return NextResponse.json({
       employees,
       policy: {
@@ -49,6 +70,22 @@ export async function GET(request: NextRequest) {
         daysLeft: enforcement.daysLeft,
         enforcedAt: enforcement.policy.enforcedAt,
       },
+      credentialSync: health?.configured
+        ? {
+            state: health.credentials?.status ?? "pending",
+            overall: health.overall,
+            expected: health.pinGap.expected,
+            usable: health.pinGap.usable,
+            missing: health.pinGap.missing,
+            missingMembers: health.pinGap.missingMembers.map((member) => ({
+              id: member.id,
+              fullName: member.fullName,
+              role: member.role,
+            })),
+            lastSuccessAt: health.credentials?.lastSuccessAt ?? null,
+            lastError: health.credentials?.lastError ?? null,
+          }
+        : null,
     });
   });
 }

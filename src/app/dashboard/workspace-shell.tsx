@@ -1,3 +1,4 @@
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { endedSupportSessionClaims, getSession, type Role } from "@/lib/auth";
 import { appForModule } from "@/lib/apps";
@@ -11,6 +12,7 @@ import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes"
 import { ACCOUNTING_WORKSPACE_HREFS, PLATFORM_BILLING_HREF, PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
 import { settingsTabHref } from "@/lib/settings-routes";
 import { REPORTS_TABS, reportsTabHref } from "./reports/reports-nav";
+import { REPORT_CAPABILITY_PERMISSIONS } from "@/lib/report-permissions";
 import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures, isLockableFeature } from "@/lib/features";
@@ -34,9 +36,12 @@ import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { deploymentRole } from "@/lib/deployment-role";
 import { getServerSyncConfig } from "@/lib/server-sync";
-import { isHybridSite, tillNavItems } from "@/lib/site-routes";
+import { isHybridSite } from "@/lib/site-routes";
+import { isCloudEmbedUserAgent } from "@/lib/cloud-embed";
+import { HybridConnectivityNotice } from "./hybrid-connectivity-notice";
 import { getGrant } from "@/lib/platform-service";
 import { SupportSessionBanner, SupportSessionEnded } from "./support-session-banner";
+import { GROWTH_APP_PERMISSIONS } from "@/lib/growth-access";
 
 /**
  * The dashboard nav.
@@ -72,6 +77,16 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       // both keeps a waiter with orders.create out and honours either explicit
       // revocation for custom/system roles.
       requiredAllPermissions: [...POS_REQUIRED_PERMISSIONS],
+    },
+    // The canonical menu manager (issue #844) — «مدیریت منو», right after the
+    // till it stocks. Gated on the canonical read capability; the page and the
+    // workspace composer take their gate from this same entry, and mutations
+    // are separately gated `menu.edit` on every route.
+    {
+      label: "مدیریت منو",
+      module: "menu",
+      href: ACCOUNTING_WORKSPACE_HREFS.menu,
+      requiredAnyPermission: ["menu.view"],
     },
     // The CRM app's door (Phase 36 — it is its own app, not a section of any
     // other). It is anchored on the `customers` module — core for every trade,
@@ -109,8 +124,11 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     {
       label: "رشد و بازاریابی",
       module: "loyalty",
+      // The door's permission is the union of the section gates (issue #764);
+      // a member without the overview is forwarded by its page to the first
+      // section they may open (`growthFallbackHref`).
       href: "/growth/overview",
-      roles: ["owner", "manager", "cashier"],
+      requiredAnyPermission: [...GROWTH_APP_PERMISSIONS],
     },
     // Its own app (issue #378) — an integration with an external system of
     // record (eshobe-cms), not a Growth engine. Owner/manager only, the same
@@ -135,6 +153,15 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     { label: "انبار", module: "inventory", href: ACCOUNTING_WORKSPACE_HREFS.inventory, roles: ["owner", "manager"], flag: "inventory" },
     { label: INDUSTRY_LABELS.jewelry, module: "jewelry", href: "/accounting/jewelry", roles: ["owner", "manager"] },
     { label: INDUSTRY_LABELS.watch, module: "watch", href: "/accounting/watch", roles: ["owner", "manager"] },
+    // Issue #839 — the automotive manager. Same shape as the two above: one
+    // trade-titled entry that the module gate (and therefore the industry
+    // profile) removes entirely for every other business.
+    {
+      label: INDUSTRY_LABELS.automotive,
+      module: "automotive",
+      href: ACCOUNTING_WORKSPACE_HREFS.automotive,
+      roles: ["owner", "manager"],
+    },
     // Phase 42 — the retail trade-goods trades manage their catalogue in the
     // shared products workspace: a collapsible sidebar group — افزودن محصول،
     // لیست محصولات، لیست قیمت، ویژگی محصول، الگوی بارکد وزنی and the trade's
@@ -204,17 +231,25 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       href: "/media",
       roles: ["owner", "manager"],
     },
+    // Issue #819 — the reports door and its tabs are gated by the *reporting
+    // capabilities*, not by a role list: the entry's old
+    // `roles: ["owner","manager","accountant"]` both hid «گزارش‌ها» from an
+    // admin who holds `reports.view` and, because the `roles` field is only
+    // consulted for the industry catalogue modules, did not actually restrict
+    // the children — «مقایسهٔ شعب» rendered for anyone with `reports.view`
+    // while the branch-comparison API claimed to be owner-only. Each child now
+    // names the same permission its route enforces.
     {
       label: "گزارش‌ها",
       module: "reports",
       href: ACCOUNTING_WORKSPACE_HREFS.reports,
-      roles: ["owner", "manager", "accountant"],
+      requiredAnyPermission: [REPORT_CAPABILITY_PERMISSIONS.canViewReports],
       flag: "reporting",
       children: REPORTS_TABS.map((tab) => ({
         label: tab.label,
         module: "reports" as const,
         href: reportsTabHref(tab.key),
-        roles: tab.roles ?? ["owner", "manager", "accountant"],
+        requiredAnyPermission: [REPORT_CAPABILITY_PERMISSIONS[tab.capability]],
       })),
     },
     // The assistant itself is not an entry: it IS the dashboard (`/dashboard`
@@ -260,7 +295,7 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
 function modulePermissions(module: NavItem["module"]): Permission[] {
   const map: Partial<Record<NavItem["module"], Permission[]>> = {
     orders: ["orders.create"], pos: ["orders.create"], customers: ["crm.view", "crm.manage"],
-    loyalty: ["growth.view", "loyalty.view"], website: ["website.view"], stock: ["inventory.view"],
+    loyalty: [...GROWTH_APP_PERMISSIONS], website: ["website.view"], stock: ["inventory.view"],
     tables: ["tables.manage"], kitchen: ["kitchen.view"], reservations: ["reservations.manage"],
     delivery: ["delivery.manage"], inventory: ["inventory.view"], jewelry: ["inventory.view"],
     watch: ["inventory.view"], cosmetics: ["inventory.view"], ledger: ["ledger.view"],
@@ -377,8 +412,11 @@ export async function WorkspaceShell({
   if (!member?.isActive) redirect("/login");
   const [industryResult, prefs, appAvailability, features, deployment, serverSyncConfig] = tenantReads;
   const runtimeRole = deploymentRole();
-  // Phase 45: a Hybrid desktop is the till — its menu lists only till screens.
-  const tillMode = isHybridSite(deployment.profile, runtimeRole);
+  // Phase 46: a Hybrid desktop shows the full menu; cloud screens open in its
+  // content area (DeploymentCapabilityGate → CloudPane).
+  const hybridSite = isHybridSite(deployment.profile, runtimeRole);
+  // The cloud page inside that pane: the desktop draws the menu, so this page does not.
+  const embedded = runtimeRole === "central" && isCloudEmbedUserAgent((await headers()).get("user-agent"));
   const cloudUrl = serverSyncConfig?.enabled ? serverSyncConfig.remoteUrl : null;
   const supportGrant = session.imp ? await getGrant(session.imp.grantId, session.businessId) : null;
   const industry = industryResult.rows[0]?.industry ?? "food_service";
@@ -447,8 +485,15 @@ export async function WorkspaceShell({
           once the bar retracts.
         */}
         <div className="flex h-[100dvh] flex-col md:h-screen md:flex-row">
-        <DashboardSidebar
-          navItems={tillMode ? tillNavItems(navItems) : navItems}
+        {hybridSite ? <HybridConnectivityNotice /> : null}
+        {/*
+          `embedded` covers a request that arrived with the pane's token. The
+          wrapper's attribute covers the rest: a navigation the cloud's service
+          worker forwarded without it (globals.css hides it under
+          `html[data-cloud-embed]`). `contents` keeps it out of the layout.
+        */}
+        {embedded ? null : <div data-workspace-sidebar="" className="contents"><DashboardSidebar
+          navItems={navItems}
           role={member.role}
           permissions={[...permissions]}
           fullName={session.fullName}
@@ -457,9 +502,9 @@ export async function WorkspaceShell({
           industry={industry}
           workspaceSections={workspaceSections}
           deploymentProfile={deployment.profile}
-          till={tillMode ? { cloudUrl } : undefined}
-        />
-        <DashboardMain>
+          account={`${session.businessId}:${session.sub}`}
+        /></div>}
+        <DashboardMain hybridSite={hybridSite}>
           {session.imp && supportGrant ? (
             <SupportSessionBanner session={{
               grantId: supportGrant.id,
@@ -476,7 +521,7 @@ export async function WorkspaceShell({
               runtimeRole={runtimeRole}
               cloudUrl={cloudUrl}
             >
-              <AssistantLinkProvider enabled={features.ai_assistant === true && !tillMode}>
+              <AssistantLinkProvider enabled={features.ai_assistant === true}>
                 {children}
               </AssistantLinkProvider>
             </DeploymentCapabilityGate>

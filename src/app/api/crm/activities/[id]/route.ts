@@ -28,6 +28,9 @@ interface PatchBody {
   subject?: string;
   body?: string;
   dueAt?: string | null;
+  /** The assignee as a member id; `""` unassigns. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy clients — resolved server-side. */
   assignedTo?: string;
   customerId?: string | null;
 }
@@ -80,6 +83,12 @@ export const PATCH = withTenantScope(
         return NextResponse.json({ error: "activity_assignee_too_long" }, { status: 400 });
       }
       patch.assignedTo = body.assignedTo;
+    }
+    if (body.assigneeUserId !== undefined) {
+      if (body.assigneeUserId !== null && body.assigneeUserId !== "" && !isUuid(body.assigneeUserId)) {
+        return NextResponse.json({ error: "bad_request" }, { status: 400 });
+      }
+      patch.assigneeUserId = body.assigneeUserId;
     }
     if (body.customerId !== undefined) {
       if (body.customerId !== null && !isUuid(body.customerId)) {

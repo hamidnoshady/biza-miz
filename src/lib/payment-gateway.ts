@@ -208,6 +208,10 @@ export function gatewayErrorMessage(code: string | undefined): string {
     gateway_unreachable: "درگاه پرداخت در دسترس نیست. اتصال سرور را بررسی کنید.",
     payment_not_found: "این رسید پرداخت پیدا نشد.",
     payment_not_pending: "این رسید دیگر قابل پیگیری نیست.",
+    invalid_payment_gateway: "درگاه پرداخت این رسید با تأیید آنلاین هم‌خوانی ندارد.",
+    authority_mismatch: "شناسهٔ پیگیری درگاه با رسید ثبت‌شده مطابقت ندارد.",
+    duplicate_gateway_ref: "این شمارهٔ مرجع تراکنش قبلاً برای رسید دیگری ثبت شده است.",
+    gateway_ref_mismatch: "شمارهٔ مرجع تراکنش با رسید تأییدشده هم‌خوانی ندارد.",
     amount_mismatch: "مبلغ رسید با مبلع ثبت‌شده هم‌خوانی ندارد.",
     manual_review: "پرداخت دستی در انتظار تأیید مدیر است.",
   };

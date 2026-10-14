@@ -13,6 +13,7 @@ import { MODULE_KEYS, type ModuleKey } from "./industry-profile";
 import type { CapabilityKey, ExecutionTarget } from "./capabilities";
 import type { DeploymentProfile } from "./deployment-mode";
 import type { Permission } from "./permissions";
+import { GROWTH_APP_PERMISSIONS } from "./growth-access";
 
 export const APP_KEYS = [
   "accounting",
@@ -79,6 +80,11 @@ export const APPS: AppDef[] = [
       "dashboard", "orders", "pos", "tables", "waiter", "kitchen", "reservations",
       "delivery", "inventory", "menu", "jewelry", "watch", "accessories",
       "cosmetics", "wholesale", "tools_fittings", "haberdashery", "stock",
+      // Issue #839 — the automotive trade's manager is a work area inside
+      // Accounting, exactly like the jewel/jewellery and watch managers above
+      // it: a dealership's vehicle stock, holds and sales are the counter, not
+      // a fifth app.
+      "automotive",
       "ledger", "reports",
     ],
   },
@@ -123,15 +129,17 @@ export const APPS: AppDef[] = [
     capability: "app.growth",
     supportedProfiles: ["cloud", "hybrid"],
     executionTarget: "cloud",
-    requiredAnyPermission: ["growth.view"],
+    // Derived from the section gates (issue #764): the launcher admits exactly
+    // the members who can open at least one Growth section, never a second list.
+    requiredAnyPermission: GROWTH_APP_PERMISSIONS,
     landingRoutes: ["/growth/overview", "/growth/loyalty", "/growth/campaigns", "/growth/commission"],
     // Since Phase 36b this app has a home of its own (/growth) with
     // a management dashboard and one section per engine — the same shape the
     // accounting suite has — over the same services and posting rules the
     // three old flat pages used.
-    // `messaging` remains a forward reference here: it acts *on* an audience
-    // rather than owning the customer record, so it stays with the engines
-    // that will use it. `crm` and `customers` left for the CRM app above —
+    // `messaging` (SMS/email campaigns, /growth/messaging) acts *on* an
+    // audience rather than owning the customer record, so it lives with the
+    // engines that use it. `crm` and `customers` left for the CRM app above —
     // see the note there. `website` left too, below — see its own note.
     modules: ["loyalty", "promotions", "commission", "messaging"],
   },

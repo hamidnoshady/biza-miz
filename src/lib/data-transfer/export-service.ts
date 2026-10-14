@@ -30,7 +30,7 @@ import { ensureAdaptersRegistered } from "./entities";
 import { requireAdapter, type AdapterContext } from "./adapters";
 import { displayCell, sheetsToXlsxBuffer, toCsv, toJsonDocument } from "./codecs";
 import { recordDataTransferAudit } from "./audit";
-import type { EntityDefinition, ExportFormat, ExportJobStatus } from "./types";
+import type { EntityDefinition, ExportFormat, ExportJobFormat, ExportJobStatus, ProviderJobMetadata } from "./types";
 
 /** A hard ceiling on one export, whatever the caller asks for. */
 export const MAX_EXPORT_ROWS = 100_000;
@@ -50,13 +50,14 @@ export interface ExportJob {
   id: string;
   entityKey: string;
   entityLabel: string;
-  format: ExportFormat;
+  format: ExportJobFormat;
   status: ExportJobStatus;
   fields: string[];
   filters: Record<string, unknown>;
   rowCount: number;
   fileName: string;
   contentType: string;
+  providerMetadata: ProviderJobMetadata | null;
   sizeBytes: number;
   error: string | null;
   scheduleId: string | null;
@@ -70,10 +71,11 @@ export interface ExportJob {
 interface JobRow extends Record<string, unknown> {
   id: string;
   entity_key: string;
-  format: ExportFormat;
+  format: ExportJobFormat;
   status: ExportJobStatus;
   fields: unknown;
   filters: unknown;
+  provider_metadata: unknown;
   row_count: number;
   file_name: string;
   content_type: string;
@@ -86,15 +88,34 @@ interface JobRow extends Record<string, unknown> {
   has_content: boolean;
 }
 
-const JOB_COLUMNS = `id, entity_key, format, status, fields, filters, row_count, file_name,
+const JOB_COLUMNS = `id, entity_key, format, status, fields, filters, provider_metadata, row_count, file_name,
   content_type, size_bytes, error, schedule_id, created_by_name, created_at, finished_at,
   (content IS NOT NULL) AS has_content`;
 
+function exportProviderMetadata(value: unknown): ProviderJobMetadata | null {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try { candidate = JSON.parse(candidate); } catch { return null; }
+  }
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const metadata = candidate as Record<string, unknown>;
+  if (
+    typeof metadata.provider !== "string" ||
+    typeof metadata.sourceFormat !== "string" ||
+    typeof metadata.connectionId !== "string" ||
+    typeof metadata.profileKey !== "string" ||
+    typeof metadata.profileVersion !== "number" ||
+    !Array.isArray(metadata.selectedScopes)
+  ) return null;
+  return metadata as unknown as ProviderJobMetadata;
+}
+
 function toJob(row: JobRow): ExportJob {
+  const providerMetadata = exportProviderMetadata(row.provider_metadata);
   return {
     id: row.id,
     entityKey: row.entity_key,
-    entityLabel: findEntity(row.entity_key)?.label ?? row.entity_key,
+    entityLabel: providerMetadata?.provider === "holoo" ? "خروجی هلو" : findEntity(row.entity_key)?.label ?? row.entity_key,
     format: row.format,
     status: row.status,
     fields: Array.isArray(row.fields) ? (row.fields as string[]) : [],
@@ -102,6 +123,7 @@ function toJob(row: JobRow): ExportJob {
     rowCount: row.row_count,
     fileName: row.file_name,
     contentType: row.content_type,
+    providerMetadata,
     sizeBytes: Number(row.size_bytes ?? 0),
     error: row.error,
     scheduleId: row.schedule_id,

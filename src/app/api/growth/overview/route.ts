@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
+import { redactGrowthOverview } from "@/lib/growth-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { growthOverviewForSession } from "@/lib/growth-overview";
 
@@ -9,12 +10,14 @@ import { growthOverviewForSession } from "@/lib/growth-overview";
  * commission services and their posting rules — so this endpoint can never
  * disagree with the ledger it reports the balances of.
  *
- * Owner/manager only: the overview carries commission (compensation) data, the
- * same reason the ledger's payroll tab is not for managers.
+ * `growth.view` opens it; its compensation parts (the commission card, the
+ * commission activity rows, the ۲۳۰۰/۵۲۱۰ bridge balances) additionally need
+ * `commission.view` and are removed here, server-side, for anyone without it.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.growthView);
+  const { session, membership, error } = await requirePermission(PERMISSIONS.growthView);
   if (error) return error;
 
-  return NextResponse.json({ overview: await growthOverviewForSession(session) });
+  const overview = redactGrowthOverview(await growthOverviewForSession(session), membership.permissions);
+  return NextResponse.json({ overview });
 });

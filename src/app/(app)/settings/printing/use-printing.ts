@@ -10,20 +10,33 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/app/dashboard/ui";
 import { allowConnectorRetry, connectorHealth, type ConnectorHealth } from "@/lib/printing/client";
-import type { StoredPrinterConnection, PrinterPurpose } from "@/lib/printing/types";
-import type { PrintBusinessInfo, PrintTemplate } from "@/lib/print-template";
+import type { PrinterPurpose, StoredPrinterConnection } from "@/lib/printing/types";
+import type { PaperKey, PrintBusinessInfo, PrintTemplate } from "@/lib/print-template";
 
+/**
+ * A `printers` row as the settings screens read it. Behaviour (purpose,
+ * paper, drawer, defaultness) is relational; `connection` is the hardware
+ * target and nothing else.
+ */
 export interface PrinterRow {
   id: string;
   name: string;
   kind: PrinterPurpose;
   connection: StoredPrinterConnection;
   is_active: boolean;
+  printer_class?: "thermal" | "page" | "label" | null;
+  paper?: PaperKey | null;
+  paper_width_mm?: number | null;
+  supports_drawer?: boolean | null;
+  supports_cut?: boolean | null;
+  is_default?: boolean | null;
 }
 
 export interface SavedTemplateRow extends PrintTemplate {
   id: string;
   isDefault: boolean;
+  /** Bumped by every write; stamped onto each print job it produced. */
+  version: number;
   updatedAt: string;
 }
 

@@ -36,6 +36,9 @@ const ACTION_LABELS: Record<string, string> = {
   "device.revoked": "لغو ثبت دستگاه",
   "order.amended": "ویرایش سفارش بسته‌شده",
   "order.voided_after_close": "حذف سفارش بسته‌شده",
+  // Issue #844 — the canonical selling-price change, written only by
+  // src/lib/menu-price-service.ts together with its immutable history row.
+  "menu.item.price_changed": "تغییر قیمت آیتم منو",
   "shift.opened": "شروع شیفت",
   "shift.closed": "پایان شیفت",
   "branch.created": "ایجاد شعبه",
@@ -49,10 +52,18 @@ const ACTION_LABELS: Record<string, string> = {
   "settings.business.update": "تغییر اطلاعات کسب‌وکار",
   "settings.mfa_policy.update": "تغییر سیاست ورود دومرحله‌ای",
   "impersonation.request": "درخواست ورود جانشینی",
+  "account.created": "ایجاد حساب",
   "account.renamed": "تغییر نام حساب",
   "account.reparented": "جابه‌جایی حساب در ساختار",
   "account.archived": "بایگانی حساب",
   "account.reactivated": "بازگردانی حساب از بایگانی",
+  "account.contra_changed": "تغییر وضعیت حساب کاهنده",
+  "account.deleted": "حذف حساب",
+  "fiscal_year.created": "تعریف سال مالی",
+  "fiscal_period.soft_closed": "بستن موقت دورهٔ مالی",
+  "fiscal_period.locked": "قفل‌کردن دورهٔ مالی",
+  "fiscal_period.reopened": "بازگشایی دورهٔ مالی",
+  "fiscal_year.closed": "بستن نهایی سال مالی",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -63,7 +74,12 @@ const ENTITY_LABELS: Record<string, string> = {
   order: "سفارش",
   location: "شعبه",
   account: "حساب",
+  fiscal_year: "سال مالی",
+  fiscal_period: "دورهٔ مالی",
   settings: "تنظیمات",
+  menu_item: "آیتم منو",
+  commission_run: "دورهٔ تسویه پورسانت",
+  commission_payout: "پرداخت پورسانت",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

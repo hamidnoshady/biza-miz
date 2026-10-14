@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { createEvent, deleteEvent, listCalendar } from "@/lib/workspace";
+import { createEvent, deleteEvent, listCalendar, updateEvent } from "@/lib/workspace";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
 
 /**
@@ -20,7 +20,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const to = params.get("to");
   if (!from || !to) return NextResponse.json({ error: "range_required" }, { status: 400 });
   try {
-    const entries = await listCalendar(owner.businessId, {
+    const entries = await listCalendar(owner, {
       from, to, projectId: params.get("projectId") ?? undefined,
     });
     return NextResponse.json({ entries });
@@ -45,7 +45,22 @@ export const DELETE = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
   const id = new URL(request.url).searchParams.get("id") ?? "";
   try {
-    return NextResponse.json({ deleted: await deleteEvent(owner.businessId, id) });
+    return NextResponse.json({ deleted: await deleteEvent(owner, id) });
+  } catch (err) {
+    return handleWorkspaceError(err);
+  }
+});
+
+/** PATCH ?id= — amend a stored event (title, note, kind, date, times, place, project). */
+export const PATCH = withTenantScope(async (request: NextRequest) => {
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  if (error) return error;
+  const id = new URL(request.url).searchParams.get("id") ?? "";
+  const body = await readBody(request);
+  try {
+    const updated = await updateEvent(owner, id, body);
+    if (!updated) return NextResponse.json({ error: "event_not_found" }, { status: 404 });
+    return NextResponse.json({ updated });
   } catch (err) {
     return handleWorkspaceError(err);
   }

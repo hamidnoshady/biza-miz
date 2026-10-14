@@ -183,6 +183,20 @@ describe("variant stock", () => {
     expect(stock?.unitPrice).toBe(250_000);
     expect(stock?.unitCost).toBe(90_000);
   });
+
+  it("sets an opening purchase cost with nothing on hand, and refuses to rewrite the average after a receipt", async () => {
+    // The price-list editor's «قیمت خرید» column sends a cost with no
+    // quantity; this is the write it now lands on instead of a silent no-op.
+    const { child } = await makeFamilyWithVariant();
+    await accessories.setInitialUnitCost(child.id, 40_000);
+    expect((await accessories.getStock(child.id))?.unitCost).toBe(40_000);
+
+    await accessories.receiveStock(child.id, { quantity: "2", unitCost: 60_000 });
+    await expect(accessories.setInitialUnitCost(child.id, 1_000)).rejects.toThrow(/قابل جایگزینی نیست/);
+    const stock = await accessories.getStock(child.id);
+    expect(stock?.quantity).toBe("2.000000000");
+    expect(stock?.unitCost).toBe(60_000);
+  });
 });
 
 describe("sellAccessoryUnits", () => {

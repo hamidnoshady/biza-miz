@@ -9,6 +9,10 @@ import {
   startPayment,
 } from "@/lib/wallet-service";
 import { listBillingPlans, listPlanFeatures } from "@/lib/billing-plans-service";
+import { calculateSubscriptionTotal } from "@/lib/subscription-service";
+import { readCommercialSettings } from "@/lib/billing/runtime";
+import { applyTaxAndRounding } from "@/lib/billing/rating/engine";
+import { parseSafeIntInput } from "@/lib/platform-money";
 import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
 
 /**
@@ -29,9 +33,9 @@ export const GET = withTenantScope(async () => {
  *
  * Body:
  *  { kind: "topup", packageId }                      → credit package top-up
- *  { kind: "topup", amountRial }                     → custom top-up (credit == amount)
- *  { kind: "plan", planKey }                         → plan monthly fee purchase
- *  { kind: "addon", featureKey }                     → one-off feature purchase
+ *  { kind: "topup", amountRial }                     → custom top-up (credit == base amount)
+ *  { kind: "plan", planKey }                         → plan monthly fee + recurring add-ons + tax
+ *  { kind: "addon", featureKey }                     → one-off feature purchase + tax
  *
  * Returns { redirectUrl } to send the browser to the gateway, or null for the
  * manual gateway (payment waits for admin approval).
@@ -49,37 +53,55 @@ export const POST = withTenantScope(async (req: Request) => {
 
   const kind = String(body.kind ?? "topup");
   try {
+    const commercial = await readCommercialSettings();
+    const taxRateBps = Number(commercial.tax_rate_bps ?? 0);
+    const rounding: "ceil" | "floor" = commercial.rounding === "floor" ? "floor" : "ceil";
+    const minTopUpRial = Math.max(0, Number(commercial.minimum_top_up_rial ?? 100_000));
+
     let payment: { id: string; amountRial: number };
-    let description: string;
 
     if (kind === "topup") {
       const packages = await listCreditPackages(true);
-      const pkg = packages.find((p) => p.id === body.packageId);
+      const pkg = body.packageId ? packages.find((p) => p.id === body.packageId) : undefined;
       if (pkg) {
+        const quoted = applyTaxAndRounding({
+          subtotalRial: pkg.priceRial,
+          taxRateBps,
+          rounding,
+        });
         payment = await createPayment({
           businessId: session.businessId,
           purpose: "top_up",
-          amountRial: pkg.priceRial,
+          amountRial: quoted.totalRial,
           creditRial: pkg.creditRial,
           packageId: pkg.id,
           description: `شارژ اعتبار: ${pkg.name}`,
           userId: session.sub,
         });
-        description = `شارژ اعتبار: ${pkg.name}`;
       } else {
-        const amount = Math.floor(Number(body.amountRial ?? 0));
-        if (!Number.isSafeInteger(amount) || amount < 100_000) {
+        const baseAmount = parseSafeIntInput(body.amountRial, { min: 1 });
+        if (baseAmount === null) {
           return NextResponse.json({ error: "bad_amount" }, { status: 400 });
         }
+        if (minTopUpRial > 0 && baseAmount < minTopUpRial) {
+          return NextResponse.json(
+            { error: "below_minimum_top_up", minimumTopUpRial: minTopUpRial },
+            { status: 400 },
+          );
+        }
+        const quoted = applyTaxAndRounding({
+          subtotalRial: baseAmount,
+          taxRateBps,
+          rounding,
+        });
         payment = await createPayment({
           businessId: session.businessId,
           purpose: "top_up",
-          amountRial: amount,
-          creditRial: amount,
+          amountRial: quoted.totalRial,
+          creditRial: baseAmount,
           description: "شارژ اعتبار (مبلغ دلخواه)",
           userId: session.sub,
         });
-        description = "شارژ اعتبار (مبلغ دلخواه)";
       }
     } else if (kind === "plan") {
       const plans = await listBillingPlans(true);
@@ -87,16 +109,16 @@ export const POST = withTenantScope(async (req: Request) => {
       if (!plan || plan.monthlyPriceRial == null) {
         return NextResponse.json({ error: "plan_not_found" }, { status: 404 });
       }
+      const quote = await calculateSubscriptionTotal(session.businessId, { planKey: plan.key });
       payment = await createPayment({
         businessId: session.businessId,
         purpose: "plan_purchase",
-        amountRial: plan.monthlyPriceRial,
+        amountRial: quote.totalRial,
         creditRial: 0,
         planKey: plan.key,
         description: `اشتراک پلن «${plan.name}»`,
         userId: session.sub,
       });
-      description = `اشتراک پلن «${plan.name}»`;
     } else if (kind === "addon") {
       const featureKey = String(body.featureKey ?? "");
       const { query } = await import("@/lib/db");
@@ -110,24 +132,32 @@ export const POST = withTenantScope(async (req: Request) => {
       if (!feature) {
         return NextResponse.json({ error: "addon_not_found" }, { status: 404 });
       }
+      const quoted = applyTaxAndRounding({
+        subtotalRial: feature.priceRial,
+        taxRateBps,
+        rounding,
+      });
       payment = await createPayment({
         businessId: session.businessId,
         purpose: "addon_purchase",
-        amountRial: feature.priceRial,
+        amountRial: quoted.totalRial,
         creditRial: 0,
         featureKey: feature.featureKey,
         planKey: currentPlanKey,
         description: `خرید قابلیت «${feature.featureName ?? feature.featureKey}»`,
         userId: session.sub,
       });
-      description = `خرید قابلیت «${feature.featureName ?? feature.featureKey}»`;
     } else {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
 
-    void description;
     const started = await startPayment(payment.id);
-    return NextResponse.json({ paymentId: payment.id, redirectUrl: started.redirectUrl, gateway: started.gateway });
+    return NextResponse.json({
+      paymentId: payment.id,
+      amountRial: payment.amountRial,
+      redirectUrl: started.redirectUrl,
+      gateway: started.gateway,
+    });
   } catch (err) {
     if (err instanceof GatewayError) {
       return NextResponse.json(
@@ -135,7 +165,6 @@ export const POST = withTenantScope(async (req: Request) => {
         { status: 502 },
       );
     }
-    const code = err instanceof Error ? err.message : "internal_error";
-    return NextResponse.json({ error: code }, { status: 400 });
+    throw err;
   }
 });

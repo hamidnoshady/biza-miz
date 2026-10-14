@@ -100,9 +100,11 @@ describe("accountingSectionsFor", () => {
   });
 
   it("opens the ledger to everyone holding its door capability", () => {
-    // Including `viewer`, the read-only auditor role: being able to read the
-    // books is the entire point of that role, and `ledger.view` is in its
-    // preset deliberately.
+    // Capability, not a role name: any member holding `ledger.view` opens the
+    // ledger, and every preset that reads the books holds it. (This used to
+    // cite a `viewer` "read-only auditor role" — `viewer` is a
+    // workspace-shared.ts project role, not a member `Role`, so the comment
+    // described an audience the role union cannot produce.)
     for (const role of ["owner", "admin", "manager", "accountant"] as const) {
       expect(of(role).has(ACCOUNTING_DOOR_PERMISSION), role).toBe(true);
       expect(accountingSectionsFor(of(role)).length, role).toBeGreaterThan(0);

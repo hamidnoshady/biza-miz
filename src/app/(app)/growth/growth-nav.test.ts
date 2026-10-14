@@ -49,11 +49,12 @@ describe("growthNavItemsForPermissions", () => {
     }
   });
 
-  it("shows a cashier only the floor surface, and never a page they are redirected off", () => {
+  it("shows a cashier only the floor surfaces, and never a page they are redirected off", () => {
     // The menu and the route guard must agree exactly: an entry that leads to a
-    // redirect is a button that does nothing. The customers screen is a
-    // management surface, not a cashier Growth workflow.
-    expect(growthNavItemsForPermissions(effectivePermissions("cashier" as Role, null)).map((item) => item.key)).toEqual(["loyalty"]);
+    // redirect is a button that does nothing. Loyalty (earn/redeem points) and
+    // the gift-card balance lookup are the till's; the dashboard, audience,
+    // campaigns and compensation are not (issue #764).
+    expect(growthNavItemsForPermissions(effectivePermissions("cashier" as Role, null)).map((item) => item.key)).toEqual(["gift-cards", "loyalty"]);
   });
 
   it("shows a role the app does not admit nothing at all", () => {
@@ -62,7 +63,10 @@ describe("growthNavItemsForPermissions", () => {
     for (const role of ["waiter", "kitchen", ""]) {
       expect(growthNavItemsForPermissions(permissionsFor(role))).toEqual([]);
     }
-    expect(growthNavItemsForPermissions(effectivePermissions("accountant" as Role, null)).map((item) => item.key)).toEqual(["customers"]);
+    // The accountant reads the Growth dashboard (its accounting bridge), the
+    // audience figures, and commission — compensation, like the payroll they
+    // already read — but none of the marketing engines.
+    expect(growthNavItemsForPermissions(effectivePermissions("accountant" as Role, null)).map((item) => item.key)).toEqual(["overview", "customers", "commission"]);
   });
 
   it("is the same gate the pages enforce", () => {
@@ -88,8 +92,8 @@ describe("growthFallbackHref", () => {
     // The per-page gates this replaces sent an accountant who opened
     // /growth/campaigns to «وفاداری», which an accountant may not open either —
     // a redirect straight into a second redirect.
-    expect(growthFallbackHref(effectivePermissions("accountant" as Role, null))).toBe(growthSectionHref("customers"));
-    expect(growthFallbackHref(effectivePermissions("cashier" as Role, null))).toBe(growthSectionHref("loyalty"));
+    expect(growthFallbackHref(effectivePermissions("accountant" as Role, null))).toBe(growthSectionHref("overview"));
+    expect(growthFallbackHref(effectivePermissions("cashier" as Role, null))).toBe(growthSectionHref("gift-cards"));
     expect(growthFallbackHref(effectivePermissions("owner" as Role, null))).toBe(growthSectionHref("overview"));
     expect(growthFallbackHref(effectivePermissions("manager" as Role, null))).toBe(growthSectionHref("overview"));
   });

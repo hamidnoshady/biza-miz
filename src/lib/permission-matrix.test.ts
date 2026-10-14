@@ -57,23 +57,26 @@ describe("built-in role presets", () => {
 
   it("holds the manager preset exactly", () => {
     expect(effective("manager")).toEqual([
-      "ai.agents.manage", "ai.automations.manage", "ai.knowledge.manage", "ai.manage", "ai.usage.view", "ai.use", "ai.widgets.manage",
+      "ai.automations.manage", "ai.manage", "ai.usage.view", "ai.use",
       "backup.manage",
       "billing.manage", "billing.view",
       "campaigns.manage", "campaigns.view",
       "cms.configure", "cms.content_manage", "cms.publish", "cms.view",
+      "commission.calculate",
+      "commission.manage", "commission.view",
       "crm.configure", "crm.consent_manage", "crm.delete", "crm.export", "crm.manage", "crm.merge", "crm.view",
       "data.export", "data.import",
       "delivery.configure", "delivery.manage",
       "finance.assets_manage", "finance.cheques_manage", "finance.expenses_manage",
       "finance.installments_manage", "finance.payables_manage",
       "finance.receivables_manage", "finance.reconciliation_manage",
+      "gift_cards.issue", "gift_cards.redeem", "gift_cards.view",
       "growth.view",
       "integrations.manage", "integrations.view",
       "inventory.adjust", "inventory.view",
       "kitchen.view",
       "ledger.propose", "ledger.view",
-      "loyalty.manage", "loyalty.view",
+      "loyalty.manage", "loyalty.redeem", "loyalty.view",
       "marketing.configure",
       "media.manage", "media.view",
       "menu.edit", "menu.view",
@@ -82,13 +85,18 @@ describe("built-in role presets", () => {
       "payments.refund", "payments.take",
       "printing.execute",
       "purchases.manage",
-      "reports.export", "reports.view",
+      "reports.dashboard_defaults.manage", "reports.export", "reports.manage", "reports.view",
       "reservations.manage", "reservations.view",
       "settings.manage",
+      "store_credit.issue", "store_credit.payout",
       "tables.edit", "tables.manage",
+      "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
+      "vehicles.archive", "vehicles.cost_edit", "vehicles.cost_view", "vehicles.create",
+      "vehicles.edit", "vehicles.expense_record", "vehicles.override_min_price", "vehicles.price_edit",
+      "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.transfer", "vehicles.view",
       "website.manage", "website.settings_manage", "website.view",
       "woocommerce.configure", "woocommerce.manage", "woocommerce.sync", "woocommerce.view",
-      "workspace.approve", "workspace.contracts_manage", "workspace.manage", "workspace.view",
+      "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.documents_issue", "workspace.manage", "workspace.view",
     ]);
   });
 
@@ -96,6 +104,7 @@ describe("built-in role presets", () => {
     expect(effective("accountant")).toEqual([
       "accounts.edit",
       "ai.usage.view", "ai.use",
+      "commission.approve", "commission.calculate", "commission.payout", "commission.reverse", "commission.view",
       "data.export", "data.import",
       "finance.assets_manage", "finance.cheques_manage", "finance.expenses_manage",
       "finance.installments_manage", "finance.payables_manage",
@@ -106,7 +115,9 @@ describe("built-in role presets", () => {
       "menu.view",
       "parties.manage", "parties.view",
       "payroll.manage", "payroll.view",
-      "reports.export", "reports.view",
+      "reports.export", "reports.manage", "reports.view",
+      "tax.amend", "tax.cancel", "tax.export", "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
+      "vehicles.cost_view", "vehicles.view",
       "workspace.view",
     ]);
   });
@@ -114,12 +125,11 @@ describe("built-in role presets", () => {
   it("holds the cashier preset exactly", () => {
     expect(effective("cashier")).toEqual([
       "ai.use",
-      "campaigns.view",
       "crm.manage", "crm.view",
       "delivery.manage",
-      "growth.view",
+      "gift_cards.view",
       "inventory.view",
-      "loyalty.manage", "loyalty.view",
+      "loyalty.redeem", "loyalty.view",
       "menu.view",
       "orders.create", "orders.discount", "orders.view",
       "parties.manage", "parties.view",
@@ -127,6 +137,7 @@ describe("built-in role presets", () => {
       "printing.execute",
       "reservations.manage", "reservations.view",
       "tables.manage",
+      "vehicles.sell", "vehicles.view",
       "workspace.manage", "workspace.view",
     ]);
   });
@@ -163,6 +174,37 @@ describe("privilege boundaries that must not drift", () => {
     for (const role of ["manager", "accountant", "cashier", "waiter", "kitchen"] as const) {
       expect(hasPermission(role, {}, PERMISSIONS.teamManage)).toBe(false);
       expect(hasPermission(role, {}, PERMISSIONS.teamPermissionsManage)).toBe(false);
+    }
+  });
+
+  it("keeps the taxpayer's credentials with the administrator alone", () => {
+    // Issue #866: the keys that sign and send invoices in the taxpayer's name.
+    // Neither the accountant nor the manager writes them, even though both reach
+    // the register.
+    for (const role of ROLES) {
+      const expected = role === "owner" || role === "admin";
+      expect(hasPermission(role, {}, PERMISSIONS.taxManageSettings), role).toBe(expected);
+    }
+  });
+
+  it("keeps the authority-facing cancellation and the register export off the manager", () => {
+    expect(hasPermission("manager", {}, PERMISSIONS.taxCancel)).toBe(false);
+    expect(hasPermission("manager", {}, PERMISSIONS.taxAmend)).toBe(false);
+    expect(hasPermission("manager", {}, PERMISSIONS.taxExport)).toBe(false);
+    expect(hasPermission("accountant", {}, PERMISSIONS.taxCancel)).toBe(true);
+  });
+
+  it("keeps the taxpayer register away from the till and the floor", () => {
+    for (const role of ["cashier", "waiter", "kitchen"] as const) {
+      for (const key of [PERMISSIONS.taxView, PERMISSIONS.taxPrepare, PERMISSIONS.taxSend]) {
+        expect(hasPermission(role, {}, key), `${role} ${key}`).toBe(false);
+      }
+    }
+  });
+
+  it("keeps consolidated cross-branch reporting out of every non-owner preset (issue #819)", () => {
+    for (const role of ROLES) {
+      expect(hasPermission(role, {}, PERMISSIONS.reportsBusinessWide)).toBe(role === "owner");
     }
   });
 
@@ -212,6 +254,37 @@ describe("backward compatibility with the roles that existed before the refactor
     expect(hasPermission("accountant", {}, PERMISSIONS.campaignsManage)).toBe(false);
     expect(hasPermission("cashier", {}, PERMISSIONS.campaignsManage)).toBe(false);
     expect(hasPermission("accountant", {}, PERMISSIONS.loyaltyManage)).toBe(false);
+  });
+
+  it("keeps management, compensation and liability-creating Growth acts off the cashier (issue #764)", () => {
+    // The cashier still earns and spends points and looks a gift card up.
+    for (const key of [PERMISSIONS.loyaltyView, PERMISSIONS.loyaltyRedeem, PERMISSIONS.giftCardsView]) {
+      expect(hasPermission("cashier", {}, key), key).toBe(true);
+    }
+    // Everything else needs an explicit grant of that exact key.
+    for (const key of [
+      PERMISSIONS.growthView, PERMISSIONS.commissionView, PERMISSIONS.commissionManage,
+      PERMISSIONS.campaignsView, PERMISSIONS.campaignsManage, PERMISSIONS.loyaltyManage,
+      PERMISSIONS.storeCreditIssue, PERMISSIONS.storeCreditPayout,
+      PERMISSIONS.giftCardsIssue, PERMISSIONS.giftCardsRedeem, PERMISSIONS.marketingConfigure,
+    ]) {
+      expect(hasPermission("cashier", {}, key), key).toBe(false);
+    }
+  });
+
+  it("grants one Growth capability without dragging the management dashboard along", () => {
+    // A write implies its own read, never growth.view: a senior cashier given
+    // gift-card issuing must not also receive the business's KPIs.
+    const granted = effectivePermissions("cashier", { granted: [PERMISSIONS.giftCardsIssue, PERMISSIONS.storeCreditPayout] });
+    expect(granted.has(PERMISSIONS.giftCardsIssue)).toBe(true);
+    expect(granted.has(PERMISSIONS.storeCreditPayout)).toBe(true);
+    expect(granted.has(PERMISSIONS.growthView)).toBe(false);
+    expect(granted.has(PERMISSIONS.storeCreditIssue)).toBe(false);
+    // Revoking the read takes the dependent writes with it.
+    const revoked = effectivePermissions("manager", { revoked: [PERMISSIONS.giftCardsView, PERMISSIONS.commissionView] });
+    expect(revoked.has(PERMISSIONS.giftCardsIssue)).toBe(false);
+    expect(revoked.has(PERMISSIONS.giftCardsRedeem)).toBe(false);
+    expect(revoked.has(PERMISSIONS.commissionManage)).toBe(false);
   });
 });
 

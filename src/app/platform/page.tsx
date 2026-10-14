@@ -96,14 +96,15 @@ export default function OverviewPage() {
                 label="فوری باز"
                 value={formatPersianNumber(o.support.urgentOpen)}
                 tone={o.support.urgentOpen ? "danger" : "muted"}
-                href="/platform/support?priority=urgent"
+                href="/platform/support?priority=urgent&queue=open"
                 hint={o.support.urgentOpen ? "رسیدگی فوری" : undefined}
               />
               <PlatformStat
                 label="بدون مسئول"
                 value={formatPersianNumber(o.support.unassignedOpen)}
                 tone={o.support.unassignedOpen ? "warning" : "muted"}
-                href="/platform/support"
+                href="/platform/support?queue=open&unassigned=true"
+                hint={o.support.unassignedOpen ? "بدون مسئول" : undefined}
               />
               <PlatformStat
                 label="گزارش خطای جدید"
@@ -160,17 +161,29 @@ export default function OverviewPage() {
               <PlatformStat
                 label="سلامت سیستم"
                 value={
-                  o.system.pendingMigrations === 0 && o.system.rlsEffective ? "سالم" : "نیازمند بررسی"
+                  !o.system.migrationHeadline || o.system.migrationHeadline.tone === "unknown"
+                    ? "نامشخص"
+                    : o.system.migrationHeadline.tone === "ok" && o.system.rlsEffective
+                      ? "سالم"
+                      : o.system.migrationHeadline.label
                 }
-                tone={o.system.pendingMigrations === 0 && o.system.rlsEffective ? "success" : "danger"}
+                tone={
+                  !o.system.rlsEffective
+                    ? "danger"
+                    : o.system.migrationHeadline?.tone === "ok"
+                      ? "success"
+                      : o.system.migrationHeadline?.tone === "warn"
+                        ? "warning"
+                        : o.system.migrationHeadline?.tone === "unknown"
+                          ? "muted"
+                          : "danger"
+                }
                 icon={<ServerIcon className="size-4" />}
                 href="/platform/system"
                 hint={
-                  o.system.pendingMigrations > 0
-                    ? `${formatPersianNumber(o.system.pendingMigrations)} مهاجرت معلق`
-                    : !o.system.rlsEffective
-                      ? "RLS بررسی شود"
-                      : "سلامت پایگاه‌داده"
+                  !o.system.rlsEffective
+                    ? "RLS بررسی شود"
+                    : o.system.migrationHeadline?.summary ?? "وضعیت مهاجرت‌ها نامشخص است"
                 }
               />
             </div>

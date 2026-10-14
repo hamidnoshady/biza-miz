@@ -53,7 +53,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     sourceLocationId?: string;
     destinationLocationId?: string;
     note?: string | null;
-    lines?: { sourceItemId?: string; destinationItemId?: string; quantity?: string }[];
+    lines?: {
+      sourceItemId?: string;
+      destinationItemId?: string;
+      quantity?: string;
+      /** Batch-tracked items only: move this exact lot instead of FEFO. */
+      batchId?: string | null;
+    }[];
   };
   try {
     body = await request.json();

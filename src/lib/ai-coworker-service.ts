@@ -30,7 +30,8 @@ import {
   type AutopilotCategory,
   type AutopilotCategorySetting,
 } from "./ai-autopilot";
-import { AUTOPILOT_EXECUTORS } from "./ai-autopilot-executors";
+import { AUTOPILOT_EXECUTORS, executorTargetLocation } from "./ai-autopilot-executors";
+import { isDeferrableDenial, verifyUnattendedAuthority } from "./ai-unattended-authority";
 import { autopilotAmountContext } from "./ai-amount-context";
 import {
   dedupeKeyForEvent,
@@ -691,9 +692,35 @@ async function applyAction(input: {
     return { status: "failed", auditId, error: "coworker_executor_missing" };
   }
 
-  const result = await executor({
+  // Issue #812 §13 — the same central authority gate the autopilot path uses.
+  // A coworker job's `authorized_by` is revocable delegation, so the member's
+  // CURRENT role, permission overrides, business status, branch scope and the
+  // canonical action permission are resolved immediately before the write.
+  const authority = await verifyUnattendedAuthority({
     businessId: input.businessId,
     authorizedByUserId: input.authorizedBy,
+    actionType: input.action.type,
+    targetLocationId: await executorTargetLocation(meta.executor, input.action.payload),
+  });
+  if (!authority.ok) {
+    // A revocable denial leaves the row 'proposed' so a human can still apply
+    // it with their own session; a job that never had an authorizer fails.
+    if (isDeferrableDenial(authority)) {
+      await query(
+        `UPDATE ai_action_audit SET deferred_reason = $3 WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+        [auditId, input.businessId, authority.reasonCode],
+      );
+    }
+    return {
+      status: "failed",
+      auditId,
+      error: authority.reasonCode ?? "authority_denied",
+    };
+  }
+
+  const result = await executor({
+    businessId: input.businessId,
+    authorizedByUserId: authority.userId,
     payload: input.action.payload,
   });
 

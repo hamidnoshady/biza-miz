@@ -425,6 +425,7 @@ export function ServerSyncPanel() {
         </SectionCard>
 
         <SyncStatusPanels
+          central
           syncState={syncState}
           appUpdateStatus={appUpdateStatus}
           domainDiagnostics={domainDiagnostics}
@@ -691,10 +692,13 @@ function SyncHealthCard({ health, conflicts }: { health: SyncHealthView; conflic
 
 /**
  * Everything below the connection section, which both roles show: a central
- * server still pushes and pulls, still runs update checks, and still
- * dead-letters events it cannot apply.
+ * server still runs update checks and still dead-letters events it cannot
+ * apply. It never pushes or pulls — sites do — so its push/pull rows are
+ * hidden: what a central has there is a leftover from before it was central
+ * (an old «unreachable: fetch failed» shown forever as if it were current).
  */
 function SyncStatusPanels({
+  central = false,
   syncState,
   appUpdateStatus,
   domainDiagnostics,
@@ -702,6 +706,7 @@ function SyncStatusPanels({
   busy,
   onReconcile,
 }: {
+  central?: boolean;
   syncState: StateView | null;
   appUpdateStatus: AppUpdateStatusView | null;
   domainDiagnostics: DomainDiagnostics | null;
@@ -714,7 +719,7 @@ function SyncStatusPanels({
 }) {
   return (
     <>
-      {syncState ? (
+      {syncState && (!central || syncState.legacyTokenLastUsedAt) ? (
         <SectionCard title="وضعیت همگام‌سازی">
           {syncState.legacyTokenLastUsedAt ? (
             <InfoBox>
@@ -725,7 +730,7 @@ function SyncStatusPanels({
               کنید.
             </InfoBox>
           ) : null}
-          <div className="grid gap-x-8 sm:grid-cols-2">
+          {central ? null : <div className="grid gap-x-8 sm:grid-cols-2">
             <div>
               <h3 className="mb-1 text-sm font-medium text-muted-foreground">
                 ارسال (Push)
@@ -762,7 +767,7 @@ function SyncStatusPanels({
                 tone={syncState.lastPullError ? "error" : undefined}
               />
             </div>
-          </div>
+          </div>}
         </SectionCard>
       ) : null}
 

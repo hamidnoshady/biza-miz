@@ -26,6 +26,7 @@ const PAGE_SIZE = 50;
 const ENTITY_FILTERS = [
   ["", "همه"], ["employee", "کارمند"], ["team", "تیم"], ["device", "دستگاه"],
   ["shift", "شیفت"], ["order", "سفارش"], ["location", "شعبه"], ["account", "حساب"],
+  ["fiscal_year", "سال مالی"], ["fiscal_period", "دورهٔ مالی"],
   // The settings writers (business identity, MFA policy) log under this
   // entity; without the chip those rows were reachable only via «همه».
   ["settings", "تنظیمات"],

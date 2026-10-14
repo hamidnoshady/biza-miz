@@ -62,3 +62,32 @@ describe("message campaign launch safety", () => {
     expect(SERVICE_SOURCE).toMatch(/validateTemplateBody\(`\$\{body\}\\n\$\{subject\}`\)/);
   });
 });
+
+describe("Growth does not run a second billing centre (issue #764)", () => {
+  it("shows the central wallet's balance and links to it, with no package purchase or credit ledger", () => {
+    expect(SECTION_SOURCE).toMatch(/CENTRAL_BILLING_HREF = "\/settings\/billing"/);
+    expect(SECTION_SOURCE).toMatch(/insufficientCredit/);
+    expect(SECTION_SOURCE).not.toMatch(/top_up|requestTopUp|خرید اعتبار|data\.packages|data\.ledger/);
+    expect(ROUTE_SOURCE).not.toMatch(/top_up|listMessageCreditPackages|listRecentMessageLedger|createMessageTopUpRequest/);
+  });
+
+  it("draws the composer and send controls only for campaigns.manage", () => {
+    expect(SECTION_SOURCE).toMatch(/\{canManage \? \(/);
+    expect(SECTION_SOURCE).toMatch(/!canManage \? null : campaign\.status === "draft"/);
+  });
+});
+
+describe("a discount campaign's targeting is real", () => {
+  const CAMPAIGNS_SOURCE = code(read("./campaigns-section.tsx"));
+
+  it("sends the chosen product scope instead of hard-coded empty arrays", () => {
+    expect(CAMPAIGNS_SOURCE).not.toMatch(/itemIds: \[\],\s*brandIds: \[\],\s*categoryIds: \[\]/);
+    expect(CAMPAIGNS_SOURCE).toMatch(/JSON\.stringify\(\{ \.\.\.draft, \.\.\.scope \}\)/);
+    expect(CAMPAIGNS_SOURCE).toMatch(/\/api\/promotions\/targets/);
+  });
+
+  it("no longer implies a segment-targeted discount the engine does not enforce", () => {
+    expect(CAMPAIGNS_SOURCE).not.toMatch(/CampaignAudiencePanel|campaign-audience/);
+    expect(CAMPAIGNS_SOURCE).toMatch(/growthSectionHref\("messaging"\)\}\?promotion=/);
+  });
+});

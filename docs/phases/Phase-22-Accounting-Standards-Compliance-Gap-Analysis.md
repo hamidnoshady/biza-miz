@@ -512,7 +512,7 @@ workflow yet.
   **`/api/ledger/fixed-assets/[id]/depreciate`** (post one period) — owner/manager/accountant, the
   standard "post immediately" ledger-surface gate (AR receive-payment, AP pay-bill, expenses,
   reconciliation), not payroll's narrower owner+accountant-only gate, since asset depreciation isn't
-  compensation-sensitive data.
+  compensation-sensitive data. (Update, issue #835: payroll's gate is now the `payroll.view` / `payroll.manage` capabilities — see [docs/payroll.md](../payroll.md).)
 - **A new «دارایی‌های ثابت» tab** (`fixed-assets-section.tsx`) in the ledger dashboard — register an
   asset, see its cost/salvage/accumulated-depreciation/book-value, and post a period's depreciation
   inline per row. Uses its own local error-message map + direct `api()` calls rather than the shared

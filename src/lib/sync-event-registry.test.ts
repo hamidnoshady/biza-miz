@@ -5,6 +5,7 @@ import { classifySyncDomainError } from "./sync-events";
 import { SyncPayloadError } from "./sync-domain-handlers";
 import {
   isOfflineQueueEligible,
+  siteSkipsPulledEvent,
   publicSyncEventRegistry,
   SYNC_EVENT_REGISTRY,
   syncEventDefinition,
@@ -95,5 +96,39 @@ describe("sync domain failure classification", () => {
     expect(classifySyncDomainError(Object.assign(new Error("socket reset"), { code: "ECONNRESET" }), payment)).toBe("transient");
     expect(classifySyncDomainError(new Error("injected_sync_failure_after_domain_effect"), payment)).toBe("transient");
     expect(classifySyncDomainError(new TypeError("cannot read property"), payment)).toBe("transient");
+  });
+});
+
+describe("business-scope settlement events (issue #869)", () => {
+  it("registers the payout and its reversal as business-wide events, with no location rule", () => {
+    for (const type of ["commission.payout.recorded", "commission.payout.reversed"]) {
+      const definition = syncEventDefinition(type, 1);
+      expect(definition?.locationRule, type).toBe("business");
+      expect(definition?.effectClass, type).toBe("commission_settlement");
+      expect(definition?.payloadFields, type).not.toContain("locationId");
+    }
+  });
+
+  it("is acknowledged, never applied, by a desktop that pulls it: the money already moved at the cloud", () => {
+    for (const type of ["commission.payout.recorded", "commission.payout.reversed"]) {
+      expect(siteSkipsPulledEvent(syncEventDefinition(type, 1)!), type).toBe(true);
+    }
+  });
+});
+
+describe("pulled cloud events a desktop acknowledges without applying (Phase 46)", () => {
+  it("skips stock, transfers and ledger reversals — the cloud owns them since Phase 45", () => {
+    const skipped = SYNC_EVENT_REGISTRY.filter((definition) => siteSkipsPulledEvent(definition)).map((d) => d.type);
+    expect(skipped).toContain("inventory.purchase.created");
+    expect(skipped).toContain("inventory.purchase.received");
+    expect(skipped).toContain("accounting.manual_journal.reversed");
+  });
+
+  it("still applies everything the till needs: orders, payments, refunds and shifts", () => {
+    for (const definition of SYNC_EVENT_REGISTRY) {
+      if (["order", "payment", "refund", "shift"].includes(definition.effectClass)) {
+        expect(siteSkipsPulledEvent(definition), definition.type).toBe(false);
+      }
+    }
   });
 });

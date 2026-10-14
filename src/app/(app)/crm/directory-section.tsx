@@ -12,9 +12,10 @@
  * What is left here is the CRM's own opinion about that shared list: which scope
  * it shows, and the URL conventions its other sections and the AI use to hand a
  * customer over — `?customer=<id>` opens one party's file (the phone lookup the AI
- * answers with), `?new=1` opens the add form (the overview's quick action). Both
- * keep working after the rename; a saved link to a customer is not a thing to
- * break.
+ * answers with), `?new=1` opens the add form (the overview's quick action) and
+ * `?q=<text>` arrives already searched (the command field's «جست‌وجو» result).
+ * All three keep working after the rename; a saved link to a customer is not a
+ * thing to break.
  */
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -43,12 +44,25 @@ export function DirectorySection({
   useEffect(() => {
     if (customerParam) setEditPartyId(customerParam);
   }, [customerParam]);
+  /**
+   * The command field hands its whole question over as `?q=`.
+   *
+   * `PartiesSection` seeds both its typed text and its already-applied query
+   * from this, so following the link shows results at once instead of spending
+   * the debounce looking as though it ignored the link. The `key` makes the
+   * *second* link to a different word a fresh mount: Next re-renders this
+   * section in place when only the query string changes, and state seeded once
+   * would keep showing the previous word's results.
+   */
+  const initialQuery = searchParams.get("q") ?? "";
   return (
     <PartiesSection
+      key={initialQuery}
       scope={partyScopeFor("crm")}
       role={role}
       editPartyId={editPartyId}
       openNewOnMount={openNewOnMount}
+      initialQuery={initialQuery}
       permissions={permissions}
     />
   );

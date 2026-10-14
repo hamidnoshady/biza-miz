@@ -133,10 +133,9 @@ export const ENCRYPTED_TABLES: Record<string, EncryptedTable> = {
  * `src/lib/integrations/secrets.ts` — the same scheme as
  * `platform_cms_config.api_key_ciphertext` (0139) — rather than a business DEK,
  * since both are platform/tenant-administrative credentials, not customer PII.
- * `ai-gateway-service.ts` writes only the ciphertext column; the legacy
- * plaintext columns stay as a read fallback until `npm run
- * db:encrypt-ai-secrets` has backfilled every deployment and a follow-up
- * migration drops them.
+ * `ai-gateway-service.ts` reads and writes only ciphertext. Migration 0209
+ * drops the legacy plaintext columns after the guarded
+ * `npm run db:encrypt-ai-secrets` backfill and production read verification.
  */
 // Migration 0187 removed the inactive platform_update_config singleton and
 // its plaintext S3 secret rather than carrying an unused credential forward.

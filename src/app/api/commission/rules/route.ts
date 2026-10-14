@@ -11,7 +11,7 @@ import {
 
 /** The business's commission rules (all employees) plus the staff picker for the editor. */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.growthView);
+  const { session, error } = await requirePermission(PERMISSIONS.commissionView);
   if (error) return error;
   const [rules, staff] = await Promise.all([
     listCommissionRules(session.businessId, undefined, true),
@@ -22,7 +22,7 @@ export const GET = withTenantScope(async () => {
 
 /** Creates one commission rule for a selling employee. */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.campaignsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.commissionManage);
   if (error) return error;
 
   let body: CommissionRuleInput;
@@ -46,7 +46,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
 /** Activates or retires one rule. History is kept; a deactivated rule simply stops earning. */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.campaignsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.commissionManage);
   if (error) return error;
 
   let body: { ruleId?: string; isActive?: boolean };

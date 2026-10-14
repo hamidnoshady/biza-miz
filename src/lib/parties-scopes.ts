@@ -171,16 +171,17 @@ export const PARTY_SCOPES_DEF: readonly PartyScopeDef[] = [
     app: "growth",
     roles: ["Customer"],
     defaultRole: "Customer",
-    label: "مشتریان",
-    description: "مشتریان رشد: چرخهٔ حیات، امتیاز و خرید — افزودن و ویرایش در همین بخش",
+    label: "مخاطبان",
+    description: "بینش مخاطبان رشد: چرخهٔ حیات، امتیاز و خرید — ویرایش پرونده در CRM",
     href: "/growth/customers",
     columns: ["displayName", "phone", "status"],
     accounting: "hidden",
-    // Growth manages its own customers screen (its own lifecycle/loyalty columns,
-    // its own add/edit form) over the same shared `parties` row — the record is
-    // still one thing, so there is no second table for the duplicates screen to
-    // clean up. Only the 360° file (notes, tags, timeline) stays CRM's.
-    readOnly: false,
+    // Issue #764: Growth *reads* the shared record (lifecycle, spend, loyalty,
+    // reachability) and acts on audiences; it does not own the customer's
+    // identity. Creating, editing and archiving a customer is the CRM's door,
+    // and the Growth audience screen links there rather than mounting a second
+    // add/edit form over the same row.
+    readOnly: true,
   },
   {
     key: "sales",
@@ -368,4 +369,38 @@ export function partiesSectionAbilities(
     // `ledger.view` is revoked.
     canOpenStatement: canSeeLedger && PARTIES_STATEMENT_ROLES.includes(role),
   };
+}
+
+/**
+ * Roles whose built-in presets carry `parties.view` — the fallback answer when
+ * a screen asks whether the directory may be rendered at all without the
+ * member's effective permissions in hand. Mirrors `ROLE_PRESETS` in
+ * permissions.ts (admin is everything but owner-only keys; waiter and kitchen
+ * carry no party read); `parties-scopes.test.ts` pins it against
+ * `roleBasePermissions` so the two cannot drift.
+ */
+export const PARTIES_PRESET_VIEWING_ROLES: readonly string[] = [
+  "owner",
+  "admin",
+  "manager",
+  "accountant",
+  "cashier",
+];
+
+/**
+ * Issue #854 (pass 4, gap 3) — may this member see a party directory at all:
+ * the real answer when their effective permissions are known, the preset
+ * answer when they are not. `/api/parties` enforces `parties.view` either
+ * way; this exists so a screen (the Team tab's personnel file) can hide the
+ * section instead of rendering a list that only ever answers 403 — without
+ * broadening the permission itself.
+ */
+export function canViewParties(
+  role: string,
+  permissions?: readonly string[] | null,
+): boolean {
+  const known = permissions !== undefined && permissions !== null;
+  return known
+    ? permissions.includes(PERMISSIONS.partiesView)
+    : PARTIES_PRESET_VIEWING_ROLES.includes(role);
 }

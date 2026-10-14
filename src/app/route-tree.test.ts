@@ -97,9 +97,49 @@ function expectRoute(pathname: string) {
 }
 
 describe("the route tree resolves every promised URL", () => {
-  it("finds the workspace home and the platform's own pages", () => {
-    for (const pathname of ["/dashboard", "/workspace", "/settings", "/login"]) {
+  it("finds the workspace home and the platform's current AI control-plane pages", () => {
+    for (const pathname of [
+      "/dashboard",
+      "/workspace",
+      "/settings",
+      "/login",
+      "/platform/ai",
+      "/platform/ai/modes",
+      "/platform/ai/prompts",
+      "/platform/ai/agents",
+      "/platform/ai/research",
+      "/platform/ai/widgets",
+    ]) {
       expectRoute(pathname);
+    }
+  });
+
+  it("does not redirect the active prompt console with a retired page redirect", () => {
+    const nextConfig = readFileSync(join(APP_DIR, "../../next.config.ts"), "utf8");
+    expect(nextConfig).not.toContain('source: "/platform/ai/prompts"');
+    expect(nextConfig).toContain('source: "/platform/ai/gateway", destination: "/platform/ai"');
+    expect(nextConfig).toContain('source: "/dashboard/ai/settings", destination: "/dashboard"');
+    expect(nextConfig).toContain('source: "/ai/settings", destination: "/dashboard"');
+    expectRoute("/platform/ai/prompts");
+  });
+
+  it("keeps tenant provider configuration retired without removing platform prompt versions", () => {
+    const tenantConfig = readFileSync(join(APP_DIR, "api/ai/config/route.ts"), "utf8");
+    expect(tenantConfig).toContain("ai_configuration_platform_managed");
+    expect(tenantConfig).toContain("status: 410");
+    expect(tenantConfig).not.toContain("saveAiGatewayConfig");
+
+    const platformPrompts = readFileSync(join(APP_DIR, "api/platform/ai/prompts/route.ts"), "utf8");
+    expect(platformPrompts).toContain("listPromptVersions");
+    expect(platformPrompts).toContain("publishPromptVersion");
+    for (const retiredApi of [
+      "api/ai/prompt-manager",
+      "api/ai/prompts",
+      "api/platform/ai/models",
+      "api/platform/ai/budget",
+      "api/platform/ai/budgets",
+    ]) {
+      expect(existsSync(join(APP_DIR, retiredApi)), `${retiredApi} is retired`).toBe(false);
     }
   });
 

@@ -36,7 +36,7 @@ just a declared name.
 `inventory.adjust` `purchases.manage` `parties.view` `parties.manage`
 `crm.view` `crm.manage` `crm.merge` `crm.consent_manage` `crm.export`
 `crm.configure` `workspace.view` `workspace.manage`
-`workspace.contracts_manage` `workspace.approve` `ledger.view` `ledger.post`
+`workspace.contracts_manage` `workspace.approve` `workspace.documents_issue` `ledger.view` `ledger.post`
 `ledger.approve` `ledger.close_period` `accounts.edit` `reports.view`
 `reports.export` `data.import` `data.export` `team.manage` `settings.manage`
 `locations.manage` `backup.manage` `api.manage` `website.view` `growth.view`
@@ -91,6 +91,17 @@ Both sides gate **the same routes** under `src/app/api/cms/website/**`.
 configure the module), which `main` had already split. `growth.view` survives
 only as the app-wide door.
 
+**Superseded by issue #764.** `growth.view` is no longer the app door: it is
+the management dashboard, audience insights and the accounting bridge, and no
+floor preset holds it. The door is the union of the section keys
+(`GROWTH_APP_PERMISSIONS` in `src/lib/growth-access.ts`). `loyalty.manage` now
+means loyalty-program configuration only; the acts it used to bundle have
+their own keys — `loyalty.redeem`, `store_credit.issue`, `store_credit.payout`,
+`gift_cards.view`/`issue`/`redeem` — and compensation is `commission.view` /
+`commission.manage`. `src/lib/growth-access.ts` is the one page/API/button
+matrix, asserted against the route handlers' source by its test; migration
+0194 rewrote stored overrides and custom roles.
+
 ## 4. Backup — keep `main`'s granularity
 
 | `main` | this branch | Canonical |
@@ -113,7 +124,7 @@ api), `integrations.manage` (36), `media.view` (3), `media.manage` (6),
 
 | Key | API consumers | Why it must survive |
 |---|---|---|
-| `finance.expenses_manage` | 1 | Operational finance ≠ accounting authority. Sixteen ledger write routes used `requireRole("owner","manager","accountant")` as a proxy for two different capabilities. Mapping them to `ledger.post` either removes work every manager does, or widens `ledger.post` past its name. |
+| `finance.expenses_manage` | 3 routes (record, reverse, receipt OCR) — plus the data-transfer import gate and the AI capability, since #832 | Operational finance ≠ accounting authority. Sixteen ledger write routes used `requireRole("owner","manager","accountant")` as a proxy for two different capabilities. Mapping them to `ledger.post` either removes work every manager does, or widens `ledger.post` past its name. #832 §4 also moved expense *import* off `ledger.post` onto this key, so one business act has one capability on every door. |
 | `finance.receivables_manage` | 1 | ″ |
 | `finance.payables_manage` | 1 | ″ |
 | `finance.cheques_manage` | 2 | ″ |

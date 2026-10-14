@@ -10,21 +10,39 @@
  * engine, and the ledger side rides the `retail.*` domain events in
  * retail-stock-posting-rules.ts.
  *
- * Scope boundaries, deliberately: `weight` items (gold) and `serial` items
- * (watches) keep their existing intake paths (setWeightAttributes / addSerial)
- * and are refused here with a clear message, because those models are
- * one-row-per-unit, not a fungible quantity on `item_stock`. Transfers move
- * fungible `none`-tracking stock between two branch items.
+ * Scope boundaries, deliberately: `weight` items (gold) keep their existing
+ * intake path (setWeightAttributes) and are refused here with a clear
+ * message, because that model is one-row-per-unit with a formula-priced
+ * cost, not a fungible quantity on `item_stock`. `serial` items (watches)
+ * ARE received here since issue #795: a serial purchase line names its
+ * exact physical serials and creates their `item_serials` rows in the same
+ * transaction as the AP posting, which is what gives a serialized unit's
+ * cost basis a real purchase behind it (bare `addSerial` registration
+ * records a cost with no accounting). Transfers move
+ * fungible `none`-tracking stock AND `batch`-tracking stock between two branch
+ * items: a batch transfer relieves the lots at the source (a named lot when
+ * the line names one, FEFO otherwise), records exactly which lots left, and
+ * puts those same lots — number, expiry and cost — on the destination shelf.
+ * Cosmetics uses this shared workflow; there is no separate transfer module.
  */
+import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
+import {
+  recomputeItemStockRollup,
+  receiveBatchesForTransfer,
+  relieveBatchesForTransfer,
+  restoreBatchesForTransferCancel,
+} from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
 import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
-import { classifyStockLevel, isDeadStock, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { validateWarrantyMonths } from "./watch";
+import { validateSerialStatusTransition, type SerialStatus } from "./items";
 // Side-effect import: registers the retail.* stock posting rules.
 import "./retail-stock-posting-rules";
 
@@ -34,8 +52,24 @@ type PurchaseLine = {
   itemId: string;
   quantity: string;
   unitCost: number;
+  /** Batch-tracked only — the real manufacturer/supplier lot number. */
+  batchNumber?: string | null;
   /** Batch-tracked only — the expiry date this receipt carries. */
   expiryDate?: string | null;
+  /** Batch-tracked only — the manufacture date, when the label carries one. */
+  manufactureDate?: string | null;
+  /** Batch-tracked only — the supplier's own reference for this delivery. */
+  supplierReference?: string | null;
+  /**
+   * Serial-tracked only (issue #795 item 1) — the exact physical units this
+   * line receives. A serial line of quantity N must name exactly N serials;
+   * each becomes an `item_serials` row with this line's unit cost as its
+   * cost basis and opens the model's warranty default. This is what finally
+   * completes the serialized accounting chain: purchase → Debit
+   * {industry}Inventory / Credit AP (retail.purchase_received), so the later
+   * sale's Credit of that same inventory account has a real debit behind it.
+   */
+  serials?: { serialNumber: string; warrantyMonths?: number }[] | null;
 };
 
 export interface ReceivePurchaseResult {
@@ -81,29 +115,101 @@ export async function receiveItemPurchase(
       throw new RetailStockError("موجودی روی خودِ خانوادهٔ کالا ثبت نمی‌شود؛ روی هر تنوع جداگانه ثبت کنید.");
     }
 
+    // The real manufacturer/supplier lot number is what a batch-tracked
+    // receipt must carry — the shop prints it on the label and it is the unit
+    // of recall. An internal `P-…` reference is generated only when the
+    // delivery genuinely has no lot number, and it is flagged as generated
+    // (`internal_batch_number`) so a report can tell the two apart. It is
+    // never a replacement for a real number, which is what this used to be.
+    const realLotNumber = line.batchNumber?.trim() || null;
+    let batchNumberForReceipt: string | null = realLotNumber;
+    // Serial-tracked, single-unit lines: the exact physical unit received.
+    let receivedSerialId: string | null = null;
     if (item.tracking === "batch") {
+      const generated = `P-${purchaseId.slice(0, 8)}-${i + 1}`;
+      batchNumberForReceipt = realLotNumber ?? generated;
       await receiveBatch(client, {
         itemId: line.itemId,
-        batchNumber: `P-${purchaseId.slice(0, 8)}-${i + 1}`,
+        batchNumber: batchNumberForReceipt,
         expiryDate: line.expiryDate ?? null,
+        manufactureDate: line.manufactureDate ?? null,
         quantity: line.quantity,
         unitCost: line.unitCost,
-        supplierReference: purchaseId,
+        supplierReference: line.supplierReference?.trim() || purchaseId,
       });
     } else if (item.tracking === "none") {
       await receiveStock(line.itemId, { quantity: line.quantity, unitCost: line.unitCost }, client);
+    } else if (item.tracking === "serial") {
+      // Issue #795 item 1 — a serial-tracked line is received as exact
+      // physical units, inside this same transaction, so the serial rows,
+      // their cost basis, the purchase document and the inventory/AP posting
+      // are one atomic fact. Distinct unit costs belong on distinct lines
+      // (the same way an invoice works), so every serial on this line
+      // carries this line's exact unit cost.
+      const qty = Number(line.quantity);
+      if (!Number.isInteger(qty) || qty <= 0) {
+        throw new RetailStockError("تعداد کالای سریالی باید یک عدد صحیح مثبت باشد.");
+      }
+      if (!Number.isInteger(line.unitCost) || line.unitCost <= 0) {
+        throw new RetailStockError("بهای هر دستگاه سریالی باید یک عدد صحیح مثبت (ریال) باشد.");
+      }
+      const serials = line.serials ?? [];
+      if (serials.length !== qty) {
+        throw new RetailStockError(
+          "دریافت کالای سریالی باید به ازای هر واحد دقیقاً یک شماره سریال داشته باشد.",
+        );
+      }
+      const seen = new Set<string>();
+      for (const s of serials) {
+        const serialNumber = s.serialNumber?.trim();
+        if (!serialNumber) throw new RetailStockError("شماره سریال نمی‌تواند خالی باشد.");
+        if (seen.has(serialNumber)) {
+          throw new RetailStockError(`شماره سریال «${serialNumber}» در این ردیف تکراری است.`);
+        }
+        seen.add(serialNumber);
+        const warrantyMonths = s.warrantyMonths ?? 0;
+        const warrantyError = validateWarrantyMonths(warrantyMonths);
+        if (warrantyError) throw new RetailStockError(warrantyError);
+        try {
+          const { rows: created } = await client.query<{ id: string }>(
+            `INSERT INTO item_serials (item_id, serial_number, unit_cost, warranty_months)
+             VALUES ($1, $2, $3, $4) RETURNING id`,
+            [line.itemId, serialNumber, line.unitCost, warrantyMonths],
+          );
+          // `item_purchase_items.serial_id` (migration 0084) is singular, so
+          // it can only point at THE unit of a one-unit line; multi-unit
+          // lines keep their provenance through the serial rows themselves.
+          if (serials.length === 1) receivedSerialId = created[0].id;
+        } catch (err) {
+          if ((err as { code?: string }).code === "23505") {
+            throw new RetailStockError(`شماره سریال «${serialNumber}» قبلاً برای این کالا ثبت شده است.`);
+          }
+          throw err;
+        }
+      }
     } else {
       throw new RetailStockError(
-        item.tracking === "serial"
-          ? "ورود کالای سریالی از مسیر «سریال دستگاه» ثبت می‌شود."
-          : "ورود کالای وزنی از مسیر وزن/عیار ثبت می‌شود.",
+        "ورود کالای وزنی از مسیر وزن/عیار ثبت می‌شود.",
       );
     }
 
     await client.query(
-      `INSERT INTO item_purchase_items (purchase_id, item_id, quantity, unit_cost)
-       VALUES ($1, $2, $3, $4)`,
-      [purchaseId, line.itemId, line.quantity, line.unitCost],
+      `INSERT INTO item_purchase_items
+         (purchase_id, item_id, quantity, unit_cost, batch_number, manufacture_date, expiry_date,
+          supplier_reference, internal_batch_number, serial_id)
+       VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $10)`,
+      [
+        purchaseId,
+        line.itemId,
+        line.quantity,
+        line.unitCost,
+        batchNumberForReceipt,
+        line.manufactureDate ?? null,
+        line.expiryDate ?? null,
+        line.supplierReference?.trim() || null,
+        item.tracking === "batch" && realLotNumber == null,
+        receivedSerialId,
+      ],
     );
     total += BigInt(roundRial(new Decimal(line.quantity).times(line.unitCost)));
   }
@@ -128,6 +234,13 @@ type ReturnLine = {
   quantity: string;
   /** Batch-tracked only — the specific batch being sent back. */
   batchId?: string | null;
+  /**
+   * Serial-tracked only (issue #795) — the exact physical unit being sent
+   * back, by row id or by its serial number (what the operator scans/types).
+   * One line returns exactly one unit.
+   */
+  serialId?: string | null;
+  serialNumber?: string | null;
 };
 
 export interface SupplierReturnResult {
@@ -183,12 +296,48 @@ export async function createItemSupplierReturn(
 
     const item = await getItem(line.itemId);
     if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
-    if (item.tracking === "weight" || item.tracking === "serial") {
-      throw new RetailStockError("برگشت کالای وزنی/سریالی از مسیر همان کالا ثبت می‌شود.");
+    if (item.tracking === "weight") {
+      throw new RetailStockError("برگشت کالای وزنی از مسیر همان کالا ثبت می‌شود.");
     }
 
     let value: RialText;
-    if (item.tracking === "batch") {
+    let returnedSerialId: string | null = null;
+    if (item.tracking === "serial") {
+      // Issue #795 — a serialized supplier return names the exact physical
+      // unit. The unit must be on this shelf (`in_stock`), it moves to the
+      // terminal `supplier_returned` state (never deleted — provenance), and
+      // the posting relieves inventory at its own recorded cost basis.
+      if (new Decimal(line.quantity).toString() !== "1") {
+        throw new RetailStockError("برگشت کالای سریالی هر ردیف دقیقاً یک دستگاه است.");
+      }
+      const serialNumber = line.serialNumber?.trim();
+      if (!line.serialId && !serialNumber) {
+        throw new RetailStockError("برای برگشت کالای سریالی، سریال دقیق دستگاه را مشخص کنید.");
+      }
+      const { rows: serialRows } = await client.query<{
+        id: string;
+        status: string;
+        unit_cost: string | null;
+      }>(
+        line.serialId
+          ? `SELECT id, status, unit_cost::text FROM item_serials WHERE id = $2 AND item_id = $1 FOR UPDATE`
+          : `SELECT id, status, unit_cost::text FROM item_serials WHERE item_id = $1 AND serial_number = $2 FOR UPDATE`,
+        [line.itemId, line.serialId ?? serialNumber],
+      );
+      const serial = serialRows[0];
+      if (!serial) throw new RetailStockError("سریال یافت نشد.");
+      const transitionError = validateSerialStatusTransition(
+        serial.status as SerialStatus,
+        "supplier_returned",
+      );
+      if (transitionError) throw new RetailStockError(transitionError);
+      if (serial.unit_cost == null) {
+        throw new RetailStockError("بهای تمام‌شده این دستگاه ثبت نشده است؛ برگشت بدون مبنای بها ممکن نیست.");
+      }
+      value = rialText(serial.unit_cost);
+      returnedSerialId = serial.id;
+      await client.query(`UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1`, [serial.id]);
+    } else if (item.tracking === "batch") {
       if (!line.batchId) throw new RetailStockError("برای برگشت کالای بچ‌محور، بچ را مشخص کنید.");
       const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null }>(
         `SELECT id, quantity::text, unit_cost::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
@@ -202,6 +351,11 @@ export async function createItemSupplierReturn(
       const unitCost = Number(batch.unit_cost ?? 0);
       value = roundRial(new Decimal(line.quantity).times(unitCost));
       await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [batch.id, line.quantity]);
+      // The rollup is recomputed in the SAME transaction: a supplier return
+      // that relieved a lot but left `item_stock` at its old quantity would
+      // desynchronise the shared cache from the authoritative batches
+      // (migration 0078), and every later sale would over-sell.
+      await recomputeItemStockRollup(client, line.itemId);
     } else {
       const stock = await getStock(line.itemId, client);
       if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالا ثبت نشده است.");
@@ -216,9 +370,9 @@ export async function createItemSupplierReturn(
     }
 
     await client.query(
-      `INSERT INTO item_supplier_return_items (return_id, item_id, batch_id, quantity, value_rial)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [returnId, line.itemId, line.batchId ?? null, line.quantity, value],
+      `INSERT INTO item_supplier_return_items (return_id, item_id, batch_id, serial_id, quantity, value_rial)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [returnId, line.itemId, line.batchId ?? null, returnedSerialId, line.quantity, value],
     );
     total += BigInt(value);
   }
@@ -238,7 +392,13 @@ export async function createItemSupplierReturn(
   return { id: returnId, value: rialText(total.toString()), duplicate: false };
 }
 
-type TransferLine = { sourceItemId: string; destinationItemId: string; quantity: string };
+type TransferLine = {
+  sourceItemId: string;
+  destinationItemId: string;
+  quantity: string;
+  /** Batch-tracked only: move this exact lot instead of taking FEFO. */
+  batchId?: string | null;
+};
 
 export async function createItemTransfer(
   client: PoolClient,
@@ -289,13 +449,23 @@ export async function createItemTransfer(
     if (!source || source.locationId !== input.sourceLocationId || !destination || destination.locationId !== input.destinationLocationId) {
       throw new RetailStockError("کالای مبدأ یا مقصد یافت نشد.");
     }
-    if (source.tracking !== "none" || destination.tracking !== "none") {
-      throw new RetailStockError("انتقال فقط برای کالای بدون ردیابی (موجودی عادی) ثبت می‌شود.");
+    // Serial/weight units are one-row-per-unit and keep their own intake
+    // paths; batch and fungible stock both transfer through this workflow.
+    if (
+      source.tracking === "serial" ||
+      source.tracking === "weight" ||
+      destination.tracking === "serial" ||
+      destination.tracking === "weight"
+    ) {
+      throw new RetailStockError("انتقال کالای سریالی/وزنی از مسیر خودِ کالا ثبت می‌شود.");
+    }
+    if (source.tracking !== destination.tracking) {
+      throw new RetailStockError("روش ردیابی کالای مبدأ و مقصد باید یکسان باشد.");
     }
     await client.query(
-      `INSERT INTO item_stock_transfer_items (transfer_id, source_item_id, destination_item_id, quantity)
-       VALUES ($1, $2, $3, $4)`,
-      [header[0].id, line.sourceItemId, line.destinationItemId, line.quantity],
+      `INSERT INTO item_stock_transfer_items (transfer_id, source_item_id, destination_item_id, quantity, batch_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [header[0].id, line.sourceItemId, line.destinationItemId, line.quantity, line.batchId ?? null],
     );
   }
   return { id: header[0].id, duplicate: false };
@@ -315,22 +485,47 @@ export async function shipItemTransfer(
     throw new RetailStockError(transfer.status === "shipped" ? "انتقال قبلاً ارسال شده است." : "وضعیت انتقال نامعتبر است.");
   }
 
-  const { rows: lines } = await client.query<{ id: string; source_item_id: string; quantity: string }>(
-    `SELECT id, source_item_id, quantity::text FROM item_stock_transfer_items WHERE transfer_id = $1 ORDER BY source_item_id`,
+  const { rows: lines } = await client.query<{
+    id: string;
+    source_item_id: string;
+    quantity: string;
+    batch_id: string | null;
+  }>(
+    `SELECT id, source_item_id, quantity::text, batch_id
+       FROM item_stock_transfer_items WHERE transfer_id = $1 ORDER BY source_item_id`,
     [input.transferId],
   );
 
   let total = 0n;
   for (const line of lines) {
-    const stock = await getStock(line.source_item_id, client);
-    if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالای مبدأ ثبت نشده است.");
-    if (new Decimal(stock.quantity).lt(new Decimal(line.quantity))) throw new RetailStockError("موجودی مبدأ کافی نیست.");
+    const item = await getItem(line.source_item_id);
+    let value: RialText;
 
-    const value = roundRial(new Decimal(line.quantity).times(stock.unitCost));
-    await client.query(`UPDATE item_stock SET quantity = quantity - $2, updated_at = now() WHERE item_id = $1`, [
-      line.source_item_id,
-      line.quantity,
-    ]);
+    if (item?.tracking === "batch") {
+      // The lots leave through the canonical engine and the exact rows that
+      // left are recorded, so receive puts the same lots on the destination
+      // shelf and a cancel restores the same lots at the source.
+      const relieved = await relieveBatchesForTransfer(client, {
+        sourceItemId: line.source_item_id,
+        transferLineId: line.id,
+        quantity: line.quantity,
+        batchId: line.batch_id,
+      });
+      value = relieved.value;
+    } else {
+      const stock = await getStock(line.source_item_id, client);
+      if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالای مبدأ ثبت نشده است.");
+      if (new Decimal(stock.quantity).lt(new Decimal(line.quantity))) {
+        throw new RetailStockError("موجودی مبدأ کافی نیست.");
+      }
+
+      value = roundRial(new Decimal(line.quantity).times(stock.unitCost));
+      await client.query(`UPDATE item_stock SET quantity = quantity - $2, updated_at = now() WHERE item_id = $1`, [
+        line.source_item_id,
+        line.quantity,
+      ]);
+    }
+
     await client.query(`UPDATE item_stock_transfer_items SET value_rial = $2 WHERE id = $1`, [line.id, value]);
     total += BigInt(value);
   }
@@ -376,8 +571,24 @@ export async function receiveItemTransfer(
 
   let total = 0n;
   for (const line of lines) {
+    const item = await getItem(line.destination_item_id);
     const value = line.value_rial ?? "0";
-    await receiveStock(line.destination_item_id, { quantity: line.quantity, unitCost: Number(value) }, client);
+
+    if (item?.tracking === "batch") {
+      const received = await receiveBatchesForTransfer(client, {
+        destinationItemId: line.destination_item_id,
+        transferLineId: line.id,
+      });
+      total += BigInt(received.value);
+      continue;
+    }
+
+    // `value_rial` is the whole line's value, NOT a unit cost. Passing it
+    // straight to receiveStock valued every destination unit at the line
+    // total — a 3-unit line at 100,000 each became 300,000 per unit on the
+    // destination shelf. The unit cost is the value divided by the quantity.
+    const unitCost = Number(roundRial(new Decimal(value).div(new Decimal(line.quantity))));
+    await receiveStock(line.destination_item_id, { quantity: line.quantity, unitCost }, client);
     total += BigInt(value);
   }
 
@@ -413,15 +624,35 @@ export async function cancelItemTransfer(
     return { value: rialText("0") };
   }
 
-  // Shipped: restore the source's stock at the value that left it.
-  const { rows: lines } = await client.query<{ source_item_id: string; quantity: string; value_rial: string | null }>(
-    `SELECT source_item_id, quantity::text, value_rial::text FROM item_stock_transfer_items WHERE transfer_id = $1`,
+  // Shipped: restore the source's stock at the value that left it — and for
+  // batch stock, into the exact lots that left.
+  const { rows: lines } = await client.query<{
+    id: string;
+    source_item_id: string;
+    quantity: string;
+    value_rial: string | null;
+  }>(
+    `SELECT id, source_item_id, quantity::text, value_rial::text
+       FROM item_stock_transfer_items WHERE transfer_id = $1`,
     [input.transferId],
   );
   let total = 0n;
   for (const line of lines) {
+    const item = await getItem(line.source_item_id);
     const value = line.value_rial ?? "0";
-    await receiveStock(line.source_item_id, { quantity: line.quantity, unitCost: Number(value) }, client);
+
+    if (item?.tracking === "batch") {
+      const restored = await restoreBatchesForTransferCancel(client, {
+        sourceItemId: line.source_item_id,
+        transferLineId: line.id,
+      });
+      total += BigInt(restored.value);
+      continue;
+    }
+
+    // Same total-value-vs-unit-cost defect as the receive path above.
+    const unitCost = Number(roundRial(new Decimal(value).div(new Decimal(line.quantity))));
+    await receiveStock(line.source_item_id, { quantity: line.quantity, unitCost }, client);
     total += BigInt(value);
   }
   await client.query(`UPDATE item_stock_transfers SET status = 'cancelled', cancelled_at = now() WHERE id = $1`, [input.transferId]);
@@ -439,25 +670,24 @@ export interface LowStockRow {
   level: "out" | "low";
 }
 
-/** Variants at or under their reorder point — the «کمبود موجودی» list per branch. */
-export async function lowStockReport(locationId: string): Promise<LowStockRow[]> {
-  const { rows } = await query<{ item_id: string; name: string; sku: string | null; quantity: string; reorder_point: string }>(
+/** Variants out of stock or at/under a positive reorder point — the «کمبود موجودی» list per branch. */
+async function readLowStockReport(locationId: string, page?: number) {
+  const result = await queryReportPage<{ item_id: string; name: string; sku: string | null; quantity: string; reorder_point: string }>(
     `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text, s.reorder_point::text
-       FROM item_stock s
-       JOIN items i ON i.id = s.item_id
-      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND s.reorder_point > 0
-      ORDER BY i.name`,
-    [locationId],
+       FROM item_stock s JOIN items i ON i.id = s.item_id
+      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND i.is_active
+        AND ${stockNeedsAttentionSql("s.quantity", "s.reorder_point")}`,
+    [locationId], { page, orderBy: "name, item_id" },
   );
-  const result: LowStockRow[] = [];
-  for (const r of rows) {
-    const level = classifyStockLevel(r.quantity, r.reorder_point);
-    if (level === "out" || level === "low") {
-      result.push({ itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity, reorderPoint: r.reorder_point, level });
-    }
-  }
-  return result;
+  return { ...result, rows: result.rows.map((r): LowStockRow => ({
+    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity, reorderPoint: r.reorder_point,
+    level: classifyStockLevel(r.quantity, r.reorder_point) as "low" | "out",
+  })) };
 }
+export async function lowStockReport(locationId: string): Promise<LowStockRow[]> {
+  return (await readLowStockReport(locationId)).rows;
+}
+export const lowStockReportPage = (locationId: string, page: number) => readLowStockReport(locationId, page);
 
 export interface DeadStockRow {
   itemId: string;
@@ -471,35 +701,30 @@ export interface DeadStockRow {
 }
 
 /** Variants that have not sold in `days` days (never sold included) — the dead-stock list per branch. */
-export async function deadStockReport(locationId: string, days: number, todayIso: string): Promise<DeadStockRow[]> {
-  const { rows } = await query<{
-    item_id: string;
-    name: string;
-    sku: string | null;
-    quantity: string;
-    last_sold_at: string | null;
-    unit_cost: string | null;
-  }>(
+async function readDeadStockReport(locationId: string, days: number, todayIso: string, page?: number) {
+  const result = await queryReportPage<{
+    item_id: string; name: string; sku: string | null; quantity: string;
+    last_sold_at: string | null; unit_cost: string | null; value_rial: string;
+  }, { totalValueRial: number }>(
     `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text,
-            s.last_sold_at::text, s.unit_cost::text
-       FROM item_stock s
-       JOIN items i ON i.id = s.item_id
+            s.last_sold_at::text, s.unit_cost::text,
+            floor(s.quantity::double precision * coalesce(s.unit_cost,0)::double precision + 0.5)::text AS value_rial
+       FROM item_stock s JOIN items i ON i.id = s.item_id
       WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND s.quantity > 0
-      ORDER BY i.name`,
-    [locationId],
+        AND $2::timestamptz IS NOT NULL AND (s.last_sold_at IS NULL OR s.last_sold_at <= $2::timestamptz)`,
+    [locationId, deadStockCutoff(todayIso, days)],
+    { page, orderBy: "name, item_id", summary: `jsonb_build_object('totalValueRial', coalesce(sum(value_rial::numeric),0))` },
   );
-  return rows
-    .filter((r) => isDeadStock(r.last_sold_at, todayIso, days))
-    .map((r) => ({
-      itemId: r.item_id,
-      itemName: r.name,
-      sku: r.sku,
-      quantity: r.quantity,
-      lastSoldAt: r.last_sold_at,
-      unitCost: r.unit_cost == null ? null : Number(r.unit_cost),
-      valueRial: Math.round(Number(r.quantity) * Number(r.unit_cost ?? 0)),
-    }));
+  return { ...result, rows: result.rows.map((r): DeadStockRow => ({
+    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity,
+    lastSoldAt: r.last_sold_at, unitCost: r.unit_cost == null ? null : Number(r.unit_cost), valueRial: Number(r.value_rial),
+  })) };
 }
+export async function deadStockReport(locationId: string, days: number, todayIso: string): Promise<DeadStockRow[]> {
+  return (await readDeadStockReport(locationId, days, todayIso)).rows;
+}
+export const deadStockReportPage = (locationId: string, days: number, todayIso: string, page: number) =>
+  readDeadStockReport(locationId, days, todayIso, page);
 
 /** Sets a variant's reorder point (0 = not tracked). */
 export async function setReorderPoint(itemId: string, reorderPoint: number): Promise<ItemStock> {

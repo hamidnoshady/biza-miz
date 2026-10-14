@@ -11,10 +11,11 @@ export const GET = withPlatformScope(async () => {
     target_key: string;
     version: number;
     unit_amount_rial: string;
+    unit_size: string;
     unit: string;
     effective_from: string;
   }>(
-    `SELECT target_key, version, unit_amount_rial, unit, effective_from
+    `SELECT target_key, version, unit_amount_rial, unit_size, unit, effective_from
        FROM billing_price_versions
       WHERE target_type = 'meter' AND effective_until IS NULL`,
   );
@@ -28,6 +29,7 @@ export const GET = withPlatformScope(async () => {
           ? {
               version: price.version,
               unitAmountRial: Number(price.unit_amount_rial),
+              unitSize: Number(price.unit_size ?? 1),
               unit: price.unit,
               effectiveFrom: price.effective_from,
             }

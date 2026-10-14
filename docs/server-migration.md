@@ -155,8 +155,10 @@ intact** for a few days — the cheapest possible rollback.
   `WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN` to the new host exactly — no scheme in
   `RP_ID`, exact scheme+host in `ORIGIN`.
 - **If the domain changed:** update each café laptop's sync peer URL (per
-  business, in the Owner dashboard — `server_sync.config`, not env), and
-  `APP_URL` if the AI assistant is configured.
+  business, in the Owner dashboard — `server_sync.config`, not env). The AI
+  connection is configured separately at `/platform/ai`; update its LiteLLM
+  Base URL only if the proxy endpoint itself changed (there is no `APP_URL`
+  provider setting).
 - Re-point any external monitoring, and the public API consumers' base URL.
 
 ## Platform recipes

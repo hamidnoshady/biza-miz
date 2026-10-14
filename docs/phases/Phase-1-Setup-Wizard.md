@@ -4,6 +4,10 @@
 **Depends on:** Phase 0 (Foundation)
 **Goal:** A fresh install can be fully configured end-to-end through a guided wizard, no manual DB edits.
 
+> **Note:** this is the Phase-1 record. The wizard has since grown an optional Backup step and become
+> industry-shaped (retail/service industries skip costing and menu); see the README's «First run — the
+> Setup Wizard» section for the current flow. The 8-step list below describes the Phase-1 deliverable.
+
 ---
 
 ## Scope — 8 wizard steps

@@ -104,7 +104,14 @@ export function WaiterBoard() {
     try {
       const result = await api<BoardData>("/api/waiter/board");
       if (!result.ok) {
-        setError("دریافت میزهای تخصیص‌داده‌شده ممکن نشد. دوباره تلاش کنید.");
+        // The board lists the sections assigned to *this* member, so the API
+        // admits only cashiers and waiters. An owner or manager used to be told
+        // to "try again" — a retry that can never succeed.
+        setError(
+          result.status === 403
+            ? "این تابلو میزهای بخشِ تخصیص‌داده‌شده به گارسون یا صندوق‌دار را نشان می‌دهد و با نقش شما باز نمی‌شود. همهٔ میزها در «میزها» است."
+            : "دریافت میزهای تخصیص‌داده‌شده ممکن نشد. دوباره تلاش کنید.",
+        );
         return;
       }
       setSections(result.data.sections);

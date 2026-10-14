@@ -121,7 +121,12 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     table: "menu_items",
     pk: ["id"],
     scope: { kind: "location" },
-    excluded: ["updated_at", "image_media_id"],
+    // `image_media_id` used to be excluded here — media assets live per
+    // deployment, so a Hybrid peer could be handed a dangling id (issue #844
+    // called it out). The canonical photo now travels: media ids are
+    // business-scoped rows, and a missing asset degrades to the placeholder,
+    // never to a broken row.
+    excluded: ["updated_at"],
     optionalRefs: ["category_id"],
     softDeleteColumn: "is_active",
     touchColumn: "updated_at",
@@ -155,6 +160,38 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     scope: { kind: "parent", table: "modifiers", column: "modifier_id" },
     excluded: [],
     optionalRefs: [],
+  },
+  // Issue #795 Phase 7 (migration 0206): the serialized-retail catalogue.
+  // Brands before items (items.brand_id), items before their attributes.
+  // item_serials deliberately never joins this feed: serialized stock is
+  // cloud-owned, so one authority decides a sale and a serial can never
+  // sell twice across devices.
+  {
+    table: "item_brands",
+    pk: ["id"],
+    scope: { kind: "location" },
+    excluded: [],
+    optionalRefs: [],
+  },
+  {
+    table: "items",
+    pk: ["id"],
+    scope: { kind: "location" },
+    excluded: ["updated_at"],
+    // brand_id arrives through item_brands above; parent_item_id must wait
+    // for its parent (NULLing it would break the variant-child CHECK), so
+    // neither is written as NULL — a missing reference defers the row.
+    optionalRefs: [],
+    softDeleteColumn: "is_active",
+    touchColumn: "updated_at",
+  },
+  {
+    table: "watch_item_attributes",
+    pk: ["item_id"],
+    scope: { kind: "parent", table: "items", column: "item_id" },
+    excluded: ["updated_at"],
+    optionalRefs: [],
+    touchColumn: "updated_at",
   },
 ];
 

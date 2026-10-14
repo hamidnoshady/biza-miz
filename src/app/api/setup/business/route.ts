@@ -4,7 +4,7 @@ import { markStepDone, setSetting, SETTING_KEYS } from "@/lib/settings";
 import { resolveActiveLocation, requireManager, type BusinessPrefs } from "@/lib/setup-state";
 import { withTenantScope } from "@/lib/auth";
 
-/** Step 1 — business info: names, contact, display/currency preferences. */
+/** Business info: names, contact, display/currency preferences. (First in every industry shape.) */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireManager();
   if (error) return error;

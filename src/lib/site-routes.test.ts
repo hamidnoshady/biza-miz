@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
 import { PERMISSIONS } from "./permissions";
 import { settingsTabHref } from "./settings-routes";
-import { isHybridSite, isSiteLocalRoute, siteHomeFor, tillNavItems } from "./site-routes";
+import { isHybridSite, isSiteLocalRoute, siteHomeFor } from "./site-routes";
 
 describe("isSiteLocalRoute", () => {
   it("keeps every till screen and its sub-pages on the desktop", () => {
@@ -62,21 +62,6 @@ describe("isHybridSite", () => {
     expect(isHybridSite("hybrid", "central")).toBe(false);
     expect(isHybridSite("local", "site")).toBe(false);
     expect(isHybridSite("cloud", "central")).toBe(false);
-  });
-});
-
-describe("tillNavItems", () => {
-  it("keeps only till entries, and a group only when a till entry is left in it", () => {
-    const items = [
-      { label: "pos", href: "/accounting/pos" },
-      { label: "crm", href: "/crm/overview" },
-      { label: "ops", children: [{ label: "kitchen", href: "/accounting/kitchen" }, { label: "stock", href: "/accounting/inventory" }] },
-      { label: "reports", children: [{ label: "sales", href: "/accounting/reports?tab=sales" }] },
-    ];
-    expect(tillNavItems(items)).toEqual([
-      { label: "pos", href: "/accounting/pos" },
-      { label: "ops", children: [{ label: "kitchen", href: "/accounting/kitchen" }] },
-    ]);
   });
 });
 

@@ -11,7 +11,7 @@ interface Ctx {
 /**
  * Closes a fiscal year: every period must already be `soft_closed`. Posts one
  * closing entry rolling revenue/expense into Retained Earnings, then locks
- * every period. `ledger.close_period` — owner and accountant, same gate as
+ * every period. `ledger.close_period` — the same effective capability as
  * soft-closing/locking a period.
  */
 export const POST = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
@@ -24,7 +24,7 @@ export const POST = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof FiscalPeriodError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json({ error: err.message, ...err.details }, { status: err.status });
     }
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });

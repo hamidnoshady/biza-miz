@@ -258,8 +258,8 @@ describe("the growth dashboard", () => {
     // the whole counterparty book.
     expect(overview.loyalty.customersTotal).toBe(1);
 
-    expect(overview.commission.accrued30d).toBe(25_000);
-    expect(overview.commission.top[0]).toMatchObject({ employeeName: "Akbar", amount: 25_000 });
+    expect(overview.commission?.accrued30d).toBe(25_000);
+    expect(overview.commission?.top[0]).toMatchObject({ employeeName: "Akbar", amount: 25_000 });
 
     // The merged feed carries every engine that produced an event, newest first.
     const kinds = overview.activity.map((row) => row.kind).sort();
@@ -313,7 +313,7 @@ describe("the growth dashboard", () => {
     expect(overview.campaigns.counts).toEqual({ live: 0, scheduled: 0, ended: 0, paused: 0 });
     expect(overview.campaigns.discountRial).toBe(0);
     expect(overview.loyalty.pointsOutstanding).toBe(0);
-    expect(overview.commission.accrued30d).toBe(0);
+    expect(overview.commission?.accrued30d).toBe(0);
     expect(overview.repurchase.due).toBe(0);
     expect(overview.activity).toEqual([]);
     // The bridge still lists the four accounts (present here only as 2420 in

@@ -6,6 +6,7 @@ import {
   withPlatformScope,
 } from "@/lib/platform-auth";
 import { deletePlanFeature, listPlanFeatures, savePlanFeature } from "@/lib/billing-plans-service";
+import { parseOptionalSafeIntInput, parseSafeIntInput } from "@/lib/platform-money";
 
 /**
  * Per-feature pricing rows for one plan.
@@ -51,8 +52,15 @@ export const POST = withPlatformScope(
       return NextResponse.json({ error: "bad_pricing_model" }, { status: 400 });
     }
 
-    const priceRial = Math.max(0, Math.floor(Number(body.priceRial ?? 0)));
-    if (!Number.isSafeInteger(priceRial) || priceRial < 0) {
+    const priceRial =
+      body.priceRial == null || body.priceRial === ""
+        ? 0
+        : parseSafeIntInput(body.priceRial, { min: 0 });
+    if (priceRial === null) {
+      return NextResponse.json({ error: "INVALID_AMOUNT" }, { status: 400 });
+    }
+    const freeLimitParsed = parseOptionalSafeIntInput(body.freeLimit, { min: 0 });
+    if (!freeLimitParsed.ok) {
       return NextResponse.json({ error: "INVALID_AMOUNT" }, { status: 400 });
     }
 
@@ -65,10 +73,7 @@ export const POST = withPlatformScope(
       pricingModel: pricingModel as "included" | "monthly" | "per_use" | "addon",
       priceRial,
       freeUntil: typeof body.freeUntil === "string" && body.freeUntil ? body.freeUntil : null,
-      freeLimit:
-        body.freeLimit === "" || body.freeLimit == null
-          ? null
-          : Math.max(0, Math.floor(Number(body.freeLimit))),
+      freeLimit: freeLimitParsed.value,
       sortOrder: Math.floor(Number(body.sortOrder ?? 0)) || 0,
     });
     await platformAudit({

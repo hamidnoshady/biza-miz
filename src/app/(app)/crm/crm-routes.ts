@@ -1,66 +1,41 @@
 /**
- * The CRM app's section routing (Phase 36).
+ * The CRM app's section routing.
  *
- * Same shape as `growth-routes.ts`, and deliberately so: these keys are the one
- * source of truth for the app's menu (`crm-nav.ts` labels them), for the
- * server-side role gate on each page, and for the sidebar's "you are here".
- * A section that exists as a route but not as a key is a page nobody can find.
+ * These keys are the one source of truth for the app's menu (`crm-nav.ts`
+ * labels them), for the server-side permission gate on each page, and for the
+ * sidebar's "you are here". A section that exists as a route but not as a key
+ * is a page nobody can find.
  *
- * The role line is drawn differently from Growth's, because the data is
- * different. Growth gates on *compensation*; the CRM gates on **who the
- * customer is**:
- *
- * - `directory`, `persons` (the 360° file) and `activities` are floor work —
- *   a cashier takes a phone number, adds a note, ticks off a callback. They are
- *   the surfaces the old flat «مشتریان» page already gave them.
- * - `cases` is floor work too: the person who hears the complaint is the person
- *   at the counter, and a service desk a cashier cannot open is a service desk
- *   that never gets used.
- * - `leads` is management: an unconverted enquiry carries a revenue
- *   expectation and an owner, and converting one creates a customer record.
- * - `overview`, `segments`, `deals`, `duplicates` and `consent` are management.
- *   Segments and consent decide who gets *messaged*, duplicates *destroys*
- *   records irreversibly, deals carry revenue expectations, and the overview
- *   aggregates all of it — none of that belongs to a shift.
- *
- * Accountants are admitted read-only to nothing here: the CRM holds no ledger
- * data of its own (deals post nothing — see migration 0118), so there is no
- * accounting reason to be in it, and personal customer data with no reason to
- * be read is data that should not be reachable.
+ * **The keys and their permissions moved to `src/lib/crm-permissions.ts`**, for
+ * one concrete reason: `crm-routes.ts` lives under a `(app)` page directory, so
+ * an API route cannot import it, and the section permission table is exactly
+ * what a route guard has to agree with. Keeping the table here meant the API
+ * restated it — and the two statements drifted, which is how the case-delete
+ * button came to be drawn on a permission the endpoint does not accept. What is
+ * left in this file is what only a route can know: hrefs, and which path
+ * belongs to which section.
  */
 
-export const CRM_SECTION_KEYS = [
-  "overview",
-  "directory",
-  "persons",
-  "leads",
-  "segments",
-  "deals",
-  "activities",
-  "cases",
-  "duplicates",
-  // Deciding who an anonymous online shopper is attaches their whole purchase
-  // history to a named person, so it sits with the management sections rather
-  // than on the floor.
-  "reconciliation",
-  "consent",
-  // The CRM's *own* settings. `/settings` is the platform settings area;
-  // `/crm/settings` configures this app (duplicate matching, consent defaults,
-  // pipeline stages) and is a different route with a different component.
-  "settings",
-] as const;
+export { CRM_SECTION_KEYS, type CrmSectionKey } from "@/lib/crm-permissions";
 
-export type CrmSectionKey = (typeof CRM_SECTION_KEYS)[number];
-
+import {
+  canOpenCrm as canOpenCrmWith,
+  canViewCrmSection as canViewCrmSectionWith,
+  crmFallbackSection,
+  type CrmSectionKey as CrmSectionKeyType,
+} from "@/lib/crm-permissions";
 import type { Permission } from "@/lib/permissions";
 
 /** The route for a section. The overview is the app root; the rest nest under it. */
-export function crmSectionHref(key: CrmSectionKey): string {
+export function crmSectionHref(key: CrmSectionKeyType): string {
   return key === "overview" ? "/crm/overview" : `/crm/${key}`;
 }
 
 /** The CRM's own settings page — never the platform settings page. */
 export const CRM_SETTINGS_HREF = "/crm/settings";
+
+/** The CRM's decision log — who moved what, and why. */
+export const CRM_AUDIT_HREF = "/crm/audit";
 
 /** The route of one customer's 360° file. */
 export function crmCustomerHref(customerId: string): string {
@@ -78,24 +53,26 @@ export function crmDealOrderHref(orderId: string): string {
   return `/accounting/orders?order=${orderId}`;
 }
 
-/** Canonical capability required to open each CRM section. */
-const CRM_SECTION_PERMISSIONS: Record<CrmSectionKey, readonly Permission[]> = {
-  overview: ["crm.export", "crm.configure"], directory: ["crm.view", "crm.manage"], persons: ["crm.view", "crm.manage"],
-  leads: ["crm.export", "crm.configure"], segments: ["crm.export", "crm.configure"], deals: ["crm.export", "crm.configure"], activities: ["crm.manage"],
-  cases: ["crm.manage"], duplicates: ["crm.merge"], reconciliation: ["crm.merge"],
-  consent: ["crm.consent_manage"], settings: ["crm.configure"],
-};
-
-export function canViewCrmSection(permissions: ReadonlySet<Permission>, key: CrmSectionKey): boolean {
-  return CRM_SECTION_PERMISSIONS[key].some((permission) => permissions.has(permission));
+/**
+ * The section permission table lives in `src/lib/crm-permissions.ts` because
+ * the API routes need it too, and a route guard may not import from a
+ * `(app)` page directory. These two are thin re-exports so every existing
+ * caller keeps working and no screen grows a second copy of the rule.
+ */
+export function canViewCrmSection(
+  permissions: ReadonlySet<Permission>,
+  key: CrmSectionKeyType,
+): boolean {
+  return canViewCrmSectionWith(permissions, key);
 }
 
 export function canOpenCrm(permissions: ReadonlySet<Permission>): boolean {
-  return CRM_SECTION_KEYS.some((key) => canViewCrmSection(permissions, key));
+  return canOpenCrmWith(permissions);
 }
 
 export function crmFallbackHref(permissions: ReadonlySet<Permission>): string {
-  return canViewCrmSection(permissions, "directory") ? crmSectionHref("directory") : "/dashboard";
+  const section = crmFallbackSection(permissions);
+  return section ? crmSectionHref(section) : "/dashboard";
 }
 
 /**
@@ -109,7 +86,7 @@ export function crmFallbackHref(permissions: ReadonlySet<Permission>): string {
  * external links survive the rename — both the current `/crm/customers/*` and
  * the pre-move `/dashboard/crm/customers/*`, which middleware redirects here.
  */
-export function isCrmSectionPathname(pathname: string, key: CrmSectionKey): boolean {
+export function isCrmSectionPathname(pathname: string, key: CrmSectionKeyType): boolean {
   const href = crmSectionHref(key);
   if (key === "overview") return pathname === href;
   const isPersonDetail =

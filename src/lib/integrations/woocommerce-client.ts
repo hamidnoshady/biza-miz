@@ -223,8 +223,14 @@ export interface WooOrder {
   /** The watermark for an incremental order pull. */
   date_modified?: string;
   date_paid?: string | null;
+  /** UTC twins of the store-local dates above (no offset, by Woo's convention). */
+  date_created_gmt?: string;
+  date_paid_gmt?: string | null;
+  date_completed?: string | null;
+  date_completed_gmt?: string | null;
   discount_total?: string;
   shipping_total?: string;
+  fee_lines?: { name?: string; total: string }[];
   meta_data?: WooMetaData[];
 }
 

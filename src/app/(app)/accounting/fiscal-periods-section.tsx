@@ -28,12 +28,15 @@ import {
 import {
   api,
   ErrorBox,
+  InfoBox,
   Field,
   inputClass,
   PrimaryButton,
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import { FilterChip } from "@/app/dashboard/filters";
+import type { FiscalReadiness } from "@/lib/fiscal-readiness";
+import { FiscalReadinessBanner } from "./fiscal-readiness-banner";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
 interface FiscalYear {
@@ -79,12 +82,15 @@ function errorMessage(code: string | undefined): string {
     invalid_year: `سال شمسی باید عددی بین ${toPersianDigits(FISCAL_YEAR_MIN)} تا ${toPersianDigits(FISCAL_YEAR_MAX)} باشد.`,
     fiscal_year_exists: "این سال مالی قبلاً تعریف شده است.",
     fiscal_period_overlap: "بازهٔ این سال با یک دورهٔ مالی موجود هم‌پوشانی دارد؛ اطلاعات دوره‌ها را بررسی کنید.",
+    fiscal_period_not_defined: "این تاریخ در هیچ دورهٔ مالیِ تعریف‌شده‌ای قرار نمی‌گیرد. در حسابداری، بخش «سال‌ها و دوره‌های مالی»، سال شمسیِ مربوط را تعریف کنید؛ تا آن زمان ثبت سند پذیرفته نمی‌شود.",
     fiscal_year_not_found: "سال مالی یافت نشد؛ فهرست را دوباره بارگذاری کنید.",
     period_not_found: "دوره یافت نشد؛ فهرست را دوباره بارگذاری کنید.",
     invalid_transition: "وضعیت این دوره هم‌زمان تغییر کرده است؛ فهرست را بررسی و دوباره تلاش کنید.",
     fiscal_year_closed: "سال مالی بسته شده است و دوره‌های آن دیگر قابل بازگشایی نیستند.",
     fiscal_year_already_closed: "این سال مالی قبلاً بسته شده است.",
     periods_not_ready: "برای بستن سال مالی، ابتدا همهٔ دوره‌ها را به‌صورت موقت ببندید.",
+    uncovered_entries_before_close:
+      "بستن نهایی این سال ممکن نیست: اسنادی با تاریخ پیش از پایان سال بیرون از همهٔ دوره‌های مالی ثبت شده‌اند. سال مالیِ آن تاریخ‌ها را تعریف کنید؛ اسناد رد یا جابه‌جا نمی‌شوند.",
     periods_incomplete: "فهرست دوره‌های این سال کامل نیست؛ برای بررسی با پشتیبانی تماس بگیرید.",
     period_locked_for_closing: "دورهٔ پایانی سال قفل است؛ ابتدا آن را بازگشایی و دوباره به‌صورت موقت ببندید.",
     ledger_account_missing: "حساب «سود (زیان) انباشته» در سرفصل حساب‌ها یافت نشد.",
@@ -110,7 +116,7 @@ function actionCopy(action: PendingAction): {
     return {
       title: `بستن نهایی سال مالی ${toPersianDigits(action.fiscalYear.label)}؟`,
       description:
-        "پس از ثبت سند اختتامیه، هر دوازده دوره قفل می‌شوند و در این سال دیگر امکان ثبت یا بازگشایی دوره وجود ندارد.",
+        "درآمد و هزینه بسته می‌شوند و ماندهٔ دقیق سود یا زیان به سود (زیان) انباشته منتقل می‌شود. با ثبت سند اختتامیه هر دوازده دوره قفل می‌شوند؛ پس از بستن نهایی، بازگشایی هیچ دوره‌ای ممکن نیست.",
       confirmLabel: "بستن نهایی سال مالی",
       destructive: true,
     };
@@ -121,7 +127,7 @@ function actionCopy(action: PendingAction): {
     return {
       title: `بستن موقت ${periodName}؟`,
       description:
-        "پس از این تغییر، ثبت سند در این بازه فقط برای مالک و حسابدار ممکن است. تا پیش از بستن نهایی سال می‌توانید دوره را بازگشایی کنید.",
+        "پس از این تغییر، ثبت سند در این بازه فقط برای عضوی ممکن است که مجوز «بستن دورهٔ مالی» (ledger.close_period) را دارد. تا پیش از بستن نهایی سال می‌توانید دوره را بازگشایی کنید.",
       confirmLabel: "بستن موقت دوره",
       destructive: false,
     };
@@ -205,7 +211,7 @@ function PeriodActionButtons({
   );
 }
 
-export function FiscalPeriodsSection() {
+export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
   const [years, setYears] = useState<FiscalYear[] | null>(null);
   const [selectedYearId, setSelectedYearId] = useState<string | null>(null);
   const [periodsState, setPeriodsState] = useState<{ yearId: string; periods: FiscalPeriod[] } | null>(null);
@@ -217,6 +223,31 @@ export function FiscalPeriodsSection() {
   const [periodsLoadFailed, setPeriodsLoadFailed] = useState(false);
   const [mutation, setMutation] = useState<Mutation>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
+  const [readinessLoadFailed, setReadinessLoadFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setReadiness(null);
+    setReadinessLoadFailed(false);
+    // Readiness is advisory. If unavailable, keep final close reachable and let
+    // the close transaction enforce coverage; expose a retry instead of
+    // leaving the user with a permanently disabled action.
+    void api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness")
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        setReadiness(ok ? data.readiness : null);
+        setReadinessLoadFailed(!ok);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setReadiness(null);
+        setReadinessLoadFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -289,7 +320,13 @@ export function FiscalPeriodsSection() {
   const softClosedCount = periods?.filter((period) => period.status === "soft_closed").length ?? 0;
   const allPeriodsSoftClosed =
     periods?.length === FISCAL_PERIOD_COUNT && softClosedCount === FISCAL_PERIOD_COUNT;
-  const canManagePeriods = Boolean(selectedYear && !selectedYear.closedAt);
+  const selectedYearCoverageReady = Boolean(
+    selectedYear && readiness?.closableYearLabels.includes(selectedYear.label),
+  );
+  const canCloseSelectedYear = Boolean(
+    allPeriodsSoftClosed && (selectedYearCoverageReady || readinessLoadFailed) && !periodsLoadFailed,
+  );
+  const canManagePeriods = Boolean(canManage && selectedYear && !selectedYear.closedAt);
   const isMutating = mutation !== null;
   const newYearNumber = Number(newYear);
   const newYearInvalid = newYear.trim().length > 0 && !isSupportedFiscalYear(newYearNumber);
@@ -308,6 +345,7 @@ export function FiscalPeriodsSection() {
   }
 
   async function createYear() {
+    if (!canManage) return;
     setError("");
     setNotice("");
     if (!isSupportedFiscalYear(newYearNumber)) {
@@ -345,20 +383,21 @@ export function FiscalPeriodsSection() {
   }
 
   function requestPeriodStatus(period: FiscalPeriod, targetStatus: PeriodStatus) {
+    if (!canManage || selectedYear?.closedAt) return;
     setError("");
     setNotice("");
     setPendingAction({ kind: "period", period, targetStatus });
   }
 
   function requestCloseYear() {
-    if (!selectedYear || !allPeriodsSoftClosed) return;
+    if (!canManage || !selectedYear || selectedYear.closedAt || !canCloseSelectedYear) return;
     setError("");
     setNotice("");
     setPendingAction({ kind: "close-year", fiscalYear: selectedYear });
   }
 
   async function confirmAction() {
-    if (!pendingAction || isMutating) return;
+    if (!canManage || !pendingAction || isMutating) return;
     const action = pendingAction;
     setMutation(action.kind === "period" ? "period" : "close-year");
     setError("");
@@ -409,14 +448,42 @@ export function FiscalPeriodsSection() {
     : periods.length !== FISCAL_PERIOD_COUNT
       ? "فهرست دوره‌ها کامل نیست و سال مالی قابل بستن نیست."
       : allPeriodsSoftClosed
-        ? "همهٔ دوره‌ها برای بستن نهایی سال آماده‌اند."
-        : `${toPersianDigits(softClosedCount)} از ${toPersianDigits(FISCAL_PERIOD_COUNT)} دوره به‌صورت موقت بسته شده‌اند.`;
+        ? !readiness
+          ? readinessLoadFailed
+            ? "هر دوازده دوره موقت بسته‌اند؛ بررسی پوشش در دسترس نبود و سرور هنگام بستن نهایی دوباره آن را کنترل می‌کند."
+            : "در حال بررسی پوشش اسناد تا پایان سال…"
+          : readiness.closableYearLabels.includes(selectedYear?.label ?? "")
+            ? "همهٔ دوازده دوره موقت بسته‌اند و اسناد تا پایان سال پوشش دارند؛ سال برای بستن نهایی آماده است."
+            : "همهٔ دوره‌ها موقت بسته‌اند، اما اسنادِ بیرون از دوره تا پایان سال باید با تعریف سال‌های مالی مربوط پوشش داده شوند."
+        : `${toPersianDigits(softClosedCount)} از ${toPersianDigits(FISCAL_PERIOD_COUNT)} دوره به‌صورت موقت بسته شده‌اند؛ برای بستن نهایی هر دوازده دوره باید موقت بسته باشند.`;
 
   return (
-    <section className="space-y-4" aria-label="مدیریت سال‌ها و دوره‌های مالی">
+    <section className="space-y-4" aria-label="سال‌ها و دوره‌های مالی">
       <ErrorBox>{error}</ErrorBox>
       <ErrorBox>{yearsLoadFailed ? "بارگذاری سال‌های مالی ناموفق بود. می‌توانید دوباره تلاش کنید." : ""}</ErrorBox>
       <ErrorBox>{periodsLoadFailed ? "بارگذاری دوره‌های این سال مالی ناموفق بود. می‌توانید دوباره تلاش کنید." : ""}</ErrorBox>
+      <FiscalReadinessBanner readiness={readiness} />
+      {readinessLoadFailed ? (
+        <InfoBox>
+          <p className="font-semibold">بررسی پوشش اسناد در دسترس نیست</p>
+          <p className="mt-1 text-xs leading-5">
+            بستن نهایی فقط پس از بررسی سرور انجام می‌شود؛ اگر سندی بیرون از دوره باشد، درخواست رد خواهد شد.
+          </p>
+          <div className="mt-2">
+            <SecondaryButton onClick={refresh} disabled={isMutating}>
+              تلاش دوباره برای بررسی پوشش
+            </SecondaryButton>
+          </div>
+        </InfoBox>
+      ) : null}
+      {!canManage ? (
+        <InfoBox>
+          <p className="text-sm font-medium">نمایش فقط‌خواندنی</p>
+          <p className="mt-1 text-xs leading-5">
+            وضعیت سال‌ها و دوره‌ها قابل مشاهده است؛ برای تعریف سال، بستن یا بازگشایی دوره و بستن نهایی، مجوز «بستن دورهٔ مالی» لازم است.
+          </p>
+        </InfoBox>
+      ) : null}
       {notice ? (
         <p role="status" className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm leading-6 text-foreground">
           {notice}
@@ -427,7 +494,46 @@ export function FiscalPeriodsSection() {
         title="سال‌های مالی"
         description="هر سال مالی از فروردین تا اسفند و شامل دوازده دورهٔ ماهانه است. تعریف سال، هیچ سندی ثبت یا قفل نمی‌کند."
       >
+        {canManage || years.length === 0 ? (
+          <InfoBox>
+            {years.length === 0 ? (
+              <>
+                <p className="font-semibold">کنترل دوره‌های مالی با تعریف نخستین سال فعال می‌شود.</p>
+                <p className="mt-1 text-xs leading-5">
+                  پس از آن، ثبت هر سند جدید—حتی اگر تاریخش به گذشته برگردد—باید در یک دورهٔ تعریف‌شده قرار بگیرد؛ ثبت با تاریخِ بدون پوشش پذیرفته نمی‌شود.
+                </p>
+                <p className="mt-1 text-xs leading-5">
+                  این فعال‌سازی سندهای پیشین را بازنویسی نمی‌کند؛ اما سند تازه با همان تاریخِ بدون پوشش هم پذیرفته نخواهد شد.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-semibold">هر ثبت تازه باید در یک دورهٔ مالی تعریف‌شده قرار بگیرد.</p>
+                <p className="mt-1 text-xs leading-5">
+                  این شرط برای سندهای با تاریخ گذشته هم برقرار است؛ تاریخِ بدون پوشش پذیرفته نمی‌شود.
+                </p>
+              </>
+            )}
+            {canManage ? (
+              <>
+                <p className="mt-1 text-xs leading-5">
+                  اگر تاریخی هنوز پوشش ندارد، سال شمسی مربوط را در همین فرم تعریف کنید؛ دوازده دورهٔ ماهانهٔ آن خودکار ساخته می‌شود.
+                </p>
+                <Button asChild variant="link" size="sm">
+                  <a href="#fiscal-year-definition">رفتن به فرم تعریف سال مالی</a>
+                </Button>
+              </>
+            ) : (
+              <p className="mt-1 text-xs leading-5">
+                برای تعریف سال مربوط، از دارندهٔ مجوز «بستن دورهٔ مالی» بخواهید در همین بخش سال شمسی را تعریف کند.
+              </p>
+            )}
+          </InfoBox>
+        ) : null}
+
+        {canManage ? (
         <form
+          id="fiscal-year-definition"
           className="grid gap-3 sm:grid-cols-[minmax(0,13rem)_auto] sm:items-end"
           onSubmit={(event) => {
             event.preventDefault();
@@ -455,9 +561,14 @@ export function FiscalPeriodsSection() {
             </PrimaryButton>
           </div>
         </form>
+        ) : null}
 
         {years.length === 0 ? (
-          <EmptyState>هنوز سال مالی‌ای تعریف نشده است. سال جاری را وارد و تعریف کنید تا دوازده دورهٔ ماهانه ساخته شود.</EmptyState>
+          <EmptyState>
+            {canManage
+              ? "هنوز سال مالی‌ای تعریف نشده است. سال شمسی موردنظر را وارد و تعریف کنید تا دوازده دورهٔ ماهانه ساخته شود."
+              : "هنوز سال مالی‌ای تعریف نشده است. برای مشاهدهٔ دوره‌ها، از دارندهٔ مجوز «بستن دورهٔ مالی» بخواهید سال مربوط را تعریف کند."}
+          </EmptyState>
         ) : (
           <div className="mt-5">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -497,20 +608,26 @@ export function FiscalPeriodsSection() {
           title={`دوره‌های سال مالی ${toPersianDigits(selectedYear.label)}`}
           description={selectedYear.closedAt ? "این سال به‌صورت نهایی بسته شده است؛ همهٔ دوره‌ها قفل و غیرقابل بازگشایی‌اند." : closingHint}
           actions={
-            !selectedYear.closedAt ? (
+            selectedYear.closedAt ? (
+              <StatusBadge tone="danger">بسته‌شده</StatusBadge>
+            ) : canManagePeriods ? (
               <Button
                 type="button"
                 variant="destructive"
-                disabled={isMutating || !allPeriodsSoftClosed}
+                disabled={isMutating || !canCloseSelectedYear}
                 onClick={requestCloseYear}
+                aria-describedby="fiscal-year-close-prerequisites"
               >
                 {mutation === "close-year" ? "در حال بستن…" : "بستن نهایی سال"}
               </Button>
-            ) : (
-              <StatusBadge tone="danger">بسته‌شده</StatusBadge>
-            )
+            ) : null
           }
         >
+          {canManagePeriods && !selectedYear.closedAt ? (
+            <p id="fiscal-year-close-prerequisites" className="sr-only">
+              برای بستن نهایی، هر دوازده دوره باید موقت بسته باشند و هیچ سند پوشش‌نداده‌شده‌ای تا پایان سال باقی نماند.
+            </p>
+          ) : null}
           {periods === null ? (
             <LoadingSkeleton rows={FISCAL_PERIOD_COUNT} compact label="در حال بارگذاری دوره‌های سال مالی" />
           ) : periodsLoadFailed ? (
@@ -524,7 +641,7 @@ export function FiscalPeriodsSection() {
             <>
               {!canManagePeriods ? null : (
                 <p className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200">
-                  بستن موقت، ثبت سند را به مالک و حسابدار محدود می‌کند. قفل‌کردن ثبت را برای همه می‌بندد؛ پیش از بستن نهایی سال می‌توانید یک دوره را بازگشایی کنید.
+                  بستن موقت، ثبت سند را به اعضای دارای مجوز «بستن دورهٔ مالی» محدود می‌کند. قفل‌کردن ثبت را برای همه می‌بندد؛ پیش از بستن نهایی سال می‌توانید یک دوره را بازگشایی کنید.
                 </p>
               )}
               <DataTable caption="دوره‌های مالی و وضعیت هر دوره" className="hidden lg:block">
@@ -591,12 +708,12 @@ export function FiscalPeriodsSection() {
       ) : null}
 
       <Dialog
-        open={pendingAction !== null}
+        open={canManage && pendingAction !== null}
         onOpenChange={(open) => {
           if (!open && !isMutating) setPendingAction(null);
         }}
       >
-        {pendingAction && pendingCopy ? (
+        {canManage && pendingAction && pendingCopy ? (
           <DialogContent showCloseButton={!isMutating}>
             <DialogHeader>
               <DialogTitle>{pendingCopy.title}</DialogTitle>

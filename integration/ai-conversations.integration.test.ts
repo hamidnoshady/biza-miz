@@ -329,3 +329,124 @@ describe("listConversationsByProject (Phase F — a project's own threads)", () 
     expect(firstPage).toHaveLength(2);
   });
 });
+
+/**
+ * §29 "reopening restores valid metadata".
+ *
+ * Reopening is a read of one conversation and everything hanging off it. The
+ * failure mode worth pinning is not "it 404s" — that is covered above — but a
+ * transcript that comes back hollow: the right messages with the wrong mode, or
+ * a proposal card that lost the state that decides whether it is still
+ * clickable. Both are what the sidebar and the transcript render from, so both
+ * are asserted here rather than assumed.
+ */
+describe("reopening restores the metadata the transcript renders from", () => {
+  it("returns the conversation's own mode, so a reopened turn is not re-typed", async () => {
+    // The mode is not decoration: it selects the runtime alias and the prompt
+    // layers the next turn composes under. Reopening under the wrong one would
+    // silently move the conversation onto another model.
+    const created = await asBusiness(alpha.businessId, () =>
+      ai.getOrCreateConversation({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        mode: "dashboard",
+        conversationId: null,
+        firstMessageContent: "سلام",
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      ai.appendMessage({ conversationId: created.id, role: "user", content: "سلام" }),
+    );
+
+    const reopened = await asBusiness(alpha.businessId, () =>
+      ai.getConversationMessages({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        conversationId: created.id,
+      }),
+    );
+    expect(reopened).not.toBeNull();
+    expect(reopened!.conversation.mode).toBe("dashboard");
+    expect(reopened!.conversation.id).toBe(created.id);
+    expect(reopened!.messages).toHaveLength(1);
+    expect(reopened!.messages[0].content).toBe("سلام");
+  });
+
+  it("keeps a proposal's status on the message, so a reloaded card is still correct", async () => {
+    // A proposed mutation that was already applied must reload as applied, not
+    // as a fresh clickable proposal — otherwise a reload invites the same write
+    // twice, which is exactly what confirm-before-apply exists to prevent.
+    const created = await asBusiness(alpha.businessId, () =>
+      ai.getOrCreateConversation({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        mode: "dashboard",
+        conversationId: null,
+        firstMessageContent: "قیمت را بالا ببر",
+      }),
+    );
+    // An audit row in the `applied` state is what a write that already happened
+    // leaves behind; the message links to it by id.
+    const audit = await asBusiness(alpha.businessId, async () => {
+      const { rows } = await dbLib.getPool().query<{ id: string }>(
+        `INSERT INTO ai_action_audit
+           (business_id, actor_user_id, prompt_excerpt, action_type, action_title, action_summary, proposal_payload, status)
+         VALUES ($1, $2, 'قیمت را بالا ببر', 'menu.item.priceUpdate', 'تغییر قیمت', 'افزایش قیمت', $3::jsonb, 'applied')
+         RETURNING id`,
+        [alpha.businessId, alpha.userA, JSON.stringify({ price: 120000 })],
+      );
+      return rows[0].id;
+    });
+    await asBusiness(alpha.businessId, () =>
+      ai.appendMessage({
+        conversationId: created.id,
+        role: "assistant",
+        content: "پیشنهاد تغییر قیمت",
+        proposal: {
+          type: "menu.item.priceUpdate",
+          title: "تغییر قیمت",
+          summary: "افزایش قیمت",
+          payload: { menuItemId: "00000000-0000-0000-0000-000000000000", price: 120000 },
+        },
+        auditId: audit,
+      }),
+    );
+
+    const reopened = await asBusiness(alpha.businessId, () =>
+      ai.getConversationMessages({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        conversationId: created.id,
+      }),
+    );
+    const message = reopened!.messages[0];
+    expect(message.proposal).not.toBeNull();
+    expect(message.proposal!.type).toBe("menu.item.priceUpdate");
+    expect(message.auditId).toBe(audit);
+    // The status comes back applied, so the reloaded card is locked rather than
+    // a fresh invitation to write the same mutation a second time.
+    expect(message.proposalStatus).toBe("applied");
+  });
+
+  it("reports a foreign conversation as absent rather than as an empty transcript", async () => {
+    // A hollow transcript is worse than a 404: it renders as "this conversation
+    // is empty" and invites the member to start typing into someone else's.
+    const created = await asBusiness(alpha.businessId, () =>
+      ai.getOrCreateConversation({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        mode: "dashboard",
+        conversationId: null,
+        firstMessageContent: "سلام",
+      }),
+    );
+    const foreign = await asBusiness(alpha.businessId, () =>
+      ai.getConversationMessages({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userB,
+        conversationId: created.id,
+      }),
+    );
+    expect(foreign).toBeNull();
+  });
+});

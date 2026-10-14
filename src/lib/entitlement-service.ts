@@ -35,10 +35,14 @@
  * includes, what costs extra) is answered by the Billing plan domain above.
  */
 import { query } from "./db";
-import { resolveFeaturesAccess, type FeatureAccess } from "./billing-plans-service";
+import {
+  isSubscriptionCarryingPlan,
+  resolveFeaturesAccess,
+  type FeatureAccess,
+} from "./billing-plans-service";
 import { planLimitsFor } from "./plan-limits";
 import { declarationFor } from "./billing/catalog/declarations";
-import { evaluateSpend } from "./billing/policy/spend";
+import { evaluateBusinessSpend } from "./billing/runtime";
 
 export type DenialReason =
   | "platform_unavailable"
@@ -61,6 +65,11 @@ export interface CapabilityResolution {
   perUsePriceRial?: number;
   /** Present when denied on a limit: which limit and the numbers. */
   limit?: { key: LimitKey; limit: number | null; current: number };
+  /** Spend policy status when evaluated. */
+  throttled?: boolean;
+  throttleDelayMs?: number;
+  warned?: boolean;
+  crossedThresholds?: number[];
 }
 
 export type LimitKey = "branch_limit" | "member_limit" | "monthly_order_limit";
@@ -73,6 +82,9 @@ export interface BusinessEntitlementSnapshot {
   /** The subscription's current period end (null when no row exists). */
   subscriptionPeriodEnd: string | null;
   subscriptionCancelAtPeriodEnd: boolean;
+  subscriptionAutoRenew: boolean;
+  subscriptionTrialEndsAt: string | null;
+  subscriptionGraceEndsAt: string | null;
   /** The plan's per-feature commercial rows, resolved to effective access. */
   featureAccess: Map<string, FeatureAccess>;
   /** Active capability overrides (business_billing_overrides + business_features). */
@@ -115,8 +127,12 @@ export async function getBusinessEntitlements(
       status: string | null;
       period_end: string | Date | null;
       cancel_at_period_end: boolean | null;
+      auto_renew: boolean | null;
+      trial_end: string | Date | null;
+      grace_end: string | Date | null;
     }>(
-      `SELECT b.plan, s.status, s.current_period_end, s.cancel_at_period_end
+      `SELECT b.plan, s.status, s.current_period_end AS period_end,
+              s.cancel_at_period_end, s.auto_renew, s.trial_end, s.grace_end
          FROM businesses b
          LEFT JOIN business_subscriptions s ON s.business_id = b.id
         WHERE b.id = $1`,
@@ -165,16 +181,18 @@ export async function getBusinessEntitlements(
     exec,
   );
 
+  const toIso = (val: string | Date | null | undefined) =>
+    val == null ? null : val instanceof Date ? val.toISOString() : new Date(val).toISOString();
+
   return {
     businessId,
     planKey,
     subscriptionStatus: bizRow.rows[0]?.status ?? null,
-    subscriptionPeriodEnd: bizRow.rows[0]?.period_end
-      ? bizRow.rows[0].period_end instanceof Date
-        ? bizRow.rows[0].period_end.toISOString()
-        : new Date(bizRow.rows[0].period_end).toISOString()
-      : null,
+    subscriptionPeriodEnd: toIso(bizRow.rows[0]?.period_end),
     subscriptionCancelAtPeriodEnd: Boolean(bizRow.rows[0]?.cancel_at_period_end),
+    subscriptionAutoRenew: bizRow.rows[0]?.auto_renew !== false,
+    subscriptionTrialEndsAt: toIso(bizRow.rows[0]?.trial_end),
+    subscriptionGraceEndsAt: toIso(bizRow.rows[0]?.grace_end),
     featureAccess: new Map(access.map((a) => [a.featureKey, a])),
     capabilityOverrides,
     limitOverrides,
@@ -183,25 +201,24 @@ export async function getBusinessEntitlements(
 
 /**
  * Is the subscription still carrying the business's plan?
- *
- *   active / trialing / past_due → yes (past_due is *inside* its grace window
- *   by definition — the grace window is exactly «still served, unpaid»).
- *   active + cancel-at-period-end → yes until the paid period elapses.
- *   cancelled (an immediate cancellation) / expired → no.
- *   no subscription row → treated as carrying: pre-subscription businesses
- *   (and any path that never wrote one) keep the historical behaviour where
- *   `businesses.plan` alone governs, so nothing regresses on migration day.
+ * Delegates to the single canonical lifecycle rule in billing-plans-service.ts.
  */
 function subscriptionCarrying(
   snapshot: BusinessEntitlementSnapshot,
   now: Date,
 ): boolean {
-  const status = snapshot.subscriptionStatus;
-  if (status == null) return true;
-  if (status === "active") {
-    return !(snapshot.subscriptionCancelAtPeriodEnd && snapshot.subscriptionPeriodEnd != null && snapshot.subscriptionPeriodEnd <= now.toISOString());
-  }
-  return status === "trialing" || status === "past_due";
+  if (snapshot.subscriptionStatus == null) return true;
+  return isSubscriptionCarryingPlan(
+    {
+      status: snapshot.subscriptionStatus,
+      currentPeriodEnd: snapshot.subscriptionPeriodEnd,
+      cancelAtPeriodEnd: snapshot.subscriptionCancelAtPeriodEnd,
+      autoRenew: snapshot.subscriptionAutoRenew,
+      trialEnd: snapshot.subscriptionTrialEndsAt,
+      graceEnd: snapshot.subscriptionGraceEndsAt,
+    },
+    now.toISOString(),
+  );
 }
 
 /**
@@ -318,8 +335,9 @@ async function finishAllowed(
 ): Promise<CapabilityResolution> {
   if (!resolution.allowed) return resolution;
   const declaration = declarationFor(resolution.capability);
-  if (!declaration || declaration.mode === "exempt") return resolution;
+  if (declaration?.mode === "exempt") return resolution;
   if (
+    declaration &&
     "requiredPermission" in declaration &&
     declaration.requiredPermission &&
     permissions &&
@@ -327,43 +345,26 @@ async function finishAllowed(
   ) {
     return deny(resolution.capability, "permission_denied");
   }
-  if (await spendDenial(businessId, declaration.critical, { query })) {
-    return deny(resolution.capability, "spend_limit_reached");
+  const critical = declaration ? declaration.critical : false;
+  const spendResult = await evaluateBusinessSpend(businessId, { critical });
+  if (spendResult.evaluation.blocked) {
+    return {
+      ...deny(resolution.capability, "spend_limit_reached"),
+      throttled: false,
+      warned: spendResult.evaluation.warned,
+      crossedThresholds: spendResult.evaluation.crossedThresholds,
+    };
+  }
+  if (spendResult.policy) {
+    return {
+      ...resolution,
+      throttled: spendResult.evaluation.throttled,
+      throttleDelayMs: spendResult.evaluation.throttled ? 2000 : 0,
+      warned: spendResult.evaluation.warned,
+      crossedThresholds: spendResult.evaluation.crossedThresholds,
+    };
   }
   return resolution;
-}
-
-async function spendDenial(
-  businessId: string,
-  critical: boolean,
-  exec: EntitlementExecutor,
-): Promise<boolean> {
-  const { rows } = await exec.query<{
-    monthly_budget_rial: string | null;
-    thresholds: number[] | null;
-    action_at_limit: "continue" | "warn_only" | "block_noncritical" | "throttle_noncritical";
-  }>(
-    `SELECT monthly_budget_rial, thresholds, action_at_limit
-       FROM business_spend_policies WHERE business_id = $1`,
-    [businessId],
-  );
-  const policy = rows[0];
-  if (!policy || policy.monthly_budget_rial == null) return false;
-  const { rows: spentRows } = await exec.query<{ spent: string }>(
-    `SELECT COALESCE(SUM(amount_rial), 0)::text AS spent
-       FROM wallet_ledger
-      WHERE business_id = $1 AND direction = 'debit'
-        AND created_at >= date_trunc('month', now())`,
-    [businessId],
-  );
-  const decision = evaluateSpend({
-    spentRial: Number(spentRows[0]?.spent ?? 0),
-    budgetRial: Number(policy.monthly_budget_rial),
-    thresholds: policy.thresholds ?? [50, 75, 90, 100],
-    action: policy.action_at_limit,
-    critical,
-  });
-  return decision.blocked;
 }
 
 function deny(capability: string, reason: DenialReason): CapabilityResolution {

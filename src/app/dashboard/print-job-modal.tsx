@@ -7,15 +7,21 @@ import { subscribePrintProgress, type PrintProgress } from "@/lib/printing/clien
 
 const STEPS = [
   { phase: "preparing", label: "آماده‌سازی سند" },
+  { phase: "routing", label: "مسیریابی چاپگر" },
   { phase: "sending", label: "ارسال به چاپگر" },
 ] as const;
 
-function stepState(current: PrintProgress["phase"], step: "preparing" | "sending"): "done" | "active" | "wait" {
-  if (current === "failed") return step === "preparing" ? "done" : "wait";
+type StepPhase = (typeof STEPS)[number]["phase"];
+
+function stepState(current: PrintProgress["phase"], step: StepPhase): "done" | "active" | "wait" {
+  if (current === "failed") return STEPS.findIndex((item) => item.phase === step) === 0 ? "done" : "wait";
   if (current === "handed_off") return "done";
-  if (current === "preparing") return step === "preparing" ? "active" : "wait";
-  if (current === "routing" || current === "sending") return step === "preparing" ? "done" : "active";
-  return "wait";
+  const order: PrintProgress["phase"][] = ["preparing", "routing", "sending"];
+  const currentIndex = order.indexOf(current);
+  const stepIndex = order.indexOf(step);
+  if (currentIndex < 0) return "wait";
+  if (stepIndex < currentIndex) return "done";
+  return stepIndex === currentIndex ? "active" : "wait";
 }
 
 /** The only print UI: progress until the spooler accepts the job, then it closes. */

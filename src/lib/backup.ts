@@ -19,6 +19,7 @@
  * unrecoverable; local artifacts are plaintext and stay on-site.
  */
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import path from "node:path";
 
 /** How often the scheduler wakes up to check whether a backup slot passed (ms). */
 export const BACKUP_TICK_INTERVAL_MS = 60 * 1000;
@@ -217,28 +218,110 @@ export function dumpDatabaseUrl(env: Partial<NodeJS.ProcessEnv> = process.env): 
 // ---------------------------------------------------------------------------
 // Artifact naming
 // ---------------------------------------------------------------------------
+//
+// Issue #807 — an artifact name carries three things beyond the timestamp:
+//
+//   • a **scope tag** (the short, stable business/installation id) so two
+//     backup scopes sharing one directory can never collide, and so retention
+//     for one scope can never prune another's files;
+//   • a **run id** (8 hex chars of the run's uuid) so two runs in the same
+//     second — a scheduled tick racing a manual click, two processes on a
+//     shared volume — still produce different paths;
+//   • a **format** marker: `.dump` for a physical `pg_dump` artifact,
+//     `.sql` for a per-tenant *logical* snapshot. Central deployments may only
+//     ever write the logical one (see backup-policy.ts).
+//
+// Legacy names (`pos-backup-YYYYMMDD-HHMMSS.dump`) still parse: their scope is
+// `null`, which the retention selector treats as belonging to the site's own
+// scope so an upgraded install does not orphan its existing history.
 
-/** Matches an artifact name (or an object key ending in one), capturing the UTC stamp. */
-export const ARTIFACT_RE = /pos-backup-(\d{8})-(\d{6})\.dump(\.enc)?$/;
+/**
+ * Matches an artifact name (or an object key ending in one), capturing scope,
+ * UTC stamp, optional run id, format and the `.enc` marker. Deliberately not
+ * anchored at the start: cloud object keys (`platform-backups/pos-backup-…`)
+ * are matched against it to select what to prune.
+ */
+export const ARTIFACT_RE =
+  /pos-backup(?:-([a-z0-9]{1,16}))?-(\d{8})-(\d{6})(?:-([0-9a-f]{8}))?\.(dump|sql)(\.enc)?$/;
 
-/** `pos-backup-YYYYMMDD-HHMMSS.dump` — UTC stamp, so names sort chronologically. */
-export function makeArtifactName(now: Date = new Date()): string {
+export type ArtifactFormat = "dump" | "sql";
+
+export interface ParsedArtifact {
+  /** the name itself (or the object key's artifact suffix) */
+  name: string;
+  /** short stable scope tag, or null for a pre-#807 name */
+  scope: string | null;
+  /** UTC stamp embedded in the name, ISO-8601 seconds */
+  timestamp: string | null;
+  /** the run uuid's short form, or null for a pre-#807 name */
+  runId: string | null;
+  format: ArtifactFormat;
+  encrypted: boolean;
+}
+
+/** A short, stable, filesystem-safe tag for a backup scope (a business id). */
+export function artifactScopeTag(scopeId: string): string {
+  const clean = scopeId.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return clean.slice(0, 16) || "default";
+}
+
+/** Eight hex characters of a run uuid — collision-resistant inside one second. */
+export function artifactRunToken(runId: string): string {
+  const clean = runId.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (clean.slice(0, 8) || "00000000").padEnd(8, "0");
+}
+
+export interface MakeArtifactNameOptions {
+  /** short scope tag (see `artifactScopeTag`); omitted = a legacy-style name */
+  scope?: string | null;
+  /** the run's uuid; omitted = none, which is only useful for tests/fixtures */
+  runId?: string | null;
+  format?: ArtifactFormat;
+  /** append `.enc` — what every encrypted artifact's name must carry */
+  encrypted?: boolean;
+}
+
+/** `pos-backup[-<scope>]-YYYYMMDD-HHMMSS[-<run>].<dump|sql>[.enc]` — UTC stamp, so names sort chronologically. */
+export function makeArtifactName(now: Date = new Date(), opts: MakeArtifactNameOptions = {}): string {
   const iso = now.toISOString(); // 2026-07-21T03:30:05.123Z
   const stamp = `${iso.slice(0, 10).replaceAll("-", "")}-${iso.slice(11, 19).replaceAll(":", "")}`;
-  return `pos-backup-${stamp}.dump`;
+  const scope = opts.scope ? `-${artifactScopeTag(opts.scope)}` : "";
+  const run = opts.runId ? `-${artifactRunToken(opts.runId)}` : "";
+  const format = opts.format ?? "dump";
+  return `pos-backup${scope}-${stamp}${run}.${format}${opts.encrypted ? ".enc" : ""}`;
+}
+
+/** Everything the artifact grammar can tell about a name/key, or null if it isn't one. */
+export function parseArtifactName(name: string): ParsedArtifact | null {
+  const m = ARTIFACT_RE.exec(name);
+  if (!m) return null;
+  const [, scope, d, t, runId, format, enc] = m;
+  const iso = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${t.slice(0, 2)}:${t.slice(2, 4)}:${t.slice(4, 6)}Z`;
+  const parsed = new Date(iso);
+  const timestamp = Number.isNaN(parsed.getTime()) || parsed.toISOString() !== `${iso.slice(0, 19)}.000Z` ? null : iso;
+  return {
+    name,
+    scope: scope ?? null,
+    timestamp,
+    runId: runId ?? null,
+    format: format as ArtifactFormat,
+    encrypted: Boolean(enc),
+  };
 }
 
 /** ISO timestamp embedded in an artifact name/key, or null if it isn't one. */
 export function parseArtifactTimestamp(name: string): string | null {
-  const m = ARTIFACT_RE.exec(name);
-  if (!m) return null;
-  const [, d, t] = m;
-  const iso = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${t.slice(0, 2)}:${t.slice(2, 4)}:${t.slice(4, 6)}Z`;
-  const parsed = new Date(iso);
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== `${iso.slice(0, 19)}.000Z`) {
-    return null;
-  }
-  return iso;
+  return parseArtifactName(name)?.timestamp ?? null;
+}
+
+/** A physical whole-database dump (`.dump`), as opposed to a logical tenant snapshot. */
+export function isPhysicalArtifactName(name: string): boolean {
+  return parseArtifactName(name)?.format === "dump";
+}
+
+/** A per-tenant logical snapshot (`.sql`) — the only artifact central may write. */
+export function isLogicalArtifactName(name: string): boolean {
+  return parseArtifactName(name)?.format === "sql";
 }
 
 /** Object key an artifact is uploaded under (encrypted, hence `.enc`). */
@@ -387,6 +470,55 @@ export function selectPrunable(names: string[], keep: number): string[] {
     .filter((n) => ARTIFACT_RE.test(n))
     .sort((a, b) => (ARTIFACT_RE.exec(b)![0] < ARTIFACT_RE.exec(a)![0] ? -1 : 1));
   return artifacts.slice(Math.max(0, keep));
+}
+
+/**
+ * Retention inside one scope (issue #807).
+ *
+ * `selectPrunable` answers "which of these files may be deleted", not "which of
+ * these files are *ours*" — and two scopes sharing a directory (a NAS holding
+ * several site installs, or a site directory that also received artifacts
+ * before scoping existed) would let one scope's retention delete another's only
+ * copy. This selector is the fix: a name is prunable only when its parsed scope
+ * tag equals `scope`, or when it is a legacy (unscoped) name and `adoptUnscoped`
+ * says the caller owns those (the site's own directory does; the platform's
+ * never does).
+ */
+export function selectPrunableInScope(
+  names: string[],
+  keep: number,
+  scope: string,
+  opts: { adoptUnscoped?: boolean } = {},
+): string[] {
+  const tag = artifactScopeTag(scope);
+  const mine = names.filter((name) => {
+    const parsed = parseArtifactName(name);
+    if (!parsed) return false;
+    if (parsed.scope === null) return Boolean(opts.adoptUnscoped);
+    return parsed.scope === tag;
+  });
+  return selectPrunable(mine, keep);
+}
+
+/**
+ * A free artifact path: `makeName()` retried with a fresh run token until the
+ * directory has no such file. Two concurrent runs cannot produce the same name
+ * (the run token is part of it), and this closes the remaining case — a
+ * leftover file from a manual copy — rather than letting `rename` overwrite a
+ * copy somebody kept. Retries regenerate the whole name so the result always
+ * still matches `ARTIFACT_RE` (a `-1` suffix would silently drop it out of
+ * retention and out of the restorable list).
+ */
+export async function reserveArtifactName(
+  dir: string,
+  makeName: () => string,
+  exists: (filePath: string) => Promise<boolean>,
+): Promise<string> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const candidate = makeName();
+    if (!(await exists(path.join(dir, candidate)))) return candidate;
+  }
+  throw new Error("artifact_name_collision");
 }
 
 // ---------------------------------------------------------------------------

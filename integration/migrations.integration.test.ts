@@ -96,12 +96,14 @@ describe("migration runner", () => {
       applied: expectedMigrations.length,
       adoptedChecksums: 0,
       repairedChecksums: [],
+      deferredMigrations: [],
     });
     expect(actualMigrations.rows).toEqual(expectedMigrations);
     expect(second).toEqual({
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: [],
+      deferredMigrations: [],
     });
   }, 60_000);
 
@@ -181,6 +183,7 @@ describe("migration runner", () => {
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: [],
+      deferredMigrations: [],
     });
   }, 60_000);
 
@@ -291,6 +294,7 @@ describe("migration runner", () => {
       applied: 0,
       adoptedChecksums: 1,
       repairedChecksums: [],
+      deferredMigrations: [],
     });
     await expect(
       runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true }),
@@ -298,6 +302,7 @@ describe("migration runner", () => {
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: [],
+      deferredMigrations: [],
     });
   });
 
@@ -340,6 +345,7 @@ describe("migration runner", () => {
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: ["0103_holoo_integration.sql"],
+      deferredMigrations: [],
     });
 
     // The stored checksum now matches the repaired file, and the migration was
@@ -367,6 +373,7 @@ describe("migration runner", () => {
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: [],
+      deferredMigrations: [],
     });
   });
 
@@ -410,6 +417,7 @@ describe("migration runner", () => {
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: ["0127_bug_reports.sql", "0140_installments.sql"],
+      deferredMigrations: [],
     });
 
     const verify = new Client({ connectionString: database.url });
@@ -432,6 +440,7 @@ describe("migration runner", () => {
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: [],
+      deferredMigrations: [],
     });
   });
 
