@@ -131,7 +131,7 @@ export default function UsersStep() {
               </Field>
             </>
           ) : (
-            <Field label="پین (۴ تا ۱۲ رقم) *" hint="برای ورود سریع در صفحهٔ ورود؛ در هر شعبه باید یکتا باشد.">
+            <Field label="پین (۴ تا ۱۲ رقم) *" hint="برای ورود سریع در صفحهٔ ورود؛ رمز شخصی همین عضو است.">
               <input
                 className={`${inputClass} w-48 text-center tracking-[0.25em]`}
                 dir="ltr"

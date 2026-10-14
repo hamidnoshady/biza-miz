@@ -1,0 +1,32 @@
+-- ============================================================================
+-- 0217_native_app_devices_generation.sql — Issue #884 follow-up: a device
+-- "session generation" so reactivating a revoked installation cannot quietly
+-- revive a browser session that predates the revocation.
+--
+-- 0216 bound a session to a device purely through `revoked_at`:
+-- `checkNativeDevice` (auth.ts) denied the request once `revoked_at` was set,
+-- and that was the whole check. That is enough while the device stays
+-- revoked, but it does not hold up across a revoke -> reactivate cycle: an
+-- owner/admin reactivating clears `revoked_at` back to NULL, and any session
+-- JWT that was minted against this row *before* it was revoked — one that
+-- never got invalidated any other way, e.g. a backgrounded tab whose token
+-- has not expired yet — resolves successfully again the moment
+-- `checkNativeDevice` re-reads the now-NULL `revoked_at`, with no login in
+-- between. That contradicts the owner decision that reactivation requires
+-- "an authorized owner/admin action followed by fresh authentication": the
+-- fresh-authentication half never actually happened for that pre-revocation
+-- token.
+--
+-- `session_generation` closes that gap the same way `platform_users
+-- .token_version` already does for a password change (`checkPlatformIdentity`
+-- in auth.ts): every session is stamped with the generation that was current
+-- when it was minted (`SessionPayload.nativeDeviceGeneration`), revoking OR
+-- reactivating the device bumps the column, and `checkNativeDevice` denies
+-- any session whose stamped generation no longer matches — forcing a fresh
+-- `POST /api/native-devices` call (which only a newly authenticated session
+-- can make) before the installation can do anything again, regardless of
+-- what `revoked_at` says.
+-- ============================================================================
+
+ALTER TABLE native_app_devices
+    ADD COLUMN session_generation integer NOT NULL DEFAULT 1;

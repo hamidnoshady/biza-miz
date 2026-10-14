@@ -22,7 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { kbHeadings, type KbArticleDetail, type KbCataloguePayload } from "@/lib/knowledge";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
-import { knowledgeSection } from "@/lib/knowledge-base";
+import { knowledgePage, knowledgeSection } from "@/lib/knowledge-base";
 import { api, ErrorBox } from "../ui";
 import { PageHeader, PageShell, cardClass } from "../page-chrome";
 import { articleHref, KbSearchResults, KbSideMenuFrame, useKbSearch } from "./kb-nav";
@@ -87,7 +87,7 @@ export function KbArticleView({ slug }: { slug: string }) {
   const sectionLabels = useMemo(
     () =>
       (article?.sectionKeys ?? [])
-        .map((key) => knowledgeSection(key)?.label)
+        .map((key) => knowledgePage(key)?.label ?? knowledgeSection(key)?.label)
         .filter((x): x is string => Boolean(x)),
     [article],
   );

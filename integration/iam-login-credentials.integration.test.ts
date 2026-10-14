@@ -91,15 +91,18 @@ describe("global login replication", () => {
       [cloud.userId, site.businessId, email, site.locationId],
     ));
 
-    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials))).resolves.toBe(true);
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials))).resolves.toMatchObject({ changed: true });
     // Unchanged cloud → no rewrite.
-    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials))).resolves.toBe(false);
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials))).resolves.toMatchObject({ changed: false });
 
     const identity = await withoutTenantScope("identity", () => query<{ id: string; password_hash: string }>(
       `SELECT p.id, p.password_hash FROM platform_users p JOIN users u ON u.platform_user_id = p.id WHERE u.id = $1`,
       [cloud.userId],
     ));
     const localId = identity.rows[0].id;
+    // Issue #948 P0-1 — contract v2: the site binds the membership to the
+    // cloud's canonical global identity ID, not to a locally minted UUID.
+    expect(localId).toBe(cloud.platformUserId);
     expect(await bcrypt.compare("cloud-password", identity.rows[0].password_hash)).toBe(true);
 
     const code = await new TOTP({ crypto: new NobleCryptoPlugin(), base32: new ScureBase32Plugin() }).generate({ secret });
@@ -117,7 +120,7 @@ describe("global login replication", () => {
     // A password changed on the site alone is noticed and put back to the cloud's.
     await withoutTenantScope("identity", () =>
       query(`UPDATE platform_users SET password_hash = $2 WHERE id = $1`, [localId, bcrypt.hashSync("site-only", 4)]));
-    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, changed))).resolves.toBe(true);
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, changed))).resolves.toMatchObject({ changed: true });
     const restored = await withoutTenantScope("identity", () =>
       query<{ password_hash: string }>(`SELECT password_hash FROM platform_users WHERE id = $1`, [localId]));
     expect(await bcrypt.compare("cloud-password", restored.rows[0].password_hash)).toBe(true);
@@ -170,5 +173,64 @@ describe("global login replication", () => {
       [cashierId],
     ));
     expect(await bcrypt.compare("4826", stored.rows[0].secret_hash)).toBe(true);
+  }, 180_000);
+
+  it("repairs a pre-v2 locally minted identity UUID onto the cloud's canonical ID (issue #948)", async () => {
+    await useDatabase(cloudDb);
+    const email = `owner-${randomUUID()}@example.com`;
+    const cloud = await provisionBusiness({
+      businessName: "کافه ابر ۳", ownerName: "حمید", email, password: "cloud-password", seedChartOfAccounts: false,
+    });
+    const secret = generateSecret();
+    await withoutTenantScope("platform", async () => {
+      await provisionMfaEnrolment({ query: (t, p) => query(t, p as unknown[]) }, "platform_user", cloud.platformUserId!, "totp", true, null, Buffer.from(secret));
+    });
+    const credentials = await buildLoginCredentials(cloud.businessId);
+
+    // Site: the pairing-era replication minted its *own* local UUID for the
+    // same person (same unique email) and linked the membership to it — the
+    // exact divergence behind `identity_not_synced`.
+    await useDatabase(siteDb);
+    const site = await provisionBusiness({
+      businessName: "کافه محلی ۳", ownerName: "حمید", email: `local-${randomUUID()}@example.com`, password: "local-password", seedChartOfAccounts: false,
+    });
+    await withTenant(site.businessId, () => query(
+      `INSERT INTO users (id, business_id, role, full_name, email, location_id) VALUES ($1, $2, 'owner', 'حمید', $3, $4)`,
+      [cloud.userId, site.businessId, email, site.locationId],
+    ));
+    const legacy = await withoutTenantScope("identity", () => query<{ id: string }>(
+      `INSERT INTO platform_users (email, password_hash, full_name, token_version)
+       VALUES ($1, $2, 'حمید', 3) RETURNING id`,
+      [email, bcrypt.hashSync("legacy-password", 4)],
+    ));
+    const legacyId = legacy.rows[0].id;
+    expect(legacyId).not.toBe(cloud.platformUserId);
+    await withoutTenantScope("identity", () => query(
+      `UPDATE users SET platform_user_id = $2 WHERE id = $1`, [cloud.userId, legacyId],
+    ));
+
+    // Convergence re-keys the row onto the canonical ID and preserves the
+    // token-version chain (GREATEST of local and cloud).
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials)))
+      .resolves.toMatchObject({ changed: true, identitiesRekeyed: 1 });
+    const identity = await withoutTenantScope("identity", () => query<{ id: string; password_hash: string; token_version: number }>(
+      `SELECT p.id, p.password_hash, p.token_version FROM platform_users p JOIN users u ON u.platform_user_id = p.id WHERE u.id = $1`,
+      [cloud.userId],
+    ));
+    expect(identity.rows[0].id).toBe(cloud.platformUserId);
+    expect(identity.rows[0].token_version).toBeGreaterThanOrEqual(3);
+    expect(await bcrypt.compare("cloud-password", identity.rows[0].password_hash)).toBe(true);
+    // Nothing left behind under the discarded UUID.
+    const orphan = await withoutTenantScope("identity", () => query(`SELECT 1 FROM platform_users WHERE id = $1`, [legacyId]));
+    expect(orphan.rows).toHaveLength(0);
+
+    // The TOTP factor rode along with the re-key and still verifies.
+    const code = await new TOTP({ crypto: new NobleCryptoPlugin(), base32: new ScureBase32Plugin() }).generate({ secret });
+    await expect(verifyExistingConfirmedMfaFactor({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code }))
+      .resolves.toMatchObject({ outcome: "totp" });
+
+    // Unchanged cloud → converged, no rewrite.
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials)))
+      .resolves.toMatchObject({ changed: false });
   }, 180_000);
 });

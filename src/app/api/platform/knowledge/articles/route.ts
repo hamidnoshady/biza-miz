@@ -5,7 +5,7 @@ import {
   withPlatformScope,
   platformAudit,
 } from "@/lib/platform-auth";
-import { KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
+import { KNOWLEDGE_PAGES, KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
 import {
   adminCreateKbArticle,
   adminListKbArticles,
@@ -13,7 +13,7 @@ import {
   parseArticleInput,
 } from "@/lib/knowledge-service";
 
-const KNOWN_SECTION_KEYS = new Set(KNOWLEDGE_SECTIONS.map((s) => s.key));
+const KNOWN_SECTION_KEYS = new Set([...KNOWLEDGE_SECTIONS.map((s) => s.key), ...KNOWLEDGE_PAGES.map((p) => p.key)]);
 
 /**
  * The knowledge base's articles (migration 0131) — the console's editor data.

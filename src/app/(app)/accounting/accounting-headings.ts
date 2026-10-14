@@ -17,6 +17,14 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
     description:
       "میز کار حسابداری — نمای مالی کسب‌وکار، اشخاص و دسترسی به همهٔ بخش‌های کاری از منوی کناری.",
   },
+  // The workspace landing itself. Its title is deliberately the menu's own
+  // words («فضای کار حسابداری», from `ACCOUNTING_SECTIONS`) — this is the one
+  // page that *is* the workspace, so the rule below ("a section never wears
+  // the generic workspace name") turns around here on purpose.
+  ledger: {
+    description:
+      "همهٔ ابزارهای دفترداری در یک‌جا — دفتر و اسناد، دریافتنی و پرداختنی، وجوه و هزینه، دوره، مالیات و حقوق.",
+  },
   "trial-balance": {
     title: "تراز آزمایشی",
     description: "ماندهٔ افتتاحیه، گردش و ماندهٔ پایان دورهٔ انتخاب‌شده؛ توازن حساب‌ها و سلامت اسناد را جداگانه بررسی کنید.",

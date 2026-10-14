@@ -3,7 +3,6 @@ import { APP_SETTINGS_HREFS, PLATFORM_SETTINGS_HOME } from "./app-routes";
 import {
   PLATFORM_SETTINGS_PAGES,
   canonicalSettingsHrefForTabParam,
-  isKnownSettingsSlug,
   isPlatformSettingsPage,
   settingsTabForSlug,
   settingsTabHref,
@@ -36,13 +35,11 @@ describe("settings section URLs", () => {
   it("rejects a slug that is not a settings section", () => {
     expect(settingsTabForSlug("nope")).toBeNull();
     expect(settingsTabForSlug("")).toBeNull();
-    expect(isKnownSettingsSlug("nope")).toBe(false);
   });
 
   it("keeps the non-tab platform pages out of the tab table", () => {
     for (const page of PLATFORM_SETTINGS_PAGES) {
       expect(isPlatformSettingsPage(page)).toBe(true);
-      expect(isKnownSettingsSlug(page)).toBe(true);
       // They are real pages of their own, not sections of the settings manager.
       expect(settingsTabForSlug(page)).toBeNull();
     }

@@ -26,7 +26,21 @@ export function OfflineBanner() {
     message = "سرور محلی متصل است؛ اقدام‌های ذخیره‌شده در حال ارسال هستند.";
     className = "bg-primary/10 text-primary";
   } else {
-    message = "سرور محلی و عملیات کسب‌وکار فعال است؛ همگام‌سازی ابری موقتاً متوقف شده و پس از بازگشت اینترنت خودکار ادامه می‌یابد.";
+    // Issue #948 P0/P1-5 — say which plane is stopped, and never claim the
+    // Internet is gone while the operator may be standing on a working
+    // connection with only the IAM/auth stage broken.
+    const fault = connectionState.syncFault;
+    if (fault === "auth_expired" || fault === "forbidden") {
+      message = "سرور محلی و عملیات کسب‌وکار فعال است؛ همگام‌سازی ابری به دلیل پایان نشست حساب ابری متوقف است. از «تنظیمات ← ابر و همگام‌سازی» دوباره وارد شوید.";
+    } else if (fault === "identity_blocked") {
+      message = "سرور محلی و عملیات کسب‌وکار فعال است؛ همگام‌سازی به دلیل مشکل هویت/حساب کارکنان متوقف است. وضعیت را از «تنظیمات ← ابر و همگام‌سازی» بررسی و تعمیر کنید.";
+    } else if (fault === "server_error") {
+      message = "سرور محلی و عملیات کسب‌وکار فعال است؛ سرویس ابری موقتاً خطا می‌دهد و همگام‌سازی خودکار دوباره تلاش می‌شود.";
+    } else if (fault === "transport_unreachable" || fault === "timeout" || fault === null) {
+      message = "سرور محلی و عملیات کسب‌وکار فعال است؛ همگام‌سازی ابری موقتاً متوقف شده و به‌محض برقراری اتصال خودکار ادامه می‌یابد.";
+    } else {
+      message = "سرور محلی و عملیات کسب‌وکار فعال است؛ همگام‌سازی ابری موقتاً متوقف شده و به‌صورت خودکار دوباره تلاش می‌شود.";
+    }
     className = "bg-amber-500/10 text-amber-800 dark:text-amber-200";
   }
 

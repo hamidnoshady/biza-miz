@@ -47,15 +47,13 @@ interface UserRow extends Record<string, unknown> {
 /**
  * PIN quick-login for Cashier/Waiter/Kitchen.
  *
- * PINs are unique per business (migration 0020 moved that uniqueness down from
- * the whole table), so (business, pin) identifies one member; passing a
- * locationId narrows it further on a multi-branch business.
- *
- * Phase 20 Wave 2 — the redesigned login picks an employee by name first
- * (`pin-login/roster`), so `employeeId` narrows the lookup to that one row
- * instead of scanning every PIN-role member; omitting it keeps the original
- * bcrypt-scan behaviour for any caller that still only sends a PIN. Either
- * way, a successful match also mints a server-side `employee_sessions` row
+ * The member is named first (`pin-login/roster`, Phase 20 Wave 2), and the
+ * PIN is checked against that one member only. A PIN is a personal secret,
+ * not an identifier: two members may choose the same digits (migration 0221
+ * dropped the per-business uniqueness that the old PIN-only scan needed,
+ * because refusing a duplicate told the person choosing it what a colleague's
+ * PIN was). So a request without `employeeId` is refused rather than scanned.
+ * A successful match also mints a server-side `employee_sessions` row
  * (Wave 1) *alongside* the existing JWT — the JWT stays the bearer credential
  * in the cookie, the DB row exists so the session can be listed/revoked and
  * so a revocation takes effect immediately (see checkEmployeeSession in
@@ -93,6 +91,10 @@ export async function POST(request: NextRequest) {
   if (!new RegExp(`^\\d{${PIN_MIN_LENGTH},${PIN_MAX_LENGTH}}$`).test(pin)) {
     return NextResponse.json({ error: "invalid_pin" }, { status: 400 });
   }
+  const employeeId = typeof body.employeeId === "string" ? body.employeeId.trim() : "";
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(employeeId)) {
+    return NextResponse.json({ error: "employee_required" }, { status: 400 });
+  }
 
   const { businessId, error } = await resolveLoginBusinessId({
     ...body,
@@ -112,28 +114,14 @@ export async function POST(request: NextRequest) {
     // Local/hybrid: both sets, since a standalone install has nothing else to
     // offer an owner standing at the till.
     const pinEligibleRoles = pinEligibleRolesSql(deployment.profile);
-    // Phase 20 Wave 8 — a picker-narrowed request already names the employee,
-    // so a lockout is checked before touching the PIN at all; a bare legacy
-    // scan doesn't know who it is yet and gets the same check further below,
-    // once the matching row (if any) is found.
-    if (body.employeeId) {
-      const lockout = await checkLoginLockout(businessId, body.employeeId);
-      if (lockout.locked) {
-        return NextResponse.json(
-          { error: "account_locked", lockedUntil: lockout.lockedUntil },
-          { status: 423 },
-        );
-      }
-    }
-
-    const params: unknown[] = [];
-    let filter = "";
-    if (body.employeeId) {
-      params.push(body.employeeId);
-      filter = "AND u.id = $1";
-    } else if (body.locationId) {
-      params.push(body.locationId);
-      filter = "AND u.location_id = $1";
+    // Phase 20 Wave 8 — the request names the employee, so a lockout is
+    // checked before touching the PIN at all.
+    const lockout = await checkLoginLockout(businessId, employeeId);
+    if (lockout.locked) {
+      return NextResponse.json(
+        { error: "account_locked", lockedUntil: lockout.lockedUntil },
+        { status: 423 },
+      );
     }
 
     // RLS confines this to `businessId`, which is why there is no business_id
@@ -156,37 +144,21 @@ export async function POST(request: NextRequest) {
         WHERE u.is_active
           AND u.role IN ${pinEligibleRoles}
           AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL
-          ${filter}`,
-      params,
+          AND u.id = $1`,
+      [employeeId],
     );
 
-    let user: UserRow | undefined;
-    for (const row of rows) {
-      if (row.pin_hash && (await bcrypt.compare(pin, row.pin_hash))) {
-        user = row;
-        break;
-      }
-    }
+    const candidate = rows[0];
+    const user =
+      candidate?.pin_hash && (await bcrypt.compare(pin, candidate.pin_hash))
+        ? candidate
+        : undefined;
 
     if (!user) {
       // Phase 20 Wave 7 — visible in the new security center even though no
-      // one is authenticated yet; entity_id is the attempted employeeId when
-      // the Wave 2 picker narrowed the request, null for a bare legacy scan.
-      await auditLoginFailure(businessId, body.employeeId ?? null, "invalid_pin");
+      // one is authenticated yet; entity_id is the attempted employeeId.
+      await auditLoginFailure(businessId, employeeId, "invalid_pin");
       return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
-    }
-
-    // Phase 20 Wave 8 — the employeeId branch above already checked; only a
-    // bare legacy scan reaches here without having checked yet, since it only
-    // learns who matched by finding the right PIN.
-    if (!body.employeeId) {
-      const lockout = await checkLoginLockout(businessId, user.id);
-      if (lockout.locked) {
-        return NextResponse.json(
-          { error: "account_locked", lockedUntil: lockout.lockedUntil },
-          { status: 423 },
-        );
-      }
     }
 
     // -----------------------------------------------------------------------

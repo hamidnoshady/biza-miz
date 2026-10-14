@@ -32,9 +32,6 @@
 import { PLATFORM_SETTINGS_HOME } from "./app-routes";
 import { SETTINGS_TAB_KEYS, type SettingsTabKey } from "./settings-tabs";
 
-/** A settings section's URL slug — the segment after `/settings/`. */
-export type SettingsSlug = string;
-
 /**
  * Slug → tab key, for the sections the settings manager renders.
  *
@@ -83,11 +80,6 @@ export type PlatformSettingsPage = (typeof PLATFORM_SETTINGS_PAGES)[number];
 
 export function isPlatformSettingsPage(slug: string): slug is PlatformSettingsPage {
   return (PLATFORM_SETTINGS_PAGES as readonly string[]).includes(slug);
-}
-
-/** Whether a slug is any known platform settings section (tab or page). */
-export function isKnownSettingsSlug(slug: string): boolean {
-  return settingsTabForSlug(slug) !== null || isPlatformSettingsPage(slug);
 }
 
 /**

@@ -1,0 +1,22 @@
+{
+  "$comment": "Non-secret configuration for the Android Trusted Web Activity runtime (issue #884). Read by android/app/build.gradle.kts and by src/lib/native tests. webOrigin is the HTTPS origin the TWA opens; it stays empty for staging and production so a release cannot be built against a guessed host. Set it per build with -Pbiza.webOrigin.<env>=... or the environment variable BIZA_ANDROID_WEB_ORIGIN_<ENV>. Signing material never belongs here: see docs/android-runtime.md.",
+  "schemaVersion": 1,
+  "displayName": "Biza Miz",
+  "environments": {
+    "development": {
+      "applicationId": "com.bizamiz.app.dev",
+      "label": "Biza Miz Dev",
+      "webOrigin": "https://app.invalid"
+    },
+    "staging": {
+      "applicationId": "com.bizamiz.app.staging",
+      "label": "Biza Miz Staging",
+      "webOrigin": ""
+    },
+    "production": {
+      "applicationId": "com.bizamiz.app",
+      "label": "Biza Miz",
+      "webOrigin": ""
+    }
+  }
+}

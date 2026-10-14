@@ -20,16 +20,25 @@ export function DeploymentStatusIndicator({ profile }: { profile: DeploymentProf
   const pending = serverStatus?.outboundPending ?? 0;
   const identityDegraded =
     serverStatus?.overallIdentity === "degraded" || serverStatus?.overallIdentity === "limited";
+  // Issue #948 P0/P1-5 — operational sync and identity health are separate
+  // facts. A site can be happily synced while identity needs attention (and
+  // vice versa), so the badge states both instead of letting one replace the
+  // other: "سایت محلی · همگام با ابر · نیازمند بررسی هویت" is the truthful
+  // reading of a green pipe with a broken identity plane.
+  const syncLabel =
+    profile === "hybrid"
+      ? serverStatus?.sync === "connected"
+        ? "سایت محلی · همگام با ابر"
+        : serverStatus?.sync === "connecting"
+          ? "سایت محلی · در حال اتصال به ابر"
+          : `سایت محلی · همگام‌سازی متوقف${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`
+      : null;
   const label =
     profile === "cloud"
       ? "ابر"
       : profile === "local"
         ? "فقط محلی · اتصال به ابر"
-        : identityDegraded
-          ? "سایت محلی · نیازمند بررسی هویت و ورود کارکنان"
-          : serverStatus?.sync === "connected"
-            ? "سایت محلی · همگام با ابر"
-            : `سایت محلی · همگام‌سازی متوقف${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`;
+        : `${syncLabel}${identityDegraded ? " · نیازمند بررسی هویت و ورود کارکنان" : ""}`;
   const tone =
     profile === "hybrid" && (serverStatus?.sync !== "connected" || identityDegraded)
       ? "bg-amber-500 dark:bg-amber-400"

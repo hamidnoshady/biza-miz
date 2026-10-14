@@ -47,10 +47,21 @@ mapping layered on top means the icon lands inside the new centre.
 
 ## Editing content day-to-day
 
-`/platform/knowledge` has four tabs: **مقاله‌ها** (markdown editor with
-live preview, section mapping, tags, publish/draft), **دسته‌ها** (tree
-builder; deleting is refused while children/articles exist), **برچسب‌ها**,
-and **بخش‌ها** (the dashboard-section key guide).
+`/platform/knowledge` has three tabs: **مقاله‌ها** (markdown editor with
+live preview, searchable multi-select of all page-level KnowledgeHelpButton
+destinations, tags, publish/draft), **دسته‌ها** (tree builder; deleting is refused
+while children/articles exist), and **برچسب‌ها**.
+
+A new article can link to any number of pages. The page registry is
+`KNOWLEDGE_PAGES` in `src/lib/knowledge-base.ts`. Its stable
+`page:/canonical/route` keys are stored in the existing
+`knowledge_articles.section_keys` field. At runtime a help button resolves
+its most specific page key and then falls back to the old section key, so
+legacy articles and previously configured external learning URLs remain
+readable. The old standalone **پیوند بخش‌ها** tab was removed from the
+Superadmin UI; the legacy endpoint remains read-compatible. When adding a
+new screen that mounts the help button, register its canonical route in
+`KNOWLEDGE_PAGES` so operators can assign a guide to it.
 
 ## Seeding the starter content
 
