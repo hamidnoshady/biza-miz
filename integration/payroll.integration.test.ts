@@ -503,7 +503,13 @@ describe("pay-term change audit (issue #835 §6)", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await change(33_000_000);
     const { changes } = await history();
-    expect(changes.map((c) => [c.previousAmount, c.newAmount])).toEqual([
+    // Three writes in a row can share a database timestamp (Windows CI does), and
+    // the newest-first order between tied rows then falls to the random id. The
+    // chain is what this test is about; "newest first" is the pagination test's.
+    const chain = changes
+      .map((c) => [c.previousAmount, c.newAmount])
+      .sort((a, b) => Number(b[1]) - Number(a[1]));
+    expect(chain).toEqual([
       ["32000000", "33000000"],
       ["31000000", "32000000"],
       ["30000000", "31000000"],
