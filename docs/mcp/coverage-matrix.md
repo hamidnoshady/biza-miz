@@ -11,13 +11,15 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **969**. Rows: tenant **86**, platform **19**.
+Route files scanned: **985**. Rows: tenant **88**, platform **19**.
 
 ## Summary of remaining gaps
 
-### Tenant (5)
+### Tenant (7)
 - **accounting.currencies** (Accounting · Currencies and exchange rates) — MCP gap
 - **accounting.multicurrency** (Accounting · Multi-currency entries, settlements and revaluations) — MCP gap
+- **accounting.opening-balances** (Accounting · Opening balances & fiscal carry-forward) — MCP gap
+- **accounting.vouchers** (Accounting · Voucher numbering, gaps, renumbering & summary vouchers) — MCP gap
 - **accounting.tax_invoices** (Accounting · Taxpayer invoices (سامانه مودیان)) — MCP gap
 - **automotive.vehicles** (Automotive · Vehicles, leads, reservations and transfers) — MCP gap
 - **accounting.ar** (Accounting · Receivables (receipts, aging, customers)) — partial
@@ -29,7 +31,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 63 · partial: 1 · MCP gap: 4 · backend gap: 0 · n/a (infra): 9 · duplicate surface: 1 · route-only (by design): 8
+Counts — covered: 63 · partial: 1 · MCP gap: 6 · backend gap: 0 · n/a (infra): 9 · duplicate surface: 1 · route-only (by design): 8
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -37,6 +39,8 @@ Counts — covered: 63 · partial: 1 · MCP gap: 4 · backend gap: 0 · n/a (inf
 | Accounting | Journal entries<br>_manual drafts are intentionally one lane — humans and the assistant both draft through the same parseManualDraftPayload pipeline (journal.manual.propose); reversal makes a new mirrored entry, never an edit_ | list_journal_entries, list_manual_journal_drafts | journal.manual.propose | — | journal.draft.approve, journal.draft.reject, journal.entry.reverse | — | ledger.approve, ledger.propose, ledger.view | connection mode; step-up (always approve) | list_journal_entries, list_manual_journal_drafts, journal.manual.propose, journal.draft.approve, journal.draft.reject, journal.entry.reverse | integration/ledger-reports.integration.test.ts | covered |
 | Accounting | Currencies and exchange rates<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | (route only) | (route only) | — | ledger.post, ledger.view, settings.manage | — | — | — | MCP gap |
 | Accounting | Multi-currency entries, settlements and revaluations<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | — | (route only) | — | ledger.post, ledger.view | — | — | — | MCP gap |
+| Accounting | Opening balances & fiscal carry-forward<br>_landed on main after this map's batch; no MCP verb yet — approving and posting an opening document stays a human act_ | (route only) | (route only) | (route only) | (route only) | (route only) | ledger.approve, ledger.post, ledger.view | — | — | — | MCP gap |
+| Accounting | Voucher numbering, gaps, renumbering & summary vouchers<br>_landed on main after this map's batch; no MCP verb yet — renumbering is a fiscal-year act for a person_ | (route only) | (route only) | — | — | — | ledger.approve, ledger.post, ledger.view | — | — | — | MCP gap |
 | Accounting | Taxpayer invoices (سامانه مودیان)<br>_landed on main after this map's batch; no MCP verb yet — every send stays a human act_ | (route only) | (route only) | (route only) | (route only) | — | tax.amend, tax.cancel, tax.export, tax.inquiry, tax.manage_settings, tax.prepare, tax.send, tax.view | — | — | — | MCP gap |
 | Accounting | Taxpayer provider callback<br>_signed provider callback, not a business operation_ | — | — | — | (route only) | — | — | — | — | — | n/a (infra) |
 | Automotive | Vehicles, leads, reservations and transfers<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | (route only) | (route only) | — | crm.manage, media.view, vehicles.archive, vehicles.cost_edit, vehicles.cost_view, vehicles.create, vehicles.edit, vehicles.expense_record | — | — | — | MCP gap |
