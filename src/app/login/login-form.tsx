@@ -109,8 +109,10 @@ export default function LoginForm() {
         <div className={`w-full max-w-sm ${cardClass} p-8`}>
           <Skeleton className="mx-auto mb-2 h-6 w-40" />
           <Skeleton className="mx-auto mb-6 h-4 w-28" />
-          <div className="grid grid-cols-3 gap-2">
-            {Array.from({ length: 3 }, (_, i) => (
+          {/* Two doors while capabilities load (fail closed — issue #948 P1-4);
+              the third appears only on a confirmed Local-only install. */}
+          <div className="grid grid-cols-2 gap-2">
+            {Array.from({ length: 2 }, (_, i) => (
               <Skeleton key={i} className="h-16 rounded-xl" />
             ))}
           </div>

@@ -60,14 +60,7 @@ import {
   SectionCardSkeleton,
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
-import {
-  DataTable,
-  DataTableBody,
-  DataTableHead,
-  DataTableRow,
-  Td,
-  Th,
-} from "@/app/dashboard/data-table";
+import { DataCardTable, type DataCardTableColumn } from "@/app/dashboard/data-table";
 import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { CrmAssigneePicker, type CrmAssignee } from "./crm-assignee-picker";
@@ -254,6 +247,81 @@ export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
 
   if (loading && !leads) return <SectionCardSkeleton rows={5} />;
 
+  // Declared once: drives both the desktop grid and, on a phone, the stacked
+  // card list — see `DataCardTable` (issue #884's mobile card-row follow-up).
+  const leadColumns: DataCardTableColumn<Lead>[] = [
+    {
+      key: "name",
+      header: "نام",
+      cell: (lead) => (
+        <>
+          <div className="font-medium text-foreground">{lead.name}</div>
+          {lead.organization ? (
+            <div className="text-xs text-muted-foreground">{lead.organization}</div>
+          ) : null}
+          {lead.phone ? (
+            <div className="text-xs text-muted-foreground">{formatPhoneDisplay(lead.phone)}</div>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      key: "source",
+      header: "راه آشنایی",
+      muted: true,
+      cell: (lead) => (
+        <>
+          {lead.sourceDetail || lead.source}
+          <div className="text-xs">{RATING_LABELS[lead.rating] ?? lead.rating}</div>
+        </>
+      ),
+    },
+    {
+      key: "status",
+      header: "وضعیت",
+      cell: (lead) => (
+        <StatusBadge tone={STATUS_TONES[lead.status] ?? "neutral"}>
+          {STATUS_LABELS[lead.status] ?? lead.status}
+        </StatusBadge>
+      ),
+    },
+    { key: "owner", header: "مسئول", muted: true, cell: (lead) => lead.ownerName || "—" },
+    {
+      key: "nextAction",
+      header: "پیگیری بعدی",
+      muted: true,
+      cell: (lead) => (
+        <>
+          {lead.nextActionAt ? formatJalali(lead.nextActionAt) : "—"}
+          {lead.nextAction ? <div className="text-xs">{lead.nextAction}</div> : null}
+        </>
+      ),
+    },
+    {
+      key: "action",
+      header: "اقدام",
+      cell: (lead) =>
+        lead.convertedPartyId ? (
+          <Link
+            className="text-sm underline underline-offset-4"
+            href={crmCustomerHref(lead.convertedPartyId)}
+          >
+            پروندهٔ مشتری
+          </Link>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setEditing(lead)}>
+              ویرایش
+            </Button>
+            <Button type="button" size="sm" onClick={() => void openConvert(lead)}>
+              <UserCheckIcon aria-hidden="true" className="size-4" />
+              تبدیل
+            </Button>
+          </div>
+        ),
+    },
+  ];
+
   return (
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
@@ -336,76 +404,12 @@ export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
             </EmptyState>
           ) : (
             <>
-              <DataTable caption="فهرست سرنخ‌ها">
-                <DataTableHead>
-                  <tr>
-                    <Th>نام</Th>
-                    <Th>راه آشنایی</Th>
-                    <Th>وضعیت</Th>
-                    <Th>مسئول</Th>
-                    <Th>پیگیری بعدی</Th>
-                    <Th>اقدام</Th>
-                  </tr>
-                </DataTableHead>
-                <DataTableBody>
-                  {(leads ?? []).map((lead) => (
-                    <DataTableRow key={lead.id}>
-                      <Td>
-                        <div className="font-medium text-foreground">{lead.name}</div>
-                        {lead.organization ? (
-                          <div className="text-xs text-muted-foreground">{lead.organization}</div>
-                        ) : null}
-                        {lead.phone ? (
-                          <div className="text-xs text-muted-foreground">
-                            {formatPhoneDisplay(lead.phone)}
-                          </div>
-                        ) : null}
-                      </Td>
-                      <Td muted>
-                        {lead.sourceDetail || lead.source}
-                        <div className="text-xs">{RATING_LABELS[lead.rating] ?? lead.rating}</div>
-                      </Td>
-                      <Td>
-                        <StatusBadge tone={STATUS_TONES[lead.status] ?? "neutral"}>
-                          {STATUS_LABELS[lead.status] ?? lead.status}
-                        </StatusBadge>
-                      </Td>
-                      <Td muted>{lead.ownerName || "—"}</Td>
-                      <Td muted nowrap>
-                        {lead.nextActionAt ? formatJalali(lead.nextActionAt) : "—"}
-                        {lead.nextAction ? (
-                          <div className="text-xs">{lead.nextAction}</div>
-                        ) : null}
-                      </Td>
-                      <Td>
-                        {lead.convertedPartyId ? (
-                          <Link
-                            className="text-sm underline underline-offset-4"
-                            href={crmCustomerHref(lead.convertedPartyId)}
-                          >
-                            پروندهٔ مشتری
-                          </Link>
-                        ) : (
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setEditing(lead)}
-                            >
-                              ویرایش
-                            </Button>
-                            <Button type="button" size="sm" onClick={() => void openConvert(lead)}>
-                              <UserCheckIcon aria-hidden="true" className="size-4" />
-                              تبدیل
-                            </Button>
-                          </div>
-                        )}
-                      </Td>
-                    </DataTableRow>
-                  ))}
-                </DataTableBody>
-              </DataTable>
+              <DataCardTable
+                caption="فهرست سرنخ‌ها"
+                columns={leadColumns}
+                rows={leads ?? []}
+                rowKey={(lead) => lead.id}
+              />
 
               {total > PAGE_SIZE ? (
                 <div className="flex items-center justify-between gap-2">

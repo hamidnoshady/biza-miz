@@ -319,6 +319,7 @@ const DRAFTS: Draft[] = [
 
   // --- Security ------------------------------------------------------------
   { key: P.apiManage, group: "security", label: "مدیریت کلیدهای API", description: "ساخت و ابطال اعتبارنامه‌های بلندمدت برای سامانه‌های بیرونی.", risk: "critical", audit: true },
+  { key: P.nativeDevicesManage, group: "security", label: "مدیریت دستگاه‌های موبایل", description: "دیدن و ابطال نصب‌های اپ اندروید ثبت‌شده برای کل کسب‌وکار، نه فقط دستگاه خودِ کاربر.", risk: "high", audit: true },
 ];
 
 /**

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the web app's manifest theme colour (src/app/manifest.ts, #0f172a). -->
+    <style name="Theme.BizaMiz" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">#0F172A</item>
+        <item name="android:colorPrimaryDark">#0F172A</item>
+        <item name="android:statusBarColor">#0F172A</item>
+        <item name="android:navigationBarColor">#0F172A</item>
+        <item name="android:windowBackground">#0F172A</item>
+    </style>
+
+    <style name="Theme.BizaMiz.Launcher" parent="Theme.BizaMiz" />
+</resources>

@@ -4,7 +4,7 @@
  * The knowledge base console — where the super-admin team authors everything
  * «مرکز آموزش» shows.
  *
- * Four tabs, one capability (`knowledge.manage` for writes; any admin reads):
+ * Three tabs, one capability (`knowledge.manage` for writes; any admin reads):
  *
  *  - «مقالات»      the guides themselves: markdown body with live preview,
  *                  video/cover, sections-taught, tags, publish state
@@ -12,8 +12,8 @@
  *  - «دسته‌بندی‌ها» the category builder — the nested side-menu tree members
  *                  browse by;
  *  - «برچسب‌ها»    cross-cutting tags for filtering;
- *  - «پیوند بخش‌ها» the legacy (migration 0117) per-section external URL each
- *                  screen's «آموزش» icon can open in a modal.
+ * The article editor itself selects pages that have an «آموزش» button.
+ * Legacy external links remain readable for backward compatibility.
  *
  * Categories and tags are fetched once here and handed to the articles panel
  * so its selects and chips never re-read them per row.
@@ -22,7 +22,6 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BookOpenIcon,
   FolderTreeIcon,
-  Link2Icon,
   NewspaperIcon,
   TagIcon,
 } from "lucide-react";
@@ -30,16 +29,14 @@ import { api, useCan } from "../ui";
 import { ArticlesPanel } from "./kb-articles-panel";
 import { CategoriesPanel } from "./kb-categories-panel";
 import { TagsPanel } from "./kb-tags-panel";
-import { SectionsPanel } from "./sections-panel";
 import type { ConsoleCategory, ConsoleTag } from "./kb-types";
 
-type Tab = "articles" | "categories" | "tags" | "sections";
+type Tab = "articles" | "categories" | "tags";
 
 const TABS: { key: Tab; label: string; icon: typeof NewspaperIcon }[] = [
   { key: "articles", label: "مقالات", icon: NewspaperIcon },
   { key: "categories", label: "دسته‌بندی‌ها", icon: FolderTreeIcon },
   { key: "tags", label: "برچسب‌ها", icon: TagIcon },
-  { key: "sections", label: "پیوند بخش‌ها", icon: Link2Icon },
 ];
 
 export default function KnowledgePage() {
@@ -71,8 +68,8 @@ export default function KnowledgePage() {
         <div className="min-w-0">
           <h1 className="text-xl font-bold">پایگاه دانش</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            محتوای «مرکز آموزش» کاربران را اینجا بسازید: مقاله، دسته، برچسب — و برای هر بخشِ
-            برنامه، پیوند صفحهٔ آموزشی خارجی.
+            محتوای «مرکز آموزش» کاربران را اینجا بسازید: مقاله، دسته و برچسب.
+            صفحه‌های مقصد هر راهنما را در همان فرم ایجاد یا ویرایش مقاله انتخاب کنید.
             {canManage ? "" : " (فقط مشاهده — تغییر در اختیار مهندس و مدیر ارشد است.)"}
           </p>
         </div>
@@ -106,10 +103,8 @@ export default function KnowledgePage() {
         <ArticlesPanel categories={categories} tags={tags} onChanged={loadTaxonomy} />
       ) : tab === "categories" ? (
         <CategoriesPanel />
-      ) : tab === "tags" ? (
-        <TagsPanel />
       ) : (
-        <SectionsPanel />
+        <TagsPanel />
       )}
     </div>
   );

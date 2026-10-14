@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { ACCOUNTING_SECTIONS } from "@/app/(app)/accounting/accounting-nav";
+import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
+import { CRM_NAV_ITEMS } from "@/app/(app)/crm/crm-nav";
+import { crmSectionHref } from "@/app/(app)/crm/crm-routes";
+import { GROWTH_NAV_ITEMS } from "@/app/(app)/growth/growth-nav";
+import { growthSectionHref } from "@/app/(app)/growth/growth-routes";
+import { CMS_NAV_ITEMS, WP_NAV_ITEMS } from "@/app/(app)/websites/website-nav";
+import { cmsSectionHref, wpSectionHref } from "@/app/(app)/websites/website-routes";
 import {
   KNOWLEDGE_SECTIONS,
+  KNOWLEDGE_PAGES,
+  knowledgePage,
+  knowledgePageForPathname,
   isKnownKnowledgeSection,
   knowledgeSection,
   parseKnowledgeUrl,
@@ -107,5 +118,55 @@ describe("parseKnowledgeUrl", () => {
       error: "invalid_url",
     });
     expect(parseKnowledgeUrl(42)).toEqual({ ok: false, error: "invalid_url" });
+  });
+});
+
+describe("knowledge page assignments", () => {
+  it("has one distinct stable key for every selectable page", () => {
+    expect(KNOWLEDGE_PAGES.length).toBeGreaterThan(70);
+    expect(new Set(KNOWLEDGE_PAGES.map((page) => page.key)).size).toBe(KNOWLEDGE_PAGES.length);
+    expect(new Set(KNOWLEDGE_PAGES.map((page) => page.route)).size).toBe(KNOWLEDGE_PAGES.length);
+    for (const page of KNOWLEDGE_PAGES) {
+      expect(page.key).toBe(`page:${page.route}`);
+      expect(page.route.startsWith("/")).toBe(true);
+      expect(page.label.trim()).not.toBe("");
+      expect(page.group.trim()).not.toBe("");
+      expect(knowledgePage(page.key)).toEqual(page);
+    }
+  });
+
+  it("covers each page in the shared Accounting, CRM, Growth and Website help headers", () => {
+    const routes = new Set(KNOWLEDGE_PAGES.map((page) => page.route));
+    for (const section of ACCOUNTING_SECTIONS) {
+      expect(routes.has(accountingSectionHref(section.key))).toBe(true);
+    }
+    for (const section of CRM_NAV_ITEMS) {
+      expect(routes.has(crmSectionHref(section.key))).toBe(true);
+    }
+    for (const section of GROWTH_NAV_ITEMS) {
+      expect(routes.has(growthSectionHref(section.key))).toBe(true);
+    }
+    for (const section of CMS_NAV_ITEMS) {
+      expect(routes.has(cmsSectionHref(section.key))).toBe(true);
+    }
+    for (const section of WP_NAV_ITEMS) {
+      expect(routes.has(wpSectionHref(section.key))).toBe(true);
+    }
+  });
+
+  it("resolves specific nested operational pages before their parent", () => {
+    expect(knowledgePageForPathname("/accounting/products/prices")?.key).toBe("page:/accounting/products/prices");
+    expect(knowledgePageForPathname("/accounting/products/new")?.key).toBe("page:/accounting/products/new");
+    expect(knowledgePageForPathname("/accounting/products")?.key).toBe("page:/accounting/products");
+    expect(knowledgePageForPathname("/websites/wp/orders")?.key).toBe("page:/websites/wp/orders");
+    expect(knowledgePageForPathname("/websites/cms/orders")?.key).toBe("page:/websites/cms/orders");
+  });
+
+  it("assigns knowledge on shared-app headers and project detail pages", () => {
+    expect(knowledgePageForPathname("/crm/deals")?.key).toBe("page:/crm/deals");
+    expect(knowledgePageForPathname("/growth/messaging")?.key).toBe("page:/growth/messaging");
+    expect(knowledgePageForPathname("/workspace/projects/123")?.key).toBe("page:/workspace/projects");
+    expect(knowledgePageForPathname("/settings/connections")?.key).toBe("page:/settings/connections");
+    expect(knowledgePageForPathname("/unknown")).toBeUndefined();
   });
 });

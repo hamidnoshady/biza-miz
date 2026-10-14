@@ -13,7 +13,6 @@
  */
 
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
-import { canOpenApp } from "@/lib/apps";
 import type { AccountingSectionKey } from "./accounting-routes";
 
 /**
@@ -44,9 +43,19 @@ export interface AccountingSectionDef {
   permission?: Permission;
 }
 
+/**
+ * The one definition of the ledger workspace's name. The menu row, the
+ * workspace page heading and the tests all read it from here, so the label
+ * cannot drift between the place a member clicks and the place they land.
+ */
+export const LEDGER_WORKSPACE_LABEL = "فضای کار حسابداری";
+
 /** The app's sections, in menu order. The dashboard (the app's home) is first. */
 export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "dashboard", label: "داشبورد حسابداری" },
+  // The ledger workspace's landing page. One ordinary menu link — the same
+  // skin as «فروش و فاکتور» — whose page lists the permitted ledger tools.
+  { key: "ledger", label: LEDGER_WORKSPACE_LABEL },
   { key: "trial-balance", label: "تراز آزمایشی" },
   { key: "entries", label: "دفتر روزنامه" },
   { key: "manual", label: "ثبت سند دستی" },
@@ -88,59 +97,6 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "settings", label: "تنظیمات حسابداری" },
 ];
 
-/**
- * How the *ledger rail* («فضای کار حسابداری», the in-page menu) divides those
- * sections.
- *
- * The app's **sidebar** is no longer this list: Accounting is the business's
- * primary workspace now, so its menu is composed in
- * `accounting-workspace.ts` — the business's work areas plus these sections
- * gathered into one group. This grouping stays because the in-page rail still
- * draws it, and because it is the one place that guarantees every section has
- * a home.
- *
- * Twenty-three rows in one column is a list nobody reads; these are the
- * accountant's own divisions of the work. Every key appears in exactly one
- * group — asserted in `accounting-nav.test.ts`, so a section added to
- * `ACCOUNTING_SECTIONS` without a home here fails the build rather than
- * quietly vanishing from the menu.
- */
-export const ACCOUNTING_NAV_GROUPS: readonly {
-  label: string;
-  keys: readonly AccountingSectionKey[];
-}[] = [
-  {
-    label: "دفتر",
-    keys: [
-      "dashboard",
-      "trial-balance",
-      "entries",
-      "manual",
-      "chart-of-accounts",
-      "dimensions",
-    ],
-  },
-  {
-    label: "ارز و تسعیر",
-    keys: ["multicurrency"],
-  },
-  { label: "اشخاص", keys: ["directory"] },
-  {
-    label: "دریافتنی و پرداختنی",
-    keys: ["receivables", "payables", "installments", "cheques"],
-  },
-  {
-    label: "وجوه و هزینه",
-    keys: ["receipts", "expenses", "reconciliation", "fixed-assets"],
-  },
-  {
-    label: "دوره و گزارش",
-    keys: ["fiscal-periods", "vat", "tax-invoices", "payroll", "financial-reports", "growth"],
-  },
-  // The app's settings entry, last — the shape every app's menu ends with.
-  { label: "پیکربندی", keys: ["settings"] },
-];
-
 /** The sections a member may open — the same list the sidebar and the rail draw. */
 export function accountingSectionsFor(
   permissions: ReadonlySet<string>,
@@ -162,13 +118,4 @@ export function canViewAccountingSection(
 /** Whether the member may read the bookkeeping workspace and ledger sections. */
 export function canOpenLedger(permissions: ReadonlySet<string>): boolean {
   return permissions.has(ACCOUNTING_DOOR_PERMISSION);
-}
-
-/**
- * Whether the member has any surface owned by the Accounting application.
- * This is intentionally broader than ledger access: selling and floor
- * operations share the app shell without exposing bookkeeping data.
- */
-export function canOpenAccountingApp(permissions: ReadonlySet<string>): boolean {
-  return canOpenApp("accounting", permissions);
 }

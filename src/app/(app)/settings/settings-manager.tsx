@@ -36,6 +36,7 @@ import { AuditLogSettings } from "./audit-log-settings";
 import { BusinessSettings } from "./business-settings";
 import { AecProfileForm } from "@/components/aec/aec-profile-form";
 import { DeviceSettings } from "./device-settings";
+import { NativeDeviceManagementSettings } from "./native-device-management-settings";
 import { LogsPanel } from "./logs-panel";
 import { NotificationSettings } from "./notification-settings";
 import { OnlinePlatformsSettings } from "./online-platforms-settings";
@@ -242,7 +243,18 @@ export function SettingsManager({
       {activeTab === "printers" ? <PrintingManager /> : null}
       {activeTab === "cloud-sync" ? <CloudSyncSettings /> : null}
       {activeTab === "branch-management" ? <BranchManagementSettings features={features} /> : null}
-      {activeTab === "devices" ? <DeviceSettings /> : null}
+      {activeTab === "devices" ? (
+        <div className="space-y-6">
+          <DeviceSettings />
+          {/*
+            Issue #884 — a different registry (Android app installations, not
+            the login-picker terminals above): self-contained, so it renders
+            nothing for a member who lacks `native_devices.manage` instead of
+            needing its own tab-level gate.
+          */}
+          <NativeDeviceManagementSettings isOwner={isOwner} permissions={permissions} />
+        </div>
+      ) : null}
       {activeTab === "desktop" ? <DesktopUpdateSettings /> : null}
       {activeTab === "notifications" ? <NotificationSettings /> : null}
       {activeTab === "shifts" ? (

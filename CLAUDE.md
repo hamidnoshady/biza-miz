@@ -133,10 +133,12 @@ list ever disagrees with it:
 | `postgresql-tools-artifact.yml` | `pull_request` touching its own workflow and PostgreSQL-tools scripts |
 | `mobile-emulator-acceptance.yml` | `pull_request` touching the gateway/certificate files it accepts |
 | `publish.yml` | `push` to `main` and to `v*` tags |
+| `android-build.yml` | `pull_request` and `push` to `main` and `arena/**`, path-filtered to `android/**`, `config/android-*`, `config/native-bridge-contract.json`, `public/.well-known/assetlinks.json`, `src/lib/native/**`, `src/components/native/**` |
 
 `release-readiness`, `release-acceptance-aggregate`, `physical-printer-acceptance`,
-`mobile-real-device-acceptance`, `windows-11-release`, `windows-signed-candidate` and
-`windows-production-release` are manual only.
+`mobile-real-device-acceptance`, `windows-11-release`, `windows-signed-candidate`,
+`windows-production-release`, `android-signed-candidate` and `android-production-release` are
+manual only.
 
 `test.yml` runs the checklist above — type check, unit tests, integration tests, and
 production build — as four independent jobs in parallel (each GitHub-hosted job gets its
@@ -168,6 +170,10 @@ a Linux container image. Four things follow, and each one is load-bearing:
   `FROM node:24-alpine`; hosted `ubuntu-latest` runners provide Docker with the Linux
   backend and buildx out of the box, which `docker/build-push-action` needs. Don't move it
   back to a Windows runner — hosted Windows runners cannot run a Linux-containers daemon.
+- **The `android-*.yml` workflows run on `ubuntu-latest` in bash, not PowerShell.** Each job
+  installs platform 36 and build-tools 36.0.0 with the runner's `sdkmanager`. The release
+  workflows run only on `main`, in the `android-staging` and `android-production` environments,
+  and PR builds never reference a secret. See `docs/android-runtime.md`.
 
 What follows from that:
 
@@ -806,6 +812,16 @@ and the CMS-side surface `/api/platform/*` (its own
   `domainVerified` and re-checks uniqueness across primaries *and* aliases; a second
   door would be a second place to forget that. Moving a connected site's domain
   stays the business's own «تنظیمات و همگام‌سازی» flow.
+
+### Editing in a modal — the CMS page, not a copy of it
+
+Posts and pages are created and edited in `CmsEmbedDialog` (`cms/cms-sections.tsx`): an iframe on the CMS's own admin document, entered through `POST /api/cms/website/embed`. See [docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md) «Editing in a modal».
+
+- **Do not rebuild a CMS editor here.** A new content type gets an entry in the CMS's embed allowlist (`EMBED_COLLECTIONS`) and a dialog use, not a form.
+- **`canPublish` is derived from the session on the server** (`membership.permissions.has(cmsPublish)`), never read from the body — it picks which CMS user the frame acts as.
+- **The returned URL is a credential for a minute.** It is returned once, never stored or logged, and `createOwnerEmbedSession` refuses one that is not on the CMS origin it called.
+- **Outside clicks must not close the modal** (`onInteractOutside` is prevented): an unsaved page is the cost.
+- `frame-src` in `contentSecurityPolicy` comes from `ESHOBE_CMS_URL` + `CMS_EMBED_ORIGINS` only; a new framed origin is a decision, not a wildcard.
 
 ### Building a site, and paying for it (migration 0138)
 

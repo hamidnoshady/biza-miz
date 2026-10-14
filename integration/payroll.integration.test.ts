@@ -483,8 +483,24 @@ describe("pay-term change audit (issue #835 §6)", () => {
   });
 
   it("chains: each change's previous amount is the one before it, newest first", async () => {
+    // Each changed_at comes from clock_timestamp(), so three service calls in
+    // a tight loop can still land on the same timestamp under a coarse CI
+    // clock, and the newest-first order between same-timestamp rows then
+    // falls to the random uuid tie-break the index uses (CI failed on
+    // exactly that order once — pull-request run 38436212192, integration
+    // tests, payroll.integration.test.ts:490; same root cause this file
+    // already hit once before for a sibling test, see "paginates with a
+    // cursor, newest first" below). payroll_pay_term_changes is append-only
+    // (migrations/0215_payroll_hardening.sql) — a trigger refuses any
+    // UPDATE/DELETE on it, including from a test fixture — so unlike the
+    // pagination fixture this row's changed_at can't be backdated after the
+    // fact. A short real delay between the three change() calls, each of
+    // which must stay a real service call since this test is exercising the
+    // service's own previousAmount chaining, is what actually separates them.
     await change(31_000_000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await change(32_000_000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await change(33_000_000);
     const { changes } = await history();
     // Three writes in a row can share a database timestamp (Windows CI does), and

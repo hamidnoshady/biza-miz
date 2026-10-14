@@ -27,7 +27,7 @@ import { cardClass, PageShell } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ACCOUNTING_WORKSPACE_HREFS } from "@/lib/app-routes";
-import { CLOUD_EMBED_UA_TOKEN, cloudPageUrl, cloudThemeScript, mirroredPath } from "@/lib/cloud-embed";
+import { CLOUD_EMBED_UA_TOKEN, cloudPageUrl, cloudThemeScript, isCloudAuthLanding, mirroredPath } from "@/lib/cloud-embed";
 import { isSiteLocalRoute } from "@/lib/site-routes";
 
 /** The parts of Electron's <webview> element the pane uses. */
@@ -37,7 +37,7 @@ interface WebviewElement extends HTMLElement {
   executeJavaScript(code: string): Promise<unknown>;
 }
 
-type PaneState = "starting" | "embedded" | "link" | "offline";
+type PaneState = "starting" | "embedded" | "link" | "offline" | "auth-required";
 
 export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cloudUrl: string | null }) {
   const router = useRouter();
@@ -45,6 +45,27 @@ export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cl
   const target = cloudPageUrl(cloudUrl, pathAndQuery);
   const [state, setState] = useState<PaneState>("starting");
   const [attempt, setAttempt] = useState(0);
+  const [authBusy, setAuthBusy] = useState(false);
+
+  // Issue #948 P0-3 — the explicit, safe auth action: «ورود با حساب ابری»
+  // opens the system browser on the cloud's own login with a one-use, state-
+  // bound handoff (POST /api/auth/cloud-login/start → businesssuite://
+  // callback). Never a silent form inside the pane.
+  async function startCloudSignIn() {
+    setAuthBusy(true);
+    try {
+      const res = await fetch("/api/auth/cloud-login/start", { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as { url?: string };
+      if (res.ok && data.url) {
+        // The desktop shell opens https links in the system browser.
+        window.open(data.url, "_blank", "noopener,noreferrer");
+      }
+    } catch {
+      // Offline: the till below still works; retry later.
+    } finally {
+      setAuthBusy(false);
+    }
+  }
   // The first address the guest loads. Fixed for the guest's lifetime: later
   // moves go through loadURL, so the element is never re-created mid-session.
   const [initialSrc, setInitialSrc] = useState<string | null>(null);
@@ -56,8 +77,16 @@ export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cl
     let cancelled = false;
     const decide = async () => {
       if (!window.businessSuiteDesktop?.embedsCloud) return setState("link");
-      if (!navigator.onLine) return setState("offline");
       if (!target) return setState("link");
+      // The browser reporting *no network interface at all* is authoritative
+      // in the negative direction (the same contract as `probeServer`): a
+      // cloud screen cannot load, and the one-use handoff code must not be
+      // consumed for an attempt that cannot succeed — so the internet card is
+      // shown here, before any handoff is spent. Everything else is decided by
+      // actual outcomes: the guest's load result, and where it lands (issue
+      // #948 — a missing cloud session is "cloud sign-in required", never a
+      // navigator.onLine guess and never a login-loop).
+      if (!navigator.onLine) return setState("offline");
       // A one-click cloud sign-in left a single-use code: spend it on the first load.
       let src = target;
       try {
@@ -69,8 +98,14 @@ export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cl
           handoff.searchParams.set("next", pathAndQuery);
           src = handoff.toString();
         }
+        // No code to spend is fine: the `persist:cloud` partition may already
+        // hold a cloud session. If it does not, the guest lands on the cloud's
+        // own login page and `onNavigate` below turns that into an explicit
+        // "cloud sign-in required" card — never an uncontrolled login-loop in
+        // the pane, and never an "internet is down" claim.
       } catch {
-        // No code to spend: the guest signs in on the cloud's own login page.
+        // The handoff lookup itself failed; load the plain target and let the
+        // load outcome decide between the guest and the offline card.
       }
       if (cancelled) return;
       guestUrl.current = target;
@@ -108,6 +143,16 @@ export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cl
       const { url, isMainFrame } = event as Event & { url: string; isMainFrame?: boolean };
       if (isMainFrame === false) return;
       guestUrl.current = url;
+      // Issue #948 P0-3 — the guest landing on the cloud's own sign-in page
+      // means the `persist:cloud` partition holds no cloud session. That is
+      // "cloud sign-in required", not an internet outage and not something to
+      // leave the pane looping through: show the explicit, one-use handoff
+      // action. (Checked on the raw URL — `mirroredPath` deliberately returns
+      // null for login paths.)
+      if (isCloudAuthLanding(url, cloudUrl)) {
+        setState("auth-required");
+        return;
+      }
       const path = mirroredPath(url, cloudUrl);
       if (!path) return;
       const current = `${window.location.pathname}${window.location.search}`;
@@ -166,6 +211,46 @@ export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cl
         useragent={`${navigator.userAgent} ${CLOUD_EMBED_UA_TOKEN}`}
         className="absolute inset-0 flex"
       />
+    );
+  }
+
+  if (state === "auth-required") {
+    return (
+      <PageShell className="py-6">
+        <section className={`${cardClass} mx-auto mt-6 max-w-2xl p-6 sm:p-8`}>
+          <div className="flex items-start gap-4">
+            <span className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200">
+              <CloudIcon className="size-5" aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <h2 className="font-bold text-foreground">برای نمایش این بخش باید وارد حساب ابری شوید</h2>
+              <p className="mt-2 text-sm leading-7 text-muted-foreground">
+                نشست ابری روی این دستگاه فعال نیست. صندوق، سفارش‌ها، میزها، آشپزخانه و شیفت روی همین دستگاه کار می‌کنند؛
+                این بخش با ورود حساب ابری باز می‌شود. این پیام به معنی قطع بودن اینترنت نیست.
+              </p>
+              <div className="mt-5 flex flex-wrap gap-2">
+                <Button onClick={() => void startCloudSignIn()} disabled={authBusy}>
+                  <CloudIcon className="size-4" aria-hidden="true" />
+                  {authBusy ? "در حال بازکردن مرورگر…" : "ورود با حساب ابری"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setState("starting");
+                    setAttempt((count) => count + 1);
+                  }}
+                >
+                  <RefreshCwIcon className="size-4" aria-hidden="true" />
+                  تلاش دوباره
+                </Button>
+                <Button variant="outline" asChild>
+                  <Link href={ACCOUNTING_WORKSPACE_HREFS.pos}>بازگشت به صندوق</Link>
+                </Button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </PageShell>
     );
   }
 

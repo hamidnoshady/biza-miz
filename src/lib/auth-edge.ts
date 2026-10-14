@@ -120,6 +120,34 @@ export interface SessionPayload {
    * pin-login) and on any token minted before this field existed.
    */
   employeeSessionId?: string | null;
+  /**
+   * Issue #884 — native_app_devices.id, set only when this token belongs to a
+   * browser running inside the Android app's Trusted Web Activity and that
+   * installation has registered itself (`POST /api/native-devices`). The JWT
+   * stays the bearer credential; this just names the device row that makes
+   * the session revocable per-installation, re-checked live on the server by
+   * `checkNativeDevice` in auth.ts — never trusted alone, the same shape
+   * `employeeSessionId` above already has. Absent on every session that did
+   * not come through a registered native installation (every browser tab,
+   * and a TWA session before registration completes).
+   */
+  nativeDeviceId?: string | null;
+  /**
+   * Issue #884 — `native_app_devices.session_generation` as it stood the
+   * moment this token was signed (registration, or a `device_revoked`
+   * re-registration attempt — see `registerNativeDevice` and
+   * `POST /api/native-devices`). Revoking a device bumps the column by one;
+   * reactivating it bumps it again. `checkNativeDevice` denies any session
+   * whose stamped generation no longer matches the row's current one, which
+   * is what makes a revoke→reactivate cycle require a *fresh* registration
+   * rather than quietly reviving a browser tab's token that predates the
+   * revocation: without this, clearing `revoked_at` alone would make such a
+   * token valid again, which is exactly the "followed by fresh
+   * authentication" half of the owner decision that a bare `revoked_at`
+   * check cannot enforce by itself. Always set together with
+   * `nativeDeviceId`; never meaningful without it.
+   */
+  nativeDeviceGeneration?: number | null;
   /** True when this session completed MFA verification at login. */
   mfaVerified?: boolean;
   /** Epoch seconds of the most recent primary/MFA/step-up authentication. */

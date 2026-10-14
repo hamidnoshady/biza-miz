@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   loginCredentialsFingerprint,
+  planIdentityBinding,
   planPinRemoval,
   planPinReplication,
   validateLoginCredentialPayload,
@@ -38,6 +39,23 @@ describe("loginCredentialsFingerprint", () => {
     expect(loginCredentialsFingerprint([{ ...owner, passwordHash: "$2b$10$other" }])).not.toBe(base);
     expect(loginCredentialsFingerprint([{ ...owner, mfa: [] }])).not.toBe(base);
     expect(loginCredentialsFingerprint([{ ...owner, recoveryCodes: [{ codeHash: "h1", usedAt: "2026-09-30T00:00:00.000Z" }] }])).not.toBe(base);
+  });
+
+  it("changes when the bound global identity ID changes, even with identical hashes (issue #948)", () => {
+    const A = "11111111-1111-1111-1111-111111111111";
+    const B = "22222222-2222-2222-2222-222222222222";
+    const boundToA = loginCredentialsFingerprint([{ ...owner, platformUserId: A }]);
+    // The pre-v2 short-circuit: identical credential material bound to the
+    // wrong identity fingerprinted as converged and skipped repair forever.
+    expect(loginCredentialsFingerprint([{ ...owner, platformUserId: B }])).not.toBe(boundToA);
+    expect(loginCredentialsFingerprint([{ ...owner, platformUserId: A.toLowerCase() }])).toBe(boundToA);
+  });
+
+  it("treats an absent identity ID (legacy cloud) the same as explicit null", () => {
+    expect(loginCredentialsFingerprint([{ ...owner, platformUserId: null }]))
+      .toBe(loginCredentialsFingerprint([{ ...owner, platformUserId: undefined }]));
+    expect(loginCredentialsFingerprint([{ ...owner, platformUserId: null }]))
+      .toBe(loginCredentialsFingerprint([owner]));
   });
 });
 
@@ -99,6 +117,7 @@ describe("validateLoginCredentialPayload", () => {
       pins: [],
       staffPinMemberships: [],
       staffPinsAuthoritative: false,
+      identityContract: "legacy",
     });
     expect(validateLoginCredentialPayload({ pins: [{ membershipId: "not-a-uuid", pinHash: "h" }] }))
       .toEqual({ ok: false, code: "invalid_pin_record" });
@@ -108,6 +127,26 @@ describe("validateLoginCredentialPayload", () => {
       .toEqual({ ok: false, code: "invalid_credential_record" });
     expect(validateLoginCredentialPayload({ credentials: [{ ...credential, membershipId: "nope" }] }))
       .toEqual({ ok: false, code: "invalid_credential_record" });
+    // Issue #948 — a present identity ID must be a real UUID: a half-sent
+    // identifier must never become a row's primary key.
+    expect(validateLoginCredentialPayload({ credentials: [{ ...credential, platformUserId: "not-a-uuid" }] }))
+      .toEqual({ ok: false, code: "invalid_credential_record" });
+  });
+
+  it("distinguishes the v2 identity contract from a legacy payload, and refuses a mix", () => {
+    const CLOUD_ID = "22222222-2222-2222-2222-222222222222";
+    const legacy = validateLoginCredentialPayload({ credentials: [credential] });
+    expect(legacy).toMatchObject({ ok: true, identityContract: "legacy" });
+    // `null` = a PIN-only membership with no global identity — still v2.
+    const canonical = validateLoginCredentialPayload({
+      credentials: [{ ...credential, platformUserId: CLOUD_ID }, { ...credential, membershipId: id, platformUserId: null }],
+    });
+    expect(canonical).toMatchObject({ ok: true, identityContract: "canonical" });
+    // Some records naming an identity and some omitting it has no coherent
+    // contract to apply — refuse the payload whole.
+    expect(validateLoginCredentialPayload({
+      credentials: [{ ...credential, platformUserId: CLOUD_ID }, { ...credential, membershipId: id }],
+    })).toEqual({ ok: false, code: "mixed_identity_contract" });
   });
 
   it("accepts the staff-PIN block only whole, and refuses a half-sent one", () => {
@@ -151,5 +190,72 @@ describe("validateLoginCredentialPayload", () => {
     // (strangerId) keeps their PIN, and a listed member that already has no
     // PIN (kitchenId) has nothing to remove.
     expect(planPinRemoval({ pins: [], memberships: [cashierId, kitchenId], authoritative: true }, local)).toEqual([cashierId]);
+  });
+});
+
+describe("planIdentityBinding", () => {
+  const CANONICAL = "11111111-1111-1111-1111-111111111111";
+  const LEGACY_LOCAL = "22222222-2222-2222-2222-222222222222";
+  const OTHER = "33333333-3333-3333-3333-333333333333";
+
+  it("binds to the canonical cloud ID when the row already exists", () => {
+    expect(planIdentityBinding({
+      platformUserId: CANONICAL,
+      linkedPlatformUserId: CANONICAL,
+      canonicalRowExists: true,
+      emailRowId: CANONICAL,
+    })).toEqual({ platformUserId: CANONICAL, rekeyFrom: null, insert: false });
+  });
+
+  it("re-keys a pre-v2 local UUID (found by unique email) onto the canonical ID", () => {
+    // The `identity_not_synced` installation: same person, desktop-minted row.
+    expect(planIdentityBinding({
+      platformUserId: CANONICAL,
+      linkedPlatformUserId: LEGACY_LOCAL,
+      canonicalRowExists: false,
+      emailRowId: LEGACY_LOCAL,
+    })).toEqual({ platformUserId: CANONICAL, rekeyFrom: LEGACY_LOCAL, insert: false });
+  });
+
+  it("creates the identity under the canonical ID — never a fresh local UUID", () => {
+    expect(planIdentityBinding({
+      platformUserId: CANONICAL,
+      linkedPlatformUserId: null,
+      canonicalRowExists: false,
+      emailRowId: null,
+    })).toEqual({ platformUserId: CANONICAL, rekeyFrom: null, insert: true });
+  });
+
+  it("never overwrites another person's row when the membership is mislinked", () => {
+    // Linked to SOMEONE ELSE's row (its email is not the credential's): the
+    // canonical identity is created and the membership relinked; the other
+    // row — which may serve another membership — is left alone.
+    expect(planIdentityBinding({
+      platformUserId: CANONICAL,
+      linkedPlatformUserId: OTHER,
+      canonicalRowExists: false,
+      emailRowId: null,
+    })).toEqual({ platformUserId: CANONICAL, rekeyFrom: null, insert: true });
+  });
+
+  it("keeps the v1 email rules for a legacy payload with no identity IDs", () => {
+    expect(planIdentityBinding({
+      platformUserId: null,
+      linkedPlatformUserId: OTHER,
+      canonicalRowExists: false,
+      emailRowId: LEGACY_LOCAL,
+    })).toEqual({ platformUserId: LEGACY_LOCAL, rekeyFrom: null, insert: false });
+    expect(planIdentityBinding({
+      platformUserId: null,
+      linkedPlatformUserId: OTHER,
+      canonicalRowExists: false,
+      emailRowId: null,
+    })).toEqual({ platformUserId: OTHER, rekeyFrom: null, insert: false });
+    expect(planIdentityBinding({
+      platformUserId: null,
+      linkedPlatformUserId: null,
+      canonicalRowExists: false,
+      emailRowId: null,
+    })).toEqual({ platformUserId: null, rekeyFrom: null, insert: true });
   });
 });

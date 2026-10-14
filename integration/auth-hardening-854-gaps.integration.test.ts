@@ -69,7 +69,6 @@ let team: typeof import("../src/lib/team-service");
 let mfaService: typeof import("../src/lib/mfa-service");
 let mfaEnrol: typeof import("../src/lib/mfa-enrol");
 let mfaVerify: typeof import("../src/lib/mfa-verify");
-let otpChallenge: typeof import("../src/lib/otp-challenge");
 let rolesService: typeof import("../src/lib/iam/roles-service");
 let membershipLock: typeof import("../src/lib/membership-lock");
 let loginCredentials: typeof import("../src/lib/iam/login-credentials-service");
@@ -108,7 +107,6 @@ beforeAll(async () => {
   mfaService = await import("../src/lib/mfa-service");
   mfaEnrol = await import("../src/lib/mfa-enrol");
   mfaVerify = await import("../src/lib/mfa-verify");
-  otpChallenge = await import("../src/lib/otp-challenge");
   rolesService = await import("../src/lib/iam/roles-service");
   membershipLock = await import("../src/lib/membership-lock");
   loginCredentials = await import("../src/lib/iam/login-credentials-service");
@@ -207,14 +205,9 @@ async function seedCashierWithPin(seed: Seed, pin: string): Promise<string> {
     seed.businessId,
   ]);
   await db.query(
-    `INSERT INTO employee_credentials (employee_id, business_id, credential_type, secret_hash, pin_blind_index)
-     VALUES ($1, $2, 'pin', $3, $4)`,
-    [
-      cashierId,
-      seed.businessId,
-      await bcrypt.hash(pin, 10),
-      await otpChallenge.pinBlindIndex(seed.businessId, pin),
-    ],
+    `INSERT INTO employee_credentials (employee_id, business_id, credential_type, secret_hash)
+     VALUES ($1, $2, 'pin', $3)`,
+    [cashierId, seed.businessId, await bcrypt.hash(pin, 10)],
   );
   return cashierId;
 }

@@ -476,8 +476,14 @@ async function main() {
     // session. This role has menu.view but deliberately NOT media.view
     // (src/lib/permissions.ts) — the exact gap the named bug was about.
     const cashierContext = await browser.newContext(contextOptions);
+    // The door names the member before the PIN (a PIN is not an identifier),
+    // so pick the seeded Cashier from the same roster the login screen shows.
+    const roster = await cashierContext.request.get(
+      `${BASE_URL}/api/auth/pin-login/roster?businessSlug=${encodeURIComponent(BUSINESS_SLUG)}`,
+    );
+    const cashier = ((await roster.json().catch(() => ({}))).employees ?? []).find((e) => e.role === "cashier");
     const pinLogin = await cashierContext.request.post(`${BASE_URL}/api/auth/pin-login`, {
-      data: { pin: CASHIER_PIN, businessSlug: BUSINESS_SLUG },
+      data: { pin: CASHIER_PIN, employeeId: cashier?.id, businessSlug: BUSINESS_SLUG },
     });
     if (!pinLogin.ok()) {
       fail(

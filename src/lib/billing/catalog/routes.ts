@@ -71,6 +71,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   "support-access": keys("operations.shared"),
   notifications: keys("operations.shared"),
   devices: keys("operations.shared"),
+  // Issue #884 — the Android installation registry (native_app_devices), a
+  // sibling of `devices` (pos_devices) and classified the same way: an
+  // operations/security surface, not a capability a tenant is billed for.
+  "native-devices": keys("operations.shared"),
   "bug-report": keys("operations.shared"),
   "audit-log": keys("operations.shared"),
   security: keys("operations.shared"),

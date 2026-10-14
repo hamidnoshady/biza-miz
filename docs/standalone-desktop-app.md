@@ -209,37 +209,47 @@ passed end to end:
 | Unpacked installed payload | 504.9 MiB | 600 MiB |
 | Positively staged runtime (local Linux build) | 153.9 MiB | 200 MiB |
 
-**Current configured budgets (2026-10-13; maintainer acceptance undecided).** The
-installer gate is 175 MiB and the workflow currently checks an unpacked payload
-limit of **640 MiB**. The issue #834 Windows package measured 620.2 MiB
-([run 38165434904](https://github.com/hamidnoshady/biza-miz/actions/runs/38165434904));
-the merged multicurrency/auth-hardening build on main measured 620.4 MiB on
-2026-10-11. Both exceed the former 620 MiB detector. The configured 640 MiB value
-is not yet accepted by the maintainer and is not a claim that either result meets
-the former 620 MiB policy. The AEC document-control wave took the traced runtime
-from 599.8 MiB to 600.6 MiB. The detector is intended to catch accidental
-inclusion of `node_modules`, build caches or source maps, not to freeze normal
-application growth.
+**Current configured budgets (2026-10-13; maintainer acceptance of the 640/220
+MiB values is still open).** The installer gate is 175 MiB. The workflow
+currently checks an unpacked-payload limit of **640 MiB** and a pre-package
+staged-runtime limit of **220 MiB**. Both numbers were reached independently,
+more than once, by parallel branches that have now merged, and are recorded
+here exactly rather than smoothed into a single tidy story:
 
-**Where the bytes are.** The dominant term is the per-route client-reference
-manifests (`*_client-reference-manifest.js`): on commit `90cc02b` (run
-[37979722293](https://github.com/hamidnoshady/biza-miz/actions/runs/37979722293))
-these numbered 1,051 files / 71.95 MiB of the staged runtime. Each route carries
-a copy of the app's client-module map, so every new route handler adds about
-67 KiB before its own code. The earlier note that called roughly 103 MiB of
-`.next/server` "unminified chunks" the dominant term was counting those manifests
-together with route bundles and traces; the shared server chunks themselves are
-about 11 MiB. Next's `*.nft.json` build traces add about 8.3 MiB on a Linux
-build and are read only by `next build`. Shrinking the manifests is a
-framework-level change and is tracked separately. A Linux build also installs
-both glibc and musl libvips (about 36 MiB); Windows installs one set (about
-18.9 MiB), so Linux absolute sizes are not gate numbers.
+- The AEC document-control wave took the traced runtime from 599.8 to 600.6
+  MiB against the former 600 MiB gate, which moved it to 620 MiB (0.2 → 20 MiB
+  headroom).
+- Issue #884's device-registry slice (five API routes, a service module, a
+  migration, the native-bridge device-identity command) took the unpacked
+  payload from 618.6 to 621.4 MiB, crossing 620 MiB; that branch's owner
+  explicitly signed off on moving the detector to 640/220 MiB for this reason.
+- Separately, issue #834's Windows package measured 620.2 MiB
+  ([run 38165434904](https://github.com/hamidnoshady/biza-miz/actions/runs/38165434904)),
+  and the merged multicurrency/auth-hardening build on `main` measured 620.4
+  MiB on 2026-10-11 — both also past the old 620 MiB gate, and that branch's
+  own commit raised the configured value to 640 MiB too, but documented that
+  **maintainer acceptance of that specific increase was still undecided** at
+  the time, not a claim that either of those two results meets the former
+  620 MiB policy.
 
-Each desktop build records these categories, with exact bytes, traced packages,
-the largest files and a manifest, as `desktop-size-diagnostics` in the workflow
-notices and in the `desktop-staged-runtime-size` and
-`business-suite-desktop-size-report` artifacts. They are written after the
-budget steps, even when a budget fails, so a failed run still shows its numbers.
+So the number in the workflow files is 640/220 MiB, arrived at twice
+independently, but it carries one open owner decision (from the issue #834 /
+main-growth side) that has not been explicitly confirmed, alongside one that
+has (the issue #884 side). Because this merge now ships every contributing
+change together, the actual combined payload has not yet been re-measured;
+the next `packaged Windows end-to-end` CI run is the source of truth for
+whether 640/220 MiB still holds, and the budget is not to be raised again
+without a fresh measurement and an explicit sign-off covering the still-open
+question. The detector's job is to catch a payload that accidentally ships
+`node_modules`, a build cache or source maps rather than to freeze the app's
+growth. The component report shows the dominant term: roughly 103 MiB of
+*unminified* `.next/server` chunks — minifying the compile pass is the real
+size work available here and is tracked separately.
+
+*(2026-10-03 history.)* The installer gate was 175 MiB and the unpacked
+payload's runaway detector was 620 MiB, raised from 600 MiB when the AEC
+document-control wave took the traced runtime to 600.6 MiB against 0.2 MiB of
+headroom.
 
 The uploaded installer artifact is 136,405,815 bytes as a GitHub artifact and
 has digest

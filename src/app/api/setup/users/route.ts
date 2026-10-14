@@ -5,7 +5,7 @@ import { resolveActiveLocation, requireManager } from "@/lib/setup-state";
 import { toLatinDigits } from "@/lib/digits";
 import { isPasswordRole, isPinRole, isValidPin } from "@/lib/team";
 import { SETUP_CREATABLE_ROLES } from "@/lib/roles";
-import { TeamError, createMembership, isPhoneTaken, isPinTaken } from "@/lib/team-service";
+import { TeamError, createMembership, isPhoneTaken } from "@/lib/team-service";
 import { canonicalMemberPhone } from "@/lib/phone-otp";
 import type { Role } from "@/lib/auth";
 import { withTenantScope } from "@/lib/auth";
@@ -101,9 +101,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       return NextResponse.json({ error: "no_location" }, { status: 409 });
     }
     locationId = location.id;
-    if (await isPinTaken(session.businessId, pin)) {
-      return NextResponse.json({ error: "pin_taken" }, { status: 409 });
-    }
   }
 
   // Phase 42 — the login phone, optional: stored unverified, proven by the
