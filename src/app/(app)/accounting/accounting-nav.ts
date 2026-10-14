@@ -76,6 +76,7 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "reconciliation", label: "تطبیق بانکی" },
   { key: "multicurrency", label: "ارز و تسعیر" },
   { key: "chart-of-accounts", label: "سرفصل حساب‌ها" },
+  { key: "dimensions", label: "ابعاد حسابداری" },
   // Wages are compensation data, so this entry follows `payroll.view` — the
   // same capability the in-page rail and `/api/ledger/payroll/*` enforce. By
   // default that is the owner, the admin and the accountant; a manager may open

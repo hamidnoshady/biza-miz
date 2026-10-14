@@ -4,12 +4,26 @@
  * Holoo vouchers remain document-atomic: lines are normalized in exact Rial
  * arithmetic, and an unbalanced document is reported rather than plugged with
  * a synthetic adjustment. The plan is shared by migration preview and apply.
+ *
+ * Each line may also carry optional accounting-dimension codes (issue #868):
+ * `costCenterCode`, `profitCenterCode`, `departmentCode`, `detailCode`. Blank
+ * cells leave the line unattributed for that kind; any code is validated by
+ * the importer against this business's own catalogue, the way the expense
+ * importer validates them, and an unknown or archived code refuses the row.
  */
 
 export interface HolooVoucherLine {
   accountCode: string;
   debitRial?: bigint | number | string | null;
   creditRial?: bigint | number | string | null;
+  /** Optional cost-centre code (issue #868). */
+  costCenterCode?: string | null;
+  /** Optional profit-centre code (issue #868). */
+  profitCenterCode?: string | null;
+  /** Optional department code (issue #868). */
+  departmentCode?: string | null;
+  /** Optional detail-dimension code (issue #868). */
+  detailCode?: string | null;
 }
 
 export interface HolooVoucher {
@@ -42,11 +56,20 @@ function assertJournalDate(value: string): void {
   }
 }
 
-/** One netted line — debit XOR credit, both non-negative exact Rial. */
+/** One netted line — debit XOR credit, both non-negative exact Rial.
+ *
+ * Dimension codes are normalized from the raw input by trimming whitespace
+ * and converting null/undefined to the empty string (meaning "unattributed")
+ * so the importer's code-resolution step receives a stable shape.
+ */
 export interface NormalizedLine {
   accountCode: string;
   debit: bigint;
   credit: bigint;
+  costCenterCode: string;
+  profitCenterCode: string;
+  departmentCode: string;
+  detailCode: string;
 }
 
 /** Net a possibly-two-sided line to a single side without Number conversion. */
@@ -55,8 +78,26 @@ export function normalizeLine(line: HolooVoucherLine): NormalizedLine {
   const debit = rialBigInt(line.debitRial);
   const credit = rialBigInt(line.creditRial);
   const net = debit - credit;
-  if (net >= 0n) return { accountCode: line.accountCode, debit: net, credit: 0n };
-  return { accountCode: line.accountCode, debit: 0n, credit: -net };
+  const trim = (v: string | null | undefined) => (typeof v === "string" ? v.trim() : "");
+  return net >= 0n
+    ? {
+        accountCode: line.accountCode,
+        debit: net,
+        credit: 0n,
+        costCenterCode: trim(line.costCenterCode),
+        profitCenterCode: trim(line.profitCenterCode),
+        departmentCode: trim(line.departmentCode),
+        detailCode: trim(line.detailCode),
+      }
+    : {
+        accountCode: line.accountCode,
+        debit: 0n,
+        credit: -net,
+        costCenterCode: trim(line.costCenterCode),
+        profitCenterCode: trim(line.profitCenterCode),
+        departmentCode: trim(line.departmentCode),
+        detailCode: trim(line.detailCode),
+      };
 }
 
 export interface NormalizedVoucher {

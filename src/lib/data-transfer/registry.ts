@@ -29,6 +29,7 @@ import type { Industry } from "../industries";
 import { PERMISSIONS } from "../permissions";
 import { EXPENSE_DUPLICATE_RULES } from "../expense-import";
 import { EXPENSE_SETTLEMENT_LABELS, EXPENSE_SETTLEMENTS } from "../payables-input";
+import { DIMENSION_CODE_FIELD, DIMENSION_KIND_LABELS, type DimensionKind } from "../accounting-dimensions";
 import type { DataModuleKey, EntityDefinition, EntityField } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1117,23 @@ const EXPENSE_SETTLEMENT_OPTIONS = EXPENSE_SETTLEMENTS.map((value) => ({
   label: EXPENSE_SETTLEMENT_LABELS[value],
 }));
 
+/**
+ * One optional expense column per accounting dimension kind (issue #868). The
+ * column is always present, so the template does not change shape when a kind is
+ * switched on; the adapter refuses a value in a kind the business has not enabled,
+ * so a file can never post to a dimension nobody turned on. Not exported by
+ * default, so an export keeps the columns it has always had.
+ */
+function dimensionCodeField(kind: DimensionKind, aliases: readonly string[]): EntityField {
+  return {
+    key: DIMENSION_CODE_FIELD[kind],
+    label: `کد ${DIMENSION_KIND_LABELS[kind]}`,
+    type: "text",
+    aliases,
+    hint: "کد یکی از مقادیر «ابعاد حسابداری». خالی یعنی بدون این بُعد؛ کد ناشناخته، بایگانی‌شده یا مربوط به نوع بُعدِ غیرفعال، ردیف را رد می‌کند.",
+  };
+}
+
 const ACCOUNTING_EXPENSES: EntityDefinition = {
   key: "accounting.expenses",
   module: "accounting",
@@ -1256,6 +1274,11 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
     // with a real supplier column, one header spelling may not name two fields.
     { key: "vendor", label: "طرف حساب", type: "text", aliases: ["نام طرف حساب"], exportDefault: true },
     { key: "memo", label: "شرح", type: "longtext", aliases: ["توضیحات", "بابت"], exportDefault: true },
+    // Attribution (issue #868). Optional, and not exported by default.
+    dimensionCodeField("cost_center", ["مرکز هزینه", "cost center"]),
+    dimensionCodeField("profit_center", ["مرکز سود", "profit center"]),
+    dimensionCodeField("department", ["واحد سازمانی", "department"]),
+    dimensionCodeField("detail", ["بعد تحلیلی", "detail dimension"]),
     // Read-only facts: they travel in an export so a sheet can be tied back to the
     // ledger, and the engine excludes read-only fields from the mapping, so a
     // re-import can never overwrite a document number or invent one.

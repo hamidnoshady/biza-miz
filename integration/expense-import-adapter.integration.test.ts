@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { DIMENSION_ERROR_MESSAGES } from "../src/lib/accounting-dimensions";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -500,5 +501,159 @@ describe("the expense import adapter on a real database", () => {
     const job = await importExpenses(csv(paidRow({ 4: future })));
     expect((await run(job.id)).failed).toBe(1);
     expect(text(await rowsOf(job.id)).length).toBeGreaterThan(0);
+  });
+});
+
+/*
+ * The attribution columns (issue #868). A sheet names a value by its code, and the
+ * importer maps that code to this business's own value or refuses the row by name.
+ * Every case here goes through the same engine and the same posting guard the
+ * screens use, so a file cannot do what a screen would refuse.
+ */
+describe("the dimension columns on an expense sheet", () => {
+  const COST_CENTER_HEADER = "کد مرکز هزینه";
+  const CC_COLUMN = 11;
+
+  function csvWithCostCenter(...lines: Cells[]): string {
+    const headers = [...HEADERS, COST_CENTER_HEADER];
+    const body = lines.map((cells) => headers.map((_, index) => cells[index] ?? "").join(","));
+    return [headers.join(","), ...body].join("\n");
+  }
+
+  async function enableCostCenters(enabled: boolean) {
+    await db.query(
+      `INSERT INTO accounting_dimension_settings (business_id, kind, is_enabled)
+       VALUES ($1, 'cost_center', $2)
+       ON CONFLICT (business_id, kind) DO UPDATE SET is_enabled = EXCLUDED.is_enabled`,
+      [biz.id, enabled],
+    );
+  }
+
+  async function addCostCenter(code: string, options: { active?: boolean; locationId?: string } = {}) {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO accounting_dimension_values (business_id, kind, code, name, location_id, is_active)
+       VALUES ($1, 'cost_center', $2, $3, $4, $5)
+       RETURNING id`,
+      [biz.id, code, `مرکز ${code}`, options.locationId ?? null, options.active ?? true],
+    );
+    return rows[0].id;
+  }
+
+  async function expenseCount(): Promise<number> {
+    const { rows } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM expenses");
+    return rows[0].n;
+  }
+
+  beforeEach(async () => {
+    await db.query("DELETE FROM accounting_dimension_values WHERE business_id = $1", [biz.id]);
+    await db.query("DELETE FROM accounting_dimension_settings WHERE business_id = $1", [biz.id]);
+  });
+
+  it("posts a known cost centre onto the expense line it belongs to, and nowhere else", async () => {
+    await enableCostCenters(true);
+    const valueId = await addCostCenter("CC-HQ");
+    // Lower case with a stray space, as a person types it: the match ignores both.
+    const job = await importExpenses(csvWithCostCenter(paidRow({ [CC_COLUMN]: " cc-hq " })));
+    expect(await run(job.id)).toMatchObject({ created: 1, failed: 0 });
+
+    const expense = await storedExpense(0);
+    const { rows } = await db.query<{ cost_center_id: string | null }>(
+      "SELECT cost_center_id FROM expenses WHERE id = $1",
+      [expense.id],
+    );
+    expect(rows[0].cost_center_id).toBe(valueId);
+    // The expense line carries the attribution. The cash line does not: the cost
+    // centre describes what the money was spent on, not where it came from.
+    const { rows: lines } = await db.query<{ code: string; cost_center_id: string | null }>(
+      `SELECT a.code, l.cost_center_id
+         FROM journal_lines l
+         JOIN journal_entries je ON je.id = l.entry_id
+         JOIN accounts a ON a.id = l.account_id
+        WHERE je.source_type = 'expense' AND je.source_id = $1
+        ORDER BY a.code`,
+      [expense.id],
+    );
+    expect(lines).toEqual([
+      { code: "1100", cost_center_id: null },
+      { code: "5200", cost_center_id: valueId },
+    ]);
+  });
+
+  it("refuses a code the business never defined, and creates nothing", async () => {
+    await enableCostCenters(true);
+    const job = await importExpenses(csvWithCostCenter(paidRow({ [CC_COLUMN]: "CC-NOPE" })));
+    expect(await run(job.id)).toMatchObject({ created: 0, failed: 1 });
+    expect(text(await rowsOf(job.id))).toContain(DIMENSION_ERROR_MESSAGES.unknown_dimension_code);
+    expect(await expenseCount()).toBe(0);
+  });
+
+  it("refuses an archived code: it exists, but it is not postable any more", async () => {
+    await enableCostCenters(true);
+    await addCostCenter("CC-OLD", { active: false });
+    const job = await importExpenses(csvWithCostCenter(paidRow({ [CC_COLUMN]: "CC-OLD" })));
+    expect(await run(job.id)).toMatchObject({ created: 0, failed: 1 });
+    expect(text(await rowsOf(job.id))).toContain(DIMENSION_ERROR_MESSAGES.inactive_dimension_code);
+    expect(await expenseCount()).toBe(0);
+  });
+
+  it("refuses a cost centre while its kind is switched off, and says where to switch it on", async () => {
+    await enableCostCenters(false);
+    await addCostCenter("CC-OFF");
+    const job = await importExpenses(csvWithCostCenter(paidRow({ [CC_COLUMN]: "CC-OFF" })));
+    expect(await run(job.id)).toMatchObject({ created: 0, failed: 1 });
+    expect(text(await rowsOf(job.id))).toContain(DIMENSION_ERROR_MESSAGES.dimension_kind_disabled);
+    expect(await expenseCount()).toBe(0);
+  });
+
+  it("refuses a cost centre that is open only at another branch, as the screens would", async () => {
+    await enableCostCenters(true);
+    await addCostCenter("CC-NORTH", { locationId: biz.otherLocationId });
+    // The file is imported at the Center branch; the value belongs to the North branch.
+    const job = await importExpenses(csvWithCostCenter(paidRow({ [CC_COLUMN]: "CC-NORTH" })));
+    expect(await run(job.id)).toMatchObject({ created: 0, failed: 1 });
+    expect(text(await rowsOf(job.id))).toContain(DIMENSION_ERROR_MESSAGES.dimension_branch_mismatch);
+    expect(await expenseCount()).toBe(0);
+  });
+
+  it("treats a blank cell as no attribution, so a row without one posts as it always did", async () => {
+    await enableCostCenters(true);
+    const job = await importExpenses(csvWithCostCenter(paidRow()));
+    expect(await run(job.id)).toMatchObject({ created: 1, failed: 0 });
+    const expense = await storedExpense(0);
+    const { rows } = await db.query<{ cost_center_id: string | null }>(
+      "SELECT cost_center_id FROM expenses WHERE id = $1",
+      [expense.id],
+    );
+    expect(rows[0].cost_center_id).toBeNull();
+  });
+
+  it("exports the code an expense carries, and reading that file back adds nothing", async () => {
+    await enableCostCenters(true);
+    await addCostCenter("CC-EXP");
+    const job = await importExpenses(csvWithCostCenter(paidRow({ [CC_COLUMN]: "CC-EXP" })));
+    expect((await run(job.id)).created).toBe(1);
+
+    const registry = await import("../src/lib/data-transfer/registry");
+    const exporter = await import("../src/lib/data-transfer/export-service");
+    const fields = [...registry.defaultExportFields(registry.requireEntity("accounting.expenses")), "costCenterCode"];
+    const built = await dbLib.withTenant(biz.id, () =>
+      exporter.buildExport({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        entityKey: "accounting.expenses",
+        format: "csv",
+        fields,
+        actorUserId: null,
+        actorName: actor.actorName,
+      }),
+    );
+    const file = built.body.toString("utf8");
+    expect(file).toContain(COST_CENTER_HEADER);
+    expect(file).toContain("CC-EXP");
+
+    // The attribution is not part of the duplicate match, so the same row read back
+    // is the one the register already holds: skipped, never posted a second time.
+    const again = await importExpenses(file, {});
+    expect(await run(again.id)).toMatchObject({ created: 0, skipped: 1, failed: 0 });
   });
 });

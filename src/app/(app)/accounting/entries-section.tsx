@@ -75,6 +75,14 @@ import {
   type JournalFilterState,
 } from "./journal-view";
 import { JOURNAL_EXPORT_ROW_CAP } from "@/lib/journal-filters";
+import { useDimensionCatalog, DimensionCatalogError } from "./dimension-fields";
+import type { DimensionKind } from "@/lib/accounting-dimensions";
+import {
+  dimensionFilterOptionsFor,
+  enabledDimensionKinds,
+  enabledKindLabel,
+  historicalKinds,
+} from "./dimension-catalog";
 
 interface JournalPageResponse {
   entries: JournalEntryView[];
@@ -145,6 +153,14 @@ export function EntriesSection({
   const [options, setOptions] = useState<FilterOptions>(NO_OPTIONS);
   const [optionsFailed, setOptionsFailed] = useState(false);
   const [optionsKey, setOptionsKey] = useState(0);
+  // Issue #868: the dimension filters, and the labels a line's attribution shows with.
+  const { catalog: dimensionCatalog, error: dimensionCatalogError, retry: retryDimensionCatalog } = useDimensionCatalog();
+  const dimSettings = useMemo(() => dimensionCatalog?.settings ?? [], [dimensionCatalog?.settings]);
+  const dimAllValues = useMemo(() => dimensionCatalog?.allValues ?? [], [dimensionCatalog?.allValues]);
+  const lineKindLabel = useCallback(
+    (kind: DimensionKind) => enabledKindLabel(dimSettings, kind),
+    [dimSettings],
+  );
 
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -476,7 +492,7 @@ export function EntriesSection({
                 />
               </label>
               <label className="block">
-                <span className="mb-1.5 block text-xs text-muted-foreground">پروژه / مرکز هزینه</span>
+                <span className="mb-1.5 block text-xs text-muted-foreground">پروژه</span>
                 <SearchableSelect
                   value={filters.project}
                   onChange={(value) => setFilter("project", value)}
@@ -488,6 +504,26 @@ export function EntriesSection({
                   ]}
                 />
               </label>
+              {historicalKinds(dimSettings, dimAllValues).map((kind) => {
+                const label = enabledKindLabel(dimSettings, kind);
+                return (
+                  <label key={kind} className="block">
+                    <span className="mb-1.5 block text-xs text-muted-foreground">{label}</span>
+                    <SearchableSelect
+                      value={filters.dimensions[kind] ?? ""}
+                      onChange={(value) => setFilter("dimensions", { ...filters.dimensions, [kind]: value || undefined })}
+                      ariaLabel={label}
+                      options={[
+                        { value: "", label: `همهٔ ${label}` },
+                        ...dimensionFilterOptionsFor(dimAllValues, kind),
+                      ]}
+                    />
+                  </label>
+                );
+              })}
+              {dimensionCatalogError ? (
+                <DimensionCatalogError error={dimensionCatalogError} onRetry={retryDimensionCatalog} />
+              ) : null}
               <label className="block">
                 <span className="mb-1.5 block text-xs text-muted-foreground">وضعیت برگشت</span>
                 <SearchableSelect
@@ -666,6 +702,7 @@ export function EntriesSection({
                                 busy={busy}
                                 onReverse={() => setReversing(entry)}
                                 onOpenEntry={openEntry}
+                                lineKindLabel={lineKindLabel}
                               />
                             </Td>
                           </DataTableRow>
@@ -721,6 +758,7 @@ export function EntriesSection({
                           busy={busy}
                           onReverse={() => setReversing(entry)}
                           onOpenEntry={openEntry}
+                          lineKindLabel={lineKindLabel}
                         />
                       ) : null}
                     </article>
@@ -774,12 +812,15 @@ function JournalEntryDetail({
   busy,
   onReverse,
   onOpenEntry,
+  lineKindLabel,
 }: {
   entry: JournalEntryView;
   canApprove: boolean | undefined;
   busy: boolean;
   onReverse: () => void;
   onOpenEntry: (entryId: string) => void;
+  /** The business's name for a dimension kind, shown against each line's attribution. */
+  lineKindLabel: (kind: DimensionKind) => string;
 }) {
   const money = useMoney();
   const counterpart = journalCounterpartEntryId(entry);
@@ -798,6 +839,16 @@ function JournalEntryDetail({
             <DataTableRow key={`${line.accountId}-${index}`}>
               <Td muted>
                 {line.accountCode} {line.accountName}
+                {(line.dimensions ?? []).length > 0 ? (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    {(line.dimensions ?? [])
+                      .map(
+                        (d) =>
+                          `${lineKindLabel(d.kind)}: ${toPersianDigits(d.code)} · ${d.name}${d.isActive ? "" : " (بایگانی)"}`,
+                      )
+                      .join("، ")}
+                  </span>
+                ) : null}
               </Td>
               <Td numeric nowrap>
                 {line.debit !== "0" ? money.formatText(line.debit) : "—"}
@@ -817,7 +868,7 @@ function JournalEntryDetail({
         <AuditField label="منبع" value={ledgerSourceLabel(entry.sourceType)} />
         <AuditField label="شناسهٔ مرجع" value={entry.sourceId} mono />
         <AuditField label="شعبه" value={entry.locationName} />
-        <AuditField label="پروژه / مرکز هزینه" value={entry.projectName} />
+        <AuditField label="پروژه" value={entry.projectName} />
         <AuditField label="ثبت‌کننده" value={entry.createdByName} />
         {entry.reversedAt ? (
           <>

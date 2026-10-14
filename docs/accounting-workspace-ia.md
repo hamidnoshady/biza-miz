@@ -55,7 +55,7 @@ The rest of the workspace has these responsibilities:
 | خرید و انبار | inventory, products and industry-specific trade entries |
 | عملیات | the industry’s canonical operations screens, such as floor, kitchen, reservations and delivery |
 | اشخاص | the one directory (`/accounting/directory`) and its `?view=` links |
-| **فضای کار حسابداری** | ONE ordinary link to the workspace page `/accounting/ledger`, which lists the permitted ledger tools (trial balance, journal, manual entry, chart of accounts, receivables, payables, receipts/payments, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll) under four named divisions |
+| **فضای کار حسابداری** | ONE ordinary link to the workspace page `/accounting/ledger`, which lists the permitted ledger tools (trial balance, journal, manual entry, chart of accounts, accounting dimensions, receivables, payables, receipts/payments, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll) under four named divisions |
 | گزارش و تحلیل | financial reports (`/accounting/financial-reports`), business reports (`/accounting/reports`), growth/marketing |
 | پیکربندی | business settings, technical connections, credit and billing |
 
@@ -81,7 +81,7 @@ so the sidebar has one spelling of a row instead of one per menu.
 
   | division | sections |
   | --- | --- |
-  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، ارز و تسعیر، سرفصل حساب‌ها |
+  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، ارز و تسعیر، سرفصل حساب‌ها، ابعاد حسابداری |
   | دریافتنی و پرداختنی | دریافتنی، پرداختنی، اقساط، چک‌ها |
   | وجوه و هزینه | دریافت و پرداخت، هزینه‌ها، تطبیق بانکی، دارایی ثابت |
   | دوره، مالیات و حقوق | دوره‌های مالی، مالیات، حقوق و دستمزد |
