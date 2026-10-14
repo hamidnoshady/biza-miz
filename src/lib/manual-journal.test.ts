@@ -205,6 +205,7 @@ describe("parseManualDraftPayload", () => {
           { accountId: UUID_B, debit: 0, credit: 100_000 },
         ],
         idempotencyKey: null,
+        voucherReference: null,
       },
     });
   });
@@ -290,6 +291,36 @@ describe("parseManualDraftPayload", () => {
     for (const row of [null, 5, "row", []]) {
       expect(parseManualDraftPayload(body([row]))).toEqual({ ok: false, problem: "invalid_line" });
     }
+  });
+
+  describe("the optional reference number (issue #867)", () => {
+    it("carries a trimmed reference through to the payload", () => {
+      const result = parseManualDraftPayload(body([], { voucherReference: "  F-1403-887  " }));
+      expect(result.ok && result.value.voucherReference).toBe("F-1403-887");
+    });
+
+    it("treats an absent, empty or blank reference as none", () => {
+      for (const voucherReference of [undefined, null, "", "   "]) {
+        const result = parseManualDraftPayload(body([], { voucherReference }));
+        expect(result.ok && result.value.voucherReference).toBeNull();
+      }
+    });
+
+    it("refuses shapes the entry's column would reject, the way the renumber dialog does", () => {
+      for (const voucherReference of ["has space", "با فاصله", "emoji-😀", "x".repeat(65), 42, {}]) {
+        expect(parseManualDraftPayload(body([], { voucherReference }))).toEqual({
+          ok: false,
+          problem: "voucher_reference_invalid",
+        });
+      }
+    });
+
+    it("accepts the full shape the column allows, up to the 64-character cap", () => {
+      for (const voucherReference of ["a.b_c/d-e", "A9", "x".repeat(64)]) {
+        const result = parseManualDraftPayload(body([], { voucherReference }));
+        expect(result.ok && result.value.voucherReference).toBe(voucherReference);
+      }
+    });
   });
 });
 

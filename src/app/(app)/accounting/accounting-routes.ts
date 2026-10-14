@@ -30,9 +30,15 @@ export const ACCOUNTING_SECTION_KEYS = [
   "ledger",
   "trial-balance",
   "entries",
+  // «دفتر اسناد» — the stable fiscal-year voucher number of every posted
+  // document (issue #867), beside the journal it numbers.
+  "vouchers",
   "manual",
   "expenses",
   "fiscal-periods",
+  // «ترازات افتتاحیه» — the accountant's opening-balance workspace, beside
+  // the fiscal years it opens (issue #867).
+  "opening-balances",
   // The platform's one people directory — the shared «اشخاص» record with the
   // ledger's columns (accounting code, tax, balance).
   //

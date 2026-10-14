@@ -24,6 +24,7 @@ import {
   verifyCodeChallenge,
 } from "./oauth";
 import { grantableScopes, parseMcpScopes, type McpScope, type McpWriteMode } from "./scopes";
+import { LEGACY_GRANTS, parseMcpGrants, validateMcpGrantsMint } from "./grants";
 
 /**
  * How long each credential lives.
@@ -253,7 +254,20 @@ export async function validateAuthorizationRequest(
 
 export type IssueCodeResult =
   | { ok: true; code: string; redirectTo: string }
-  | { ok: false; error: "invalid_client" | "invalid_redirect" | "invalid_scopes" | "invalid_request" };
+  | {
+      ok: false;
+      error:
+        | "invalid_client"
+        | "invalid_redirect"
+        | "invalid_scopes"
+        // Issue #883 §1: the consent grants the owner picked failed mint rules
+        // (no app, write-without-read, empty branch list, branch picked the
+        // connection can never reach). The consent page renders its own
+        // copy for this; external clients get 'invalid_grants' as per RFC
+        // 6749's free-form error code allowance.
+        | "invalid_grants"
+        | "invalid_request";
+    };
 
 /**
  * The owner said yes. Mint a single-use code carrying *their* decision.
@@ -276,6 +290,16 @@ export async function issueAuthorizationCode(input: {
   locationId: string;
   userId: string;
   connectionName: string;
+  /**
+   * Issue #883 §1 — the app/branch grants the owner approved on the consent
+   * screen, carried verbatim onto the minted connection. Absent = the
+   * legacy consent (everything at scope level); the consent UI always sends
+   * a real document, but OAuth clients go through this flow programmatically,
+   * and their consent page builds the grants from what they ticked. The
+   * server validates the shape and that every named branch belongs to the
+   * business before accepting.
+   */
+  grants?: unknown;
 }): Promise<IssueCodeResult> {
   const client = await getMcpClient(input.businessId, input.clientId);
   if (!client) return { ok: false, error: "invalid_client" };
@@ -287,13 +311,27 @@ export async function issueAuthorizationCode(input: {
   const scopes = grantableScopes(input.requestedScopes, input.approvedScopes);
   if (scopes.length === 0) return { ok: false, error: "invalid_scopes" };
 
+  const grants = input.grants === undefined ? LEGACY_GRANTS : parseMcpGrants(input.grants);
+  if (validateMcpGrantsMint(grants) !== null) return { ok: false, error: "invalid_grants" };
+  if (grants.branches !== "all") {
+    if (!grants.branches.includes(input.locationId)) return { ok: false, error: "invalid_grants" };
+    const { rows: branchCheck } = await query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM locations
+        WHERE business_id = $1 AND id = ANY($2::uuid[]) AND is_active`,
+      [input.businessId, grants.branches],
+    );
+    if (Number(branchCheck[0]?.count ?? 0) !== grants.branches.length) {
+      return { ok: false, error: "invalid_grants" };
+    }
+  }
+
   const name = input.connectionName.trim().slice(0, 120) || client.clientName;
   const code = createMcpAuthorizationCode();
   await query(
     `INSERT INTO mcp_oauth_codes
        (business_id, client_id, code_hash, code_challenge, redirect_uri, scopes, write_mode,
-        location_id, user_id, connection_name, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now() + ($11 || ' minutes')::interval)`,
+        location_id, user_id, connection_name, expires_at, grants)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now() + ($11 || ' minutes')::interval, $12::jsonb)`,
     [
       input.businessId,
       input.clientId,
@@ -306,6 +344,7 @@ export async function issueAuthorizationCode(input: {
       input.userId,
       name,
       AUTHORIZATION_CODE_TTL_MINUTES,
+      JSON.stringify(grants),
     ],
   );
 
@@ -386,6 +425,7 @@ export async function exchangeAuthorizationCode(input: {
     location_id: string;
     user_id: string;
     connection_name: string;
+    grants: unknown;
   }>(
     `UPDATE mcp_oauth_codes
         SET consumed_at = now()
@@ -394,7 +434,7 @@ export async function exchangeAuthorizationCode(input: {
         AND consumed_at IS NULL
         AND expires_at > now()
       RETURNING id, client_id, code_challenge, redirect_uri, scopes, write_mode,
-                location_id, user_id, connection_name`,
+                location_id, user_id, connection_name, grants`,
     [input.businessId, hashMcpToken(input.code)],
   );
   const row = rows[0];
@@ -414,8 +454,8 @@ export async function exchangeAuthorizationCode(input: {
   const scopes = parseMcpScopes(row.scopes);
   const { rows: created } = await query<{ id: string }>(
     `INSERT INTO mcp_connections
-       (business_id, location_id, name, scopes, write_mode, origin, client_id, created_by, authorized_by)
-     VALUES ($1, $2, $3, $4, $5, 'oauth', $6, $7, $7)
+       (business_id, location_id, name, scopes, write_mode, origin, client_id, created_by, authorized_by, grants)
+     VALUES ($1, $2, $3, $4, $5, 'oauth', $6, $7, $7, $8::jsonb)
      RETURNING id`,
     [
       input.businessId,
@@ -425,8 +465,25 @@ export async function exchangeAuthorizationCode(input: {
       row.write_mode,
       row.client_id,
       row.user_id,
+      JSON.stringify(row.grants ?? {}),
     ],
   );
+
+  // The consent-grants story starts here: what the owner agreed to in the
+  // interface, through that interface. Imported lazily — oauth-service is
+  // loaded at authenticate-time hot paths and this only fires on connection
+  // minting.
+  const { recordMcpGrantEvent } = await import("./connections-service");
+  await recordMcpGrantEvent({
+    businessId: input.businessId,
+    connectionId: created[0].id,
+    kind: "minted",
+    scopes,
+    writeMode: row.write_mode,
+    grants: row.grants ?? null,
+    actorUserId: row.user_id,
+    via: "oauth_consent",
+  });
 
   await query(`UPDATE mcp_oauth_clients SET last_used_at = now() WHERE id = $1 AND business_id = $2`, [
     row.client_id,

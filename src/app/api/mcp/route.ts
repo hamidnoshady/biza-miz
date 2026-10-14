@@ -84,10 +84,37 @@ export async function DELETE() {
   return withCors(new NextResponse(null, { status: 204 }));
 }
 
+/**
+ * P1-9's hard ceiling. A CMS-sized body is tens of kilobytes; the largest
+ * legitimate frame (one write with a long Persian memo, or the tools/list
+ * answer's echo) is nowhere near a megabyte. Read as text so the byte count
+ * is checked *before* the JSON parser pays for the whole allocation.
+ */
+const MAX_BODY_BYTES = 1024 * 1024;
+
 export async function POST(request: NextRequest) {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (declared > MAX_BODY_BYTES) {
+    return withCors(
+      NextResponse.json(
+        jsonRpcError(null, JSON_RPC_ERRORS.invalidRequest, "درخواست بیش از حد بزرگ است"),
+        { status: 413 },
+      ),
+    );
+  }
+
   let body: unknown;
   try {
-    body = await request.json();
+    const text = await request.text();
+    if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) {
+      return withCors(
+        NextResponse.json(
+          jsonRpcError(null, JSON_RPC_ERRORS.invalidRequest, "درخواست بیش از حد بزرگ است"),
+          { status: 413 },
+        ),
+      );
+    }
+    body = JSON.parse(text);
   } catch {
     return withCors(
       NextResponse.json(jsonRpcError(null, JSON_RPC_ERRORS.parseError, "بدنهٔ JSON نامعتبر است"), {
@@ -99,7 +126,7 @@ export async function POST(request: NextRequest) {
   const parsed = parseBody(body);
   if (!parsed) {
     return withCors(
-      NextResponse.json(jsonRpcError(null, JSON_RPC_ERRORS.invalidRequest, "درخواست خالی است"), {
+      NextResponse.json(jsonRpcError(null, JSON_RPC_ERRORS.invalidRequest, "درخواست خالی یا نامعتبر است"), {
         status: 400,
       }),
     );

@@ -35,7 +35,10 @@ function scriptedClient(respond: (sql: string, params: unknown[]) => Record<stri
     query: async (sql: string, params: unknown[] = []) => {
       const flat = sql.replace(/\s+/g, " ").trim();
       calls.push({ sql: flat, params });
-      const rows = respond(flat, params);
+      // Issue #867 — the in-transaction voucher numbering is served first so
+      // the business-specific scripts stay focused on the guard under test.
+      const voucher = voucherRows(flat);
+      const rows = voucher !== undefined ? voucher : respond(flat, params);
       if (rows === undefined) throw new Error(`unexpected query: ${flat}`);
       return { rows, rowCount: rows.length };
     },
@@ -46,6 +49,21 @@ function scriptedClient(respond: (sql: string, params: unknown[]) => Record<stri
 /** Answers only the settings read — any other query is "unexpected", proving the guard fired first. */
 function settingsOnly() {
   return scriptedClient((sql) => (sql.includes("FROM settings") ? [{ value: PERIODIC_COSTING }] : undefined));
+}
+
+/**
+ * The voucher-numbering queries every posting now issues in-transaction
+ * (issue #867): the fiscal-year lookup, the counter upsert/lock/increment and
+ * the entry's own number. A mock counter starting at zero is enough — these
+ * tests pin the posting's lines, not the number.
+ */
+function voucherRows(flat: string): Record<string, unknown>[] | undefined {
+  if (flat.includes("SELECT id FROM fiscal_years")) return [];
+  if (flat.includes("INSERT INTO voucher_sequences")) return [];
+  if (flat.includes("FROM voucher_sequences")) return [{ last_number: "0" }];
+  if (flat.includes("UPDATE voucher_sequences")) return [];
+  if (flat.includes("UPDATE journal_entries") && flat.includes("voucher_number")) return [];
+  return undefined;
 }
 
 describe("perpetual-only instruments refuse a periodic business", () => {
@@ -202,7 +220,9 @@ describe("customer return under سیستم ادواری", () => {
         const codes = params[1] as string[];
         return codes.map((code) => ({ code, id: `acc-${code}` }));
       }
-      if (sql.includes("INSERT INTO journal_entries")) return [{ id: "entry-1" }];
+      // The entry's own date is what its voucher number is derived from, so
+      // the RETURNING carries it the way the real column does.
+      if (sql.includes("INSERT INTO journal_entries")) return [{ id: "entry-1", entry_date: "2026-01-31" }];
       if (sql.includes("INSERT INTO journal_lines")) {
         journalLineInserts.push({ sql, params });
         return [];

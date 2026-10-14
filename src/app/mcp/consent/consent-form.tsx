@@ -23,10 +23,39 @@ import {
   type McpScope,
   type McpWriteMode,
 } from "@/lib/mcp/scopes";
+import {
+  MCP_APPS,
+  MCP_APP_LABELS,
+  MCP_APP_DESCRIPTIONS,
+  defaultGrantsForConsents,
+  grantsToStorage,
+  type McpGrants,
+} from "@/lib/mcp/grants";
 
 interface ConsentInfo {
   client: { clientId: string; clientName: string };
   branch: { id: string; name: string } | null;
+  /** Issue #883 §1 — every active branch the owner could consent to. */
+  branches: { id: string; name: string }[];
+}
+
+type AppGrantMap = Record<string, { read: boolean; write: boolean }>;
+
+/** The consent screen's grant state; serializes to the wire document. */
+interface GrantDraft {
+  apps: AppGrantMap;
+  branches: string[] | "all";
+}
+
+function draftToGrants(draft: GrantDraft): unknown {
+  const grants: McpGrants = {
+    apps: {},
+    branches: draft.branches,
+  };
+  for (const app of MCP_APPS) {
+    grants.apps[app] = draft.apps[app] ?? { read: false, write: false };
+  }
+  return grantsToStorage(grants);
 }
 
 export function ConsentForm(props: {
@@ -45,6 +74,10 @@ export function ConsentForm(props: {
   const [approved, setApproved] = useState<McpScope[]>([MCP_SCOPES.read]);
   const [writeMode, setWriteMode] = useState<McpWriteMode>("approve");
   const [name, setName] = useState("");
+  // Issue #883 §1 — the grant document the owner composes here. Built from
+  // the safe default (read everything, write nothing, current branch only)
+  // once the branch list lands.
+  const [draft, setDraft] = useState<GrantDraft | null>(null);
 
   const load = useCallback(async () => {
     const params = new URLSearchParams({ client_id: props.clientId });
@@ -55,6 +88,11 @@ export function ConsentForm(props: {
     if (ok) {
       setInfo(data);
       setName(data.client.clientName);
+      const primary = data.branch?.id ?? data.branches[0]?.id ?? "";
+      const defaults = defaultGrantsForConsents(primary);
+      const apps: AppGrantMap = {};
+      for (const app of MCP_APPS) apps[app] = { ...defaults.apps[app]! };
+      setDraft({ apps, branches: [...(defaults.branches as string[])] });
     } else {
       setError(
         data.error === "invalid_client"
@@ -102,6 +140,7 @@ export function ConsentForm(props: {
           approvedScopes: approved,
           writeMode,
           connectionName: name,
+          grants: draft ? draftToGrants(draft) : undefined,
         }),
       },
     );
@@ -112,6 +151,7 @@ export function ConsentForm(props: {
     }
     const messages: Record<string, string> = {
       invalid_scopes: "حداقل یک دسترسی را انتخاب کنید.",
+      invalid_grants: "مجوزهای انتخاب‌شده معتبر نیست — دسترسی خواندن یا حداقل یک شعبه را روشن کنید.",
       invalid_client: "این درخواست معتبر نیست.",
       invalid_request: "این درخواست معتبر نیست.",
       no_location: "شعبه‌ای ثبت نشده است.",
@@ -151,13 +191,146 @@ export function ConsentForm(props: {
 
   const canWrite = approved.includes(MCP_SCOPES.write);
 
+  function toggleApp(app: string, level: "read" | "write") {
+    setDraft((current) => {
+      if (!current) return current;
+      const next = { ...current.apps[app]! };
+      if (level === "read") {
+        next.read = !next.read;
+        if (!next.read) next.write = false; // write-without-read is refused at mint
+      } else {
+        next.write = !next.write;
+        if (next.write) next.read = true;
+      }
+      return { ...current, apps: { ...current.apps, [app]: next } };
+    });
+  }
+
+  function toggleBranch(id: string) {
+    setDraft((current) => {
+      if (!current || current.branches === "all") return current;
+      const branches = current.branches.includes(id)
+        ? current.branches.filter((branch) => branch !== id)
+        : [...current.branches, id];
+      return { ...current, branches };
+    });
+  }
+
+  const anyAppGranted = draft
+    ? Object.values(draft.apps).some((grant) => grant.read || grant.write)
+    : true;
+  const anyBranch = draft ? draft.branches === "all" || draft.branches.length > 0 : true;
+  const draftInvalid = !anyAppGranted || !anyBranch;
+
   return (
     <ConsentShell title="اتصال برنامهٔ هوش مصنوعی">
       <p className="text-sm leading-6 text-muted-foreground">
         برنامهٔ <span className="font-semibold text-foreground">«{info.client.clientName}»</span> درخواست
-        دسترسی به داده‌های این کسب‌وکار را دارد
-        {info.branch ? <> (شعبهٔ «{info.branch.name}»)</> : null}. انتخاب کنید چه چیزی به آن بدهید.
+        دسترسی به داده‌های این کسب‌وکار را دارد. انتخاب کنید چه چیزی به آن بدهید؛ جزئیات را می‌توانید
+        که اواخر کافی است یک کلیک بیشتر بازتر کنید.
       </p>
+
+      {draft ? (
+        <div className="mt-5 rounded-xl border border-border/80 p-3">
+          <p className="mb-3 text-sm font-medium">
+            این برنامه به کدام قسمت‌ها دسترسی داشته باشد؟
+          </p>
+          <div className="space-y-2">
+            {MCP_APPS.map((app) => {
+              const grant = draft.apps[app]!;
+              return (
+                <div
+                  key={app}
+                  className="rounded-lg border border-border/60 p-3"
+                  aria-label={MCP_APP_LABELS[app]}
+                >
+                  <p className="text-sm font-medium">{MCP_APP_LABELS[app]}</p>
+                  <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                    {MCP_APP_DESCRIPTIONS[app]}
+                  </p>
+                  <div className="mt-2 flex gap-4">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={grant.read}
+                        onChange={() => toggleApp(app, "read")}
+                      />
+                      خواندن
+                    </label>
+                    {canWrite ? (
+                      <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={grant.write}
+                          onChange={() => toggleApp(app, "write")}
+                        />
+                        نوشتن
+                      </label>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {!anyAppGranted ? (
+            <p className="mt-2 text-xs text-destructive">
+              حداقل برای یک بخش دسترسی خواندن یا نوشتن فعال کنید.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {draft && info.branches.length > 1 ? (
+        <div className="mt-4 rounded-xl border border-border/80 p-3">
+          <p className="mb-2 text-sm font-medium">دسترسی به کدام شعبه‌ها؟</p>
+          <p className="mb-3 text-xs leading-5 text-muted-foreground">
+            فقط داده‌های همین شعبه‌ها دیده یا تغییر می‌کند. جمع‌بندی‌های چندشعبه‌ای فقط وقتی بیش از
+            یک شعبه انتخاب شده باشد در دسترس است.
+          </p>
+          <div className="space-y-2">
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={draft.branches === "all"}
+                onChange={() =>
+                  setDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          branches:
+                            current.branches === "all"
+                              ? [info.branches[0]!.id]
+                              : ("all" as const),
+                        }
+                      : current,
+                  )
+                }
+              />
+              همهٔ شعبه‌ها (از جمله شعبه‌هایی که بعداً اضافه می‌شوند)
+            </label>
+            {draft.branches !== "all"
+              ? info.branches.map((branch) => (
+                  <label
+                    key={branch.id}
+                    className="flex cursor-pointer items-center gap-2 text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={
+                        draft.branches !== "all" && draft.branches.includes(branch.id)
+                      }
+                      onChange={() => toggleBranch(branch.id)}
+                    />
+                    {branch.name}
+                  </label>
+                ))
+              : null}
+          </div>
+          {!anyBranch ? (
+            <p className="mt-2 text-xs text-destructive">حداقل یک شعبه را انتخاب کنید.</p>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="mt-5 space-y-3">
         {ALL_MCP_SCOPES.map((scope) => (
@@ -226,7 +399,10 @@ export function ConsentForm(props: {
       {error ? <ErrorBox>{error}</ErrorBox> : null}
 
       <div className="mt-6 flex gap-3">
-        <Button onClick={() => decide(true)} disabled={busy || approved.length === 0}>
+        <Button
+          onClick={() => decide(true)}
+          disabled={busy || approved.length === 0 || draftInvalid}
+        >
           {busy ? "در حال ثبت…" : "اجازه بده"}
         </Button>
         <Button variant="outline" onClick={() => decide(false)} disabled={busy}>

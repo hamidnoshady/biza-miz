@@ -40,6 +40,82 @@ import { nearExpiryBatches } from "./cosmetics-service";
 import { staffCommissionReport } from "./commission-service";
 import { customersDueForRepurchase } from "./loyalty-service";
 import { getCustomerFile } from "./crm-service";
+import { listJournalEntries } from "./journal-service";
+import { decodeJournalCursor } from "./journal-filters";
+import { listAccounts } from "./accounts-service";
+import { listDrafts } from "./manual-journal-service";
+import { getExpense, listExpenses } from "./expense-service";
+import { encodeExpenseCursor, parseExpenseCursor, parseExpenseRegisterStatus } from "./expense-input";
+import { listInstallmentPlans, listPaymentsPage, listReceiptsPage } from "./installments-service";
+import { listCheques } from "./cheques-service";
+import { listFixedAssets } from "./fixed-assets-service";
+import { listFiscalYears } from "./fiscal-periods-service";
+import { listAdvances } from "./payroll-advances-service";
+import { listReconciliations } from "./reconciliation-service";
+import { listOrders, getOrderDetail, isOrderStatus } from "./order-read-service";
+import { listShifts } from "./shift-service";
+import { getMenuTree } from "./menu-service";
+import { listFormulas, listRuns } from "./production-service";
+import { listBarcodes, listItemsWithoutBarcode } from "./inventory-item-barcodes-service";
+import { listCustomerNotes, listActivities } from "./crm-service";
+import { listMembers } from "./team-service";
+import { getBackupHealth, listBackupRuns } from "./backup-service";
+import { listDevices, findActiveDeviceId } from "./device-service";
+import { listWeightItems } from "./items-service";
+import { listCosmeticBoard } from "./cosmetics-service";
+import { listBrands } from "./item-brands-service";
+import { listVariantBoard } from "./accessories-service";
+import { listVariantBoard as listTradeGoodsBoard } from "./trade-goods-service";
+import { isTradeGoodsIndustry } from "./trade-goods";
+import { listExportJobs, getExportJob } from "./data-transfer/export-service";
+import { listImportJobs, getImportJob } from "./data-transfer/import-service";
+import { listScheduledExports } from "./data-transfer/schedule-service";
+import { listExportTemplates, listMappingTemplates } from "./data-transfer/templates-service";
+import { findEntity, entitiesForIndustry, defaultExportFields, isImportable } from "./data-transfer/registry";
+import { DATA_MODULE_LABELS } from "./data-transfer/types";
+import { listCustomFields, CUSTOM_FIELD_TARGETS, type CustomFieldTarget } from "./crm-custom-fields-service";
+import { listPromotions, getGiftCardByCode, giftCardBalance, giftCardHistory } from "./promotions-service";
+import { listStockCounts, getStockCountDetail } from "./stock-count-service";
+import { listWorkspaceProjects } from "./workspace";
+import { searchKbArticles, listKbCatalogue } from "./knowledge-service";
+import { listAttributeDefinitions } from "./product-attributes-service";
+import { listWeightBarcodeTemplates } from "./weight-barcode-templates-service";
+import { listCmsPages, listCmsMedia, cmsWebsiteDns, cmsSiteCdn } from "./cms/website-service";
+import { listRetailInvoices } from "./retail-invoice/list-service";
+import { listAuditLog } from "./audit-service";
+import { getAccountStatement } from "./reports-service";
+import { getFiscalReadiness } from "./fiscal-periods-service";
+import { listMediaCollections, listMediaFolders } from "./media-service";
+import { listConnections, getConnection } from "./integrations/connections-service";
+import { wpOverviewStats, wpQueue, wpQueueSummary } from "./integrations/wp-manager-service";
+import { getRetailInvoiceDetail } from "./retail-invoice/read-service";
+import { toLatinDigits } from "./digits";
+import { listMediaAssets, getMediaAsset } from "./media-service";
+import { listSavedReports } from "./reports-service";
+import { getWorkspaceDashboard, workspaceInsights, projectReport, listTemplates, listCalendar, listComments, resolveWorkspaceSubject, listDocuments, getDocument, listDocumentVersions, getContract, WorkspaceError } from "./workspace";
+import { listDeals, listCases } from "./crm-service";
+import { listInventoryTransfers } from "./transfer-service";
+import { listPriceLists, listPriceEntries } from "./price-lists-service";
+import { listWarehouseDocuments, isWarehouseDocumentKind } from "./warehouse-document-service";
+import { listLeads } from "./crm-lead-service";
+import { listPipelines } from "./crm-pipeline-service";
+import { crmOverview } from "./crm-overview";
+import { crmDataQuality } from "./crm-data-quality";
+import { listAssignableMembers } from "./crm-ownership";
+import { crmQueueView, crmQueueViewFilters } from "./crm-queue-views";
+import { getPool } from "./db";
+import { listParties } from "./parties-service";
+import { listAutomations } from "./crm-automation-service";
+
+/** Case-insensitive contains over a whitelist of row fields — tool-side `q`. */
+function rowMatches(row: Record<string, unknown>, fields: readonly string[], q: string): boolean {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return true;
+  return fields.some((field) => {
+    const value = row[field];
+    return typeof value === "string" && value.toLowerCase().includes(needle);
+  });
+}
 import { customerTimeline } from "./customer-timeline-service";
 import { listSegmentsWithCounts, previewSegment } from "./crm-segments-service";
 import { listWebsitePostsTool, listWebsiteProductsTool, websiteStatusTool } from "./website/content-service";
@@ -87,6 +163,81 @@ async function primaryLocationId(businessId: string): Promise<string | null> {
     [businessId],
   );
   return rows[0]?.id ?? null;
+}
+
+/**
+ * Issue #883 §1 — the MCP connection's branch consent, which read executors
+ * must honour. A connection consented to one branch may not receive an answer
+ * that aggregates or resolves another branch.
+ *
+ * Delivered as a single optional parameter on `runReadTool` rather than
+ * swapped into `floorScope` (which is real floor-assistant state) — the two
+ * pins differ in meaning: the floor pin says "where the waiter stands", this
+ * one says "which branches the owner consented to the connector seeing".
+ */
+export interface McpReadScope {
+  /**
+   * Branch-consented location ids, or null when consent covers every branch
+   * ("all"). A legacy connection has null here. An empty array means the
+   * stored grants named no branch, i.e. a closed credential.
+   */
+  allowedBranchIds: string[] | null;
+}
+
+/** The single branch a pinned read resolves to. Policy:
+ *
+ *   * consent 'all'/legacy → the primary location (today's behaviour);
+ *   * consent [a]         → a;
+ *   * consent [a,b,…]     → the model must pass an explicit locationId (the
+ *     refusing message below says so); a silently-chosen one would guess.
+ *
+ * An explicitly-requested branch outside the consented set is refused; so is a
+ * business with no live branch for the pin.
+ */
+type PinnedLocation =
+  | { ok: true; locationId: string | null }
+  | { ok: false; error: string };
+
+/** The one connected WooCommerce shop this read or write names. */
+type WpConnection = { id: string } | { error: string };
+async function resolveWpConnection(businessId: string, args: Record<string, unknown>): Promise<WpConnection> {
+  const explicit = typeof args.connectionId === "string" ? args.connectionId.trim() : "";
+  if (explicit) {
+    const conn = await getConnection(businessId, explicit);
+    if (!conn || conn.provider !== "woocommerce") return { error: "not_found" };
+    return { id: conn.id };
+  }
+  const connections = (await listConnections(businessId)).filter((c) => c.provider === "woocommerce");
+  if (connections.length === 0) return { error: "not_connected" };
+  if (connections.length > 1) return { error: "connection_required" };
+  return { id: connections[0].id };
+}
+
+async function pinnedLocation(
+  businessId: string,
+  args: Record<string, unknown>,
+  mcpScope: McpReadScope | undefined,
+): Promise<PinnedLocation> {
+  if (!mcpScope || mcpScope.allowedBranchIds === null) {
+    return { ok: true, locationId: await primaryLocationId(businessId) };
+  }
+  const allowed = mcpScope.allowedBranchIds;
+  if (allowed.length === 0) {
+    return { ok: false, error: "این اتصال به هیچ شعبه‌ای اجازهٔ خواندن ندارد." };
+  }
+  const requested =
+    typeof args.locationId === "string" && args.locationId.length > 0 ? args.locationId : null;
+  if (requested !== null) {
+    return allowed.includes(requested)
+      ? { ok: true, locationId: requested }
+      : { ok: false, error: "شعبهٔ درخواستی در فهرست شعبه‌های مجاز این اتصال نیست." };
+  }
+  if (allowed.length === 1) return { ok: true, locationId: allowed[0] };
+  return {
+    ok: false,
+    error:
+      "این اتصال به چند شعبهٔ خاص اجازهٔ دیدن دارد و این ابزار شعبه‌لحاظ است؛ locationId را از بین شعبه‌های مجاز صریح بده.",
+  };
 }
 
 /**
@@ -300,10 +451,29 @@ async function voidPattern(businessId: string, args: Record<string, unknown>, lo
  * empty result), how much is on hand right now, and what it is worth — so the
  * model can say "«نان» غیرفعال است" instead of "پیدا نشد".
  */
-async function findItems(businessId: string, args: Record<string, unknown>, locationId: string | null) {
+async function findItems(
+  businessId: string,
+  args: Record<string, unknown>,
+  /** The branch this read resolved to; null = every branch (trusted/system reads). */
+  locationId: string | null,
+  /** Issue #883 §1: consented branch set for an MCP caller; null = all branches. */
+  allowedBranchIds: string[] | null = null,
+) {
   const search = typeof args.query === "string" ? args.query.trim() : "";
   const kind = args.kind === "menu" || args.kind === "inventory" ? args.kind : "all";
   if (search.length === 0) return { ok: false as const, data: { error: "عبارت جست‌وجو خالی است." } };
+
+  // An MCP connection consented to a subset of branches finds only that
+  // subset's items — even as candidates, an out-of-branch id would be a write
+  // the branch gate refuses anyway, and the find would leak the item's
+  // existence. Filter in the query, not after it, so the LIMIT cannot be
+  // exhausted by invisible rows.
+  const branchFilter =
+    allowedBranchIds === null ? "" : "AND l.id = ANY($4::uuid[])";
+  const branchParam = allowedBranchIds === null ? [] : [allowedBranchIds];
+  if (allowedBranchIds !== null && allowedBranchIds.length === 0) {
+    return { ok: false as const, data: { error: "این اتصال به هیچ شعبه‌ای اجازهٔ خواندن ندارد." } };
+  }
 
   // ILIKE on both sides: an owner typing «نان» must find «نان باگت» and
   // «نان لواش», and typing «باگت» must find the same row.
@@ -320,11 +490,12 @@ async function findItems(businessId: string, args: Record<string, unknown>, loca
       on_hand: string;
       avg_cost: string;
       location_name: string;
+      location_id: string;
     }>(
       `SELECT i.id, i.name, i.unit, i.is_active, i.is_produced,
               trim_scale(COALESCE(sm.total, 0))::text AS on_hand,
               COALESCE(i.avg_cost, 0)::text AS avg_cost,
-              l.name AS location_name
+              l.name AS location_name, l.id AS location_id
          FROM inventory_items i
          JOIN locations l ON l.id = i.location_id
          LEFT JOIN LATERAL (
@@ -333,10 +504,10 @@ async function findItems(businessId: string, args: Record<string, unknown>, loca
             WHERE sm.inventory_item_id = i.id AND sm.location_id = i.location_id
          ) sm ON true
         WHERE l.business_id = $1 AND i.name ILIKE $2
-          AND ($3::uuid IS NULL OR l.id = $3)
+          AND ($3::uuid IS NULL OR l.id = $3) ${branchFilter}
         ORDER BY i.is_active DESC, i.name
         LIMIT 25`,
-      [businessId, pattern, locationId]
+      [businessId, pattern, locationId, ...branchParam],
     );
     for (const row of rows) {
       results.push({
@@ -370,10 +541,10 @@ async function findItems(businessId: string, args: Record<string, unknown>, loca
        JOIN locations l ON l.id = m.location_id
        LEFT JOIN menu_categories c ON c.id = m.category_id AND c.location_id = m.location_id
         WHERE l.business_id = $1 AND m.name ILIKE $2
-          AND ($3::uuid IS NULL OR l.id = $3)
+          AND ($3::uuid IS NULL OR l.id = $3) ${branchFilter}
         ORDER BY m.is_active DESC, m.name
         LIMIT 25`,
-      [businessId, pattern, locationId]
+      [businessId, pattern, locationId, ...branchParam],
     );
     for (const row of rows) {
       results.push({
@@ -1354,6 +1525,14 @@ export async function runReadTool(
   permissions?: ReadonlySet<Permission>,
   /** Set only by an authenticated connection whose credential is branch-pinned. */
   pinnedLocationId?: string,
+  /**
+   * Issue #883 §1 — when the caller is an MCP connection: the branches the
+   * connection's owner consented to. Absent means "no branch restriction"
+   * (in-app assistant, internal callers); for MCP server.ts always supplies
+   * it from the connection's stored grants. A consented branch must still pass
+   * the live authorizer's own branch access below — consent only narrows.
+   */
+  mcpScope?: McpReadScope,
 ): Promise<ToolResult> {
   // The provider-facing catalogue and production executor paths pass an
   // effective permission set. Keep the low-level executor compatible with
@@ -1363,6 +1542,27 @@ export async function runReadTool(
   if (permissions && !canUseAiTool(name, permissions)) {
     return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
   }
+  /**
+   * Whether a business-wide (branch-aggregating) answer may be given.
+   * The MCP catalogue hides these tools from branch-pinned connections, and
+   * the dispatcher refuses them; this is the executor-level fail close so a
+   * future caller path cannot inherit the leak.
+   */
+  const businessWideOk = !mcpScope || mcpScope.allowedBranchIds === null;
+  // Accounting/CX list reads take a model-supplied `limit`; clamp it so a
+  // verbose prompt cannot ask the register for 10 000 rows in one call.
+  const limitArg = (value: unknown, fallback = 50, max = 100): number => {
+    const parsed = typeof value === "number" ? Math.trunc(value) : fallback;
+    return Math.min(max, Math.max(1, parsed));
+  };
+  const businessWideRefusal = (toolFa: string): ToolResult => ({
+    ok: false,
+    data: {
+      error:
+        `ابزار «${toolFa}» پاسخ تجمیعی از همهٔ شعبه‌ها می‌سازد و این اتصال فقط به شعبه‌های مشخص ` +
+        "اجازهٔ دیدن دارد. برای خواندن تجمیعی، اتصال را به «همهٔ شعبه‌ها» مجاز کنید.",
+    },
+  });
   const dateError = readToolDateError(name, args);
   if (dateError) return { ok: false, data: { error: dateError } };
 
@@ -1412,9 +1612,24 @@ export async function runReadTool(
   // is pinned to the branch its issuer approved; trusted system callers with
   // neither identity keep their explicit tenant-wide system scope. `undefined`
   // is the fail-closed state (an identified member with no accessible branch).
+  //
+  // Issue #883 §1 adds a second, independent gate for MCP: the connection's
+  // branch consent. A consent-restricted read resolves its branch from the
+  // consent (primary / the one consented / the explicitly-named one) and the
+  // authorizer must still reach that branch live — a read passes both.
+  const consentRestricted = Boolean(mcpScope && mcpScope.allowedBranchIds !== null);
   let branchLocationPromise: Promise<string | null | undefined> | undefined;
   const branchLocationForRead = () => {
     branchLocationPromise ??= (async () => {
+      if (consentRestricted) {
+        const consented = await pinnedLocation(businessId, args, mcpScope);
+        if (!consented.ok || !consented.locationId) return undefined;
+        if (actorUserId) {
+          const assigned = await resolveActiveLocationForUser(businessId, actorUserId, consented.locationId);
+          if (assigned?.id !== consented.locationId) return undefined;
+        }
+        return consented.locationId;
+      }
       if (pinnedLocationId !== undefined) {
         if (!pinnedLocationId.trim()) return undefined;
         if (actorUserId) {
@@ -1432,6 +1647,30 @@ export async function runReadTool(
   const noBranchAccess: ToolResult = {
     ok: false,
     data: { error: reportScopeDenialReasonText("no_accessible_branch") },
+  };
+  /**
+   * The single branch a branch-only tool reads: the consent's own refusal
+   * messages first (they tell the model what to pass), then the live branch
+   * gate. A trusted system read with no pin or actor falls back to primary.
+   */
+  const consentedPin = async (): Promise<PinnedLocation> => {
+    const consented = await pinnedLocation(businessId, args, mcpScope);
+    if (!consented.ok) return consented;
+    const location = await branchLocationForRead();
+    if (location === undefined) {
+      return { ok: false, error: reportScopeDenialReasonText("no_accessible_branch") };
+    }
+    return { ok: true, locationId: location ?? consented.locationId };
+  };
+  /** Whether a record's own branch is outside the consent or the live branch gate. */
+  const branchOutOfScope = async (locationId: string): Promise<boolean> => {
+    if (consentRestricted && !mcpScope!.allowedBranchIds!.includes(locationId)) return true;
+    if (!consentRestricted && pinnedLocationId !== undefined && pinnedLocationId !== locationId) return true;
+    if (actorUserId) {
+      const assigned = await resolveActiveLocationForUser(businessId, actorUserId, locationId);
+      if (assigned?.id !== locationId) return true;
+    }
+    return false;
   };
   const branchRead = async (
     read: (locationId: string | null) => Promise<unknown>,
@@ -1466,6 +1705,649 @@ export async function runReadTool(
     // Scoped to this business's trade, like every other surface that lists
     // reports: offering a jeweller «چرخش میزها» would have the model run an
     // always-empty report and then explain the emptiness as a business fact.
+    // ── POS operations reads (issue #883 package 2, batch B) ────────────────
+    case "list_orders": {
+      // Per-branch facts, exactly like the till screens. The branch resolves
+      // the same way every pinned read does (primary / the one consented / the
+      // explicitly-named one), and the orders answer always carries the branch
+      // it lists so the model cannot confuse contexts.
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const status = typeof args.status === "string" && isOrderStatus(args.status) ? args.status : undefined;
+      const limit = limitArg(args.limit);
+      const orders = await listOrders(pinned.locationId, { status, limit });
+      return { ok: true, data: { locationId: pinned.locationId, count: orders.length, orders } };
+    }
+    case "get_order": {
+      const orderId = String(args.orderId ?? "").trim();
+      if (!orderId) return { ok: false, data: { error: "invalid_arguments" } };
+      const { rows } = await query<{ location_id: string }>(
+        `SELECT location_id FROM orders WHERE id = $1`,
+        [orderId],
+      );
+      const locationId = rows[0]?.location_id;
+      if (!locationId) return { ok: false, data: { error: "order_not_found" } };
+      // Branch consent: an order's branch must be inside the pin.
+      if (await branchOutOfScope(locationId)) {
+        return { ok: false, data: { error: "branch_out_of_consent" } };
+      }
+      const order = await getOrderDetail(locationId, orderId);
+      if (!order) return { ok: false, data: { error: "order_not_found" } };
+      return { ok: true, data: order };
+    }
+    case "list_shifts": {
+      // Team-scoped register: mirrors /api/shifts GET (leader's view of the
+      // whole register). A pinned consent restricts the branches the register
+      // may show; an explicit branch outside the pin is refused.
+      const limit = limitArg(args.limit);
+      const filters: { employeeId?: string; locationId?: string; status?: "open" | "closed"; limit?: number; offset?: number } = {
+        limit,
+        offset: typeof args.offset === "number" && args.offset > 0 ? Math.trunc(args.offset) : 0,
+      };
+      if (typeof args.employeeId === "string") filters.employeeId = args.employeeId;
+      if (args.status === "open" || args.status === "closed") filters.status = args.status;
+      const pin = mcpScope?.allowedBranchIds ?? null;
+      if (pin !== null) {
+        if (typeof args.locationId === "string") {
+          if (pin.length === 0 || !pin.includes(args.locationId)) {
+            return { ok: false, data: { error: "branch_out_of_consent" } };
+          }
+          filters.locationId = args.locationId;
+        } else if (pin.length === 1) {
+          filters.locationId = pin[0];
+        } else if (pin.length === 0) {
+          return { ok: true, data: { shifts: [], hasMore: false, note: "سیم‌سیم مجازیی به هیچ شعبه‌ای اجازهٔ دیدن ندارد." } };
+        } else {
+          // Multi-branch consent without a named branch cannot be answered by
+          // one service call without pulling every branch's register — which
+          // would include branches outside the pin. The model must name one.
+          return {
+            ok: false,
+            data: { error: `فهرست شیفت‌ها تجمیعی نیست و این اتصال به چند شعبه اجازه دارد — شعبهٔ موردنظر را با locationId مشخص کنید.` },
+          };
+        }
+      } else if (pinnedLocationId !== undefined) {
+        filters.locationId = typeof args.locationId === "string" ? args.locationId : pinnedLocationId;
+      } else if (typeof args.locationId === "string") {
+        filters.locationId = args.locationId;
+      }
+      if (filters.locationId && (await branchOutOfScope(filters.locationId))) {
+        return { ok: false, data: { error: "branch_out_of_consent" } };
+      }
+      const page = await listShifts(businessId, filters);
+      return { ok: true, data: page };
+    }
+
+    // Issue #883 package 2, batch C — menu catalogue + barcode hygiene reads.
+    // Same pin rule as list_orders: the branch resolves the same way on every
+    // screen, and the answer carries the branch id it speaks for.
+    case "get_menu_tree": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const tree = await getMenuTree(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, tree } };
+    }
+    case "list_formulas": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const formulas = await listFormulas(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: formulas.length, formulas } };
+    }
+    case "list_production_runs": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const limit = limitArg(args.limit);
+      const runs = await listRuns(pinned.locationId, limit);
+      return { ok: true, data: { locationId: pinned.locationId, count: runs.length, runs } };
+    }
+    case "list_item_barcodes": {
+      const inventoryItemId = String(args.inventoryItemId ?? "").trim();
+      if (!inventoryItemId) return { ok: false, data: { error: "invalid_arguments" } };
+      // Branch consent: the item's branch must be inside the pin, exactly like
+      // get_order guards an order's branch.
+      const { rows: itemBranch } = await query<{ location_id: string }>(
+        `SELECT location_id FROM inventory_items WHERE id = $1 AND business_id = $2`,
+        [inventoryItemId, businessId],
+      );
+      const itemBranchId = itemBranch[0]?.location_id;
+      if (!itemBranchId) return { ok: false, data: { error: "item_not_found" } };
+      if (await branchOutOfScope(itemBranchId)) {
+        return { ok: false, data: { error: "branch_out_of_consent" } };
+      }
+      const barcodes = await listBarcodes(inventoryItemId);
+      return { ok: true, data: { inventoryItemId, count: barcodes.length, barcodes } };
+    }
+    case "list_items_without_barcode": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const items = await listItemsWithoutBarcode(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: items.length, items } };
+    }
+    // Issue #883 package 2, batch D — CRM lists (business-scoped records;
+    // the customer file is one list per business, not per branch).
+    case "list_customer_notes": {
+      const customerId = String(args.customerId ?? "").trim();
+      if (!customerId) return { ok: false, data: { error: "invalid_arguments" } };
+      const notes = await listCustomerNotes(businessId, customerId);
+      return { ok: true, data: { customerId, count: notes.length, notes } };
+    }
+    case "list_crm_activities": {
+      const activities = await listActivities(businessId, {
+        customerId: typeof args.customerId === "string" && args.customerId.trim() ? args.customerId.trim() : undefined,
+        openOnly: args.openOnly === true ? true : undefined,
+        completedOnly: args.completedOnly === true ? true : undefined,
+        limit: limitArg(args.limit),
+      });
+      return { ok: true, data: { count: activities.length, activities } };
+    }
+    case "list_crm_automations": {
+      const automations = await listAutomations(businessId);
+      return { ok: true, data: { count: automations.length, automations } };
+    }
+    // Issue #883 package 2, batch E — business shape: branches + staff.
+    case "list_branches": {
+      const branches = await listBranches(businessId);
+      return { ok: true, data: { count: branches.length, branches } };
+    }
+    case "list_team_members": {
+      const members = await listMembers(businessId);
+      return { ok: true, data: { count: members.length, members } };
+    }
+    // Issue #883 package 2, batch F — growth reads.
+    case "list_promotions": {
+      const promotions = await listPromotions(businessId, args.includeInactive === true);
+      return { ok: true, data: { count: promotions.length, promotions } };
+    }
+    case "get_gift_card_status": {
+      const code = String(args.code ?? "").trim();
+      if (!code) return { ok: false, data: { error: "invalid_arguments" } };
+      const card = await getGiftCardByCode(businessId, code);
+      if (!card) return { ok: false, data: { error: "gift_card_not_found" } };
+      const [balance, history] = await Promise.all([
+        giftCardBalance(businessId, code),
+        giftCardHistory(businessId, code),
+      ]);
+      return { ok: true, data: { code: card.code, balance, isActive: card.isActive, expiresAt: card.expiresAt, history } };
+    }
+    // Issue #883 package 2, batch G — stock counts + suppliers directory.
+    // Issue #883 package 2, batch AM — jewelry weight items, pinned-branch
+    // scoped exactly like the vertical_jewelry items table route.
+    case "list_jewelry_items": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const items = await listWeightItems(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: items.length, items } };
+    }
+    // Issue #883 package 2, batch AN — cosmetics board & brand directory plus
+    // the accessories board; all pinned-branch, same polite industry refusal
+    // as get_near_expiry_items.
+    case "list_cosmetic_items": {
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== "cosmetics") {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای آرایشی و بهداشتی در دسترس است." } };
+      }
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const board = await listCosmeticBoard(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
+    }
+    case "list_cosmetic_brands": {
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== "cosmetics") {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای آرایشی و بهداشتی در دسترس است." } };
+      }
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const brands = await listBrands(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: brands.length, brands } };
+    }
+    case "list_accessory_items": {
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== "accessories") {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای لوازم‌جانبی در دسترس است." } };
+      }
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const board = await listVariantBoard(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
+    }
+    // Issue #883 package 2, batch AO — one trade-goods board read bound to the
+    // business's own industry (the routes do the same binding per namespace).
+    case "list_trade_goods_items": {
+      const requested = String(args.industry ?? "");
+      if (!isTradeGoodsIndustry(requested)) return { ok: false, data: { error: "invalid_arguments" } };
+      const industry = await getBusinessIndustry(businessId);
+      if (industry !== requested) {
+        return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای همین صنعت (عمده/ابزار/خرازی) در دسترس است." } };
+      }
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const board = await listTradeGoodsBoard(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: board.length, items: board } };
+    }
+    // Issue #883 package 2, batch AP — data-transfer reads. The engine key is
+    // the MCP capability; the entity's own key (the route's second key) is
+    // re-checked here from the caller's effective permission set, and provider
+    // (Holoo) jobs stay hidden unless the caller may see integrations.
+    case "list_data_entities": {
+      const granted = permissions ?? null;
+      const industry = await getBusinessIndustry(businessId);
+      const mayImport = granted ? granted.has(PERMISSIONS.dataImport) : true;
+      const entities = entitiesForIndustry(industry)
+        .filter((entity) => !granted || granted.has(entity.exportPermission))
+        .map((entity) => ({
+          key: entity.key,
+          module: entity.module,
+          moduleLabel: DATA_MODULE_LABELS[entity.module],
+          label: entity.label,
+          locationScoped: entity.locationScoped === true,
+          canExport: true,
+          canImport:
+            mayImport && isImportable(entity) && Boolean(entity.importPermission && (!granted || granted.has(entity.importPermission))),
+          defaultExportFields: defaultExportFields(entity),
+        }));
+      return { ok: true, data: { entities, canImport: mayImport } };
+    }
+    case "list_export_jobs": {
+      const entityKey = String(args.entityKey ?? "").trim() || undefined;
+      if (entityKey && !findEntity(entityKey)) return { ok: false, data: { error: "unknown_entity" } };
+      const mayIntegrations = !permissions || permissions.has(PERMISSIONS.integrationsView);
+      const jobs = (await listExportJobs(businessId, { entityKey })).filter(
+        (job) => mayIntegrations || !job.providerMetadata,
+      );
+      return { ok: true, data: { count: jobs.length, jobs } };
+    }
+    case "get_export_job": {
+      const id = String(args.id ?? "").trim();
+      if (!id) return { ok: false, data: { error: "invalid_arguments" } };
+      const job = await getExportJob(businessId, id);
+      if (!job) return { ok: false, data: { error: "job_not_found" } };
+      if (job.providerMetadata && permissions && !permissions.has(PERMISSIONS.integrationsView)) {
+        return { ok: false, data: { error: "job_not_found" } };
+      }
+      const entity = findEntity(job.entityKey);
+      if (entity?.exportPermission && permissions && !permissions.has(entity.exportPermission)) {
+        return { ok: false, data: { error: "forbidden", requires: entity.exportPermission } };
+      }
+      return { ok: true, data: { job } };
+    }
+    case "list_import_jobs": {
+      const entityKey = String(args.entityKey ?? "").trim() || undefined;
+      if (entityKey && !findEntity(entityKey)) return { ok: false, data: { error: "unknown_entity" } };
+      const jobs = await listImportJobs(businessId, { entityKey });
+      return { ok: true, data: { count: jobs.length, jobs } };
+    }
+    case "get_import_job": {
+      const id = String(args.id ?? "").trim();
+      if (!id) return { ok: false, data: { error: "invalid_arguments" } };
+      const job = await getImportJob(businessId, id);
+      if (!job) return { ok: false, data: { error: "job_not_found" } };
+      const entity = findEntity(job.entityKey);
+      if (entity?.importPermission && permissions && !permissions.has(entity.importPermission)) {
+        return { ok: false, data: { error: "forbidden", requires: entity.importPermission } };
+      }
+      return { ok: true, data: { job } };
+    }
+    case "list_data_schedules": {
+      const schedules = await listScheduledExports(businessId);
+      return { ok: true, data: { count: schedules.length, schedules } };
+    }
+    case "list_data_templates": {
+      const kind = String(args.kind ?? "") === "export" ? "export" : "mapping";
+      const entityKey = String(args.entity ?? "").trim() || undefined;
+      if (entityKey && !findEntity(entityKey)) return { ok: false, data: { error: "unknown_entity" } };
+      const templates =
+        kind === "export" ? await listExportTemplates(businessId, entityKey) : await listMappingTemplates(businessId, entityKey);
+      return { ok: true, data: { templates, kind } };
+    }
+    // Issue #883 package 2, batch AI — paired devices.
+    case "list_devices": {
+      // No device token exists in the chat channel — currentDeviceId is
+      // deliberately null there, as the route reports for an unpaired caller.
+      const [devices, currentDeviceId] = await Promise.all([
+        listDevices(businessId),
+        findActiveDeviceId(null, businessId),
+      ]);
+      return { ok: true, data: { devices, currentDeviceId } };
+    }
+    // Issue #883 package 2, batch AH — backup health + run history.
+    case "get_backup_status": {
+      const [health, runs] = await Promise.all([getBackupHealth(businessId), listBackupRuns(businessId)]);
+      return { ok: true, data: { health, runs } };
+    }
+    case "list_stock_counts": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const counts = await listStockCounts(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: counts.length, counts } };
+    }
+    case "get_stock_count": {
+      const countId = String(args.countId ?? "").trim();
+      if (!countId) return { ok: false, data: { error: "invalid_arguments" } };
+      // The detail service is keyed by (business, location, count); resolve the
+      // count's own branch and then replay — mirroring get_order's consent hop.
+      const { rows: countBranch } = await query<{ location_id: string }>(
+        `SELECT location_id FROM stock_counts WHERE id = $1`,
+        [countId],
+      );
+      const countLocationId = countBranch[0]?.location_id;
+      if (!countLocationId) return { ok: false, data: { error: "stock_count_not_found" } };
+      if (await branchOutOfScope(countLocationId)) {
+        return { ok: false, data: { error: "branch_out_of_consent" } };
+      }
+      const client = await getPool().connect();
+      try {
+        const detail = await getStockCountDetail(client, { businessId, locationId: countLocationId, countId });
+        if (!detail) return { ok: false, data: { error: "stock_count_not_found" } };
+        return { ok: true, data: detail };
+      } finally {
+        client.release();
+      }
+    }
+    case "list_suppliers": {
+      const page = typeof args.page === "number" && Number.isInteger(args.page) && args.page >= 1 ? args.page : 1;
+      const pageSize = typeof args.pageSize === "number" && Number.isInteger(args.pageSize)
+        ? Math.min(Math.max(args.pageSize, 1), 50)
+        : 20;
+      const result = await listParties(businessId, {
+        roles: ["Supplier"],
+        includeInactive: args.includeInactive === true,
+        q: typeof args.q === "string" ? args.q : undefined,
+        page,
+        pageSize,
+      });
+      return { ok: true, data: { total: result.total, page, pageSize, count: result.parties.length, suppliers: result.parties } };
+    }
+    // Issue #883 package 2, batch H — workspace projects list. The subject is
+    // the actor only insofar as their workspace flags admit: a reader without
+    // workspace.manage sees only their own projects, the screens filter the
+    // same way (workspaceOwner flags).
+    // Issue #883 package 2, batch N1 — the workspace overview lane. Each
+    // service builds its OWN visibility from the owner (project membership,
+    // contract access, financials) — constructed exactly like batch H's
+    // list_workspace_projects case does.
+    case "get_workspace_dashboard": {
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const dashboard = await getWorkspaceDashboard(owner, {
+        horizonDays: typeof args.horizonDays === "number" && args.horizonDays > 0 ? Math.min(args.horizonDays, 90) : undefined,
+      });
+      return { ok: true, data: dashboard };
+    }
+    case "get_workspace_insights": {
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const insights = await workspaceInsights(owner);
+      return { ok: true, data: insights };
+    }
+    case "get_workspace_project_report": {
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const report = await projectReport(owner, {
+        projectId: typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : undefined,
+      });
+      return { ok: true, data: { count: report.length, report } };
+    }
+    // Issue #883 package 2, batch N2a — calendar & comment threads. Subject
+    // access is proven from the subject itself before listing, verbatim from
+    // the route (never trusting an id in the payload).
+    // Issue #883 package 2, batch N2b — document lane. listDocuments derives
+    // visibility from the owner (the route's documentWhere), never a filter.
+    case "list_workspace_documents": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 300) : 100;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const documents = await listDocuments(owner, {
+        projectId: typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : undefined,
+        taskId: typeof args.taskId === "string" && args.taskId.trim() ? args.taskId.trim() : undefined,
+        contractId: typeof args.contractId === "string" && args.contractId.trim() ? args.contractId.trim() : undefined,
+        partyId: typeof args.partyId === "string" && args.partyId.trim() ? args.partyId.trim() : undefined,
+        status: typeof args.status === "string" && args.status.trim() ? (args.status.trim() as never) : undefined,
+        currentOnly: args.currentOnly !== false,
+        search: typeof args.search === "string" && args.search.trim() ? args.search.trim() : undefined,
+        limit,
+        offset,
+      });
+      return { ok: true, data: { count: documents.length, offset, documents } };
+    }
+    case "get_workspace_document": {
+      const documentId = typeof args.documentId === "string" ? args.documentId.trim() : "";
+      if (!documentId) return { ok: false, data: { error: "invalid_arguments" } };
+      const doc = await getDocument(businessId, documentId);
+      if (!doc) return { ok: false, data: { error: "document_not_found" } };
+      const versions = args.includeVersions === true ? await listDocumentVersions(businessId, documentId) : undefined;
+      return { ok: true, data: { document: doc, ...(versions ? { versions } : {}) } };
+    }
+    case "list_workspace_calendar": {
+      const from = typeof args.from === "string" ? args.from.trim() : "";
+      const to = typeof args.to === "string" ? args.to.trim() : "";
+      if (!from || !to) return { ok: false, data: { error: "invalid_arguments" } };
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      const projectId = typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : undefined;
+      const entries = await listCalendar(owner, { from, to, projectId });
+      return { ok: true, data: { count: entries.length, entries } };
+    }
+    case "list_workspace_comments": {
+      const subjectType = typeof args.subjectType === "string" ? args.subjectType.trim() : "";
+      const subjectId = typeof args.subjectId === "string" ? args.subjectId.trim() : "";
+      if (!subjectType || !subjectId) return { ok: false, data: { error: "invalid_arguments" } };
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      await resolveWorkspaceSubject(owner, subjectType as never, subjectId, "view");
+      const comments = await listComments(businessId, subjectType as never, subjectId);
+      return { ok: true, data: { count: comments.length, comments } };
+    }
+    case "list_workspace_templates": {
+      // Template keys come from the industry catalogue — the read the
+      // project-create dialog runs before workspace.project.create.
+      const templates = await listTemplates(businessId);
+      return { ok: true, data: { count: templates.length, templates } };
+    }
+    case "list_workspace_projects": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const projects = await listWorkspaceProjects(
+        { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) },
+        { includeArchived: args.includeArchived === true, limit, offset },
+      );
+      return { ok: true, data: { count: projects.length, projects } };
+    }
+    // Issue #883 package 2, batch AQ — one contract's detail. The subject-view
+    // gate is re-run from the actor's own access flags, exactly the route's
+    // resolveWorkspaceSubject dance (not-found hides the contract's existence).
+    case "get_workspace_contract": {
+      const contractId = String(args.id ?? args.contractId ?? "").trim();
+      if (!contractId) return { ok: false, data: { error: "invalid_arguments" } };
+      const owner = { businessId, actorUserId: actorUserId ?? "", access: workspaceAccessFlags(permissions ?? new Set()) };
+      try {
+        await resolveWorkspaceSubject(owner, "contract", contractId, "view");
+      } catch (err) {
+        if (err instanceof WorkspaceError) return { ok: false, data: { error: err.code } };
+        throw err;
+      }
+      const contract = await getContract(businessId, contractId);
+      if (!contract) return { ok: false, data: { error: "contract_not_found" } };
+      const canTransition = await resolveWorkspaceSubject(owner, "contract", contractId, "edit")
+        .then(() => true)
+        .catch(() => false);
+      return { ok: true, data: { contract, canTransition } };
+    }
+    // Issue #883 package 2, batch AR — the CRM custom-field directory, grouped
+    // per target exactly like the configurator's GET.
+    case "list_custom_fields": {
+      const targetArg = String(args.target ?? "").trim();
+      const targets = targetArg
+        ? ([targetArg] as CustomFieldTarget[]).filter((t) => (CUSTOM_FIELD_TARGETS as readonly string[]).includes(t))
+        : [...CUSTOM_FIELD_TARGETS];
+      if (targetArg && targets.length === 0) return { ok: false, data: { error: "custom_field_target_invalid" } };
+      const groups = await Promise.all(
+        targets.map(async (target) => ({
+          target,
+          fields: await listCustomFields(businessId, target, { includeArchived: args.includeArchived !== false }),
+        })),
+      );
+      return { ok: true, data: { groups } };
+    }
+    // Issue #883 package 2, batch I — knowledge centre + media library reads.
+    // Issue #883 package 2, batch O — the site's pages & media library.
+    // WebsiteResult errors come back as data so a disconnected site explains
+    // itself instead of throwing (the routes map the same codes to 4xx/503).
+    case "list_cms_pages": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 50;
+      const page = typeof args.page === "number" && args.page >= 1 ? Math.trunc(args.page) : 1;
+      const result = await listCmsPages(businessId, { limit, page });
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: { pages: result.data.pages, totalDocs: result.data.totalDocs, page } };
+    }
+    case "list_cms_media": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 24;
+      const page = typeof args.page === "number" && args.page >= 1 ? Math.trunc(args.page) : 1;
+      const result = await listCmsMedia(businessId, { limit, page });
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: { media: result.data.media, totalDocs: result.data.totalDocs, page } };
+    }
+    case "list_kb_catalogue": {
+      return { ok: true, data: await listKbCatalogue() };
+    }
+    case "search_kb_articles": {
+      const q = String(args.q ?? "").trim();
+      if (!q) return { ok: false, data: { error: "invalid_arguments" } };
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 20) : 6;
+      const hits = await searchKbArticles(q, limit);
+      return { ok: true, data: { count: hits.length, hits } };
+    }
+    case "list_media_assets": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 50) : 12;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const result = await listMediaAssets(businessId, {
+        search: typeof args.search === "string" && args.search.trim() ? args.search.trim() : undefined,
+        kind: typeof args.kind === "string" && args.kind.trim() ? (args.kind.trim() as never) : undefined,
+        limit,
+        offset,
+      });
+      return { ok: true, data: result };
+    }
+    case "get_media_asset": {
+      const assetId = String(args.assetId ?? "").trim();
+      if (!assetId) return { ok: false, data: { error: "invalid_arguments" } };
+      const asset = await getMediaAsset(businessId, assetId);
+      if (!asset) return { ok: false, data: { error: "media_not_found" } };
+      return { ok: true, data: asset };
+    }
+    // Issue #883 package 2, batch K1 — CRM sales workflow reads.
+    case "list_crm_deals": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;
+      const deals = await listDeals(businessId, {
+        customerId: typeof args.customerId === "string" && args.customerId.trim() ? args.customerId.trim() : undefined,
+        stageId: typeof args.stageId === "string" && args.stageId.trim() ? args.stageId.trim() : undefined,
+        pipelineId: typeof args.pipelineId === "string" && args.pipelineId.trim() ? args.pipelineId.trim() : undefined,
+        ownerUserId: typeof args.ownerUserId === "string" && args.ownerUserId.trim() ? args.ownerUserId.trim() : undefined,
+        openOnly: args.openOnly === true,
+        q: typeof args.q === "string" && args.q.trim() ? args.q.trim() : undefined,
+        minValueRial: typeof args.minValueRial === "number" ? args.minValueRial : undefined,
+        maxValueRial: typeof args.maxValueRial === "number" ? args.maxValueRial : undefined,
+        limit,
+      });
+      return { ok: true, data: { count: deals.length, deals } };
+    }
+    // Issue #883 package 2, batch L — the two warehouse lanes' lists, via the
+    // services the routes moved to since batch L (single SQL source of truth).
+    // Issue #883 package 2, batch M — price lists (branch-pinned like the
+    // other catalogue reads; the routes read on menuView).
+    case "list_price_lists": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const priceLists = await listPriceLists(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: priceLists.length, priceLists } };
+    }
+    case "list_price_list_entries": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const entries = await listPriceEntries(pinned.locationId);
+      return { ok: true, data: { locationId: pinned.locationId, count: entries.length, entries } };
+    }
+    case "list_inventory_transfers": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 100;
+      const transfers = await listInventoryTransfers(businessId, { limit });
+      return { ok: true, data: { count: transfers.length, transfers } };
+    }
+    case "list_warehouse_documents": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 500) : 100;
+      const kind = typeof args.kind === "string" && isWarehouseDocumentKind(args.kind) ? args.kind : undefined;
+      const locationId =
+        typeof args.locationId === "string" && args.locationId.trim() ? args.locationId.trim() : undefined;
+      const documents = await listWarehouseDocuments(businessId, { kind, locationId, limit });
+      return { ok: true, data: { count: documents.length, documents } };
+    }
+    case "list_crm_cases": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 200) : 100;
+      const cases = await listCases(businessId, {
+        customerId: typeof args.customerId === "string" && args.customerId.trim() ? args.customerId.trim() : undefined,
+        status: typeof args.status === "string" ? (args.status as "open") : undefined,
+        priority: typeof args.priority === "string" ? (args.priority as "normal") : undefined,
+        q: typeof args.q === "string" && args.q.trim() ? args.q.trim() : undefined,
+        openOnly: args.openOnly === true,
+        breachedOnly: args.breachedOnly === true,
+        assigneeUserId: typeof args.assigneeUserId === "string" && args.assigneeUserId.trim() ? args.assigneeUserId.trim() : undefined,
+        unowned: args.unowned === true,
+        limit,
+      });
+      return { ok: true, data: { count: cases.length, cases } };
+    }
+    case "list_crm_leads": {
+      const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 100) : 50;
+      const offset = typeof args.offset === "number" && args.offset >= 0 ? Math.trunc(args.offset) : 0;
+      const { leads, total } = await listLeads(businessId, {
+        status: typeof args.status === "string" ? (args.status as "open") : undefined,
+        ownerUserId: typeof args.ownerUserId === "string" && args.ownerUserId.trim() ? args.ownerUserId.trim() : undefined,
+        rating: typeof args.rating === "string" ? (args.rating as "warm") : undefined,
+        source: typeof args.source === "string" && args.source.trim() ? args.source.trim() : undefined,
+        search: typeof args.search === "string" && args.search.trim() ? args.search.trim() : undefined,
+        dueOnly: args.dueOnly === true,
+        limit,
+        offset,
+      });
+      return { ok: true, data: { total, count: leads.length, offset, leads } };
+    }
+    // Issue #883 package 2, K2 addendum — the four CRM screens' read surfaces.
+    case "get_crm_overview": {
+      const overview = await crmOverview(businessId);
+      return { ok: true, data: overview };
+    }
+    case "get_crm_data_quality": {
+      const groups = await crmDataQuality(businessId);
+      return { ok: true, data: { count: groups.length, groups } };
+    }
+    case "list_crm_members": {
+      const members = await listAssignableMembers(businessId);
+      return { ok: true, data: { count: members.length, members } };
+    }
+    case "get_crm_queue": {
+      const queueKey = typeof args.queueKey === "string" ? args.queueKey.trim() : "";
+      if (!queueKey) return { ok: false, data: { error: "invalid_arguments" } };
+      const view = crmQueueView(queueKey as never);
+      if (!view) return { ok: false, data: { error: "not_found" } };
+      return { ok: true, data: { view, filters: crmQueueViewFilters(queueKey as never) } };
+    }
+    case "list_crm_pipelines": {
+      const includeArchived = args.includeArchived === true;
+      const pipelines = await listPipelines(businessId, { includeArchived });
+      return { ok: true, data: { count: pipelines.length, pipelines } };
+    }
+    // Issue #883 package 2, batch J — saved reports.
+    case "list_saved_reports": {
+      const saved = await listSavedReports(businessId);
+      return { ok: true, data: { count: saved.length, saved } };
+    }
     case "list_reports": {
       const industry = await getBusinessIndustry(businessId);
       return {
@@ -1513,12 +2395,23 @@ export async function runReadTool(
       if (requested === null) {
         return { ok: false, data: { error: "مقدار scope نامعتبر است؛ فقط branch یا business-wide." } };
       }
+      // Issue #883 §1: a branch-restricted MCP consent never reads across
+      // branches, and its report pin is the consented branch — which must
+      // still pass the authorizer's live branch access below.
+      let reportPin = pinnedLocationId;
+      if (consentRestricted) {
+        if (requested === "business-wide") return businessWideRefusal(def.label);
+        const consented = await consentedPin();
+        if (!consented.ok) return { ok: false, data: { error: consented.error } };
+        if (!consented.locationId) return noBranchAccess;
+        reportPin = consented.locationId;
+      }
       // A pinned connection has an actor or a fixed location and can never
       // inherit this trusted path. Background/system reads retain their
       // explicit all-branch authority; ordinary user reads still resolve a
       // live assigned branch and must request elevated scope explicitly.
       const trustedSystemRead =
-        !actorUserId && pinnedLocationId === undefined &&
+        !actorUserId && reportPin === undefined &&
         (permissions === undefined || permissions.has(PERMISSIONS.reportsBusinessWide));
       if (
         requested === "business-wide" &&
@@ -1532,10 +2425,10 @@ export async function runReadTool(
         ? await authorizedReportScopeForUser(businessId, actorUserId, {
             requested,
             hasBusinessWide,
-            pinnedLocationId,
+            pinnedLocationId: reportPin,
           })
-        : pinnedLocationId && requested !== "business-wide"
-          ? { ok: true as const, scope: branchScope(pinnedLocationId) }
+        : reportPin && requested !== "business-wide"
+          ? { ok: true as const, scope: branchScope(reportPin) }
           : trustedSystemRead && requested !== "branch"
             ? { ok: true as const, scope: BUSINESS_WIDE_SCOPE }
             : await authorizedReportScopeForUser(businessId, undefined, { requested, hasBusinessWide });
@@ -1555,11 +2448,16 @@ export async function runReadTool(
       const scopeNote =
         scope.mode === "business-wide"
           ? "این نتیجه برای همهٔ شعب کسب‌وکار است."
-          : pinnedLocationId && !actorUserId
+          : reportPin && !actorUserId
             ? "این نتیجه فقط برای شعبهٔ ثبت‌شدهٔ اتصال است."
             : `این نتیجه فقط برای شعبهٔ فعال شما (${scopeLocationName ?? "شعبه"}) است.`;
 
+      // Issue #883 §1: with a branch-scoped MCP consent, the business-wide
+      // statements (P&L, balance sheet) refuse, since their whole point is a
+      // total across branches; branch-pinned trade reports resolve the
+      // consented branch instead of primary.
       if (key === "profit_and_loss") {
+        if (!businessWideOk) return businessWideRefusal("سود و زیان");
         return {
           ok: true,
           data: {
@@ -1569,6 +2467,7 @@ export async function runReadTool(
         };
       }
       if (key === "balance_sheet") {
+        if (!businessWideOk) return businessWideRefusal("ترازنامه");
         return {
           ok: true,
           data: { scopeNote, report: await getBalanceSheet(businessId, dateTo, scope) },
@@ -1596,8 +2495,16 @@ export async function runReadTool(
     // Phase 33 — name→id resolution, so the assistant never asks an owner for
     // a UUID, and never reports "پیدا نشد" for an item that is merely disabled.
     case "find_items": {
+      const allowed = mcpScope?.allowedBranchIds ?? null;
+      // A multi-branch consent without a named branch searches every branch
+      // the connection may see *and* its authorizer can still reach.
+      if (allowed !== null && allowed.length > 1 && typeof args.locationId !== "string") {
+        const reachable: string[] = [];
+        for (const id of allowed) if (!(await branchOutOfScope(id))) reachable.push(id);
+        return findItems(businessId, args, null, reachable);
+      }
       const locationId = await branchLocationForRead();
-      return locationId === undefined ? noBranchAccess : findItems(businessId, args, locationId);
+      return locationId === undefined ? noBranchAccess : findItems(businessId, args, locationId, allowed);
     }
 
     case "get_waste_history": {
@@ -1674,6 +2581,160 @@ export async function runReadTool(
     // Phase C — the two messaging reads that feed messaging.campaign.create.
     // Both list the business's own rows; the campaign create action still runs
     // through the role-guarded /api/messaging route when a human applies it.
+    // Issue #883 package 2, batch Q — the sales-invoice screens' reads.
+    // The route's filters are mirrored one-for-one (Latin digits, ISO date
+    // bounds, enum guards) so the read answers with exactly what the screen
+    // would list at the same office index.
+    // Issue #883 package 2, batch S — the WooCommerce manager's reads.
+    // Connection resolution mirrors the screens: an explicit connectionId is
+    // honoured; otherwise the single active woocommerce connection answers,
+    // and zero or many ask the model to name one.
+    // Issue #883 package 2, batch T — website infra reads (DNS/CDN status).
+    // Issue #883 package 2, batch V — product masters (branch-pinned reads).
+    // Issue #883 package 2, batch W — the audit-trail screen's read.
+    // The route rejects invalid cursors/filters rather than silently paging
+    // wrong or reaching PostgreSQL casts; this case mirrors that contract
+    // byte-for-byte so the gate answers the same way as the screen.
+    // Issue #883 package 2, batch X — media library organisation reads.
+    case "list_media_collections": {
+      return { ok: true, data: { collections: await listMediaCollections(businessId) } };
+    }
+    case "list_media_folders": {
+      return { ok: true, data: { folders: await listMediaFolders(businessId) } };
+    }
+    // Issue #883 package 2, batch Y — the account statement screen's read.
+    // Same fail-soft shape as the routes: date format is rejected up front,
+    // a missing account answers account_not_found rather than throwing.
+    // Issue #883 package 2, batch Z4 — the close-readiness screen's read.
+    case "get_fiscal_readiness": {
+      return { ok: true, data: { readiness: await getFiscalReadiness(businessId) } };
+    }
+    case "get_account_statement": {
+      const accountId = typeof args.accountId === "string" ? args.accountId : "";
+      if (!accountId) return { ok: false, data: { error: "account_required" } };
+      const isoDate = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
+      const dateFrom = isoDate(args.dateFrom);
+      const dateTo = isoDate(args.dateTo);
+      if ((args.dateFrom !== undefined && !dateFrom) || (args.dateTo !== undefined && !dateTo)) {
+        return { ok: false, data: { error: "invalid_date" } };
+      }
+      const statement = await getAccountStatement(businessId, accountId, { dateFrom, dateTo });
+      if (!statement) return { ok: false, data: { error: "account_not_found" } };
+      return { ok: true, data: { statement } };
+    }
+    case "list_audit_log": {
+      const AUDIT_MAX_LIMIT = 200;
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const SAFE_FILTER = /^[a-z][a-z0-9_.-]{0,79}$/i;
+      const entity = typeof args.entity === "string" && args.entity !== "" ? args.entity : undefined;
+      const action = typeof args.action === "string" && args.action !== "" ? args.action : undefined;
+      const actorId = typeof args.actorId === "string" && args.actorId !== "" ? args.actorId : undefined;
+      const entityId = typeof args.entityId === "string" && args.entityId !== "" ? args.entityId : undefined;
+      const before = typeof args.before === "number" && Number.isSafeInteger(args.before) ? args.before : undefined;
+      const limit = typeof args.limit === "number" && Number.isSafeInteger(args.limit) ? args.limit : undefined;
+      if (before !== undefined && before < 1) return { ok: false, data: { error: "invalid_before" } };
+      if (limit !== undefined && (limit < 1 || limit > AUDIT_MAX_LIMIT)) return { ok: false, data: { error: "invalid_limit" } };
+      if ((entity && !SAFE_FILTER.test(entity)) || (action && !SAFE_FILTER.test(action))) {
+        return { ok: false, data: { error: "invalid_filter" } };
+      }
+      if ((actorId && !UUID_RE.test(actorId)) || (entityId && entity === "account" && !UUID_RE.test(entityId))) {
+        return { ok: false, data: { error: "invalid_identifier" } };
+      }
+      const entries = await listAuditLog(businessId, { entity, entityId, actorId, action, before, limit });
+      return { ok: true, data: { entries } };
+    }
+    case "list_product_attributes": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: { definitions: [] } };
+      return { ok: true, data: { definitions: await listAttributeDefinitions(pinned.locationId) } };
+    }
+    case "list_barcode_templates": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: { templates: [] } };
+      return { ok: true, data: { templates: await listWeightBarcodeTemplates(pinned.locationId) } };
+    }
+    case "get_website_dns": {
+      const result = await cmsWebsiteDns(businessId);
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: result.data };
+    }
+    case "get_website_cdn": {
+      const result = await cmsSiteCdn(businessId);
+      if (!result.ok) return { ok: false, data: { error: result.error } };
+      return { ok: true, data: result.data };
+    }
+    case "list_wp_queue": {
+      const conn = await resolveWpConnection(businessId, args);
+      if ("error" in conn) return { ok: false, data: { error: conn.error } };
+      const rows = await wpQueue(businessId, conn.id, {
+        status: typeof args.status === "string"
+          ? (args.status as import("./integrations/wp-manager-service").WpQueueFilterOptions["status"])
+          : undefined,
+        direction: typeof args.direction === "string" ? (args.direction as "out" | "in" | "all") : undefined,
+        search: typeof args.search === "string" ? args.search : undefined,
+        limit: typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.min(500, Math.max(1, Math.floor(args.limit))) : undefined,
+      });
+      return { ok: true, data: { rows, connectionId: conn.id } };
+    }
+    case "get_wp_queue_summary": {
+      const conn = await resolveWpConnection(businessId, args);
+      if ("error" in conn) return { ok: false, data: { error: conn.error } };
+      return { ok: true, data: { summary: await wpQueueSummary(businessId, conn.id), connectionId: conn.id } };
+    }
+    case "get_wp_overview": {
+      const conn = await resolveWpConnection(businessId, args);
+      if ("error" in conn) return { ok: false, data: { error: conn.error } };
+      return { ok: true, data: { overview: await wpOverviewStats(businessId, conn.id), connectionId: conn.id } };
+    }
+    case "list_sales_invoices": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const locationId = pinned.locationId;
+      const q = toLatinDigits(typeof args.q === "string" ? args.q : "").replace(/[٬,]/g, "").trim();
+      const method = typeof args.method === "string" ? args.method : "";
+      if (method && !["cash", "bank", "credit"].includes(method)) {
+        return { ok: false, data: { error: "invalid_payment_method" } };
+      }
+      const rawStatus = typeof args.status === "string" ? args.status : "";
+      if (rawStatus && !["completed", "voided"].includes(rawStatus)) return { ok: false, data: { error: "invalid_invoice_status" } };
+      const isoDate = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+      const dateFrom = isoDate(args.dateFrom);
+      const dateTo = isoDate(args.dateTo);
+      if ((args.dateFrom !== undefined && !dateFrom) || (args.dateTo !== undefined && !dateTo)) {
+        return { ok: false, data: { error: "invalid_date" } };
+      }
+      if (dateFrom && dateTo && dateFrom > dateTo) return { ok: false, data: { error: "invalid_date_range" } };
+      const page = typeof args.page === "number" && Number.isSafeInteger(args.page) && args.page > 0 ? args.page : 1;
+      const pageSize = typeof args.pageSize === "number" && Number.isSafeInteger(args.pageSize) && args.pageSize > 0
+        ? Math.min(args.pageSize, 100)
+        : 20;
+      const result = await listRetailInvoices({
+        businessId,
+        locationId,
+        q,
+        method,
+        status: rawStatus,
+        dateFrom: dateFrom ?? "",
+        dateTo: dateTo ?? "",
+        installmentEligible: args.installmentEligible === true,
+        page,
+        pageSize,
+      });
+      return { ok: true, data: result };
+    }
+    case "get_sales_invoice": {
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: false, data: { error: "branch_unavailable" } };
+      const locationId = pinned.locationId;
+      const invoiceId = typeof args.invoiceId === "string" ? args.invoiceId : "";
+      if (!invoiceId) return { ok: false, data: { error: "invoice_required" } };
+      const detail = await getRetailInvoiceDetail(businessId, locationId, invoiceId);
+      return { ok: true, data: { invoice: detail } };
+    }
     case "list_message_templates": {
       const channel =
         typeof args.channel === "string" && (CAMPAIGN_CHANNELS as readonly string[]).includes(args.channel)
@@ -1742,6 +2803,146 @@ export async function runReadTool(
 
     case "find_customers":
       return branchRead((locationId) => findCustomersTool(businessId, args, locationId));
+
+    // ── Accounting module reads (issue #883 package 2, batch A) ─────────────
+    // Everything below answers out of the same service the ledger routes use.
+    // Account books, reconciliation ledgers and expense registers are the
+    // ledger of one business — a branch pin does not subdivide them — so the
+    // business-wide refusal matches what the branch-scoped reports do above.
+    case "list_accounts": {
+      const accounts = await listAccounts(businessId);
+      const accountType = typeof args.accountType === "string" ? args.accountType : undefined;
+      const includeInactive = args.includeInactive === true;
+      const q = typeof args.q === "string" ? args.q : "";
+      const rows = accounts
+        .filter((account) => (accountType ? account.type === accountType : true))
+        .filter((account) => account.isActive || includeInactive)
+        .filter((account) => !q || account.name.includes(q) || account.code.includes(q));
+      return { ok: true, data: { count: rows.length, accounts: rows } };
+    }
+    case "list_journal_entries": {
+      if (!businessWideOk) return businessWideRefusal("اسناد دفتر روزنامه");
+      const limit = limitArg(args.limit);
+      const entryKind =
+        args.entryKind === "manual" ? ("manual" as const) : args.entryKind === "system" ? ("system" as const) : ("any" as const);
+      const reversalRaw = typeof args.reversalState === "string" ? args.reversalState : "any";
+      const reversalState = (["any", "none", "reversal", "reversed"] as const).includes(
+        reversalRaw as "any" | "none" | "reversal" | "reversed",
+      )
+        ? (reversalRaw as "any" | "none" | "reversal" | "reversed")
+        : ("any" as const);
+      const filters = {
+        dateFrom: typeof args.dateFrom === "string" ? args.dateFrom : null,
+        dateTo: typeof args.dateTo === "string" ? args.dateTo : null,
+        sourceType: typeof args.sourceType === "string" ? args.sourceType : null,
+        q: typeof args.q === "string" ? args.q : null,
+        locationId: null,
+        accountId: typeof args.accountId === "string" ? args.accountId : null,
+        createdBy: null,
+        projectId: null,
+        entryId: null,
+        reversalState,
+        entryKind,
+        amountMin: null,
+        amountMax: null,
+        limit,
+        cursor: (typeof args.cursor === "string" && decodeJournalCursor(args.cursor)) || null,
+      };
+      const page = await listJournalEntries(businessId, filters);
+      return { ok: true, data: page };
+    }
+    case "list_manual_journal_drafts": {
+      return { ok: true, data: { drafts: await listDrafts(businessId) } };
+    }
+    case "list_expenses": {
+      if (!businessWideOk) return businessWideRefusal("دفتر هزینه‌ها");
+      const status = parseExpenseRegisterStatus(typeof args.status === "string" ? args.status : null);
+      const filters = {
+        dateFrom: typeof args.dateFrom === "string" ? args.dateFrom : null,
+        dateTo: typeof args.dateTo === "string" ? args.dateTo : null,
+        accountId: typeof args.accountId === "string" ? args.accountId : null,
+        paymentAccountId: null,
+        locationId: null,
+        status,
+        q: typeof args.q === "string" ? args.q : null,
+        limit: limitArg(args.limit),
+        cursor: (typeof args.cursor === "string" && parseExpenseCursor(args.cursor)) || null,
+      };
+      const page = await listExpenses(businessId, filters);
+      return {
+        ok: true,
+        data: { ...page, nextCursor: page.nextCursor ? encodeExpenseCursor(page.nextCursor) : null },
+      };
+    }
+    case "get_expense": {
+      const expense = await getExpense(businessId, String(args.expenseId ?? ""));
+      if (!expense) return { ok: false, data: { error: "expense_not_found" } };
+      return { ok: true, data: expense };
+    }
+    case "list_receipts": {
+      const limit = limitArg(args.limit);
+      const page = await listReceiptsPage(businessId, {
+        q: typeof args.q === "string" ? args.q : undefined,
+        limit,
+      });
+      return { ok: true, data: { receipts: page.rows, hasMore: page.hasMore } };
+    }
+    case "list_payments": {
+      const limit = limitArg(args.limit);
+      const page = await listPaymentsPage(businessId, {
+        q: typeof args.q === "string" ? args.q : undefined,
+        limit,
+      });
+      return { ok: true, data: { payments: page.rows, hasMore: page.hasMore } };
+    }
+    case "list_cheques": {
+      const direction = args.direction === "payable" ? ("payable" as const) : args.direction === "receivable" ? ("receivable" as const) : undefined;
+      const page = await listCheques(businessId, { direction, limit: 50 });
+      return { ok: true, data: { count: page.total, hasMore: page.hasMore, summary: page.summary, cheques: page.cheques } };
+    }
+    case "list_fixed_assets": {
+      const assets = await listFixedAssets(businessId);
+      return { ok: true, data: { count: assets.length, assets: cap(assets) } };
+    }
+    case "list_installment_plans": {
+      const direction = args.direction === "payable" ? ("payable" as const) : ("receivable" as const);
+      const statusRaw = typeof args.status === "string" ? args.status : "open";
+      const status = (["open", "settled", "overdue", "all"] as const).includes(
+        statusRaw as "open" | "settled" | "overdue" | "all",
+      )
+        ? (statusRaw as "open" | "settled" | "overdue" | "all")
+        : ("open" as const);
+      const plans = await listInstallmentPlans(businessId, {
+        direction,
+        status,
+        q: typeof args.q === "string" ? args.q : undefined,
+      });
+      return { ok: true, data: { count: plans.length, plans: cap(plans) } };
+    }
+    case "list_fiscal_years": {
+      return { ok: true, data: { years: await listFiscalYears(businessId) } };
+    }
+    case "list_payroll_runs": {
+      const limit = limitArg(args.limit, 6, 12);
+      const { runs } = await listPayrollRuns(businessId, { limit, includeLines: false });
+      return { ok: true, data: { runs } };
+    }
+    case "list_payroll_advances": {
+      const advances = await listAdvances(businessId);
+      return { ok: true, data: { advances: cap(advances) } };
+    }
+    case "list_reconciliations": {
+      if (!businessWideOk) return businessWideRefusal("مغایرت‌گیری‌های بانکی");
+      const accountCode = typeof args.accountCode === "string" ? args.accountCode.trim() : "";
+      const summaries = [];
+      const codes = accountCode
+        ? RECONCILABLE_ACCOUNTS.filter((account) => account === accountCode)
+        : [...RECONCILABLE_ACCOUNTS];
+      for (const account of codes) {
+        summaries.push(...(await listReconciliations(businessId, account as ReconcilableAccount)));
+      }
+      return { ok: true, data: { reconciliations: summaries } };
+    }
 
     // Finance, accounting and payroll registers below deliberately follow
     // their business-level domain scope and own capability gates; they are not
@@ -1822,11 +3023,10 @@ export async function runReadTool(
       if (industry !== "cosmetics") {
         return { ok: false, data: { error: "این ابزار فقط برای کسب‌وکارهای آرایشی و بهداشتی در دسترس است." } };
       }
-      const scopedLocationId = await branchLocationForRead();
-      if (scopedLocationId === undefined) return noBranchAccess;
-      const locationId = scopedLocationId ?? await primaryLocationId(businessId);
-      if (!locationId) return { ok: true, data: [] };
-      return { ok: true, data: await nearExpiryBatches(locationId) };
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: [] };
+      return { ok: true, data: await nearExpiryBatches(pinned.locationId) };
     }
 
     case "get_staff_commission": {
@@ -1840,12 +3040,11 @@ export async function runReadTool(
     }
 
     case "get_repurchase_candidates": {
-      const scopedLocationId = await branchLocationForRead();
-      if (scopedLocationId === undefined) return noBranchAccess;
-      const locationId = scopedLocationId ?? await primaryLocationId(businessId);
-      if (!locationId) return { ok: true, data: [] };
-      const today = await locationBusinessToday(businessId, locationId);
-      return { ok: true, data: await customersDueForRepurchase(businessId, locationId, today) };
+      const pinned = await consentedPin();
+      if (!pinned.ok) return { ok: false, data: { error: pinned.error } };
+      if (!pinned.locationId) return { ok: true, data: [] };
+      const today = await locationBusinessToday(businessId, pinned.locationId);
+      return { ok: true, data: await customersDueForRepurchase(businessId, pinned.locationId, today) };
     }
 
     // Phase 32 — the coworker's two read tools. Both are deterministic: the

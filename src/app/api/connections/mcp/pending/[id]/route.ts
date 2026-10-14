@@ -16,7 +16,7 @@ import { decideMcpPendingAction } from "@/lib/mcp/write-service";
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+    const { session, error } = await requirePermission(PERMISSIONS.mcpManage);
     if (error) return error;
     const { id } = await context.params;
 
@@ -37,7 +37,12 @@ export const POST = withTenantScope(
       deciderUserId: session.sub,
     });
     if (!result.ok) {
-      return NextResponse.json({ error: result.error }, { status: result.error === "not_found" ? 404 : 400 });
+      // approver_forbidden: the decider's *current* permissions do not cover
+      // the queued action's domain permission, so the row went back to the
+      // queue for a privileged approver rather than being executed or lost.
+      const status =
+        result.error === "not_found" ? 404 : result.error === "approver_forbidden" ? 403 : 400;
+      return NextResponse.json({ error: result.error }, { status });
     }
     return NextResponse.json(
       result.decision === "approve" ? { ok: true, outcome: result.outcome } : { ok: true },

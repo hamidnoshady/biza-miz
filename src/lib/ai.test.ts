@@ -105,7 +105,9 @@ describe("action allowlist", () => {
     for (const type of ACTION_TYPES) {
       const meta = ACTION_CATALOG[type];
       expect(meta.type).toBe(type);
-      expect(["POST", "PATCH", "PUT"]).toContain(meta.method);
+      // DELETE arrived with the tenant-parity batches (batch AQ contract
+      // delete forwards the route's own erasure lane under step-up approval).
+      expect(["POST", "PATCH", "PUT", "DELETE"]).toContain(meta.method);
       expect(meta.endpoint.startsWith("/api/")).toBe(true);
       expect(meta.label.length).toBeGreaterThan(0);
       expect(meta.payloadHint.length).toBeGreaterThan(0);
@@ -171,7 +173,7 @@ describe("resolveActionEndpoint", () => {
   });
 
   it("returns null when a required placeholder is missing from the payload", () => {
-    const meta = ACTION_CATALOG["reservation.reschedule"];
+    const meta = ACTION_CATALOG["reservation.edit"];
     expect(resolveActionEndpoint(meta, { reservedAt: "2026-01-01T10:00:00Z" })).toBeNull();
   });
 
@@ -415,13 +417,11 @@ describe("Phase 31 — autopilot tagging of the action catalogue", () => {
     );
   });
 
-  it("gives the assistant no way to change consent or merge a customer", () => {
-    // Phase 36's hard line, pinned where it cannot be crossed by accident. The
-    // CRM has endpoints for both — a human uses them from the customer's file
-    // and the duplicates screen. They are absent from the catalogue entirely,
-    // so `propose_action` cannot name them however the model is asked: consent
-    // is a promise to a person, and a merge destroys one of two records.
-    for (const forbidden of ["crm.customer.consent", "crm.customer.merge", "crm.consent.set"]) {
+  it("gives the assistant no way to change consent, convert a lead or merge a customer", () => {
+    // Phase 36's hard line, pinned where it cannot be crossed by accident.
+    // Each is a decision about a real person that carries a human's name
+    // (crm-app-boundaries.test.ts holds the same list over the executors).
+    for (const forbidden of ["crm.customer.consent", "crm.consent.set", "crm.lead.convert", "crm.customer.merge"]) {
       expect(isKnownAction(forbidden), forbidden).toBe(false);
     }
     for (const type of ACTION_TYPES) {
@@ -429,6 +429,7 @@ describe("Phase 31 — autopilot tagging of the action catalogue", () => {
       expect(ACTION_CATALOG[type].endpoint).not.toContain("/merge");
     }
   });
+
 
   it("keeps waste out of an autopilot run's own catalogue — only a human-authored job may log it", () => {
     const coworkerOnly = ACTION_TYPES.filter((t) => ACTION_CATALOG[t].coworkerOnly);
@@ -444,8 +445,15 @@ describe("Phase 31 — autopilot tagging of the action catalogue", () => {
   it("tags category, executor and revertible together — never half of them", () => {
     for (const type of ACTION_TYPES) {
       const meta = ACTION_CATALOG[type];
-      const tagged = [meta.autopilotCategory, meta.executor, meta.revertible !== undefined].filter(Boolean).length;
-      expect(tagged === 0 || tagged === 3, type).toBe(true);
+      // The #883 parity batches added on-request verbs: executor-backed but
+      // deliberately not tick-eligible (no autopilotCategory). The Phase-31
+      // invariant stands where it matters: an unattended tick candidate must
+      // carry executor AND revertibility — half-tagging between the action
+      // catalogue and the tick is still forbidden.
+      if (meta.autopilotCategory) {
+        expect(meta.executor, type).toBeDefined();
+        expect(meta.revertible !== undefined, type).toBe(true);
+      }
     }
   });
 
@@ -518,16 +526,19 @@ describe("Phase C — party, campaign and receipt writes", () => {
     expect(ACTION_CATALOG["party.supplier.create"].payloadHint).toContain('"Supplier"');
   });
 
-  it("keeps campaign create a draft — no send action reaches the catalogue", () => {
+  it("keeps campaign create a draft — the only send lane never runs unattended", () => {
     const create = ACTION_CATALOG["messaging.campaign.create"];
     expect(create.endpoint).toBe("/api/messaging");
-    // The discriminator the /api/messaging route reads. The launch/send action
-    // is deliberately absent: a message that reaches a real person stays a
-    // human's click, the same line messaging.campaign.trigger draws.
+    // The discriminator the /api/messaging route reads. The parity batches
+    // opened exactly one send lane — messaging.campaign.launch, registry
+    // always_approve/high with a human's confirmation on every single launch —
+    // and closed none of Phase C's intent; the naked messaging.campaign.send
+    // alias stays absent.
     expect(create.payloadHint).toContain('"campaign"');
-    for (const forbidden of ["messaging.campaign.launch", "messaging.campaign.send"]) {
-      expect(isKnownAction(forbidden), forbidden).toBe(false);
-    }
+    expect(isKnownAction("messaging.campaign.send")).toBe(false);
+    const launch = ACTION_CATALOG["messaging.campaign.launch"];
+    expect(launch.executor).toBeDefined();
+    expect(launch.autopilotCategory).toBeUndefined();
   });
 
   it("makes recording a receipt an always-confirm, never-unattended write", () => {
@@ -535,7 +546,9 @@ describe("Phase C — party, campaign and receipt writes", () => {
     expect(receipt.endpoint).toBe("/api/ledger/ar/receipts");
     expect(receipt.alwaysConfirm).toBe(true);
     expect(receipt.autopilotCategory).toBeUndefined();
-    expect(receipt.executor).toBeUndefined();
+    // Executor-backed since the parity batches (registry always_approve/high):
+    // on-request with a human's confirmation, never tick-applied.
+    expect(receipt.executor).toBeDefined();
     // The destination requires a client idempotency key the model must not
     // invent; the apply endpoint injects a stable proposal-derived one.
     expect(receipt.needsIdempotencyKey).toBe(true);
@@ -543,8 +556,9 @@ describe("Phase C — party, campaign and receipt writes", () => {
   });
 
   it("leaves all four gap actions out of every unattended path", () => {
-    // No autopilot category, no executor, not coworker-only: none can be applied
-    // by a tick. They exist only to be proposed to a human who clicks apply.
+    // No autopilot category and not coworker-only: none can be applied by a
+    // tick. The parity batches gave them executors, so the guaranteed line is
+    // tick-eligibility, and a human is always in the loop for each apply.
     for (const type of [
       "party.customer.create",
       "party.supplier.create",
@@ -553,7 +567,6 @@ describe("Phase C — party, campaign and receipt writes", () => {
     ] as const) {
       const meta = ACTION_CATALOG[type];
       expect(meta.autopilotCategory, type).toBeUndefined();
-      expect(meta.executor, type).toBeUndefined();
       expect(meta.coworkerOnly, type).toBeFalsy();
     }
   });
