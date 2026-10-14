@@ -4900,29 +4900,6 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
-    name: "write_crm_lead_convert",
-    actionType: "crm.lead.convert",
-    english: "Convert a lead into a customer (optionally opening a deal) — transactional, duplicate-guarded.",
-    destructive: false,
-    inputSchema: {
-      type: "object",
-      properties: {
-        leadId: id("شناسهٔ سرنخ — از list_crm_leads"),
-        partyId: id("اتصال به مشتری موجود به‌جای ساخت مشتری جدید"),
-        createDeal: { type: "boolean" },
-        dealTitle: { type: "string" },
-        dealValueRial: { type: "number" },
-        dealExpectedCloseDate: { type: ["string", "null"] },
-        acknowledgeDuplicates: {
-          type: "boolean",
-          description: "فقط بعد از اینکه موارد تکراری (خروجی خطای duplicates_found) به کاربر نشان داده شد مقدار true بده",
-        },
-      },
-      required: ["leadId"],
-      additionalProperties: false,
-    },
-  },
-  {
     name: "write_crm_deal_save",
     actionType: "crm.deal.save",
     english: "Create or update a CRM deal (the kanban card form).",
@@ -5220,23 +5197,6 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         customerId: id("گارد مشتری، اختیاری"),
       },
       required: ["noteId", "pinned"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "write_crm_consent_set",
-    actionType: "crm.consent.set",
-    english: "Record a marketing/SMS consent grant or withdrawal for one customer — creates a logged consent event.",
-    destructive: false,
-    inputSchema: {
-      type: "object",
-      properties: {
-        customerId: id("شناسهٔ مشتری — از find_customers"),
-        channel: { type: "string", enum: ["sms", "email"] },
-        granted: { type: "boolean" },
-        note: { type: "string", description: "توضیح رویداد رضایت" },
-      },
-      required: ["customerId", "channel", "granted"],
       additionalProperties: false,
     },
   },

@@ -526,7 +526,6 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "crm.lead.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
   // A convert creates a customer record (and optionally a deal) — the service
   // itself blocks on duplicates unless the caller explicitly acknowledged them.
-  { actionType: "crm.lead.convert", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.deal.save", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.deal.move_stage", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.pipeline.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
@@ -543,7 +542,6 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "branch.lifecycle", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "crm.note.delete", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.note.pin", kind: "write", app: "crm", risk: "low", approval: "mode" },
-  { actionType: "crm.consent.set", kind: "write", app: "crm", risk: "high", approval: "always_approve" },
   { actionType: "crm.segment.create", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.segment.update", kind: "write", app: "crm", risk: "low", approval: "mode" },
   { actionType: "crm.segment.archive", kind: "write", app: "crm", risk: "low", approval: "mode" },

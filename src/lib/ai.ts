@@ -281,7 +281,6 @@ export type ActionType =
   // upserts (saveLead/upsertDeal take an optional id), exactly the routes'
   // create-vs-update split.
   | "crm.lead.save"
-  | "crm.lead.convert"
   | "crm.deal.save"
   | "crm.deal.move_stage"
   | "crm.pipeline.create"
@@ -635,7 +634,6 @@ export type ActionType =
   | "branch.lifecycle"
   | "crm.note.delete"
   | "crm.note.pin"
-  | "crm.consent.set"
   | "crm.segment.create"
   | "crm.segment.update"
   | "crm.segment.archive"
@@ -913,7 +911,6 @@ export type AutopilotExecutorKey =
   | "crmActivityCreate"
   | "crmActivityUpdate"
   | "crmLeadSave"
-  | "crmLeadConvert"
   | "crmDealSave"
   | "crmDealMoveStage"
   | "crmPipelineCreate"
@@ -932,7 +929,6 @@ export type AutopilotExecutorKey =
   | "branchLifecycle"
   | "crmNoteDelete"
   | "crmNotePin"
-  | "crmConsentSet"
   | "crmSegmentCreate"
   | "crmSegmentUpdate"
   | "crmSegmentArchive"
@@ -3361,15 +3357,6 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
       '{ id?: string, name: string /* لازم */, phone?: string, email?: string, organization?: string, source?: string, sourceDetail?: string, status?: "new"|"contacted"|"working"|"qualified"|"unqualified"|"converted", rating?: "hot"|"warm"|"cold", ownerUserId?: string, ownerName?: string, notes?: string, nextAction?: string, nextActionAt?: string, qualificationReason?: string, disqualificationReason?: string, utm?: object }',
     executor: "crmLeadSave",
   },
-  "crm.lead.convert": {
-    type: "crm.lead.convert",
-    endpoint: "/api/crm/leads/[id]/convert",
-    method: "POST",
-    label: "تبدیل سرنخ به مشتری — با ساخت معامده به‌صورت تراکنشی، همان دکمهٔ صفحه",
-    payloadHint:
-      '{ leadId: string /* از list_crm_leads */, partyId?: string /* اتصال به مشتری موجود */, createDeal?: boolean, dealTitle?: string, dealValueRial?: number, dealExpectedCloseDate?: string|null, acknowledgeDuplicates?: boolean /* فقط بعد از نمایش موارد تکراری به کاربر */ }',
-    executor: "crmLeadConvert",
-  },
   "crm.deal.save": {
     type: "crm.deal.save",
     endpoint: "/api/crm/deals",
@@ -3504,15 +3491,6 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "سنجاق/برداشتن سنجاق یادداشت",
     payloadHint: "{ noteId: string /* از list_customer_notes */, pinned: boolean, customerId?: string }",
     executor: "crmNotePin",
-  },
-  "crm.consent.set": {
-    type: "crm.consent.set",
-    endpoint: "/api/parties/[id]/consent",
-    method: "POST",
-    label: "ثبت رضایت بازاریابی/پیامک — سابقه حقوقی دارد",
-    payloadHint:
-      '{ customerId: string /* از find_customers */, channel: "sms"|"email", granted: boolean, note?: string } — رویداد رضایت با ثبت actress ثبت می شود و رد بازگشت نیست، تغییر جدید یک رویداد تازه است',
-    executor: "crmConsentSet",
   },
   "crm.segment.create": {
     type: "crm.segment.create",
@@ -5757,7 +5735,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
         function: {
           name: "list_crm_leads",
           description:
-            "سرنخ‌های CRM با فیلتر وضعیت/مالک/امتیاز/منشأ — فهرست صفحهٔ سرنخ‌ها با صفحه‌بندی؛ سرنخ‌های موعددار با dueOnly. شناسه برای crm.lead.convert لازم است.",
+            "سرنخ‌های CRM با فیلتر وضعیت/مالک/امتیاز/منشأ — فهرست صفحهٔ سرنخ‌ها با صفحه‌بندی؛ سرنخ‌های موعددار با dueOnly.",
           parameters: {
             type: "object",
             properties: {

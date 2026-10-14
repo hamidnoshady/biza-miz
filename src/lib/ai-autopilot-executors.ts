@@ -442,13 +442,13 @@ import { createCategory, updateCategory, createMenuItem, updateMenuItem } from "
 import { assignBarcode } from "./inventory-item-barcodes-service";
 import { createCustomer, createParty, getCustomer } from "./parties-service";
 import { getSetting, SETTING_KEYS } from "./settings";
-import { toggleNotePin, setConsent, deleteDeal, deleteCase } from "./crm-service";
+import { toggleNotePin, deleteDeal, deleteCase } from "./crm-service";
 import { createBranch, updateBranch, deactivateBranch, reactivateBranch, BranchError } from "./branch-service";
 import { upsertPromotion, setPromotionActive, issueGiftCard } from "./promotions-service";
 import { createSupplierReturn } from "./supplier-return-service";
 import { createSavedReport, deleteSavedReport, updateSavedReport } from "./reports-service";
 import { listPipelines, createPipeline, updatePipeline, moveDealToStage, type StageMoveResult } from "./crm-pipeline-service";
-import { saveLead, convertLead } from "./crm-lead-service";
+import { saveLead } from "./crm-lead-service";
 import { upsertDeal, upsertCase, createActivity, updateActivity } from "./crm-service";
 import { setCaseStatus } from "./crm-case-service";
 import {
@@ -505,7 +505,6 @@ import {
   type CustomFieldType,
 } from "./crm-custom-fields-service";
 import type { SegmentDefinition } from "./segments";
-import type { ConsentChannel } from "./crm-shared";
 import type { TaxSetting } from "./setup-state";
 import { resolveActiveLocation } from "./setup-state";
 import {
@@ -2092,24 +2091,6 @@ const crmNotePin: AutopilotExecutor = async (ctx) => {
   return { ok: true, result: { noteId, pinned } };
 };
 
-const crmConsentSet: AutopilotExecutor = async (ctx) => {
-  const customerId = str(ctx.payload.customerId);
-  const channel = str(ctx.payload.channel);
-  const granted = ctx.payload.granted;
-  if (!customerId || (channel !== "sms" && channel !== "email") || typeof granted !== "boolean") {
-    return fail("invalid_payload");
-  }
-  const outcome = await setConsent(ctx.businessId, customerId, {
-    channel: channel as ConsentChannel,
-    granted,
-    source: "staff",
-    note: str(ctx.payload.note) ?? "MCP connection",
-    changedBy: actorOf(ctx) ?? "mcp",
-  });
-  if (!outcome) return fail("customer_not_found");
-  return { ok: true, result: { customerId, channel, granted, changed: outcome.changed } };
-};
-
 const crmSegmentCreate: AutopilotExecutor = async (ctx) => {
   const name = str(ctx.payload.name);
   const definition = ctx.payload.definition;
@@ -2720,37 +2701,6 @@ const crmLeadSave: AutopilotExecutor = async (ctx) => {
 function slimLead(lead: NonNullable<Awaited<ReturnType<typeof saveLead>>>) {
   return { id: lead.id, name: lead.name, status: lead.status, rating: lead.rating };
 }
-
-const crmLeadConvert: AutopilotExecutor = async (ctx) => {
-  const leadId = str(ctx.payload.leadId);
-  if (!leadId) return fail("invalid_payload");
-  const actor = await crmActor(ctx);
-  if (!actor) return fail("no_authorizing_user");
-  const result = await convertLead(
-    ctx.businessId,
-    leadId,
-    {
-      partyId: str(ctx.payload.partyId) ?? undefined,
-      createDeal: ctx.payload.createDeal === true,
-      dealTitle: str(ctx.payload.dealTitle) ?? undefined,
-      dealValueRial: int(ctx.payload.dealValueRial) ?? undefined,
-      dealExpectedCloseDate: str(ctx.payload.dealExpectedCloseDate),
-      acknowledgeDuplicates: ctx.payload.acknowledgeDuplicates === true,
-    },
-    actor,
-  );
-  if (!result.ok) {
-    // duplicates_found carries the candidate list — the client must show it to
-    // a person and only retry with acknowledgeDuplicates: true. That rule is
-    // the service's, surfaced here untouched.
-    return {
-      ok: false,
-      errorCode: result.error,
-      result: { error: result.error, duplicates: (result as { duplicates?: unknown[] }).duplicates },
-    };
-  }
-  return { ok: true, result: result.dealId ? { partyId: result.partyId, dealId: result.dealId } : { partyId: result.partyId } };
-};
 
 const crmDealSave: AutopilotExecutor = async (ctx) => {
   const title = str(ctx.payload.title);
@@ -8533,7 +8483,6 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   crmActivityCreate,
   crmActivityUpdate,
   crmLeadSave,
-  crmLeadConvert,
   crmDealSave,
   crmDealMoveStage,
   crmPipelineCreate,
@@ -8546,7 +8495,6 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   branchLifecycle,
   crmNoteDelete,
   crmNotePin,
-  crmConsentSet,
   crmSegmentCreate,
   crmSegmentUpdate,
   crmSegmentArchive,

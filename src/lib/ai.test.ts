@@ -417,26 +417,19 @@ describe("Phase 31 — autopilot tagging of the action catalogue", () => {
     );
   });
 
-  it("gives the assistant no way to change consent or merge a customer", () => {
-    // Phase 36's hard line, pinned where it cannot be crossed by accident —
-    // merge remains absent: it destroys one of two records. Consent gained a
-    // catalogue verb with batch D (#883 parity): crm.consent.set is a legal
-    // event-ledger write and it never runs unattended — its registry row is
-    // always_approve/high, so a human confirms every change while the route's
-    // audit trail stays intact. The two Phase-36 names stay forbidden.
-    for (const forbidden of ["crm.customer.consent", "crm.customer.merge"]) {
+  it("gives the assistant no way to change consent, convert a lead or merge a customer", () => {
+    // Phase 36's hard line, pinned where it cannot be crossed by accident.
+    // Each is a decision about a real person that carries a human's name
+    // (crm-app-boundaries.test.ts holds the same list over the executors).
+    for (const forbidden of ["crm.customer.consent", "crm.consent.set", "crm.lead.convert", "crm.customer.merge"]) {
       expect(isKnownAction(forbidden), forbidden).toBe(false);
     }
-    const consent = ACTION_CATALOG["crm.consent.set"];
-    expect(consent.autopilotCategory).toBeUndefined();
     for (const type of ACTION_TYPES) {
-      // No catalogue lane touches a merge endpoint — the one exception the
-      // parity batches carved out is consent's own audit lane.
-      if (type !== "crm.consent.set") expect(ACTION_CATALOG[type].endpoint).not.toContain("/consent");
-      else expect(ACTION_CATALOG[type].endpoint).toContain("/consent");
+      expect(ACTION_CATALOG[type].endpoint).not.toContain("/consent");
       expect(ACTION_CATALOG[type].endpoint).not.toContain("/merge");
     }
   });
+
 
   it("keeps waste out of an autopilot run's own catalogue — only a human-authored job may log it", () => {
     const coworkerOnly = ACTION_TYPES.filter((t) => ACTION_CATALOG[t].coworkerOnly);

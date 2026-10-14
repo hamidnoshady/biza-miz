@@ -412,7 +412,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       // of the business uses (parties.view/manage on notes & activities and
       // crm.consent_manage on consent, exactly the routes' gates).
       listDetail: ["get_customer_profile", "find_customers", "get_customer_timeline", "get_at_risk_customers", "list_customer_notes", "list_crm_activities"],
-      create: ["party.customer.create", "party.supplier.create", "customer.note.add", "crm.customer.note", "crm.consent.set"],
+      create: ["party.customer.create", "party.supplier.create", "customer.note.add", "crm.customer.note"],
       update: ["crm.customer.tag", "crm.note.pin"],
       lifecycle: ["crm.note.delete"],
     },
@@ -427,7 +427,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       listDetail: ["list_crm_deals", "list_crm_leads"],
       create: ["crm.lead.save", "crm.deal.save"],
       update: ["crm.deal.move_stage"],
-      lifecycle: ["crm.lead.convert", "crm.deal.delete"],
+      lifecycle: ["crm.deal.delete"],
     },
     note: "the services are upserts (optional id), matching the routes' create-vs-update split; convert is transactional and duplicate-guarded, exactly the screen button",
     test: "integration/crm.integration.test.ts",
@@ -497,9 +497,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["crm/overview", "crm/members", "crm/consent", "crm/quality"],
     ops: {
       listDetail: ["get_crm_overview", "get_crm_data_quality", "list_crm_members", "get_crm_queue"],
-      update: ["crm.customer.tag", "crm.consent.set"],
+      update: ["crm.customer.tag"],
     },
-    note: "consent state changes ride the customer row's crm.consent.set (logged legal event, always_approve); quality/merge POST stays route-only (mass mutation identity merge)",
+    note: "consent changes stay route-only by design (a human act, see crm-app-boundaries.test.ts); quality/merge POST stays route-only (mass mutation identity merge)",
     test: "integration/crm.integration.test.ts",
   },
   {
