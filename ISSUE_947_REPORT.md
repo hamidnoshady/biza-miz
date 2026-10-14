@@ -1,11 +1,14 @@
 # Issue #947 — Team section consolidation: report
 
-**Branch** `arena/ce58f373-biza-miz` · **verified head** `a2f78cf0` · **baseline** `0c4a77c` ·
+**Branch** `arena/ce58f373-biza-miz` · **code head** `11dd6aa3` · **baseline** `0c4a77c` ·
 **main integrated** `916df457` (`merge 8c511bdf`) — the clone of `main` this branch started
 from; the issue's audit baseline `35cb0cd` is not in this clone's history, so every finding
 was re-verified against the working tree rather than the issue's line links.
 
-The report text itself is committed as a child of the head above; it touches no source file.
+The report is committed as a child of the code head; the commit that carries it changes
+documentation only, and the code head's own last change added one jsdom test
+(`src/app/dashboard/team/member-detail-dialog.test.tsx`). The evidence below therefore names
+the head each gate ran on.
 
 Scope delivered: TEAM-F01 … TEAM-F08, the consumer seam, migrations 0221–0223 with the
 reconciliation work, and the follow-up work the second directive named — stored-export
@@ -355,9 +358,19 @@ inventory, and that drift is bookkeeping rather than evidence.
 - `integration/data-transfer.integration.test.ts` — **65 tests**: the item-2 fixtures
   (two businesses, Employee-who-is-also-a-Customer, the revoked actor resolving narrow, the
   no-actor default, protected cells kept as row warnings).
+- `src/app/dashboard/team/member-detail-dialog.test.tsx` (**7 tests, new, rendered**): the
+  member detail surface under jsdom with `@testing-library/react` — the six sections and the
+  facts behind them, a `team.view` visit getting the facts and none of the writers (not even
+  the audit-log door), the payroll door appearing only with `payroll.view` (and, when it is
+  absent, the requirement sentence instead of a link the screen behind it would refuse), a
+  manager never being offered edit controls for an owner, an owed file rendering
+  «در انتظار ساخت» with its attempt count and last error, and every mutation handing off to
+  the dialog that owns the write. This is the gate the source-contract test cannot be: the
+  visual harness's 14 screens do not include `/settings/team`, so until this file no test
+  rendered the surface.
 - `src/lib/data-transfer/export-audience.test.ts` (8), `src/lib/personnel-access.test.ts`
   (14), `src/lib/staff-eligibility.test.ts` (3), `src/lib/location-access.test.ts` (16),
-  `src/app/dashboard/team/team-manager.test.ts` (33 — seven new contract tests for the
+  `src/app/dashboard/team/team-manager.test.ts` (33 — seven source-contract tests for the
   detail surface, the server-backed search and the hand-offs),
   `src/app/dashboard/parties/parties-directory-regressions.test.ts` (44),
   `src/lib/admin-screen-contracts.test.ts` (17).
@@ -366,26 +379,26 @@ inventory, and that drift is bookkeeping rather than evidence.
 
 ## 8. Exact verification and CI results
 
-Everything below is on the working tree of `a2f78cf0` (local Postgres 16 on
-127.0.0.1:5432, `DATABASE_URL=postgres://pos:pos@localhost:5432/pos`), unless the row
-names CI. **Source** and **checks** are separated on purpose: this sandbox is a 2-vCPU /
+Everything below is on the working tree of the head named in each row — `11dd6aa3` unless
+the row says otherwise — with local Postgres 16 on 127.0.0.1:5432 and
+`DATABASE_URL=postgres://pos:pos@localhost:5432/pos`, unless the row names CI. **Source** and **checks** are separated on purpose: this sandbox is a 2-vCPU /
 3.9 GB box with no swap, and three of the gates do not fit in it — that is a property of
 the box, not a claim about the code.
 
-### 8.1 Local gates (source `a2f78cf0`)
+### 8.1 Local gates
 
 | Gate | Command | Result |
 |---|---|---|
 | Formatting/lint | `npm run lint` (`eslint . --max-warnings=0`) | **clean, exit 0** |
 | Typecheck | `NODE_OPTIONS=--max-old-space-size=3072 ./node_modules/.bin/tsc --noEmit` | **cannot complete locally**: V8 `Ineffective mark-compacts near heap limit` after 117 s, exit **134**; retried at 3600 MB and the kernel killed it (`TSC-EXIT=137`). Green in CI (`type check`, 8.2). |
-| Unit + component | `npm test` (`vitest run`) | **868 files / 11 444 tests passed, exit 0** (440 s) |
+| Unit + component | `npm test` (`vitest run`) | **869 files / 11 451 tests passed, exit 0** (507 s) — and **868 / 11 444** on the previous code head `a2f78cf0`, the difference being the seven rendered tests added last |
 | Design system | `npm run test:design` | **5 files / 38 tests passed** |
-| Database — the suites this issue rewrites | `integration/parties.integration.test.ts` **73**, `integration/team.integration.test.ts` **53** | **126 passed, 0 failed** |
-| Database — the transfer suites | `personnel-file-obligation` **11**, `export-download-audience` **5**, `data-transfer` **65** | **81 passed, 0 failed** |
-| Database — consumer batch | `crm` 17, `crm-relationship-os` 31, `phone-otp` 8, `staff-login-tenant` 7 | **63 passed, 0 failed** |
-| Database — full sweep | `npm run test:db` (`vitest run --config vitest.db.config.ts`) | **230 files · 3 489 passed · 2 skipped · 1 failed** (2 868 s). The single failure is one 30 s **timeout** in `integration/fixed-assets.integration.test.ts` (a file and subsystem this branch does not touch — byte-identical to `origin/main`), in an issue-#833 test that creates a fiscal year, locks a period and reverses. Re-run alone on the same database: **75/75 passed in 13 s**; the single test alone: **passed** (`1 passed | 74 skipped`). Load-induced on a box running 230 database files serially, not a defect — recorded rather than hidden, and no test was weakened, skipped or given a longer timeout. |
-| Migration + reconcile | `npx tsx scripts/migrate.ts` → 0221/0222/0223 applied (356 migrations); `npm run personnel:reconcile --dry-run` | **`nothing owed`** |
-| Seed coherence | `npx tsx scripts/seed.ts` then the reconcile dry run | **`Personnel files synced for 2/2 member(s)`**, then **`nothing owed`** |
+| Database — the suites this issue rewrites | `integration/parties.integration.test.ts` **73**, `integration/team.integration.test.ts` **53** | **126 passed, 0 failed** (re-run at `11dd6aa3` on a database rebuilt from scratch: 356 migrations, then seed) |
+| Database — the transfer suites | `personnel-file-obligation` **11**, `export-download-audience` **5**, `data-transfer` **65** | **81 passed, 0 failed** (re-run at `11dd6aa3`) |
+| Database — consumer batch | `crm` 17, `crm-relationship-os` 31, `phone-otp` 8, `staff-login-tenant` 7 | **63 passed, 0 failed** (re-run at `11dd6aa3`) |
+| Database — full sweep (at `a2f78cf0`; no `src/**` changed since) | `npm run test:db` (`vitest run --config vitest.db.config.ts`) | **230 files · 3 489 passed · 2 skipped · 1 failed** (2 868 s). The single failure is one 30 s **timeout** in `integration/fixed-assets.integration.test.ts` (a file and subsystem this branch does not touch — byte-identical to `origin/main`), in an issue-#833 test that creates a fiscal year, locks a period and reverses. Re-run alone on the same database: **75/75 passed in 13 s**; the single test alone: **passed** (`1 passed | 74 skipped`). Load-induced on a box running 230 database files serially, not a defect — recorded rather than hidden, and no test was weakened, skipped or given a longer timeout. |
+| Migration + reconcile | `npx tsx scripts/migrate.ts` → 0221/0222/0223 applied (356 migrations) into a **fresh** data directory; `tsx scripts/create-app-role.ts`; `npm run personnel:reconcile --dry-run` | **`Applied 356 migration(s)`**, `Role pos_app is ready`, **`nothing owed`** |
+| Seed coherence (at `11dd6aa3`) | `tsx scripts/seed.ts` then the reconcile dry run | **`Personnel files synced for 2/2 member(s)`**, then **`nothing owed`** |
 | Production build | `npm run build` | **not possible locally**: exit 137 (`Killed`) with `NODE_OPTIONS=--max-old-space-size=3000`, V8 heap OOM at the default heap. Green in CI (`production build`, 8.2). |
 | Visual regression | `npm run test:visual` | **not run locally**: it needs the production server the build above cannot produce. Green in CI (`visual regression`, 8.2). No baseline was re-recorded, edited or approved. |
 
@@ -393,16 +406,22 @@ the box, not a claim about the code.
 
 `test.yml` runs on Arena branch pushes as well as PRs (the workflow says so in its own
 `on:` comment: GitHub suppresses the App-created PR-synchronize event, so the same required
-suite is run on the push). Head `a2f78cf0`:
+suite is run on the push).
 
 | Workflow | Run | Result |
 |---|---|---|
-| `test.yml` | **38618945936** (`a2f78cf0`, run 2026-10-14T18:53:06Z → 19:33:21Z) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅, `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116041317692`: `Build` ✅, `Start the production server` ✅, `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Publish visual regression summary` ✅; `Record visual baselines (manual, opt-in)` and `Upload diffs` **skipped** — the first is the opt-in recording step, the second is skipped precisely because there were no diffs), `design checks` ✅, `integration tests (real database)` ✅, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
+| `test.yml` | **38626207933** (`11dd6aa3`, the code head) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅ (the seven new rendered tests included), `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅**, `design checks` ✅, **`integration tests (real database)` ✅**, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
+| `test.yml` | 38618945936 (`a2f78cf0`) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅, `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116041317692`: `Build` ✅, `Start the production server` ✅, `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Publish visual regression summary` ✅; `Record visual baselines (manual, opt-in)` and `Upload diffs` **skipped** — the first is the opt-in recording step, the second is skipped precisely because there were no diffs), `design checks` ✅, `integration tests (real database)` ✅, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
 | `test.yml` | 38617346093 (`7a3e1cb5`) | **cancelled by the next push**, not a failure: 8 of its 10 jobs had already passed (`type check`, `unit tests`, `ESLint`, `API guard`, **`visual regression`**, `design checks`, `production build`, `data transfer engine`); `integration tests (real database)` was cancelled mid-flight and the aggregate `all checks passed` therefore failed. Not counted as a red check. |
 | `android-build` | 38617346091 (`7a3e1cb5`) | ✅ success |
 | `build-desktop-installer` | 38617346163 (`7a3e1cb5`) | ✅ success |
 | `verify-shippables` | 38617346040 (`7a3e1cb5`) | ✅ success |
-| `android-build` / `build-desktop-installer` / `verify-shippables` | — (`a2f78cf0`) | **did not trigger**, and their path filters are why: the delta of the final head is docs plus `scripts/seed.ts`, none of which is in their `paths:` lists — nor in what they package (`electron/package.json` ships `electron/*.js`; the Android job watches `android/**` and `src/lib/native/**`). The three passed at `7a3e1cb5`, whose shipped inputs are identical to `a2f78cf0`'s. |
+| `android-build` / `build-desktop-installer` / `verify-shippables` | — (`a2f78cf0`, `11dd6aa3`) | **did not trigger**, and their path filters are why: the delta of those two heads is documentation, `scripts/seed.ts`, and one `*.test.tsx` — and test files are explicitly excluded from the shipped paths (`electron/package.json` ships `electron/*.js`; the Android job watches `android/**` and `src/lib/native/**`; both shell workflows exclude `src/**/*.test.*`). The three passed at `7a3e1cb5`, whose shipped inputs are identical to these heads'. |
+
+Two pushes in this round were cancelled by a newer push rather than finishing — `7a3e1cb5`
+(`38617346093`) and the report-only `9099d2a9` (`38625981773`) — which is how the branch's
+`concurrency` group behaves; neither is counted as a red check, and the head that matters
+has its own completed run above.
 
 The run that failed on this branch is the one at the **pre-integration** head `0723b53`
 (`38452006386`), and its failure is the item-5 finding:
@@ -416,24 +435,28 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 ### 8.3 Running, finished and impossible
 
-- **Local, finished**: lint (exit 0), unit (868 files / 11 444 tests), design (38 tests),
-  the three database batches (126 + 81 + 63), the full database sweep (230 files, 1
-  load-induced timeout, re-run green alone), migration + reconcile, seed coherence.
+- **Local, finished** (all at `11dd6aa3` unless noted): lint (exit 0), unit (869 files /
+  11 451 tests), design (38 tests), the three database batches (126 + 81 + 63) on a database
+  rebuilt from scratch with 356 migrations, the full database sweep at `a2f78cf0` (230 files,
+  1 load-induced timeout, re-run green alone), migration + app role + reconcile, seed
+  coherence.
 - **Local, impossible**: `npm run build` (kernel OOM at 3000 MB), `tsc --noEmit` (V8 OOM at
   3072 MB, kernel OOM at 3600 MB), and therefore `npm run test:visual` (needs the build's
   server). These three are exactly the gates CI owns in this repository, and all three are
   green there at this head.
 - **CI, finished**: every run listed in 8.2. Nothing is pending at the head.
-- Nothing is running when this report was committed; the DB sweep and the isolated re-run
-  had both finished.
+- Nothing is running when this report was committed; the DB sweep, the unit suite and the
+  isolated re-run had all finished. (`node_modules` was re-installed from the lockfile with
+  `npm ci` before these runs; `node_modules` is committed on `main` as a symlink blob, which
+  is a repository-hygiene issue outside this issue's scope.)
 
 ### 8.4 The split the second directive asks for
 
 | Dimension | State |
 |---|---|
-| Source | `a2f78cf0` on `arena/ce58f373-biza-miz`, pushed; `origin/main` (`916df457`) is an ancestor; the report itself is the next commit and changes no source |
-| Tests | **11 444** unit/component + **38** design green locally; **230** database files green except one load-induced timeout that passes alone (75/75 in 13 s); CI's `integration tests (real database)`, `data transfer engine (real database)` and `media E2E tests` green |
-| Checks | `test.yml` at `a2f78cf0`: **11/11 jobs green**, including `visual regression` (with the subledger keyboard/WCAG step) and `production build`; packaging workflows green at `7a3e1cb5` and not triggered by this head's path filter |
+| Source | `11dd6aa3` on `arena/ce58f373-biza-miz`, pushed; `origin/main` (`916df457`) is an ancestor; the report is the commit after it and changes no source, and the code head's own last change added one test file |
+| Tests | **11 451** unit/component + **38** design green locally at the code head; **270** database tests re-run green at it (126 + 81 + 63); the 230-file sweep green at `a2f78cf0` except one load-induced timeout that passes alone (75/75 in 13 s); CI's `integration tests (real database)`, `data transfer engine (real database)` and `media E2E tests` green at the code head |
+| Checks | `test.yml` at **`11dd6aa3`: 11/11 jobs green**, including `visual regression` (with the subledger keyboard/WCAG step), `integration tests (real database)` and `production build`; the same 11/11 at `a2f78cf0`; packaging workflows green at `7a3e1cb5`, and not triggered by the final heads' path filters |
 | Mergeability | No conflicts: `git merge-base --is-ancestor origin/main HEAD` holds, and `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries (tree `976fd0a2`). No PR exists for this branch |
 | Deployment | **Nothing deployed, published, tagged or merged**, and nothing was authorised to be. The three migrations are forward-only and unapplied anywhere except this sandbox's database |
 | Runtime acceptance | Not claimed. The gates that exercise a running server (production build, visual regression, subledger keyboard/WCAG, media E2E) passed **in CI on GitHub's runners**, at the head named above; no runtime acceptance was performed against a deployed environment |
@@ -468,10 +491,11 @@ The run that failed on this branch is the one at the **pre-integration** head `0
   alone, the file is 75/75 green in 13 s and that single test passes. It is load, not logic
   — and it is left alone rather than given a longer timeout, because raising a budget to get
   green is exactly what the brief forbids.
-- **Dependencies**: `node_modules` came from the lockfile via `npm ci` earlier in the
-  session, then was re-installed for this round; it was not re-installed against the exact
-  final tree. `node_modules` is committed on `main` as a symlink blob, which is a
-  repository-hygiene issue outside this issue's scope (CI is unaffected).
+- **Dependencies**: local runs use `node_modules` from the lockfile (`npm ci` at the code
+  head, after the sandbox was re-created and the committed symlink had to be replaced).
+  `node_modules` is committed on `main` as a symlink blob pointing outside the repository —
+  a repository-hygiene issue outside this issue's scope; CI is unaffected because it runs
+  `npm ci` itself.
 
 ---
 
@@ -515,7 +539,7 @@ and no route, API or writer was deleted without a `grep` over `src/`, `scripts/`
 | F04/F05 — one file per membership on every path; MFA-before-acceptance and replica authority preserved | `personnel-file.ts`, `0221`, `0223`, `seed.ts` | `personnel-file-obligation.integration.test.ts` (11), `team.integration.test.ts` (invitation/rehire cases), `docs/issue-947-integration-contracts.md` |
 | F06 — capability-gated invitations in a read-only visit | `team-manager.tsx` (`canManage`) | `team-manager.test.ts` (33) |
 | F07 — linked identity read-only in the party form | `party-form.tsx`, `parties.ts` | `parties.integration.test.ts` (linked-member write refusals), `parties-directory-regressions.test.ts` |
-| F08 — role summaries, revisions, dialogs, filters/pagination, all states | `team-manager.tsx`, `member-detail-dialog.tsx`, `roles-manager.tsx`, `security-confirm-dialog.tsx` | `team-manager.test.ts` (33), `admin-screen-contracts.test.ts` (17), CI `design checks` + `visual regression` (subledger keyboard/WCAG step) |
+| F08 — role summaries, revisions, dialogs, filters/pagination, all states | `team-manager.tsx`, `member-detail-dialog.tsx`, `roles-manager.tsx`, `security-confirm-dialog.tsx` | `member-detail-dialog.test.tsx` (7, rendered), `team-manager.test.ts` (33), `admin-screen-contracts.test.ts` (17), CI `design checks` + `visual regression` (subledger keyboard/WCAG step) |
 | Consumer seam — `/api/staff` + `floor.validWaiterId` on canonical eligibility | `staff-eligibility.ts`, `/api/staff`, `lib/floor.ts` | `staff-eligibility.test.ts` (3), `team.integration.test.ts` (floor cases) |
 | Stored-export privacy under current permissions | `export-audience.ts`, `0222`, `export-service.ts`, `/api/data/exports/[id]` | `export-download-audience.integration.test.ts` (5), `export-audience.test.ts` (8) |
 | Import field-write authorization | `partyWriteAudienceForActor`, `import-service.ts`, `ai-autopilot-executors.ts` | `data-transfer.integration.test.ts` (65) |
