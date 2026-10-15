@@ -69,9 +69,15 @@ export default async function ProfilePage() {
   const member = rows[0];
   if (!member?.is_active) redirect("/login");
 
+  // Every read runs inside the tenant scope. `getSession()` cannot lend its
+  // scope to this page (see `withTenantScope` in src/lib/auth.ts), and under
+  // the production runtime role a read outside one comes back empty — RLS
+  // fails closed. The page would then render the runtime role's guess instead
+  // of the business's stored profile, offering forms the routes refuse (F11),
+  // and lose the member's credential state.
   const [credentials, deployment, branch, webauthnCount] = await Promise.all([
-    readSelfCredentialState(session.businessId, session.sub),
-    readDeploymentProfile(session.businessId),
+    withTenant(session.businessId, () => readSelfCredentialState(session.businessId, session.sub), tenantScope),
+    withTenant(session.businessId, () => readDeploymentProfile(session.businessId), tenantScope),
     withTenant(session.businessId, () => resolveProfileBranches(session, member.location_id), tenantScope),
     withTenant(
       session.businessId,

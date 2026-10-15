@@ -494,6 +494,33 @@ audit cases (and an audit failure that still counts the attempt). Component
 coverage: `security-center-settings.test.tsx` and `welcome-signed-in.test.tsx`,
 plus the updated sign-out, Profile, sidebar-menu and signed-in-notice suites.
 
+**The Profile page read two facts outside the tenant scope.** This surfaced when
+main started CI's media E2E server with `DEPLOYMENT_ROLE=central`.
+`readDeploymentProfile` and `readSelfCredentialState` ran outside `withTenant`.
+A server page cannot borrow `getSession()`'s scope (`withTenantScope` in
+`src/lib/auth.ts` explains why), and under the production runtime role RLS
+answers such a read with no rows. Two things went wrong:
+
+- the page rendered the runtime role's guess instead of the business's stored
+  profile. For a Hybrid business served by the central server, it offered
+  editable login-phone, password and authenticator-app (TOTP) cards whose
+  routes then refused with `login_managed_by_cloud` (F11);
+- it lost the member's credential state, so two-step sign-in followed the role
+  fallback: a cashier with a global identity was not offered it.
+
+Both reads now run inside the tenant scope, like the page's other reads.
+`profile-security-854` could not see this: its pool is the superuser, which RLS
+ignores. `integration/profile-page-rls-854.integration.test.ts` renders the page
+and calls `GET /api/auth/phone/self` through an unprivileged role, on both
+server roles and all three profiles. Without the fix, 3 of its 9 cases fail.
+
+**The browser run follows the server's role.** `scripts/e2e-profile-security.mjs`
+reads `E2E_DEPLOYMENT_ROLE`: `site` by default (what a server started without
+`DEPLOYMENT_ROLE` infers), `central` in CI, and any other value is refused. On a
+site, a Hybrid business's Profile is the cloud pane. On the central server it is
+the local screen: the login phone is read-only and says why, and the staff PIN
+stays self-service.
+
 **Not changed, stated plainly.**
 
 - `createSession` writes its row and its `employee.session_created` audit row on

@@ -27,9 +27,12 @@
  *      and removable while registration is withheld.
  *   3. F09: a removal whose request is dropped keeps the list, says so, and
  *      releases the button; the retry removes it.
- *   4. F11: on a Hybrid site the Profile screen is the cloud's (the cloud
- *      pane), with no local credential control; Cloud and Local render the
- *      login phone and the staff PIN editable.
+ *   4. F11: Cloud and Local render the login phone and the staff PIN
+ *      editable. Hybrid depends on the server's deployment role
+ *      (E2E_DEPLOYMENT_ROLE, below): on a Hybrid *site* the Profile screen is
+ *      the cloud's (the cloud pane), with no local credential control; on the
+ *      central server it is local, with the login phone read-only (and the
+ *      reason given) and the staff PIN still self-service.
  *   5. F08: the PIN fields are masked and open the numeric keyboard.
  *   6. Sign-out (F10 + the logout follow-up): a dropped request is not a
  *      sign-out; a real server-side audit failure is reported as unconfirmed
@@ -76,6 +79,27 @@ const SESSION_COOKIE = "pos_session";
  * inserted into the database instead.
  */
 const WEBAUTHN_CEREMONY = process.env.E2E_WEBAUTHN_CEREMONY !== "0";
+/**
+ * The deployment role of the server under test. It decides what a Hybrid
+ * business looks like (`isHybridSite` in src/lib/site-routes.ts):
+ *  - `site` — the desktop of a Hybrid business: every screen that is not the
+ *    till's, Profile included, is the cloud's and is shown as the cloud pane;
+ *  - `central` — not a Hybrid site, so the Profile screen is local and each
+ *    credential card follows the authority table
+ *    (src/lib/credential-authority.ts): the login phone is the cloud's —
+ *    read-only, with the reason — while the staff PIN stays self-service,
+ *    because a till must be able to rotate it while the uplink is down.
+ * Set it to the role the server was started with. The default is what a
+ * server started without DEPLOYMENT_ROLE infers (`site`); CI's media E2E
+ * server runs as `central`. A wrong value fails the Hybrid checks — it can
+ * never turn them into a pass.
+ */
+const SERVER_ROLE = process.env.E2E_DEPLOYMENT_ROLE ?? "site";
+if (SERVER_ROLE !== "site" && SERVER_ROLE !== "central") {
+  throw new Error(`E2E_DEPLOYMENT_ROLE must be "site" or "central", not "${SERVER_ROLE}"`);
+}
+/** What a card the cloud owns says instead of its controls (AUTH_ERROR_MESSAGES.login_managed_by_cloud). */
+const CLOUD_MANAGED_NOTICE = "این مورد در نسخهٔ ابری مدیریت می‌شود.";
 /** Unique per run, so a re-run against the same database never matches an old device. */
 const DEVICE_LABEL = `E2E ${Date.now().toString(36)}`;
 
@@ -265,6 +289,7 @@ async function main() {
     await setProfile(db, businessId, "cloud");
 
     // ======================================================================
+    console.log(`Server under test: ${BASE_URL} (deployment role: ${SERVER_ROLE})`);
     section("1. Owner on Cloud — RTL, branch facts, no biometric offer, labels");
     // ======================================================================
     const ownerContext = await browser.newContext(desktop);
@@ -442,13 +467,11 @@ async function main() {
     for (const profile of ["cloud", "hybrid", "local"]) {
       await setProfile(db, businessId, profile);
       await open(cashier, "/settings/profile");
-      if (profile === "hybrid") {
-        // This server runs as a site, so Hybrid makes it a *Hybrid site*: every
-        // screen that is not the till's — Profile included — is the cloud's
-        // (src/lib/site-routes.ts) and is shown as the cloud pane, never as a
-        // local copy with forms the site's API would refuse. (The read-only
-        // rendering of the local card is pinned by the component suite and by
-        // the integration suite's page-props-versus-routes check.)
+      if (profile === "hybrid" && SERVER_ROLE === "site") {
+        // On a site, Hybrid makes it a *Hybrid site*: every screen that is not
+        // the till's — Profile included — is the cloud's (src/lib/site-routes.ts)
+        // and is shown as the cloud pane, never as a local copy with forms the
+        // site's API would refuse.
         const pane = await until(() => cashier.getByText("این بخش در نسخهٔ ابری است").isVisible());
         check("F11 (hybrid site): Profile is the cloud's screen, shown as the cloud pane", Boolean(pane));
         check(
@@ -458,6 +481,29 @@ async function main() {
               'section[aria-label="شمارهٔ موبایل ورود"], section[aria-label="رمز عددی دستگاه"], section[aria-label="تغییر رمز عبور"]',
             )
             .count()) === 0,
+        );
+        continue;
+      }
+      if (profile === "hybrid") {
+        // On the central server a Hybrid business is not a Hybrid site, so the
+        // screen is local and the authority table decides each card: the page
+        // must render exactly what the routes enforce (F11), with no form the
+        // API would refuse.
+        const phoneCard = card(cashier, "شمارهٔ موبایل ورود");
+        await phoneCard.waitFor({ timeout: 15_000 });
+        await settle(cashier);
+        check(
+          "F11 (hybrid, central server): the login phone is read-only",
+          (await phoneCard.getByRole("button", { name: /ثبت شماره|تغییر شماره|ارسال کد تأیید/ }).count()) === 0,
+        );
+        check(
+          "F11 (hybrid, central server): …and says the cloud manages it",
+          await phoneCard.getByText(CLOUD_MANAGED_NOTICE).isVisible(),
+        );
+        const pinCard = card(cashier, "رمز عددی دستگاه");
+        check(
+          "F11 (hybrid, central server): the staff PIN stays self-service",
+          (await pinCard.getByRole("button", { name: /تغییر رمز عددی|ثبت رمز عددی/ }).count()) > 0,
         );
         continue;
       }
@@ -563,7 +609,8 @@ async function main() {
   if (process.env.GITHUB_ACTIONS === "true") {
     const summary =
       `${passed} passed, ${failures.length} failed, ${notRun.length} not run` +
-      (WEBAUTHN_CEREMONY ? "; WebAuthn ceremony ran (virtual authenticator)" : "; WebAuthn ceremony NOT run");
+      (WEBAUTHN_CEREMONY ? "; WebAuthn ceremony ran (virtual authenticator)" : "; WebAuthn ceremony NOT run") +
+      `; server role ${SERVER_ROLE}`;
     console.log(`::${failures.length === 0 ? "notice" : "error"} title=Profile security E2E::${summary}`);
   }
   console.log(`Screenshots: ${ARTIFACTS}`);
