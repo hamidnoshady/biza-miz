@@ -208,6 +208,13 @@ describe("customer return under سیستم ادواری", () => {
     const journalLineInserts: Call[] = [];
     const { client, calls } = scriptedClient((sql, params) => {
       if (sql.includes("SELECT id,refund_amount_rial::text FROM customer_returns")) return []; // no duplicate
+      // Issue #868 — the refund mirrors the sale's attribution: amendment
+      // chain, then the original entry's own dimensions (none here), then the
+      // order's mapping refs (none) — so the refund posts unattributed.
+      if (sql.includes("SELECT id FROM order_amendments WHERE order_id")) return [];
+      if (sql.includes("SELECT jl.cost_center_id")) return [];
+      if (sql.includes("SELECT 1 AS one FROM journal_entries")) return [];
+      if (sql.includes("FROM order_items oi")) return [];
       if (sql.includes("FROM orders WHERE")) return [{ tax: "0", total: "10000" }];
       if (sql.includes("FROM payments WHERE order_id")) return [{ paid: "10000" }];
       if (sql.includes("INSERT INTO customer_returns")) return [{ id: "return-1" }];

@@ -6,6 +6,7 @@ import {
   matrixColumnTitle,
   matrixTable,
   profitTable,
+  rollupTable,
   type MatrixTableInput,
 } from "./dimension-report-table";
 import { journalFiltersFromParams } from "./journal-view";
@@ -159,5 +160,49 @@ describe("matrixCellDrill — which body cells open a journal page", () => {
   it("does not link the totals row, or a row that is not there", () => {
     expect(drill(2, 2)).toBeNull();
     expect(drill(9, 2)).toBeNull();
+  });
+});
+
+describe("rollupTable", () => {
+  const report = {
+    rows: [
+      { code: "CC1", name: "تهران", depth: 0, isActive: true, own: 0, rolledUp: 1500, childCount: 1 },
+      { code: "CC1-1", name: "شعبهٔ مرکزی", depth: 1, isActive: true, own: 1500, rolledUp: 1500, childCount: 0 },
+      { code: "CC2", name: "انبار قدیم", depth: 0, isActive: false, own: 250, rolledUp: 250, childCount: 0 },
+    ],
+    grandTotal: 1750,
+    unassigned: 100,
+    reconciled: true,
+  };
+
+  it("indents children under their parent and marks archived values", () => {
+    const table = rollupTable(report);
+    expect(table.rows[0][1]).toBe("تهران");
+    expect(String(table.rows[1][1])).toContain("└ شعبهٔ مرکزی");
+    expect(table.rows[2][1]).toBe("انبار قدیم (بایگانی‌شده)");
+  });
+
+  it("totals the own column only — the rolled-up column would count children twice", () => {
+    const table = rollupTable(report);
+    const totalRow = table.rows[3];
+    expect(totalRow[1]).toBe("جمع کل (بدون دوباره‌شماری)");
+    expect(totalRow[2]).toBe(1750);
+  });
+
+  it("shows the unattributed remainder and the journal reconciliation", () => {
+    const table = rollupTable(report);
+    expect(table.rows[4]).toEqual(["", "بدون بُعد", 100, "", ""]);
+    expect(table.rows[5][2]).toBe(1850);
+    expect(table.rows[5][3]).toBe("مطابقت");
+  });
+
+  it("says «نامطابقت» in the same row when the server reports a mismatch", () => {
+    const table = rollupTable({ ...report, reconciled: false });
+    expect(table.rows[table.rows.length - 1][3]).toBe("نامطابقت");
+  });
+
+  it("omits the unassigned row when it is zero", () => {
+    const table = rollupTable({ ...report, unassigned: 0 });
+    expect(table.rows.some((row) => row[1] === "بدون بُعد")).toBe(false);
   });
 });

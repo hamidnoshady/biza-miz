@@ -3,18 +3,22 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { isValidIsoDate } from "@/lib/iso-date";
 import { isDimensionKind, parseDimensionFilter, type DimensionFilter } from "@/lib/accounting-dimensions";
-import { getAccountDimensionMatrix, getProfitAndLossByDimension } from "@/lib/accounting-dimension-reports-service";
+import { getAccountDimensionMatrix, getDimensionRollup, getProfitAndLossByDimension } from "@/lib/accounting-dimension-reports-service";
 import { getAccountStatement } from "@/lib/reports-service";
 
 const MATRIX_ACCOUNT_TYPES = ["asset", "liability", "equity", "revenue", "expense"] as const;
 
 /**
- * The dimension reports, one endpoint, three views:
+ * The dimension reports, one endpoint, four views:
  *
  *   ?view=matrix&kind=…&dateFrom=…&dateTo=…[&accountType=expense]
  *       account × dimension matrix — every line in exactly one column
  *   ?view=profit&kind=…&dateFrom=…&dateTo=…
  *       profit and loss per value of one kind (the profit-centre P&L)
+ *   ?view=rollup&kind=…&dateFrom=…&dateTo=…
+ *       the hierarchy rollup: parent rows include their descendants, `own`
+ *       and `rolledUp` never double count, archived values stay as history,
+ *       and the grand total + unattributed reconcile to the journal total
  *   ?view=card&accountId=…&kind=…&value=<id|unassigned>&dateFrom=…&dateTo=…
  *       the cost-centre account card: one account, one value's lines
  *
@@ -37,10 +41,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
 
   try {
-    if (view === "matrix" || view === "profit") {
+    if (view === "matrix" || view === "profit" || view === "rollup") {
       if (!isDimensionKind(kind)) return NextResponse.json({ error: "unknown_dimension_kind" }, { status: 400 });
       if (view === "profit") {
         const report = await getProfitAndLossByDimension(session.businessId, { kind, dateFrom, dateTo });
+        return NextResponse.json(report);
+      }
+      if (view === "rollup") {
+        const report = await getDimensionRollup(session.businessId, { kind, dateFrom, dateTo });
         return NextResponse.json(report);
       }
       const accountType = params.get("accountType");
