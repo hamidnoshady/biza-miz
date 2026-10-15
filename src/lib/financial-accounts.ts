@@ -671,4 +671,3 @@ export function isRialAmountText(value: unknown): value is string {
   if (!/^\d{1,15}$/.test(text)) return false;
   return true;
 }
-

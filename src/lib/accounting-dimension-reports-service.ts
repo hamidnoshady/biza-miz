@@ -17,8 +17,11 @@ import {
 import {
   buildAccountDimensionMatrix,
   buildDimensionProfitReport,
+  buildDimensionRollup,
   type AccountDimensionMatrix,
   type DimensionProfitReport,
+  type DimensionRollupReport,
+  type DimensionRollupValue,
   type MatrixAccountRow,
   type MatrixAccountTotal,
   type ProfitRow,
@@ -178,4 +181,74 @@ export async function getProfitAndLossByDimension(
     industry,
   });
   return { ...report, scope, industry };
+}
+
+interface RollupSqlRow extends Record<string, unknown> {
+  value_id: string | null;
+  amount: string;
+}
+
+/**
+ * Hierarchy rollup for one kind over a period (issue #868 Phase 7): every
+ * posted line's natural signed amount lands in exactly one value's `own`
+ * (posting is leaf-only), parents roll their descendants up without double
+ * counting, archived values stay in the tree as history, and the grand total
+ * plus the unattributed remainder reconciles to the unfiltered journal total
+ * of the same period — asserted here, not merely displayed, so a report can
+ * never quietly disagree with the ledger it summarises.
+ */
+export async function getDimensionRollup(
+  businessId: string,
+  scope: DimensionReportScope,
+): Promise<DimensionRollupReport & { scope: DimensionReportScope }> {
+  assertDimensionReportScope(scope);
+  const column = DIMENSION_COLUMN[scope.kind];
+
+  const [grouped, values] = await Promise.all([
+    query<RollupSqlRow>(
+      `SELECT jl.${column} AS value_id,
+              COALESCE(SUM(
+                CASE WHEN (a.normal_balance::text = 'debit') <> a.is_contra
+                     THEN jl.debit - jl.credit
+                     ELSE jl.credit - jl.debit END), 0)::text AS amount
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
+         JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
+        WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
+        GROUP BY jl.${column}`,
+      [businessId, scope.dateFrom, scope.dateTo],
+    ),
+    listDimensionValuesUncapped(businessId, { kind: scope.kind, includeArchived: true }),
+  ]);
+
+  const ownByValue = new Map<string, bigint>();
+  let unassigned = 0n;
+  let journalTotal = 0n;
+  for (const row of grouped.rows) {
+    const amount = BigInt(row.amount);
+    journalTotal += amount;
+    if (row.value_id === null) unassigned += amount;
+    else ownByValue.set(row.value_id, amount);
+  }
+
+  // A line may name a value of another kind only through its own column, so
+  // every non-null id above is a value of THIS kind — but a value deleted
+  // outside the API (no FK violation possible; the columns reference the
+  // table) or one the uncapped list somehow missed must not vanish from the
+  // totals. The reconcile guard below turns any such drift into a loud
+  // failure instead of a silently short report.
+  const rollupValues: DimensionRollupValue[] = values.map((value) => ({
+    id: value.id,
+    code: value.code,
+    name: value.name,
+    parentId: value.parentId,
+    isActive: value.isActive,
+    own: ownByValue.get(value.id) ?? 0n,
+  }));
+
+  const report = buildDimensionRollup({ values: rollupValues, unassigned, journalTotal });
+  if (!report.reconciled) {
+    throw new Error("dimension_rollup_reconcile_failed");
+  }
+  return { ...report, scope };
 }

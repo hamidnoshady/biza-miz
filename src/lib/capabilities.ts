@@ -160,6 +160,8 @@ const API_CAPABILITIES: readonly [string, CapabilityKey][] = [
   ["/api/billing", "platform.billing"],
   ["/api/messaging", "cloud.messaging"],
   ["/api/growth", "app.growth"],
+  // Commission is Growth-owned too: a paired site must not become a second payout authority.
+  ["/api/commission", "app.growth"],
   ["/api/cms", "app.website"],
   ["/api/website", "app.website"],
   ["/api/connections/website", "app.website"],

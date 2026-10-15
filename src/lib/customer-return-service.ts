@@ -12,7 +12,11 @@ import { isLotBased } from "./inventory-costing";
 import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { unitCostFromValue } from "./inventory-reversal";
 import { liveSaleInventoryEventId } from "./order-amendment-service";
-import { postExactCustomerRefundEntry, postExactOperationalInventoryEntry } from "./ledger-service";
+import {
+  postExactCustomerRefundEntry,
+  postExactOperationalInventoryEntry,
+  resolveOrderReturnAttribution,
+} from "./ledger-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import type { Role } from "./auth-edge";
@@ -198,17 +202,24 @@ export async function createCustomerReturn(
   const tax = BigInt(orders[0].total) === 0n
     ? 0n
     : BigInt(roundRial(new Decimal(params.refundAmount).times(orders[0].tax).div(orders[0].total)));
+  // Issue #868 — both legs of the return mirror the sale's own attribution:
+  // the contra-revenue debit and the COGS reversal carry what the sale's
+  // revenue and COGS legs carried, never a rule re-read today.
+  const returnAttribution = await resolveOrderReturnAttribution(client, {
+    businessId: params.businessId, locationId: params.locationId, orderId: params.orderId,
+  });
   await postExactCustomerRefundEntry(client, {
     businessId: params.businessId, locationId: params.locationId, customerReturnId: returnId,
     createdBy: params.createdBy, inventoryEventId: events[0].id, paymentMethod: params.refundMethod,
     amount: params.refundAmount, tax: rialText(tax.toString()),
+    orderId: params.orderId, dimensions: returnAttribution,
   });
   await postExactOperationalInventoryEntry(client, {
     businessId: params.businessId, locationId: params.locationId, sourceType: "customer_return",
     sourceId: returnId, postingKind: "cogs_reversal", memo: "Customer return inventory recovery",
     createdBy: params.createdBy, inventoryEventId: events[0].id,
     debitCode: WELL_KNOWN_CODES.inventory, creditCode: WELL_KNOWN_CODES.cogs,
-    amount: rialText(recovered.toString()),
+    amount: rialText(recovered.toString()), dimensions: returnAttribution,
   });
   await client.query("UPDATE customer_returns SET inventory_event_id=$2 WHERE id=$1", [returnId, events[0].id]);
   await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [events[0].id]);

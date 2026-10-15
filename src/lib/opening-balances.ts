@@ -38,6 +38,8 @@ import type { AccountType } from "./coa-template";
 // Line validation (manual / imported sets)
 // ---------------------------------------------------------------------------
 
+import type { LineDimensions } from "./accounting-dimensions";
+
 export interface OpeningLineInput {
   accountId: string;
   debit: number;
@@ -46,6 +48,8 @@ export interface OpeningLineInput {
   partyId?: string | null;
   reference?: string | null;
   sourceNote?: string | null;
+  /** Issue #868 — the attribution the line carries forward. */
+  dimensions?: LineDimensions | null;
 }
 
 /** Caps: a set is a document a person reviews, not a file of arbitrary rows. */
@@ -142,6 +146,13 @@ export interface CarryForwardAccount {
   type: AccountType;
   /** debit − credit through the close, bigint Rial. */
   closingNet: bigint;
+  /**
+   * Issue #868 — the dimension tuple this balance sits in. The service feeds
+   * ONE ROW PER (account × tuple), including a single all-absent row for an
+   * account with no attribution, so a balance sheet's split carries forward
+   * exactly as it was posted.
+   */
+  dimensions?: LineDimensions | null;
 }
 
 /** A party's open balance at the year-end date. */
@@ -153,6 +164,8 @@ export interface CarryForwardPartyBalance {
   name: string;
   /** Positive = the party owes the business (A/R) / the business owes the party (A/P). */
   balance: bigint;
+  /** Issue #868 — the tuple of this party's balance row (party × tuple rows). */
+  dimensions?: LineDimensions | null;
 }
 
 export interface CarryForwardCheque {
@@ -175,6 +188,8 @@ export interface CarryForwardFixedAsset {
   accumulatedDepreciation: bigint;
   /** 'journal' | 'opening_balance' | 'unlinked' — the register's own provenance. */
   acquisitionSource: string;
+  /** Issue #868 — the asset's own default dimension tuple (migration 0219). */
+  dimensions?: LineDimensions | null;
 }
 
 /** The accounts the rule names; the service resolves them from codes. */
@@ -203,6 +218,8 @@ export interface CarryForwardLine {
   partyId: string | null;
   reference: string | null;
   sourceNote: string | null;
+  /** Issue #868 — carried-forward attribution; absent on settlement-only lines. */
+  dimensions?: LineDimensions | null;
 }
 
 export interface CarryForwardProposal {
@@ -228,6 +245,7 @@ function line(
     partyId: null,
     reference: null,
     sourceNote: null,
+    dimensions: null,
     ...extra,
   };
 }
@@ -242,9 +260,21 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
   const notes: string[] = [];
   const handled = new Set<string>();
 
-  const byId = new Map(input.accounts.map((a) => [a.accountId, a]));
+  // One row per (account × tuple): comparisons need the account's TOTAL net,
+  // while the generic section below walks the rows so a split carries forward.
+  const byId = new Map<string, CarryForwardAccount>();
+  for (const a of input.accounts) {
+    const existing = byId.get(a.accountId);
+    if (existing) existing.closingNet += a.closingNet;
+    else byId.set(a.accountId, { ...a, closingNet: a.closingNet });
+  }
   const netOf = (accountId: string | null): bigint =>
     accountId ? (byId.get(accountId)?.closingNet ?? 0n) : 0n;
+  const dimensionedAccounts = new Set(
+    input.accounts
+      .filter((a) => a.dimensions && Object.values(a.dimensions).some((v) => Boolean(v)))
+      .map((a) => a.accountId),
+  );
 
   // -- A/R: one line per customer, the control replaced by its detail. -----
   if (input.accountIds.accountsReceivable) {
@@ -262,6 +292,7 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
         partyId: c.partyId,
         reference: c.partyId ? null : c.name,
         sourceNote: `اعتبار ${c.name}`,
+        dimensions: c.dimensions ?? null,
       });
       if (l) lines.push(l);
     }
@@ -297,6 +328,7 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
         partyId: s.partyId,
         reference: s.partyId ? null : s.name,
         sourceNote: `بدهی به ${s.name}`,
+        dimensions: s.dimensions ?? null,
       });
       if (l) lines.push(l);
     }
@@ -329,6 +361,7 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
     const total = cheques.reduce((sum, c) => sum + c.amount, 0n);
     const account = byId.get(accountId);
     if (!account) continue; // a cheque sitting in an account the chart no longer has: leave it to the GL below
+    if (dimensionedAccounts.has(accountId)) continue; // issue #868: a split account is carried by its rows, not by cheque identity
     // Receivables are debit balances; payables are credit balances (negative net).
     const expected = account.type === "asset" ? total : -total;
     if (expected === account.closingNet && expected !== 0n) {
@@ -351,10 +384,17 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
   //     when the register and the GL agree; otherwise the account totals. ----
   const accDepId = input.accountIds.accumulatedDepreciation;
   const costByAccount = new Map<string, bigint>();
+  const accumDepByTuple = new Map<string, { dimensions: LineDimensions | null; amount: bigint }>();
   let totalAccumDep = 0n;
   for (const asset of input.fixedAssets) {
     costByAccount.set(asset.accountId, (costByAccount.get(asset.accountId) ?? 0n) + asset.cost);
     totalAccumDep += asset.accumulatedDepreciation;
+    // Issue #868 — accumulated depreciation follows the assets' own tuples, so
+    // a dimensioned cost and its contra stay in the same group.
+    const key = JSON.stringify(asset.dimensions ?? null);
+    const bucket = accumDepByTuple.get(key) ?? { dimensions: asset.dimensions ?? null, amount: 0n };
+    bucket.amount += asset.accumulatedDepreciation;
+    accumDepByTuple.set(key, bucket);
   }
   const perAssetAgrees =
     costByAccount.size > 0 &&
@@ -369,6 +409,7 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
         partyId: asset.assetId,
         reference: asset.name,
         sourceNote: `دارایی ثابت «${asset.name}» — منبع: ${asset.acquisitionSource}`,
+        dimensions: asset.dimensions ?? null,
       });
       if (l) {
         lines.push(l);
@@ -376,19 +417,20 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
       }
     }
     if (accDepId) {
-      const l = line(accDepId, -totalAccumDep, {
-        sourceNote: "استهلاک انباشته دارایی‌های ثابت",
-      });
-      if (l) {
-        lines.push(l);
-        handled.add(accDepId);
+      for (const bucket of accumDepByTuple.values()) {
+        const l = line(accDepId, -bucket.amount, {
+          sourceNote: "استهلاک انباشته دارایی‌های ثابت",
+          dimensions: bucket.dimensions,
+        });
+        if (l) lines.push(l);
       }
+      if (totalAccumDep !== 0n) handled.add(accDepId);
     }
   } else if (costByAccount.size > 0) {
     notes.push("منزلک دارایی‌های ثابت با حساب‌های کل برابر نیست؛ کل حساب‌ها جابه‌سازی شد.");
   }
 
-  // -- The rest of the balance sheet, account by account. --------------------
+  // -- The rest of the balance sheet, row by row (account × tuple). ----------
   for (const account of input.accounts) {
     if (handled.has(account.accountId)) continue;
     if (account.type !== "asset" && account.type !== "liability" && account.type !== "equity") {
@@ -396,28 +438,51 @@ export function buildCarryForwardProposal(input: CarryForwardInput): CarryForwar
     }
     const l = line(account.accountId, account.closingNet, {
       sourceNote: account.type === "asset" && account.code === "1300" ? "موجودی افتتاحیه" : null,
+      dimensions: account.dimensions ?? null,
     });
     if (l) lines.push(l);
   }
 
-  // -- The prior year's result → one equity line. ----------------------------
+  // -- The prior year's result → equity line(s). -----------------------------
   // netRev + netExp is (by the trial balance balancing) the negative of the
-  // balance sheet's net — so this single line is what makes the set balance,
-  // and it is zero exactly when the year was already closed into equity.
-  let netRev = 0n;
-  let netExp = 0n;
+  // balance sheet's net — so these lines are what make the set balance, and a
+  // line is zero exactly when that dimension's year was already closed into
+  // equity. Split per dimension tuple (issue #868): each group's result lands
+  // on retained earnings with its own attribution, and an unattributed year
+  // produces exactly the single line this always produced. Attribution is
+  // carried forward deliberately; clearing it is a manual reclassification,
+  // never something this generator does silently.
+  const profitByTuple = new Map<string, { dimensions: LineDimensions | null; amount: bigint }>();
   for (const account of input.accounts) {
-    if (account.type === "revenue") netRev += account.closingNet;
-    else if (account.type === "expense") netExp += account.closingNet;
+    if (account.type !== "revenue" && account.type !== "expense") continue;
+    const key = JSON.stringify(account.dimensions ?? null);
+    const bucket = profitByTuple.get(key) ?? { dimensions: account.dimensions ?? null, amount: 0n };
+    bucket.amount += account.type === "revenue" ? account.closingNet : account.closingNet;
+    profitByTuple.set(key, bucket);
   }
-  const profit = -(netRev + netExp);
-  if (profit !== 0n && input.accountIds.retainedEarnings) {
-    lines.push(
-      line(input.accountIds.retainedEarnings, -profit, {
-        sourceNote: "سود (زیان) سال قبل — انتقال به سرمایه",
-      })!,
-    );
-  } else if (profit !== 0n) {
+  let anyProfitLine = false;
+  for (const bucket of profitByTuple.values()) {
+    // revenue net (credit side, so negative debit-credit) + expense net = the
+    // negative of what this group earns.
+    const profit = -bucket.amount;
+    if (profit === 0n) continue;
+    if (!input.accountIds.retainedEarnings) continue;
+    const l = line(input.accountIds.retainedEarnings, -profit, {
+      sourceNote: "سود (زیان) سال قبل — انتقال به سرمایه",
+      dimensions: bucket.dimensions,
+    });
+    if (l) {
+      lines.push(l);
+      anyProfitLine = true;
+    }
+  }
+  let totalProfit = 0n;
+  for (const account of input.accounts) {
+    if (account.type === "revenue" || account.type === "expense") totalProfit += account.closingNet;
+  }
+  if (-totalProfit !== 0n && !input.accountIds.retainedEarnings) {
+    notes.push("حساب سود و زیان انباشته در سرفصل وجود ندارد؛ نتیجه سال قبل جابه‌سازی نشد — تراز این مجموعه برقرار نمی‌شود.");
+  } else if (-totalProfit !== 0n && !anyProfitLine) {
     notes.push("حساب سود و زیان انباشته در سرفصل وجود ندارد؛ نتیجه سال قبل جابه‌سازی نشد — تراز این مجموعه برقرار نمی‌شود.");
   }
 

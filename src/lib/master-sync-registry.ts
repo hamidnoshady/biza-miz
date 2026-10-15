@@ -193,6 +193,38 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     optionalRefs: [],
     touchColumn: "updated_at",
   },
+  // Issue #868 — accounting-dimension master data. Cloud-authored (the
+  // dimension workspace lives in the accounting screens), replicated down so a
+  // hybrid site can name the values its documents carry and resolve mapping
+  // rules without a round trip. IDs are the identity — the same UUIDs on both
+  // sides — so a site's attribution columns reference exactly what the cloud
+  // posted. Settings before values before mappings: a batch that creates a
+  // kind, a value of it and a mapping onto the value applies in one pass.
+  {
+    table: "accounting_dimension_settings",
+    pk: ["business_id", "kind"],
+    scope: { kind: "business" },
+    excluded: ["updated_at"],
+    optionalRefs: ["updated_by"],
+  },
+  {
+    table: "accounting_dimension_values",
+    pk: ["id"],
+    scope: { kind: "business" },
+    excluded: ["updated_at"],
+    optionalRefs: ["parent_id", "location_id", "created_by"],
+    softDeleteColumn: "is_active",
+    touchColumn: "updated_at",
+  },
+  {
+    table: "accounting_dimension_mappings",
+    pk: ["id"],
+    scope: { kind: "business" },
+    excluded: ["updated_at"],
+    optionalRefs: ["cost_center_id", "profit_center_id", "department_id", "detail_dimension_id", "created_by"],
+    softDeleteColumn: "is_active",
+    touchColumn: "updated_at",
+  },
 ];
 
 const BY_TABLE = new Map(MASTER_SYNC_TABLES.map((config) => [config.table, config]));

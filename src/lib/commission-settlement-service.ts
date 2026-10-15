@@ -54,14 +54,14 @@ import {
   type PlanWarning,
   type UnmappedSeller,
 } from "./commission-settlement-plan";
-import { isUuid, type CreateRunInput, type PayoutInput } from "./commission-settlement-input";
+import { isUuid, type CreateRunInput, type PayoutInput, type StatementQuery } from "./commission-settlement-input";
 import type { LineExportRow, RunExportRow } from "./commission-settlement-csv";
 import { query } from "./db";
 import { PERMISSIONS } from "./permissions";
 import { appendBusinessSyncOutboxEvent } from "./sync-outbox";
 import { accountIdsByCode, postExactJournalEntry, postExactMirrorEntry } from "./ledger-service";
 import { listPaymentAccounts, resolvePayoutAccount } from "./payroll-accounts";
-import { clientRunner, inTransaction, lockPayroll, poolRunner, asRial, type Runner } from "./payroll-db";
+import { clientRunner, inSnapshot, inTransaction, lockPayroll, poolRunner, asRial, type Runner } from "./payroll-db";
 import type { PayrollPaymentAccount } from "./payroll-types";
 import type { RialText } from "./inventory-exact";
 
@@ -210,6 +210,10 @@ export interface CommissionStatement {
     saleDate: string | null;
     sourceLabel: string;
     orderNumber: string | null;
+    orderId: string | null;
+    entryId: string | null;
+    settlementRunId: string | null;
+    payrollRunId: string | null;
     amount: string;
     settledBy: "run" | "payroll" | null;
     settledRef: string | null;
@@ -224,7 +228,8 @@ export interface CommissionStatement {
     entryId: string | null;
   }[];
   runs: { runId: string; runNumber: number; status: string; owed: string; paid: string; outstanding: string }[];
-  /** True when `accruals` or `payouts` hold only the first 500 rows. The totals are never truncated. */
+  page: { limit: number; accrualOffset: number; payoutOffset: number; hasMoreAccruals: boolean; hasMorePayouts: boolean };
+  /** Compatibility flag: more detail pages exist. Lifetime totals are never truncated. */
   truncated: boolean;
 }
 
@@ -864,21 +869,21 @@ export async function listCommissionPaymentAccounts(businessId: string): Promise
  * balances closed runs carried forward and nobody has claimed yet. Payroll adds
  * this to its own unsettled figure, so 2300 reconciles either way.
  */
-export async function standaloneCommissionOutstanding(businessId: string): Promise<bigint> {
-  const [runs, carries] = await Promise.all([
-    query<{ total: string }>(
+export async function standaloneCommissionOutstanding(businessId: string, run: Runner): Promise<bigint> {
+  const [runs, carries] = [
+    await run<{ total: string }>(
       `SELECT COALESCE(SUM(commission_total - paid_total), 0)::text AS total
          FROM commission_settlement_runs
         WHERE business_id = $1 AND status = ANY($2::text[])`,
       [businessId, [...COMMISSION_RUN_OPEN_STATUSES]],
     ),
-    query<{ total: string }>(
+    await run<{ total: string }>(
       `SELECT COALESCE(SUM(amount), 0)::text AS total
          FROM commission_settlement_carries
         WHERE business_id = $1 AND claimed_by_run_id IS NULL`,
       [businessId],
     ),
-  ]);
+  ];
   return BigInt(runs.rows[0].total) + BigInt(carries.rows[0].total);
 }
 
@@ -887,217 +892,250 @@ export async function standaloneCommissionOutstanding(businessId: string): Promi
  * the paid and unpaid positions (`subledgerDifference`), and the ledger must
  * agree with what is still owed (`difference`). Both are zero on a healthy
  * business, and a non-zero figure names the place the books disagree.
+ * Every component uses inSnapshot's tenant-scoped, read-only REPEATABLE READ
+ * connection. An ordinary transaction (READ COMMITTED) is not enough: a payout
+ * can commit between the ledger read and the subledger reads.
  */
 export async function getCommissionLiability(businessId: string): Promise<CommissionTieOut> {
-  const [ledger, accruals, payroll, runs, carries] = await Promise.all([
-    query<{ balance: string }>(
-      `SELECT COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
-         FROM journal_lines jl
-         JOIN journal_entries je ON je.id = jl.entry_id
-         JOIN accounts a ON a.id = jl.account_id
-        WHERE je.business_id = $1 AND a.business_id = $1 AND a.code = $2`,
-      [businessId, WELL_KNOWN_CODES.salariesPayable],
-    ),
-    query<{ accrued: string; unclaimed: string }>(
-      `SELECT COALESCE(SUM(amount), 0)::text AS accrued,
-              COALESCE(SUM(amount) FILTER (WHERE payroll_run_id IS NULL AND settlement_run_id IS NULL), 0)::text AS unclaimed
-         FROM commission_accruals WHERE business_id = $1`,
-      [businessId],
-    ),
-    query<{ awaiting_net_and_commission: string; awaiting_commission: string; paid_commission: string }>(
-      `SELECT COALESCE(SUM(COALESCE(net_amount, total_amount) + commission_total) FILTER (WHERE status = 'accrued'), 0)::text AS awaiting_net_and_commission,
-              COALESCE(SUM(commission_total) FILTER (WHERE status = 'accrued'), 0)::text AS awaiting_commission,
-              COALESCE(SUM(commission_total) FILTER (WHERE status = 'paid'), 0)::text AS paid_commission
-         FROM payroll_runs WHERE business_id = $1`,
-      [businessId],
-    ),
-    query<{ outstanding: string; paid: string }>(
-      `SELECT COALESCE(SUM(commission_total - paid_total) FILTER (WHERE status = ANY($2::text[])), 0)::text AS outstanding,
-              COALESCE(SUM(paid_total) FILTER (WHERE status <> 'voided'), 0)::text AS paid
-         FROM commission_settlement_runs WHERE business_id = $1`,
-      [businessId, [...COMMISSION_RUN_OPEN_STATUSES]],
-    ),
-    query<{ total: string }>(
-      `SELECT COALESCE(SUM(amount), 0)::text AS total FROM commission_settlement_carries
-        WHERE business_id = $1 AND claimed_by_run_id IS NULL`,
-      [businessId],
-    ),
-  ]);
+  return inSnapshot(async (client) => {
+    const run = clientRunner(client);
+    const [ledger, accruals, payroll, runs, carries] = [
+      await run<{ balance: string }>(
+        `SELECT COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
+           FROM journal_lines jl
+           JOIN journal_entries je ON je.id = jl.entry_id
+           JOIN accounts a ON a.id = jl.account_id
+          WHERE je.business_id = $1 AND a.business_id = $1 AND a.code = $2`,
+        [businessId, WELL_KNOWN_CODES.salariesPayable],
+      ),
+      await run<{ accrued: string; unclaimed: string }>(
+        `SELECT COALESCE(SUM(amount), 0)::text AS accrued,
+                COALESCE(SUM(amount) FILTER (WHERE payroll_run_id IS NULL AND settlement_run_id IS NULL), 0)::text AS unclaimed
+           FROM commission_accruals WHERE business_id = $1`,
+        [businessId],
+      ),
+      await run<{ awaiting_net_and_commission: string; awaiting_commission: string; paid_commission: string }>(
+        `SELECT COALESCE(SUM(COALESCE(net_amount, total_amount) + commission_total) FILTER (WHERE status = 'accrued'), 0)::text AS awaiting_net_and_commission,
+                COALESCE(SUM(commission_total) FILTER (WHERE status = 'accrued'), 0)::text AS awaiting_commission,
+                COALESCE(SUM(commission_total) FILTER (WHERE status = 'paid'), 0)::text AS paid_commission
+           FROM payroll_runs WHERE business_id = $1`,
+        [businessId],
+      ),
+      await run<{ outstanding: string; paid: string }>(
+        `SELECT COALESCE(SUM(commission_total - paid_total) FILTER (WHERE status = ANY($2::text[])), 0)::text AS outstanding,
+                COALESCE(SUM(paid_total) FILTER (WHERE status <> 'voided'), 0)::text AS paid
+           FROM commission_settlement_runs WHERE business_id = $1`,
+        [businessId, [...COMMISSION_RUN_OPEN_STATUSES]],
+      ),
+      await run<{ total: string }>(
+        `SELECT COALESCE(SUM(amount), 0)::text AS total FROM commission_settlement_carries
+          WHERE business_id = $1 AND claimed_by_run_id IS NULL`,
+        [businessId],
+      ),
+    ];
 
-  const ledgerBalance = BigInt(ledger.rows[0].balance);
-  const accruedTotal = BigInt(accruals.rows[0].accrued);
-  const unclaimed = BigInt(accruals.rows[0].unclaimed);
-  const awaitingNetAndCommission = BigInt(payroll.rows[0].awaiting_net_and_commission);
-  const awaitingCommission = BigInt(payroll.rows[0].awaiting_commission);
-  const paidCommission = BigInt(payroll.rows[0].paid_commission);
-  const settlementOutstanding = BigInt(runs.rows[0].outstanding);
-  const standalonePaid = BigInt(runs.rows[0].paid);
-  const carriedForward = BigInt(carries.rows[0].total);
+    const ledgerBalance = BigInt(ledger.rows[0].balance);
+    const accruedTotal = BigInt(accruals.rows[0].accrued);
+    const unclaimed = BigInt(accruals.rows[0].unclaimed);
+    const awaitingNetAndCommission = BigInt(payroll.rows[0].awaiting_net_and_commission);
+    const awaitingCommission = BigInt(payroll.rows[0].awaiting_commission);
+    const paidCommission = BigInt(payroll.rows[0].paid_commission);
+    const settlementOutstanding = BigInt(runs.rows[0].outstanding);
+    const standalonePaid = BigInt(runs.rows[0].paid);
+    const carriedForward = BigInt(carries.rows[0].total);
 
-  const paidTotal = paidCommission + standalonePaid;
-  const unpaidCommission = unclaimed + awaitingCommission + settlementOutstanding + carriedForward;
-  return {
-    ledgerBalance: ledgerBalance.toString(),
-    accruedTotal: accruedTotal.toString(),
-    paidTotal: paidTotal.toString(),
-    unclaimed: unclaimed.toString(),
-    payrollAwaitingCommission: awaitingCommission.toString(),
-    settlementOutstanding: settlementOutstanding.toString(),
-    carriedForward: carriedForward.toString(),
-    unpaidCommission: unpaidCommission.toString(),
-    subledgerDifference: (accruedTotal - paidTotal - unpaidCommission).toString(),
-    difference: (ledgerBalance - awaitingNetAndCommission - unclaimed - settlementOutstanding - carriedForward).toString(),
-  };
+    const paidTotal = paidCommission + standalonePaid;
+    const unpaidCommission = unclaimed + awaitingCommission + settlementOutstanding + carriedForward;
+    return {
+      ledgerBalance: ledgerBalance.toString(),
+      accruedTotal: accruedTotal.toString(),
+      paidTotal: paidTotal.toString(),
+      unclaimed: unclaimed.toString(),
+      payrollAwaitingCommission: awaitingCommission.toString(),
+      settlementOutstanding: settlementOutstanding.toString(),
+      carriedForward: carriedForward.toString(),
+      unpaidCommission: unpaidCommission.toString(),
+      subledgerDifference: (accruedTotal - paidTotal - unpaidCommission).toString(),
+      difference: (ledgerBalance - awaitingNetAndCommission - unclaimed - settlementOutstanding - carriedForward).toString(),
+    };
+  });
 }
 
-export async function getCommissionStatement(businessId: string, employeeId: string): Promise<CommissionStatement> {
+export async function getCommissionStatement(businessId: string, employeeId: string, options: Partial<StatementQuery> = {}): Promise<CommissionStatement> {
   if (!isUuid(employeeId)) throw new CommissionSettlementError("employee_not_found", 404);
-  const { rows: people } = await query<{
-    id: string;
-    full_name: string;
-    employee_code: string | null;
-    role: string | null;
-    is_active: boolean;
-  }>(
-    `SELECT u.id, u.full_name, e.employee_code, u.role::text AS role, u.is_active
-       FROM users u LEFT JOIN employees e ON e.id = u.id
-      WHERE u.business_id = $1 AND u.id = $2`,
-    [businessId, employeeId],
-  );
-  if (!people[0]) throw new CommissionSettlementError("employee_not_found", 404);
-
-  const LIMIT = 500;
-  const [accrualRows, accrualTotals, payrollPaid, runPaidTotals, payoutRows, runRows] = await Promise.all([
-    query<{
+  return inSnapshot(async (client) => {
+    const run = clientRunner(client);
+    const { rows: people } = await run<{
       id: string;
-      sale_date: string | null;
-      source_type: string;
-      order_number: string | null;
-      amount: string;
-      settlement_run_number: number | null;
-      payroll_period: string | null;
+      full_name: string;
+      employee_code: string | null;
+      role: string | null;
+      is_active: boolean;
     }>(
-      `SELECT a.id, COALESCE(je.entry_date, a.created_at::date)::text AS sale_date, a.source_type,
-              o.order_number::text AS order_number, a.amount::text AS amount,
-              sr.run_number AS settlement_run_number, pr.period_label AS payroll_period
-         FROM commission_accruals a
-         LEFT JOIN journal_entries je ON je.id = a.entry_id
-         LEFT JOIN order_items oi ON a.source_type = 'order_item' AND oi.id = a.source_id
-         LEFT JOIN orders o ON o.id = oi.order_id
-         LEFT JOIN commission_settlement_runs sr ON sr.id = a.settlement_run_id
-         LEFT JOIN payroll_runs pr ON pr.id = a.payroll_run_id
-        WHERE a.business_id = $1 AND a.employee_id = $2 AND a.amount <> 0
-        ORDER BY COALESCE(je.entry_date, a.created_at::date) DESC, a.created_at DESC, a.id
-        LIMIT ${LIMIT + 1}`,
+      `SELECT u.id, u.full_name, e.employee_code, u.role::text AS role, u.is_active
+         FROM users u LEFT JOIN employees e ON e.id = u.id
+        WHERE u.business_id = $1 AND u.id = $2`,
       [businessId, employeeId],
-    ),
-    query<{ accrued: string }>(
-      `SELECT COALESCE(SUM(amount), 0)::text AS accrued
-         FROM commission_accruals WHERE business_id = $1 AND employee_id = $2`,
-      [businessId, employeeId],
-    ),
-    query<{ paid: string }>(
-      `SELECT COALESCE(SUM(l.commission_amount), 0)::text AS paid
-         FROM payroll_run_lines l JOIN payroll_runs pr ON pr.id = l.run_id
-        WHERE pr.business_id = $1 AND l.user_id = $2 AND pr.status = 'paid'`,
-      [businessId, employeeId],
-    ),
-    // Lifetime standalone money out, net of reversals. Summed in the database
-    // over every allocation, never over the bounded detail list below: a
-    // member with more than LIMIT allocations must still get the true total.
-    query<{ paid: string }>(
-      `SELECT COALESCE(SUM(al.amount), 0)::text AS paid
-         FROM commission_settlement_allocations al
-        WHERE al.business_id = $1 AND al.employee_id = $2`,
-      [businessId, employeeId],
-    ),
-    query<{
-      payout_id: string;
-      run_id: string;
-      run_number: number;
-      kind: "payout" | "reversal";
-      amount: string;
-      paid_date: string;
-      entry_id: string | null;
-    }>(
-      `SELECT p.id AS payout_id, p.run_id, r.run_number, p.kind, al.amount::text AS amount,
-              p.paid_date::text AS paid_date, p.entry_id
-         FROM commission_settlement_allocations al
-         JOIN commission_settlement_payouts p ON p.id = al.payout_id
-         JOIN commission_settlement_runs r ON r.id = p.run_id
-        WHERE al.business_id = $1 AND al.employee_id = $2
-        ORDER BY p.created_at DESC, p.id
-        LIMIT ${LIMIT + 1}`,
-      [businessId, employeeId],
-    ),
-    query<{ run_id: string; run_number: number; status: string; owed: string; paid: string }>(
-      `SELECT r.id AS run_id, r.run_number, r.status,
-              SUM(l.amount)::text AS owed,
-              COALESCE((SELECT SUM(al.amount) FROM commission_settlement_allocations al
-                         WHERE al.business_id = $1 AND al.run_id = r.id AND al.employee_id = $2), 0)::text AS paid
-         FROM commission_settlement_lines l
-         JOIN commission_settlement_runs r ON r.id = l.run_id
-        WHERE l.business_id = $1 AND l.employee_id = $2
-        GROUP BY r.id, r.run_number, r.status
-        ORDER BY r.run_number DESC`,
-      [businessId, employeeId],
-    ),
-  ]);
+    );
+    if (!people[0]) throw new CommissionSettlementError("employee_not_found", 404);
 
-  const accrued = BigInt(accrualTotals.rows[0].accrued);
-  const paidThroughPayroll = BigInt(payrollPaid.rows[0].paid);
-  const paidThroughRuns = BigInt(runPaidTotals.rows[0].paid);
-  const person = people[0];
-  return {
-    employee: {
-      id: person.id,
-      fullName: person.full_name,
-      employeeCode: person.employee_code,
-      role: person.role,
-      isActive: person.is_active,
-    },
-    totals: {
-      accrued: accrued.toString(),
-      paidThroughPayroll: paidThroughPayroll.toString(),
-      paidThroughRuns: paidThroughRuns.toString(),
-      unpaid: (accrued - paidThroughPayroll - paidThroughRuns).toString(),
-    },
-    accruals: accrualRows.rows.slice(0, LIMIT).map((row) => ({
-      id: row.id,
-      saleDate: row.sale_date,
-      sourceLabel: row.source_type === "order_item" ? (row.order_number ? `سفارش ${row.order_number}` : "فروش")
-        : row.source_type === "serial_return" ? "برگشت کالا"
-        : row.source_type === "order_amendment" ? "ابطال یا اصلاح فاکتور"
-        : row.source_type,
-      orderNumber: row.order_number,
-      amount: row.amount,
-      settledBy: row.settlement_run_number !== null ? "run" : row.payroll_period !== null ? "payroll" : null,
-      settledRef:
-        row.settlement_run_number !== null
-          ? `دورهٔ شماره ${row.settlement_run_number}`
-          : row.payroll_period !== null
-            ? `حقوق ${row.payroll_period}`
-            : null,
-    })),
-    payouts: payoutRows.rows.slice(0, LIMIT).map((row) => ({
-      payoutId: row.payout_id,
-      runId: row.run_id,
-      runNumber: row.run_number,
-      kind: row.kind,
-      amount: row.amount,
-      paidDate: row.paid_date,
-      entryId: row.entry_id,
-    })),
-    runs: runRows.rows.map((row) => ({
-      runId: row.run_id,
-      runNumber: row.run_number,
-      status: row.status,
-      owed: row.owed,
-      paid: row.paid,
-      outstanding: (BigInt(row.owed) - BigInt(row.paid)).toString(),
-    })),
-    truncated: accrualRows.rows.length > LIMIT || payoutRows.rows.length > LIMIT,
-  };
+    // Export is deliberately bounded, with an explicit refusal instead of a partial file.
+    const LIMIT = options.format === "csv" ? EXPORT_LINE_CAP : Math.min(500, Math.max(1, options.limit ?? 500));
+    const accrualOffset = options.format === "csv" ? 0 : options.accrualOffset ?? 0;
+    const payoutOffset = options.format === "csv" ? 0 : options.payoutOffset ?? 0;
+    const filters = [businessId, employeeId, options.dateFrom ?? null, options.dateTo ?? null, options.runId ?? null];
+    const [accrualRows, accrualTotals, payrollPaid, runPaidTotals, payoutRows, runRows] = [
+      await run<{
+        id: string;
+        sale_date: string | null;
+        source_type: string;
+        order_number: string | null;
+        amount: string;
+        order_id: string | null;
+        entry_id: string | null;
+        settlement_run_id: string | null;
+        payroll_run_id: string | null;
+        settlement_run_number: number | null;
+        payroll_period: string | null;
+      }>(
+        `SELECT a.id, COALESCE(je.entry_date, a.created_at::date)::text AS sale_date, a.source_type,
+                o.order_number::text AS order_number, a.amount::text AS amount,
+                o.id AS order_id, a.entry_id, a.settlement_run_id, a.payroll_run_id,
+                sr.run_number AS settlement_run_number, pr.period_label AS payroll_period
+           FROM commission_accruals a
+           LEFT JOIN journal_entries je ON je.id = a.entry_id
+           LEFT JOIN order_items oi ON a.source_type = 'order_item' AND oi.id = a.source_id
+           LEFT JOIN orders o ON o.id = oi.order_id
+           LEFT JOIN commission_settlement_runs sr ON sr.id = a.settlement_run_id
+           LEFT JOIN payroll_runs pr ON pr.id = a.payroll_run_id
+          WHERE a.business_id = $1 AND a.employee_id = $2 AND a.amount <> 0
+            AND ($3::date IS NULL OR COALESCE(je.entry_date, a.created_at::date) >= $3)
+            AND ($4::date IS NULL OR COALESCE(je.entry_date, a.created_at::date) <= $4)
+            AND ($5::uuid IS NULL OR a.settlement_run_id = $5)
+          ORDER BY COALESCE(je.entry_date, a.created_at::date) DESC, a.created_at DESC, a.id
+          LIMIT $6 OFFSET $7`,
+        [...filters, LIMIT + 1, accrualOffset],
+      ),
+      await run<{ accrued: string }>(
+        `SELECT COALESCE(SUM(amount), 0)::text AS accrued
+           FROM commission_accruals WHERE business_id = $1 AND employee_id = $2`,
+        [businessId, employeeId],
+      ),
+      await run<{ paid: string }>(
+        `SELECT COALESCE(SUM(l.commission_amount), 0)::text AS paid
+           FROM payroll_run_lines l JOIN payroll_runs pr ON pr.id = l.run_id
+          WHERE pr.business_id = $1 AND l.user_id = $2 AND pr.status = 'paid'`,
+        [businessId, employeeId],
+      ),
+      // Lifetime standalone money out, net of reversals. Summed in the database
+      // over every allocation, never over the bounded detail list below: a
+      // member with more than LIMIT allocations must still get the true total.
+      await run<{ paid: string }>(
+        `SELECT COALESCE(SUM(al.amount), 0)::text AS paid
+           FROM commission_settlement_allocations al
+          WHERE al.business_id = $1 AND al.employee_id = $2`,
+        [businessId, employeeId],
+      ),
+      await run<{
+        payout_id: string;
+        run_id: string;
+        run_number: number;
+        kind: "payout" | "reversal";
+        amount: string;
+        paid_date: string;
+        entry_id: string | null;
+      }>(
+        `SELECT p.id AS payout_id, p.run_id, r.run_number, p.kind, al.amount::text AS amount,
+                p.paid_date::text AS paid_date, p.entry_id
+           FROM commission_settlement_allocations al
+           JOIN commission_settlement_payouts p ON p.id = al.payout_id
+           JOIN commission_settlement_runs r ON r.id = p.run_id
+          WHERE al.business_id = $1 AND al.employee_id = $2
+            AND ($3::date IS NULL OR p.paid_date >= $3)
+            AND ($4::date IS NULL OR p.paid_date <= $4)
+            AND ($5::uuid IS NULL OR p.run_id = $5)
+          ORDER BY p.created_at DESC, p.id
+          LIMIT $6 OFFSET $7`,
+        [...filters, LIMIT + 1, payoutOffset],
+      ),
+      await run<{ run_id: string; run_number: number; status: string; owed: string; paid: string }>(
+        `SELECT r.id AS run_id, r.run_number, r.status,
+                SUM(l.amount)::text AS owed,
+                COALESCE((SELECT SUM(al.amount) FROM commission_settlement_allocations al
+                           WHERE al.business_id = $1 AND al.run_id = r.id AND al.employee_id = $2), 0)::text AS paid
+           FROM commission_settlement_lines l
+           JOIN commission_settlement_runs r ON r.id = l.run_id
+          WHERE l.business_id = $1 AND l.employee_id = $2
+          GROUP BY r.id, r.run_number, r.status
+          ORDER BY r.run_number DESC`,
+        [businessId, employeeId],
+      ),
+    ];
+
+    if (options.format === "csv" && (accrualRows.rows.length > LIMIT || payoutRows.rows.length > LIMIT)) {
+      throw new CommissionSettlementError("too_many_export_rows", 400, { limit: LIMIT });
+    }
+    const accrued = BigInt(accrualTotals.rows[0].accrued);
+    const paidThroughPayroll = BigInt(payrollPaid.rows[0].paid);
+    const paidThroughRuns = BigInt(runPaidTotals.rows[0].paid);
+    const person = people[0];
+    return {
+      employee: {
+        id: person.id,
+        fullName: person.full_name,
+        employeeCode: person.employee_code,
+        role: person.role,
+        isActive: person.is_active,
+      },
+      totals: {
+        accrued: accrued.toString(),
+        paidThroughPayroll: paidThroughPayroll.toString(),
+        paidThroughRuns: paidThroughRuns.toString(),
+        unpaid: (accrued - paidThroughPayroll - paidThroughRuns).toString(),
+      },
+      accruals: accrualRows.rows.slice(0, LIMIT).map((row) => ({
+        id: row.id,
+        saleDate: row.sale_date,
+        sourceLabel: row.source_type === "order_item" ? (row.order_number ? `سفارش ${row.order_number}` : "فروش")
+          : row.source_type === "serial_return" ? "برگشت کالا"
+          : row.source_type === "order_amendment" ? "ابطال یا اصلاح فاکتور"
+          : row.source_type,
+        orderNumber: row.order_number,
+        orderId: row.order_id,
+        entryId: row.entry_id,
+        settlementRunId: row.settlement_run_id,
+        payrollRunId: row.payroll_run_id,
+        amount: row.amount,
+        settledBy: row.settlement_run_number !== null ? "run" : row.payroll_period !== null ? "payroll" : null,
+        settledRef:
+          row.settlement_run_number !== null
+            ? `دورهٔ شماره ${row.settlement_run_number}`
+            : row.payroll_period !== null
+              ? `حقوق ${row.payroll_period}`
+              : null,
+      })),
+      payouts: payoutRows.rows.slice(0, LIMIT).map((row) => ({
+        payoutId: row.payout_id,
+        runId: row.run_id,
+        runNumber: row.run_number,
+        kind: row.kind,
+        amount: row.amount,
+        paidDate: row.paid_date,
+        entryId: row.entry_id,
+      })),
+      runs: runRows.rows.map((row) => ({
+        runId: row.run_id,
+        runNumber: row.run_number,
+        status: row.status,
+        owed: row.owed,
+        paid: row.paid,
+        outstanding: (BigInt(row.owed) - BigInt(row.paid)).toString(),
+      })),
+      page: { limit: LIMIT, accrualOffset, payoutOffset,
+        hasMoreAccruals: accrualRows.rows.length > LIMIT, hasMorePayouts: payoutRows.rows.length > LIMIT },
+      truncated: accrualRows.rows.length > LIMIT || payoutRows.rows.length > LIMIT,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,33 +1312,40 @@ async function loadCandidates(client: PoolClient, businessId: string, run: RunRo
       ORDER BY pr.created_at, a.payroll_run_id`,
     [businessId, run.period_to, run.location_id, run.employee_filter],
   );
-  // Retail sales in the period whose seller has no commission rule in force
-  // today (the same `is_active` + effective-window test the accrual path applies
-  // to a rule). The sale's business day is the day the period is measured on.
+  // Diagnose only lines without an accrual. Existing signed accruals are the
+  // financial truth even if a rule was subsequently changed or disabled.
+  // Match effective windows on the original business day, and all scope axes
+  // passed by retail-invoice-service. Category is currently not passed by that
+  // producer (#764): category-only rules must not suppress this warning.
   const { rows: unmapped } = await client.query<{
-    employee_id: string;
+    employee_id: string | null;
     full_name: string;
     lines: number;
     sales_value: string;
   }>(
-    `SELECT o.opened_by AS employee_id, COALESCE(u.full_name, '') AS full_name,
+    `SELECT o.opened_by AS employee_id, COALESCE(u.full_name, 'فروشندهٔ تعیین‌نشده') AS full_name,
             COUNT(oi.id)::int AS lines,
             COALESCE(SUM(oi.unit_price * oi.quantity), 0)::text AS sales_value
        FROM order_items oi
        JOIN orders o ON o.id = oi.order_id
        JOIN locations l ON l.id = o.location_id AND l.business_id = $1
+       LEFT JOIN items i ON i.id = oi.item_id AND i.location_id = o.location_id
        LEFT JOIN users u ON u.id = o.opened_by AND u.business_id = $1
       WHERE o.type = 'retail' AND o.status = 'completed' AND oi.status <> 'voided'
-        AND o.opened_by IS NOT NULL
         AND app_business_date(o.closed_at, l.timezone, l.business_day_start_minutes)
             BETWEEN $2::date AND $3::date
         AND ($4::uuid IS NULL OR o.location_id = $4::uuid)
         AND (cardinality($5::uuid[]) = 0 OR o.opened_by = ANY($5::uuid[]))
+        AND NOT EXISTS (SELECT 1 FROM commission_accruals a
+                         WHERE a.business_id = $1 AND a.source_type = 'order_item' AND a.source_id = oi.id)
         AND NOT EXISTS (
           SELECT 1 FROM commission_rules r
-           WHERE r.business_id = $1 AND r.employee_id = o.opened_by AND r.is_active
-             AND (r.active_from IS NULL OR r.active_from <= CURRENT_DATE)
-             AND (r.active_to IS NULL OR r.active_to >= CURRENT_DATE)
+           WHERE r.business_id = $1 AND r.employee_id = o.opened_by AND r.is_active AND u.is_active
+             AND (r.active_from IS NULL OR r.active_from <= app_business_date(o.closed_at, l.timezone, l.business_day_start_minutes))
+             AND (r.active_to IS NULL OR r.active_to >= app_business_date(o.closed_at, l.timezone, l.business_day_start_minutes))
+             AND (COALESCE(cardinality(r.item_ids), 0) = 0 OR oi.item_id = ANY(r.item_ids))
+             AND (COALESCE(cardinality(r.brand_ids), 0) = 0 OR i.brand_id = ANY(r.brand_ids))
+             AND COALESCE(cardinality(r.category_ids), 0) = 0
         )
       GROUP BY o.opened_by, u.full_name
       ORDER BY u.full_name NULLS LAST, o.opened_by`,

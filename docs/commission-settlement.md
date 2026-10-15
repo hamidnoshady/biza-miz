@@ -105,12 +105,15 @@ run. `outstanding = Σ lines − Σ net allocations`, derived, never stored.
 
 - Each allocation is either a typed amount (integer Rial, positive, at most the member's
   outstanding) or `all: true`, which the server resolves to the exact outstanding at the
-  moment of the payout. `all` exists because the screen may show a unit (toman) that cannot
-  display every Rial; the server, not the form, sets the amount.
+  moment of the payout. The server, not a potentially stale form, sets the amount;
+  both Rial and Toman formatting preserve the final Rial.
 - A payout posts once: **Dr 2300 *حقوق پرداختنی* total / Cr the chosen cash or bank account**,
   `source_type = commission_payout`, `posting_kind = commission_payout`, business-wide
   (no branch). The payment account is validated against the same eligibility rule payroll
-  uses (`resolvePayoutAccount`), so a receivable or a card-clearing account is refused.
+  uses (`resolvePayoutAccount`), so a receivable, card-clearing or explicitly foreign-currency
+  account is refused. This flow has no FX document: foreign amounts are never silently
+  treated as Rial. Explicit choices and the cash/bank fallback recheck currency under
+  `FOR SHARE` until transaction commit; refusals leave no payout, journal or outbox event.
 - The payout document and its allocations are written in the same transaction as the journal
   entry. The status moves to `partially_paid` or `paid` from the net paid total.
 - **Idempotency.** `POST /api/commission/runs/[id]/payouts` requires an `Idempotency-Key`
@@ -133,6 +136,13 @@ reopened to fix a mistake.
 ## Reconciliation
 
 The 2300 tie-out is `GET /api/commission/liability` (and the card on the runs page).
+Both this report and payroll's `getPayrollLiability` use the existing `inSnapshot`
+helper: one `REPEATABLE READ READ ONLY` connection, stamped by the normal tenant pool
+hook. **Every component, including standalone outstanding and carries, uses that
+client.** A plain READ COMMITTED transaction or `Promise.all` over pool queries is
+not a snapshot. Concurrent payouts/reversals/payroll payments may commit without
+blocking the report; it sees either the old or the new committed position, never
+components of both. Real differences remain differences (including manual 2300 journals).
 
 Positions, all integer Rial:
 
@@ -189,20 +199,28 @@ migration.
 Calculation records each warning on the run, with the text the screen shows (`commission-settlement-messages.ts`):
 
 - `balance_not_positive` — a member whose net balance is not positive is not paid; their rows wait for the next run.
-- `claimed_by_payroll` — rows a payroll run already paid. The warning names each payroll run
+- `claimed_by_payroll` — rows a payroll run already holds or paid. The warning names each payroll run
   (its period label) and its row count. The run does not take those rows. The run screen links
-  to the payroll section (`/accounting/payroll`); there is no per-run deep link yet.
+  to the payroll workspace. A statement's individual payroll-held row links to
+  `/accounting/payroll?run=<payrollRunId>`, which loads that exact legacy run through
+  the existing `payroll.view` API and opens its immutable lines in a read-only panel.
+  This works outside the first history page. A missing/foreign run is an explicit
+  error, not a fallback to a different run. The monthly payroll controls and engine
+  run routes are unchanged.
 - `earlier_rows_included` — unpaid rows dated before the period start are included. Each run takes
   every unclaimed row up to its end date, so nothing is missed and nothing is paid twice. The
   message says so.
 - `inactive_member` — an inactive member is being paid; confirm before paying.
 - `rule_missing` — rows whose rule is no longer set.
-- `unmapped_seller` — retail sale lines in the run's period (business day, branch and member
-  filter applied) whose seller (`orders.opened_by`) has no commission rule in force today. The
-  warning gives each seller's line count and sales value (Σ unit price × quantity, before any
-  invoice-level discount). Nothing is accrued or paid for them, because there is no rule to accrue
-  under. Limits: "in force" is checked against today's rules, not the rules on each sale's day, and
-  sales value is not net of discounts.
+- `unmapped_seller` — retail sale lines **without an existing accrual** and without
+  an active assigned seller/applicable active rule on the sale's original business day.
+  Effective windows and item/brand scope are checked, not just "seller has any rule today".
+  Missing sellers appear as «فروشندهٔ تعیین‌نشده» with a null employee ID.
+  Rules may have been edited since a historical sale; this is a diagnostic of current rule
+  records against the original sale date, not a reconstructed historical rule audit.
+  Category is not passed by the retail producer (#764), so a category-scoped rule does not
+  suppress this warning. Sales value is pre-discount Σ unit price × quantity, not a payable.
+  A warning never creates an accrual or a payment. Existing signed accruals remain authoritative.
 
 The run's CSV export (`runs` list) carries a warning count per run.
 
@@ -240,13 +258,49 @@ accountant holds all four; the manager holds `commission.calculate` (not approva
 | `POST …/release`, `…/close`, `…/payouts` | payout |
 | `POST /api/commission/payouts/[id]/reverse` | reverse |
 | `GET /api/commission/payment-accounts` | payout |
-| `GET /api/commission/statement?employeeId=` | view |
+| `GET /api/commission/statement?employeeId=` (paging, date/run filters, CSV) | view |
 | `GET /api/commission/liability` | view |
 
 Money is an integer Rial string on the wire. Dates are `YYYY-MM-DD` on the wire and Shamsi on
 screen. Errors are `{ error: <code>, …details }`; the codes are translated in
 `commission-settlement-messages.ts`, and a test fails if the settlement code raises a code it
 does not translate.
+
+
+## Seller statement history and export
+
+`GET /api/commission/statement?employeeId=` keeps the previous JSON fields and
+adds `page` (`limit`, `accrualOffset`, `payoutOffset`, `hasMoreAccruals`,
+`hasMorePayouts`). The default remains 500 for API compatibility; Growth requests
+100 and offers independent previous/next controls for both lists. `truncated`
+is retained as a compatibility flag for "more detail pages exist", not missing totals.
+
+Optional `dateFrom`, `dateTo` (inclusive sale/paid date) and `runId` filter **history
+only**. The employee's lifetime accrued, paid-through-payroll, net standalone paid
+and outstanding totals always come from full-history sums on the same snapshot.
+The stable sort ends in the immutable row ID. Pages are fresh snapshots; they are not
+an export frozen across multiple requests while new records arrive.
+
+`format=csv` uses the shared reporting CSV codec (BOM, CRLF, formula protection),
+Shamsi dates and exact signed amounts in the business's selected unit. It ignores
+page offsets, exports both filtered histories and explicitly labelled lifetime totals,
+and refuses `too_many_export_rows` if either history exceeds 20,000 rows. Narrow the
+same date/run filters rather than downloading a silently incomplete file. Toman CSV
+preserves a final Rial as a decimal digit, including signed returns/reversals.
+
+Accrual rows include `orderId`, `entryId`, `settlementRunId` and `payrollRunId` when
+available. Growth links the source sale, journal and commission run; legacy payroll
+provenance links to `/accounting/payroll?run=<payrollRunId>`, opening the exact read-only
+source through the existing authorized payroll API, independently of history paging.
+The business-wide reconciliation status remains on the runs report; the statement
+does not fabricate an employee-specific GL balance.
+
+Browser acceptance: `scripts/e2e-commission.mjs`, disposable fixture
+`scripts/seed-commission-e2e.ts`, `npm run test:e2e:commission`. It authenticates three
+real memberships against the running production application, exercises workflow
+and permission refusals, partial/full payment, reversal, close/carry, statement CSV,
+RTL and desktop/tablet/phone overflow. See `ISSUE_869_PLAN.md` for actual execution
+results and release blockers; presence of the script is not a pass claim.
 
 ## Audit and events
 
@@ -287,12 +341,46 @@ note (a void's reason is required). The run page shows the trail.
 
 ## Known gaps
 
-- Sales lines whose seller has no matching rule never accrue. The run warns about them
-  (`unmapped_seller`), but a rule-scoped line for a seller who does have a rule is not warned about.
+- Sales lines without an applicable rule never accrue; they are warned, including nonmatching item/brand scope.
 - No project dimension exists on commission accruals, so the statement and the run carry none.
 - Amounts are stored as integer Rial and shown in the business's display unit.
 - Category-scoped commission rules never match: the retail invoice path does not pass a category
   (`retail-invoice-service.ts`). This predates #869 and is unchanged.
-- The statement's detail lists show at most 500 accruals and 500 payouts per member, with a `truncated` flag.
-  Its totals (accrued, paid through payroll, paid through runs, unpaid) are database sums over the whole
-  history and are never truncated.
+- History pages are bounded at 500, but every row is reachable through paging and filtered export; lifetime sums are never page-limited.
+- Any later financial/UI/transport changes must re-pass the real two-instance and full browser acceptance matrix; see the versioned evidence in the completion audit.
+
+
+### Continuation acceptance (#869)
+
+The production browser lifecycle, full integration suite, pinned visuals and packaged
+Windows E2E all passed at PR #964 head `03f9cb3` (Actions runs `38728487023`,
+`38728481214`, `38728487272`). Later changes must earn their own passing checks.
+The extended commission runner now covers both Rial and Toman, both themes, 1440/768/390
+widths, focused WCAG/contrast audit on the statement, calendar keyboard/focus, a delayed
+**real upstream** response, real offline/retry recovery, exact payroll source navigation,
+overpay refusal, rejection/recalculation/void and unchanged reconciliation after carry release.
+No invented financial response, forced click, visual baseline update or reduced assertion.
+
+`/api/commission` now resolves to the existing `app.growth` capability. This closes an
+omitted HTTP-family mapping: a Hybrid site must return `WRONG_EXECUTION_TARGET`, even
+for a fully entitled accountant, rather than becoming an independent payout authority.
+No permission, rule calculation, approved self-approval policy or financial formula changed.
+The broader rule/producer audit remains #764.
+
+Controlled two-instance acceptance is `npm run test:e2e:commission:transport`, after
+`scripts/prepare-commission-sync-e2e.mjs` (opt-in disposable loopback database, before
+app startup). CI clones an initial snapshot into `commission_site_e2e`, runs separate
+central/site HTTP processes with the non-BYPASSRLS application role, and invokes the
+production pull client on the site DB. It checks real recorded/reversed v1 feed envelopes,
+business/branch scope, site mutation refusal, an unreachable endpoint, unchanged cursor
+on failure, the full production backoff deadline, recovery, duplicate delivery, durable
+`cloud_owned` effects and **no second site payout/journal**. This is controlled transport
+acceptance, not a claim of a customer deployment, physical desktop pairing ceremony,
+or the full IAM-gated scheduler using a modern branch credential. Branch credentials
+intentionally do not receive these business-scope envelopes. The full enhanced Rial/Toman browser matrix and controlled real-HTTP transport
+PASSED at `9fdb199`, run `38743483853`, job `116451226863`. Later heads must earn
+their own passing required checks; this does not imply customer/physical pairing acceptance. The `commission-transport-evidence`
+artifact contains only whitelisted event/payout/reversal/journal/effect IDs, exact Rial
+amounts, persisted failure/recovery cursors and before/after financial counts; it never
+contains fixture credentials or passwords. Current candidate results are tracked in
+[PR #964](https://github.com/hamidnoshady/biza-miz/pull/964).

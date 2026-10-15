@@ -120,3 +120,16 @@ describe("isWholeRial", () => {
     expect(isWholeRial(2 ** 53)).toBe(false);     // whole, but no longer safe to hand to a JS number
   });
 });
+
+describe("exact signed export text", () => {
+  it("preserves the final Rial digit and amounts beyond Number's range", async () => {
+    const { moneyToExportText } = await import("./money");
+    expect(moneyToExportText("90071992547409931", "toman")).toBe("9007199254740993.1");
+    expect(moneyToExportText("-21", "toman")).toBe("-2.1");
+    expect(moneyToExportText("-1", "toman")).toBe("-0.1");
+    expect(moneyToExportText("-20", "toman")).toBe("-2");
+    expect(moneyToExportText("-21", "rial")).toBe("-21");
+    expect(moneyToExportText("-0", "toman")).toBe("0");
+    expect(() => moneyToExportText("1.5", "rial")).toThrow();
+  });
+});

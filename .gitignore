@@ -69,3 +69,6 @@ electron/build-output.log
 *.jks
 *.keystore
 keystore.properties
+
+# Disposable local/browser fixtures (may contain generated test credentials)
+.cache/
