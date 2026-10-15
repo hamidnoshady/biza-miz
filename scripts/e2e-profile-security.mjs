@@ -97,8 +97,10 @@ const phone = {
 
 const failures = [];
 const notRun = [];
+let passed = 0;
 function check(name, condition, detail = "") {
   if (condition) {
+    passed += 1;
     console.log(`  ✓ ${name}`);
   } else {
     failures.push(`${name}${detail ? ` — ${detail}` : ""}`);
@@ -555,6 +557,14 @@ async function main() {
   if (notRun.length > 0) {
     console.log(`Not run (${notRun.length}):`);
     for (const n of notRun) console.log(`  - ${n}`);
+  }
+  // On GitHub Actions, also leave the counts as a check-run annotation, so the
+  // result is readable from the API without downloading the job log.
+  if (process.env.GITHUB_ACTIONS === "true") {
+    const summary =
+      `${passed} passed, ${failures.length} failed, ${notRun.length} not run` +
+      (WEBAUTHN_CEREMONY ? "; WebAuthn ceremony ran (virtual authenticator)" : "; WebAuthn ceremony NOT run");
+    console.log(`::${failures.length === 0 ? "notice" : "error"} title=Profile security E2E::${summary}`);
   }
   console.log(`Screenshots: ${ARTIFACTS}`);
   if (failures.length > 0) process.exit(1);
