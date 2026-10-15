@@ -131,6 +131,10 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/accounting/receivables", "حساب‌های دریافتنی"],
     ["/accounting/payables", "حساب‌های پرداختنی"],
     ["/accounting/receipts", "دریافت و پرداخت"],
+    // Issue #862 — the business's own money containers, and the document that
+    // moves money between two of them.
+    ["/accounting/financial-accounts", "حساب‌های مالی"],
+    ["/accounting/transfers", "انتقال وجه"],
     ["/accounting/installments", "اقساط"],
     ["/accounting/cheques", "چک‌ها"],
     ["/accounting/reconciliation", "تطبیق بانکی"],

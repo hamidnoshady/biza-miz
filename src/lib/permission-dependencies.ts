@@ -85,6 +85,10 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "finance.installments_manage": ["ledger.view"],
   "finance.reconciliation_manage": ["ledger.view"],
   "finance.assets_manage": ["ledger.view"],
+  // Issue #862 — both are ledger screens: an account is a container for ledger
+  // money and a transfer is two ledger lines. Neither implies the other.
+  "finance.accounts_manage": ["ledger.view"],
+  "finance.transfers_manage": ["ledger.view"],
   "payroll.manage": ["payroll.view"],
   "reports.export": ["reports.view"],
   // The reporting stack (issue #819): each key implies the read key, and

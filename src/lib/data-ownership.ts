@@ -532,6 +532,34 @@ export const DATA_OWNERSHIP_REGISTRY = {
     transport: "none",
     events: [],
   }),
+  // Issue #839 §19 (Wave 6) — the automotive branch board, and the two requests
+  // a paired dealership desktop may queue while the cloud is unreachable.
+  //
+  // This is the *only* part of the trade that leaves the cloud, and it is
+  // deliberately a projection plus a request queue rather than a second copy of
+  // the car: the mirror is the cloud's own answer (whole rows, no per-field
+  // merge), the queue carries intents the cloud decides, and a sale is not
+  // offline-finalizable at all — which is why no sale event is listed here.
+  // `automotive-sync-classification.ts` records the same split per table, and
+  // `replication-catalogue.ts` publishes it to the pairing screen.
+  automotive_vehicle_board: replicated({
+    domain: "automotive_vehicle_board",
+    authority: "cloud_authoritative",
+    direction: "bidirectional",
+    conflictPolicy: "authoritative_scope",
+    tombstonePolicy: "authoritative_delete",
+    bootstrap: "required",
+    continuousSync: "active",
+    identity:
+      "the physical unit's serial_id for the mirrored board (unique per business in 0212, and again in the mirror), and a client-generated request UUID for a queued hold — the same value as the sync event's client_event_id",
+    retry:
+      "idempotent replay: the mirror is replaced whole from a content-hashed snapshot so a repeated or out-of-order response is harmless, and a queued request is applied once by the cloud — a retry answers `duplicate` with the hold it already created, and a refusal is recorded with a named conflict code for an operator to resolve instead of being merged",
+    transport: "events",
+    events: [
+      event("automotive.vehicle.reservation.requested", 1),
+      event("automotive.vehicle.reservation.released", 1),
+    ],
+  }),
 } as const satisfies Record<string, DomainOwnershipDefinition>;
 
 export type DataDomain = keyof typeof DATA_OWNERSHIP_REGISTRY;

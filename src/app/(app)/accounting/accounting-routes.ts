@@ -54,6 +54,14 @@ export const ACCOUNTING_SECTION_KEYS = [
   "receivables",
   "payables",
   "receipts",
+  // «حساب‌های مالی» and «انتقال وجه» (issue #862) — the business's own money
+  // containers (bank, till, petty cash, card terminal), each linked to exactly
+  // one postable GL account, and the documents that move money between two of
+  // them. Two sections rather than one, because registering a container and
+  // moving money are different acts with different capabilities
+  // (`finance.accounts_manage` / `finance.transfers_manage`).
+  "financial-accounts",
+  "transfers",
   "installments",
   "cheques",
   "reconciliation",

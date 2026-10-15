@@ -20,6 +20,13 @@ import {
 } from "./transfer-service";
 import { isWasteReason, recordWasteInTransaction } from "./waste-service";
 import type { SyncEventDefinition } from "./sync-event-registry";
+import { deploymentRole } from "./deployment-role";
+import {
+  applyVehicleOfflineRequest,
+  recordVehicleOfflineRequestIntent,
+  parseVehicleOfflineRequestPayload,
+  type ParsedVehicleOfflineRequest,
+} from "./automotive-stock-service";
 import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
 import { applyShiftReplay, parseShiftSyncPayload } from "./shift-sync";
 import { amendClosedOrder, OrderAmendmentError } from "./order-amendment-service";
@@ -47,6 +54,31 @@ export class SyncPayloadError extends Error {
   constructor(readonly code = "invalid_payload") {
     super(code);
     this.name = "SyncPayloadError";
+  }
+}
+
+/**
+ * The offline queue's payload parser, with its refusals translated into the sync
+ * layer's own vocabulary.
+ *
+ * `parseVehicleOfflineRequestPayload` speaks `VehicleError`, because the HTTP
+ * routes and the desktop's queue writer both surface it to a person who can fix
+ * the form. Here there is nobody to fix anything: the payload arrived over the
+ * wire and will parse exactly the same way on every attempt. A
+ * `SyncPayloadError` is what makes that outcome *terminal* — dead-lettered with
+ * its own code, and the desktop is told — instead of a retry loop that never
+ * drains. The answers that genuinely can change (a car another branch holds, a
+ * reservation already released, a stale expected version) do not come from this
+ * throw at all: `applyVehicleOfflineRequest` returns them as an outcome.
+ */
+function parseVehicleOfflineRequestTerminal(
+  payload: Record<string, unknown>,
+  handler: string,
+): ParsedVehicleOfflineRequest {
+  try {
+    return parseVehicleOfflineRequestPayload(payload, handler);
+  } catch (error) {
+    throw new SyncPayloadError(syncErrorCode(error));
   }
 }
 
@@ -408,6 +440,49 @@ export async function applySyncDomainHandler(context: SyncDomainContext): Promis
       requiredString(payload, "reversedPayoutId");
       requiredString(payload, "amount");
       throw new SyncPayloadError("business_event_not_replayable");
+    // #839 §19: the two vehicle operations a paired desktop may queue. The
+    // cloud is the only side that applies them; a *site* that somehow receives
+    // one (a client flush through POST /api/sync/events, say) records the intent
+    // and lets the ordinary push carry it up, rather than holding a car it has
+    // no authority over.
+    case "automotive.vehicle.reservation.requested":
+    case "automotive.vehicle.reservation.released": {
+      const request = parseVehicleOfflineRequestTerminal(payload, context.definition.handler);
+      if (deploymentRole() === "site") {
+        await recordVehicleOfflineRequestIntent({
+          client,
+          businessId,
+          locationId,
+          requestType: request.requestType,
+          payload: request.payload,
+          requestId: request.requestId,
+          actorId: actor.userId,
+        });
+        return {
+          effectType: "automotive_offline_request",
+          effectId: request.requestId,
+          result: { outcome: "queued", requestType: request.requestType },
+        };
+      }
+      const outcome = await applyVehicleOfflineRequest({
+        client,
+        businessId,
+        locationId,
+        requestId: request.requestId,
+        actorId: actor.userId,
+        payload: { ...request.payload, requestType: request.requestType },
+      });
+      return {
+        effectType: "automotive_offline_request",
+        effectId: request.requestId,
+        result: {
+          outcome: outcome.status,
+          conflictCode: outcome.conflictCode,
+          reservationId: outcome.reservationId,
+          duplicate: outcome.duplicate,
+        },
+      };
+    }
     // #864: cloud-owned Accounting effects have already moved the money and
     // posted the journal on their authority. A replay is terminally refused;
     // sites acknowledge pulled copies before reaching this handler.

@@ -111,6 +111,7 @@ export function McpPanel() {
   const [connections, setConnections] = useState<McpConnection[]>([]);
   const [pending, setPending] = useState<PendingAction[]>([]);
   const [endpoint, setEndpoint] = useState("");
+  const mcpExampleUrl = endpoint || "https://your-business.example.com/api/mcp";
   // Issue #883 P0-4 — creating, narrowing, revoking and approving are
   // owner-only (`mcp.manage`). The panel still lists what is connected, but
   // renders every mutating control only when the server says this member may.
@@ -829,15 +830,37 @@ export function McpPanel() {
 
       <SectionCard title="راهنمای برنامه‌های مبتنی بر فایل تنظیمات">
         <p className="mb-2 text-xs leading-6 text-muted-foreground">
-          توکن را در سرآیند <code dir="ltr">Authorization</code> بفرستید. نمونهٔ تنظیمات برای یک کلاینت MCP:
+          توکن را در سرآیند <code dir="ltr">Authorization</code> بفرستید. برای کلاینت‌هایی که اتصال HTTP را
+          مستقیم می‌پذیرند (مثل Claude Code در فایل <code dir="ltr">.mcp.json</code>):
         </p>
         <pre dir="ltr" className="overflow-x-auto rounded-lg bg-primary p-3 text-xs text-primary-foreground/90">
 {`{
   "mcpServers": {
     "cafe-pos": {
       "type": "http",
-      "url": "${endpoint || "https://your-business.example.com/api/mcp"}",
+      "url": "${mcpExampleUrl}",
       "headers": { "Authorization": "Bearer posmcp_..." }
+    }
+  }
+}`}
+        </pre>
+        <p className="mb-2 mt-4 text-xs leading-6 text-muted-foreground">
+          برنامهٔ دسکتاپ Claude در فایل <code dir="ltr">claude_desktop_config.json</code> فقط سرورهایی با{" "}
+          <code dir="ltr">command</code> را می‌پذیرد و نمونهٔ بالا را «نامعتبر» رد می‌کند. راه ساده‌تر افزودن همان
+          آدرس بالا از بخش Connector است؛ اگر فایل تنظیمات را ترجیح می‌دهید، از پل{" "}
+          <code dir="ltr">mcp-remote</code> استفاده کنید (Node.js لازم است):
+        </p>
+        <pre dir="ltr" className="overflow-x-auto rounded-lg bg-primary p-3 text-xs text-primary-foreground/90">
+{`{
+  "mcpServers": {
+    "cafe-pos": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote",
+        "${mcpExampleUrl}",
+        "--header", "Authorization:\${AUTH_HEADER}"
+      ],
+      "env": { "AUTH_HEADER": "Bearer posmcp_..." }
     }
   }
 }`}

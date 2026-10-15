@@ -253,6 +253,19 @@ export const PERMISSIONS = {
   financeInstallmentsManage: "finance.installments_manage",
   financeReconciliationManage: "finance.reconciliation_manage",
   financeAssetsManage: "finance.assets_manage",
+  /**
+   * «حساب‌های مالی» and «انتقال وجه» (issue #862).
+   *
+   * Two keys rather than one, because the two acts are different sizes: an
+   * account is a master record (its chart link, its branch, its default), a
+   * transfer is money moving *now*. A business that wants a cashier to be able
+   * to move the day's takings between the till and the safe, without also being
+   * able to register or re-point containers, can grant exactly the second.
+   *
+   * Both imply `ledger.view`: a transfer screen is a ledger screen.
+   */
+  financeAccountsManage: "finance.accounts_manage",
+  financeTransfersManage: "finance.transfers_manage",
 
   /**
    * Salary data is narrower than the surrounding ledger, so it has its own pair
@@ -596,6 +609,7 @@ const {
   shareholdersDistributionsApprove, shareholdersDistributionsPay, shareholdersDistributionsReverse,
   financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
   financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
+  financeAccountsManage, financeTransfersManage,
   payrollView, payrollManage,
   taxView, taxPrepare, taxSend, taxInquiry, taxAmend, taxCancel, taxManageSettings, taxExport,
   reportsView, reportsManage, reportsExport, reportsBusinessWide, reportsDashboardDefaultsManage,
@@ -659,6 +673,9 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // accounting authority, and not payroll.
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
+    // Issue #862 — the manager kept every screen the ledger already had, and
+    // the two new ones are the same work («حساب‌های مالی»، «انتقال وجه»).
+    financeAccountsManage, financeTransfersManage,
     ledgerPropose,
     // Taxpayer invoicing, operational half: prepare, send and inquire. The
     // amendment, cancellation, export and the taxpayer's keys stay with the
@@ -711,6 +728,9 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     shareholdersDistributionsApprove, shareholdersDistributionsPay,
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
+    // Issue #862 — registering the business's accounts and moving money between
+    // them is bookkeeping, which is this role.
+    financeAccountsManage, financeTransfersManage,
     payrollView, payrollManage,
     // Taxpayer invoicing, accounting half: every record action except the
     // taxpayer's keys, which only the administrator holds. Cancelling an accepted

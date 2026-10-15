@@ -19,6 +19,8 @@ import {
   CoinsIcon,
   HashIcon,
   LandmarkIcon,
+  WalletIcon,
+  ArrowLeftRightIcon,
   LayoutDashboardIcon,
   ReceiptIcon,
   ScrollTextIcon,
@@ -50,6 +52,10 @@ export const ACCOUNTING_SECTION_ICONS: Record<AccountingSectionKey, LucideIcon> 
   receivables: UsersIcon,
   payables: UsersIcon,
   receipts: ScrollTextIcon,
+  // The containers themselves (a wallet) and the movement between them (the
+  // two-way arrow every transfer UI wears).
+  "financial-accounts": WalletIcon,
+  transfers: ArrowLeftRightIcon,
   installments: CalendarDaysIcon,
   cheques: ScrollTextIcon,
   reconciliation: CircleIcon,

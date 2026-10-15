@@ -111,6 +111,11 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
   fixed_asset_disposal: "واگذاری دارایی ثابت",
   fixed_asset_acquisition: "خرید دارایی ثابت",
+  // Internal transfers between the business's own financial accounts
+  // (issue #862). One code for the document and one for its reversal, because
+  // the journal shows both and a reader has to be able to tell them apart.
+  financial_transfer: "انتقال وجه بین حساب‌ها",
+  financial_transfer_reversal: "برگشت انتقال وجه",
 
   // Marketing and loyalty
   gift_card: "کارت هدیه",

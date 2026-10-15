@@ -394,14 +394,18 @@ describe("the taxpayer register on the ledger workspace", () => {
 });
 
 describe("the ledger tool divisions", () => {
-  it("gives every ledger tool exactly one division, and the tool set is exactly these twenty-one", () => {
+  it("gives every ledger tool exactly one division, and the tool set is exactly these twenty-three", () => {
     // The contract, written out: a tool added or dropped must change this list
     // on purpose. The tool set is derived from the divisions, so this is the one
     // place the membership is pinned — not a second copy of it.
+    //
+    // Issue #862 added the two money-container tools («حساب‌های مالی»,
+    // «انتقال وجه») to the funds division, beside the payments they are the
+    // counterparts of.
     const expected = [
       "trial-balance", "entries", "vouchers", "manual", "multicurrency", "chart-of-accounts", "dimensions",
       "receivables", "payables", "installments", "cheques",
-      "receipts", "expenses", "reconciliation", "fixed-assets",
+      "receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets",
       "shareholders", "fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll",
     ];
     const placed = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
@@ -413,7 +417,7 @@ describe("the ledger tool divisions", () => {
     expect(LEDGER_WORKSPACE_SUBGROUPS.map((subGroup) => subGroup.keys)).toEqual([
       ["trial-balance", "entries", "vouchers", "manual", "multicurrency", "chart-of-accounts", "dimensions"],
       ["receivables", "payables", "installments", "cheques"],
-      ["receipts", "expenses", "reconciliation", "fixed-assets"],
+      ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets"],
       ["shareholders"],
       ["fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll"],
     ]);

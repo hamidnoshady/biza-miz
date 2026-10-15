@@ -16,12 +16,13 @@
  */
 import { describe, expect, it } from "vitest";
 import { MASTER_SYNC_TABLES } from "./master-sync-registry";
-import { SYNC_EVENT_REGISTRY } from "./sync-event-registry";
+import { SYNC_EVENT_REGISTRY, siteSkipsPulledEvent } from "./sync-event-registry";
 import {
   AUTOMOTIVE_SYNC_CLASSIFICATION,
   AUTOMOTIVE_SYNC_CLASS_LABELS,
   automotiveClassifiedTables,
   automotiveCloudOnlyTables,
+  automotiveSiteLocalTables,
   automotiveSyncClassificationProblems,
   isAutomotiveTable,
 } from "./automotive-sync-classification";
@@ -44,6 +45,9 @@ describe("the automotive deployment-mode classification (§22)", () => {
       "vehicle_sales",
       "vehicle_media_links",
       "vehicle_catalogue",
+      // §19's Wave 6: the two derived tables a paired desktop does hold.
+      "vehicle_board_mirror",
+      "vehicle_offline_requests",
     ]) {
       expect(keys.has(key), key).toBe(true);
     }
@@ -63,6 +67,14 @@ describe("the automotive deployment-mode classification (§22)", () => {
       if (entry.key === "vehicle_catalogue") {
         expect(entry.class, entry.key).toBe("cloud_catalogue");
         expect(entry.tables, entry.key).toEqual([]);
+      } else if (entry.key === "vehicle_board_mirror") {
+        // The one exception §19 (Wave 6) adds, and it is a projection rather
+        // than a record: the cloud's own answer, replaced whole.
+        expect(entry.class, entry.key).toBe("cloud_mirror");
+        expect(entry.tables, entry.key).toEqual(["automotive_vehicle_stock_mirror"]);
+      } else if (entry.key === "vehicle_offline_requests") {
+        expect(entry.class, entry.key).toBe("site_request_queue");
+        expect(entry.tables, entry.key).toEqual(["automotive_vehicle_offline_requests"]);
       } else {
         expect(entry.class, entry.key).toBe("cloud_only");
         expect(entry.tables.length, entry.key).toBeGreaterThan(0);
@@ -73,8 +85,9 @@ describe("the automotive deployment-mode classification (§22)", () => {
   it("claims every table once, and never claims a table twice", () => {
     const all = automotiveClassifiedTables();
     expect(new Set(all).size).toBe(all.length);
-    // Eight automotive-owned tables, exactly: six vehicle/media/history
-    // tables plus the two CRM lead extensions.
+    // Ten automotive-owned tables, exactly: six authoritative vehicle/media/
+    // history tables, the two CRM lead extensions, and §19's read-only mirror
+    // plus request queue.
     expect([...all].sort()).toEqual(
       [
         "automotive_vehicle_attributes",
@@ -83,11 +96,19 @@ describe("the automotive deployment-mode classification (§22)", () => {
         "automotive_vehicle_price_history",
         "automotive_vehicle_sales",
         "automotive_vehicle_transfers",
+        "automotive_vehicle_offline_requests",
+        "automotive_vehicle_stock_mirror",
         "crm_lead_vehicle_links",
         "crm_lead_vehicle_preferences",
       ].sort(),
     );
-    expect(automotiveCloudOnlyTables().length).toBe(all.length);
+    // Eight of the ten are cloud-only; the two site-local ones are the mirror
+    // and the queue, and the helper names exactly them.
+    expect(automotiveCloudOnlyTables().length).toBe(all.length - 2);
+    expect(automotiveSiteLocalTables().sort()).toEqual([
+      "automotive_vehicle_offline_requests",
+      "automotive_vehicle_stock_mirror",
+    ]);
   });
 
   it("keeps every classified table out of the last-write-wins master sync", () => {
@@ -104,20 +125,52 @@ describe("the automotive deployment-mode classification (§22)", () => {
     expect(master.has("item_serials")).toBe(false);
   });
 
-  it("advertises no automotive domain as an ongoing sync source", () => {
+  it("keeps the authoritative records cloud-only and advertises only the projection", () => {
     const automotiveDomains = replicationCatalogue().filter((domain) => domain.key.startsWith("automotive_"));
-    expect(automotiveDomains.length).toBe(1);
-    const [domain] = automotiveDomains;
-    expect(domain.eventTypes).toEqual([]);
-    expect(domain.authority).toBe("cloud_only");
-    expect(domain.bootstrap).toBe("none");
-    expect(domain.deploymentProfiles).toEqual(["cloud"]);
-    expect(domain.notes.length).toBeGreaterThan(30);
+    expect(automotiveDomains.map((domain) => domain.key).sort()).toEqual([
+      "automotive_vehicle_board",
+      "automotive_vehicle_stock",
+    ]);
 
-    // And no registered sync event belongs to the trade, so a desktop is never
-    // promised an automotive workflow that does not exist.
-    expect(SYNC_EVENT_REGISTRY.some((event) => event.type.startsWith("automotive."))).toBe(false);
-    expect(pairingDataClassification().ongoingDomainEvents.some((event) => event.includes("automotive"))).toBe(false);
+    // The records themselves: still one authority, still no event, still no
+    // bootstrap — a VIN is never merged.
+    const records = automotiveDomains.find((domain) => domain.key === "automotive_vehicle_stock")!;
+    expect(records.eventTypes).toEqual([]);
+    expect(records.authority).toBe("cloud_only");
+    expect(records.bootstrap).toBe("none");
+    expect(records.deploymentProfiles).toEqual(["cloud"]);
+    expect(records.notes.length).toBeGreaterThan(30);
+
+    // §19's Wave 6 addition: a *projection* plus a request queue, and exactly
+    // the two events that carry a request up. Nothing in this domain decides a
+    // hold, posts money, or names a sale.
+    const board = automotiveDomains.find((domain) => domain.key === "automotive_vehicle_board")!;
+    expect(board.authority).toBe("cloud_authoritative");
+    expect(board.bootstrap).toBe("snapshot");
+    expect(board.deploymentProfiles).toEqual(["cloud", "hybrid", "site"]);
+    expect(board.eventTypes.sort()).toEqual([
+      "automotive.vehicle.reservation.released",
+      "automotive.vehicle.reservation.requested",
+    ]);
+    expect(board.notes.length).toBeGreaterThan(30);
+
+    // The registry and the discovery copy agree with the catalogue: the trade's
+    // only events are those two requests, and pairing tells the operator about
+    // them instead of promising a synchronised vehicle record.
+    const automotiveEvents = SYNC_EVENT_REGISTRY.filter((event) => event.type.startsWith("automotive."));
+    expect(automotiveEvents.map((event) => event.type).sort()).toEqual([
+      "automotive.vehicle.reservation.released",
+      "automotive.vehicle.reservation.requested",
+    ]);
+    for (const event of automotiveEvents) {
+      // A desktop *applies* these (the cloud decides them); it must never be
+      // told to acknowledge one as cloud-owned, or a queued hold would be
+      // discarded on the way down.
+      expect(siteSkipsPulledEvent(event), event.type).toBe(false);
+    }
+    const advertised = pairingDataClassification().ongoingDomainEvents;
+    expect(advertised).toContain("automotive.vehicle.reservation.requested");
+    expect(advertised).toContain("automotive.vehicle.reservation.released");
   });
 
   it("names the automotive bucket in the pairing coverage copy", () => {
@@ -127,7 +180,13 @@ describe("the automotive deployment-mode classification (§22)", () => {
     expect(pairingDataClassification().centralOnlyData).toContain(
       "Automotive vehicle records (VIN/chassis identity, landed cost, price and sale history, holds, transfers and media links)",
     );
-    expect(pairingDataClassification().bootstrapMasterData.join(" ")).not.toContain("Automotive vehicle");
+    // …and the projection is disclosed as what it is: a read-only mirror, not
+    // the record. The cloud-only line above must not be duplicated here, or the
+    // operator would read two contradictory promises.
+    const bootstrap = pairingDataClassification().bootstrapMasterData;
+    expect(bootstrap.join(" ")).toContain("Automotive branch board mirror");
+    expect(bootstrap.join(" ")).not.toContain("Automotive vehicle records");
+    expect(pairingDataClassification().siteLocalOperationalData.join(" ")).not.toContain("Automotive branch board");
   });
 
   it("recognizes an automotive table by one predicate the database half shares", () => {

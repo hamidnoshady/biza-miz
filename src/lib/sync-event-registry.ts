@@ -17,6 +17,16 @@ type EffectClass =
   | "transfer"
   | "shift"
   | "commission_settlement"
+  /**
+   * Issue #839 §19: a paired dealership desktop's *requests* about a physical
+   * car (hold it, release a hold it placed). They travel site → cloud and the
+   * cloud decides them; nothing about a car is ever merged field by field, so
+   * this class is deliberately absent from CLOUD_OWNED_EFFECT_CLASSES — the
+   * cloud applies these, and a site never receives one back (the pull feed
+   * carries `origin='local'` rows only, and a pushed event is recorded remote).
+   */
+  | "automotive_vehicle"
+  /** #864: cloud-owned shareholder money effects; they are acknowledged, never replayed. */
   | "shareholder_accounting";
 
 export interface SyncEventDefinition {
@@ -150,6 +160,16 @@ export const SYNC_EVENT_REGISTRY = [
   // sync-domain-handlers.ts), and a desktop acknowledges a pulled copy.
   { type: "commission.payout.recorded", schemaVersion: 1, handler: "commission.payout.recorded", permission: COMMISSION_PAYOUT_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["payoutId", "runId", "runNumber", "amount", "paidDate", "method", "entryId", "allocations"] },
   { type: "commission.payout.reversed", schemaVersion: 1, handler: "commission.payout.reversed", permission: COMMISSION_REVERSE_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedPayoutId", "runId", "runNumber", "amount", "entryId"] },
+
+  // Issue #839 §19 (Wave 6). A paired dealership desktop may queue exactly two
+  // operations about a car: hold it for a customer, and release a hold that
+  // branch placed. Both are requests with their own idempotency key (`requestId`),
+  // the version and state of the mirrored row the operator saw, and no financial
+  // effect at all. The cloud re-validates the car inside its transaction and
+  // records a named conflict on refusal; a pending request is never presented as
+  // a hold. The permissions match the counter actions.
+  { type: "automotive.vehicle.reservation.requested", schemaVersion: 1, handler: "automotive.vehicle.reservation.requested", permission: "vehicles.reserve", effectClass: "automotive_vehicle", locationRule: "event_location", dependencyErrors: [], payloadFields: ["requestId", "serialId", "stockNumber", "customerId", "customerName", "expiresAt", "expiresAtTime", "depositRial", "depositMethod", "depositRefundable", "depositNote", "note", "expectedVersion", "expectedState", "requestedAt"] },
+  { type: "automotive.vehicle.reservation.released", schemaVersion: 1, handler: "automotive.vehicle.reservation.released", permission: "vehicles.reservation_cancel", effectClass: "automotive_vehicle", locationRule: "event_location", dependencyErrors: [], payloadFields: ["requestId", "reservationId", "serialId", "stockNumber", "reason", "refundDeposit", "expectedVersion", "expectedState", "requestedAt"] },
 
   // #864: shareholder money effects are written by the cloud in the same
   // transaction as their journal entry. Site peers receive the business event
