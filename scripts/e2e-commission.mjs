@@ -36,13 +36,13 @@ async function actor(member) {
   await page.goto(`${base}/growth/commission/runs`);
   return page;
 }
-async function api(page, method, path, body, expected = 200) {
+async function api(page, method, path, body, expected = 200, headers = {}) {
   if (expected >= 400) expectedFailures.add(path.split("?")[0]);
-  const result = await page.evaluate(async ({ method, path, body }) => {
-    const response = await fetch(path, { method, headers: { "Content-Type": "application/json" },
+  const result = await page.evaluate(async ({ method, path, body, headers }) => {
+    const response = await fetch(path, { method, headers: { "Content-Type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: response.status, text: await response.text() };
-  }, { method, path, body });
+  }, { method, path, body, headers });
   assert.equal(result.status, expected, `${method} ${path}: ${result.text}`);
   return JSON.parse(result.text);
 }
@@ -67,9 +67,10 @@ async function pay(page, id, amount) {
   const payout = (await response.json()).payout;
   const key = response.request().headers()["idempotency-key"];
   assert.ok(key, "UI payout must send its retry key");
-  const retry = await page.request.post(response.url(), { data: response.request().postDataJSON(), headers: { "Idempotency-Key": key } });
-  assert.equal(retry.status(), 200, await retry.text());
-  const replay = await retry.json();
+  // Retry through the same browser fetch/Origin/tenant-context path as the
+  // original UI request; an out-of-page APIRequestContext is not that path.
+  const replay = await api(page, "POST", new URL(response.url()).pathname,
+    response.request().postDataJSON(), 200, { "Idempotency-Key": key });
   assert.equal(replay.replayed, true);
   assert.equal(replay.payout.id, payout.id, "HTTP retry must return the original payment, not post again");
   return payout;
