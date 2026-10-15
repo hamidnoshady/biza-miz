@@ -503,9 +503,29 @@ it reads a request the section's `useEffect` may not have issued yet (that job r
 | Provenance of the test | `bbdcb709` → `1f993daa`, both on `main`, long before this branch |
 
 Re-running the failed job through this session's GitHub App is refused
-(`Resource not accessible by integration`, HTTP 403), so the fresh verdict comes from the
-next push's run; the flake is recorded in §9 rather than papered over, and main's test was
-**not** edited — a change to `main`'s suite belongs in its own PR (#955 is the precedent).
+(`Resource not accessible by integration`, HTTP 403), and the next push produced the same
+red job **at the same line** (`38708097514`), so this stopped being a one-off and became the
+thing blocking the PR. The race is structural, not statistical: the heading the test waits
+for renders as soon as the year *list* lands (`years.length > 0`), while the periods request
+is issued by an effect keyed on `selectedYearId`, which React runs *after* that commit — so
+the assertion at line 214 read a request that had not been made yet whenever the passive
+effect had not flushed, which is what a loaded `windows-latest` runner does often.
+
+The test is therefore fixed in its **own commit** (`8b7f692d`), kept separate rather than
+folded into issue #947's change so it can be extracted into a PR of its own (the repository
+did exactly this in #955). The assertion keeps its full strength and loses the race:
+
+```ts
+await waitFor(() =>
+  expect(network.calls.some((url) => url === `/api/ledger/fiscal-years/${fiscalYear.id}/periods`)).toBe(true),
+);
+```
+
+Verified in both directions on this tree: with the component's periods URL renamed so the
+request is never made, the test **still fails** at that assertion (`expected false to be
+true`, line 226) — the check is live, it just waits instead of racing; with the real
+component it passed **12/12** focused runs. No test was disabled or skipped, no assertion
+weakened, no timeout raised, and no baseline touched.
 
 **Open PR**: **[#958](https://github.com/hamidnoshady/biza-miz/pull/958)** — the only PR for
 this branch; no duplicate was opened, and nothing was merged, tagged or deployed.
@@ -538,14 +558,15 @@ this branch; no duplicate was opened, and nothing was merged, tagged or deployed
   swap): `npm run build` is killed at 3000 MB, `tsc --noEmit` aborts at 3072 MB, and
   `npm run test:visual` needs the build's server. CI is where those gates are meaningful,
   and their results are reported above — nothing here claims a local pass.
-- **A pre-existing flake in `main`'s own unit suite.** On PR #958, `unit tests` failed at
-  `src/app/(app)/accounting/fiscal-periods-section.test.tsx:214` on one run and passed on
-  another run of the *same commit* (see 8.5): the assertion reads a request that a
-  `waitFor` on a heading does not guarantee has been issued. It is outside this issue's
-  scope, and fixing another workstream's test in this branch would blur the ownership this
-  issue is explicitly about — so it is reported, not edited. The remedy is either a
-  re-run/next-push verdict (a re-run is refused to this session's App token) or a one-line
-  change in `main`'s suite: await the request instead of asserting it synchronously.
+- **A pre-existing race in `main`'s fiscal-periods test is fixed here, in its own commit.**
+  `unit tests` failed twice in a row at `fiscal-periods-section.test.tsx:214` on the PR while
+  passing on a push run of the same commit (see 8.5); the file and its component are
+  byte-identical to `origin/main`, and this branch's only contribution to that test's
+  transitive import graph is an added `ERROR_MESSAGES` map. Commit `8b7f692d` awaits the
+  periods request instead of asserting it synchronously — the assertion is unchanged in
+  force and proven live (it fails when the request is removed). It is deliberately a
+  separate commit so a reviewer can drop it or lift it into its own PR; it is **not** part
+  of issue #947's change.
 - **One inherited database test times out under the full serial sweep.** In a 230-file run,
   `integration/fixed-assets.integration.test.ts` (issue #833, `main`'s code, byte-identical
   to `origin/main`) had one test hit its 30 s budget after the file had already taken 194 s;
