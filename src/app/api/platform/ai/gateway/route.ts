@@ -39,6 +39,7 @@ import {
 import {
   isGatewayActive,
   resolveChatModel,
+  resolveEffectiveCredentialSource,
   validateGatewayInput,
   type BusinessGateway,
   type AiGatewayInput,
@@ -244,30 +245,34 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     // "Has a key" means a credential is stored, independent of whether this
     // deployment can currently decrypt it — a stored-but-undecryptable row
     // must never read as "never provisioned" (issue #757 §B).
+    // "Has a key" describes what is STORED, independent of whether this
+    // deployment can currently decrypt it — a stored-but-undecryptable row
+    // must never read as "never provisioned" (issue #757 §B). This is
+    // reported separately from which credential is actually EFFECTIVE below:
+    // folding the two together is exactly what used to make an unreadable
+    // branch credential outrank a perfectly usable business key.
     const businessHasKey = businessRow?.credentialState !== undefined && businessRow?.credentialState !== "absent";
     const branchHasKey = focusLocationId
       ? branchRow?.credentialState !== undefined && branchRow?.credentialState !== "absent"
       : null;
     const businessCredentialUndecryptable = businessRow?.credentialState === "undecryptable";
     const branchCredentialUndecryptable = branchRow?.credentialState === "undecryptable";
-    const credentialSource: "branch" | "business" | "master" | "none" = !isGatewayActive(gateway)
-      ? "none"
-      : gateway.virtualKeysEnabled
-        ? branchHasKey
-          ? "branch"
-          : businessHasKey
-            ? "business"
-            : "none"
-        : gateway.masterKey
-          ? "master"
-          : "none";
-    const credentialRow = !isGatewayActive(gateway) || !gateway.virtualKeysEnabled
-      ? null
-      : branchHasKey
-        ? branchRow
-        : businessHasKey
-          ? businessRow
-          : null;
+    // The credential actually in effect for a call: the SAME decision
+    // `resolveGatewayAuthKey` makes for the live request path, so the
+    // console can never claim a different source than the one a request
+    // would really use. A branch row with an undecryptable credential has
+    // `virtualKey === null`, exactly like a branch with no row at all, so it
+    // is correctly skipped here in favour of a usable business key.
+    const effective = isGatewayActive(gateway)
+      ? resolveEffectiveCredentialSource({
+          gateway,
+          business: businessRow,
+          branch: focusLocationId ? branchRow : null,
+          tenantScoped: true,
+        })
+      : { source: "none" as const, row: null };
+    const credentialSource = effective.source;
+    const credentialRow = effective.row;
     const businessSyncError = businessRow?.syncError ?? null;
     const branchSyncError = branchRow?.syncError ?? null;
     branchReadiness = {
@@ -280,8 +285,7 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
       branchHasKey,
       businessCredentialUndecryptable,
       branchCredentialUndecryptable,
-      inheritedFromBusiness:
-        gateway.virtualKeysEnabled && Boolean(focusLocationId) && !branchHasKey && businessHasKey,
+      inheritedFromBusiness: credentialSource === "business" && Boolean(focusLocationId),
       effectiveModel: resolveChatModel({ platformModel: platform.model, gateway, business: businessRow, branch: branchRow }),
       lastVerifiedAt: credentialRow?.syncedAt ?? null,
       businessSyncError,
