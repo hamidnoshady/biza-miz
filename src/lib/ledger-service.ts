@@ -24,7 +24,9 @@ import {
 import type { Rial } from "./money";
 import { rialBigInt, type RialText } from "./inventory-exact";
 import type { LineDimensions } from "./accounting-dimensions";
-import { assertDimensionsPostable, dimensionColumnValues, hasDimensions } from "./accounting-dimensions-service";
+import { assertDimensionsPostable, dimensionColumnValues, dimensionsFromColumns, hasDimensions } from "./accounting-dimensions-service";
+import { resolveTradingAttribution } from "./accounting-dimension-mappings-service";
+import { orderChannelRef, platformChannelRef, type TradingDocumentRefs } from "./accounting-dimension-mappings";
 import { assignVoucherNumber } from "./voucher-numbering-service";
 
 /**
@@ -158,6 +160,144 @@ export async function postExactJournalEntry(
   return rows[0].id;
 }
 
+// ---------------------------------------------------------------------------
+// Operational attribution (issue #868, Phase 3)
+// ---------------------------------------------------------------------------
+//
+// One resolution point for every operational posting: purchases, sales, COGS
+// and their returns decide attribution here and stamp it on the cost/revenue
+// legs only. Settlement legs (cash, bank, A/P, A/R, VAT) stay unattributed —
+// they settle balances, they do not incur or earn them — and reversals never
+// consult rules at all: `postExactMirrorEntry` copies the original's stamped
+// attribution column for column.
+//
+// The precedence is the one in `accounting-dimension-mappings.ts`: explicit
+// attribution from the caller (a mirror-repost, an amendment, a source
+// document that has it) wins per kind; then the business's mapping rules,
+// most specific scope first; then «بدون بُعد». Never inferred from unrelated
+// data.
+
+/**
+ * The channel keys an order sale can be keyed by, most specific first: a
+ * platform settlement (SnapFood and friends) outranks the plain order channel.
+ */
+function salesChannelRefs(tenders: readonly string[], orderChannel: OrderChannel): string[] {
+  const refs: string[] = [];
+  for (const settlement of tenders) {
+    if (SETTLEMENT_DEBIT_CODES[settlement] === WELL_KNOWN_CODES.platformReceivable) {
+      refs.push(platformChannelRef(settlement));
+    }
+  }
+  refs.push(orderChannelRef(orderChannel));
+  return [...new Set(refs)];
+}
+
+/** The item, category and channel references an order's lines carry, for mapping rules. */
+async function orderMappingRefs(
+  client: PoolClient,
+  orderId: string,
+): Promise<TradingDocumentRefs> {
+  const { rows } = await client.query<{
+    menu_item_id: string | null;
+    item_id: string | null;
+    category_id: string | null;
+    channel: string | null;
+  }>(
+    `SELECT oi.menu_item_id, oi.item_id, mi.category_id, o.type::text AS channel
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+       LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
+      WHERE oi.order_id = $1`,
+    [orderId],
+  );
+  const itemRefs = new Set<string>();
+  const categoryRefs = new Set<string>();
+  const channelRefs: string[] = [];
+  for (const row of rows) {
+    if (row.item_id) itemRefs.add(row.item_id);
+    if (row.menu_item_id) itemRefs.add(row.menu_item_id);
+    if (row.category_id) categoryRefs.add(row.category_id);
+    if (row.channel && channelRefs.length === 0) channelRefs.push(orderChannelRef(row.channel));
+  }
+  return { itemRefs: [...itemRefs], categoryRefs: [...categoryRefs], channelRefs };
+}
+
+/** The supplier a purchase names, for its mapping rules. */
+async function purchaseSupplierRef(client: PoolClient, purchaseId: string): Promise<string | null> {
+  const { rows } = await client.query<{ supplier_id: string | null }>(
+    `SELECT supplier_id FROM purchases WHERE id = $1`,
+    [purchaseId],
+  );
+  return rows[0]?.supplier_id ?? null;
+}
+
+/**
+ * The attribution an earlier posting recorded for this source document — what
+ * a return mirrors (issue #868: «reversals must mirror original dimensions»).
+ *
+ * Reads the most recent non-reversed entry of the named sources and takes the
+ * first line that carries attribution. An original that posted *without*
+ * attribution answers `{ found: true, dimensions: {} }` and the return stays
+ * unattributed too: mirroring «none» is still mirroring, and filling a return
+ * from today's rules would put a cost centre on a document whose sale never
+ * had one. `found: false` (no original readable at all) lets the caller fall
+ * back to the mapping rules over the same document refs.
+ */
+async function postedEntryAttribution(
+  client: PoolClient,
+  businessId: string,
+  sourceIds: readonly string[],
+  postingKinds: readonly string[],
+): Promise<{ found: boolean; dimensions: LineDimensions }> {
+  const { rows } = await client.query<{
+    cost_center_id: string | null;
+    profit_center_id: string | null;
+    department_id: string | null;
+    detail_dimension_id: string | null;
+  }>(
+    `SELECT jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id
+       FROM journal_lines jl
+       JOIN journal_entries je ON je.id = jl.entry_id
+      WHERE je.business_id = $1
+        AND je.source_id = ANY($2::uuid[])
+        AND je.posting_kind = ANY($3::text[])
+        AND je.reversed_at IS NULL
+        AND (jl.cost_center_id IS NOT NULL OR jl.profit_center_id IS NOT NULL
+             OR jl.department_id IS NOT NULL OR jl.detail_dimension_id IS NOT NULL)
+      ORDER BY je.id DESC, jl.id
+      LIMIT 1`,
+    [businessId, [...sourceIds], [...postingKinds]],
+  );
+  const row = rows[0];
+  if (row) return { found: true, dimensions: dimensionsFromColumns(row) };
+  const { rows: found } = await client.query<{ one: number }>(
+    `SELECT 1 AS one FROM journal_entries
+      WHERE business_id = $1 AND source_id = ANY($2::uuid[]) AND posting_kind = ANY($3::text[])
+      LIMIT 1`,
+    [businessId, [...sourceIds], [...postingKinds]],
+  );
+  return { found: Boolean(found[0]), dimensions: {} };
+}
+
+async function operationalAttribution(
+  client: PoolClient,
+  params: {
+    businessId: string;
+    entryDate: string | null;
+    locationId: string;
+    explicit?: LineDimensions | null;
+    refs?: TradingDocumentRefs | null;
+  },
+): Promise<LineDimensions | null> {
+  return resolveTradingAttribution(client, {
+    businessId: params.businessId,
+    entryDate: params.entryDate,
+    locationId: params.locationId,
+    explicit: params.explicit ?? null,
+    refs: params.refs ?? null,
+  });
+}
+
 /**
  * Audit F11 — the credit side and input-VAT leg shared by both purchase
  * receipt postings. The supplier's invoice may carry VAT on top of the goods
@@ -210,6 +350,12 @@ export async function postExactPurchaseEntry(
     inventoryEventId: string;
     /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
     vat?: RialText;
+    /**
+     * Issue #868 — explicit attribution (a replay that carries the original's).
+     * With none, the supplier's mapping rules decide; with no rule, the entry
+     * posts unattributed exactly as it always did.
+     */
+    dimensions?: LineDimensions | null;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
@@ -218,6 +364,13 @@ export async function postExactPurchaseEntry(
     WELL_KNOWN_CODES.cash,
     WELL_KNOWN_CODES.bankClearing,
   ]);
+  const attribution = await operationalAttribution(client, {
+    businessId: params.businessId,
+    entryDate: null,
+    locationId: params.locationId,
+    explicit: params.dimensions ?? null,
+    refs: { supplierRef: await purchaseSupplierRef(client, params.purchaseId) },
+  });
   const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
@@ -229,7 +382,14 @@ export async function postExactPurchaseEntry(
     postingKind: "receipt",
     inventoryEventId: params.inventoryEventId,
     lines: [
-      { accountId: accounts.get(WELL_KNOWN_CODES.inventory)!, debit: params.total, credit: "0" as RialText },
+      // The cost leg carries the attribution; the settlement and VAT legs
+      // settle balances and stay unattributed.
+      {
+        accountId: accounts.get(WELL_KNOWN_CODES.inventory)!,
+        debit: params.total,
+        credit: "0" as RialText,
+        dimensions: attribution,
+      },
       ...settlementLines,
     ],
   });
@@ -253,6 +413,8 @@ export async function postPeriodicPurchaseEntry(
     settlementMethod: SettlementMethod;
     /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
     vat?: RialText;
+    /** Issue #868 — explicit attribution; see `postExactPurchaseEntry`. */
+    dimensions?: LineDimensions | null;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
@@ -261,6 +423,13 @@ export async function postPeriodicPurchaseEntry(
     WELL_KNOWN_CODES.cash,
     WELL_KNOWN_CODES.bankClearing,
   ]);
+  const attribution = await operationalAttribution(client, {
+    businessId: params.businessId,
+    entryDate: null,
+    locationId: params.locationId,
+    explicit: params.dimensions ?? null,
+    refs: { supplierRef: await purchaseSupplierRef(client, params.purchaseId) },
+  });
   const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
@@ -271,7 +440,12 @@ export async function postPeriodicPurchaseEntry(
     createdBy: params.createdBy,
     postingKind: "periodic_purchase",
     lines: [
-      { accountId: accounts.get(WELL_KNOWN_CODES.periodicPurchases)!, debit: params.total, credit: "0" as RialText },
+      {
+        accountId: accounts.get(WELL_KNOWN_CODES.periodicPurchases)!,
+        debit: params.total,
+        credit: "0" as RialText,
+        dimensions: attribution,
+      },
       ...settlementLines,
     ],
   });
@@ -508,12 +682,25 @@ export async function postExactCogsEntry(
     sourceType?: string;
     sourceId?: string;
     entryDate?: string | null;
+    /**
+     * Issue #868 — explicit attribution. An amendment re-posting a corrected
+     * sale passes the original entry's attribution here, so the correction
+     * carries what the sale carried even if a mapping rule changed since.
+     */
+    dimensions?: LineDimensions | null;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
     WELL_KNOWN_CODES.inventory,
     WELL_KNOWN_CODES.cogs,
   ]);
+  const attribution = await operationalAttribution(client, {
+    businessId: params.businessId,
+    entryDate: params.entryDate ?? null,
+    locationId: params.locationId,
+    explicit: params.dimensions ?? null,
+    refs: await orderMappingRefs(client, params.orderId),
+  });
   const zero = "0" as RialText;
   return postExactJournalEntry(client, {
     businessId: params.businessId,
@@ -526,7 +713,14 @@ export async function postExactCogsEntry(
     postingKind: "cogs",
     inventoryEventId: params.inventoryEventId,
     lines: [
-      { accountId: accounts.get(WELL_KNOWN_CODES.cogs)!, debit: params.totalCost, credit: zero },
+      // The cost of sale carries the sale's own attribution; the inventory
+      // credit is the asset leaving the shelves and stays unattributed.
+      {
+        accountId: accounts.get(WELL_KNOWN_CODES.cogs)!,
+        debit: params.totalCost,
+        credit: zero,
+        dimensions: attribution,
+      },
       { accountId: accounts.get(WELL_KNOWN_CODES.inventory)!, debit: zero, credit: params.totalCost },
     ],
   });
@@ -635,6 +829,13 @@ export async function postExactOrderPaymentEntry(
     sourceType?: string;
     sourceId?: string;
     entryDate?: string | null;
+    /**
+     * Issue #868 — explicit attribution (a mirror-repost, an amendment
+     * carrying the original's). With none, the business's mapping rules
+     * decide from the order's channel/items; with no rule the revenue posts
+     * unattributed exactly as it always did.
+     */
+    dimensions?: LineDimensions | null;
   },
 ): Promise<string | null> {
   const tip = rialBigInt(params.tip ?? ("0" as RialText));
@@ -718,6 +919,17 @@ export async function postExactOrderPaymentEntry(
     takeawayRevenue: WELL_KNOWN_CODES.takeawayRevenue,
     deliveryRevenue: WELL_KNOWN_CODES.deliveryRevenue,
   });
+  const orderRefs = await orderMappingRefs(client, params.orderId);
+  const attribution = await operationalAttribution(client, {
+    businessId: params.businessId,
+    entryDate: params.entryDate ?? null,
+    locationId: params.locationId,
+    explicit: params.dimensions ?? null,
+    refs: {
+      ...orderRefs,
+      channelRefs: [...salesChannelRefs(tenders.map((t) => t.settlement), params.orderChannel), ...(orderRefs.channelRefs ?? [])],
+    },
+  });
   const zero = "0" as RialText;
   return postExactJournalEntry(client, {
     businessId: params.businessId,
@@ -749,7 +961,11 @@ export async function postExactOrderPaymentEntry(
       {
         accountId: accounts.get(revenueCode)!,
         debit: zero,
+        // The sale's own attribution (issue #868): revenue keeps the source
+        // the mapping rules resolved for this order. Settlement, VAT and
+        // liability legs stay unattributed — they settle balances.
         credit: revenue.toString() as RialText,
+        dimensions: attribution,
       },
       { accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: zero, credit: params.tax },
       ...(tip > 0n
@@ -872,6 +1088,13 @@ export async function postExactOperationalInventoryEntry(
     debitCode: string;
     creditCode: string;
     amount: RialText;
+    /**
+     * Issue #868 — attribution for the **credit** leg (the cost being
+     * reversed: inventory on a supplier return, COGS on a sales return).
+     * Only callers with a real source attribution (a return mirroring its
+     * original) pass this; plain stock movements post unattributed.
+     */
+    dimensions?: LineDimensions | null;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [params.debitCode, params.creditCode]);
@@ -887,7 +1110,12 @@ export async function postExactOperationalInventoryEntry(
     inventoryEventId: params.inventoryEventId,
     lines: [
       { accountId: accounts.get(params.debitCode)!, debit: params.amount, credit: zero },
-      { accountId: accounts.get(params.creditCode)!, debit: zero, credit: params.amount },
+      {
+        accountId: accounts.get(params.creditCode)!,
+        debit: zero,
+        credit: params.amount,
+        dimensions: params.dimensions ?? null,
+      },
     ],
   });
 }
@@ -910,6 +1138,10 @@ export async function postExactSupplierReturnEntry(
     debitCode: string;
     goods: RialText;
     vat: RialText;
+    /** The purchase being returned from — its posted attribution is mirrored. */
+    purchaseId?: string | null;
+    /** Issue #868 — explicit attribution; wins over the mirrored original. */
+    dimensions?: LineDimensions | null;
   },
 ): Promise<string | null> {
   const common = {
@@ -922,6 +1154,25 @@ export async function postExactSupplierReturnEntry(
     createdBy: params.createdBy,
     inventoryEventId: params.inventoryEventId,
   };
+  // A return reverses cost the purchase recorded: it mirrors the purchase's
+  // own attribution (issue #868). Only when no original posting is readable
+  // do the supplier's mapping rules speak — never a mix of both.
+  let attribution: LineDimensions | null = params.dimensions ?? null;
+  if (!attribution && params.purchaseId) {
+    const mirrored = await postedEntryAttribution(client, params.businessId, [params.purchaseId], [
+      "receipt",
+      "periodic_purchase",
+    ]);
+    if (mirrored.found) attribution = mirrored.dimensions;
+    else {
+      attribution = await operationalAttribution(client, {
+        businessId: params.businessId,
+        entryDate: null,
+        locationId: params.locationId,
+        refs: { supplierRef: await purchaseSupplierRef(client, params.purchaseId) },
+      });
+    }
+  }
   const vat = rialBigInt(params.vat);
   if (vat < 0n) throw new Error("invalid_supplier_return_vat");
   if (vat === 0n) {
@@ -930,6 +1181,7 @@ export async function postExactSupplierReturnEntry(
       debitCode: params.debitCode,
       creditCode: WELL_KNOWN_CODES.inventory,
       amount: params.goods,
+      dimensions: attribution,
     });
   }
   const accounts = await accountIdsByCode(client, params.businessId, [
@@ -946,9 +1198,45 @@ export async function postExactSupplierReturnEntry(
         debit: (rialBigInt(params.goods) + vat).toString() as RialText,
         credit: zero,
       },
-      { accountId: accounts.get(WELL_KNOWN_CODES.inventory)!, debit: zero, credit: params.goods },
+      // The cost leg mirrors the purchase's attribution; settlement and VAT
+      // legs settle balances and stay unattributed.
+      {
+        accountId: accounts.get(WELL_KNOWN_CODES.inventory)!,
+        debit: zero,
+        credit: params.goods,
+        dimensions: attribution,
+      },
       { accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: zero, credit: params.vat },
     ],
+  });
+}
+
+/**
+ * The attribution a return of this order should carry (issue #868): the
+ * original sale's posted attribution mirrored; when no original posting is
+ * readable, the order's mapping rules; otherwise unattributed. Exported so
+ * the sales-return document's COGS-reversal leg carries the same tuple as its
+ * refund leg.
+ */
+export async function resolveOrderReturnAttribution(
+  client: PoolClient,
+  params: { businessId: string; locationId: string; orderId: string },
+): Promise<LineDimensions | null> {
+  // A closed-order amendment re-posts the sale under its own source id, so the
+  // live attribution of the order lives on the amendment's entries once one
+  // exists. Walk the chain: the order and every amendment of it.
+  const { rows: amendments } = await client.query<{ id: string }>(
+    `SELECT id FROM order_amendments WHERE order_id = $1`,
+    [params.orderId],
+  );
+  const sourceIds = [params.orderId, ...amendments.map((row) => row.id)];
+  const mirrored = await postedEntryAttribution(client, params.businessId, sourceIds, ["revenue", "cogs"]);
+  if (mirrored.found) return mirrored.dimensions;
+  return operationalAttribution(client, {
+    businessId: params.businessId,
+    entryDate: null,
+    locationId: params.locationId,
+    refs: await orderMappingRefs(client, params.orderId),
   });
 }
 
@@ -957,8 +1245,23 @@ export async function postExactCustomerRefundEntry(
   params: {
     businessId:string; locationId:string; customerReturnId:string; createdBy:string|null;
     inventoryEventId:string; paymentMethod:string; amount:RialText; tax:RialText;
+    /** The sale being returned — its posted revenue attribution is mirrored (issue #868). */
+    orderId?: string | null;
+    /** Issue #868 — explicit attribution; wins over the mirrored original. */
+    dimensions?: LineDimensions | null;
   },
 ): Promise<string|null> {
+  // The return mirrors the sale's own attribution; only when the original
+  // posting is unreadable do the order's mapping rules speak.
+  const attribution: LineDimensions | null =
+    params.dimensions ??
+    (params.orderId
+      ? await resolveOrderReturnAttribution(client, {
+          businessId: params.businessId,
+          locationId: params.locationId,
+          orderId: params.orderId,
+        })
+      : null);
   const accounts=await accountIdsByCode(client,params.businessId,[
     WELL_KNOWN_CODES.cash,WELL_KNOWN_CODES.bankClearing,WELL_KNOWN_CODES.accountsReceivable,
     WELL_KNOWN_CODES.salesReturns,WELL_KNOWN_CODES.vatPayable,
@@ -972,7 +1275,9 @@ export async function postExactCustomerRefundEntry(
     memo:"Customer refund",sourceType:"customer_return",sourceId:params.customerReturnId,
     createdBy:params.createdBy,postingKind:"customer_refund",inventoryEventId:params.inventoryEventId,
     lines:[
-      {accountId:accounts.get(WELL_KNOWN_CODES.salesReturns)!,debit:net.toString() as RialText,credit:zero},
+      // The contra-revenue leg mirrors the sale's attribution (issue #868);
+      // the VAT and settlement legs stay unattributed.
+      {accountId:accounts.get(WELL_KNOWN_CODES.salesReturns)!,debit:net.toString() as RialText,credit:zero,dimensions:attribution},
       {accountId:accounts.get(WELL_KNOWN_CODES.vatPayable)!,debit:params.tax,credit:zero},
       {accountId:accounts.get(refundAccount)!,debit:zero,credit:params.amount},
     ]});

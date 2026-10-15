@@ -34,6 +34,8 @@ function scriptedClient(accounts: Record<string, string> = ACCOUNTS) {
     query: async (sql: string, params: unknown[] = []) => {
       const flat = sql.replace(/\s+/g, " ").trim();
       calls.push({ sql: flat, params });
+      // Issue #868 — the purchase's supplier feeds its mapping rules.
+      if (flat.includes("SELECT supplier_id FROM purchases")) return { rows: [{ supplier_id: null }] };
       if (flat.includes("SELECT code, id FROM accounts")) {
         const requested = params[1] as string[];
         return { rows: requested.filter((code) => accounts[code]).map((code) => ({ code, id: accounts[code] })) };

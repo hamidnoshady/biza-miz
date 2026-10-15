@@ -34,6 +34,7 @@ export const COMMISSION_SETTLEMENT_ERROR_MESSAGES: Record<string, string> = {
   location_not_found: "شعبهٔ انتخاب‌شده پیدا نشد.",
   employee_not_found: "یکی از فروشنده‌های انتخاب‌شده پیدا نشد.",
   period_in_future: "دورهٔ تسویه نمی‌تواند تا تاریخی در آینده برود.",
+  too_many_export_rows: "تعداد ردیف‌ها برای خروجی زیاد است؛ بازهٔ تاریخ یا دوره را محدود کنید.",
   invalid_period: "تاریخ دوره معتبر نیست.",
   invalid_period_range: "تاریخ پایان دوره نمی‌تواند پیش از تاریخ شروع باشد.",
   invalid_employee_ids: "فهرست فروشنده‌ها معتبر نیست.",
@@ -102,7 +103,7 @@ export function commissionWarningText(
     case "claimed_by_payroll": {
       const payrolls = (warning.payrolls ?? []).map((p) => p.periodLabel).join("، ");
       const where = payrolls ? ` در فیش حقوق ${payrolls}` : "";
-      return `${formatCount(warning.rows)} ردیف پورسانت${where} ثبت شده و پیش‌تر پرداخت شده است؛ در این دوره نیامده تا دو بار پرداخت نشود.`;
+      return `${formatCount(warning.rows)} ردیف پورسانت${where} ثبت یا پرداخت شده است؛ در این دوره نیامده تا دو بار پرداخت نشود.`;
     }
     case "earlier_rows_included":
       return `${formatCount(warning.rows)} ردیف مربوط به پیش از شروع این دوره، که هنوز پرداخت نشده، در این دوره آمده است. هر دوره همهٔ پورسانت پرداخت‌نشدهٔ تا پایان خود را می‌گیرد، تا چیزی جا نماند و چیزی دو بار پرداخت نشود.`;
@@ -116,7 +117,7 @@ export function commissionWarningText(
       const parts = warning.sellers.map(
         (seller) => `${seller.fullName || "فروشندهٔ بدون نام"} (${formatCount(seller.lines)} فروش، ${formatMoney(seller.salesValue)})`,
       );
-      return `فروشندگانی در این دوره فروش داشته‌اند که قانون پورسانت فعال ندارند؛ برای فروش آن‌ها پورسانتی ثبت نشده است: ${parts.join("، ")}.`;
+      return `فروش‌هایی بدون پورسانت ثبت‌شده و بدون فروشندهٔ فعال یا قانون قابل‌اعمال در تاریخ فروش وجود دارد (محدودهٔ کالا و برند نیز بررسی شده است): ${parts.join("، ")}.`;
     }
   }
 }

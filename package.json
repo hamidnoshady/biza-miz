@@ -21,6 +21,8 @@
     "test:visual": "node scripts/visual-regression.mjs",
     "test:visual:update": "node scripts/visual-regression.mjs --update",
     "test:e2e:media": "node scripts/e2e-media.mjs",
+    "test:e2e:commission": "node scripts/e2e-commission.mjs",
+    "test:e2e:commission:transport": "tsx scripts/e2e-commission-transport.ts",
     "test:e2e:cheques": "node scripts/e2e-cheques.mjs",
     "test:e2e:fiscal-opening": "node scripts/e2e-fiscal-opening.mjs",
     "db:dev": "node scripts/dev-postgres.mjs",

@@ -243,3 +243,32 @@ export function parseEmployeeParam(params: URLSearchParams): string {
   if (!isUuid(employee)) throw new CommissionSettlementError("employee_required", 400);
   return employee.toLowerCase();
 }
+
+export interface StatementQuery {
+  limit: number;
+  accrualOffset: number;
+  payoutOffset: number;
+  dateFrom: string | null;
+  dateTo: string | null;
+  runId: string | null;
+  format: "json" | "csv";
+}
+
+/** Detail filters never narrow the lifetime totals. Each history has its own page. */
+export function parseStatementQuery(params: URLSearchParams): StatementQuery {
+  const dateFrom = params.get("dateFrom") || null;
+  const dateTo = params.get("dateTo") || null;
+  // Reuse the same strict date parser as the run period (including leap days).
+  if (dateFrom && !isValidIsoDate(dateFrom)) throw new CommissionSettlementError("invalid_period", 400);
+  if (dateTo && !isValidIsoDate(dateTo)) throw new CommissionSettlementError("invalid_period", 400);
+  if (dateFrom && dateTo && dateFrom > dateTo) throw new CommissionSettlementError("invalid_period_range", 400);
+  const runId = params.get("runId") || null;
+  if (runId && !isUuid(runId)) throw new CommissionSettlementError("run_not_found", 404);
+  return {
+    limit: boundedInt(params.get("limit"), 500, 1, 500, "invalid_limit"),
+    accrualOffset: boundedInt(params.get("accrualOffset"), 0, 0, 1_000_000, "invalid_offset"),
+    payoutOffset: boundedInt(params.get("payoutOffset"), 0, 0, 1_000_000, "invalid_offset"),
+    dateFrom, dateTo, runId,
+    format: formatParam(params.get("format")),
+  };
+}

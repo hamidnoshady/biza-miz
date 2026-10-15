@@ -12,20 +12,32 @@ import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode } from "./ledger-service";
 import { PayrollError } from "./payroll-errors";
 import { clientRunner, poolRunner, type Runner } from "./payroll-db";
-import { usablePaymentAccounts, type ChartAccountRow } from "./payroll-payment-accounts";
+import { isRialPayoutCurrency, usablePaymentAccounts, type ChartAccountRow } from "./payroll-payment-accounts";
 import type { PayrollPaymentAccount } from "./payroll-types";
 
 async function loadChart(run: Runner, businessId: string): Promise<ChartAccountRow[]> {
-  const { rows } = await run<{ id: string; code: string; name: string; parent_id: string | null; type: ChartAccountRow["type"] }>(
-    `SELECT id, code, name, parent_id, type::text AS type FROM accounts WHERE business_id = $1 AND is_active`,
+  const { rows } = await run<{ id: string; code: string; name: string; parent_id: string | null; type: ChartAccountRow["type"]; currency_code: string | null }>(
+    `SELECT id, code, name, parent_id, type::text AS type, currency_code FROM accounts WHERE business_id = $1 AND is_active`,
     [businessId],
   );
-  return rows.map((r) => ({ id: r.id, code: r.code, name: r.name, parentId: r.parent_id, type: r.type }));
+  return rows.map((r) => ({ id: r.id, code: r.code, name: r.name, parentId: r.parent_id, type: r.type, currencyCode: r.currency_code }));
 }
 
 /** The accounts a payroll payout may leave (cash, banks, petty cash) — one chart, one classification. */
 export async function listPaymentAccounts(businessId: string): Promise<PayrollPaymentAccount[]> {
   return usablePaymentAccounts(await loadChart(poolRunner, businessId));
+}
+
+/** Pin the selected account's currency until this payout transaction commits.
+ * FOR SHARE also blocks a non-key currency/active-state edit; an FK's key-share
+ * lock alone would not. No implicit FX conversion or changed legacy heading policy.
+ */
+async function lockRialPayoutAccount(client: PoolClient, businessId: string, accountId: string): Promise<void> {
+  const { rows } = await client.query<{ currency_code: string | null }>(
+    "SELECT currency_code FROM accounts WHERE business_id=$1 AND id=$2 AND is_active FOR SHARE",
+    [businessId, accountId],
+  );
+  if (!rows[0] || !isRialPayoutCurrency(rows[0].currency_code)) throw new PayrollError("invalid_payment_account");
 }
 
 export interface PayoutChoice {
@@ -52,9 +64,12 @@ export async function resolvePayoutAccount(
     const allowed = usablePaymentAccounts(await loadChart(clientRunner(client), businessId));
     const chosen = allowed.find((account) => account.id === choice.paymentAccountId);
     if (!chosen) throw new PayrollError("invalid_payment_account");
+    await lockRialPayoutAccount(client, businessId, chosen.id);
     return { accountId: chosen.id, method: chosen.role === "bank" ? "bank" : "cash" };
   }
   const code = choice.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bank;
   const accounts = await accountIdsByCode(client, businessId, [code]);
-  return { accountId: accounts.get(code)!, method: choice.method };
+  const accountId = accounts.get(code)!;
+  await lockRialPayoutAccount(client, businessId, accountId);
+  return { accountId, method: choice.method };
 }

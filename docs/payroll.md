@@ -260,6 +260,15 @@ account that did not yet hold it, and the real bank account never moved.
 page.) The screen defaults to cash and offers the shorthand only when the chart
 has no account to pick.
 
+Payroll, advances and commission payouts remain **Rial-only** postings. The shared
+picker excludes GL accounts explicitly tagged with a foreign `currency_code`; legacy
+untagged accounts and `IRR` accounts remain eligible. The transactional resolver
+rechecks the chosen account under `FOR SHARE` (including the legacy cash/bank method
+fallback), preventing a concurrent currency edit between validation and posting.
+Unsupported foreign sources return `400 invalid_payment_account`, with no journal,
+payment or sync effect. No implicit conversion or FX settlement is introduced; the
+existing legacy method/heading policy is otherwise unchanged.
+
 ## Dates
 
 - The accrual date, the payment date and the advance date are ISO `YYYY-MM-DD`.
@@ -440,3 +449,27 @@ and payments screens keeps *their* wording there.
 - AR/AP/installment settlement still maps «bank» to 1120 (card clearing).
 - Not built, on purpose: payslips, filing outputs, remitting the withheld
   amounts, attendance, and a benefits engine.
+
+
+### Commission settlement reconciliation snapshot (#869)
+
+Legacy payroll's 2300 tie-out now reads its GL, accrued payroll, unclaimed
+commission, standalone commission-run outstanding and unclaimed carry rows through
+one `inSnapshot` (`REPEATABLE READ READ ONLY`) connection. `standaloneCommissionOutstanding`
+requires that caller's runner, so it cannot silently fall back to pool autocommits.
+The commission report uses the same isolation and the same canonical 2300 account.
+No financial formula, payout authority, claim policy or self-approval rule changes.
+See [commission settlement](commission-settlement.md) for the identities and the
+PostgreSQL inter-query payout/reversal/payroll-commit barrier tests.
+
+
+### Exact commission source links (#869)
+
+`/accounting/payroll?run=<legacy-payroll-run-id>` opens the linked run above the normal
+workspace tabs. It reads the exact authorized `/api/ledger/payroll/runs/:id`, including
+runs outside paged history, and reuses `PayrollRunItem` with its immutable lines already
+open and mutation controls disabled. The panel is not another payment surface. Existing
+Accounting app/section/feature and API permission/RLS gates still apply. Missing/foreign
+runs show an explicit error; retry never substitutes a different run. A changed URL
+aborts the earlier request and hides its data immediately. Engine run IDs belong to
+the engine's own route, not this legacy source contract.

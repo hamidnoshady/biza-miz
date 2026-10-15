@@ -75,10 +75,24 @@ import {
   type PayrollSettings,
 } from "./payroll-gross-to-net";
 import { parseRialInput } from "./payroll-amounts";
+import {
+  defaultShare,
+  parsePayrollAllocations,
+  payrollExpenseSplit,
+  type PayrollAllocationShare,
+} from "./payroll-dimensions";
+import {
+  assertDimensionsPostable,
+  dimensionColumnValues,
+  dimensionsFromColumns,
+  hasDimensions,
+} from "./accounting-dimensions-service";
+import type { LineDimensions } from "./accounting-dimensions";
+import { DIMENSION_KINDS } from "./accounting-dimensions";
 import { resolvePayoutAccount } from "./payroll-accounts";
 import { outstandingAdvances } from "./payroll-advances-service";
 import { standaloneCommissionOutstanding } from "./commission-settlement-service";
-import { asRial, clientRunner, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
+import { asRial, clientRunner, inSnapshot, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
 import { normalizeIdempotencyKey, PayrollError } from "./payroll-errors";
 import {
   decodePayTermCursor,
@@ -631,40 +645,43 @@ async function mustGetRun(businessId: string, runId: string): Promise<PayrollRun
  * advances in 1260; none of them is part of 2300.)
  */
 export async function getPayrollLiability(businessId: string): Promise<PayrollLiability> {
-  const [ledger, awaiting, unsettled] = await Promise.all([
-    query<{ balance: string }>(
-      `SELECT COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
-         FROM journal_lines jl
-         JOIN journal_entries je ON je.id = jl.entry_id
-         JOIN accounts a ON a.id = jl.account_id
-        WHERE je.business_id = $1 AND a.business_id = $1 AND a.code = $2`,
-      [businessId, WELL_KNOWN_CODES.salariesPayable],
-    ),
-    query<{ total: string }>(
-      `SELECT COALESCE(SUM(COALESCE(net_amount, total_amount) + commission_total), 0)::text AS total
-         FROM payroll_runs WHERE business_id = $1 AND status = 'accrued'`,
-      [businessId],
-    ),
-    query<{ total: string }>(
-      `SELECT COALESCE(SUM(amount), 0)::text AS total
-         FROM commission_accruals
-        WHERE business_id = $1 AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
-      [businessId],
-    ),
-  ]);
-  // Commission a standalone settlement run has claimed but not paid, plus the
-  // balances closed runs carried forward (issue #869). Both are still owed by
-  // 2300, so they belong in the same «not yet paid» bucket as unclaimed rows.
-  const standalone = await standaloneCommissionOutstanding(businessId);
-  const ledgerBalance = BigInt(ledger.rows[0].balance);
-  const awaitingPayment = BigInt(awaiting.rows[0].total);
-  const unsettledCommission = BigInt(unsettled.rows[0].total) + standalone;
-  return {
-    ledgerBalance: ledgerBalance.toString(),
-    awaitingPayment: awaitingPayment.toString(),
-    unsettledCommission: unsettledCommission.toString(),
-    difference: (ledgerBalance - awaitingPayment - unsettledCommission).toString(),
-  };
+  return inSnapshot(async (client) => {
+    const run = clientRunner(client);
+    const [ledger, awaiting, unsettled] = [
+      await run<{ balance: string }>(
+        `SELECT COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
+           FROM journal_lines jl
+           JOIN journal_entries je ON je.id = jl.entry_id
+           JOIN accounts a ON a.id = jl.account_id
+          WHERE je.business_id = $1 AND a.business_id = $1 AND a.code = $2`,
+        [businessId, WELL_KNOWN_CODES.salariesPayable],
+      ),
+      await run<{ total: string }>(
+        `SELECT COALESCE(SUM(COALESCE(net_amount, total_amount) + commission_total), 0)::text AS total
+           FROM payroll_runs WHERE business_id = $1 AND status = 'accrued'`,
+        [businessId],
+      ),
+      await run<{ total: string }>(
+        `SELECT COALESCE(SUM(amount), 0)::text AS total
+           FROM commission_accruals
+          WHERE business_id = $1 AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
+        [businessId],
+      ),
+    ];
+    // Commission a standalone settlement run has claimed but not paid, plus the
+    // balances closed runs carried forward (issue #869). Both are still owed by
+    // 2300, so they belong in the same «not yet paid» bucket as unclaimed rows.
+    const standalone = await standaloneCommissionOutstanding(businessId, run);
+    const ledgerBalance = BigInt(ledger.rows[0].balance);
+    const awaitingPayment = BigInt(awaiting.rows[0].total);
+    const unsettledCommission = BigInt(unsettled.rows[0].total) + standalone;
+    return {
+      ledgerBalance: ledgerBalance.toString(),
+      awaitingPayment: awaitingPayment.toString(),
+      unsettledCommission: unsettledCommission.toString(),
+      difference: (ledgerBalance - awaitingPayment - unsettledCommission).toString(),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +843,8 @@ interface AccrualLine {
   employeeCode: string | null;
   breakdown: GrossToNetBreakdown;
   commission: bigint;
+  /** The employee's default dimension tuple (issue #868), applied when the run has no allocation for them. */
+  defaultDimensions: LineDimensions;
 }
 
 /** A member with commission to settle and no wage: every wage-side figure is zero. */
@@ -904,6 +923,14 @@ export async function accruePayroll(params: {
   idempotencyKey?: string | null;
   /** Settle unsettled commission in this run (default true). */
   includeCommission?: boolean;
+  /**
+   * Issue #868 — the per-run allocation override: an array of
+   * `{ userId, shares: [{ shareBp, costCenterId?, …, label? }] }`. A member
+   * with no entry here posts to their employee default dimension tuple.
+   * Expense legs split by the shares to the Rial; liability legs and the
+   * payment stay unattributed.
+   */
+  allocations?: unknown;
 }): Promise<PayrollRun & { idempotentReplay: boolean }> {
   const resolved = resolvePayrollPeriodKey(params.periodKey);
   if (!resolved.ok) throw new PayrollError(resolved.error);
@@ -974,13 +1001,57 @@ export async function accruePayroll(params: {
       const totals = payrollAccrualTotals(lines.members.map((m) => m.breakdown));
       assertLedgerFits(totals, lines.commissionTotal);
 
+      // Issue #868 — the allocation override, or each member's default tuple.
+      // The split is exact (the engine's allocateExact through
+      // payrollExpenseSplit): the per-tuple expense lines sum to the run's
+      // actual amounts to the Rial.
+      const parsedAllocations = parsePayrollAllocations(params.allocations);
+      if (!parsedAllocations.ok) throw new PayrollError(parsedAllocations.error, 400, parsedAllocations.field);
+      const allocations = parsedAllocations.value;
+      for (const userId of allocations.keys()) {
+        if (!lines.members.some((m) => m.userId === userId)) {
+          throw new PayrollError("invalid_allocations", 400, userId);
+        }
+      }
+      const memberByUser = new Map(lines.members.map((m) => [m.userId, m]));
+      const split = payrollExpenseSplit(
+        lines.members.map((m) => ({
+          userId: m.userId,
+          grossRial: m.breakdown.grossRial,
+          employerInsuranceExpenseRial: m.breakdown.employerInsuranceRial + m.breakdown.unemploymentInsuranceRial,
+        })),
+        (userId) => allocations.get(userId) ?? defaultShare(memberByUser.get(userId)?.defaultDimensions),
+      );
+
       // Only the accounts a non-zero side needs are looked up, so a business
       // with no deductions configured posts exactly the two-line entry it always
       // did — and needs no account it has never used. A commission-only run
       // posts no accrual at all (its liability is already in 2300).
-      const sides: Array<{ code: string; debit: bigint; credit: bigint }> = [
-        { code: WELL_KNOWN_CODES.salariesExpense, debit: totals.grossRial, credit: 0n },
-        { code: WELL_KNOWN_CODES.employerInsuranceExpense, debit: totals.employerInsuranceExpenseRial, credit: 0n },
+      //
+      // Expense legs carry the dimension attribution (one line per tuple);
+      // liability legs stay unattributed — salary expense attribution is
+      // separate from what the business owes (issue #868).
+      const sides: Array<{ code: string; debit: bigint; credit: bigint; dimensions?: LineDimensions | null }> = [
+        ...split.buckets.flatMap((bucket) => {
+          const legs: Array<{ code: string; debit: bigint; credit: bigint; dimensions?: LineDimensions | null }> = [];
+          if (bucket.grossRial !== 0n) {
+            legs.push({
+              code: WELL_KNOWN_CODES.salariesExpense,
+              debit: bucket.grossRial,
+              credit: 0n,
+              dimensions: bucket.dimensions,
+            });
+          }
+          if (bucket.employerInsuranceExpenseRial !== 0n) {
+            legs.push({
+              code: WELL_KNOWN_CODES.employerInsuranceExpense,
+              debit: bucket.employerInsuranceExpenseRial,
+              credit: 0n,
+              dimensions: bucket.dimensions,
+            });
+          }
+          return legs;
+        }),
         { code: WELL_KNOWN_CODES.salariesPayable, debit: 0n, credit: totals.netPayableRial },
         { code: WELL_KNOWN_CODES.insurancePayable, debit: 0n, credit: totals.insurancePayableRial },
         { code: WELL_KNOWN_CODES.payrollTaxPayable, debit: 0n, credit: totals.incomeTaxPayableRial },
@@ -1043,6 +1114,36 @@ export async function accruePayroll(params: {
         );
       }
 
+      // Issue #868 — the allocation snapshot: what each member's shares were
+      // actually charged, written once with the run. A member on their default
+      // tuple with no default configured has nothing to remember and no row.
+      for (const member of split.perMember) {
+        const record = allocations.has(member.userId) ||
+          member.shares.some((share) => DIMENSION_KINDS.some((kind) => share.dimensions[kind]));
+        if (!record) continue;
+        for (const [index, share] of member.shares.entries()) {
+          const dims = dimensionColumnValues(share.dimensions);
+          await client.query(
+            `INSERT INTO payroll_run_allocations
+               (business_id, run_id, user_id, share_bp, amount, cost_center_id, profit_center_id,
+                department_id, detail_dimension_id, label)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [
+              params.businessId,
+              runId,
+              member.userId,
+              share.shareBp,
+              member.grossParts[index].toString(),
+              dims.cost_center_id,
+              dims.profit_center_id,
+              dims.department_id,
+              dims.detail_dimension_id,
+              share.label,
+            ],
+          );
+        }
+      }
+
       if (lines.claimIds.length > 0) {
         // The rows are locked by this transaction, so all of them are still free.
         const claimed = await client.query(
@@ -1067,6 +1168,7 @@ export async function accruePayroll(params: {
             accountId: accounts.get(s.code)!,
             debit: asRial(s.debit),
             credit: asRial(s.credit),
+            dimensions: s.dimensions ?? null,
           })),
         });
       }
@@ -1123,11 +1225,16 @@ async function buildAccrualLines(
     monthly_taxable_allowance: string;
     monthly_non_taxable_allowance: string;
     monthly_fixed_deduction: string;
+    cost_center_id: string | null;
+    profit_center_id: string | null;
+    department_id: string | null;
+    detail_dimension_id: string | null;
   }>(
     `SELECT u.id, u.full_name, u.role::text AS role, e.employee_code, u.monthly_wage::text AS monthly_wage,
             u.monthly_taxable_allowance::text AS monthly_taxable_allowance,
             u.monthly_non_taxable_allowance::text AS monthly_non_taxable_allowance,
-            u.monthly_fixed_deduction::text AS monthly_fixed_deduction
+            u.monthly_fixed_deduction::text AS monthly_fixed_deduction,
+            e.cost_center_id, e.profit_center_id, e.department_id, e.detail_dimension_id
        FROM users u
        LEFT JOIN employees e ON e.id = u.id
       WHERE u.business_id = $1 AND u.is_active AND u.monthly_wage IS NOT NULL AND u.monthly_wage > 0
@@ -1166,6 +1273,7 @@ async function buildAccrualLines(
       employeeCode: s.employee_code,
       breakdown: result,
       commission: commissionOf.get(s.id)?.amount ?? 0n,
+      defaultDimensions: dimensionsFromColumns(s),
     });
   }
   const covered = new Set(members.map((m) => m.userId));
@@ -1178,6 +1286,7 @@ async function buildAccrualLines(
       employeeCode: c.employeeCode,
       breakdown: NO_WAGE,
       commission: c.amount,
+      defaultDimensions: {},
     });
   }
   members.sort((a, b) => a.fullName.localeCompare(b.fullName, "fa") || (a.userId < b.userId ? -1 : 1));

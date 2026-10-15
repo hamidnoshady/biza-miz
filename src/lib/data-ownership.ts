@@ -390,6 +390,42 @@ export const DATA_OWNERSHIP_REGISTRY = {
     events: [],
     masterTables: ["item_brands", "items", "watch_item_attributes"],
   }),
+  /*
+   * Accounting-dimension master data (issue #868): cost centres, profit
+   * centres, departments and detail values, their settings and the
+   * item/category/supplier/channel posting mappings (migration 0222). The
+   * dimension workspace is authored in the accounting screens, which are
+   * cloud-owned — so the cloud is the one canonical owner and the master feed
+   * carries rows down with their UUIDs unchanged, exactly the ids a site's
+   * attribution columns and a pulled entry's lines reference. A conflict is
+   * settled by that ownership (`authoritative_scope`): a site never becomes a
+   * second writable authority for a value a posting names.
+   *
+   * What deliberately does not ride this feed: payroll_run_allocations (an
+   * immutable posted-run snapshot, cloud-owned like payroll), the employees
+   * default-dimension columns (users bootstrap, `staff_access`), and the
+   * dimension columns of journal_lines themselves (inside the ledger,
+   * `accounting_journals`).
+   */
+  accounting_dimension_master: replicated({
+    domain: "accounting_dimension_master",
+    authority: "cloud_authoritative",
+    direction: "cloud_to_site",
+    conflictPolicy: "authoritative_scope",
+    tombstonePolicy: "archive",
+    bootstrap: "required",
+    continuousSync: "active",
+    identity: "stable dimension value UUIDs (settings by business_id+kind)",
+    retry:
+      "per-field hybrid-logical-clock capture by trigger; settings apply before values, values before mappings; an archived value keeps its history and blocks nothing posted",
+    transport: "master_feed",
+    events: [],
+    masterTables: [
+      "accounting_dimension_settings",
+      "accounting_dimension_values",
+      "accounting_dimension_mappings",
+    ],
+  }),
   staff_access: cloudOrBootstrapOnly({
     domain: "staff_access",
     authority: "cloud_authoritative",

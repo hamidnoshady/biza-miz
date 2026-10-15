@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1023**. Rows: tenant **92**, platform **19**.
+Route files scanned: **1024**. Rows: tenant **92**, platform **19**.
 
 ## Summary of remaining gaps
 
@@ -43,7 +43,7 @@ Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (inf
 | Accounting | Multi-currency entries, settlements and revaluations<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | — | (route only) | — | ledger.post, ledger.view | — | — | — | MCP gap |
 | Accounting | Opening balances & fiscal carry-forward<br>_landed on main after this map's batch; no MCP verb yet — approving and posting an opening document stays a human act_ | (route only) | (route only) | (route only) | (route only) | (route only) | ledger.approve, ledger.post, ledger.view | — | — | — | MCP gap |
 | Accounting | Voucher numbering, gaps, renumbering & summary vouchers<br>_landed on main after this map's batch; no MCP verb yet — renumbering is a fiscal-year act for a person_ | (route only) | (route only) | — | — | — | ledger.approve, ledger.post, ledger.view | — | — | — | MCP gap |
-| Accounting | Accounting dimensions (cost/profit centres, departments) & dimension reports<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | (route only) | (route only) | — | accounts.edit, ledger.view | — | — | — | MCP gap |
+| Accounting | Accounting dimensions (cost/profit centres, departments) & dimension reports<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | (route only) | (route only) | (route only) | accounts.edit, ledger.approve, ledger.view | — | — | — | MCP gap |
 | Accounting | Taxpayer invoices (سامانه مودیان)<br>_landed on main after this map's batch; no MCP verb yet — every send stays a human act_ | (route only) | (route only) | (route only) | (route only) | — | tax.amend, tax.cancel, tax.export, tax.inquiry, tax.manage_settings, tax.prepare, tax.send, tax.view | — | — | — | MCP gap |
 | Accounting | Taxpayer provider callback<br>_signed provider callback, not a business operation_ | — | — | — | (route only) | — | — | — | — | — | n/a (infra) |
 | Automotive | Vehicles, leads, reservations and transfers<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | (route only) | (route only) | — | crm.manage, media.view, vehicles.archive, vehicles.cost_edit, vehicles.cost_view, vehicles.create, vehicles.edit, vehicles.expense_record | — | — | — | MCP gap |

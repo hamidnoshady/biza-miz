@@ -33,6 +33,8 @@ import {
 } from "./opening-import";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { postJournalEntry, postExactMirrorEntry } from "./ledger-service";
+import { parseLineDimensions, type LineDimensions } from "./accounting-dimensions";
+import { dimensionColumnValues, dimensionsFromColumns } from "./accounting-dimensions-service";
 import {
   AR_CUSTOMER_ATTRIBUTION_SQL,
   AR_CUSTOMER_ID_SQL,
@@ -119,6 +121,10 @@ interface LineRow extends Record<string, unknown> {
   code: string;
   account_name: string;
   party_name: string | null;
+  cost_center_id: string | null;
+  profit_center_id: string | null;
+  department_id: string | null;
+  detail_dimension_id: string | null;
 }
 
 function toSet(r: SetRow) {
@@ -159,6 +165,12 @@ function toLine(r: LineRow) {
     partyName: r.party_name,
     reference: r.reference,
     sourceNote: r.source_note,
+    dimensions: dimensionsFromColumns(r as {
+      cost_center_id: string | null;
+      profit_center_id: string | null;
+      department_id: string | null;
+      detail_dimension_id: string | null;
+    }),
   };
 }
 
@@ -174,6 +186,7 @@ export async function listOpeningSets(businessId: string) {
 const LINE_SELECT = `
   SELECT l.id, l.set_id, l.account_id, l.debit::text AS debit, l.credit::text AS credit,
          l.party_type, l.party_id::text AS party_id, l.reference, l.source_note,
+         l.cost_center_id, l.profit_center_id, l.department_id, l.detail_dimension_id,
          a.code, a.name AS account_name,
          COALESCE(c.name, sp.name, ch.counterparty_name, fa.name) AS party_name
     FROM opening_balance_lines l
@@ -231,6 +244,10 @@ function normalizedLines(payload: unknown): OpeningLineInput[] {
     // unattributed, with the human-readable reference the row already carries.
     const rawPartyId = typeof l.partyId === "string" && isUuid(l.partyId) ? l.partyId : null;
     const partyId = partyType !== null && rawPartyId !== null ? rawPartyId : null;
+    // Issue #868 — optional attribution (`dimensions` object, the same shape
+    // the draft and expense APIs take); a malformed value drops the whole
+    // attribution rather than half-applying it (the row still posts, unattributed).
+    const parsedDims = parseLineDimensions(l.dimensions);
     lines.push({
       accountId: typeof l.accountId === "string" && isUuid(l.accountId) ? l.accountId : "",
       debit,
@@ -239,6 +256,7 @@ function normalizedLines(payload: unknown): OpeningLineInput[] {
       partyId,
       reference: typeof l.reference === "string" ? l.reference.slice(0, 200) : null,
       sourceNote: typeof l.sourceNote === "string" ? l.sourceNote.slice(0, 500) : null,
+      dimensions: parsedDims.ok ? parsedDims.value : null,
     });
   }
   return lines;
@@ -369,10 +387,26 @@ async function fiscalYearIdFor(client: PoolClient, businessId: string, label: st
 
 async function insertLines(client: PoolClient, setId: string, lines: OpeningLineInput[]): Promise<void> {
   for (const l of lines) {
+    const dims = dimensionColumnValues(l.dimensions ?? null);
     await client.query(
-      `INSERT INTO opening_balance_lines (set_id, account_id, debit, credit, party_type, party_id, reference, source_note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [setId, l.accountId, l.debit, l.credit, l.partyType, l.partyId || null, l.reference, l.sourceNote],
+      `INSERT INTO opening_balance_lines
+         (set_id, account_id, debit, credit, party_type, party_id, reference, source_note,
+          cost_center_id, profit_center_id, department_id, detail_dimension_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [
+        setId,
+        l.accountId,
+        l.debit,
+        l.credit,
+        l.partyType,
+        l.partyId || null,
+        l.reference,
+        l.sourceNote,
+        dims.cost_center_id,
+        dims.profit_center_id,
+        dims.department_id,
+        dims.detail_dimension_id,
+      ],
     );
   }
 }
@@ -515,10 +549,11 @@ export async function approveOpeningSet(params: {
 async function readSetLines(
   client: PoolClient,
   setId: string,
-): Promise<{ accountId: string; debit: bigint; credit: bigint; partyType: string | null; partyId: string | null; reference: string | null; sourceNote: string | null }[]> {
+): Promise<{ accountId: string; debit: bigint; credit: bigint; partyType: string | null; partyId: string | null; reference: string | null; sourceNote: string | null; dimensions: LineDimensions }[]> {
   const { rows } = await client.query<Record<string, unknown>>(
     `SELECT account_id, debit::text AS debit, credit::text AS credit, party_type,
-            party_id::text AS party_id, reference, source_note
+            party_id::text AS party_id, reference, source_note,
+            cost_center_id, profit_center_id, department_id, detail_dimension_id
        FROM opening_balance_lines WHERE set_id = $1`,
     [setId],
   );
@@ -530,6 +565,12 @@ async function readSetLines(
     partyId: (r.party_id as string | null) ?? null,
     reference: (r.reference as string | null) ?? null,
     sourceNote: (r.source_note as string | null) ?? null,
+    dimensions: dimensionsFromColumns(r as {
+      cost_center_id: string | null;
+      profit_center_id: string | null;
+      department_id: string | null;
+      detail_dimension_id: string | null;
+    }),
   }));
 }
 
@@ -576,7 +617,16 @@ export async function postOpeningSet(params: {
       sourceId: params.setId,
       createdBy: params.actorId,
       postingKind: "opening",
-      lines: lineRows.map((l) => ({ accountId: l.accountId, debit: Number(l.debit), credit: Number(l.credit) })),
+      // Issue #868 — a carry-forward set mirrors the prior year's attribution
+      // (a fact restated, valid even when its value has since been archived);
+      // a manual opening set is a new attribution and is held to the policy.
+      dimensionMirror: set.source === "carry_forward",
+      lines: lineRows.map((l) => ({
+        accountId: l.accountId,
+        debit: Number(l.debit),
+        credit: Number(l.credit),
+        dimensions: l.dimensions,
+      })),
     });
     if (!entryId) throw new OpeningBalanceError("set_has_no_lines", 409);
 
@@ -855,17 +905,20 @@ async function readCarryForwardInput(
     throw new OpeningBalanceError("prior_year_not_closed", 409, { openPeriods });
   }
 
-  // Complete closing trial balance, signed net per account. The same
-  // aggregation the trial balance uses — net per account through the close.
+  // Complete closing trial balance, signed net per (account × dimension
+  // tuple) — issue #868: the split a year of attributed postings actually
+  // has, so the carry-forward preserves it instead of collapsing it.
   const { rows: accountRows } = await client.query<Record<string, unknown>>(
     `SELECT a.id AS account_id, a.code, a.name, a.type::text AS type,
+            jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id,
             (COALESCE(SUM(jl.debit), 0) - COALESCE(SUM(jl.credit), 0))::text AS closing_net
        FROM accounts a
        LEFT JOIN journal_lines jl ON jl.account_id = a.id
        LEFT JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
       WHERE a.business_id = $1
         AND (je.id IS NULL OR je.entry_date <= $2::date)
-      GROUP BY a.id, a.code, a.name, a.type
+      GROUP BY a.id, a.code, a.name, a.type,
+               jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id
       ORDER BY a.code`,
     [businessId, asOf],
   );
@@ -873,6 +926,7 @@ async function readCarryForwardInput(
   // A/R by customer, at the year-end date, via the subledger's own attribution.
   const { rows: arRows } = await client.query<Record<string, unknown>>(
     `SELECT ${AR_CUSTOMER_ID_SQL} AS customer_id,
+            jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id,
             COALESCE(SUM(jl.debit - jl.credit), 0)::text AS balance
      ${AR_CUSTOMER_ATTRIBUTION_SQL}
      JOIN accounts a ON a.id = jl.account_id
@@ -881,7 +935,8 @@ async function readCarryForwardInput(
        AND a.code = $2
        AND je.entry_date <= $3::date
        AND ${AR_CUSTOMER_ID_SQL} IS NOT NULL
-     GROUP BY ${AR_CUSTOMER_ID_SQL}`,
+     GROUP BY ${AR_CUSTOMER_ID_SQL},
+              jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id`,
     [businessId, WELL_KNOWN_CODES.accountsReceivable, asOf],
   );
   // The attribution's customer id is the party's own id (0137), so the
@@ -900,6 +955,12 @@ async function readCarryForwardInput(
         partyId: c ? (c.id as string) : null,
         name: c ? (c.name as string) : "مشتری ناشناس",
         balance: BigInt(r.balance as string),
+        dimensions: dimensionsFromColumns(r as {
+          cost_center_id: string | null;
+          profit_center_id: string | null;
+          department_id: string | null;
+          detail_dimension_id: string | null;
+        }),
       };
     })
     .filter((r) => r.balance !== 0n);
@@ -907,6 +968,7 @@ async function readCarryForwardInput(
   // A/P by supplier — the mirror (credit positive).
   const { rows: apRows } = await client.query<Record<string, unknown>>(
     `SELECT ${AP_SUPPLIER_ID_SQL} AS supplier_id,
+            jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id,
             COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
      ${AP_SUPPLIER_ATTRIBUTION_SQL}
      JOIN accounts a ON a.id = jl.account_id
@@ -915,7 +977,8 @@ async function readCarryForwardInput(
        AND a.code = $2
        AND je.entry_date <= $3::date
        AND ${AP_SUPPLIER_ID_SQL} IS NOT NULL
-     GROUP BY ${AP_SUPPLIER_ID_SQL}`,
+     GROUP BY ${AP_SUPPLIER_ID_SQL},
+              jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id`,
     [businessId, WELL_KNOWN_CODES.accountsPayable, asOf],
   );
   // `suppliers` is location-scoped (0001 predates the business-wide party);
@@ -938,6 +1001,12 @@ async function readCarryForwardInput(
         partyId: (s?.party_id as string | null) ?? null,
         name: s ? (s.name as string) : "تأمین‌کننده ناشناس",
         balance: BigInt(r.balance as string),
+        dimensions: dimensionsFromColumns(r as {
+          cost_center_id: string | null;
+          profit_center_id: string | null;
+          department_id: string | null;
+          detail_dimension_id: string | null;
+        }),
       };
     })
     .filter((r) => r.balance !== 0n);
@@ -982,6 +1051,7 @@ async function readCarryForwardInput(
   const { rows: assetRows } = await client.query<Record<string, unknown>>(
     `SELECT fa.id, fa.name, fa.cost::text AS cost, fa.acquisition_source,
             fa.asset_account_id::text AS asset_account_id,
+            fa.cost_center_id, fa.profit_center_id, fa.department_id, fa.detail_dimension_id,
             COALESCE(d.total, 0)::text AS accumulated
        FROM fixed_assets fa
        LEFT JOIN (SELECT fixed_asset_id, SUM(amount) AS total
@@ -1007,6 +1077,12 @@ async function readCarryForwardInput(
       cost: BigInt(r.cost as string),
       accumulatedDepreciation: BigInt(r.accumulated as string),
       acquisitionSource: r.acquisition_source as string,
+      dimensions: dimensionsFromColumns(r as {
+        cost_center_id: string | null;
+        profit_center_id: string | null;
+        department_id: string | null;
+        detail_dimension_id: string | null;
+      }),
     }))
     .filter((r) => r.accountId !== "");
 
@@ -1037,6 +1113,12 @@ async function readCarryForwardInput(
         name: r.name as string,
         type: r.type as CarryForwardAccount["type"],
         closingNet: BigInt(r.closing_net as string),
+        dimensions: dimensionsFromColumns(r as {
+          cost_center_id: string | null;
+          profit_center_id: string | null;
+          department_id: string | null;
+          detail_dimension_id: string | null;
+        }),
       })),
       arByCustomer,
       apBySupplier,
@@ -1072,6 +1154,10 @@ function toCarryForwardApiLines(lines: readonly CarryForwardLine[]): CarryForwar
     partyId: l.partyId,
     reference: l.reference,
     sourceNote: l.sourceNote,
+    // Issue #868 — the proposal shows the attribution it will carry forward.
+    // An empty attribution normalises to null, the same "absent" the posting
+    // paths use.
+    dimensions: l.dimensions && Object.keys(l.dimensions).length > 0 ? l.dimensions : null,
   }));
 }
 
@@ -1157,10 +1243,26 @@ export async function generateCarryForward(params: {
     );
     const setId = setRows[0].id;
     for (const l of proposal.lines) {
+      const dims = dimensionColumnValues(l.dimensions ?? null);
       await client.query(
-        `INSERT INTO opening_balance_lines (set_id, account_id, debit, credit, party_type, party_id, reference, source_note)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [setId, l.accountId, l.debit.toString(), l.credit.toString(), l.partyType, l.partyId, l.reference, l.sourceNote],
+        `INSERT INTO opening_balance_lines
+           (set_id, account_id, debit, credit, party_type, party_id, reference, source_note,
+            cost_center_id, profit_center_id, department_id, detail_dimension_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          setId,
+          l.accountId,
+          l.debit.toString(),
+          l.credit.toString(),
+          l.partyType,
+          l.partyId,
+          l.reference,
+          l.sourceNote,
+          dims.cost_center_id,
+          dims.profit_center_id,
+          dims.department_id,
+          dims.detail_dimension_id,
+        ],
       );
     }
     await client.query(
