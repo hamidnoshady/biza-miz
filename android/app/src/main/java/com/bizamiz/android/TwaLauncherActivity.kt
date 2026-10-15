@@ -136,11 +136,7 @@ class TwaLauncherActivity : Activity() {
 
         when (val decision = AppLinkRouter.decide(resolvedIncoming, BuildConfig.WEB_ORIGIN)) {
             LaunchDecision.NotConfigured -> showFallback(OfflineActivity.REASON_NOT_CONFIGURED, null)
-            is LaunchDecision.OpenExternal -> {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(decision.url)))
-                finish()
-            }
-            is LaunchDecision.OpenInTwa -> openInTwa(decision.url)
+            is LaunchDecision.Open -> openInTwa(decision.url)
         }
     }
 
