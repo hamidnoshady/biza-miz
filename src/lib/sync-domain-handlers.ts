@@ -25,6 +25,7 @@ import {
   applyVehicleOfflineRequest,
   recordVehicleOfflineRequestIntent,
   parseVehicleOfflineRequestPayload,
+  type ParsedVehicleOfflineRequest,
 } from "./automotive-stock-service";
 import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
 import { applyShiftReplay, parseShiftSyncPayload } from "./shift-sync";
@@ -53,6 +54,31 @@ export class SyncPayloadError extends Error {
   constructor(readonly code = "invalid_payload") {
     super(code);
     this.name = "SyncPayloadError";
+  }
+}
+
+/**
+ * The offline queue's payload parser, with its refusals translated into the sync
+ * layer's own vocabulary.
+ *
+ * `parseVehicleOfflineRequestPayload` speaks `VehicleError`, because the HTTP
+ * routes and the desktop's queue writer both surface it to a person who can fix
+ * the form. Here there is nobody to fix anything: the payload arrived over the
+ * wire and will parse exactly the same way on every attempt. A
+ * `SyncPayloadError` is what makes that outcome *terminal* — dead-lettered with
+ * its own code, and the desktop is told — instead of a retry loop that never
+ * drains. The answers that genuinely can change (a car another branch holds, a
+ * reservation already released, a stale expected version) do not come from this
+ * throw at all: `applyVehicleOfflineRequest` returns them as an outcome.
+ */
+function parseVehicleOfflineRequestTerminal(
+  payload: Record<string, unknown>,
+  handler: string,
+): ParsedVehicleOfflineRequest {
+  try {
+    return parseVehicleOfflineRequestPayload(payload, handler);
+  } catch (error) {
+    throw new SyncPayloadError(syncErrorCode(error));
   }
 }
 
@@ -421,7 +447,7 @@ export async function applySyncDomainHandler(context: SyncDomainContext): Promis
     // no authority over.
     case "automotive.vehicle.reservation.requested":
     case "automotive.vehicle.reservation.released": {
-      const request = parseVehicleOfflineRequestPayload(payload, context.definition.handler);
+      const request = parseVehicleOfflineRequestTerminal(payload, context.definition.handler);
       if (deploymentRole() === "site") {
         await recordVehicleOfflineRequestIntent({
           client,
