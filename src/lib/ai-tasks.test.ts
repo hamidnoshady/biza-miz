@@ -314,7 +314,22 @@ describe("isTaskEligible, resolveEligibleTasks, and resolveStarterPrompts", () =
       expect(prompt).not.toContain("مشتریان در خطر");
     }
 
-    // 3. Floor mode with `reservations: false` excludes table bill-split prompt
+    // 3. Explicit `eligibleTaskIds` allowlist alone (without `permissions` or `accessibleFocuses`)
+    // also restricts `workspace` and `website` focuses and starters automatically.
+    const taskListOnlyContext = {
+      mode: "dashboard" as const,
+      industry: "wholesale" as const,
+      eligibleTaskIds: ["general", "inventory"] as const,
+    };
+    expect(resolveAccessibleFocuses(taskListOnlyContext)).toEqual([
+      "all",
+      "accounting",
+    ]);
+    expect(resolveStarterPrompts(taskListOnlyContext)).toEqual(
+      taskById("inventory")!.suggestions,
+    );
+
+    // 4. Floor mode with `reservations: false` excludes table bill-split prompt
     const floorNoTables = resolveStarterPrompts({
       mode: "floor",
       industry: "food_service",

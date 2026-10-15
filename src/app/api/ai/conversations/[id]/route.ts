@@ -15,6 +15,7 @@ import {
 } from "@/lib/ai-conversations";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MODES: readonly AgentMode[] = ["wizard", "dashboard", "floor"];
 
 /**
  * Canonical conversation-mode authorization policy (Issue #905 §10):
@@ -39,7 +40,7 @@ async function authorizeConversationById(id: string) {
     PERMISSIONS.menuView,
   );
   if (baseGuard.error) {
-    return { error: baseGuard.error, session: null };
+    return { error: baseGuard.error, session: null, mode: null };
   }
   const session = baseGuard.session;
 
@@ -47,6 +48,7 @@ async function authorizeConversationById(id: string) {
     return {
       error: NextResponse.json({ error: "not_found" }, { status: 404 }),
       session: null,
+      mode: null,
     };
   }
 
@@ -59,23 +61,33 @@ async function authorizeConversationById(id: string) {
     return {
       error: NextResponse.json({ error: "not_found" }, { status: 404 }),
       session: null,
+      mode: null,
     };
   }
 
   const modeGuard = await requireConversationModeAccess(savedMode);
   if (modeGuard.error) {
-    return { error: modeGuard.error, session: null };
+    return { error: modeGuard.error, session: null, mode: null };
   }
 
-  return { error: null, session: modeGuard.session };
+  return { error: null, session: modeGuard.session, mode: savedMode };
 }
 
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
     const { id } = await context.params;
     const auth = await authorizeConversationById(id);
     if (auth.error) return auth.error;
     const session = auth.session;
+
+    const rawMode = new URL(request.url).searchParams.get("mode");
+    const requestedMode =
+      rawMode && (MODES as readonly string[]).includes(rawMode)
+        ? (rawMode as AgentMode)
+        : null;
+    if (requestedMode && requestedMode !== auth.mode) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
 
     const result = await getConversationMessages({
       businessId: session.businessId,

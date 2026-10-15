@@ -526,6 +526,12 @@ export function isFocusEligible(
     if (permSet) {
       return WORKSPACE_PERMISSIONS.some((perm) => permSet.has(perm));
     }
+    if (accessibleSet) {
+      return true;
+    }
+    if (context?.eligibleTaskIds && featuresRecord?.workspace !== true) {
+      return false;
+    }
     return true;
   }
 
@@ -561,6 +567,12 @@ export function isFocusEligible(
         permSet.has("integrations.manage") &&
         featuresRecord?.integrations !== false;
       return hasWebsitePerm || hasIntegrationsPerm;
+    }
+    if (accessibleSet) {
+      return true;
+    }
+    if (context?.eligibleTaskIds && featuresRecord?.website !== true) {
+      return false;
     }
     return true;
   }

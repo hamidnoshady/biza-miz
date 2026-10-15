@@ -50,6 +50,7 @@ import { animateStaggerIn } from "@/components/ai/chat-animations";
 import { useStickyScroll } from "@/components/ai/use-sticky-scroll";
 import {
   SUGGESTED_PROMPTS,
+  resolveAccessibleFocuses,
   resolveEligibleTasks,
   resolveStarterPrompts,
   taskById,
@@ -134,11 +135,28 @@ export function AiChatHub({
     [deepResearchEnabled],
   );
 
+  const effectiveAccessibleFocuses = useMemo<
+    readonly AiAppFocus[] | undefined
+  >(() => {
+    if (accessibleFocuses) {
+      return accessibleFocuses;
+    }
+    if (eligibleTaskIds !== undefined) {
+      return resolveAccessibleFocuses({
+        mode: "dashboard",
+        industry,
+        eligibleTaskIds,
+      }) as readonly AiAppFocus[];
+    }
+    return undefined;
+  }, [accessibleFocuses, eligibleTaskIds, industry]);
+
   const canSelectProject =
-    !accessibleFocuses || accessibleFocuses.includes("workspace");
+    !effectiveAccessibleFocuses ||
+    effectiveAccessibleFocuses.includes("workspace");
 
   const [appFocus, setAppFocus] = useState<AiAppFocus>(() =>
-    normalizeAiAppFocus(rawFocusParam, accessibleFocuses),
+    normalizeAiAppFocus(rawFocusParam, effectiveAccessibleFocuses),
   );
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() =>
     canSelectProject ? projectFromUrl : null,
@@ -241,7 +259,7 @@ export function AiChatHub({
 
   const updateAppFocus = useCallback(
     (value: AiAppFocus) => {
-      const normalized = normalizeAiAppFocus(value, accessibleFocuses);
+      const normalized = normalizeAiAppFocus(value, effectiveAccessibleFocuses);
       setAppFocus(normalized);
       replaceParams((params) => {
         params.delete("app");
@@ -249,7 +267,7 @@ export function AiChatHub({
         else params.set("focus", normalized);
       });
     },
-    [accessibleFocuses, replaceParams],
+    [effectiveAccessibleFocuses, replaceParams],
   );
 
   const money = useMoney();
@@ -314,13 +332,16 @@ export function AiChatHub({
 
   // Normalize and sync URL parameters (`focus`, `mode`, `widgets`) when URL changes.
   useEffect(() => {
-    const nextFocus = normalizeAiAppFocus(rawFocusParam, accessibleFocuses);
+    const nextFocus = normalizeAiAppFocus(
+      rawFocusParam,
+      effectiveAccessibleFocuses,
+    );
     setAppFocus(nextFocus);
     const nextMode = resolveValidMode(rawModeParam);
     setRuntimeMode(nextMode);
     setWidgetsSheetOpen(widgetsFromUrl);
   }, [
-    accessibleFocuses,
+    effectiveAccessibleFocuses,
     rawFocusParam,
     rawModeParam,
     resolveValidMode,
@@ -330,7 +351,7 @@ export function AiChatHub({
 
   const handleNewConversation = useCallback(() => {
     startNewConversation();
-    setActiveProjectId(projectFromUrl);
+    setActiveProjectId(canSelectProject ? projectFromUrl : null);
     replaceParams((params) => {
       params.delete("conversation");
       params.delete("ctx");
@@ -338,7 +359,7 @@ export function AiChatHub({
     window.requestAnimationFrame(() => {
       composerInputRef.current?.focus();
     });
-  }, [projectFromUrl, replaceParams, startNewConversation]);
+  }, [canSelectProject, projectFromUrl, replaceParams, startNewConversation]);
 
   const changeProject = useCallback(
     (nextProjectId: string | null) => {
@@ -489,14 +510,14 @@ export function AiChatHub({
         mode: "dashboard",
         industry,
         eligibleTaskIds,
-        accessibleFocuses: accessibleFocuses as
+        accessibleFocuses: effectiveAccessibleFocuses as
           | readonly AiTaskAppFocus[]
           | undefined,
         appFocus: taskFocus,
       },
       { includeCustom: false, respectAppFocus: true },
     ).map((item) => item.id);
-  }, [accessibleFocuses, eligibleTaskIds, industry, taskFocus]);
+  }, [effectiveAccessibleFocuses, eligibleTaskIds, industry, taskFocus]);
 
   useEffect(() => {
     if (
@@ -526,16 +547,16 @@ export function AiChatHub({
       projectId: canSelectProject ? activeProjectId : null,
       task,
       eligibleTaskIds,
-      accessibleFocuses: accessibleFocuses as
+      accessibleFocuses: effectiveAccessibleFocuses as
         | readonly AiTaskAppFocus[]
         | undefined,
       fallback: starterPrompts ?? SUGGESTED_PROMPTS.dashboard,
       count: 3,
     });
   }, [
-    accessibleFocuses,
     activeProjectId,
     canSelectProject,
+    effectiveAccessibleFocuses,
     eligibleTaskIds,
     industry,
     starterPrompts,
@@ -855,7 +876,7 @@ export function AiChatHub({
                 compact
                 appFocus={appFocus}
                 onAppFocusChange={updateAppFocus}
-                accessibleFocuses={accessibleFocuses}
+                accessibleFocuses={effectiveAccessibleFocuses}
                 runtimeMode={runtimeMode}
                 onRuntimeModeChange={updateRuntimeMode}
                 deepResearchEnabled={deepResearchEnabled}

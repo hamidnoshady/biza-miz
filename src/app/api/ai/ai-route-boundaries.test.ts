@@ -644,10 +644,17 @@ describe("Issue #905 §10 — /api/ai/conversations transcript access and pagina
     deleteConversation.mockResolvedValueOnce(true);
 
     const waiterGet = await detailRoute.GET(
-      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}?mode=floor`, "GET"),
       { params: Promise.resolve({ id: convId }) },
     );
     expect(waiterGet.status).toBe(200);
+
+    // Calling GET with a mismatched `?mode=dashboard` on a `floor` conversation returns 404
+    const waiterMismatchModeGet = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}?mode=dashboard`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterMismatchModeGet.status).toBe(404);
 
     const waiterPatch = await detailRoute.PATCH(
       jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
