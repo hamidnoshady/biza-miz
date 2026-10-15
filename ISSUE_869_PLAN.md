@@ -67,12 +67,12 @@ not verification of this completion branch.
 | ESLint | PASS, final full sequential rerun exit 0. No warning threshold changed. |
 | Focused unit/HTTP | PASS: 74 tests / 5 files, including pagination/view denial and exact CSV download contract. |
 | Financial PostgreSQL | PASS: 247 tests / 6 files, 45.55s: payroll 184, accrual 11, settlement 23, contention 10, sync handlers 12, tenant isolation 7. Includes oversized-export refusal, whole-history paging, exact manual GL drift and deterministic snapshot barriers. |
-| Full unit / full DB | Initial runs were contaminated by simultaneous build memory exhaustion and stopped; NOT passes. Fresh sequential runs in progress. |
+| Full unit / full DB | Fresh sequential full unit PASS: 11,415 tests / 865 files, 493.27s. Full PostgreSQL still running. Initial memory-contaminated runs were stopped and are not counted. |
 | Actual-app browser | NOT passed. On unprivileged runtime role, browser reproduced the calendar-label defect; after correction, calendar-close assertion and real run creation/calculation succeeded. Later dev route compilation exhausted sandbox RAM and the server died. Full script remains an unverified gate; no mocked route or forced click was substituted. |
 | Production build | BLOCKED locally: both parallel and isolated attempts were killed (isolated exit 137) during compilation on the 3.8 GiB sandbox. No successful build claim or altered build/test acceptance thresholds. |
 | Pinned visual / Windows packaging | NOT verified here. Available local Chromium 138 is not the pinned visual browser; no baselines regenerated. Windows packaging requires its existing Windows runner. |
 | Live central/site sync | NOT verified. Handler/outbox/RLS tests above are not real transport evidence. |
-| Actions / merge | Pending PR/CI. Do not merge or close #869 on these local results. |
+| Actions / merge | Draft PR #964. At implementation head `fdb9389`, Actions typecheck, lint, full unit, design, API guards, data transfer, production build and pinned visual PASSED. The production commission browser step FAILED; its exact log is being investigated (log-blob downloads are inaccessible here, so failures are also emitted as check annotations). Full integration and Windows/package/container checks still pending. No merge or closure. |
 
 Remaining acceptance also includes the broader actual-app theme, keyboard/accessibility,
 Rial/Toman, stale/error/filter and source navigation matrix, a supported payroll-run deep

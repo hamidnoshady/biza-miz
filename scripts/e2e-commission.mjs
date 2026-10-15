@@ -148,6 +148,10 @@ try {
   assert.deepEqual(errors, [], "unexpected browser errors");
   console.log("Commission multi-user browser lifecycle passed (real application, PostgreSQL/RLS runtime)");
 } catch (error) {
+  // Keep the exact failure/stack available through check annotations as well
+  // as runner logs and screenshots (some clients cannot download log blobs).
+  const diagnostic = String(error?.stack ?? error).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+  console.error(`::error::${diagnostic}`);
   mkdirSync(".cache/commission-e2e", { recursive: true });
   for (const [index, context] of contexts.entries()) {
     for (const page of context.pages()) await page.screenshot({ path: `.cache/commission-e2e/actor-${index}.png`, fullPage: true }).catch(() => {});
