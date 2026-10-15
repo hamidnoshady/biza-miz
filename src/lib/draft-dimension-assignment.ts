@@ -204,7 +204,7 @@ export async function assignDimensionsToDrafts(params: {
           row.id,
           row.line_no,
           params.actorId,
-          mode === "fill_blank" ? "bulk_fill_blank" : "bulk_overwrite",
+          mode === "fill_blank" ? "bulk_fill" : "bulk_overwrite",
           JSON.stringify(before),
           JSON.stringify(after),
         ],

@@ -1154,6 +1154,10 @@ function toCarryForwardApiLines(lines: readonly CarryForwardLine[]): CarryForwar
     partyId: l.partyId,
     reference: l.reference,
     sourceNote: l.sourceNote,
+    // Issue #868 — the proposal shows the attribution it will carry forward.
+    // An empty attribution normalises to null, the same "absent" the posting
+    // paths use.
+    dimensions: l.dimensions && Object.keys(l.dimensions).length > 0 ? l.dimensions : null,
   }));
 }
 
