@@ -472,6 +472,16 @@ jobs:
         # through the real API with the seeded owner session — on this job's
         # fresh database, so it never touches the visual-regression fixture.
         run: npm run test:e2e:fiscal-opening
+      - name: Profile & sign-out security E2E (Cloud/Hybrid/Local, WebAuthn, sign-out contract, phone frame)
+        # Issue #854 follow-up. Last on purpose: it flips this job's deployment
+        # profile and injects (then drops) one audit failure through the
+        # superuser DATABASE_URL, and puts the profile back when it ends. The
+        # base URL is `localhost` because WebAuthn refuses an IP as the relying
+        # party; the registration ceremony runs through Chromium's virtual
+        # authenticator in the full Playwright Chromium (`channel: "chromium"`).
+        env:
+          E2E_BASE_URL: http://localhost:3000
+        run: npm run test:e2e:profile
       - name: Server log (on failure)
         if: failure()
         run: cat server.log || true

@@ -154,6 +154,8 @@ export interface SessionPayload {
   recentAuthAt?: number;
   /** Registered JWT issued-at claim (epoch seconds). */
   iat?: number;
+  /** Registered JWT expiry claim (epoch seconds) — set by `signSession`, read back after verification. */
+  exp?: number;
 }
 
 

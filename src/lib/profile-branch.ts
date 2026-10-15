@@ -21,11 +21,30 @@ export interface ProfileBranch {
   name: string;
 }
 
+/**
+ * How the membership's home branch relates to the branch in view:
+ *
+ *  - `same` — the member is working in their own home branch;
+ *  - `different` — they are working somewhere else today (`home` names it);
+ *  - `unassigned` — the membership has no home branch at all;
+ *  - `unavailable` — it names a branch that is no longer an active branch of
+ *    this business (deactivated, or gone), so there is no name to show.
+ *
+ * Stated explicitly because "no separate home row" used to mean two opposite
+ * things: the home *is* the active branch, or there is no usable home — and
+ * the screen labelled the active branch «شعبهٔ اصلی شما» in both cases.
+ */
+export type ProfileHomeBranchStatus = "same" | "different" | "unassigned" | "unavailable";
+
 export interface ProfileBranchInfo {
   /** The branch this session is working in right now. */
   active: ProfileBranch | null;
-  /** The membership's home branch, only when it differs from `active`. */
+  /**
+   * The membership's home branch whenever it is an active branch of this
+   * business — named whether or not it is the branch in view.
+   */
   home: ProfileBranch | null;
+  homeStatus: ProfileHomeBranchStatus;
   /** Whether the member may switch branches (the header switcher) — and has more than one. */
   canSwitch: boolean;
 }
@@ -40,12 +59,21 @@ export function describeProfileBranches(input: {
   /** `accessibleLocationsFor(session)`. */
   access: { canSwitch: boolean; locations: readonly ProfileBranch[] };
 }): ProfileBranchInfo {
-  const home = input.homeLocationId
+  const homeRow = input.homeLocationId
     ? (input.businessLocations.find((l) => l.id === input.homeLocationId) ?? null)
     : null;
+  const home = homeRow ? { id: homeRow.id, name: homeRow.name } : null;
+  const homeStatus: ProfileHomeBranchStatus = !input.homeLocationId
+    ? "unassigned"
+    : !home
+      ? "unavailable"
+      : home.id === input.active?.id
+        ? "same"
+        : "different";
   return {
     active: input.active ? { id: input.active.id, name: input.active.name } : null,
-    home: home && home.id !== input.active?.id ? { id: home.id, name: home.name } : null,
+    home,
+    homeStatus,
     canSwitch: input.access.canSwitch && input.access.locations.length > 1,
   };
 }

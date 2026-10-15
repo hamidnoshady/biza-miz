@@ -91,7 +91,7 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.5 personnel/membership identity drift | **resolved (pass 4)** | canonical ownership defined exactly as the issue prescribes: the membership row (`users`: `full_name`, `email`, `phone_e164`) and the global identity own the login-identity fields; the personnel record keeps HR-only fields. A personnel write that would *change* a shared field away from the membership's value is refused with `identity_{name,email,phone}_managed_by_membership` (HTTP 409 + fieldErrors from `/api/parties/[id]`), so `/api/parties` can never silently fork a conflicting identity copy; repair writes that align the party with the membership stay allowed, and unlinked parties are untouched. The membership→party direction remains the repair path (`ensureEmployeeParty` after a committed rename, plus `setMemberPhone` post-commit sync). Nothing reads a stale personnel copy for authorization. Pinned by the canonical-ownership cases in `parties.integration.test.ts` and the sync cases in `team.integration.test.ts` |
 | P2.6 membership-linked party hard-deleted | **resolved (pass 2)** | `removeParty`'s history check now counts the `employee_user_id` link itself, so a member's personnel file is archived, never hard-deleted; pinned by the new case in `parties.integration.test.ts` |
 | P2.7 personnel subsection without `parties.view` | **resolved (pass 4)** | the issue offers two fixes; the Team page now implements the first — the personnel subsection mounts only when the signed-in member can actually read it: `canViewParties(role, permissions)` from the shared `parties-scopes` module gates the single `<PartiesSection>` mount (no unconditional fallback mount), so a team manager with team access but no `parties.view` sees a clean team screen instead of a 403-ing subsection. The dedicated membership-scoped personnel read path stays recorded as possible future work; the `parties.view` permission itself was *not* widened to make the error disappear |
-| P2.8 offboarded member looks "reactivatable" | **resolved (pass 4)** | actions now derive from the lifecycle state: suspended members get «فعال‌سازی» (reactivate), offboarded members get «بازگشت به کار» (rehire) and nothing else — the generic activate button no longer renders for an offboarded row, and the service refuses `not_offboarded` in the other direction. Rehire is an explicit ceremony, `POST /api/team/[id]/rehire`, holding the membership row lock, gated on `team.manage` **and** `team.permissions.manage` (a rehire re-grants the stored role/permissions), with the whole grant re-checked against the actor (`grants_beyond_actor`) and owner-only/self checks preserved. It restores the identity linkage (relinks or mints the platform identity, preserving the historical membership row — no history deletion), re-establishes PIN credentials under the blind index, and applies the stored role, permission overrides and branch scope in one transaction, with an explicit `reason`. No migration was required: offboarding already retained everything a rehire needs. Pinned by the rehire cases in `team.integration.test.ts` (success + every refusal code + MFA factor survival + same-email rehire with history kept) |
+| P2.8 offboarded member looks "reactivatable" | **resolved (pass 4)** | actions now derive from the lifecycle state: suspended members get «فعال‌سازی» (reactivate), offboarded members get «بازگشت به کار» (rehire) and nothing else — the generic activate button no longer renders for an offboarded row, and the service refuses `not_offboarded` in the other direction. Rehire is an explicit ceremony, `POST /api/team/[id]/rehire`, holding the membership row lock, gated on `team.manage` **and** `team.permissions.manage` (a rehire re-grants the stored role/permissions), with the whole grant re-checked against the actor (`grants_beyond_actor`) and owner-only/self checks preserved. It restores the identity linkage (relinks or mints the platform identity, preserving the historical membership row — no history deletion), re-establishes PIN credentials (as `employee_credentials.secret_hash` — since #953 there is no blind index), and applies the stored role, permission overrides and branch scope in one transaction, with an explicit `reason`. No migration was required: offboarding already retained everything a rehire needs. Pinned by the rehire cases in `team.integration.test.ts` (success + every refusal code + MFA factor survival + same-email rehire with history kept) |
 | P2.9 re-invite collides with retained rows | **resolved (pass 4)** | the same-email case no longer dead-ends: a new membership for an offboarded identity's email is refused `email_taken` by design, and the retained row is recovered through the rehire ceremony instead of colliding with it — invitations still supersede pending ones per address and acceptance stays idempotent per identity. Cross-tenant rehire attempts answer `not_found`, and historical membership/personnel/audit references survive the relink untouched |
 | P2.10 branch-scope validation incomplete | resolved (pass 1) | explicit scope validated at creation and acceptance |
 | P2.11 invitation UI lacks branch scope | resolved (pass 1) | the invite form asks for scope + branches |
@@ -146,19 +146,25 @@ passes 1–3; it closed what the review still found reachable:
 
 - **Legacy `users.pin_hash` rows.** Every PIN read goes through
   `coalesce(ec.secret_hash, u.pin_hash)`, so a pre-migration bcrypt hash still
-  signs its owner in, but such a row sits *outside* the keyed blind index —
-  uniqueness for it is not enforced by the constraint, and it cannot be looked
-  up by index. No code path writes that column any more (creations and
-  rotations write `employee_credentials` + the index; suspension/offboarding
-  and cloud replication only ever NULL it). The safe migration policy is
-  rotation on next contact: an affected member sets a new PIN through the
-  normal self-service or admin-reset flow, which writes the indexed credential,
-  and the legacy column is then cleared. Until that happens the legacy hash
-  remains the only door for that member — which is why it is kept readable
-  rather than dropped.
+  signs its owner in. No code path writes that column any more (creations and
+  rotations write `employee_credentials`; suspension/offboarding and cloud
+  replication only ever NULL it). The safe migration policy is rotation on next
+  contact: an affected member sets a new PIN through the normal self-service or
+  admin-reset flow, which writes the credential row, and the legacy column is
+  then cleared. Until that happens the legacy hash remains the only door for
+  that member — which is why it is kept readable rather than dropped.
+- **PIN values are not unique across employees — by decision (#953).** Two
+  members of a business may hold the same PIN: refusing a duplicate told the
+  person choosing it what a colleague's PIN was, so migration `0221` dropped the
+  blind index and its unique index, and the PIN door always names the member
+  first (`employeeId` is required by `/api/auth/pin-login`). The only reuse that
+  is refused is a member rotating to **their own current PIN** (`pin_unchanged`,
+  #854 F07). Neither cross-member uniqueness nor a unique PIN blind index is a
+  goal of this issue; any checklist wording asking to refuse "other members'
+  duplicate PINs" is superseded by #953.
 - **`issueCredential` / `verifyCredential` were dead code and are removed.**
   The audit found no route, job, script, dynamic import or test calling them;
-  they were a parallel bcrypt PIN path that bypassed the blind index, so they
+  they were a parallel bcrypt PIN path outside `employee_credentials`, so they
   are deleted rather than left as a hole around the one-source-of-truth rule.
 - **The invitation reason lives on the invitation, not the membership.** The
   acceptance audit inherits it; the membership row itself does not carry it,
@@ -283,13 +289,13 @@ the server, with the screen reading the server's answer instead of guessing.
 | **F04** password committed, then an audit failure lost the refreshed cookie | `changeOwnPassword` (`src/lib/password-reset.ts`) runs bcrypt outside and everything else inside one identity transaction: a compare-and-swap on the verified hash, the token-version bump, every other session's revocation (all businesses of the identity), the lockout reset and — through `beforeCommit` — the route's audit row and token signing. Any failure rolls all of it back and answers `500 credential_change_failed`; success returns `{ ok, tokenVersion }` and the cookie together | integration «F04» (injected audit failure ⇒ same hash, same token version, no session revoked, old cookie still valid; success ⇒ both businesses' sessions revoked, caller's kept, old cookie dead, new one valid); `security-audit.test.ts` |
 | **F05** phone audits swallowed by `.catch(() => {})` | `stampPhoneVerified({ audit })` (`src/lib/phone-otp.ts`) writes the stamp and its `auth.self_phone_changed` / `auth.self_phone_verified` row in one tenant transaction; the route answers `409 phone_taken` for the unique-index race and `500 credential_change_failed` otherwise, logging only the error message. OTP purpose and destination binding are unchanged; the audit carries the masked number only | integration «F05» (injected failure ⇒ number unchanged, no row; then both commit; payload has no full number or code) |
 | **F06** resend after a reload targeted the old number | The ceremony is the server's challenge row: `action: "resend"` re-sends to the live challenge's candidate under its own purpose (a `phone` in the body is ignored), `action: "cancel"` burns the self-service codes (no step-up needed — it only removes capability), a fresh send burns the other self purpose, and a re-verification whose number changed meanwhile is `409 code_wrong_phone`. The card renders from `pendingChallenge` and names nothing but the code on verify | integration «F06» (reload+resend, single use/replay, cancel, expiry, one ceremony at a time, admin-changed number); `profile-section.test.tsx` «F06» |
-| **F07** the current PIN accepted as the new one | `setPin` in `src/lib/team-service.ts`, for `selfService` only, bcrypt-compares the member's **own** active PIN under the membership lock and throws `pin_unchanged`; it also accepts a `beforeCommit` so `/api/auth/pin/self` writes its audit inside the rotation. An administrator's reset and a colleague's identical PIN stay allowed — #953 supersedes the comment's request to refuse other members' duplicates | integration «F07» (route + service layer, Persian digits, #953 shared PIN, audit rollback) |
+| **F07** the current PIN accepted as the new one | `setPin` in `src/lib/team-service.ts`, for `selfService` only, bcrypt-compares the member's **own** active PIN under the membership lock and throws `pin_unchanged`; it also accepts a `beforeCommit` so `/api/auth/pin/self` writes its audit inside the rotation. An administrator's reset and a colleague's identical PIN stay allowed: **confirmed product decision** — different employees may use identical PINs (#953), so the audit checklist's request to refuse other members' duplicates is withdrawn, not deferred | integration «F07» (route + service layer, Persian digits, #953 shared PIN, audit rollback) |
 | **F08** PINs readable on screen | `PIN_INPUT_PROPS` (`type="password"`, `inputMode="numeric"`, `autoComplete="off"`) on all three Profile PIN fields; the step-up PIN field is masked too; `normalizeSecurityDigits` still maps Persian/Arabic-Indic digits | `profile-section.test.tsx` «F08 / F07», `step-up-prompt.test.tsx` «F08» |
 | **F09** a failed WebAuthn removal stranded the card | removal uses `api()` inside `try/finally`; busy is always released, the list stays, the error is explained and the action can be retried; a stale session goes through step-up | `webauthn-manager.test.tsx` «F09» |
-| **F10** sign-out reported success on failure | `src/components/auth/sign-out.ts` (`requestSignOut`) succeeds only on a 2xx; the card stays put on a server or network failure, says the member may still be signed in, and offers a retry | `sign-out.test.ts`, `profile-section.test.tsx` «F10» |
+| **F10** sign-out reported success on failure | One typed contract, `src/lib/logout-contract.ts`, for the route and every caller (see "Sign-out, end to end" below): the card leaves only on a confirmed outcome, stays put on a server or network failure with the reason and a retry, and tells an *unconfirmed* end (cookie cleared, server unconfirmed) apart — retrying it through the server's retry ticket | `logout-contract.test.ts`, `sign-out.test.ts`, `profile-section.test.tsx` «F10 + logout», integration «sign-out», `scripts/e2e-profile-security.mjs` |
 | **F11** read-only credentials still had pending forms | `two-factor-settings.tsx` no longer adopts a pending enrolment when the factor set is read-only and guards every enrol/confirm/resend form; the phone card renders no pending verification when the login phone is read-only. The routes already refused (`409 login_managed_by_cloud`) — now the screen agrees | `two-factor-settings.test.tsx` «F11»; integration «F11» (Cloud/Hybrid/Local: every surface the page marks read-only is refused by its route, including a code requested before pairing and MFA confirm/resend; cancel and the staff PIN stay available) |
 | **F12** unsupported browser hid registered devices | browser support gates only *registration*; the list and removal follow `canRemove` | `webauthn-manager.test.tsx` «F12» |
-| **F13** hard-coded branch | `settings/profile/page.tsx` resolves the active branch (`resolveActiveLocation`) and the member's home branch under the tenant scope; `describeProfileBranches` (`src/lib/profile-branch.ts`, pure) sends only id and name; the card shows «شعبهٔ فعال» and, when different, «شعبهٔ اصلی» | `profile-branch.test.ts`, `profile-section.test.tsx` «F13», integration «F13» (another tenant's branch in the session is never shown) |
+| **F13** hard-coded branch | `settings/profile/page.tsx` resolves the active branch (`resolveActiveLocation`) and the member's home branch under the tenant scope; `describeProfileBranches` (`src/lib/profile-branch.ts`, pure) sends only id and name, and states the home branch's relation explicitly (`homeStatus`: same / different / unassigned / unavailable) — the first version returned `home: null` for both "same as active" and "missing or deactivated", and the card then labelled the active branch «شعبهٔ اصلی شما» for a member with no home branch at all | `profile-branch.test.ts` (missing, inactive, equal, different, foreign id), `profile-section.test.tsx` «F13» (all four rendered), integration «F13» (all four through the real page props; another tenant's branch in the session is never shown) |
 
 **Shared seams with #947.** The phone-change transaction ends where #947's
 `ensurePersonnelFileForMembership` begins: that hook is designed to run after the
@@ -299,12 +305,89 @@ self-service branch; #947's Team doors (`createMembership`, `updateMembership`,
 `rehireMembership`, `setMemberPhone`, invitation acceptance) are untouched, and
 `/settings/team` is not modified.
 
-**Still open, deliberately.** The logout route itself still swallows a failed
-session revocation (the Profile card now reports a failed *request*, not a failed
-revocation inside a 200), and the sidebar/notice sign-out buttons keep their old
-pattern; WebAuthn *login* for privileged roles off-cloud stays behind the P0.6
-MFA gate as before. A WebAuthn step-up needs a real assertion ceremony before
+### Second pass (2026-10-15): sign-out end to end, and what the first pass missed
+
+**Sign-out, end to end.** `POST /api/auth/logout` used to swallow every
+revocation failure and answer `{ ok: true }`; the sidebar menu ignored the HTTP
+status, and the signed-in notice called a *rejected* request a sign-out. Now:
+
+- `revokeSession` (`src/lib/employee-service.ts`) ends the `employee_sessions`
+  row and writes its `employee.session_revoked` audit row in **one tenant
+  transaction** — previously two writes on two connections, so an audit failure
+  left an ended session with no record (this also makes the security center's
+  `DELETE /api/sessions/[id]` atomic). A sign-out restricts it to the caller's own
+  row (`ownedBy`), and a malformed id is a miss rather than a database error.
+- The route still clears the cookie on **every** answer — its one unconditional
+  job — but now answers the shared contract (`src/lib/logout-contract.ts`):
+  `revoked` / `already_ended` / `not_tracked` (a session minted without a
+  server-side record) / `no_session`, or `unconfirmed` (HTTP 503) when ending the
+  row failed.
+- An unconfirmed sign-out is finishable: the route sets an httpOnly,
+  `SameSite=Strict` **retry ticket** scoped to `/api/auth/logout`
+  (`src/lib/logout-retry.ts`) naming only the session(s) the signed token named,
+  signed under a realm claim `verifySession` refuses. `POST
+  /api/auth/logout/retry` (session-less by necessity — middleware's public list,
+  with the Origin-mismatch rule) reads only that ticket, ends only those rows, and
+  never touches the session cookie; a later sign-out on the same browser also
+  retries pending entries.
+- Every caller reads the contract through `src/components/auth/sign-out.ts`
+  (`useSignOut`: the busy flag is released on every path, and after an
+  unconfirmed end the next attempt is the retry route, never a second plain
+  sign-out that would "succeed" with no cookie). The Profile card explains inline
+  and offers both the retry and the way to /login; the sidebar menu (its panel is
+  gone by then) uses a persistent toast with «تلاش دوباره» that survives the
+  navigation; the signed-in notice says «حساب قبلی خارج شد» only on a confirmed
+  end and otherwise says the previous session is still open (or unconfirmed),
+  with a retry. Account switching navigates only once this browser is signed
+  out — including when the cookie was cleared despite a server error.
+
+**Branch display.** See the F13 row: `homeStatus` replaces the ambiguous
+`home: null`.
+
+**Phone OTP digits at the API boundary.** `/api/auth/phone/self` rejected
+«۱۲۳۴۵۶» with an ASCII-only regex before the shared verifier ever saw it. It now
+uses `normalizeOtpCode` (`src/lib/otp-challenge.ts`) exactly as the door does
+(`phone-otp/verify`, #885 L11); purpose, destination, expiry, the five-attempt
+limit and single-use redemption are all still enforced by `redeemOtpChallenge`.
+
+**Step-up by SMS and recovery code** now has route-level regressions: a code
+minted for login or enrolment is not a step-up code, a pending SMS enrolment is
+not a factor (no code is sent, none accepted), codes are single-use, another
+account's recovery code never works, and an audit failure grants no recent-auth
+window (the code it spent stays spent).
+
+**Browser evidence.** `scripts/e2e-profile-security.mjs` (`npm run
+test:e2e:profile`) drives the real Profile page in Chromium against a production
+build: RTL, the branch facts, F02/F12 with WebAuthn present (a credential
+registered through Chromium's **virtual** authenticator) and removed, F09
+removal retry, F11 across Cloud/Hybrid/Local, F08 masking, keyboard reach of
+sign-out, axe-core on the Profile content, a 390px phone frame, and the sign-out
+paths above — including a real server-side audit failure, the retained-token
+check before and after the retry, the sidebar toast retry and the /login switch.
+
+**Known gap, stated plainly.** A session minted without an `employee_sessions`
+row — a business switch, first-run setup, the desktop hand-off — has nothing a
+sign-out can end: the route clears the cookie and answers `not_tracked`, but a
+copy of that token kept elsewhere stays valid until it expires (or until the
+identity's token version moves, e.g. «خروج از همهٔ کسب‌وکارها» or a password
+change). Giving those doors a session row belongs with the session-coherence
+work (#948), not with this sign-out contract, which already reports the case
+truthfully.
+
+**Still not verified, and why.** A *physical* authenticator and a real SMS
+provider are outside any sandbox run: WebAuthn was exercised with Chromium's
+virtual authenticator, and SMS through the provider seam the integration suite
+mocks. WebAuthn *login* for privileged roles off-cloud stays behind the P0.6 MFA
+gate, unchanged; a WebAuthn step-up needs a real assertion ceremony before
 `webauthn` can return to `VERIFIABLE_STEP_UP_METHODS`.
+
+**Overlap with #947 (re-checked against its head `4c3a7205`).** A trial merge
+(`git merge-tree`) conflicts in one file only, `src/lib/phone-otp.ts`: keep both
+import lines, and place #947's `ensurePersonnelFileForMembership(...)` after the
+new stamp-plus-audit transaction (at the "post-commit" comment), never inside it.
+`docs/auth-hardening-854.md`, `src/lib/team-service.ts` and `package.json`
+merge cleanly; none of the sign-out, branch, OTP-digit or step-up files is
+touched by #947, and `/settings/team` is not modified here.
 
 ## Gate results in this workspace
 

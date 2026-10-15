@@ -38,8 +38,9 @@ export const metadata = { title: "حساب کاربری" };
  *  - **F13** — the branch shown is the session's *active* branch as the server
  *    resolves it for this membership (re-read from `users`/`user_locations`
  *    under the tenant scope, so a revoked assignment falls back exactly as the
- *    rest of the app does), and the home branch is shown separately when it is
- *    a different one. Nothing about the branch comes from the client.
+ *    rest of the app does), and the home branch's relation to it is stated
+ *    explicitly — the same branch, a different one, none assigned, or one
+ *    that is no longer active. Nothing about the branch comes from the client.
  *  - **F02** — the biometric card is rendered from `webauthn-policy.ts`, the
  *    same function the registration routes enforce: offered to the roles that
  *    may enrol, and kept for anyone who already holds an authenticator.
@@ -124,8 +125,10 @@ export default async function ProfilePage() {
  * `resolveActiveLocation` honours the session's active branch only while the
  * member can still reach it (otherwise their default accessible branch), the
  * same resolution every branch-scoped route uses. The home branch is the
- * membership's own `location_id`; it is reported separately only when it is
- * not the branch in view, so the two are never conflated.
+ * membership's own `location_id`, with its relation to the active branch
+ * stated explicitly (`homeStatus`: same / different / unassigned /
+ * unavailable), so the two are never conflated and a missing or deactivated
+ * home branch is never presented as "this one".
  */
 async function resolveProfileBranches(
   session: NonNullable<Awaited<ReturnType<typeof getSession>>>,

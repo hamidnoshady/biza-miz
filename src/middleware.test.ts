@@ -76,6 +76,19 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/auth/phone-otp")).toBe(false);
   });
 
+  it("opens only the sign-out retry, never the sign-out itself (#854 follow-up)", () => {
+    // The retry finishes a sign-out whose first answer already cleared the
+    // cookie, so it necessarily arrives with no session; its credential is the
+    // httpOnly ticket that answer set.
+    expect(isPublicPath("/api/auth/logout/retry")).toBe(true);
+    // The sign-out itself keeps the session gate (and the authenticated Origin
+    // check and the support-session rules that come with it).
+    expect(isPublicPath("/api/auth/logout")).toBe(false);
+    expect(isPublicPath("/api/auth/logout-retry")).toBe(false);
+    // A cross-site POST to the retry is still refused by the Origin rule.
+    expect(isBrowserLoginMutationPath("/api/auth/logout/retry")).toBe(true);
+  });
+
   it("serves the login capability probe without a session (issue #885 L04)", () => {
     // The chooser asks what this install can do before it offers offline
     // access, and no session exists when the chooser renders.

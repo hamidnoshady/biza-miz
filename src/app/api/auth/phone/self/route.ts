@@ -21,6 +21,7 @@ import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { describeCredentialSurface } from "@/lib/credential-authority";
 import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
 import { SELF_CREDENTIAL_AUDIT_ACTIONS } from "@/lib/security-audit";
+import { normalizeOtpCode } from "@/lib/otp-challenge";
 
 /**
  * Phase 42 — self-service phone verification for a member who is *already
@@ -255,8 +256,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       );
     }
 
-    const code = String((body as { code?: string }).code ?? "").trim();
-    if (!/^\d{6}$/.test(code)) {
+    /*
+     * #854 follow-up — fold the digits at the boundary, as the door does
+     * (`phone-otp/verify`, #885 L11). A bare `/^\d{6}$/` on the raw input told
+     * a member who typed «۱۲۳۴۵۶» off the SMS that the code was wrong without
+     * ever comparing it. `normalizeOtpCode` maps Persian/Arabic-Indic digits to
+     * ASCII, drops spaces and dashes, and still demands exactly six digits; the
+     * challenge's purpose, destination, expiry, attempt limit and single-use
+     * redemption are all still enforced by `redeemOtpChallenge` below.
+     */
+    const code = normalizeOtpCode(body.code);
+    if (!code) {
       return NextResponse.json({ error: "invalid_code" }, { status: 401 });
     }
 

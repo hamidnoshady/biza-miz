@@ -33,7 +33,7 @@ import {
   useResendCooldown,
 } from "@/components/auth/use-resend-cooldown";
 import { WebAuthnManager } from "@/components/auth/webauthn-manager";
-import { requestSignOut, signOutFailureMessage } from "@/components/auth/sign-out";
+import { signOutResultMessage, useSignOut } from "@/components/auth/sign-out";
 import type { ProfileBranchInfo } from "@/lib/profile-branch";
 import { TwoFactorSettings } from "../two-factor-settings";
 
@@ -91,28 +91,31 @@ export function ProfileSection({
   showBiometric = true,
 }: ProfileSectionProps) {
   const router = useRouter();
-  const [signingOut, setSigningOut] = useState(false);
-  const [signOutError, setSignOutError] = useState<string | null>(null);
+  const { busy: signingOut, result: signOutResult, run: runSignOut } = useSignOut();
+  const signOutMessage = signOutResult ? signOutResultMessage(signOutResult) : null;
+  /** The cookie is gone but the server could not confirm the end of the session. */
+  const signedOutUnconfirmed =
+    signOutResult?.kind === "unconfirmed" && signOutResult.sessionCookieCleared;
 
-  /**
-   * #854 follow-up (F10): leave only once the server has confirmed the
-   * sign-out. The old handler ignored the response, so a 5xx or a dropped
-   * connection still navigated to /login and looked like success while the
-   * session stayed open on the server and in this browser.
-   */
-  async function signOut() {
-    setSigningOut(true);
-    setSignOutError(null);
-    const result = await requestSignOut();
-    if (!result.ok) {
-      setSigningOut(false);
-      setSignOutError(signOutFailureMessage(result.reason));
-      return;
-    }
-    // The cookie is gone; `replace` keeps Back from returning to a page that
-    // now belongs to nobody, and `refresh` drops the cached server tree.
+  // `replace` keeps Back from returning to a page that now belongs to nobody,
+  // and `refresh` drops the cached server tree.
+  function leaveForLogin() {
     router.replace("/login");
     router.refresh();
+  }
+
+  /**
+   * #854 follow-up (F10 + logout): leave only once the server has confirmed
+   * the sign-out. The old handler ignored the response, so a 5xx or a dropped
+   * connection still navigated to /login and looked like success while the
+   * session stayed open. Now a failure keeps the member here with the reason
+   * and a retry — and an *unconfirmed* end (the cookie is already gone, the
+   * server could not confirm the session ended) says so, retries through the
+   * server's retry ticket, and offers the way to the login page.
+   */
+  async function signOut() {
+    const result = await runSignOut();
+    if (result?.kind === "signed_out") leaveForLogin();
   }
 
   return (
@@ -151,7 +154,8 @@ export function ProfileSection({
               <dt className="text-muted-foreground">شعبهٔ فعال</dt>
               <dd className="font-semibold text-foreground">
                 {branch.active.name}
-                {!branch.home ? (
+                {/* Only when it really is the home branch — never inferred from a missing one. */}
+                {branch.homeStatus === "same" ? (
                   <span className="ms-2 text-xs font-normal text-muted-foreground">
                     (شعبهٔ اصلی شما)
                   </span>
@@ -159,10 +163,18 @@ export function ProfileSection({
               </dd>
             </div>
           ) : null}
-          {branch?.home ? (
+          {branch && branch.homeStatus !== "same" ? (
             <div className="flex items-center justify-between gap-4 py-3">
               <dt className="text-muted-foreground">شعبهٔ اصلی</dt>
-              <dd className="font-semibold text-foreground">{branch.home.name}</dd>
+              {branch.homeStatus === "different" && branch.home ? (
+                <dd className="font-semibold text-foreground">{branch.home.name}</dd>
+              ) : (
+                <dd className="text-xs text-muted-foreground">
+                  {branch.homeStatus === "unavailable"
+                    ? "دیگر فعال نیست؛ با مدیر کسب‌وکار هماهنگ کنید"
+                    : "تعیین نشده"}
+                </dd>
+              )}
             </div>
           ) : null}
         </dl>
@@ -174,10 +186,21 @@ export function ProfileSection({
         ) : null}
 
         <div className="mt-4 space-y-3 border-t border-border pt-4">
-          <ErrorBox>{signOutError}</ErrorBox>
-          <div className="flex justify-end">
+          <ErrorBox>{signOutMessage}</ErrorBox>
+          <div className="flex flex-wrap justify-end gap-2">
+            {signedOutUnconfirmed ? (
+              <SecondaryButton onClick={leaveForLogin} disabled={signingOut}>
+                رفتن به صفحهٔ ورود
+              </SecondaryButton>
+            ) : null}
             <SecondaryButton onClick={() => void signOut()} disabled={signingOut}>
-              {signingOut ? "در حال خروج…" : signOutError ? "تلاش دوباره برای خروج" : "خروج از حساب"}
+              {signingOut
+                ? "در حال خروج…"
+                : signedOutUnconfirmed
+                  ? "تلاش دوباره برای پایان نشست"
+                  : signOutMessage
+                    ? "تلاش دوباره برای خروج"
+                    : "خروج از حساب"}
             </SecondaryButton>
           </div>
         </div>

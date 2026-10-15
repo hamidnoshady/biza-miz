@@ -108,6 +108,12 @@ let webauthnItemRoute: typeof import("../src/app/api/auth/webauthn/credentials/[
 let webauthnOptionsRoute: typeof import("../src/app/api/auth/webauthn/register/options/route");
 let profilePage: typeof import("../src/app/(app)/settings/profile/page");
 let profileSectionModule: typeof import("../src/app/(app)/settings/profile/profile-section");
+let logoutRoute: typeof import("../src/app/api/auth/logout/route");
+let logoutRetryRoute: typeof import("../src/app/api/auth/logout/retry/route");
+let logoutRetry: typeof import("../src/lib/logout-retry");
+let sessionsByIdRoute: typeof import("../src/app/api/sessions/[id]/route");
+let mfaVerify: typeof import("../src/lib/mfa-verify");
+let mfaRecovery: typeof import("../src/lib/mfa-recovery");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -151,6 +157,12 @@ beforeAll(async () => {
   webauthnOptionsRoute = await import("../src/app/api/auth/webauthn/register/options/route");
   profilePage = await import("../src/app/(app)/settings/profile/page");
   profileSectionModule = await import("../src/app/(app)/settings/profile/profile-section");
+  logoutRoute = await import("../src/app/api/auth/logout/route");
+  logoutRetryRoute = await import("../src/app/api/auth/logout/retry/route");
+  logoutRetry = await import("../src/lib/logout-retry");
+  sessionsByIdRoute = await import("../src/app/api/sessions/[id]/route");
+  mfaVerify = await import("../src/lib/mfa-verify");
+  mfaRecovery = await import("../src/lib/mfa-recovery");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -1187,6 +1199,7 @@ describe("#854 F13 — the branch facts come from the membership", () => {
     expect(props.branch).toEqual({
       active: { id: north, name: "North" },
       home: { id: business.mainLocationId, name: "Main" },
+      homeStatus: "different",
       canSwitch: true,
     });
   });
@@ -1202,8 +1215,554 @@ describe("#854 F13 — the branch facts come from the membership", () => {
     const props = await profileProps();
     expect(props.branch).toEqual({
       active: { id: alpha.mainLocationId, name: "Main" },
-      home: null,
+      home: { id: alpha.mainLocationId, name: "Main" },
+      homeStatus: "same",
       canSwitch: false,
     });
   });
+
+  it("says a member without a home branch has none, instead of calling the active one home", async () => {
+    const business = await seedBusiness("BranchNone");
+    const north = await addLocation(business.id, "North");
+    const owner = await addMember(business, "owner", { locationId: null, locationScope: "all" });
+    await signIn(owner, { activeLocationId: north });
+
+    const props = await profileProps();
+    expect(props.branch).toEqual({
+      active: { id: north, name: "North" },
+      home: null,
+      homeStatus: "unassigned",
+      canSwitch: true,
+    });
+  });
+
+  it("says a deactivated home branch is unavailable, even when only one branch is left", async () => {
+    const business = await seedBusiness("BranchClosed");
+    const closing = await addLocation(business.id, "Closing");
+    const waiter = await addMember(business, "waiter", { locationId: closing, locationScope: "all" });
+    await db.query(`UPDATE locations SET is_active = false WHERE id = $1`, [closing]);
+    await signIn(waiter);
+
+    const props = await profileProps();
+    expect(props.branch).toEqual({
+      active: { id: business.mainLocationId, name: "Main" },
+      home: null,
+      homeStatus: "unavailable",
+      canSwitch: false,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sign-out (#854 follow-up) — confirmed, already ended, untracked, unconfirmed
+// ---------------------------------------------------------------------------
+
+/** A POST carrying exactly these cookies — the sign-out routes read `request.cookies`. */
+function postWithCookies(url: string, cookies: Record<string, string | undefined>): NextRequest {
+  const header = Object.entries(cookies)
+    .filter(([, value]) => value !== undefined)
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+  return new NextRequest(`http://localhost${url}`, {
+    method: "POST",
+    headers: header ? { cookie: header } : {},
+  });
+}
+
+const RETRY_COOKIE = "pos_logout_retry";
+
+async function signOutWith(cookies: Record<string, string | undefined>) {
+  return call(() => logoutRoute.POST(postWithCookies("/api/auth/logout", cookies)));
+}
+
+async function retrySignOutWith(cookies: Record<string, string | undefined>) {
+  return call(() => logoutRetryRoute.POST(postWithCookies("/api/auth/logout/retry", cookies)));
+}
+
+/** Whether a token the browser no longer holds would still be accepted anywhere. */
+async function tokenStillWorks(token: string): Promise<boolean> {
+  return (await authLib.resolveSessionFromToken(token)) !== null;
+}
+
+describe("#854 follow-up — sign-out says what happened, and an unconfirmed one can be finished", () => {
+  it("revoked: ends the row with its audit row, clears the cookie, and a retained copy is refused", async () => {
+    const business = await seedBusiness("LogoutRevoked");
+    const cashier = await addMember(business, "cashier");
+    const sessionId = await addSession(cashier);
+    const token = await signIn(cashier, { sessionId });
+    expect(await tokenStillWorks(token)).toBe(true);
+
+    const out = await signOutWith({ [authLib.SESSION_COOKIE]: token });
+    expect(out.status).toBe(200);
+    expect(out.body).toEqual({ ok: true, outcome: "revoked", sessionCookieCleared: true, pendingRevocations: 0 });
+    expect(out.response?.cookies.get(authLib.SESSION_COOKIE)?.value).toBe("");
+    expect(out.response?.cookies.get(RETRY_COOKIE)).toBeUndefined();
+    expect(out.response?.headers.get("cache-control")).toBe("no-store");
+
+    expect(await sessionRevoked(sessionId)).toBe(true);
+    const audit = await auditRows(business.id, "employee.session_revoked");
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ user_id: cashier.id, payload: { sessionId, via: "sign_out" } });
+
+    // The retained-token regression: a copy kept anywhere is dead now.
+    expect(await tokenStillWorks(token)).toBe(false);
+    cookieJar.set(authLib.SESSION_COOKIE, token);
+    expect((await call(() => sessionsSelfRoute.GET())).status).toBe(401);
+  });
+
+  it("already ended: a session revoked elsewhere is reported as such, with no second audit row", async () => {
+    const business = await seedBusiness("LogoutEnded");
+    const manager = await addMember(business, "manager");
+    const sessionId = await addSession(manager);
+    const token = await signIn(manager, { sessionId });
+    await db.query(`UPDATE employee_sessions SET revoked_at = now() WHERE id = $1`, [sessionId]);
+
+    const out = await signOutWith({ [authLib.SESSION_COOKIE]: token });
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ ok: true, outcome: "already_ended" });
+    expect(out.response?.cookies.get(authLib.SESSION_COOKIE)?.value).toBe("");
+    expect(await auditRows(business.id, "employee.session_revoked")).toHaveLength(0);
+  });
+
+  it("not tracked: a session with no server-side record only loses its cookie", async () => {
+    const business = await seedBusiness("LogoutUntracked");
+    const owner = await addMember(business, "owner");
+    const other = await addSession(owner);
+    const token = await signIn(owner); // no employeeSessionId, as after a business switch
+
+    const out = await signOutWith({ [authLib.SESSION_COOKIE]: token });
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ ok: true, outcome: "not_tracked" });
+    expect(out.response?.cookies.get(authLib.SESSION_COOKIE)?.value).toBe("");
+    // Nothing else of theirs was touched.
+    expect(await sessionRevoked(other)).toBe(false);
+  });
+
+  it("no session: a missing or forged cookie is still cleared, and ends nothing", async () => {
+    for (const cookie of [undefined, "not-a-jwt"]) {
+      const out = await signOutWith({ [authLib.SESSION_COOKIE]: cookie });
+      expect(out.status).toBe(200);
+      expect(out.body).toMatchObject({ ok: true, outcome: "no_session" });
+      expect(out.response?.cookies.get(authLib.SESSION_COOKIE)?.value).toBe("");
+    }
+  });
+
+  it("unconfirmed: an audit failure rolls the revocation back, says so, and the retry ticket finishes it", async () => {
+    const business = await seedBusiness("LogoutFault");
+    const waiter = await addMember(business, "waiter");
+    const sessionId = await addSession(waiter);
+    const token = await signIn(waiter, { sessionId });
+    await failAuditFor("employee.session_revoked");
+
+    const out = await signOutWith({ [authLib.SESSION_COOKIE]: token });
+    expect(out.status).toBe(503);
+    expect(out.body).toMatchObject({
+      ok: false,
+      outcome: "unconfirmed",
+      sessionCookieCleared: true,
+      pendingRevocations: 1,
+      error: "logout_unconfirmed",
+    });
+    expect(String(out.body?.message)).toMatch(/از این دستگاه خارج شدید/);
+    // The cookie is cleared regardless — the route's one unconditional job…
+    expect(out.response?.cookies.get(authLib.SESSION_COOKIE)?.value).toBe("");
+    // …and the ticket that lets the member finish is unreadable by script and
+    // sent to the sign-out routes only.
+    const ticket = out.response?.cookies.get(RETRY_COOKIE);
+    expect(ticket?.value).toBeTruthy();
+    expect(ticket).toMatchObject({ httpOnly: true, sameSite: "strict", path: "/api/auth/logout" });
+
+    // Truthfully unconfirmed: nothing was half-written, and a retained copy of
+    // the token still works — which is exactly what the 503 told the member.
+    expect(await sessionRevoked(sessionId)).toBe(false);
+    expect(await auditRows(business.id, "employee.session_revoked")).toHaveLength(0);
+    expect(await tokenStillWorks(token)).toBe(true);
+    // A ticket can never stand in for a session.
+    expect(await tokenStillWorks(ticket!.value)).toBe(false);
+
+    // A retry while the fault persists stays unconfirmed and keeps the ticket.
+    const stillFailing = await retrySignOutWith({ [RETRY_COOKIE]: ticket!.value });
+    expect(stillFailing.status).toBe(503);
+    expect(stillFailing.body).toMatchObject({ ok: false, outcome: "unconfirmed", sessionCookieCleared: false });
+    expect(stillFailing.response?.cookies.get(authLib.SESSION_COOKIE)).toBeUndefined();
+    const reissued = stillFailing.response?.cookies.get(RETRY_COOKIE)?.value;
+    expect(reissued).toBeTruthy();
+
+    // Once the audit can be written, the retry ends the session with its row.
+    await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
+    const finished = await retrySignOutWith({ [RETRY_COOKIE]: reissued });
+    expect(finished.status).toBe(200);
+    expect(finished.body).toEqual({ ok: true, outcome: "revoked", sessionCookieCleared: false, pendingRevocations: 0 });
+    expect(finished.response?.cookies.get(RETRY_COOKIE)?.value).toBe("");
+    expect(finished.response?.cookies.get(authLib.SESSION_COOKIE)).toBeUndefined();
+    expect(await sessionRevoked(sessionId)).toBe(true);
+    const audit = await auditRows(business.id, "employee.session_revoked");
+    expect(audit).toHaveLength(1);
+    expect(audit[0].payload).toMatchObject({ sessionId, via: "sign_out_retry" });
+    expect(await tokenStillWorks(token)).toBe(false);
+
+    // Replaying the old ticket ends nothing more and writes no second row.
+    const replay = await retrySignOutWith({ [RETRY_COOKIE]: reissued });
+    expect(replay.body).toMatchObject({ ok: true, outcome: "already_ended" });
+    expect(await auditRows(business.id, "employee.session_revoked")).toHaveLength(1);
+  });
+
+  it("a later sign-out also finishes an earlier unconfirmed one", async () => {
+    const business = await seedBusiness("LogoutLater");
+    const cashier = await addMember(business, "cashier");
+    const first = await addSession(cashier);
+    const firstToken = await signIn(cashier, { sessionId: first });
+    await failAuditFor("employee.session_revoked");
+    const failed = await signOutWith({ [authLib.SESSION_COOKIE]: firstToken });
+    const ticket = failed.response?.cookies.get(RETRY_COOKIE)?.value;
+    expect(ticket).toBeTruthy();
+    await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
+
+    // Signed in again on the same browser, then signed out normally.
+    const second = await addSession(cashier);
+    const secondToken = await signIn(cashier, { sessionId: second });
+    const out = await signOutWith({ [authLib.SESSION_COOKIE]: secondToken, [RETRY_COOKIE]: ticket });
+    expect(out.body).toMatchObject({ ok: true, outcome: "revoked", pendingRevocations: 0 });
+    expect(out.response?.cookies.get(RETRY_COOKIE)?.value).toBe("");
+    expect(await sessionRevoked(first)).toBe(true);
+    expect(await sessionRevoked(second)).toBe(true);
+    expect(await tokenStillWorks(firstToken)).toBe(false);
+  });
+
+  it("a stale retry never signs out a session started since — it does not touch the cookie", async () => {
+    const business = await seedBusiness("LogoutStale");
+    const owner = await addMember(business, "owner");
+    const current = await addSession(owner);
+    const token = await signIn(owner, { sessionId: current });
+    const out = await retrySignOutWith({ [authLib.SESSION_COOKIE]: token });
+    expect(out.body).toMatchObject({ ok: true, outcome: "no_session", sessionCookieCleared: false });
+    expect(out.response?.cookies.get(authLib.SESSION_COOKIE)).toBeUndefined();
+    expect(await sessionRevoked(current)).toBe(false);
+  });
+
+  it("a ticket only ever ends its own member's session in its own business", async () => {
+    const alpha = await seedBusiness("TicketAlpha");
+    const beta = await seedBusiness("TicketBeta");
+    const attacker = await addMember(alpha, "cashier");
+    const victim = await addMember(alpha, "waiter");
+    const foreign = await addMember(beta, "kitchen");
+    const victimSession = await addSession(victim);
+    const foreignSession = await addSession(foreign);
+
+    // Even a correctly signed ticket (which needs the server key) that pairs
+    // someone else's session with the wrong member or business matches no row.
+    const forged = await logoutRetry.signLogoutRetryTicket([
+      { sessionId: victimSession, businessId: alpha.id, employeeId: attacker.id, expiresAt: Math.floor(Date.now() / 1000) + 600 },
+      { sessionId: foreignSession, businessId: alpha.id, employeeId: foreign.id, expiresAt: Math.floor(Date.now() / 1000) + 600 },
+    ]);
+    const out = await retrySignOutWith({ [RETRY_COOKIE]: forged!.token });
+    expect(out.body).toMatchObject({ ok: true, outcome: "already_ended" });
+    expect(await sessionRevoked(victimSession)).toBe(false);
+    expect(await sessionRevoked(foreignSession)).toBe(false);
+    expect(await auditRows(alpha.id, "employee.session_revoked")).toHaveLength(0);
+  });
+
+  it("the security center's revocation is atomic too: no ended session without its audit row", async () => {
+    const business = await seedBusiness("AdminRevoke");
+    const owner = await addMember(business, "owner");
+    const cashier = await addMember(business, "cashier");
+    const target = await addSession(cashier);
+    await signIn(owner);
+    const revoke = () =>
+      call(() =>
+        sessionsByIdRoute.DELETE(request(`/api/sessions/${target}`, "DELETE"), {
+          params: Promise.resolve({ id: target }),
+        }),
+      );
+
+    await failAuditFor("employee.session_revoked");
+    expect((await revoke()).status).toBe(500);
+    expect(await sessionRevoked(target)).toBe(false);
+
+    await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
+    expect((await revoke()).status).toBe(200);
+    expect(await sessionRevoked(target)).toBe(true);
+    expect(await auditRows(business.id, "employee.session_revoked")).toHaveLength(1);
+    // A malformed id is a miss, not a database error.
+    const malformed = await call(() =>
+      sessionsByIdRoute.DELETE(request("/api/sessions/not-a-uuid", "DELETE"), {
+        params: Promise.resolve({ id: "not-a-uuid" }),
+      }),
+    );
+    expect(malformed.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// phone/self — Persian and Arabic-Indic codes at the API boundary
+// ---------------------------------------------------------------------------
+
+const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+const ARABIC_INDIC_DIGITS = "٠١٢٣٤٥٦٧٨٩";
+const toDigits = (code: string, alphabet: string) => code.replace(/\d/g, (d) => alphabet[Number(d)]);
+
+describe("#854 follow-up — phone/self accepts the digits members actually type", () => {
+  async function phoneFixture() {
+    const business = await seedBusiness("PhoneDigits");
+    const owner = await addMember(business, "owner", { phone: "+989121110001" });
+    await signIn(owner);
+    expect((await phoneSelf({ action: "send", phone: "09121110002" })).status).toBe(200);
+    return { business, owner, code: sms.sent[0].code };
+  }
+
+  async function phoneOf(userId: string) {
+    const { rows } = await db.query<{ phone_e164: string }>(`SELECT phone_e164 FROM users WHERE id = $1`, [userId]);
+    return rows[0].phone_e164;
+  }
+
+  it("verifies a code typed in Persian digits", async () => {
+    const f = await phoneFixture();
+    const verified = await phoneSelf({ action: "verify", code: toDigits(f.code, PERSIAN_DIGITS) });
+    expect(verified.status).toBe(200);
+    expect(verified.body).toMatchObject({ status: "verified", purpose: "change_login_phone" });
+    expect(await phoneOf(f.owner.id)).toBe("+989121110002");
+  });
+
+  it("verifies a code typed in Arabic-Indic digits with the spacing an SMS app adds", async () => {
+    const f = await phoneFixture();
+    const typed = toDigits(`${f.code.slice(0, 3)} ${f.code.slice(3)}`, ARABIC_INDIC_DIGITS);
+    expect((await phoneSelf({ action: "verify", code: typed })).status).toBe(200);
+    expect(await phoneOf(f.owner.id)).toBe("+989121110002");
+  });
+
+  it("is single-use whatever the alphabet: replaying the Persian code changes nothing", async () => {
+    const f = await phoneFixture();
+    const persian = toDigits(f.code, PERSIAN_DIGITS);
+    expect((await phoneSelf({ action: "verify", code: persian })).status).toBe(200);
+    await db.query(`UPDATE users SET phone_e164 = '+989121110009' WHERE id = $1`, [f.owner.id]);
+    const replay = await phoneSelf({ action: "verify", code: persian });
+    expect(replay.status).toBe(400);
+    expect(replay.body).toMatchObject({ error: "challenge_expired" });
+    expect(await phoneOf(f.owner.id)).toBe("+989121110009");
+  });
+
+  it("counts wrong Persian codes against the challenge's attempt limit, then refuses even the right one", async () => {
+    const f = await phoneFixture();
+    const wrong = toDigits(f.code === "000000" ? "111111" : "000000", PERSIAN_DIGITS);
+    const attempts = async () =>
+      (
+        await db.query<{ attempts: number }>(
+          `SELECT attempts FROM mfa_challenges WHERE purpose = 'change_login_phone' ORDER BY created_at DESC LIMIT 1`,
+        )
+      ).rows[0].attempts;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const refused = await phoneSelf({ action: "verify", code: wrong });
+      expect(refused.status).toBe(401);
+      expect(refused.body).toMatchObject({ error: "invalid_code" });
+      // The folded code reached the comparison and was counted.
+      expect(await attempts()).toBe(attempt);
+    }
+    // The member-level lockout (five failures) would also refuse the next try;
+    // clear it to show the challenge's own limit holds independently.
+    await db.query(
+      `DELETE FROM audit_log WHERE business_id = $1 AND action = 'employee.login_failed'`,
+      [f.business.id],
+    );
+    const exhausted = await phoneSelf({ action: "verify", code: toDigits(f.code, PERSIAN_DIGITS) });
+    expect(exhausted.status).toBe(400);
+    expect(exhausted.body).toMatchObject({ error: "challenge_expired" });
+    expect(await phoneOf(f.owner.id)).toBe("+989121110001");
+  });
+
+  it("refuses malformed input before it can spend an attempt", async () => {
+    const f = await phoneFixture();
+    for (const junk of ["۱۲۳", "12a456", "1234567", "", "   "]) {
+      const refused = await phoneSelf({ action: "verify", code: junk });
+      expect(refused.status).toBe(401);
+      expect(refused.body).toMatchObject({ error: "invalid_code" });
+    }
+    const { rows } = await db.query<{ attempts: number }>(
+      `SELECT attempts FROM mfa_challenges WHERE consumed_at IS NULL ORDER BY created_at DESC LIMIT 1`,
+    );
+    expect(rows[0].attempts).toBe(0);
+    expect((await phoneSelf({ action: "verify", code: toDigits(f.code, PERSIAN_DIGITS) })).status).toBe(200);
+  });
+
+  it("keeps the destination binding: a Persian code for the new number cannot write another one", async () => {
+    const f = await phoneFixture();
+    const verified = await phoneSelf({
+      action: "verify",
+      code: toDigits(f.code, PERSIAN_DIGITS),
+      phone: "+989121119999",
+    });
+    expect(verified.status).toBe(200);
+    expect(await phoneOf(f.owner.id)).toBe("+989121110002");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step-up by SMS and by recovery code
+// ---------------------------------------------------------------------------
+
+describe("#854 follow-up — SMS and recovery-code step-up through the route", () => {
+  const PHONE = "+989121234567";
+
+  async function ownerWithSmsFactor(name: string) {
+    const business = await seedBusiness(name);
+    const owner = await addMember(business, "owner");
+    const enrolled = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: owner.platformUserId!,
+      email: owner.email!,
+      method: "sms_otp",
+      phone: "09121234567",
+      sendSmsChallenge: true,
+    });
+    expect(enrolled.ok).toBe(true);
+    const confirmed = await mfaVerify.verifyAndConfirmMfaCode({
+      subjectRealm: "platform_user",
+      subjectId: owner.platformUserId!,
+      method: "sms_otp",
+      code: sms.sent.at(-1)!.code,
+      useRecoveryCode: false,
+      confirmPendingEnrolment: true,
+      smsPurposes: ["mfa_enrol_sms"],
+    });
+    expect(confirmed.outcome).toBe("sms_otp");
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    await signIn(owner, { recent: false });
+    return { business, owner };
+  }
+
+  async function sendStepUpSms(): Promise<string> {
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    const sent = await stepUp({ action: "send_sms" });
+    expect(sent.status).toBe(200);
+    expect(sent.body).toMatchObject({ status: "challenge_sent", candidatePhoneE164: PHONE });
+    expect(sms.sent.at(-1)!.phone).toBe(PHONE);
+    return sms.sent.at(-1)!.code;
+  }
+
+  it("SMS: a step-up code for the confirmed factor grants recent auth once, with its audit row", async () => {
+    const { business } = await ownerWithSmsFactor("StepUpSms");
+    expect((await call(() => stepUpRoute.GET())).body?.availableMethods).toContain("sms_otp");
+    const code = await sendStepUpSms();
+
+    const ok = await stepUp({ method: "sms_otp", credential: toDigits(code, PERSIAN_DIGITS) });
+    expect(ok.status).toBe(200);
+    expect(sessionCookieOf(ok)).toBeTruthy();
+    const audit = await auditRows(business.id, "auth.step_up");
+    expect(audit.map((row) => row.payload.method)).toEqual(["sms_otp"]);
+    expect(JSON.stringify(audit)).not.toContain(code);
+
+    // Replay: the code is spent.
+    const replay = await stepUp({ method: "sms_otp", credential: code });
+    expect(replay.status).toBe(401);
+    expect(sessionCookieOf(replay)).toBeUndefined();
+  });
+
+  it("SMS: a code minted for another purpose — login or enrolment — is not a step-up code", async () => {
+    const { owner } = await ownerWithSmsFactor("StepUpSmsPurpose");
+    for (const purpose of ["mfa_login", "mfa_enrol_sms"] as const) {
+      await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+      const issued = await mfaEnrol.issueSmsMfaChallenge({
+        subjectRealm: "platform_user",
+        subjectId: owner.platformUserId!,
+        email: owner.email!,
+        purpose,
+      });
+      expect(issued.ok).toBe(true);
+      const refused = await stepUp({ method: "sms_otp", credential: sms.sent.at(-1)!.code });
+      expect(refused.status).toBe(401);
+      expect(refused.body).toMatchObject({ error: "invalid_code" });
+      expect(sessionCookieOf(refused)).toBeUndefined();
+    }
+  });
+
+  it("SMS: a pending (unconfirmed) SMS enrolment is not a factor — no code is sent, none is accepted", async () => {
+    const business = await seedBusiness("StepUpSmsPending");
+    const owner = await addMember(business, "owner");
+    expect(
+      (
+        await mfaEnrol.enrolMfaMethod({
+          subjectRealm: "platform_user",
+          subjectId: owner.platformUserId!,
+          email: owner.email!,
+          method: "sms_otp",
+          phone: "09121234567",
+        })
+      ).ok,
+    ).toBe(true);
+    await signIn(owner, { recent: false });
+
+    const send = await stepUp({ action: "send_sms" });
+    expect(send.status).toBe(400);
+    expect(send.body).toMatchObject({ error: "sms_not_enrolled" });
+
+    // Even a step-up-purpose challenge aimed at the pending number is refused.
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    const forced = await mfaEnrol.issueSmsMfaChallenge({
+      subjectRealm: "platform_user",
+      subjectId: owner.platformUserId!,
+      email: owner.email!,
+      purpose: "step_up_sms",
+      phoneE164: PHONE,
+      requireActiveFactor: false,
+    });
+    expect(forced.ok).toBe(true);
+    const refused = await stepUp({ method: "sms_otp", credential: sms.sent.at(-1)!.code });
+    expect(refused.status).toBe(401);
+    expect(sessionCookieOf(refused)).toBeUndefined();
+  });
+
+  it("SMS: no recent-auth window when the success audit cannot be written — and the code is spent", async () => {
+    const { business } = await ownerWithSmsFactor("StepUpSmsAudit");
+    const code = await sendStepUpSms();
+    await failAuditFor("auth.step_up");
+    const failed = await stepUp({ method: "sms_otp", credential: code });
+    expect(failed.status).toBe(500);
+    expect(sessionCookieOf(failed)).toBeUndefined();
+    await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
+
+    const replay = await stepUp({ method: "sms_otp", credential: code });
+    expect(replay.status).toBe(401);
+    expect(await auditRows(business.id, "auth.step_up")).toHaveLength(0);
+  });
+
+  // bcrypt-heavy (each recovery attempt compares against the whole set), so
+  // these two carry their own timeout rather than racing the suite default.
+  it("recovery: one code, once — and another account's code never", async () => {
+    const { business, owner } = await ownerWithSmsFactor("StepUpRecovery");
+    const codes = await mfaRecovery.issueRecoveryCodes("platform_user", owner.platformUserId!);
+    const stranger = await createIdentity();
+    const strangerCodes = await mfaRecovery.issueRecoveryCodes("platform_user", stranger.id);
+
+    expect((await call(() => stepUpRoute.GET())).body?.availableMethods).toContain("recovery");
+    const foreign = await stepUp({ method: "recovery", credential: strangerCodes[0] });
+    expect(foreign.status).toBe(401);
+    expect(sessionCookieOf(foreign)).toBeUndefined();
+
+    const ok = await stepUp({ method: "recovery", credential: codes[0] });
+    expect(ok.status).toBe(200);
+    expect(sessionCookieOf(ok)).toBeTruthy();
+    const audit = await auditRows(business.id, "auth.step_up");
+    expect(audit.map((r) => r.payload.method)).toEqual(["recovery"]);
+    expect(JSON.stringify(audit)).not.toContain(codes[0]);
+
+    const replay = await stepUp({ method: "recovery", credential: codes[0] });
+    expect(replay.status).toBe(401);
+    expect(sessionCookieOf(replay)).toBeUndefined();
+  }, 90_000);
+
+  it("recovery: an audit failure grants nothing, and the code it spent stays spent", async () => {
+    const { business, owner } = await ownerWithSmsFactor("StepUpRecoveryAudit");
+    const codes = await mfaRecovery.issueRecoveryCodes("platform_user", owner.platformUserId!);
+
+    await failAuditFor("auth.step_up");
+    const failed = await stepUp({ method: "recovery", credential: codes[1] });
+    expect(failed.status).toBe(500);
+    expect(sessionCookieOf(failed)).toBeUndefined();
+    await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
+    expect(await auditRows(business.id, "auth.step_up")).toHaveLength(0);
+
+    // Spent by the attempt that could not be audited: still single-use.
+    expect((await stepUp({ method: "recovery", credential: codes[1] })).status).toBe(401);
+    // The rest of the set still works.
+    expect((await stepUp({ method: "recovery", credential: codes[2] })).status).toBe(200);
+  }, 90_000);
 });

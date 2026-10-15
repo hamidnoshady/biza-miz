@@ -18,7 +18,8 @@ import bcrypt from "bcryptjs";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
 import type { AuthenticationResponseJSON, AuthenticatorTransportFuture, RegistrationResponseJSON } from "@simplewebauthn/server";
-import { getPool, query, withoutTenantScope } from "./db";
+import { getPool, query, withTenantTransaction, withoutTenantScope } from "./db";
+import { isUuid } from "./uuid";
 import { hostRoutingEnabled, leadingHostLabel, parseHost, rootDomain } from "./host";
 import { postgresDateToIso } from "./jalali";
 import { resolveBusinessByLabel } from "./host-resolution";
@@ -62,8 +63,13 @@ interface Executor {
   query: PoolClient["query"];
 }
 
+/** Where an audit row can go: a pooled client, the pool, or the ambient transaction. */
+interface AuditWriter {
+  query(text: string, params?: unknown[]): Promise<unknown>;
+}
+
 async function auditEmployee(
-  client: Executor,
+  client: AuditWriter,
   params: {
     businessId: string;
     actorId: string | null;
@@ -813,28 +819,53 @@ export async function touchSession(sessionId: string, businessId: string): Promi
   );
 }
 
+/**
+ * End one `employee_sessions` row, with its audit row, atomically.
+ *
+ * Issue #854 follow-up (logout): the UPDATE and the `employee.session_revoked`
+ * row used to be two separate writes on two connections — the revocation
+ * autocommitted, then the audit went through the pool, so an audit failure
+ * left an ended session with no record, and the sign-out route swallowed the
+ * resulting error and answered success either way. Both now share one tenant
+ * transaction: either the session is ended *and* recorded, or neither happened
+ * and the caller is told.
+ *
+ * `ownedBy` restricts the row to one member's own session — what a sign-out
+ * (which names the session from its own signed token) asks for; the security
+ * center's administrative revocation omits it. A malformed id, or a row that is
+ * already revoked or missing, is `employee_session_not_found`.
+ */
 export async function revokeSession(
   sessionId: string,
   businessId: string,
   actorId: string | null,
+  options: { ownedBy?: string; via?: "sign_out" | "sign_out_retry" } = {},
 ): Promise<void> {
-  const { rows } = await query<{ employee_id: string }>(
-    `UPDATE employee_sessions
-        SET revoked_at = now()
-      WHERE id = $1 AND business_id = $2 AND revoked_at IS NULL
-      RETURNING employee_id`,
-    [sessionId, businessId],
-  );
   // Its own code: `session_not_found` belongs to table (میز) sessions, whose
   // mapped Persian message reads «نشست میز پیدا نشد.» — nonsense when what the
   // owner was ending was an employee's login from the security center.
-  if (!rows[0]) throw new EmployeeError("employee_session_not_found", 404);
-  await auditEmployee(getPool(), {
-    businessId,
-    actorId,
-    action: "employee.session_revoked",
-    employeeId: rows[0].employee_id,
-    payload: { sessionId },
+  if (!isUuid(sessionId)) throw new EmployeeError("employee_session_not_found", 404);
+  const ownedBy = options.ownedBy ?? null;
+  await withTenantTransaction(businessId, async () => {
+    const { rows } = await query<{ employee_id: string }>(
+      `UPDATE employee_sessions
+          SET revoked_at = now()
+        WHERE id = $1 AND business_id = $2 AND revoked_at IS NULL
+          AND ($3::uuid IS NULL OR employee_id = $3::uuid)
+        RETURNING employee_id`,
+      [sessionId, businessId, ownedBy],
+    );
+    if (!rows[0]) throw new EmployeeError("employee_session_not_found", 404);
+    await auditEmployee(
+      { query: (text, params) => query(text, params) },
+      {
+        businessId,
+        actorId,
+        action: "employee.session_revoked",
+        employeeId: rows[0].employee_id,
+        payload: options.via ? { sessionId, via: options.via } : { sessionId },
+      },
+    );
   });
 }
 

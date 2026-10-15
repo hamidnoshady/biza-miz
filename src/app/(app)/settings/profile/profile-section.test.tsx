@@ -14,9 +14,11 @@
  *  - **F06** a reloaded phone verification resends, cancels and verifies
  *    without sending any number — the server owns the destination;
  *  - **F08** the PIN fields are masked, numeric, and normalise Persian digits;
- *  - **F10** sign-out navigates only after the server confirmed it;
+ *  - **F10 + logout** sign-out navigates only after the server confirmed it,
+ *    and an unconfirmed end retries through the server's retry ticket;
  *  - **F11** a read-only login phone renders no form, including a pending one;
- *  - **F13** the active and home branches are shown from server data, apart.
+ *  - **F13** the active and home branches are shown from server data, apart —
+ *    and a missing or deactivated home branch is never presented as this one.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -144,67 +146,140 @@ async function stepUpPinField(title: string): Promise<HTMLInputElement> {
   return (await within(form).findByLabelText("رمز عددی دستگاه")) as HTMLInputElement;
 }
 
-describe("#854 F10 — sign-out only leaves once the server confirmed it", () => {
+/** The sign-out contract's answers (`@/lib/logout-contract`). */
+const signedOutAnswer = (outcome = "revoked") =>
+  json(200, { ok: true, outcome, sessionCookieCleared: true, pendingRevocations: 0 });
+const unconfirmedAnswer = (sessionCookieCleared = true) =>
+  json(503, {
+    ok: false,
+    outcome: "unconfirmed",
+    sessionCookieCleared,
+    pendingRevocations: 1,
+    error: "logout_unconfirmed",
+  });
+
+describe("#854 F10 + logout — sign-out only leaves once the server confirmed it", () => {
   it("navigates to /login after a confirmed sign-out", async () => {
-    routes["POST /api/auth/logout"] = () => json(200, { ok: true });
+    routes["POST /api/auth/logout"] = () => signedOutAnswer();
     mount();
     fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"));
     expect(router.refresh).toHaveBeenCalled();
   });
 
+  it("treats an already-ended or untracked session as signed out", async () => {
+    for (const outcome of ["already_ended", "not_tracked", "no_session"]) {
+      router.replace.mockReset();
+      routes["POST /api/auth/logout"] = () => signedOutAnswer(outcome);
+      const view = mount();
+      fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
+      await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"));
+      view.unmount();
+    }
+  });
+
   it("a server failure keeps the member on the page, says so, and offers a retry", async () => {
     routes["POST /api/auth/logout"] = () => json(500, { error: "internal" });
     mount();
     fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
-    await screen.findByText(/خروج از حساب کامل نشد/);
+    expect((await screen.findByRole("alert")).textContent).toMatch(/خروج از حساب کامل نشد/);
     expect(router.replace).not.toHaveBeenCalled();
     const retry = screen.getByRole("button", { name: "تلاش دوباره برای خروج" }) as HTMLButtonElement;
     expect(retry.disabled).toBe(false);
 
-    routes["POST /api/auth/logout"] = () => json(200, { ok: true });
+    routes["POST /api/auth/logout"] = () => signedOutAnswer();
     fireEvent.click(retry);
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"));
+    // Still the plain sign-out route: the cookie was never cleared.
+    expect(posts("/api/auth/logout/retry")).toHaveLength(0);
   });
 
-  it("a dropped connection is not a sign-out", async () => {
+  it("a dropped connection is not a sign-out, and the button is usable again", async () => {
     routes["POST /api/auth/logout"] = () => "reject";
     mount();
     fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
     await screen.findByText(/نشست شما هنوز باز است/);
     expect(router.replace).not.toHaveBeenCalled();
     expect(router.push).not.toHaveBeenCalled();
+    expect(
+      (screen.getByRole("button", { name: "تلاش دوباره برای خروج" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("an unconfirmed end says so, retries through the retry ticket, then leaves", async () => {
+    routes["POST /api/auth/logout"] = () => unconfirmedAnswer();
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/سرور پایان نشست را تأیید نکرد/);
+    expect(router.replace).not.toHaveBeenCalled();
+    // The way out is offered, but not taken for them.
+    expect(screen.getByRole("button", { name: "رفتن به صفحهٔ ورود" })).toBeTruthy();
+
+    // A retry that fails again is still "unconfirmed", never "still signed in".
+    routes["POST /api/auth/logout/retry"] = () => "reject";
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره برای پایان نشست" }));
+    await waitFor(() => expect(posts("/api/auth/logout/retry")).toHaveLength(1));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/سرور پایان نشست را تأیید نکرد/);
+    expect(screen.queryByText(/نشست شما هنوز باز است/)).toBeNull();
+
+    routes["POST /api/auth/logout/retry"] = () =>
+      json(200, { ok: true, outcome: "revoked", sessionCookieCleared: false, pendingRevocations: 0 });
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره برای پایان نشست" }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"));
+    // Never a second plain sign-out: that would find no cookie and "succeed".
+    expect(posts("/api/auth/logout")).toHaveLength(1);
+    expect(posts("/api/auth/logout/retry")).toHaveLength(2);
+  });
+
+  it("from an unconfirmed end, the member may go to the login page themselves", async () => {
+    routes["POST /api/auth/logout"] = () => unconfirmedAnswer();
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
+    fireEvent.click(await screen.findByRole("button", { name: "رفتن به صفحهٔ ورود" }));
+    expect(router.replace).toHaveBeenCalledWith("/login");
   });
 });
 
 describe("#854 F13 — active and home branch, from the server", () => {
+  const north = { id: "l-n", name: "شعبهٔ شمال" };
+  const main = { id: "l-m", name: "شعبهٔ مرکزی" };
+
   it("shows the active branch and, separately, a different home branch", () => {
-    mount({
-      branch: {
-        active: { id: "l-n", name: "شعبهٔ شمال" },
-        home: { id: "l-m", name: "شعبهٔ مرکزی" },
-        canSwitch: true,
-      },
-    });
+    mount({ branch: { active: north, home: main, homeStatus: "different", canSwitch: true } });
     expect(screen.getByText("شعبهٔ فعال")).toBeTruthy();
     expect(screen.getByText("شعبهٔ شمال")).toBeTruthy();
     expect(screen.getByText("شعبهٔ اصلی")).toBeTruthy();
     expect(screen.getAllByText("شعبهٔ مرکزی").length).toBeGreaterThan(0);
+    expect(screen.queryByText("(شعبهٔ اصلی شما)")).toBeNull();
     expect(screen.getByText(/از انتخابگر شعبه در بالای صفحه تغییر دهید/)).toBeTruthy();
   });
 
-  it("marks the active branch as home when they are the same, with no second row", () => {
-    mount({
-      branch: { active: { id: "l-m", name: "شعبهٔ مرکزی" }, home: null, canSwitch: false },
-    });
+  it("marks the active branch as home only when they are the same, with no second row", () => {
+    mount({ branch: { active: main, home: main, homeStatus: "same", canSwitch: false } });
     expect(screen.getByText("(شعبهٔ اصلی شما)")).toBeTruthy();
     expect(screen.queryByText("شعبهٔ اصلی")).toBeNull();
     expect(screen.queryByText(/از انتخابگر شعبه/)).toBeNull();
   });
 
+  it("never calls the active branch home when the member has no home branch", () => {
+    mount({ branch: { active: north, home: null, homeStatus: "unassigned", canSwitch: false } });
+    expect(screen.getByText("شعبهٔ شمال")).toBeTruthy();
+    expect(screen.queryByText("(شعبهٔ اصلی شما)")).toBeNull();
+    expect(screen.getByText("شعبهٔ اصلی")).toBeTruthy();
+    expect(screen.getByText("تعیین نشده")).toBeTruthy();
+  });
+
+  it("never calls the active branch home when the home branch is deactivated", () => {
+    mount({ branch: { active: north, home: null, homeStatus: "unavailable", canSwitch: true } });
+    expect(screen.queryByText("(شعبهٔ اصلی شما)")).toBeNull();
+    expect(screen.getByText("شعبهٔ اصلی")).toBeTruthy();
+    expect(screen.getByText(/دیگر فعال نیست/)).toBeTruthy();
+  });
+
   it("shows no branch row at all when the server resolved none", () => {
     mount({ branch: null });
     expect(screen.queryByText("شعبهٔ فعال")).toBeNull();
+    expect(screen.queryByText("شعبهٔ اصلی")).toBeNull();
   });
 });
 

@@ -1,41 +1,121 @@
 /**
- * Issue #854 follow-up (F10) — one client-side sign-out request whose answer
- * is actually read.
+ * Issue #854 follow-up (F10 and the logout follow-up) — the one client-side
+ * sign-out request whose answer is actually read.
  *
- * The Profile card used to `await fetch("/api/auth/logout")` and navigate to
- * `/login` whatever happened: a 5xx, a proxy error page or a dropped
- * connection all looked like a successful sign-out while the session stayed
- * open on the server *and* the cookie stayed in the browser. A sign-out is a
- * security action, so "it failed and you are still signed in" has to be
- * something the member is told.
+ * Every sign-out surface (the Profile card, the sidebar menu's «خروج» and
+ * «تغییر حساب», the signed-in notice on /login and /admin) goes through these
+ * two calls and reads the answer with the shared contract in
+ * `@/lib/logout-contract`, so "the server confirmed it", "this browser is out
+ * but the server could not confirm it" and "nothing happened, you are still
+ * signed in" are told apart the same way everywhere.
  *
- * Framework-free so it can be unit-tested and reused by any sign-out button.
+ * The request functions are plain (unit-tested with a fake `fetch`);
+ * `useSignOut` below is the thin React state around them — the busy flag, the
+ * last result and the right next attempt.
  */
+import { useCallback, useRef, useState } from "react";
+import {
+  LOGOUT_PATH,
+  LOGOUT_RETRY_PATH,
+  readLogoutResponse,
+  type SignOutResult,
+} from "@/lib/logout-contract";
 
-export type SignOutFailure = "network" | "server";
+export type { SignOutResult } from "@/lib/logout-contract";
+export { browserSignedOut, signOutResultMessage, LOGOUT_MESSAGES } from "@/lib/logout-contract";
 
-export type SignOutResult = { ok: true } | { ok: false; reason: SignOutFailure };
-
-export async function requestSignOut(
-  fetchImpl: typeof fetch = (...args) => fetch(...args),
-): Promise<SignOutResult> {
+async function postSignOut(path: string, fetchImpl: typeof fetch): Promise<SignOutResult> {
   let res: Response;
   try {
-    res = await fetchImpl("/api/auth/logout", {
+    res = await fetchImpl(path, {
       method: "POST",
       credentials: "same-origin",
       // A sign-out must reach the server; never answer it from a cache.
       cache: "no-store",
+      headers: { accept: "application/json" },
     });
   } catch {
-    return { ok: false, reason: "network" };
+    // Offline, aborted, DNS: the request never got an answer, so nothing
+    // changed — the cookie is still in this browser.
+    return { kind: "network" };
   }
-  return res.ok ? { ok: true } : { ok: false, reason: "server" };
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  return readLogoutResponse(res.status, body);
 }
 
-/** What to tell the member — both cases say plainly that they are still signed in. */
-export function signOutFailureMessage(reason: SignOutFailure): string {
-  return reason === "network"
-    ? "ارتباط با سرور برقرار نشد و خروج انجام نشد؛ نشست شما هنوز باز است. اتصال را بررسی کنید و دوباره تلاش کنید."
-    : "خروج از حساب کامل نشد و نشست شما ممکن است هنوز باز باشد؛ دوباره تلاش کنید.";
+const defaultFetch: typeof fetch = (...args) => fetch(...args);
+
+/** End this browser's session (`POST /api/auth/logout`). */
+export function requestSignOut(fetchImpl: typeof fetch = defaultFetch): Promise<SignOutResult> {
+  return postSignOut(LOGOUT_PATH, fetchImpl);
+}
+
+/**
+ * Finish a sign-out the server could not confirm (`POST /api/auth/logout/retry`).
+ * The session cookie is already gone by then; the server finds the session
+ * from the httpOnly retry ticket it set, never from anything this code sends.
+ */
+export function retrySignOut(fetchImpl: typeof fetch = defaultFetch): Promise<SignOutResult> {
+  return postSignOut(LOGOUT_RETRY_PATH, fetchImpl);
+}
+
+/**
+ * The right next attempt after `previous`: once the server has cleared the
+ * cookie, a second plain sign-out would find no session and report success
+ * without ending anything — only the retry route can finish the job.
+ */
+export async function signOutAgain(
+  previous: SignOutResult | null,
+  fetchImpl: typeof fetch = defaultFetch,
+): Promise<SignOutResult> {
+  if (previous?.kind !== "unconfirmed" || !previous.sessionCookieCleared) {
+    return requestSignOut(fetchImpl);
+  }
+  const next = await retrySignOut(fetchImpl);
+  if (next.kind === "signed_out") return next;
+  // The retry did not finish it — but this browser is still signed out (its
+  // cookie went with the first answer). A dropped retry is "still
+  // unconfirmed", never "you are still signed in".
+  return {
+    kind: "unconfirmed",
+    pendingRevocations:
+      next.kind === "unconfirmed" ? next.pendingRevocations : previous.pendingRevocations,
+    sessionCookieCleared: true,
+  };
+}
+
+/**
+ * React state for a sign-out button: the busy flag is released on every path
+ * (including a rejected request), and each attempt picks the right route from
+ * the previous result.
+ */
+export function useSignOut(fetchImpl: typeof fetch = defaultFetch) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<SignOutResult | null>(null);
+  const last = useRef<SignOutResult | null>(null);
+  const inFlight = useRef(false);
+
+  const run = useCallback(async (): Promise<SignOutResult | null> => {
+    // A double click must not send two sign-outs; the second one would read
+    // the first one's cleared cookie as "no session".
+    if (inFlight.current) return null;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      const next = await signOutAgain(last.current, fetchImpl);
+      last.current = next;
+      setResult(next);
+      return next;
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }, [fetchImpl]);
+
+  return { busy, result, run };
 }
