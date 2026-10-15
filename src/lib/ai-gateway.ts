@@ -708,6 +708,47 @@ export function resolveEmbeddingModel(input: {
   return alias || trimmed(gateway.chatModel) || platformModel;
 }
 
+/** Which stored row a call's credential actually came from, or `"none"` when nothing usable exists. */
+export type GatewayCredentialSource = "branch" | "business" | "master" | "none";
+
+/**
+ * The one place that decides which stored row a call's credential actually
+ * comes from, and the one place `resolveGatewayAuthKey` and the platform
+ * console's readiness projection (`/platform/ai` route) both have to agree
+ * with (issue #757 follow-up — effective-source mismatch).
+ *
+ * This is a decision about *usability*, not about whether a row exists: a
+ * branch row whose credential is stored but undecryptable (issue #757 §B)
+ * has `branch.virtualKey === null`, exactly like a branch with no row at
+ * all, so it is correctly skipped in favour of a usable business key. Every
+ * caller that needs to show *why* — "this branch's key needs recovery" vs
+ * "this branch never had its own key" — reads that from the row's own
+ * `credentialState`, never from this decision; mixing the two is what used
+ * to make the console claim a branch's stored-but-broken credential was the
+ * one in effect, when a perfectly usable business key would actually have
+ * served the call.
+ */
+export function resolveEffectiveCredentialSource(input: {
+  gateway: AiGatewayConfig | null;
+  business?: BusinessGateway | null;
+  branch?: BusinessGateway | null;
+  /** Tenant calls must not fall back to a shared master key when virtual keys are enabled. */
+  tenantScoped?: boolean;
+}): { source: GatewayCredentialSource; key?: string; row: BusinessGateway | null } {
+  const { gateway, business, branch } = input;
+  if (!gateway || !gateway.enabled) return { source: "none", row: null };
+  if (gateway.virtualKeysEnabled) {
+    const branchKey = trimmed(branch?.virtualKey);
+    if (branchKey) return { source: "branch", key: branchKey, row: branch ?? null };
+    const businessKey = trimmed(business?.virtualKey);
+    if (businessKey) return { source: "business", key: businessKey, row: business ?? null };
+    if (input.tenantScoped) return { source: "none", row: null };
+  }
+  const masterKey = trimmed(gateway.masterKey);
+  if (masterKey) return { source: "master", key: masterKey, row: null };
+  return { source: "none", row: null };
+}
+
 /**
  * The credential for one call. With virtual keys enabled, tenant calls use
  * branch key -> business key -> undefined (the master key is never a tenant
@@ -720,15 +761,7 @@ export function resolveGatewayAuthKey(input: {
   /** Tenant calls must not fall back to a shared master key when virtual keys are enabled. */
   tenantScoped?: boolean;
 }): string | undefined {
-  const { gateway, business, branch } = input;
-  if (!gateway || !gateway.enabled) return undefined;
-  if (gateway.virtualKeysEnabled) {
-    if (trimmed(branch?.virtualKey)) return trimmed(branch?.virtualKey);
-    if (trimmed(business?.virtualKey)) return trimmed(business?.virtualKey);
-    if (input.tenantScoped) return undefined;
-  }
-  if (trimmed(gateway.masterKey)) return trimmed(gateway.masterKey);
-  return undefined;
+  return resolveEffectiveCredentialSource(input).key;
 }
 
 /** LiteLLM `key_alias` for a business or branch — stable, short and traceable. */
