@@ -473,11 +473,13 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 **[PR #958](https://github.com/hamidnoshady/biza-miz/pull/958)** (`arena/ce58f373-biza-miz`
 → `main`) was opened so the repository's own required suite — including the
 `pull_request`-triggered desktop/container/workflow paths that a branch push skips by path
-filter — runs against the head. On it: `type check`, `ESLint`, `design checks`,
-`API guard and permission tests`, `visual regression`, `production build`,
-`data transfer engine`, `media E2E`, `desktop shell`, `production container`,
-`packaged Windows end-to-end` and `which shippables changed` all **passed**;
-`integration tests (real database)` was still running when this was written.
+filter — runs against the head. At `16764aed` (the head that carries the test fix below):
+**15 checks passed, 3 skipped, none pending and none red** — `type check`, `unit tests`,
+`ESLint`, `design checks`, `API guard and permission tests`, `visual regression`,
+`integration tests (real database)`, `production build`, `data transfer engine`,
+`media E2E`, `desktop shell`, `production container`, `packaged Windows end-to-end`,
+`which shippables changed`, `all checks passed`; the three skips are the path-filtered
+shippables (WordPress plugin, Windows print connector, the desktop version commit).
 
 **`unit tests` failed on the PR run and passed on the push run of the *same commit***
 (`4c3a720`): push run `38655674538` ✅, PR run `38703844576` ❌. The failing annotation is
