@@ -232,6 +232,8 @@ const DRAFTS: Draft[] = [
   { key: P.financeInstallmentsManage, group: "finance", label: "مدیریت اقساط", description: "تعریف طرح اقساط و ثبت پرداخت هر قسط.", risk: "medium", audit: true },
   { key: P.financeReconciliationManage, group: "finance", label: "تطبیق بانکی", description: "ایجاد و تکمیل تطبیق صورت‌حساب بانکی با دفاتر.", risk: "medium", audit: true },
   { key: P.financeAssetsManage, group: "finance", label: "دارایی‌های ثابت", description: "نگهداری دفتر دارایی‌های ثابت و اجرای استهلاک دوره‌ای.", risk: "medium", audit: true },
+  { key: P.financeAccountsManage, group: "finance", label: "مدیریت حساب‌های مالی", description: "ثبت حساب‌های بانکی، صندوق، تنخواه و پایانه، اتصال هر حساب به سرفصل دفتر کل و تعیین پیش‌فرض.", risk: "medium", audit: true },
+  { key: P.financeTransfersManage, group: "finance", label: "انتقال وجه", description: "انتقال وجه بین حساب‌های مالی با سند دوطرفه و برگشت سند.", risk: "high", audit: true },
 
   // --- Payroll -------------------------------------------------------------
   // Its own group because compensation data is sensitive in a way the rest of
