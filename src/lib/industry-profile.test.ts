@@ -330,6 +330,9 @@ describe("moduleForApiPath", () => {
     expect(moduleForApiPath("/api/tables/abc/close")).toBe("tables");
     expect(moduleForApiPath("/api/menu/items")).toBe("menu");
     expect(moduleForApiPath("/api/inventory/counts")).toBe("inventory");
+    expect(
+      moduleForApiPath("/api/accounting/shareholders/distributions"),
+    ).toBe("ledger");
     expect(moduleForApiPath("/api/integrations/wp-manager/overview")).toBe("integrations");
   });
 

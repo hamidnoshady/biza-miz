@@ -255,6 +255,138 @@ export function closingEntryProfitRial(input: { debit: bigint; credit: bigint })
   return profit > 0n ? profit : 0n;
 }
 
+export interface DistributionFinancialFact {
+  status: string;
+  distributableRial: string;
+  /** Net of original payments and their immutable reversals. */
+  netPaidRial: string;
+  count?: number;
+}
+
+export interface DistributionFinancialProjection {
+  /** Amount reserved by a draft, approved or live posted distribution. */
+  reservedRial: string;
+  /** Approved but not yet posted to the ledger. */
+  pendingPostingRial: string;
+  /** Net appropriation actually posted to retained earnings. */
+  distributedRial: string;
+  /** Net cash paid for a live posted distribution. */
+  paidRial: string;
+  /** Unpaid liability from a live posted distribution. */
+  outstandingRial: string;
+}
+
+export interface DistributionFinancialSummary extends DistributionFinancialProjection {
+  distributionCount: number;
+  draftReservedRial: string;
+}
+
+const RESERVING_DISTRIBUTION_STATUSES = new Set(["draft", "approved", "posted", "partially_paid", "paid"]);
+const POSTED_DISTRIBUTION_STATUSES = new Set(["posted", "partially_paid", "paid"]);
+
+/**
+ * One status-aware projection for the shareholder subledger. Draft and
+ * approved snapshots reserve future capacity but are not GL distributions or
+ * payable balances. Only posted documents are live obligations. Cancelled and
+ * reversed documents remain historical records, but contribute zero to live
+ * retained-earnings appropriation, payments, and unpaid obligations.
+ */
+export function projectDistributionFinancials(
+  status: string,
+  distributableRial: string,
+  netPaidRial: string,
+): DistributionFinancialProjection {
+  const amount = parseDistributionInteger(distributableRial, "distributable_rial");
+  const netPaid = parseDistributionInteger(netPaidRial, "net_paid_rial");
+  const reserved = RESERVING_DISTRIBUTION_STATUSES.has(status);
+  const pending = status === "approved";
+  const posted = POSTED_DISTRIBUTION_STATUSES.has(status);
+  return {
+    reservedRial: reserved ? amount.toString() : "0",
+    pendingPostingRial: pending ? amount.toString() : "0",
+    distributedRial: posted ? amount.toString() : "0",
+    paidRial: posted ? netPaid.toString() : "0",
+    outstandingRial: posted ? (amount - netPaid).toString() : "0",
+  };
+}
+
+/** Summation is exact and linear, so grouped database facts and full rows agree. */
+export function summarizeDistributionFinancials(
+  facts: readonly DistributionFinancialFact[],
+): DistributionFinancialSummary {
+  let distributionCount = 0;
+  let reserved = 0n;
+  let pending = 0n;
+  let distributed = 0n;
+  let paid = 0n;
+  let outstanding = 0n;
+  let draftReserved = 0n;
+  for (const fact of facts) {
+    const projection = projectDistributionFinancials(fact.status, fact.distributableRial, fact.netPaidRial);
+    distributionCount += fact.count ?? 1;
+    reserved += BigInt(projection.reservedRial);
+    pending += BigInt(projection.pendingPostingRial);
+    distributed += BigInt(projection.distributedRial);
+    paid += BigInt(projection.paidRial);
+    outstanding += BigInt(projection.outstandingRial);
+    if (fact.status === "draft") draftReserved += BigInt(projection.reservedRial);
+  }
+  return {
+    distributionCount,
+    reservedRial: reserved.toString(),
+    draftReservedRial: draftReserved.toString(),
+    pendingPostingRial: pending.toString(),
+    distributedRial: distributed.toString(),
+    paidRial: paid.toString(),
+    outstandingRial: outstanding.toString(),
+  };
+}
+
+export interface FiscalYearDistributionProjection extends DistributionFinancialSummary {
+  sourceProfitRial: string;
+  glDistributedRial: string;
+  undistributedRetainedProfitRial: string;
+  availableToAllocateRial: string;
+  glUnpaidRial: string;
+  distributionVarianceRial: string;
+  payableVarianceRial: string;
+}
+
+/**
+ * Reconcile a closed-year source to the actual linked GL entries. Documents
+ * explain reservations and expected payable; the GL independently supplies
+ * distributed and payable balances, so a variance remains visible rather than
+ * being hidden by a duplicate equity balance.
+ */
+export function projectFiscalYearDistributions(input: {
+  sourceProfitRial: string;
+  glDistributedRial: string;
+  glUnpaidRial: string;
+  facts: readonly DistributionFinancialFact[];
+}): FiscalYearDistributionProjection {
+  const documents = summarizeDistributionFinancials(input.facts);
+  const source = parseDistributionInteger(input.sourceProfitRial, "source_profit_rial");
+  const glDistributed = parseDistributionInteger(input.glDistributedRial, "gl_distributed_rial", true);
+  const glUnpaid = parseDistributionInteger(input.glUnpaidRial, "gl_unpaid_rial", true);
+  return {
+    ...documents,
+    sourceProfitRial: source.toString(),
+    glDistributedRial: glDistributed.toString(),
+    undistributedRetainedProfitRial: (source - glDistributed).toString(),
+    availableToAllocateRial: (source - BigInt(documents.reservedRial)).toString(),
+    glUnpaidRial: glUnpaid.toString(),
+    distributionVarianceRial: (BigInt(documents.distributedRial) - glDistributed).toString(),
+    payableVarianceRial: (BigInt(documents.outstandingRial) - glUnpaid).toString(),
+  };
+}
+
+function parseDistributionInteger(value: string, field: string, signed = false): bigint {
+  if (typeof value !== "string" || !(signed ? /^-?(?:0|[1-9]\d*)$/ : /^(?:0|[1-9]\d*)$/).test(value)) {
+    throw new Error(`invalid_${field}`);
+  }
+  return BigInt(value);
+}
+
 function parseStoredPercent(value: string | bigint): bigint | null {
   if (typeof value === "bigint") return value >= 0n && value <= FULL_OWNERSHIP_MICRO_PERCENT ? value : null;
   const parsed = parseOwnershipPercent(value);

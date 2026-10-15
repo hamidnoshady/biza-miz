@@ -116,6 +116,8 @@ describe("built-in role presets", () => {
       "parties.manage", "parties.view",
       "payroll.manage", "payroll.view",
       "reports.export", "reports.manage", "reports.view",
+      "shareholders.capital_post", "shareholders.distributions_adjust", "shareholders.distributions_approve",
+      "shareholders.distributions_manage", "shareholders.distributions_pay", "shareholders.manage", "shareholders.view",
       "tax.amend", "tax.cancel", "tax.export", "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
       "vehicles.cost_view", "vehicles.view",
       "workspace.view",

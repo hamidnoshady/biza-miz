@@ -9,6 +9,9 @@ import {
   parseNonNegativeRial,
   parseOwnershipPercent,
   parsePositiveRial,
+  projectDistributionFinancials,
+  projectFiscalYearDistributions,
+  summarizeDistributionFinancials,
   validateOwnershipTimeline,
 } from "./shareholder-accounting";
 import type { OwnershipTimelineEvent } from "./shareholder-accounting";
@@ -133,5 +136,74 @@ describe("integer-Rial allocation and close sourcing", () => {
     expect(ownershipSnapshotIsComplete([{ ownershipPercent: "60" }])).toBe(false);
     expect(closingEntryProfitRial({ debit: 15n, credit: 120n })).toBe(105n);
     expect(closingEntryProfitRial({ debit: 120n, credit: 15n })).toBe(0n);
+  });
+});
+
+describe("status-aware distribution projections", () => {
+  it("reserves drafts and approved documents without calling them posted or unpaid obligations", () => {
+    expect(projectDistributionFinancials("draft", "9007199254740993", "0")).toEqual({
+      reservedRial: "9007199254740993",
+      pendingPostingRial: "0",
+      distributedRial: "0",
+      paidRial: "0",
+      outstandingRial: "0",
+    });
+    expect(projectDistributionFinancials("approved", "2500", "0")).toEqual({
+      reservedRial: "2500",
+      pendingPostingRial: "2500",
+      distributedRial: "0",
+      paidRial: "0",
+      outstandingRial: "0",
+    });
+  });
+
+  it("counts only live posted distributions and subtracts net payments with exact integers", () => {
+    expect(projectDistributionFinancials("partially_paid", "9007199254740993", "9007199254740000")).toEqual({
+      reservedRial: "9007199254740993",
+      pendingPostingRial: "0",
+      distributedRial: "9007199254740993",
+      paidRial: "9007199254740000",
+      outstandingRial: "993",
+    });
+    expect(projectDistributionFinancials("paid", "5000", "5000").outstandingRial).toBe("0");
+  });
+
+  it.each(["cancelled", "reversed", "unknown"])("excludes %s history from current balances", (status) => {
+    expect(projectDistributionFinancials(status, "10000", "0")).toEqual({
+      reservedRial: "0",
+      pendingPostingRial: "0",
+      distributedRial: "0",
+      paidRial: "0",
+      outstandingRial: "0",
+    });
+  });
+
+  it("keeps aggregate totals independent of page boundaries and reconciles to linked GL movement", () => {
+    const facts = [
+      { status: "draft", distributableRial: "10000", netPaidRial: "0" },
+      { status: "approved", distributableRial: "2000", netPaidRial: "0" },
+      { status: "partially_paid", distributableRial: "3000", netPaidRial: "500" },
+      { status: "reversed", distributableRial: "4000", netPaidRial: "0" },
+    ];
+    expect(summarizeDistributionFinancials(facts)).toEqual({
+      distributionCount: 4,
+      reservedRial: "15000",
+      draftReservedRial: "10000",
+      pendingPostingRial: "2000",
+      distributedRial: "3000",
+      paidRial: "500",
+      outstandingRial: "2500",
+    });
+    expect(projectFiscalYearDistributions({
+      sourceProfitRial: "20000",
+      glDistributedRial: "3000",
+      glUnpaidRial: "2500",
+      facts,
+    })).toMatchObject({
+      undistributedRetainedProfitRial: "17000",
+      availableToAllocateRial: "5000",
+      distributionVarianceRial: "0",
+      payableVarianceRial: "0",
+    });
   });
 });

@@ -20,7 +20,7 @@ import { useMoney } from "@/components/money/money-context";
 import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { TabBar, TabPanel, type Tab } from "@/app/dashboard/page-chrome";
-import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
+import { EmptyState, KpiCard, KpiRow, LoadingSkeleton, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
 import { PARTY_ROLE_LABELS, type PartyRole } from "@/lib/parties";
@@ -28,10 +28,16 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { formatJalali } from "@/lib/jalali";
 import { formatOwnershipPercent, parseOwnershipPercent } from "@/lib/shareholder-accounting";
 import type {
+  ShareholderAccountStatement,
   ShareholderBalanceRow,
+  ShareholderDistributionLinePage,
   ShareholderDistributionLineRow,
+  ShareholderDistributionPage,
   ShareholderDistributionRow,
+  ShareholderEventPage,
   ShareholderEventRow,
+  ShareholderFiscalYearReconciliationRow,
+  ShareholderPaymentPage,
   ShareholderPaymentRow,
   ShareholderWorkspace,
 } from "@/lib/shareholder-service";
@@ -58,6 +64,9 @@ type ConfirmRequest = {
 
 type OwnershipMode = "event" | "transfer";
 type SimpleOwnershipEvent = "shareholder_added" | "ownership_changed" | "shareholder_removed";
+type ShareholderHistoryFilters = { dateFrom: string; dateTo: string; partyId: string; category: string; eventType: string };
+type ShareholderDistributionFiltersUi = { fiscalYearId: string; status: string };
+type ShareholderPaymentFiltersUi = { dateFrom: string; dateTo: string; partyId: string; paymentType: string };
 
 const OWNERSHIP_EVENT_OPTIONS: readonly { value: SimpleOwnershipEvent; label: string }[] = [
   { value: "shareholder_added", label: "افزودن سهام‌دار" },
@@ -239,11 +248,43 @@ export function ShareholdersSection({
   const [confirmation, setConfirmation] = useState<ConfirmRequest | null>(null);
   const [confirmationReason, setConfirmationReason] = useState("");
 
+  const [eventFilters, setEventFilters] = useState({ dateFrom: "", dateTo: "", partyId: "", category: "", eventType: "" });
+  const [eventCursor, setEventCursor] = useState<string | null>(null);
+  const [eventCursorHistory, setEventCursorHistory] = useState<Array<string | null>>([]);
+  const [eventPage, setEventPage] = useState<ShareholderEventPage | null>(null);
+  const [eventLoading, setEventLoading] = useState(false);
+  const [eventError, setEventError] = useState("");
+  const [eventRetry, setEventRetry] = useState(0);
+
+  const [distributionFilters, setDistributionFilters] = useState({ fiscalYearId: "", status: "all" });
+  const [distributionCursor, setDistributionCursor] = useState<string | null>(null);
+  const [distributionCursorHistory, setDistributionCursorHistory] = useState<Array<string | null>>([]);
+  const [distributionPage, setDistributionPage] = useState<ShareholderDistributionPage | null>(null);
+  const [distributionLoading, setDistributionLoading] = useState(false);
+  const [distributionError, setDistributionError] = useState("");
+  const [distributionRetry, setDistributionRetry] = useState(0);
+  const [distributionDetail, setDistributionDetail] = useState<ShareholderDistributionRow | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+  const [detailRetry, setDetailRetry] = useState(0);
+  const [linePage, setLinePage] = useState<ShareholderDistributionLinePage | null>(null);
+  const [lineOffset, setLineOffset] = useState(0);
+  const [linePartyId, setLinePartyId] = useState("");
+  const [lineLoading, setLineLoading] = useState(false);
+  const [lineError, setLineError] = useState("");
+  const [lineRetry, setLineRetry] = useState(0);
+  const [paymentPage, setPaymentPage] = useState<ShareholderPaymentPage | null>(null);
+  const [paymentFilters, setPaymentFilters] = useState({ dateFrom: "", dateTo: "", partyId: "", paymentType: "" });
+  const [paymentCursor, setPaymentCursor] = useState<string | null>(null);
+  const [paymentCursorHistory, setPaymentCursorHistory] = useState<Array<string | null>>([]);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentError, setPaymentError] = useState("");
+  const [paymentRetry, setPaymentRetry] = useState(0);
+
   const loadWorkspace = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     const params = new URLSearchParams();
     if (asOf) params.set("asOf", asOf);
-    if (selectedDistributionId) params.set("distributionId", selectedDistributionId);
     const query = params.toString();
     const url = query ? `${WORKSPACE_URL}?${query}` : WORKSPACE_URL;
     const { ok, data, aborted } = await api<ShareholderWorkspace & { error?: string }>(url, { signal });
@@ -259,13 +300,148 @@ export function ShareholdersSection({
     setPolicyDraft(data.totalPolicy);
     if (!asOf) setAsOf(data.asOf);
     setLoading(false);
-  }, [asOf, selectedDistributionId]);
+  }, [asOf]);
 
   useEffect(() => {
     const controller = new AbortController();
     void loadWorkspace(controller.signal);
     return () => controller.abort();
   }, [loadWorkspace, refreshKey]);
+
+  const effectiveEventCategory = tab === "capital" ? "capital" : eventFilters.category;
+  useEffect(() => {
+    const capitalTypes = new Set(["capital_contribution", "capital_withdrawal", "capital_reversal"]);
+    if (tab === "capital" && eventFilters.eventType && !capitalTypes.has(eventFilters.eventType)) {
+      setEventFilters((current) => ({ ...current, eventType: "" }));
+      setEventCursor(null);
+      setEventCursorHistory([]);
+    }
+  }, [tab, eventFilters.eventType]);
+  const eventRequestUrl = useMemo(() => {
+    const params = new URLSearchParams({ limit: "50" });
+    if (eventFilters.dateFrom) params.set("dateFrom", eventFilters.dateFrom);
+    if (eventFilters.dateTo) params.set("dateTo", eventFilters.dateTo);
+    if (eventFilters.partyId) params.set("partyId", eventFilters.partyId);
+    if (effectiveEventCategory) params.set("category", effectiveEventCategory);
+    if (eventFilters.eventType) params.set("eventType", eventFilters.eventType);
+    if (eventCursor) params.set("cursor", eventCursor);
+    return `${WORKSPACE_URL}/events?${params.toString()}`;
+  }, [effectiveEventCategory, eventCursor, eventFilters.dateFrom, eventFilters.dateTo, eventFilters.eventType, eventFilters.partyId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setEventLoading(true);
+    setEventError("");
+    void api<ShareholderEventPage & { error?: string }>(eventRequestUrl, { signal: controller.signal }).then(({ ok, data, aborted }) => {
+      if (aborted) return;
+      if (!ok) {
+        setEventError(errorLabel(data.error));
+        setEventPage(null);
+      } else setEventPage(data);
+      setEventLoading(false);
+    });
+    return () => controller.abort();
+  }, [eventRequestUrl, eventRetry, refreshKey]);
+
+  const distributionRequestUrl = useMemo(() => {
+    const params = new URLSearchParams({ limit: "25" });
+    if (distributionFilters.fiscalYearId) params.set("fiscalYearId", distributionFilters.fiscalYearId);
+    if (distributionFilters.status !== "all") params.set("status", distributionFilters.status);
+    if (distributionCursor) params.set("cursor", distributionCursor);
+    return `${WORKSPACE_URL}/distributions?${params.toString()}`;
+  }, [distributionCursor, distributionFilters.fiscalYearId, distributionFilters.status]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDistributionLoading(true);
+    setDistributionError("");
+    void api<ShareholderDistributionPage & { error?: string }>(distributionRequestUrl, { signal: controller.signal }).then(({ ok, data, aborted }) => {
+      if (aborted) return;
+      if (!ok) {
+        setDistributionError(errorLabel(data.error));
+        setDistributionPage(null);
+      } else setDistributionPage(data);
+      setDistributionLoading(false);
+    });
+    return () => controller.abort();
+  }, [distributionRequestUrl, distributionRetry, refreshKey]);
+
+  useEffect(() => {
+    if (!selectedDistributionId && distributionPage?.distributions[0]) {
+      setSelectedDistributionId(distributionPage.distributions[0].id);
+    }
+  }, [distributionPage, selectedDistributionId]);
+
+  useEffect(() => {
+    if (!selectedDistributionId) {
+      setDistributionDetail(null);
+      setDetailError("");
+      return;
+    }
+    const controller = new AbortController();
+    setDetailLoading(true);
+    setDetailError("");
+    void api<ShareholderDistributionRow & { error?: string }>(`${WORKSPACE_URL}/distributions/${encodeURIComponent(selectedDistributionId)}`, { signal: controller.signal }).then(({ ok, data, aborted }) => {
+      if (aborted) return;
+      if (!ok) {
+        setDetailError(errorLabel(data.error));
+        setDistributionDetail(null);
+      } else setDistributionDetail(data);
+      setDetailLoading(false);
+    });
+    return () => controller.abort();
+  }, [selectedDistributionId, detailRetry, refreshKey]);
+
+  useEffect(() => {
+    if (!selectedDistributionId) {
+      setLinePage(null);
+      return;
+    }
+    const controller = new AbortController();
+    const params = new URLSearchParams({ limit: "25", offset: String(lineOffset) });
+    if (linePartyId) params.set("partyId", linePartyId);
+    setLineLoading(true);
+    setLineError("");
+    void api<ShareholderDistributionLinePage & { error?: string }>(`${WORKSPACE_URL}/distributions/${encodeURIComponent(selectedDistributionId)}/lines?${params.toString()}`, { signal: controller.signal }).then(({ ok, data, aborted }) => {
+      if (aborted) return;
+      if (!ok) {
+        setLineError(errorLabel(data.error));
+        setLinePage(null);
+      } else setLinePage(data);
+      setLineLoading(false);
+    });
+    return () => controller.abort();
+  }, [selectedDistributionId, lineOffset, linePartyId, lineRetry, refreshKey]);
+
+  const paymentRequestUrl = useMemo(() => {
+    const params = new URLSearchParams({ limit: "25" });
+    if (selectedDistributionId) params.set("distributionId", selectedDistributionId);
+    if (paymentFilters.dateFrom) params.set("dateFrom", paymentFilters.dateFrom);
+    if (paymentFilters.dateTo) params.set("dateTo", paymentFilters.dateTo);
+    if (paymentFilters.partyId) params.set("partyId", paymentFilters.partyId);
+    if (paymentFilters.paymentType) params.set("paymentType", paymentFilters.paymentType);
+    if (paymentCursor) params.set("cursor", paymentCursor);
+    return `${WORKSPACE_URL}/distributions/payments?${params.toString()}`;
+  }, [paymentCursor, paymentFilters.dateFrom, paymentFilters.dateTo, paymentFilters.partyId, paymentFilters.paymentType, selectedDistributionId]);
+
+  useEffect(() => {
+    if (!selectedDistributionId) {
+      setPaymentPage(null);
+      return;
+    }
+    const controller = new AbortController();
+    setPaymentLoading(true);
+    setPaymentError("");
+    void api<ShareholderPaymentPage & { error?: string }>(paymentRequestUrl, { signal: controller.signal }).then(({ ok, data, aborted }) => {
+      if (aborted) return;
+      if (!ok) {
+        setPaymentError(errorLabel(data.error));
+        setPaymentPage(null);
+      } else setPaymentPage(data);
+      setPaymentLoading(false);
+    });
+    return () => controller.abort();
+  }, [paymentRequestUrl, paymentRetry, refreshKey, selectedDistributionId]);
 
   const loadPartyOptions = useCallback(async (query: string) => {
     setPartySearchBusy(true);
@@ -279,13 +455,6 @@ export function ShareholdersSection({
   useEffect(() => {
     void loadPartyOptions("");
   }, [loadPartyOptions]);
-
-  useEffect(() => {
-    if (!workspace?.distributions.length) return;
-    if (!workspace.distributions.some((item) => item.id === selectedDistributionId)) {
-      setSelectedDistributionId(workspace.distributions[0].id);
-    }
-  }, [workspace, selectedDistributionId]);
 
   const assetAccounts = useMemo(
     () => accounts.filter((account) => account.type === "asset" && account.currency_code == null && account.is_postable !== false),
@@ -356,15 +525,88 @@ export function ShareholdersSection({
     await mutate(`${WORKSPACE_URL}/policy`, "PUT", { totalPolicy: policyDraft }, "سیاست جمع مالکیت به‌روز شد.");
   }
 
+  function updateEventFilters(patch: Partial<typeof eventFilters>) {
+    setEventFilters((current) => ({ ...current, ...patch }));
+    setEventCursor(null);
+    setEventCursorHistory([]);
+  }
+
+  function updateDistributionFilters(patch: Partial<typeof distributionFilters>) {
+    setDistributionFilters((current) => ({ ...current, ...patch }));
+    setDistributionCursor(null);
+    setDistributionCursorHistory([]);
+  }
+
+  function nextEventPage() {
+    if (!eventPage?.nextCursor) return;
+    setEventCursorHistory((current) => [...current, eventCursor]);
+    setEventCursor(eventPage.nextCursor);
+  }
+
+  function previousEventPage() {
+    if (eventCursorHistory.length === 0) return;
+    setEventCursor(eventCursorHistory.at(-1) ?? null);
+    setEventCursorHistory((current) => current.slice(0, -1));
+  }
+
+  function nextDistributionPage() {
+    if (!distributionPage?.nextCursor) return;
+    setDistributionCursorHistory((current) => [...current, distributionCursor]);
+    setDistributionCursor(distributionPage.nextCursor);
+  }
+
+  function previousDistributionPage() {
+    if (distributionCursorHistory.length === 0) return;
+    setDistributionCursor(distributionCursorHistory.at(-1) ?? null);
+    setDistributionCursorHistory((current) => current.slice(0, -1));
+  }
+
+  function nextPaymentPage() {
+    if (!paymentPage?.nextCursor) return;
+    setPaymentCursorHistory((current) => [...current, paymentCursor]);
+    setPaymentCursor(paymentPage.nextCursor);
+  }
+
+  function previousPaymentPage() {
+    if (paymentCursorHistory.length === 0) return;
+    setPaymentCursor(paymentCursorHistory.at(-1) ?? null);
+    setPaymentCursorHistory((current) => current.slice(0, -1));
+  }
+
+  function updatePaymentFilters(patch: Partial<ShareholderPaymentFiltersUi>) {
+    setPaymentFilters((current) => ({ ...current, ...patch }));
+    setPaymentCursor(null);
+    setPaymentCursorHistory([]);
+  }
+
+  function selectDistribution(id: string) {
+    setSelectedDistributionId(id);
+    setLineOffset(0);
+    setLinePartyId("");
+    setPaymentCursor(null);
+    setPaymentCursorHistory([]);
+  }
+
+  const eventExportUrl = useMemo(() => {
+    const params = new URLSearchParams();
+    if (eventFilters.dateFrom) params.set("dateFrom", eventFilters.dateFrom);
+    if (eventFilters.dateTo) params.set("dateTo", eventFilters.dateTo);
+    if (eventFilters.partyId) params.set("partyId", eventFilters.partyId);
+    if (effectiveEventCategory) params.set("category", effectiveEventCategory);
+    if (eventFilters.eventType) params.set("eventType", eventFilters.eventType);
+    const query = params.toString();
+    return `${WORKSPACE_URL}/events/export${query ? `?${query}` : ""}`;
+  }, [effectiveEventCategory, eventFilters.dateFrom, eventFilters.dateTo, eventFilters.eventType, eventFilters.partyId]);
+
   const register = workspace?.register ?? [];
   const activeOwners = register.filter((row) => row.active);
   const ownershipPercentTotal = workspace ? ownershipTotal(register) : "0";
-  const selectedDistribution = workspace?.distributions.find((item) => item.id === selectedDistributionId) ?? null;
-  const distributionLines = useMemo(
-    () => (workspace?.distributionLines ?? []).filter((line) => line.distributionId === selectedDistributionId),
-    [workspace?.distributionLines, selectedDistributionId],
-  );
-  const netOutstanding = workspace?.distributions.reduce((sum, distribution) => sum + BigInt(distribution.outstandingRial), 0n).toString() ?? "0";
+  const selectedDistribution = distributionDetail;
+  const distributionLines = linePage?.lines ?? [];
+  const totalUndistributedRetained = workspace?.fiscalYearReconciliation.reduce(
+    (sum, year) => sum + BigInt(year.undistributedRetainedProfitRial), 0n,
+  ).toString() ?? "0";
+  const totalUnpaidAllocated = workspace?.distributionSummary.outstandingRial ?? "0";
 
   if (loading && !workspace) return <SectionCardSkeleton rows={6} />;
   if (!workspace) {
@@ -386,7 +628,8 @@ export function ShareholdersSection({
       <KpiRow>
         <KpiCard label="سهام‌داران فعال در تاریخ انتخابی" value={toPersianDigits(String(activeOwners.length))} hint={`مجموع مالکیت ${percentLabel(ownershipPercentTotal)}`} icon={UsersIcon} />
         <KpiCard label="سیاست مالکیت" value={workspace.totalPolicy === "exactly_100" ? "دقیقاً ۱۰۰٪" : "حداکثر ۱۰۰٪"} hint={`نمای مالکیت تا ${dateLabel(workspace.asOf)}`} />
-        <KpiCard label="سود تقسیم‌نشده" value={formatBalance(money, netOutstanding)} hint="جمع ماندهٔ توزیع‌های ثبت‌شده و پرداخت‌نشده" />
+        <KpiCard label="سود نگه‌داشته‌شدهٔ تقسیم‌نشده" value={formatBalance(money, totalUndistributedRetained)} hint="نتیجهٔ بسته‌شده منهای تخصیص واقعی ثبت‌شده در GL" />
+        <KpiCard label="تخصیص پرداخت‌نشده" value={formatBalance(money, totalUnpaidAllocated)} hint="بدهی سود سهام‌داران پس از کسر پرداخت‌های ثبت‌شده" />
         <KpiCard label="حساب‌های قابل تطبیق" value={toPersianDigits(String(workspace.glReconciliation.length))} hint={workspace.glReconciliation.every((row) => row.unattributedBalanceRial === "0") ? "مانده‌ها به اشخاص منتسب‌اند" : "برخی مانده‌ها نیازمند بررسی‌اند"} />
       </KpiRow>
 
@@ -408,6 +651,17 @@ export function ShareholdersSection({
             partyOptions={partySelectOptions}
             partiesLoading={partySearchBusy}
             searchParties={(query) => void loadPartyOptions(query)}
+            events={eventPage?.events ?? []}
+            eventPage={eventPage}
+            historyFilters={eventFilters}
+            historyLoading={eventLoading}
+            historyError={eventError}
+            eventExportUrl={eventExportUrl}
+            onHistoryFilterChange={updateEventFilters}
+            onPreviousEventPage={previousEventPage}
+            onNextEventPage={nextEventPage}
+            canPreviousEventPage={eventCursorHistory.length > 0}
+            onRetryEvents={() => setEventRetry((current) => current + 1)}
             onReverseCapital={(event) => setConfirmation({
               title: "برگشت رویداد سرمایه؟",
               description: "برگشت، سند آینهٔ جدید می‌سازد و سند ثبت‌شده را حذف یا ویرایش نمی‌کند.",
@@ -429,6 +683,20 @@ export function ShareholdersSection({
             permissions={{ record: canRecordCapital, reverse: canReverseCapital }}
             busy={busy}
             parties={shareholderOptions}
+            events={eventPage?.events ?? []}
+            eventPage={eventPage}
+            historyFilters={eventFilters}
+            historyLoading={eventLoading}
+            historyError={eventError}
+            eventExportUrl={eventExportUrl}
+            historyPartyOptions={partySelectOptions}
+            historyPartiesLoading={partySearchBusy}
+            searchHistoryParties={(query) => void loadPartyOptions(query)}
+            onHistoryFilterChange={updateEventFilters}
+            onPreviousEventPage={previousEventPage}
+            onNextEventPage={nextEventPage}
+            canPreviousEventPage={eventCursorHistory.length > 0}
+            onRetryEvents={() => setEventRetry((current) => current + 1)}
             onRecord={async (body) => Boolean(await mutate(`${WORKSPACE_URL}/capital`, "POST", body, "رویداد سرمایه و سند حسابداری ثبت شد."))}
             onReverse={(event) => setConfirmation({
               title: "برگشت رویداد سرمایه؟",
@@ -444,10 +712,44 @@ export function ShareholdersSection({
         {tab === "distributions" ? (
           <DistributionPanel
             workspace={workspace}
-            lines={distributionLines}
+            distributions={distributionPage?.distributions ?? []}
+            distributionPage={distributionPage}
+            distributionLoading={distributionLoading}
+            distributionError={distributionError}
+            distributionFilters={distributionFilters}
+            onDistributionFilterChange={updateDistributionFilters}
+            onPreviousDistributionPage={previousDistributionPage}
+            onNextDistributionPage={nextDistributionPage}
+            canPreviousDistributionPage={distributionCursorHistory.length > 0}
+            onRetryDistributions={() => setDistributionRetry((current) => current + 1)}
             selected={selectedDistribution}
             selectedId={selectedDistributionId}
-            onSelect={setSelectedDistributionId}
+            onSelect={selectDistribution}
+            detailLoading={detailLoading}
+            detailError={detailError}
+            onRetryDetail={() => setDetailRetry((current) => current + 1)}
+            lines={distributionLines}
+            linePage={linePage}
+            lineLoading={lineLoading}
+            lineError={lineError}
+            lineOffset={lineOffset}
+            onLineOffsetChange={setLineOffset}
+            linePartyId={linePartyId}
+            onLinePartyChange={(partyId) => { setLinePartyId(partyId); setLineOffset(0); }}
+            onRetryLines={() => setLineRetry((current) => current + 1)}
+            payments={paymentPage?.payments ?? []}
+            paymentPage={paymentPage}
+            paymentFilters={paymentFilters}
+            onPaymentFilterChange={updatePaymentFilters}
+            paymentPartyOptions={partySelectOptions}
+            paymentPartySearchBusy={partySearchBusy}
+            searchPaymentParties={(query) => void loadPartyOptions(query)}
+            paymentLoading={paymentLoading}
+            paymentError={paymentError}
+            onPreviousPaymentPage={previousPaymentPage}
+            onNextPaymentPage={nextPaymentPage}
+            canPreviousPaymentPage={paymentCursorHistory.length > 0}
+            onRetryPayments={() => setPaymentRetry((current) => current + 1)}
             accountOptions={assetAccountOptions}
             permissions={{
               manage: canManageDistributions,
@@ -462,7 +764,7 @@ export function ShareholdersSection({
             money={money}
             onCreate={async (body) => {
               const result = await mutate<{ distribution: ShareholderDistributionRow }>(`${WORKSPACE_URL}/distributions`, "POST", body, "پیش‌نویس تقسیم سود با snapshot مالکیت ساخته شد.");
-              if (result?.distribution?.id) setSelectedDistributionId(result.distribution.id);
+              if (result?.distribution?.id) selectDistribution(result.distribution.id);
               return Boolean(result);
             }}
             onAction={mutate}
@@ -532,6 +834,17 @@ function OwnershipPanel({
   partyOptions,
   partiesLoading,
   searchParties,
+  events,
+  eventPage,
+  historyFilters,
+  historyLoading,
+  historyError,
+  eventExportUrl,
+  onHistoryFilterChange,
+  onPreviousEventPage,
+  onNextEventPage,
+  canPreviousEventPage,
+  onRetryEvents,
   onReverseCapital,
   onSubmit,
 }: {
@@ -549,6 +862,17 @@ function OwnershipPanel({
   partyOptions: SelectOption[];
   partiesLoading: boolean;
   searchParties: (query: string) => void;
+  events: ShareholderEventRow[];
+  eventPage: ShareholderEventPage | null;
+  historyFilters: ShareholderHistoryFilters;
+  historyLoading: boolean;
+  historyError: string;
+  eventExportUrl: string;
+  onHistoryFilterChange: (patch: Partial<ShareholderHistoryFilters>) => void;
+  onPreviousEventPage: () => void;
+  onNextEventPage: () => void;
+  canPreviousEventPage: boolean;
+  onRetryEvents: () => void;
   onReverseCapital: (event: ShareholderEventRow) => void;
   onSubmit: (events: Record<string, unknown>[], key: string) => Promise<boolean>;
 }) {
@@ -756,8 +1080,28 @@ function OwnershipPanel({
         )}
       </SectionCard>
 
-      <SectionCard title="تاریخچهٔ رویدادهای مالکیت و سرمایه" description={workspace.eventsTruncated ? "۵۰۰ رویداد اخیر نمایش داده می‌شود؛ گزارش کامل از خروجی قابل دریافت است." : "تاریخچه به‌ترتیب اثر زمانی؛ برای اصلاح هر رویداد، ثبت تازه با مجوز مناسب لازم است."} actions={<Button variant="outline" size="sm" onClick={() => downloadEvents(workspace.events)}><DownloadIcon className="size-4" aria-hidden="true" /> دریافت CSV</Button>} flush>
-        <EventHistoryTable events={workspace.events} money={money} canReverseCapital={canReverseCapital} onReverse={onReverseCapital} />
+      <SectionCard title="تاریخچهٔ رویدادهای مالکیت و سرمایه" description="تاریخچه به‌ترتیب اثر زمانی و صفحه‌بندی‌شده است؛ خروجی CSV تمام نتایج فیلترشده را دریافت می‌کند." actions={<a className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium hover:bg-muted" href={eventExportUrl} download><DownloadIcon className="size-4" aria-hidden="true" /> خروجی کامل CSV</a>} flush>
+        <HistoryFilters
+          filters={historyFilters}
+          categoryOptions
+          partyOptions={partyOptions}
+          partiesLoading={partiesLoading}
+          searchParties={searchParties}
+          onChange={onHistoryFilterChange}
+        />
+        <ErrorBox>{historyError}</ErrorBox>
+        {historyLoading ? <LoadingSkeleton rows={2} compact label="در حال بارگذاری تاریخچه" className="px-4 py-2" /> : null}
+        {!eventPage && historyError ? <Button variant="outline" size="sm" onClick={onRetryEvents}>تلاش دوباره</Button> : null}
+        <EventHistoryTable events={events} money={money} canReverseCapital={canReverseCapital} onReverse={onReverseCapital} />
+        <CursorPagination
+          totalCount={eventPage?.totalCount ?? 0}
+          limit={eventPage?.limit ?? 50}
+          hasMore={eventPage?.hasMore ?? false}
+          loading={historyLoading}
+          canPrevious={canPreviousEventPage}
+          onPrevious={onPreviousEventPage}
+          onNext={onNextEventPage}
+        />
       </SectionCard>
     </div>
   );
@@ -773,6 +1117,20 @@ function CapitalPanel({
   permissions,
   busy,
   parties,
+  events,
+  eventPage,
+  historyFilters,
+  historyLoading,
+  historyError,
+  eventExportUrl,
+  historyPartyOptions,
+  historyPartiesLoading,
+  searchHistoryParties,
+  onHistoryFilterChange,
+  onPreviousEventPage,
+  onNextEventPage,
+  canPreviousEventPage,
+  onRetryEvents,
   onRecord,
   onReverse,
   money,
@@ -782,6 +1140,20 @@ function CapitalPanel({
   permissions: { record: boolean; reverse: boolean };
   busy: boolean;
   parties: SelectOption[];
+  events: ShareholderEventRow[];
+  eventPage: ShareholderEventPage | null;
+  historyFilters: ShareholderHistoryFilters;
+  historyLoading: boolean;
+  historyError: string;
+  eventExportUrl: string;
+  historyPartyOptions: SelectOption[];
+  historyPartiesLoading: boolean;
+  searchHistoryParties: (query: string) => void;
+  onHistoryFilterChange: (patch: Partial<ShareholderHistoryFilters>) => void;
+  onPreviousEventPage: () => void;
+  onNextEventPage: () => void;
+  canPreviousEventPage: boolean;
+  onRetryEvents: () => void;
   onRecord: (body: Record<string, unknown>) => Promise<boolean>;
   onReverse: (event: ShareholderEventRow) => void;
   money: ReturnType<typeof useMoney>;
@@ -796,7 +1168,7 @@ function CapitalPanel({
   const [sourceReference, setSourceReference] = useState("");
   const [notes, setNotes] = useState("");
   const [formError, setFormError] = useState("");
-  const capitalEvents = workspace.events.filter((event) => event.amountRial !== null && ["capital_contribution", "capital_withdrawal"].includes(event.eventType));
+  const capitalEvents = events.filter((event) => event.amountRial !== null && ["capital_contribution", "capital_withdrawal", "capital_reversal"].includes(event.eventType));
 
   useEffect(() => setEffectiveOn(workspace.today), [workspace.today]);
 
@@ -862,22 +1234,28 @@ function CapitalPanel({
         <ShareholderBalanceTable rows={workspace.shareholderBalances} money={money} />
       </SectionCard>
 
-      <SectionCard title="رویدادهای سرمایه ثبت‌شده" description="هر برگشت، سند آینهٔ مستقل است؛ سابقهٔ اصلی تغییر نمی‌کند." flush>
-        {capitalEvents.length === 0 ? <EmptyState title="رویداد سرمایه‌ای ثبت نشده است">آورده یا برداشت سهام‌دار را از فرم بالا ثبت کنید.</EmptyState> : (
+      <SectionCard title="رویدادهای سرمایه ثبت‌شده" description="تاریخچهٔ کامل با فیلتر و صفحه‌بندی؛ خروجی CSV همهٔ نتایج فیلترشده را شامل می‌شود." actions={<a className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium hover:bg-muted" href={eventExportUrl} download><DownloadIcon className="size-4" aria-hidden="true" /> خروجی CSV</a>} flush>
+        <HistoryFilters filters={historyFilters} forcedCategory="capital" partyOptions={historyPartyOptions} partiesLoading={historyPartiesLoading} searchParties={searchHistoryParties} onChange={onHistoryFilterChange} />
+        <ErrorBox>{historyError}</ErrorBox>
+        {historyLoading ? <LoadingSkeleton rows={2} compact label="در حال بارگذاری رویدادهای سرمایه" className="px-4 py-2" /> : null}
+        {!eventPage && historyError ? <Button variant="outline" size="sm" onClick={onRetryEvents}>تلاش دوباره</Button> : null}
+        {capitalEvents.length === 0 && !historyLoading ? <EmptyState title="رویداد سرمایه‌ای در این فیلتر ثبت نشده است">آورده یا برداشت سهام‌دار را از فرم بالا ثبت کنید یا فیلترها را تغییر دهید.</EmptyState> : (
           <DataTable caption="رویدادهای سرمایهٔ سهام‌داران">
             <DataTableHead><Th>تاریخ</Th><Th>سهام‌دار</Th><Th>نوع</Th><Th>طبقه</Th><Th numeric>مبلغ</Th><Th>سند دفتر کل</Th><Th>دلیل</Th><Th>عملیات</Th></DataTableHead>
             <DataTableBody>
-              {capitalEvents.map((event) => (
-                <DataTableRow key={event.id}>
+              {capitalEvents.map((event) => {
+                const alreadyReversed = event.isReversed;
+                return <DataTableRow key={event.id}>
                   <Td nowrap>{dateLabel(event.effectiveOn)}</Td><Td>{event.partyName}</Td><Td>{EVENT_LABELS[event.eventType] ?? event.eventType}</Td><Td>{capitalClassLabel(event.capitalClass)}</Td><Td numeric>{formatBalance(money, event.amountRial ?? "0")}</Td>
                   <Td>{event.journalEntryId ? <Link className="text-primary underline-offset-4 hover:underline" href={journalHref(event.journalEntryId)}>{event.journalVoucher ? `سند ${toPersianDigits(event.journalVoucher)}` : "مشاهدهٔ سند"}</Link> : "—"}</Td>
                   <Td className="max-w-64 truncate" title={event.reason ?? undefined}>{event.reason ?? "—"}</Td>
-                  <Td>{permissions.reverse && !event.reversesEventId ? <Button variant="outline" size="sm" disabled={busy} onClick={() => onReverse(event)}>برگشت</Button> : event.reversesEventId ? <StatusBadge tone="neutral">رویداد برگشت</StatusBadge> : "—"}</Td>
-                </DataTableRow>
-              ))}
+                  <Td>{permissions.reverse && !alreadyReversed && !event.reversesEventId && event.eventType !== "capital_reversal" ? <Button variant="outline" size="sm" disabled={busy} onClick={() => onReverse(event)}>برگشت</Button> : event.reversesEventId ? <StatusBadge tone="neutral">رویداد برگشت</StatusBadge> : alreadyReversed ? <StatusBadge tone="neutral">برگشت‌شده</StatusBadge> : "—"}</Td>
+                </DataTableRow>;
+              })}
             </DataTableBody>
           </DataTable>
         )}
+        <CursorPagination totalCount={eventPage?.totalCount ?? 0} limit={eventPage?.limit ?? 50} hasMore={eventPage?.hasMore ?? false} loading={historyLoading} canPrevious={canPreviousEventPage} onPrevious={onPreviousEventPage} onNext={onNextEventPage} />
       </SectionCard>
     </div>
   );
@@ -902,12 +1280,57 @@ function ShareholderBalanceTable({ rows, money }: { rows: ShareholderBalanceRow[
   );
 }
 
+function distributionPartyOptions(
+  workspace: ShareholderWorkspace,
+  lines: readonly ShareholderDistributionLineRow[],
+): SelectOption[] {
+  const parties = new Map<string, string>();
+  for (const row of workspace.register) parties.set(row.partyId, row.partyName);
+  for (const row of workspace.shareholderBalances) parties.set(row.partyId, row.partyName);
+  for (const row of lines) parties.set(row.partyId, row.partyName);
+  return [...parties].map(([value, name]) => ({ value, label: name, searchString: name }));
+}
+
 function DistributionPanel({
   workspace,
-  lines,
+  distributions,
+  distributionPage,
+  distributionLoading,
+  distributionError,
+  distributionFilters,
+  onDistributionFilterChange,
+  onPreviousDistributionPage,
+  onNextDistributionPage,
+  canPreviousDistributionPage,
+  onRetryDistributions,
   selected,
   selectedId,
   onSelect,
+  detailLoading,
+  detailError,
+  onRetryDetail,
+  lines,
+  linePage,
+  lineLoading,
+  lineError,
+  lineOffset,
+  onLineOffsetChange,
+  linePartyId,
+  onLinePartyChange,
+  onRetryLines,
+  payments,
+  paymentPage,
+  paymentFilters,
+  onPaymentFilterChange,
+  paymentPartyOptions,
+  paymentPartySearchBusy,
+  searchPaymentParties,
+  paymentLoading,
+  paymentError,
+  onPreviousPaymentPage,
+  onNextPaymentPage,
+  canPreviousPaymentPage,
+  onRetryPayments,
   accountOptions,
   permissions,
   currentUserId,
@@ -918,10 +1341,44 @@ function DistributionPanel({
   onConfirm,
 }: {
   workspace: ShareholderWorkspace;
-  lines: ShareholderDistributionLineRow[];
+  distributions: ShareholderDistributionRow[];
+  distributionPage: ShareholderDistributionPage | null;
+  distributionLoading: boolean;
+  distributionError: string;
+  distributionFilters: ShareholderDistributionFiltersUi;
+  onDistributionFilterChange: (patch: Partial<ShareholderDistributionFiltersUi>) => void;
+  onPreviousDistributionPage: () => void;
+  onNextDistributionPage: () => void;
+  canPreviousDistributionPage: boolean;
+  onRetryDistributions: () => void;
   selected: ShareholderDistributionRow | null;
   selectedId: string;
   onSelect: (id: string) => void;
+  detailLoading: boolean;
+  detailError: string;
+  onRetryDetail: () => void;
+  lines: ShareholderDistributionLineRow[];
+  linePage: ShareholderDistributionLinePage | null;
+  lineLoading: boolean;
+  lineError: string;
+  lineOffset: number;
+  onLineOffsetChange: (offset: number) => void;
+  linePartyId: string;
+  onLinePartyChange: (partyId: string) => void;
+  onRetryLines: () => void;
+  payments: ShareholderPaymentRow[];
+  paymentPage: ShareholderPaymentPage | null;
+  paymentFilters: ShareholderPaymentFiltersUi;
+  onPaymentFilterChange: (patch: Partial<ShareholderPaymentFiltersUi>) => void;
+  paymentPartyOptions: SelectOption[];
+  paymentPartySearchBusy: boolean;
+  searchPaymentParties: (query: string) => void;
+  paymentLoading: boolean;
+  paymentError: string;
+  onPreviousPaymentPage: () => void;
+  onNextPaymentPage: () => void;
+  canPreviousPaymentPage: boolean;
+  onRetryPayments: () => void;
   accountOptions: SelectOption[];
   permissions: { manage: boolean; adjust: boolean; approve: boolean; post: boolean; pay: boolean; reverse: boolean };
   currentUserId: string;
@@ -977,8 +1434,8 @@ function DistributionPanel({
     }
   }, [selectedYear, taxAdjustment, reserveAdjustment, manualAdjustment, money]);
 
-  const linesTotal = lines.reduce((sum, line) => sum + BigInt(line.allocatedRial), 0n).toString();
-  const payments = workspace.payments.filter((payment) => payment.distributionId === selectedId);
+  const linesTotal = linePage?.totalAllocatedRial ?? "0";
+  const linePartyOptions = distributionPartyOptions(workspace, lines);
   const outstandingLines = lines.filter((line) => BigInt(line.outstandingRial) > 0n);
   const payOptions = outstandingLines.map((line) => ({ value: line.shareholderId, label: `${line.partyName} — مانده ${formatBalance(money, line.outstandingRial)}` }));
   const selectedLine = lines.find((line) => line.shareholderId === payShareholderId) ?? null;
@@ -1086,21 +1543,58 @@ function DistributionPanel({
         </form>
       </SectionCard>
 
+      <FiscalYearDistributionReconciliation rows={workspace.fiscalYearReconciliation} money={money} />
+
       <SectionCard title="توزیع‌های سود" description="مبالغ هر خط با مالکیت snapshot ثابت شده‌اند؛ پرداخت‌ها جداگانه در حساب ۲۵۲۰ و حساب پرداخت ثبت می‌شوند." flush>
-        {workspace.distributions.length === 0 ? <EmptyState title="توزیعی ثبت نشده است">با انتخاب یک سال بسته‌شده، پیش‌نویس تقسیم سود بسازید.</EmptyState> : (
+        <div className="grid gap-3 border-b border-border/70 p-4 sm:grid-cols-2 xl:grid-cols-4">
+          <Field label="فیلتر سال مالی">
+            <select className={inputClass} value={distributionFilters.fiscalYearId} onChange={(event) => onDistributionFilterChange({ fiscalYearId: event.target.value })}>
+              <option value="">همهٔ سال‌ها</option>
+              {workspace.fiscalYears.map((year) => <option key={year.id} value={year.id}>{year.label}</option>)}
+            </select>
+          </Field>
+          <Field label="فیلتر وضعیت">
+            <select className={inputClass} value={distributionFilters.status} onChange={(event) => onDistributionFilterChange({ status: event.target.value })}>
+              <option value="all">همهٔ وضعیت‌ها</option>
+              {Object.entries(DISTRIBUTION_STATUS).map(([value, status]) => <option key={value} value={value}>{status.label}</option>)}
+            </select>
+          </Field>
+          <div className="sm:col-span-2 flex flex-wrap items-end gap-3 text-sm text-muted-foreground">
+            <span>تعداد در فیلتر: <strong className="text-foreground">{toPersianDigits(String(distributionPage?.totalCount ?? 0))}</strong></span>
+            <span>رزرو فعال: <strong className="text-foreground">{formatBalance(money, distributionPage?.summary.reservedRial ?? "0")}</strong></span>
+            <span>در انتظار ثبت: <strong className="text-foreground">{formatBalance(money, distributionPage?.summary.pendingPostingRial ?? "0")}</strong></span>
+            <span>پرداخت‌نشده: <strong className="text-foreground">{formatBalance(money, distributionPage?.summary.outstandingRial ?? "0")}</strong></span>
+          </div>
+        </div>
+        <ErrorBox>{distributionError}</ErrorBox>
+        {distributionLoading ? <LoadingSkeleton rows={2} compact label="در حال بارگذاری توزیع‌ها" className="px-4 py-2" /> : null}
+        {!distributionPage && distributionError ? <div className="p-4"><Button variant="outline" size="sm" onClick={onRetryDistributions}>تلاش دوباره</Button></div> : null}
+        {distributionPage?.totalCount === 0 && !distributionLoading ? <EmptyState title="توزیعی با این فیلترها پیدا نشد">سال مالی یا وضعیت دیگری انتخاب کنید، یا پیش‌نویس جدید بسازید.</EmptyState> : null}
+        {distributions.length > 0 ? (
           <DataTable caption="توزیع‌های سود سهام‌داران">
             <DataTableHead><Th>سال مالی</Th><Th>Snapshot</Th><Th>وضعیت</Th><Th numeric>سود مبنا</Th><Th numeric>قابل‌تقسیم</Th><Th numeric>پرداخت‌شده</Th><Th numeric>مانده</Th><Th>جزئیات</Th></DataTableHead>
-            <DataTableBody>{workspace.distributions.map((distribution) => {
+            <DataTableBody>{distributions.map((distribution) => {
               const status = DISTRIBUTION_STATUS[distribution.status] ?? { label: distribution.status, tone: "neutral" as const };
               return <DataTableRow key={distribution.id} selected={distribution.id === selectedId} onClick={() => onSelect(distribution.id)}>
-                <Td>{distribution.fiscalYearLabel}</Td><Td nowrap>{dateLabel(distribution.snapshotOn)}</Td><Td><StatusBadge tone={status.tone}>{status.label}</StatusBadge></Td><Td numeric>{formatBalance(money, distribution.sourceProfitRial)}</Td><Td numeric>{formatBalance(money, distribution.distributableRial)}</Td><Td numeric>{formatBalance(money, distribution.paidRial)}</Td><Td numeric>{formatBalance(money, distribution.outstandingRial)}</Td><Td><Button type="button" variant="outline" size="sm" onClick={() => onSelect(distribution.id)}>نمایش</Button></Td>
+                <Td>{distribution.fiscalYearLabel}</Td><Td nowrap>{dateLabel(distribution.snapshotOn)}</Td><Td><StatusBadge tone={status.tone}>{status.label}</StatusBadge></Td><Td numeric>{formatBalance(money, distribution.sourceProfitRial)}</Td><Td numeric>{formatBalance(money, distribution.distributableRial)}</Td><Td numeric>{formatBalance(money, distribution.paidRial)}</Td><Td numeric>{formatBalance(money, distribution.outstandingRial)}</Td><Td><Button type="button" variant="outline" size="sm" onClick={(event) => { event.stopPropagation(); onSelect(distribution.id); }}>نمایش</Button></Td>
               </DataTableRow>;
             })}</DataTableBody>
-            <DataTableFoot><tr><Th scope="row" colSpan={6}>ماندهٔ کل توزیع‌های فهرست‌شده</Th><Td numeric>{formatBalance(money, workspace.distributions.reduce((sum, row) => sum + BigInt(row.outstandingRial), 0n).toString())}</Td><Td /></tr></DataTableFoot>
+            <DataTableFoot><tr><Th scope="row" colSpan={6}>جمع نتایج فیلترشده، مستقل از صفحه</Th><Td numeric>{formatBalance(money, distributionPage?.summary.outstandingRial ?? "0")}</Td><Td /></tr></DataTableFoot>
           </DataTable>
-        )}
+        ) : null}
+        <CursorPagination
+          totalCount={distributionPage?.totalCount ?? 0}
+          limit={distributionPage?.limit ?? 25}
+          hasMore={distributionPage?.hasMore ?? false}
+          loading={distributionLoading}
+          canPrevious={canPreviousDistributionPage}
+          onPrevious={onPreviousDistributionPage}
+          onNext={onNextDistributionPage}
+        />
       </SectionCard>
 
+      {detailLoading && selectedId ? <SectionCard title="بارگذاری توزیع انتخاب‌شده"><p className="py-4 text-sm text-muted-foreground" role="status">جزئیات مستقل توزیع در حال بارگذاری است…</p></SectionCard> : null}
+      {detailError ? <SectionCard title="جزئیات توزیع در دسترس نیست"><ErrorBox>{detailError}</ErrorBox><Button variant="outline" size="sm" onClick={onRetryDetail}>تلاش دوباره</Button></SectionCard> : null}
       {selected ? (
         <>
           <SectionCard title={`توزیع ${selected.fiscalYearLabel}`} description={`Snapshot مالکیت: ${dateLabel(selected.snapshotOn)} · سود مبنا از سند اختتامیه: ${formatBalance(money, selected.sourceProfitRial)}`} actions={<StatusBadge tone={(DISTRIBUTION_STATUS[selected.status] ?? { tone: "neutral" }).tone}>{DISTRIBUTION_STATUS[selected.status]?.label ?? selected.status}</StatusBadge>}>
@@ -1123,14 +1617,35 @@ function DistributionPanel({
             </div>
           </SectionCard>
 
-          <SectionCard title="خطوط تخصیص snapshot" description="مبالغ با ریال صحیح و روش بزرگ‌ترین باقیمانده تخصیص یافته‌اند؛ جمع دقیق خطوط با مبلغ قابل‌تقسیم برابر است." flush>
-            {lines.length === 0 ? <EmptyState title="خطوط تخصیص در دسترس نیست»">خطوط ۲۰ توزیع اخیر نگهداری و نمایش داده می‌شوند؛ فهرست را تازه کنید.</EmptyState> : (
+          <SectionCard title="خطوط تخصیص snapshot" description="مبالغ ثابت و تغییرناپذیرند؛ این جدول فقط صفحهٔ درخواستی را نشان می‌دهد و جمع کل از همهٔ خطوط محاسبه می‌شود." flush>
+            <div className="grid gap-3 border-b border-border/70 p-4 sm:grid-cols-2">
+              <Field label="فیلتر سهام‌دار">
+                <SearchableSelect value={linePartyId} onChange={onLinePartyChange} options={linePartyOptions} placeholder="همهٔ سهام‌داران" searchPlaceholder="جست‌وجوی نام سهام‌دار" ariaLabel="فیلتر خطوط تخصیص بر اساس سهام‌دار" />
+              </Field>
+              <div className="flex items-end gap-3 text-sm text-muted-foreground">
+                <span>کل خطوط: <strong className="text-foreground">{toPersianDigits(String(linePage?.totalCount ?? 0))}</strong></span>
+                <span>تخصیص: <strong className="text-foreground">{formatBalance(money, linesTotal)}</strong></span>
+                <span>پرداخت‌نشده: <strong className="text-foreground">{formatBalance(money, linePage?.totalOutstandingRial ?? "0")}</strong></span>
+              </div>
+            </div>
+            <ErrorBox>{lineError}</ErrorBox>
+            {lineLoading ? <LoadingSkeleton rows={2} compact label="در حال بارگذاری خطوط تخصیص" className="px-4 py-2" /> : null}
+            {!linePage && lineError ? <div className="p-4"><Button variant="outline" size="sm" onClick={onRetryLines}>تلاش دوباره</Button></div> : null}
+            {linePage?.totalCount === 0 && !lineLoading ? <EmptyState title="خط تخصیصی با این فیلتر پیدا نشد">فیلتر سهام‌دار را پاک کنید یا جزئیات را دوباره بارگذاری کنید.</EmptyState> : null}
+            {lines.length > 0 ? (
               <DataTable caption="مالکیت و مبلغ تخصیص‌یافته برای هر سهام‌دار">
                 <DataTableHead><Th>سهام‌دار</Th><Th numeric>مالکیت در snapshot</Th><Th numeric>تعداد سهم</Th><Th numeric>تخصیص</Th><Th numeric>پرداخت‌شده</Th><Th numeric>ماندهٔ سهم</Th></DataTableHead>
                 <DataTableBody>{lines.map((line) => <DataTableRow key={`${line.distributionId}:${line.shareholderId}`}><Td>{line.partyName}</Td><Td numeric>{percentLabel(line.ownershipPercent)}</Td><Td numeric>{line.shareUnits ? toPersianDigits(line.shareUnits) : "—"}</Td><Td numeric>{formatBalance(money, line.allocatedRial)}</Td><Td numeric>{formatBalance(money, line.paidRial)}</Td><Td numeric>{formatBalance(money, line.outstandingRial)}</Td></DataTableRow>)}</DataTableBody>
-                <DataTableFoot><tr><Th scope="row" colSpan={3}>جمع تخصیص</Th><Td numeric>{formatBalance(money, linesTotal)}</Td><Td numeric>{formatBalance(money, lines.reduce((sum, line) => sum + BigInt(line.paidRial), 0n).toString())}</Td><Td numeric>{formatBalance(money, lines.reduce((sum, line) => sum + BigInt(line.outstandingRial), 0n).toString())}</Td></tr></DataTableFoot>
+                <DataTableFoot><tr><Th scope="row" colSpan={3}>جمع کل، مستقل از صفحه</Th><Td numeric>{formatBalance(money, linePage?.totalAllocatedRial ?? "0")}</Td><Td numeric>{formatBalance(money, linePage?.totalPaidRial ?? "0")}</Td><Td numeric>{formatBalance(money, linePage?.totalOutstandingRial ?? "0")}</Td></tr></DataTableFoot>
               </DataTable>
-            )}
+            ) : null}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 p-3">
+              <span className="text-xs text-muted-foreground">صفحهٔ {toPersianDigits(String(Math.floor(lineOffset / (linePage?.limit ?? 25)) + 1))}</span>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" disabled={lineLoading || lineOffset === 0} onClick={() => onLineOffsetChange(Math.max(0, lineOffset - (linePage?.limit ?? 25)))}>قبلی</Button>
+                <Button variant="outline" size="sm" disabled={lineLoading || linePage?.nextOffset === null || linePage?.nextOffset === undefined} onClick={() => { if (linePage?.nextOffset !== null && linePage?.nextOffset !== undefined) onLineOffsetChange(linePage.nextOffset); }}>بعدی</Button>
+              </div>
+            </div>
           </SectionCard>
 
           {selected.status === "posted" || selected.status === "partially_paid" ? (
@@ -1148,20 +1663,69 @@ function DistributionPanel({
             </SectionCard>
           ) : null}
 
-          <SectionCard title="پرداخت‌ها و برگشت پرداخت" description="برگشت پرداخت، یک ثبت منفی در سابقه و سند آینهٔ جداگانه است." flush>
-            {payments.length === 0 ? <EmptyState title="پرداختی ثبت نشده است">پس از ثبت توزیع در دفتر کل، پرداخت‌ها در این بخش ظاهر می‌شوند.</EmptyState> : (
+          <SectionCard title="پرداخت‌ها و برگشت پرداخت" description="پرداخت‌ها با تاریخ و Party فیلتر و صفحه‌بندی می‌شوند؛ ماندهٔ خالص مستقل از صفحه محاسبه می‌شود." flush>
+            <div className="grid gap-3 border-b border-border/70 p-4 sm:grid-cols-2 xl:grid-cols-4">
+              <Field label="از تاریخ"><JalaliDatePicker value={paymentFilters.dateFrom} onChange={(value) => onPaymentFilterChange({ dateFrom: value })} ariaLabel="فیلتر پرداخت‌ها از تاریخ" /></Field>
+              <Field label="تا تاریخ"><JalaliDatePicker value={paymentFilters.dateTo} onChange={(value) => onPaymentFilterChange({ dateTo: value })} ariaLabel="فیلتر پرداخت‌ها تا تاریخ" /></Field>
+              <Field label="سهام‌دار"><SearchableSelect value={paymentFilters.partyId} onChange={(value) => onPaymentFilterChange({ partyId: value })} options={paymentPartyOptions} loading={paymentPartySearchBusy} onQueryChange={searchPaymentParties} placeholder="همهٔ اشخاص" ariaLabel="فیلتر پرداخت‌ها بر اساس سهام‌دار" /></Field>
+              <Field label="نوع ثبت"><select className={inputClass} value={paymentFilters.paymentType} onChange={(event) => onPaymentFilterChange({ paymentType: event.target.value })}><option value="">پرداخت و برگشت</option><option value="payment">پرداخت</option><option value="reversal">برگشت</option></select></Field>
+              <div className="sm:col-span-2 xl:col-span-4 flex flex-wrap gap-x-5 gap-y-1 text-sm text-muted-foreground">
+                <span>تعداد: <strong className="text-foreground">{toPersianDigits(String(paymentPage?.totalCount ?? 0))}</strong></span>
+                <span>خالص پرداخت: <strong className="text-foreground">{formatBalance(money, paymentPage?.netPaidRial ?? "0")}</strong></span>
+              </div>
+            </div>
+            <ErrorBox>{paymentError}</ErrorBox>
+            {paymentLoading ? <LoadingSkeleton rows={2} compact label="در حال بارگذاری پرداخت‌ها" className="px-4 py-2" /> : null}
+            {!paymentPage && paymentError ? <div className="p-4"><Button variant="outline" size="sm" onClick={onRetryPayments}>تلاش دوباره</Button></div> : null}
+            {paymentPage?.totalCount === 0 && !paymentLoading ? <EmptyState title="پرداختی با این فیلتر ثبت نشده است">پس از ثبت توزیع در دفتر کل، پرداخت‌ها در این بخش ظاهر می‌شوند.</EmptyState> : null}
+            {payments.length > 0 ? (
               <DataTable caption="پرداخت‌ها و برگشت‌های سود سهام‌داران">
                 <DataTableHead><Th>تاریخ</Th><Th>سهام‌دار</Th><Th>نوع</Th><Th numeric>مبلغ</Th><Th>حساب پرداخت</Th><Th>سند دفتر کل</Th><Th>عملیات</Th></DataTableHead>
-                <DataTableBody>{payments.map((payment) => {
-                  const alreadyReversed = payments.some((candidate) => candidate.reversesPaymentId === payment.id);
-                  return <DataTableRow key={payment.id}><Td nowrap>{dateLabel(payment.paidOn)}</Td><Td>{payment.partyName}</Td><Td>{payment.paymentType === "payment" ? "پرداخت" : "برگشت"}</Td><Td numeric>{formatBalance(money, payment.amountRial)}</Td><Td>{payment.paymentAccountName}</Td><Td><Link className="text-primary underline-offset-4 hover:underline" href={journalHref(payment.journalEntryId)}>{payment.journalVoucher ? `سند ${toPersianDigits(payment.journalVoucher)}` : "مشاهدهٔ سند"}</Link></Td><Td>{payment.paymentType === "payment" && permissions.reverse && !alreadyReversed && selected.status !== "reversed" && selected.status !== "cancelled" ? <Button variant="outline" size="sm" disabled={busy} onClick={() => onConfirm({ title: "برگشت پرداخت سهام‌دار؟", description: "مبلغ به حساب توزیع پرداختنی برمی‌گردد؛ پرداخت اصلی و سند قبلی دست‌نخورده می‌مانند.", confirmLabel: "ثبت برگشت پرداخت", run: async () => { await onAction(`${WORKSPACE_URL}/distributions/payments/${payment.id}/reverse`, "POST", { idempotencyKey: idempotencyKey("shareholder-payment-reversal") }, "برگشت پرداخت با سند آینه ثبت شد."); } })}>برگشت پرداخت</Button> : payment.paymentType === "reversal" ? <StatusBadge tone="neutral">برگشت</StatusBadge> : "—"}</Td></DataTableRow>;
-                })}</DataTableBody>
+                <DataTableBody>{payments.map((payment) => (
+                  <DataTableRow key={payment.id}>
+                    <Td nowrap>{dateLabel(payment.paidOn)}</Td><Td>{payment.partyName}</Td><Td>{payment.paymentType === "payment" ? "پرداخت" : "برگشت"}</Td><Td numeric>{formatBalance(money, payment.amountRial)}</Td><Td>{payment.paymentAccountName}</Td><Td><Link className="text-primary underline-offset-4 hover:underline" href={journalHref(payment.journalEntryId)}>{payment.journalVoucher ? `سند ${toPersianDigits(payment.journalVoucher)}` : "مشاهدهٔ سند"}</Link></Td><Td>{payment.paymentType === "payment" && permissions.reverse && !payment.isReversed && selected.status !== "reversed" && selected.status !== "cancelled" ? <Button variant="outline" size="sm" disabled={busy} onClick={() => onConfirm({ title: "برگشت پرداخت سهام‌دار؟", description: "مبلغ به حساب توزیع پرداختنی برمی‌گردد؛ پرداخت اصلی و سند قبلی دست‌نخورده می‌مانند.", confirmLabel: "ثبت برگشت پرداخت", run: async () => { await onAction(`${WORKSPACE_URL}/distributions/payments/${payment.id}/reverse`, "POST", { idempotencyKey: idempotencyKey("shareholder-payment-reversal") }, "برگشت پرداخت با سند آینه ثبت شد."); } })}>برگشت پرداخت</Button> : payment.paymentType === "reversal" ? <StatusBadge tone="neutral">برگشت</StatusBadge> : payment.isReversed ? <StatusBadge tone="neutral">برگشت‌شده</StatusBadge> : "—"}</Td>
+                  </DataTableRow>
+                ))}</DataTableBody>
               </DataTable>
-            )}
+            ) : null}
+            <CursorPagination
+              totalCount={paymentPage?.totalCount ?? 0}
+              limit={paymentPage?.limit ?? 25}
+              hasMore={paymentPage?.hasMore ?? false}
+              loading={paymentLoading}
+              canPrevious={canPreviousPaymentPage}
+              onPrevious={onPreviousPaymentPage}
+              onNext={onNextPaymentPage}
+            />
           </SectionCard>
         </>
       ) : null}
     </div>
+  );
+}
+
+function FiscalYearDistributionReconciliation({ rows, money }: { rows: ShareholderFiscalYearReconciliationRow[]; money: ReturnType<typeof useMoney> }) {
+  return (
+    <SectionCard title="تطبیق تقسیم سود با نتیجهٔ سال بسته‌شده" description="سود نگه‌داشته‌شده از GL و بدهی تخصیص‌شدهٔ پرداخت‌نشده دو ماندهٔ جدا هستند؛ اختلاف سندها و GL آشکار نمایش داده می‌شود." flush>
+      {rows.length === 0 ? <EmptyState title="سال مالی بسته‌شده برای تطبیق وجود ندارد">تطبیق پس از ثبت سند اختتامیه در دفتر کل نمایش داده می‌شود.</EmptyState> : (
+        <DataTable caption="تطبیق توزیع سود هر سال مالی بسته‌شده">
+          <DataTableHead><Th>سال مالی</Th><Th>سند اختتامیه</Th><Th numeric>سود مبنا</Th><Th numeric>تخصیص در GL</Th><Th numeric>سود نگه‌داشته‌شده</Th><Th numeric>در دسترس برای تخصیص</Th><Th numeric>بدهی پرداخت‌نشدهٔ GL</Th><Th numeric>اختلاف تخصیص / بدهی</Th></DataTableHead>
+          <DataTableBody>{rows.map((row) => {
+            const balanced = row.distributionVarianceRial === "0" && row.payableVarianceRial === "0";
+            return <DataTableRow key={row.fiscalYearId}>
+              <Td>{row.fiscalYearLabel}</Td>
+              <Td><Link className="text-primary underline-offset-4 hover:underline" href={journalHref(row.closingEntryId)}>مشاهدهٔ سند</Link></Td>
+              <Td numeric>{formatBalance(money, row.sourceProfitRial)}</Td>
+              <Td numeric>{formatBalance(money, row.glDistributedRial)}</Td>
+              <Td numeric>{formatBalance(money, row.undistributedRetainedProfitRial)}</Td>
+              <Td numeric>{formatBalance(money, row.availableToAllocateRial)}</Td>
+              <Td numeric>{formatBalance(money, row.glUnpaidRial)}</Td>
+              <Td numeric><StatusBadge tone={balanced ? "positive" : "danger"}>{balanced ? "تطبیق" : `اختلاف ${formatBalance(money, row.distributionVarianceRial)} / ${formatBalance(money, row.payableVarianceRial)}`}</StatusBadge></Td>
+            </DataTableRow>;
+          })}</DataTableBody>
+        </DataTable>
+      )}
+    </SectionCard>
   );
 }
 
@@ -1192,6 +1756,177 @@ function ReconciliationPanel({ workspace, money }: { workspace: ShareholderWorks
       <SectionCard title="مانده‌های منتسب به هر سهام‌دار" description="این خلاصه نیز از خطوط GL با party_id ساخته شده است، نه از یک تراز موازی.»" flush>
         <ShareholderBalanceTable rows={workspace.shareholderBalances} money={money} />
       </SectionCard>
+      <ShareholderAccountStatementPanel workspace={workspace} money={money} />
+    </div>
+  );
+}
+
+function ShareholderAccountStatementPanel({ workspace, money }: { workspace: ShareholderWorkspace; money: ReturnType<typeof useMoney> }) {
+  const [accountId, setAccountId] = useState("");
+  const [partyId, setPartyId] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [statement, setStatement] = useState<ShareholderAccountStatement | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  const accounts = useMemo(() => workspace.glReconciliation.map((row) => ({ value: row.accountId, label: `${row.accountCode} — ${row.accountName}` })), [workspace.glReconciliation]);
+  const parties = useMemo(() => {
+    const result = new Map<string, string>();
+    for (const row of workspace.register) result.set(row.partyId, row.partyName);
+    for (const row of workspace.shareholderBalances) result.set(row.partyId, row.partyName);
+    return [...result].map(([value, name]) => ({ value, label: name, searchString: name }));
+  }, [workspace.register, workspace.shareholderBalances]);
+
+  useEffect(() => {
+    if (!accountId && accounts[0]) setAccountId(accounts[0].value);
+    else if (accountId && !accounts.some((option) => option.value === accountId)) setAccountId(accounts[0]?.value ?? "");
+  }, [accountId, accounts]);
+
+  const requestUrl = useMemo(() => {
+    if (!accountId) return "";
+    const params = new URLSearchParams({ limit: "50", offset: String(offset) });
+    if (partyId) params.set("partyId", partyId);
+    if (dateFrom) params.set("dateFrom", dateFrom);
+    if (dateTo) params.set("dateTo", dateTo);
+    return `${WORKSPACE_URL}/accounts/${encodeURIComponent(accountId)}/statement?${params.toString()}`;
+  }, [accountId, dateFrom, dateTo, offset, partyId]);
+
+  useEffect(() => {
+    if (!requestUrl) {
+      setStatement(null);
+      return;
+    }
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    void api<ShareholderAccountStatement & { error?: string }>(requestUrl, { signal: controller.signal }).then(({ ok, data, aborted }) => {
+      if (aborted) return;
+      if (!ok) {
+        setError(errorLabel(data.error));
+        setStatement(null);
+      } else setStatement(data);
+      setLoading(false);
+    });
+    return () => controller.abort();
+  }, [requestUrl, retry]);
+
+  return (
+    <SectionCard title="کارت حساب دفتر کل سهام‌داران" description="افتتاحیه و مانده‌های جاری از journal_lines محاسبه می‌شوند؛ گردش هر سند به تفکیک Party و تاریخ، با ماندهٔ جاری و پیوند به سند مبدأ نمایش داده می‌شود." flush>
+      <div className="grid gap-3 border-b border-border/70 p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <Field label="سرفصل دفتر کل"><select className={inputClass} value={accountId} onChange={(event) => { setAccountId(event.target.value); setOffset(0); }}><option value="">انتخاب حساب…</option>{accounts.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
+        <Field label="طرف‌حساب / سهام‌دار"><SearchableSelect value={partyId} onChange={(value) => { setPartyId(value); setOffset(0); }} options={parties} placeholder="همهٔ اشخاص" ariaLabel="فیلتر کارت حساب بر اساس Party" /></Field>
+        <Field label="از تاریخ"><JalaliDatePicker value={dateFrom} onChange={(value) => { setDateFrom(value); setOffset(0); }} ariaLabel="تاریخ شروع کارت حساب" /></Field>
+        <Field label="تا تاریخ"><JalaliDatePicker value={dateTo} onChange={(value) => { setDateTo(value); setOffset(0); }} ariaLabel="تاریخ پایان کارت حساب" /></Field>
+      </div>
+      <ErrorBox>{error}</ErrorBox>
+      {loading ? <LoadingSkeleton rows={3} compact label="در حال بارگذاری کارت حساب" className="px-4 py-2" /> : null}
+      {!statement && error ? <div className="p-4"><Button variant="outline" size="sm" onClick={() => setRetry((current) => current + 1)}>تلاش دوباره</Button></div> : null}
+      {!accountId && !loading ? <EmptyState title="سرفصل قابل نمایش نیست">حساب‌های سهام‌داری مرتبط در دفتر کل پیدا نشدند.</EmptyState> : null}
+      {statement ? (
+        <>
+          <div className="grid gap-3 border-b border-border/70 p-4 sm:grid-cols-2 xl:grid-cols-4">
+            <DetailValue label="ماندهٔ افتتاحیه">{formatBalance(money, statement.openingBalanceRial)}</DetailValue>
+            <DetailValue label="جمع بدهکار دوره">{formatBalance(money, statement.totalDebitRial)}</DetailValue>
+            <DetailValue label="جمع بستانکار دوره">{formatBalance(money, statement.totalCreditRial)}</DetailValue>
+            <DetailValue label="ماندهٔ پایانی">{formatBalance(money, statement.closingBalanceRial)}</DetailValue>
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 px-4 py-2 text-xs text-muted-foreground">
+            <span>{statement.accountCode} — {statement.accountName}</span>
+            <span>ماهیت عادی: {statement.normalBalance === "debit" ? "بدهکار" : "بستانکار"}</span>
+            <span>تعداد سطرها: {toPersianDigits(String(statement.totalCount))}</span>
+          </div>
+          {statement.lines.length === 0 ? <EmptyState title="گردشی در این بازه پیدا نشد">ماندهٔ افتتاحیه در بالا نمایش داده شده است؛ تاریخ یا طرف‌حساب دیگری انتخاب کنید.</EmptyState> : (
+            <DataTable caption="گردش روزانهٔ سرفصل دفتر کل سهام‌داران">
+              <DataTableHead><Th>تاریخ</Th><Th>شماره سند / شرح</Th><Th>طرف‌حساب</Th><Th numeric>بدهکار</Th><Th numeric>بستانکار</Th><Th numeric>ماندهٔ جاری</Th><Th>منبع</Th></DataTableHead>
+              <DataTableBody>{statement.lines.map((line) => <DataTableRow key={`${line.entryId}:${line.partyId ?? "none"}`}>
+                <Td nowrap>{dateLabel(line.date)}</Td>
+                <Td><div className="font-medium">{line.voucherNumber ? `سند ${toPersianDigits(line.voucherNumber)}` : "سند دفتر کل"}</div><div className="max-w-64 truncate text-xs text-muted-foreground" title={line.memo ?? undefined}>{line.memo ?? "—"}</div></Td>
+                <Td>{line.partyName ?? "بدون انتساب"}</Td>
+                <Td numeric>{formatBalance(money, line.debitRial)}</Td>
+                <Td numeric>{formatBalance(money, line.creditRial)}</Td>
+                <Td numeric>{formatBalance(money, line.balanceRial)}</Td>
+                <Td><Link className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline" href={journalHref(line.entryId)}>مشاهدهٔ سند <ArrowUpRightIcon className="size-3.5" aria-hidden="true" /></Link><div className="text-xs text-muted-foreground">{line.sourceType ?? "manual"}</div></Td>
+              </DataTableRow>)}</DataTableBody>
+            </DataTable>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 p-3">
+            <span className="text-xs text-muted-foreground">صفحهٔ {toPersianDigits(String(Math.floor(offset / statement.limit) + 1))} · {toPersianDigits(String(statement.totalCount))} سطر</span>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" disabled={loading || offset === 0} onClick={() => setOffset((current) => Math.max(0, current - (statement?.limit ?? 50)))}>قبلی</Button>
+              <Button variant="outline" size="sm" disabled={loading || statement.nextOffset === null} onClick={() => { if (statement.nextOffset !== null) setOffset(statement.nextOffset); }}>بعدی</Button>
+            </div>
+          </div>
+        </>
+      ) : null}
+    </SectionCard>
+  );
+}
+
+function HistoryFilters({
+  filters,
+  categoryOptions = false,
+  forcedCategory,
+  partyOptions,
+  partiesLoading,
+  searchParties,
+  onChange,
+}: {
+  filters: ShareholderHistoryFilters;
+  categoryOptions?: boolean;
+  forcedCategory?: "ownership" | "capital";
+  partyOptions: SelectOption[];
+  partiesLoading: boolean;
+  searchParties: (query: string) => void;
+  onChange: (patch: Partial<ShareholderHistoryFilters>) => void;
+}) {
+  const category = forcedCategory ?? filters.category;
+  const eventOptions = [
+    { value: "shareholder_added", label: EVENT_LABELS.shareholder_added, category: "ownership" },
+    { value: "ownership_changed", label: EVENT_LABELS.ownership_changed, category: "ownership" },
+    { value: "shareholder_removed", label: EVENT_LABELS.shareholder_removed, category: "ownership" },
+    { value: "ownership_transfer_out", label: EVENT_LABELS.ownership_transfer_out, category: "ownership" },
+    { value: "ownership_transfer_in", label: EVENT_LABELS.ownership_transfer_in, category: "ownership" },
+    { value: "capital_contribution", label: EVENT_LABELS.capital_contribution, category: "capital" },
+    { value: "capital_withdrawal", label: EVENT_LABELS.capital_withdrawal, category: "capital" },
+    { value: "capital_reversal", label: EVENT_LABELS.capital_reversal, category: "capital" },
+  ].filter((option) => !category || option.category === category);
+  return (
+    <div className="grid gap-3 border-b border-border/70 p-4 sm:grid-cols-2 xl:grid-cols-5">
+      <Field label="از تاریخ"><JalaliDatePicker value={filters.dateFrom} onChange={(value) => onChange({ dateFrom: value })} ariaLabel="فیلتر تاریخچه از تاریخ" /></Field>
+      <Field label="تا تاریخ"><JalaliDatePicker value={filters.dateTo} onChange={(value) => onChange({ dateTo: value })} ariaLabel="فیلتر تاریخچه تا تاریخ" /></Field>
+      <Field label="Party / سهام‌دار"><SearchableSelect value={filters.partyId} onChange={(value) => onChange({ partyId: value })} options={partyOptions} loading={partiesLoading} onQueryChange={searchParties} placeholder="همهٔ اشخاص" ariaLabel="فیلتر تاریخچه بر اساس Party" /></Field>
+      {categoryOptions ? <Field label="دستهٔ رویداد"><select className={inputClass} value={filters.category} onChange={(event) => onChange({ category: event.target.value, eventType: "" })}><option value="">همهٔ رویدادها</option><option value="ownership">مالکیت</option><option value="capital">سرمایه</option></select></Field> : null}
+      <Field label="نوع رویداد"><select className={inputClass} value={filters.eventType} onChange={(event) => onChange({ eventType: event.target.value })}><option value="">همهٔ انواع</option>{eventOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
+    </div>
+  );
+}
+
+function CursorPagination({
+  totalCount,
+  limit,
+  hasMore,
+  loading,
+  canPrevious,
+  onPrevious,
+  onNext,
+}: {
+  totalCount: number;
+  limit: number;
+  hasMore: boolean;
+  loading: boolean;
+  canPrevious: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 p-3" aria-live="polite">
+      <span className="text-xs text-muted-foreground">{toPersianDigits(String(totalCount))} نتیجه · حداکثر {toPersianDigits(String(limit))} سطر در هر صفحه</span>
+      <div className="flex gap-2">
+        <Button type="button" variant="outline" size="sm" disabled={loading || !canPrevious} onClick={onPrevious}>قبلی</Button>
+        <Button type="button" variant="outline" size="sm" disabled={loading || !hasMore} onClick={onNext}>بعدی</Button>
+      </div>
     </div>
   );
 }
@@ -1201,16 +1936,9 @@ function EventHistoryTable({ events, money, canReverseCapital, onReverse }: { ev
   return (
     <DataTable caption="تاریخچهٔ تغییرناپذیر مالکیت و سرمایهٔ سهام‌داران">
       <DataTableHead><Th>تاریخ</Th><Th>سهام‌دار</Th><Th>رویداد</Th><Th numeric>مالکیت پس از رویداد</Th><Th numeric>مبلغ</Th><Th>دلیل / مرجع</Th><Th>سند</Th><Th>عملیات</Th></DataTableHead>
-      <DataTableBody>{events.map((event) => <DataTableRow key={event.id}><Td nowrap>{dateLabel(event.effectiveOn)}</Td><Td>{event.partyName}</Td><Td>{EVENT_LABELS[event.eventType] ?? event.eventType}</Td><Td numeric>{percentLabel(event.ownershipPercent)}</Td><Td numeric>{event.amountRial ? formatBalance(money, event.amountRial) : "—"}</Td><Td className="max-w-64 truncate" title={[event.reason, event.sourceReference].filter(Boolean).join(" · ")}>{[event.reason, event.sourceReference].filter(Boolean).join(" · ") || "—"}</Td><Td>{event.journalEntryId ? <Link className="text-primary underline-offset-4 hover:underline" href={journalHref(event.journalEntryId)}>{event.journalVoucher ? `سند ${toPersianDigits(event.journalVoucher)}` : "مشاهده"}</Link> : "—"}</Td><Td>{canReverseCapital && event.amountRial && ["capital_contribution", "capital_withdrawal"].includes(event.eventType) && !event.reversesEventId ? <Button variant="outline" size="sm" onClick={() => onReverse(event)}>برگشت سرمایه</Button> : "—"}</Td></DataTableRow>)}</DataTableBody>
+      <DataTableBody>{events.map((event) => <DataTableRow key={event.id}><Td nowrap>{dateLabel(event.effectiveOn)}</Td><Td>{event.partyName}</Td><Td>{EVENT_LABELS[event.eventType] ?? event.eventType}</Td><Td numeric>{percentLabel(event.ownershipPercent)}</Td><Td numeric>{event.amountRial ? formatBalance(money, event.amountRial) : "—"}</Td><Td className="max-w-64 truncate" title={[event.reason, event.sourceReference].filter(Boolean).join(" · ")}>{[event.reason, event.sourceReference].filter(Boolean).join(" · ") || "—"}</Td><Td>{event.journalEntryId ? <Link className="text-primary underline-offset-4 hover:underline" href={journalHref(event.journalEntryId)}>{event.journalVoucher ? `سند ${toPersianDigits(event.journalVoucher)}` : "مشاهده"}</Link> : "—"}</Td><Td>{canReverseCapital && event.amountRial && ["capital_contribution", "capital_withdrawal"].includes(event.eventType) && !event.reversesEventId && !event.isReversed ? <Button variant="outline" size="sm" onClick={() => onReverse(event)}>برگشت سرمایه</Button> : event.isReversed ? <StatusBadge tone="neutral">برگشت‌شده</StatusBadge> : event.reversesEventId ? <StatusBadge tone="neutral">رویداد برگشت</StatusBadge> : "—"}</Td></DataTableRow>)}</DataTableBody>
     </DataTable>
   );
-}
-
-function downloadEvents(events: ShareholderEventRow[]) {
-  downloadCsv("shareholder-events.csv", [
-    ["id", "shareholderId", "partyId", "partyName", "eventType", "effectiveOn", "ownershipPercent", "shareUnits", "transferPercent", "amountRial", "capitalClass", "journalEntryId", "reason", "sourceReference", "createdAt"],
-    ...events.map((event) => [event.id, event.shareholderId, event.partyId, event.partyName, event.eventType, event.effectiveOn, event.ownershipPercent ?? "", event.shareUnits ?? "", event.transferPercent ?? "", event.amountRial ?? "", event.capitalClass ?? "", event.journalEntryId ?? "", event.reason ?? "", event.sourceReference ?? "", event.createdAt]),
-  ]);
 }
 
 function downloadCsv(filename: string, rows: readonly (readonly string[])[]) {

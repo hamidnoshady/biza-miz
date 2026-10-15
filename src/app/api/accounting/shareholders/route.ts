@@ -10,8 +10,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
   try {
     const asOf = request.nextUrl.searchParams.get("asOf");
-    const distributionId = request.nextUrl.searchParams.get("distributionId");
-    return NextResponse.json(await loadShareholderWorkspace(session.businessId, asOf, distributionId));
+    return NextResponse.json(await loadShareholderWorkspace(session.businessId, asOf));
   } catch (caught) {
     const response = shareholderErrorResponse(caught);
     if (response) return response;

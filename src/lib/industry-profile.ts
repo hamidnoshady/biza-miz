@@ -655,7 +655,10 @@ const API_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // segments, the pipeline, cases, consent history.
   ["/api/crm", "crm"],
   // The accounting suite's data routes — without these, an accounting
-  // «به‌زودی» would badge the pages while every figure kept loading.
+  // «به‌زودی» would badge the pages while every figure kept loading. The
+  // shareholder accounting namespace is a sibling HTTP namespace and uses the
+  // same ledger module, entitlement and app availability gates.
+  ["/api/accounting", "ledger"],
   ["/api/ledger", "ledger"],
   ["/api/reports", "reports"],
   // The pricing settings route configures recipe-backed menu suggestions. It

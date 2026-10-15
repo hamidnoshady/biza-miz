@@ -29,6 +29,11 @@ import {
   parsePositiveRial,
   SHAREHOLDER_ACCOUNT_CODES,
   validateOwnershipTimeline,
+  projectDistributionFinancials,
+  projectFiscalYearDistributions,
+  summarizeDistributionFinancials,
+  type DistributionFinancialFact,
+  type DistributionFinancialSummary,
   type OwnershipEventType,
   type OwnershipTimelineEvent,
   type OwnershipTotalPolicy,
@@ -124,6 +129,7 @@ export interface ShareholderEventRow {
   journalEntryId: string | null;
   journalVoucher: string | null;
   reversesEventId: string | null;
+  isReversed: boolean;
   reason: string | null;
   sourceReference: string | null;
   notes: string | null;
@@ -188,12 +194,14 @@ export interface ShareholderPaymentRow {
   journalEntryId: string;
   journalVoucher: string | null;
   reversesPaymentId: string | null;
+  isReversed: boolean;
   note: string | null;
   createdByName: string | null;
   createdAt: string;
 }
 
 export interface ShareholderGlReconciliationRow {
+  accountId: string;
   accountCode: string;
   accountName: string;
   accountType: string;
@@ -226,19 +234,126 @@ export interface ClosedFiscalYearOption {
   closingProfitRial: string;
 }
 
+export interface ShareholderFiscalYearReconciliationRow extends DistributionFinancialSummary {
+  fiscalYearId: string;
+  fiscalYearLabel: string;
+  closingEntryId: string;
+  sourceProfitRial: string;
+  glDistributedRial: string;
+  undistributedRetainedProfitRial: string;
+  availableToAllocateRial: string;
+  glUnpaidRial: string;
+  distributionVarianceRial: string;
+  payableVarianceRial: string;
+}
+
 export interface ShareholderWorkspace {
   today: string;
   asOf: string;
   totalPolicy: OwnershipTotalPolicy;
   register: ShareholderRegisterRow[];
-  events: ShareholderEventRow[];
-  eventsTruncated: boolean;
-  distributions: ShareholderDistributionRow[];
-  distributionLines: ShareholderDistributionLineRow[];
-  payments: ShareholderPaymentRow[];
   fiscalYears: ClosedFiscalYearOption[];
+  distributionSummary: DistributionFinancialSummary;
+  fiscalYearReconciliation: ShareholderFiscalYearReconciliationRow[];
   glReconciliation: ShareholderGlReconciliationRow[];
   shareholderBalances: ShareholderBalanceRow[];
+}
+
+export interface ShareholderEventFilters {
+  dateFrom?: unknown;
+  dateTo?: unknown;
+  partyId?: unknown;
+  eventType?: unknown;
+  category?: unknown;
+  limit?: unknown;
+  cursor?: unknown;
+}
+
+export interface ShareholderDistributionFilters {
+  fiscalYearId?: unknown;
+  status?: unknown;
+  limit?: unknown;
+  cursor?: unknown;
+}
+
+export interface ShareholderOffsetPageOptions {
+  limit?: unknown;
+  offset?: unknown;
+}
+
+export interface ShareholderPaymentFilters extends ShareholderEventFilters {
+  distributionId?: unknown;
+  paymentType?: unknown;
+}
+
+export interface ShareholderEventPage {
+  events: ShareholderEventRow[];
+  totalCount: number;
+  netCapitalMovementRial: string;
+  limit: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface ShareholderDistributionPage {
+  distributions: ShareholderDistributionRow[];
+  totalCount: number;
+  summary: DistributionFinancialSummary;
+  limit: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface ShareholderDistributionLinePage {
+  lines: ShareholderDistributionLineRow[];
+  totalCount: number;
+  totalAllocatedRial: string;
+  totalPaidRial: string;
+  totalOutstandingRial: string;
+  limit: number;
+  offset: number;
+  nextOffset: number | null;
+}
+
+export interface ShareholderPaymentPage {
+  payments: ShareholderPaymentRow[];
+  totalCount: number;
+  netPaidRial: string;
+  limit: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface ShareholderAccountStatementLine {
+  entryId: string;
+  voucherNumber: string | null;
+  date: string;
+  memo: string | null;
+  sourceType: string | null;
+  partyId: string | null;
+  partyName: string | null;
+  debitRial: string;
+  creditRial: string;
+  balanceRial: string;
+}
+
+export interface ShareholderAccountStatement {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  normalBalance: "debit" | "credit";
+  partyId: string | null;
+  dateFrom: string | null;
+  dateTo: string | null;
+  openingBalanceRial: string;
+  lines: ShareholderAccountStatementLine[];
+  totalDebitRial: string;
+  totalCreditRial: string;
+  closingBalanceRial: string;
+  totalCount: number;
+  limit: number;
+  offset: number;
+  nextOffset: number | null;
 }
 
 const OWNERSHIP_EVENT_TYPES = new Set<OwnershipEventType>([
@@ -534,6 +649,7 @@ async function loadReconciliation(client: PoolClient, businessId: string): Promi
   shareholderBalances: ShareholderBalanceRow[];
 }> {
   const { rows } = await client.query<{
+    account_id: string;
     code: string;
     name: string;
     type: string;
@@ -543,7 +659,7 @@ async function loadReconciliation(client: PoolClient, businessId: string): Promi
     attributed_debit_rial: string;
     attributed_credit_rial: string;
   }>(
-    `SELECT a.code, a.name, a.type::text AS type, a.is_contra,
+    `SELECT a.id AS account_id, a.code, a.name, a.type::text AS type, a.is_contra,
             COALESCE(SUM(jl.debit), 0)::text AS debit_rial,
             COALESCE(SUM(jl.credit), 0)::text AS credit_rial,
             COALESCE(SUM(jl.debit) FILTER (WHERE sa.id IS NOT NULL), 0)::text AS attributed_debit_rial,
@@ -553,7 +669,7 @@ async function loadReconciliation(client: PoolClient, businessId: string): Promi
        LEFT JOIN journal_lines jl ON jl.entry_id = je.id AND jl.account_id = a.id
        LEFT JOIN shareholder_accounts sa ON sa.business_id = a.business_id AND sa.party_id = jl.party_id
       WHERE a.business_id = $1 AND a.code = ANY($2::text[])
-      GROUP BY a.code, a.name, a.type, a.is_contra
+      GROUP BY a.id, a.code, a.name, a.type, a.is_contra
       ORDER BY a.code`,
     [businessId, RECONCILIATION_CODES],
   );
@@ -566,6 +682,7 @@ async function loadReconciliation(client: PoolClient, businessId: string): Promi
     const ledger = accountBalance(debit, credit, normal);
     const attributed = accountBalance(attributedDebit, attributedCredit, normal);
     return {
+      accountId: row.account_id,
       accountCode: row.code,
       accountName: row.name,
       accountType: row.type,
@@ -622,7 +739,7 @@ async function loadReconciliation(client: PoolClient, businessId: string): Promi
   return { glReconciliation, shareholderBalances: [...byShareholder.values()].sort((a, b) => a.partyName.localeCompare(b.partyName)) };
 }
 
-async function loadDistributionDetail(
+export async function loadDistributionDetail(
   client: PoolClient,
   businessId: string,
   distributionId: string,
@@ -643,7 +760,7 @@ async function loadDistributionDetail(
             canceller.full_name AS "cancelledByName", d.cancelled_at::text AS "cancelledAt",
             d.cancel_reason AS "cancelReason",
             COALESCE(payments.paid_rial, '0') AS "paidRial",
-            (d.distributable_rial::numeric - COALESCE(payments.paid_rial, '0')::numeric)::text AS "outstandingRial"
+            '0'::text AS "outstandingRial"
        FROM shareholder_distributions d
        JOIN fiscal_years fy ON fy.id = d.fiscal_year_id AND fy.business_id = d.business_id
        LEFT JOIN users creator ON creator.id = d.created_by
@@ -659,180 +776,189 @@ async function loadDistributionDetail(
       WHERE d.business_id = $1 AND d.id = $2`,
     [businessId, distributionId],
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  const projection = projectDistributionFinancials(row.status, row.distributableRial, row.paidRial);
+  return { ...row, paidRial: projection.paidRial, outstandingRial: projection.outstandingRial };
 }
 
-async function loadDistributionLines(
+interface DistributionPostingLine {
+  shareholderId: string;
+  partyId: string;
+  allocatedRial: string;
+}
+
+/**
+ * Posting consumes every frozen allocation fact. Presentation pages have their
+ * own bounded reader; this financial path deliberately has no row cap.
+ */
+async function loadAllDistributionLinesForPosting(
   client: PoolClient,
   businessId: string,
-  distributionIds?: readonly string[],
-): Promise<ShareholderDistributionLineRow[]> {
-  const { rows } = await client.query<ShareholderDistributionLineRow>(
-    `SELECT dl.distribution_id AS "distributionId", dl.shareholder_id AS "shareholderId",
-            dl.party_id AS "partyId", p.name AS "partyName",
-            dl.ownership_percent::text AS "ownershipPercent", dl.share_units::text AS "shareUnits",
-            dl.allocated_rial::text AS "allocatedRial",
-            COALESCE(paid.paid_rial, '0') AS "paidRial",
-            (dl.allocated_rial::numeric - COALESCE(paid.paid_rial, '0')::numeric)::text AS "outstandingRial"
+  distributionId: string,
+): Promise<DistributionPostingLine[]> {
+  const { rows } = await client.query<DistributionPostingLine>(
+    `SELECT dl.shareholder_id AS "shareholderId", dl.party_id AS "partyId",
+            dl.allocated_rial::text AS "allocatedRial"
        FROM shareholder_distribution_lines dl
-       JOIN parties p ON p.id = dl.party_id AND p.business_id = dl.business_id
-       LEFT JOIN LATERAL (
-         SELECT SUM(CASE WHEN payment_type = 'payment' THEN amount_rial ELSE -amount_rial END)::text AS paid_rial
-           FROM shareholder_distribution_payments pmt
-          WHERE pmt.distribution_line_id = dl.id AND pmt.business_id = dl.business_id
-       ) paid ON true
-      WHERE dl.business_id = $1 AND ($2::uuid[] IS NULL OR dl.distribution_id = ANY($2::uuid[]))
-      ORDER BY dl.distribution_id, p.name, dl.shareholder_id
-      LIMIT 2000`,
-    [businessId, distributionIds ?? null],
+      WHERE dl.business_id = $1 AND dl.distribution_id = $2
+      ORDER BY dl.shareholder_id`,
+    [businessId, distributionId],
   );
   return rows;
+}
+
+async function loadDistributionStatusFacts(
+  client: PoolClient,
+  businessId: string,
+  fiscalYearId?: string,
+): Promise<DistributionFinancialFact[]> {
+  const { rows } = await client.query<{
+    status: string;
+    distribution_count: string;
+    distributable_rial: string;
+    net_paid_rial: string;
+  }>(
+    `SELECT d.status, COUNT(*)::text AS distribution_count,
+            COALESCE(SUM(d.distributable_rial), 0)::text AS distributable_rial,
+            COALESCE(SUM(payments.net_paid_rial::numeric), 0)::text AS net_paid_rial
+       FROM shareholder_distributions d
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(SUM(CASE WHEN pmt.payment_type = 'payment' THEN pmt.amount_rial ELSE -pmt.amount_rial END), 0)::text AS net_paid_rial
+           FROM shareholder_distribution_payments pmt
+          WHERE pmt.business_id = d.business_id AND pmt.distribution_id = d.id
+       ) payments ON true
+      WHERE d.business_id = $1 AND ($2::uuid IS NULL OR d.fiscal_year_id = $2)
+      GROUP BY d.status`,
+    [businessId, fiscalYearId ?? null],
+  );
+  return rows.map((row) => ({
+    status: row.status,
+    count: Number(row.distribution_count),
+    distributableRial: row.distributable_rial,
+    netPaidRial: row.net_paid_rial,
+  }));
+}
+
+async function loadFiscalYearReconciliation(
+  client: PoolClient,
+  businessId: string,
+  fiscalYears: readonly ClosedFiscalYearOption[],
+): Promise<ShareholderFiscalYearReconciliationRow[]> {
+  const closedYears = fiscalYears.filter((year) => year.closedAt && year.closingEntryId);
+  if (closedYears.length === 0) return [];
+  const [factsResult, glResult] = await Promise.all([
+    client.query<{
+      fiscal_year_id: string;
+      status: string;
+      distribution_count: string;
+      distributable_rial: string;
+      net_paid_rial: string;
+    }>(
+      `SELECT d.fiscal_year_id, d.status, COUNT(*)::text AS distribution_count,
+              COALESCE(SUM(d.distributable_rial), 0)::text AS distributable_rial,
+              COALESCE(SUM(payments.net_paid_rial::numeric), 0)::text AS net_paid_rial
+         FROM shareholder_distributions d
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(CASE WHEN pmt.payment_type = 'payment' THEN pmt.amount_rial ELSE -pmt.amount_rial END), 0)::text AS net_paid_rial
+             FROM shareholder_distribution_payments pmt
+            WHERE pmt.business_id = d.business_id AND pmt.distribution_id = d.id
+         ) payments ON true
+        WHERE d.business_id = $1
+        GROUP BY d.fiscal_year_id, d.status`,
+      [businessId],
+    ),
+    client.query<{
+      fiscal_year_id: string;
+      gl_distributed_rial: string;
+      gl_unpaid_rial: string;
+    }>(
+      `WITH distribution_entries AS (
+         SELECT d.fiscal_year_id, d.id AS distribution_id, d.posting_entry_id AS entry_id, 'distribution'::text AS entry_kind
+           FROM shareholder_distributions d
+          WHERE d.business_id = $1 AND d.posting_entry_id IS NOT NULL
+         UNION ALL
+         SELECT d.fiscal_year_id, d.id AS distribution_id, d.reversal_entry_id AS entry_id, 'distribution'::text AS entry_kind
+           FROM shareholder_distributions d
+          WHERE d.business_id = $1 AND d.reversal_entry_id IS NOT NULL
+         UNION ALL
+         SELECT d.fiscal_year_id, d.id AS distribution_id, pmt.journal_entry_id AS entry_id, 'payment'::text AS entry_kind
+           FROM shareholder_distributions d
+           JOIN shareholder_distribution_payments pmt
+             ON pmt.business_id = d.business_id AND pmt.distribution_id = d.id
+          WHERE d.business_id = $1
+       )
+       SELECT de.fiscal_year_id,
+              COALESCE(SUM(jl.debit - jl.credit) FILTER (WHERE de.entry_kind = 'distribution' AND a.code = $2), 0)::text AS gl_distributed_rial,
+              COALESCE(SUM(jl.credit - jl.debit) FILTER (WHERE a.code = $3), 0)::text AS gl_unpaid_rial
+         FROM distribution_entries de
+         JOIN journal_entries je ON je.id = de.entry_id AND je.business_id = $1
+         JOIN journal_lines jl ON jl.entry_id = je.id
+         JOIN accounts a ON a.id = jl.account_id AND a.business_id = je.business_id
+        GROUP BY de.fiscal_year_id`,
+      [businessId, SHAREHOLDER_ACCOUNT_CODES.retainedEarnings, SHAREHOLDER_ACCOUNT_CODES.distributionsPayable],
+    ),
+  ]);
+  const factsByYear = new Map<string, DistributionFinancialFact[]>();
+  for (const row of factsResult.rows) {
+    const facts = factsByYear.get(row.fiscal_year_id) ?? [];
+    facts.push({
+      status: row.status,
+      count: Number(row.distribution_count),
+      distributableRial: row.distributable_rial,
+      netPaidRial: row.net_paid_rial,
+    });
+    factsByYear.set(row.fiscal_year_id, facts);
+  }
+  const glByYear = new Map(glResult.rows.map((row) => [row.fiscal_year_id, row]));
+  return closedYears.map((year) => {
+    const gl = glByYear.get(year.id);
+    return {
+      fiscalYearId: year.id,
+      fiscalYearLabel: year.label,
+      closingEntryId: year.closingEntryId!,
+      ...projectFiscalYearDistributions({
+        sourceProfitRial: year.closingProfitRial,
+        glDistributedRial: gl?.gl_distributed_rial ?? "0",
+        glUnpaidRial: gl?.gl_unpaid_rial ?? "0",
+        facts: factsByYear.get(year.id) ?? [],
+      }),
+    };
+  });
 }
 
 export async function loadShareholderWorkspace(
   businessId: string,
   requestedAsOf?: string | null,
-  requestedDistributionId?: string | null,
 ): Promise<ShareholderWorkspace> {
   const today = await businessToday(businessId);
   const asOf = requestedAsOf ? requireDate(requestedAsOf, "as_of") : today;
-  const selectedDistributionId = requestedDistributionId
-    ? requireUuid(requestedDistributionId, "distribution_id")
-    : null;
   return inSnapshot(async (client) => {
     const policy = await ensureOwnershipPolicy(client, businessId);
     const snapshot = await loadOwnershipSnapshot(client, businessId, asOf);
-    const eventsResult = await client.query<{
-        id: string; shareholder_id: string; party_id: string; party_name: string; event_type: string;
-        effective_on: string; ownership_percent: string | null; share_units: string | null;
-        transfer_percent: string | null; transfer_group_id: string | null; capital_class: string | null;
-        amount_rial: string | null; payment_account_id: string | null; payment_account_name: string | null;
-        journal_entry_id: string | null; journal_voucher: string | null; reverses_event_id: string | null;
-        reason: string | null; source_reference: string | null; notes: string | null;
-        created_by_name: string | null; created_at: string;
-      }>(
-        `SELECT e.id, e.shareholder_id, sa.party_id, p.name AS party_name, e.event_type,
-                e.effective_on::text AS effective_on, e.ownership_percent::text AS ownership_percent,
-                e.share_units::text AS share_units, e.transfer_percent::text AS transfer_percent,
-                e.transfer_group_id, e.capital_class, e.amount_rial::text AS amount_rial,
-                e.payment_account_id, pa.name AS payment_account_name, e.journal_entry_id,
-                je.voucher_number AS journal_voucher, e.reverses_event_id, e.reason, e.source_reference,
-                e.notes, u.full_name AS created_by_name, e.created_at::text AS created_at
-           FROM shareholder_events e
-           JOIN shareholder_accounts sa ON sa.id = e.shareholder_id AND sa.business_id = e.business_id
-           JOIN parties p ON p.id = sa.party_id AND p.business_id = e.business_id
-           LEFT JOIN accounts pa ON pa.id = e.payment_account_id AND pa.business_id = e.business_id
-           LEFT JOIN journal_entries je ON je.id = e.journal_entry_id AND je.business_id = e.business_id
-           LEFT JOIN users u ON u.id = e.created_by
-          WHERE e.business_id = $1
-          ORDER BY e.effective_on DESC, e.created_at DESC, e.id DESC
-          LIMIT 501`,
-        [businessId],
-      );
-    const distributionsResult = await client.query<ShareholderDistributionRow>(
-        `SELECT d.id, d.fiscal_year_id AS "fiscalYearId", fy.label AS "fiscalYearLabel",
-                d.closing_entry_id AS "closingEntryId", d.snapshot_on::text AS "snapshotOn",
-                d.source_profit_rial::text AS "sourceProfitRial",
-                d.tax_adjustment_rial::text AS "taxAdjustmentRial",
-                d.reserve_adjustment_rial::text AS "reserveAdjustmentRial",
-                d.manual_adjustment_rial::text AS "manualAdjustmentRial",
-                d.adjustment_reason AS "adjustmentReason", d.distributable_rial::text AS "distributableRial",
-                d.status, d.posting_entry_id AS "postingEntryId", d.reversal_entry_id AS "reversalEntryId",
-                d.created_by AS "createdById", creator.full_name AS "createdByName", d.created_at::text AS "createdAt",
-                approver.full_name AS "approvedByName", d.approved_at::text AS "approvedAt",
-                poster.full_name AS "postedByName", d.posted_at::text AS "postedAt",
-                reverser.full_name AS "reversedByName", d.reversed_at::text AS "reversedAt",
-                canceller.full_name AS "cancelledByName", d.cancelled_at::text AS "cancelledAt",
-                d.cancel_reason AS "cancelReason",
-                COALESCE(payments.paid_rial, '0') AS "paidRial",
-                (d.distributable_rial::numeric - COALESCE(payments.paid_rial, '0')::numeric)::text AS "outstandingRial"
-           FROM shareholder_distributions d
-           JOIN fiscal_years fy ON fy.id = d.fiscal_year_id AND fy.business_id = d.business_id
-           LEFT JOIN users creator ON creator.id = d.created_by
-           LEFT JOIN users approver ON approver.id = d.approved_by
-           LEFT JOIN users poster ON poster.id = d.posted_by
-           LEFT JOIN users reverser ON reverser.id = d.reversed_by
-           LEFT JOIN users canceller ON canceller.id = d.cancelled_by
-           LEFT JOIN LATERAL (
-             SELECT SUM(CASE WHEN payment_type = 'payment' THEN amount_rial ELSE -amount_rial END)::text AS paid_rial
-               FROM shareholder_distribution_payments
-              WHERE distribution_id = d.id AND business_id = d.business_id
-           ) payments ON true
-          WHERE d.business_id = $1
-          ORDER BY d.created_at DESC, d.id DESC
-          LIMIT 100`,
-        [businessId],
-      );
     const fiscalYearsResult = await client.query<ClosedFiscalYearOption>(
-        `SELECT fy.id, fy.label, fy.starts_on::text AS "startsOn", fy.ends_on::text AS "endsOn",
-                fy.closed_at::text AS "closedAt", close_entry.id AS "closingEntryId",
-                GREATEST(COALESCE(close_entry.credit_rial, '0')::numeric - COALESCE(close_entry.debit_rial, '0')::numeric, 0)::text AS "closingProfitRial"
-           FROM fiscal_years fy
-           LEFT JOIN LATERAL (
-             SELECT je.id, COALESCE(SUM(jl.credit) FILTER (WHERE a.code = $2), 0)::text AS credit_rial,
-                    COALESCE(SUM(jl.debit) FILTER (WHERE a.code = $2), 0)::text AS debit_rial
-               FROM journal_entries je
-               LEFT JOIN journal_lines jl ON jl.entry_id = je.id
-               LEFT JOIN accounts a ON a.id = jl.account_id AND a.business_id = je.business_id
-              WHERE je.business_id = fy.business_id AND je.source_type = 'closing' AND je.source_id = fy.id
-              GROUP BY je.id
-              ORDER BY je.entry_date DESC, je.posted_at DESC
-              LIMIT 1
-           ) close_entry ON true
-          WHERE fy.business_id = $1
-          ORDER BY fy.starts_on DESC`,
-        [businessId, SHAREHOLDER_ACCOUNT_CODES.retainedEarnings],
-      );
-    const reconciliation = await loadReconciliation(client, businessId);
-
-    const eventRows = eventsResult.rows.slice(0, 500).map((row): ShareholderEventRow => ({
-      id: row.id,
-      shareholderId: row.shareholder_id,
-      partyId: row.party_id,
-      partyName: row.party_name,
-      eventType: row.event_type,
-      effectiveOn: row.effective_on,
-      ownershipPercent: row.ownership_percent,
-      shareUnits: row.share_units,
-      transferPercent: row.transfer_percent,
-      transferGroupId: row.transfer_group_id,
-      capitalClass: row.capital_class,
-      amountRial: row.amount_rial,
-      paymentAccountId: row.payment_account_id,
-      paymentAccountName: row.payment_account_name,
-      journalEntryId: row.journal_entry_id,
-      journalVoucher: row.journal_voucher,
-      reversesEventId: row.reverses_event_id,
-      reason: row.reason,
-      sourceReference: row.source_reference,
-      notes: row.notes,
-      createdByName: row.created_by_name,
-      createdAt: row.created_at,
-    }));
-    const distributions = distributionsResult.rows;
-    const requestedDistributionIsVisible = selectedDistributionId && distributions.some((row) => row.id === selectedDistributionId);
-    const lineDistributionIds = requestedDistributionIsVisible
-      ? [selectedDistributionId]
-      : distributions.slice(0, 20).map((row) => row.id);
-    const distributionLines = await loadDistributionLines(client, businessId, lineDistributionIds);
-    const paymentsResult = await client.query<ShareholderPaymentRow>(
-      `SELECT pmt.id, pmt.distribution_id AS "distributionId", pmt.shareholder_id AS "shareholderId",
-              pmt.party_id AS "partyId", party.name AS "partyName", pmt.payment_type AS "paymentType",
-              pmt.paid_on::text AS "paidOn", pmt.amount_rial::text AS "amountRial",
-              pmt.payment_account_id AS "paymentAccountId", account.name AS "paymentAccountName",
-              pmt.journal_entry_id AS "journalEntryId", je.voucher_number AS "journalVoucher",
-              pmt.reverses_payment_id AS "reversesPaymentId", pmt.note,
-              actor.full_name AS "createdByName", pmt.created_at::text AS "createdAt"
-         FROM shareholder_distribution_payments pmt
-         JOIN parties party ON party.id = pmt.party_id AND party.business_id = pmt.business_id
-         JOIN accounts account ON account.id = pmt.payment_account_id AND account.business_id = pmt.business_id
-         JOIN journal_entries je ON je.id = pmt.journal_entry_id AND je.business_id = pmt.business_id
-         LEFT JOIN users actor ON actor.id = pmt.created_by
-        WHERE pmt.business_id = $1 AND ($2::uuid IS NULL OR pmt.distribution_id = $2)
-        ORDER BY pmt.created_at DESC, pmt.id DESC
-        LIMIT 200`,
-      [businessId, selectedDistributionId],
+      `SELECT fy.id, fy.label, fy.starts_on::text AS "startsOn", fy.ends_on::text AS "endsOn",
+              fy.closed_at::text AS "closedAt", close_entry.id AS "closingEntryId",
+              GREATEST(COALESCE(close_entry.credit_rial, '0')::numeric - COALESCE(close_entry.debit_rial, '0')::numeric, 0)::text AS "closingProfitRial"
+         FROM fiscal_years fy
+         LEFT JOIN LATERAL (
+           SELECT je.id, COALESCE(SUM(jl.credit) FILTER (WHERE a.code = $2), 0)::text AS credit_rial,
+                  COALESCE(SUM(jl.debit) FILTER (WHERE a.code = $2), 0)::text AS debit_rial
+             FROM journal_entries je
+             LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+             LEFT JOIN accounts a ON a.id = jl.account_id AND a.business_id = je.business_id
+            WHERE je.business_id = fy.business_id AND je.source_type = 'closing' AND je.source_id = fy.id
+            GROUP BY je.id
+            ORDER BY je.entry_date DESC, je.posted_at DESC
+            LIMIT 1
+         ) close_entry ON true
+        WHERE fy.business_id = $1
+        ORDER BY fy.starts_on DESC`,
+      [businessId, SHAREHOLDER_ACCOUNT_CODES.retainedEarnings],
     );
+    const distributionFacts = await loadDistributionStatusFacts(client, businessId);
+    const fiscalYearReconciliation = await loadFiscalYearReconciliation(client, businessId, fiscalYearsResult.rows);
+    const reconciliation = await loadReconciliation(client, businessId);
 
     return {
       today,
@@ -849,12 +975,9 @@ export async function loadShareholderWorkspace(
         effectiveFrom: row.effectiveOn,
         createdAt: row.createdAt,
       })),
-      events: eventRows,
-      eventsTruncated: eventsResult.rows.length > 500,
-      distributions,
-      distributionLines,
-      payments: paymentsResult.rows,
       fiscalYears: fiscalYearsResult.rows,
+      distributionSummary: summarizeDistributionFinancials(distributionFacts),
+      fiscalYearReconciliation,
       glReconciliation: reconciliation.glReconciliation,
       shareholderBalances: reconciliation.shareholderBalances,
     };
@@ -1275,6 +1398,28 @@ async function allocationSnapshot(
   return active;
 }
 
+async function assertDistributionCapacity(
+  client: PoolClient,
+  input: { businessId: string; fiscalYearId: string; sourceProfit: bigint; amount: bigint; excludeId?: string },
+): Promise<void> {
+  const { rows } = await client.query<{ reserved: string }>(
+    `SELECT COALESCE(SUM(distributable_rial), 0)::text AS reserved
+       FROM shareholder_distributions
+      WHERE business_id = $1 AND fiscal_year_id = $2
+        AND status NOT IN ('cancelled', 'reversed')
+        AND ($3::uuid IS NULL OR id <> $3)`,
+    [input.businessId, input.fiscalYearId, input.excludeId ?? null],
+  );
+  const reserved = BigInt(rows[0]?.reserved ?? "0");
+  const available = input.sourceProfit - reserved;
+  if (input.amount > available) {
+    throw new ShareholderError("distribution_exceeds_closed_year_profit", 409, {
+      availableRial: (available > 0n ? available : 0n).toString(),
+      reservedRial: reserved.toString(),
+    });
+  }
+}
+
 export async function createShareholderDistribution(
   businessId: string,
   actor: ShareholderActor,
@@ -1318,6 +1463,12 @@ export async function createShareholderDistribution(
     if (distributable <= 0n || distributable > year.sourceProfit) {
       throw new ShareholderError("invalid_distributable_profit", 409, { sourceProfitRial: year.sourceProfit.toString() });
     }
+    await assertDistributionCapacity(client, {
+      businessId,
+      fiscalYearId,
+      sourceProfit: year.sourceProfit,
+      amount: distributable,
+    });
     const allocations = allocateRialByWeight(distributable, owners.map((owner) => ({ key: owner.partyId, weight: owner.weight })));
     const allocationByParty = new Map(allocations.map((row) => [row.key, row.amountRial]));
     const distributionId = randomUUID();
@@ -1363,14 +1514,34 @@ export async function approveShareholderDistribution(
   const distributionId = requireUuid(distributionIdValue, "distribution_id");
   return inTransaction(async (client) => {
     await lockShareholderBusiness(client, businessId);
-    const { rows } = await client.query<{ status: string; created_by: string | null }>(
-      "SELECT status, created_by FROM shareholder_distributions WHERE business_id=$1 AND id=$2 FOR UPDATE",
+    const { rows } = await client.query<{
+      status: string;
+      created_by: string | null;
+      fiscal_year_id: string;
+      closing_entry_id: string;
+      source_profit_rial: string;
+      distributable_rial: string;
+    }>(
+      `SELECT status, created_by, fiscal_year_id, closing_entry_id,
+              source_profit_rial::text AS source_profit_rial, distributable_rial::text AS distributable_rial
+         FROM shareholder_distributions WHERE business_id=$1 AND id=$2 FOR UPDATE`,
       [businessId, distributionId],
     );
     const row = rows[0];
     if (!row) throw new ShareholderError("distribution_not_found", 404);
     if (row.status !== "draft") throw new ShareholderError("distribution_not_approvable", 409, { status: row.status });
     if (row.created_by === actor.userId) throw new ShareholderError("distribution_creator_cannot_approve", 403);
+    const year = await closedFiscalYearSource(client, businessId, row.fiscal_year_id);
+    if (year.closingEntryId !== row.closing_entry_id || year.sourceProfit.toString() !== row.source_profit_rial) {
+      throw new ShareholderError("closed_year_result_changed", 409);
+    }
+    await assertDistributionCapacity(client, {
+      businessId,
+      fiscalYearId: row.fiscal_year_id,
+      sourceProfit: year.sourceProfit,
+      amount: BigInt(row.distributable_rial),
+      excludeId: distributionId,
+    });
     await client.query(
       `UPDATE shareholder_distributions SET status='approved', approved_by=$3, approved_at=now()
         WHERE business_id=$1 AND id=$2`,
@@ -1451,16 +1622,14 @@ export async function postShareholderDistribution(
     if (year.closingEntryId !== distribution.closing_entry_id || year.sourceProfit.toString() !== distribution.source_profit_rial) {
       throw new ShareholderError("closed_year_result_changed", 409);
     }
-    const alreadyPosted = await client.query<{ total: string }>(
-      `SELECT COALESCE(SUM(distributable_rial), 0)::text AS total
-         FROM shareholder_distributions
-        WHERE business_id=$1 AND fiscal_year_id=$2 AND id<>$3
-          AND status IN ('posted', 'partially_paid', 'paid')`,
-      [businessId, distribution.fiscal_year_id, distributionId],
-    );
-    if (BigInt(alreadyPosted.rows[0]?.total ?? "0") + BigInt(distribution.distributable_rial) > BigInt(distribution.source_profit_rial)) {
-      throw new ShareholderError("distribution_exceeds_closed_year_profit", 409);
-    }
+    const amount = BigInt(distribution.distributable_rial);
+    await assertDistributionCapacity(client, {
+      businessId,
+      fiscalYearId: distribution.fiscal_year_id,
+      sourceProfit: year.sourceProfit,
+      amount,
+      excludeId: distributionId,
+    });
     const accountMap = await accountIdsByCode(client, businessId, [SHAREHOLDER_ACCOUNT_CODES.retainedEarnings, SHAREHOLDER_ACCOUNT_CODES.distributionsPayable]);
     await verifyAccountTypes(client, businessId, accountMap, {
       [SHAREHOLDER_ACCOUNT_CODES.retainedEarnings]: "equity",
@@ -1474,10 +1643,9 @@ export async function postShareholderDistribution(
       [businessId, SHAREHOLDER_ACCOUNT_CODES.retainedEarnings],
     );
     const retainedAvailable = BigInt(retainedBalance.rows[0]?.credit ?? "0") - BigInt(retainedBalance.rows[0]?.debit ?? "0");
-    const amount = BigInt(distribution.distributable_rial);
     if (retainedAvailable < amount) throw new ShareholderError("retained_earnings_insufficient", 409, { availableRial: retainedAvailable.toString() });
 
-    const lines = await loadDistributionLines(client, businessId, [distributionId]);
+    const lines = await loadAllDistributionLinesForPosting(client, businessId, distributionId);
     if (lines.length === 0 || lines.reduce((sum, line) => sum + BigInt(line.allocatedRial), 0n) !== amount) {
       throw new ShareholderError("distribution_lines_unbalanced", 409);
     }

@@ -144,6 +144,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/accounting/financial-reports", "گزارش‌های مالی"],
     ["/accounting/growth", "رشد در حسابداری"],
     ["/accounting/settings", "تنظیمات حسابداری"],
+    ["/accounting/shareholders", "سهام‌داران، سرمایه و تقسیم سود"],
   ]),
   ...pageGroup("ارتباط با مشتری (CRM)", [
     ["/crm/overview", "میز کار CRM"],
