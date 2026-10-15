@@ -772,6 +772,28 @@ describe("undecryptable stored credentials (issue #757 §B)", () => {
     expect(JSON.parse(init.body ?? "{}")).toEqual({ key_aliases: ["pos-undecryptable-3"] });
   });
 
+  it("clears an undecryptable credential when LiteLLM confirms the alias was already absent, and allows a fresh key afterwards", async () => {
+    // The proxy's documented "No keys found" 404 — the same wording
+    // `delete_key_aliases()`/`delete_verification_tokens()` raise when zero
+    // rows match — is just as confirmed as an explicit deletion: there is
+    // nothing live at LiteLLM under this alias either way, so holding on to
+    // an unreadable ciphertext no longer protects anything.
+    await plantUndecryptableVirtualKey("pos-undecryptable-3b");
+    stubFetch([{ status: 404, body: { error: "No keys found" } }]);
+    const result = await gateway.revokeVirtualKey(testConfig(), alpha.businessId);
+    expect(result.ok).toBe(true);
+    expect(result.alreadyGone).toBe(true);
+    expect(await gateway.getBusinessGateway(alpha.businessId)).toBeNull();
+
+    // With the row cleared, this is no longer an "undecryptable" tenant —
+    // provisioning a fresh key must proceed normally instead of being stuck
+    // behind a permanent recovery error for a credential that is gone.
+    stubFetch([{ status: 200, body: { key: "sk-fresh-after-already-absent" } }]);
+    const provisioned = await gateway.provisionVirtualKey(testConfig(), { businessId: alpha.businessId });
+    expect(provisioned.virtualKey).toBe("sk-fresh-after-already-absent");
+    expect(provisioned.credentialState).toBe("present");
+  });
+
   it("refuses to provision a replacement while the credential is undecryptable, and never orphans it", async () => {
     await plantUndecryptableVirtualKey("pos-undecryptable-4");
     await expect(
@@ -800,6 +822,17 @@ describe("undecryptable stored credentials (issue #757 §B)", () => {
     ]);
     const rotated = await gateway.rotateVirtualKey(testConfig(), alpha.businessId);
     expect(rotated.virtualKey).toBe("sk-fresh-after-recovery");
+    expect(rotated.credentialState).toBe("present");
+  });
+
+  it("rotates an undecryptable credential once LiteLLM confirms the alias was already absent", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-6b");
+    stubFetch([
+      { status: 404, body: { error: "No keys found" } }, // alias revoke: already gone at LiteLLM
+      { status: 200, body: { key: "sk-fresh-after-already-absent-rotate" } }, // replacement
+    ]);
+    const rotated = await gateway.rotateVirtualKey(testConfig(), alpha.businessId);
+    expect(rotated.virtualKey).toBe("sk-fresh-after-already-absent-rotate");
     expect(rotated.credentialState).toBe("present");
   });
 

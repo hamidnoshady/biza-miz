@@ -616,6 +616,63 @@ describe("branch-scoped readiness (issue #757 P1-5)", () => {
       businessCredentialUndecryptable: true,
     });
   });
+
+  it("reports business inheritance, not branch, when the branch credential is stored but undecryptable and the business key is usable", async () => {
+    mockFleetQuery([fleetRow({ has_branch_override: true })], locations);
+    vi.mocked(listBusinessGatewaysForConsole).mockResolvedValueOnce([
+      businessKeyRow,
+      {
+        ...businessKeyRow,
+        id: "g-branch-1",
+        locationId: "loc-1",
+        virtualKey: null,
+        credentialState: "undecryptable",
+        keyAlias: "pos-biz1-loc1",
+      },
+    ] as never);
+
+    const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1&locationId=loc-1"));
+    const json = await res.json();
+    // The branch's own row is still reported as stored-but-broken (so the
+    // console can offer recovery) — but the EFFECTIVE source for a call is
+    // the business key, exactly as `resolveGatewayAuthKey` would pick it,
+    // because a branch credential this deployment cannot read is no more
+    // usable than one that was never issued.
+    expect(json.branchReadiness).toMatchObject({
+      credentialSource: "business",
+      businessHasKey: true,
+      branchHasKey: true,
+      branchCredentialUndecryptable: true,
+      inheritedFromBusiness: true,
+      lastVerifiedAt: businessKeyRow.syncedAt,
+    });
+  });
+
+  it("reports no effective credential when the branch's stored key is undecryptable and the business has no usable key either", async () => {
+    mockFleetQuery([fleetRow({ has_branch_override: true, business_has_key: false })], locations);
+    vi.mocked(listBusinessGatewaysForConsole).mockResolvedValueOnce([
+      {
+        ...businessKeyRow,
+        locationId: "loc-1",
+        virtualKey: null,
+        credentialState: "undecryptable",
+        keyAlias: "pos-biz1-loc1",
+      },
+    ] as never);
+
+    const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1&locationId=loc-1"));
+    const json = await res.json();
+    // Neither row is usable, so the console must say "none" rather than
+    // naming a branch credential that cannot actually serve a request.
+    expect(json.branchReadiness).toMatchObject({
+      credentialSource: "none",
+      businessHasKey: false,
+      branchHasKey: true,
+      branchCredentialUndecryptable: true,
+      inheritedFromBusiness: false,
+      lastVerifiedAt: null,
+    });
+  });
 });
 
 describe("undecryptable stored credentials (issue #757 §B)", () => {

@@ -1535,10 +1535,20 @@ async function revokeUndecryptableCredential(
     target: alias,
   });
 
-  if (classification.outcome === "deleted") {
-    // The proxy confirmed it removed the credential behind this alias.
+  if (classification.outcome === "deleted" || classification.outcome === "already_absent") {
+    // The proxy confirmed either outcome: it just removed the credential
+    // behind this alias, or it already had nothing under that alias. Both
+    // are documented, unambiguous evidence that nothing live is left behind
+    // at LiteLLM under this alias — exactly the same confirmation contract
+    // `revokeVirtualKey` applies to a readable key (issue #757 §A/§B). The
+    // row is the platform's only memory of the credential, so once LiteLLM
+    // confirms there is nothing to protect, holding on to an undecryptable
+    // ciphertext serves no purpose and would only block recovery: clearing
+    // it here is what lets a subsequent provision/rotate mint a fresh,
+    // readable key instead of being stuck behind a permanent "needs
+    // recovery" state for a credential that no longer exists anywhere.
     await clearVirtualKey(businessId, locationId);
-    return { ok: true, alreadyGone: false };
+    return { ok: true, alreadyGone: classification.outcome === "already_absent" };
   }
 
   const recovery =
