@@ -133,6 +133,13 @@ reopened to fix a mistake.
 ## Reconciliation
 
 The 2300 tie-out is `GET /api/commission/liability` (and the card on the runs page).
+Both this report and payroll's `getPayrollLiability` use the existing `inSnapshot`
+helper: one `REPEATABLE READ READ ONLY` connection, stamped by the normal tenant pool
+hook. **Every component, including standalone outstanding and carries, uses that
+client.** A plain READ COMMITTED transaction or `Promise.all` over pool queries is
+not a snapshot. Concurrent payouts/reversals/payroll payments may commit without
+blocking the report; it sees either the old or the new committed position, never
+components of both. Real differences remain differences (including manual 2300 journals).
 
 Positions, all integer Rial:
 
@@ -189,7 +196,7 @@ migration.
 Calculation records each warning on the run, with the text the screen shows (`commission-settlement-messages.ts`):
 
 - `balance_not_positive` — a member whose net balance is not positive is not paid; their rows wait for the next run.
-- `claimed_by_payroll` — rows a payroll run already paid. The warning names each payroll run
+- `claimed_by_payroll` — rows a payroll run already holds or paid. The warning names each payroll run
   (its period label) and its row count. The run does not take those rows. The run screen links
   to the payroll section (`/accounting/payroll`); there is no per-run deep link yet.
 - `earlier_rows_included` — unpaid rows dated before the period start are included. Each run takes
@@ -197,12 +204,15 @@ Calculation records each warning on the run, with the text the screen shows (`co
   message says so.
 - `inactive_member` — an inactive member is being paid; confirm before paying.
 - `rule_missing` — rows whose rule is no longer set.
-- `unmapped_seller` — retail sale lines in the run's period (business day, branch and member
-  filter applied) whose seller (`orders.opened_by`) has no commission rule in force today. The
-  warning gives each seller's line count and sales value (Σ unit price × quantity, before any
-  invoice-level discount). Nothing is accrued or paid for them, because there is no rule to accrue
-  under. Limits: "in force" is checked against today's rules, not the rules on each sale's day, and
-  sales value is not net of discounts.
+- `unmapped_seller` — retail sale lines **without an existing accrual** and without
+  an active assigned seller/applicable active rule on the sale's original business day.
+  Effective windows and item/brand scope are checked, not just "seller has any rule today".
+  Missing sellers appear as «فروشندهٔ تعیین‌نشده» with a null employee ID.
+  Rules may have been edited since a historical sale; this is a diagnostic of current rule
+  records against the original sale date, not a reconstructed historical rule audit.
+  Category is not passed by the retail producer (#764), so a category-scoped rule does not
+  suppress this warning. Sales value is pre-discount Σ unit price × quantity, not a payable.
+  A warning never creates an accrual or a payment. Existing signed accruals remain authoritative.
 
 The run's CSV export (`runs` list) carries a warning count per run.
 
@@ -240,13 +250,48 @@ accountant holds all four; the manager holds `commission.calculate` (not approva
 | `POST …/release`, `…/close`, `…/payouts` | payout |
 | `POST /api/commission/payouts/[id]/reverse` | reverse |
 | `GET /api/commission/payment-accounts` | payout |
-| `GET /api/commission/statement?employeeId=` | view |
+| `GET /api/commission/statement?employeeId=` (paging, date/run filters, CSV) | view |
 | `GET /api/commission/liability` | view |
 
 Money is an integer Rial string on the wire. Dates are `YYYY-MM-DD` on the wire and Shamsi on
 screen. Errors are `{ error: <code>, …details }`; the codes are translated in
 `commission-settlement-messages.ts`, and a test fails if the settlement code raises a code it
 does not translate.
+
+
+## Seller statement history and export
+
+`GET /api/commission/statement?employeeId=` keeps the previous JSON fields and
+adds `page` (`limit`, `accrualOffset`, `payoutOffset`, `hasMoreAccruals`,
+`hasMorePayouts`). The default remains 500 for API compatibility; Growth requests
+100 and offers independent previous/next controls for both lists. `truncated`
+is retained as a compatibility flag for "more detail pages exist", not missing totals.
+
+Optional `dateFrom`, `dateTo` (inclusive sale/paid date) and `runId` filter **history
+only**. The employee's lifetime accrued, paid-through-payroll, net standalone paid
+and outstanding totals always come from full-history sums on the same snapshot.
+The stable sort ends in the immutable row ID. Pages are fresh snapshots; they are not
+an export frozen across multiple requests while new records arrive.
+
+`format=csv` uses the shared reporting CSV codec (BOM, CRLF, formula protection),
+Shamsi dates and exact signed amounts in the business's selected unit. It ignores
+page offsets, exports both filtered histories and explicitly labelled lifetime totals,
+and refuses `too_many_export_rows` if either history exceeds 20,000 rows. Narrow the
+same date/run filters rather than downloading a silently incomplete file. Toman CSV
+preserves a final Rial as a decimal digit, including signed returns/reversals.
+
+Accrual rows include `orderId`, `entryId`, `settlementRunId` and `payrollRunId` when
+available. Growth links the source sale, journal and commission run; legacy payroll
+provenance links to `/accounting/payroll` (no supported direct legacy-run route yet).
+The business-wide reconciliation status remains on the runs report; the statement
+does not fabricate an employee-specific GL balance.
+
+Browser acceptance: `scripts/e2e-commission.mjs`, disposable fixture
+`scripts/seed-commission-e2e.ts`, `npm run test:e2e:commission`. It authenticates three
+real memberships against the running production application, exercises workflow
+and permission refusals, partial/full payment, reversal, close/carry, statement CSV,
+RTL and desktop/tablet/phone overflow. See `ISSUE_869_PLAN.md` for actual execution
+results and release blockers; presence of the script is not a pass claim.
 
 ## Audit and events
 
@@ -287,12 +332,10 @@ note (a void's reason is required). The run page shows the trail.
 
 ## Known gaps
 
-- Sales lines whose seller has no matching rule never accrue. The run warns about them
-  (`unmapped_seller`), but a rule-scoped line for a seller who does have a rule is not warned about.
+- Sales lines without an applicable rule never accrue; they are warned, including nonmatching item/brand scope.
 - No project dimension exists on commission accruals, so the statement and the run carry none.
 - Amounts are stored as integer Rial and shown in the business's display unit.
 - Category-scoped commission rules never match: the retail invoice path does not pass a category
   (`retail-invoice-service.ts`). This predates #869 and is unchanged.
-- The statement's detail lists show at most 500 accruals and 500 payouts per member, with a `truncated` flag.
-  Its totals (accrued, paid through payroll, paid through runs, unpaid) are database sums over the whole
-  history and are never truncated.
+- History pages are bounded at 500, but every row is reachable through paging and filtered export; lifetime sums are never page-limited.
+- Real two-instance central/site transport verification and the full browser acceptance matrix remain release gates; see the completion audit.

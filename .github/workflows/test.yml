@@ -443,7 +443,7 @@ jobs:
         run: npm run build
       - name: Start the production server
         run: |
-          BIND_ADDR=127.0.0.1 PORT=3000 \
+          BIND_ADDR=127.0.0.1 PORT=3000 DEPLOYMENT_ROLE=central \
           DATABASE_URL=postgres://pos_app:ci-only-app-role-password@127.0.0.1:55433/pos \
           npm run start > server.log 2>&1 &
           for i in $(seq 1 60); do
@@ -465,6 +465,17 @@ jobs:
         # Registers its own 220 receivables through the API, on this job's
         # fresh database, so it never touches the visual-regression fixture.
         run: npm run test:e2e:cheques
+      - name: Commission multi-user lifecycle E2E
+        env:
+          COMMISSION_E2E_SEED: '1'
+        run: npm run test:e2e:commission
+      - name: Commission browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: commission-browser-diagnostics
+          path: .cache/commission-e2e/*.png
+          if-no-files-found: ignore
       - name: Fiscal opening E2E (opening set life, unit import, close, carry-forward)
         # Defines its own fiscal years and walks the opening set's full life
         # (import preview → create → submit → approve → post), the selected-unit

@@ -1,11 +1,87 @@
 # Issue #869 — Commission run approval, settlement and payout lifecycle — implementation plan
 
-Working branch: `arena/40246fe8-biza-miz` (from `main` at `7b1b11c`). Committed to this branch; no pull request, not merged.
+Current completion branch: `arena/f54736c8-biza-miz`, audited against `main`
+`916df457eca2fef2123b3cfb6507bd0cfeacfe3e` on 2026-10-15. The original lifecycle
+was merged in PR #930 (`b4b7d22ba9886f589c3af8bff370984ca0f4bdb5`, 2026-10-12).
+The completion audit below supersedes the historical implementation/gate notes.
 
 Scope from the issue: complete the commission financial lifecycle *after accrual*.
 Commission rules, seller assignment, effective dates, accrual posting and the rules-and-report
 screen (#764) are not rebuilt. Payroll's own commission settlement and the 2300 tie-out (#835,
 migration 0215) are extended, not replaced. #869 owns run → approval → settlement → payout.
+
+
+## Completion audit — 2026-10-15
+
+Evidence read: live issue #869 body and comments (seven unchecked original DoD items;
+no comments), merged PR #930 body/comments, current `main`, settlement/lifecycle/planner/
+payout code, payroll, commission APIs and Growth screens, migrations 0216–0218,
+commission/contention/RLS/sync tests, `docs/commission-settlement.md`, payroll and
+business-scope sync documentation. No replacement financial subsystem or balance table.
+
+| Requirement | Audit status / completion evidence |
+| --- | --- |
+| Immutable runs and rule/employee/source snapshots | Complete in #930; existing line guards retained. Rule terms are the terms at calculation, not a reconstructed historical rules database. |
+| Separate approval/payout and audit trail | Complete in #930; calculator cannot approve, including owner; policy unchanged. Review and approval share `commission.approve`. |
+| Partial/full payouts, retries, reversals | Complete in #930; locked run, allocation bounds, request fingerprint, unique keys, mirror journals; concurrency and rollback tests retained. |
+| No duplicate accrual settlement | Complete in #930; same payroll advisory lock, row locks, mutually exclusive claim CHECK and affected-row checks. |
+| Returns, corrections, close/carry | Complete in #930; signed accruals, append-only reversal, posted-history guards and employee-level carries retained. |
+| Consistent GL reconciliation | Defect fixed here: both commission and payroll tie-outs now read via existing `inSnapshot` / explicit client runner. Includes open standalone runs AND unclaimed carries on that same connection. No RLS bypass, mutation lock, rounding or zero-forcing. |
+| Statements | Previously correct lifetime sums but capped history. Added independent accrual/payout paging, date/run filters, full filtered CSV (20,000 rows per history; explicit refusal above cap), sale/journal/run IDs and navigation. All totals remain lifetime DB sums, even for empty filters. Statement reads also use one snapshot. Payroll provenance still links to the payroll workspace: it has no supported direct legacy-run URL. |
+| Warnings | Fixed sale-day effective windows, item/brand scope, missing/inactive assignments without accrual, and inaccurate claim wording (payroll-held is not necessarily paid). Never accrue money from a warning. Historical lines with existing accruals are not re-diagnosed from subsequently edited rules. |
+| Rule-engine/category scope | Pre-existing #764 dependency, not rebuilt: retail producer does not pass category; a category rule no longer hides the warning. Rule edit history is not available to reconstruct past active flags. Warning sales values remain pre-discount, explicitly documented. |
+| Financial permissions / tenant isolation | Existing five permissions, service transitions, API guards and FORCE RLS retained. Added snapshot reporting probes under a non-superuser/non-BYPASSRLS app role. |
+| Browser acceptance | In-repo real-app multi-user script added (`npm run test:e2e:commission`) and wired into the existing production/RLS browser CI job. Local execution and CI results must be recorded below, not inferred from the script's existence. Broader keyboard/theme/filter-race and source navigation acceptance still require evidence. |
+| Synchronization | Existing transactionally appended business-scope recorded/reversed v1 contracts preserved. Existing PostgreSQL tests exercise outbox rollback, duplicate delivery, site refusal, replay and scope. A real central/site two-instance transport run has NOT been completed; no paired deployment or external credentials supplied. Branch-bound devices intentionally do not receive business-scope events; a business-wide feed does. |
+| Cleanup | Cross-reference audit of settlement helpers/API/UI/tests/sync consumers; no confirmed dead financial path removed. The optional non-snapshot runner default on standalone outstanding was removed: its sole consumer must supply the report runner. |
+| Release / closure | BLOCKED until all mandatory gates, live two-instance verification and merge. Keep issue #869 OPEN. No automatic-closing PR keyword while blocked. |
+
+### Regression evidence added
+
+- PostgreSQL table-lock barriers in `commission-contention.integration.test.ts`: report
+  reads GL, blocks on accrual history, real payout/reversal/payroll transaction commits,
+  report finishes with exactly the pre-commit position; a fresh report sees the new state.
+  Both reports, and statement totals/history, are exercised. A genuine manual GL discrepancy
+  beyond 2^53 remains visible to the last Rial.
+- Whole-history statement fixture: walk 522 signed accruals and 603 payout/reversal
+  allocations without omission/duplication; totals unchanged on every page or empty date
+  filter; CSV mode ignores page offsets and returns the full filtered history.
+- Sale-day rule warning regression, nonmatching item/brand/category scope, missing seller.
+- Signed CSV correction: existing run-line exports threw on negative return amounts because
+  they called a nonnegative input formatter. Shared exact signed export formatting now
+  preserves negative amounts, values beyond 2^53 and the final Rial digit in Toman files.
+- Strict statement query and HTTP view/export permission contracts.
+- Real browser exposed native label activation around multi-control Jalali pickers:
+  Today updated the date then reopened the calendar over Submit. Commission date fields
+  now use `Field as="div"` with explicit picker names; the E2E asserts the picker closes,
+  without force clicks or relaxed timeouts.
+
+### Current verification record
+
+Current branch evidence, 2026-10-15 (Node 24). Earlier gate tables describe #930 only,
+not verification of this completion branch.
+
+| Gate | Current evidence |
+| --- | --- |
+| TypeScript | PASS, final `tsc --noEmit` exit 0 after all source/test changes. |
+| ESLint | PASS, final full sequential rerun exit 0. No warning threshold changed. |
+| Focused unit/HTTP | PASS: 74 tests / 5 files, including pagination/view denial and exact CSV download contract. |
+| Financial PostgreSQL | PASS: 247 tests / 6 files, 45.55s: payroll 184, accrual 11, settlement 23, contention 10, sync handlers 12, tenant isolation 7. Includes oversized-export refusal, whole-history paging, exact manual GL drift and deterministic snapshot barriers. |
+| Full unit / full DB | Initial runs were contaminated by simultaneous build memory exhaustion and stopped; NOT passes. Fresh sequential runs in progress. |
+| Actual-app browser | NOT passed. On unprivileged runtime role, browser reproduced the calendar-label defect; after correction, calendar-close assertion and real run creation/calculation succeeded. Later dev route compilation exhausted sandbox RAM and the server died. Full script remains an unverified gate; no mocked route or forced click was substituted. |
+| Production build | BLOCKED locally: both parallel and isolated attempts were killed (isolated exit 137) during compilation on the 3.8 GiB sandbox. No successful build claim or altered build/test acceptance thresholds. |
+| Pinned visual / Windows packaging | NOT verified here. Available local Chromium 138 is not the pinned visual browser; no baselines regenerated. Windows packaging requires its existing Windows runner. |
+| Live central/site sync | NOT verified. Handler/outbox/RLS tests above are not real transport evidence. |
+| Actions / merge | Pending PR/CI. Do not merge or close #869 on these local results. |
+
+Remaining acceptance also includes the broader actual-app theme, keyboard/accessibility,
+Rial/Toman, stale/error/filter and source navigation matrix, a supported payroll-run deep
+link (currently workspace-only), and the #764 category-producer dependency. Keep #869 OPEN
+until mandatory verification, any required fixes and merge are complete.
+
+---
+
+## Historical implementation record (PR #930)
 
 ## Baseline, before the first change
 
@@ -88,7 +164,7 @@ migration 0215) are extended, not replaced. #869 owns run → approval → settl
 
 # Status
 
-Delivered on branch `arena/40246fe8-biza-miz` and committed there; not merged. The table maps each requirement of the
+Historical delivery from `arena/40246fe8-biza-miz` was merged through PR #930. The table maps each requirement of the
 issue to the code that meets it and to the test that proves it.
 
 ## What each part of the issue maps to

@@ -440,3 +440,15 @@ and payments screens keeps *their* wording there.
 - AR/AP/installment settlement still maps «bank» to 1120 (card clearing).
 - Not built, on purpose: payslips, filing outputs, remitting the withheld
   amounts, attendance, and a benefits engine.
+
+
+### Commission settlement reconciliation snapshot (#869)
+
+Legacy payroll's 2300 tie-out now reads its GL, accrued payroll, unclaimed
+commission, standalone commission-run outstanding and unclaimed carry rows through
+one `inSnapshot` (`REPEATABLE READ READ ONLY`) connection. `standaloneCommissionOutstanding`
+requires that caller's runner, so it cannot silently fall back to pool autocommits.
+The commission report uses the same isolation and the same canonical 2300 account.
+No financial formula, payout authority, claim policy or self-approval rule changes.
+See [commission settlement](commission-settlement.md) for the identities and the
+PostgreSQL inter-query payout/reversal/payroll-commit barrier tests.

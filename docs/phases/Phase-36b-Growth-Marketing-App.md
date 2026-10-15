@@ -207,3 +207,18 @@ app's own sidebar are exactly as the revision above left them.
 - Campaign budgets and a marketing-expense cost centre (#376 exists for the
   messaging phase; project cost centres are #377's subject).
 - Changing any engine's arithmetic, posting rule or account number.
+
+
+## Commission lifecycle completion audit — 2026-10-15 (#869)
+
+The merged #930 lifecycle is preserved, not rebuilt. Growth keeps its rule/report surface
+at `/growth/commission`, with standalone run approval and payout at
+`/growth/commission/runs`. Seller statements now page accrual and payout histories
+independently, filter by source/payment day and run, and export the complete filtered
+history under the reporting cap; lifetime totals never depend on the visible page.
+The reconciliation card reads account 2300 and every source balance from one tenant-scoped
+DB snapshot. Missing-accrual diagnostics use the original sale day and item/brand scope;
+existing signed accruals remain authoritative. The category omission in the retail accrual
+producer and broader rule-engine work remain owned by #764, not a replacement in #869.
+See [the current settlement contract](../commission-settlement.md) and
+[the audited completion record](../../ISSUE_869_PLAN.md), including unverified release gates.

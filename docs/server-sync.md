@@ -305,6 +305,20 @@ every branch. Its event is recorded with `scope = 'business'`, `business_id` set
 - **Location-scoped sync is unchanged.** The push, pull, health and connection-status
   queries now also name `scope = 'location'`, so the rule is written where it applies.
 
+### Commission verification status (2026-10-15 completion audit)
+
+The #869 follow-up does not change the recorded/reversed v1 wire contracts or
+financial authority. PostgreSQL handler/outbox tests are not evidence of live
+transport between two instances. No real paired central/site transport test has
+been completed in this audit; that remains a mandatory release/issue-closure gate.
+To accept it, use separate central and site databases/processes and real credentials:
+commit a central payout and reversal, verify business-wide pull and duplicate retry
+acknowledgements, zero additional site payout/journal effects, tenant denial, and
+location-credential exclusion as specified above. Record request IDs, original /
+reversing payout IDs, effect IDs and persisted cursor/retry results, without tokens.
+Do not claim branch devices should receive these events: business-wide versus
+location-bound delivery is an intentional authority boundary, not lost replication.
+
 ## Supported event scope
 
 `src/lib/data-ownership.ts` is the versioned, machine-readable replication

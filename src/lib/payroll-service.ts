@@ -78,7 +78,7 @@ import { parseRialInput } from "./payroll-amounts";
 import { resolvePayoutAccount } from "./payroll-accounts";
 import { outstandingAdvances } from "./payroll-advances-service";
 import { standaloneCommissionOutstanding } from "./commission-settlement-service";
-import { asRial, clientRunner, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
+import { asRial, clientRunner, inSnapshot, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
 import { normalizeIdempotencyKey, PayrollError } from "./payroll-errors";
 import {
   decodePayTermCursor,
@@ -631,40 +631,43 @@ async function mustGetRun(businessId: string, runId: string): Promise<PayrollRun
  * advances in 1260; none of them is part of 2300.)
  */
 export async function getPayrollLiability(businessId: string): Promise<PayrollLiability> {
-  const [ledger, awaiting, unsettled] = await Promise.all([
-    query<{ balance: string }>(
-      `SELECT COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
-         FROM journal_lines jl
-         JOIN journal_entries je ON je.id = jl.entry_id
-         JOIN accounts a ON a.id = jl.account_id
-        WHERE je.business_id = $1 AND a.business_id = $1 AND a.code = $2`,
-      [businessId, WELL_KNOWN_CODES.salariesPayable],
-    ),
-    query<{ total: string }>(
-      `SELECT COALESCE(SUM(COALESCE(net_amount, total_amount) + commission_total), 0)::text AS total
-         FROM payroll_runs WHERE business_id = $1 AND status = 'accrued'`,
-      [businessId],
-    ),
-    query<{ total: string }>(
-      `SELECT COALESCE(SUM(amount), 0)::text AS total
-         FROM commission_accruals
-        WHERE business_id = $1 AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
-      [businessId],
-    ),
-  ]);
-  // Commission a standalone settlement run has claimed but not paid, plus the
-  // balances closed runs carried forward (issue #869). Both are still owed by
-  // 2300, so they belong in the same «not yet paid» bucket as unclaimed rows.
-  const standalone = await standaloneCommissionOutstanding(businessId);
-  const ledgerBalance = BigInt(ledger.rows[0].balance);
-  const awaitingPayment = BigInt(awaiting.rows[0].total);
-  const unsettledCommission = BigInt(unsettled.rows[0].total) + standalone;
-  return {
-    ledgerBalance: ledgerBalance.toString(),
-    awaitingPayment: awaitingPayment.toString(),
-    unsettledCommission: unsettledCommission.toString(),
-    difference: (ledgerBalance - awaitingPayment - unsettledCommission).toString(),
-  };
+  return inSnapshot(async (client) => {
+    const run = clientRunner(client);
+    const [ledger, awaiting, unsettled] = [
+      await run<{ balance: string }>(
+        `SELECT COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
+           FROM journal_lines jl
+           JOIN journal_entries je ON je.id = jl.entry_id
+           JOIN accounts a ON a.id = jl.account_id
+          WHERE je.business_id = $1 AND a.business_id = $1 AND a.code = $2`,
+        [businessId, WELL_KNOWN_CODES.salariesPayable],
+      ),
+      await run<{ total: string }>(
+        `SELECT COALESCE(SUM(COALESCE(net_amount, total_amount) + commission_total), 0)::text AS total
+           FROM payroll_runs WHERE business_id = $1 AND status = 'accrued'`,
+        [businessId],
+      ),
+      await run<{ total: string }>(
+        `SELECT COALESCE(SUM(amount), 0)::text AS total
+           FROM commission_accruals
+          WHERE business_id = $1 AND payroll_run_id IS NULL AND settlement_run_id IS NULL`,
+        [businessId],
+      ),
+    ];
+    // Commission a standalone settlement run has claimed but not paid, plus the
+    // balances closed runs carried forward (issue #869). Both are still owed by
+    // 2300, so they belong in the same «not yet paid» bucket as unclaimed rows.
+    const standalone = await standaloneCommissionOutstanding(businessId, run);
+    const ledgerBalance = BigInt(ledger.rows[0].balance);
+    const awaitingPayment = BigInt(awaiting.rows[0].total);
+    const unsettledCommission = BigInt(unsettled.rows[0].total) + standalone;
+    return {
+      ledgerBalance: ledgerBalance.toString(),
+      awaitingPayment: awaitingPayment.toString(),
+      unsettledCommission: unsettledCommission.toString(),
+      difference: (ledgerBalance - awaitingPayment - unsettledCommission).toString(),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

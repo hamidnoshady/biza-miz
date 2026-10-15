@@ -335,7 +335,7 @@ describe("calculating a run", () => {
  * `opened_by`, with its lines. Nothing here accrues commission; the sale is what
  * the unmapped-seller warning reads.
  */
-async function retailSale(t: Tenant, sellerId: string, lines: { unitPrice: number; quantity: number; status?: string }[]): Promise<void> {
+async function retailSale(t: Tenant, sellerId: string | null, lines: { unitPrice: number; quantity: number; status?: string }[], closedAt: string | null = null): Promise<void> {
   // Opened first, as the till does: a guard refuses lines on an order that is not open.
   const { rows: [order] } = await db.query<{ id: string }>(
     `INSERT INTO orders (location_id, order_number, type, status, opened_by)
@@ -349,7 +349,7 @@ async function retailSale(t: Tenant, sellerId: string, lines: { unitPrice: numbe
       [t.locationId, order.id, line.unitPrice, line.quantity, line.status ?? "served"],
     );
   }
-  await db.query("UPDATE orders SET status = 'completed', closed_by = $2, closed_at = now() WHERE id = $1", [order.id, sellerId]);
+  await db.query("UPDATE orders SET status = 'completed', closed_by = $2, closed_at = COALESCE($3::timestamptz, now()) WHERE id = $1", [order.id, sellerId, closedAt]);
 }
 
 async function calculateNewRun(t: Tenant) {
@@ -392,6 +392,47 @@ describe("warnings about sales the run does not pay", () => {
 
     expect(run.warnings.map((w) => w.code)).not.toContain("unmapped_seller");
   });
+  it("checks rule windows on the original sale day, not the calculation day", async () => {
+    const t = await newTenant();
+    await accrue(t, t.sellerB, 100_000);
+    await retailSale(t, t.sellerA, [{ unitPrice: 1000, quantity: 1 }], "2020-06-15T12:00:00Z");
+    await db.query("UPDATE commission_rules SET active_from = '2020-01-01', active_to = '2020-12-31' WHERE employee_id = $1", [t.sellerA]);
+    const make = async () => {
+      const today = await businessDay.businessToday(t.id);
+      const { run } = await settlement.createCommissionRun(t.id, t.calculator,
+        { periodFrom: "2020-01-01", periodTo: today, locationId: null, employeeIds: [], title: null }, null);
+      return settlement.calculateCommissionRun(t.id, t.calculator, run.id);
+    };
+    const validThen = await make();
+    expect(validThen.warnings.map((w) => w.code)).not.toContain("unmapped_seller");
+    await settlement.voidCommissionRun(t.id, t.calculator, validThen.id, "بررسی تاریخ");
+    await db.query("UPDATE commission_rules SET active_from = '2021-01-01', active_to = NULL WHERE employee_id = $1", [t.sellerA]);
+    const invalidThen = await make();
+    expect(invalidThen.warnings).toContainEqual(expect.objectContaining({ code: "unmapped_seller", lines: 1 }));
+    expect(invalidThen.commissionTotal).toBe("5000");
+  });
+
+  it.each(["item_ids", "brand_ids", "category_ids"])("a nonmatching %s rule does not hide an unpaid sale warning", async (axis) => {
+    const t = await newTenant();
+    await accrue(t, t.sellerB, 100_000);
+    await retailSale(t, t.sellerA, [{ unitPrice: 1000, quantity: 1 }]);
+    // axis is the allowlisted test parameter, never request SQL.
+    await db.query(`UPDATE commission_rules SET ${axis} = ARRAY[$2::uuid] WHERE employee_id = $1`, [t.sellerA, randomUUID()]);
+    const run = await calculateNewRun(t);
+    expect(run.warnings).toContainEqual(expect.objectContaining({ code: "unmapped_seller", lines: 1 }));
+    expect(run.commissionTotal).toBe("5000");
+  });
+
+  it("warns about a missing assignment without creating an accrual or payment for it", async () => {
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000);
+    await retailSale(t, null, [{ unitPrice: 1000, quantity: 1 }]);
+    const run = await calculateNewRun(t);
+    expect(run.warnings).toContainEqual({ code: "unmapped_seller", lines: 1,
+      sellers: [{ employeeId: null, fullName: "فروشندهٔ تعیین‌نشده", lines: 1, salesValue: "1000" }] });
+    expect(run.commissionTotal).toBe("5000");
+  });
+
 });
 
 describe("approval and payout", () => {
@@ -923,6 +964,33 @@ describe("the statement totals are sums over the whole history, not over the row
     expect(statement.payouts).toHaveLength(500);
     expect(statement.truncated).toBe(true);
 
+    // Walk beyond both old 500-row windows. Totals must be identical on every
+    // page and for an empty detail selection, and no row may disappear.
+    const accrualIds = new Set<string>();
+    const allocationIds = new Set<string>();
+    for (let offset = 0; offset <= 600; offset += 100) {
+      const page = await settlement.getCommissionStatement(t.id, t.sellerA, { limit: 100, accrualOffset: offset, payoutOffset: offset });
+      expect(page.totals).toEqual(statement.totals);
+      for (const row of page.accruals) { expect(accrualIds.has(row.id)).toBe(false); accrualIds.add(row.id); }
+      for (const row of page.payouts) { expect(allocationIds.has(row.payoutId)).toBe(false); allocationIds.add(row.payoutId); }
+    }
+    expect(accrualIds.size).toBe(522);
+    expect(allocationIds.size).toBe(603);
+    const filtered = await settlement.getCommissionStatement(t.id, t.sellerA, { dateTo: "1900-01-01" });
+    expect(filtered.accruals).toEqual([]);
+    expect(filtered.payouts).toEqual([]);
+    expect(filtered.totals).toEqual(statement.totals);
+    const exported = await settlement.getCommissionStatement(t.id, t.sellerA, { format: "csv", accrualOffset: 500, payoutOffset: 500 });
+    expect(exported.accruals).toHaveLength(522);
+    expect(exported.payouts).toHaveLength(603);
+    expect(exported.truncated).toBe(false);
+    expect(exported.totals).toEqual(statement.totals);
+    const runOnly = await settlement.getCommissionStatement(t.id, t.sellerA, { runId: run.id });
+    expect(runOnly.accruals).toHaveLength(2); // the original sale AND its -3,000 return
+    expect(runOnly.accruals.every((row) => row.settlementRunId === run.id)).toBe(true);
+    expect(runOnly.accruals.reduce((sum, row) => sum + BigInt(row.amount), 0n)).toBe(2000n);
+    expect(runOnly.totals).toEqual(statement.totals);
+
     // Another business's money never leaks in, and its member id is not found here.
     await accrue(other, other.sellerA, 100_000);
     const otherRun = await approvedRun(other);
@@ -939,4 +1007,14 @@ describe("the statement totals are sums over the whole history, not over the row
     expect(again.totals.paidThroughRuns).toBe("6980");
     await expectRefusal(settlement.getCommissionStatement(t.id, other.sellerA), "employee_not_found", 404);
   }, 120_000);
+  it("refuses an oversized CSV explicitly instead of returning only the first 20,000 rows", async () => {
+    const t = await newTenant();
+    await db.query(`INSERT INTO commission_accruals (business_id, employee_id, source_type, amount, basis_amount)
+      SELECT $1, $2, 'order_item', 1, 20 FROM generate_series(1, 20001)`, [t.id, t.sellerA]);
+    await expectRefusal(settlement.getCommissionStatement(t.id, t.sellerA, { format: "csv" }), "too_many_export_rows", 400);
+    const narrowed = await settlement.getCommissionStatement(t.id, t.sellerA, { format: "csv", dateTo: "1900-01-01" });
+    expect(narrowed.accruals).toEqual([]);
+    expect(narrowed.totals.accrued).toBe("20001");
+  });
+
 });
