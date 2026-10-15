@@ -405,7 +405,7 @@ parallel session store:
 
 - Every door opens its row through the same `createSession` the sign-in doors
   use, and signs the row id into the token (`employeeSessionId`). The door is
-  recorded in `login_method`. Migration `0225_employee_session_login_methods.sql`
+  recorded in `login_method`. Migration `0226_employee_session_login_methods.sql`
   widens 0211's CHECK by exactly `business_switch`, `setup`, `desktop_handoff`
   and `company_handoff`. `SESSION_LOGIN_METHODS` mirrors that list, and
   `session-contract.test.ts` reads the newest migration to keep the two equal.

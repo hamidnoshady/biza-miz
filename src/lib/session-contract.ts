@@ -37,7 +37,7 @@ export type SessionScope = "business" | "global";
  * Login methods a session can have been minted by, for the device card. Kept
  * narrow on purpose: this is a label, not an authorization input. The same
  * list is the `employee_sessions_login_method_check` constraint (migrations
- * 0211 and 0225).
+ * 0211 and 0226).
  *
  * The last four are the doors that open a session without a sign-in form
  * (#854 follow-up, third pass): moving the session to another business, the
