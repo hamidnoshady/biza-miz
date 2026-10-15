@@ -11,6 +11,7 @@ import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DimensionFields, useDimensionCatalog, DimensionCatalogError } from "./dimension-fields";
 import { dimensionPayload, enabledDimensionKinds, type DimensionDraft } from "./dimension-catalog";
+import { DraftBulkAssignPanel } from "./draft-bulk-assign-panel";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { Button } from "@/components/ui/button";
 import {
@@ -1013,6 +1014,10 @@ export function ManualEntrySection({
               })}
             </ul>
           )}
+
+          {canApprove && drafts && drafts.length > 0 ? (
+            <DraftBulkAssignPanel drafts={drafts} onChanged={loadDrafts} />
+          ) : null}
 
           {/* Bounded on purpose: the queue is business-wide and open-ended, so
               it is read a page at a time rather than loaded whole. */}
