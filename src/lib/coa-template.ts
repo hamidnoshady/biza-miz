@@ -130,6 +130,12 @@ export const WELL_KNOWN_CODES = {
   // custom orders) and the gold-account (حساب طلایی) liability.
   layawayDeposit: "2430",
   goldCustomerAccount: "2450",
+  // Issue #864 — partner-specific liabilities and paid-in capital. Balances
+  // remain in attributed journal lines; these are chart headings, not a second
+  // shareholder balance store.
+  shareholderLoanPayable: "2510",
+  shareholderDistributionPayable: "2520",
+  additionalPaidInCapital: "3150",
   openingEquity: "3900",
   historicalInventoryReconciliationEquity: "3950",
   retainedEarnings: "3800",
@@ -546,9 +552,12 @@ const SHARED_LIABILITY_ACCOUNTS: TemplateAccount[] = [
   { code: "2455", name: "پرداختنی به پلتفرم (اعتبار پیام)", type: "liability", parentCode: "2000" },
   // Non-current, and the reason `isNonCurrentCode` treats 2500+ as such.
   { code: "2500", name: "تسهیلات و وام پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2510", name: "وام پرداختنی به سهام‌داران", type: "liability", parentCode: "2000" },
+  { code: "2520", name: "سود سهام پرداختنی", type: "liability", parentCode: "2000" },
 ];
 
 const SHARED_EQUITY_ACCOUNTS: TemplateAccount[] = [
+  { code: "3150", name: "سرمایه پرداخت‌شده اضافی", type: "equity", parentCode: "3000" },
   { code: "3200", name: "برداشت مالک", type: "equity", parentCode: "3000", isContra: true },
 ];
 

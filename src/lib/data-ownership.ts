@@ -270,6 +270,33 @@ export const DATA_OWNERSHIP_REGISTRY = {
     transport: "events",
     events: [event("commission.payout.recorded", 1), event("commission.payout.reversed", 1)],
   }),
+  /**
+   * Shareholder Accounting (#864). Parties, immutable ownership events,
+   * distribution snapshots and the GL remain cloud-authoritative. The
+   * business-wide money effects travel only so paired sites can acknowledge
+   * them; they do not copy shareholder data or replay a posted journal.
+   */
+  shareholder_accounting: replicated({
+    domain: "shareholder_accounting",
+    authority: "cloud_authoritative",
+    direction: "cloud_to_site",
+    conflictPolicy: "immutable_idempotent",
+    tombstonePolicy: "not_applicable",
+    bootstrap: "none",
+    continuousSync: "active",
+    identity: "immutable shareholder-event, distribution, payment or reversal UUID plus deterministic client_event_id",
+    retry:
+      "transactional business-scope sync_events row; retries land once; a site acknowledges the pulled copy without applying the cloud-owned GL effect; explicit mirror journals correct money",
+    transport: "events",
+    events: [
+      event("shareholder.capital.recorded", 1),
+      event("shareholder.capital.reversed", 1),
+      event("shareholder.distribution.posted", 1),
+      event("shareholder.distribution.payment.recorded", 1),
+      event("shareholder.distribution.payment.reversed", 1),
+      event("shareholder.distribution.reversed", 1),
+    ],
+  }),
   inventory_movements: replicated({
     domain: "inventory_movements",
     authority: "site_authoritative",

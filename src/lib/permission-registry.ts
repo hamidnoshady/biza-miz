@@ -221,6 +221,19 @@ const DRAFTS: Draft[] = [
   { key: P.ledgerClosePeriod, group: "accounting", label: "بستن دوره مالی", description: "بستن یا بازگشایی دوره مالی. پس از آن ثبت در دوره ممکن نیست.", risk: "critical", audit: true },
   { key: P.accountsEdit, group: "accounting", label: "ویرایش کدینگ حساب‌ها", description: "تغییر ساختار حساب‌ها؛ هر گزارش تاریخی را بازتعریف می‌کند.", risk: "high", audit: true },
   { key: P.ledgerPropose, group: "accounting", label: "پیش‌نویس سند", description: "تهیه پیش‌نویس سند حسابداری برای بررسی. تا زمانی که تأیید نشود بر دفاتر اثری ندارد.", risk: "low", audit: false },
+  // Shareholder identity is the canonical Party record; these keys govern its
+  // Accounting relationship, ownership history, ledger postings and closed-year
+  // distribution workflow (issue #864).
+  { key: P.shareholdersView, group: "accounting", label: "مشاهده سهام‌داران", description: "مشاهدهٔ دفتر مالکیت، رویدادهای سرمایه و تطبیق مانده‌های هر شخص با دفتر کل.", risk: "medium", audit: true },
+  { key: P.shareholdersManage, group: "accounting", label: "مدیریت مالکیت", description: "ثبت رویدادهای تاریخ‌دار مالکیت برای اشخاص موجود در دفتر اشخاص.", risk: "high", audit: true },
+  { key: P.shareholdersRetroactive, group: "accounting", label: "اصلاح تاریخ گذشتهٔ مالکیت", description: "ثبت تغییر مالکیت با تاریخ مؤثر گذشته؛ دلیل آن در سابقهٔ حسابرسی ثبت می‌شود.", risk: "high", audit: true },
+  { key: P.shareholdersCapitalPost, group: "accounting", label: "ثبت آورده و برداشت", description: "ثبت آورده، برداشت یا وام سهام‌دار با سند متوازن و تفصیلی شخص.", risk: "high", audit: true },
+  { key: P.shareholdersCapitalReverse, group: "accounting", label: "برگشت رویداد سرمایه", description: "برگشت رویداد سرمایه با سند معکوس جدید؛ سند ثبت‌شده هرگز ویرایش نمی‌شود.", risk: "high", audit: true },
+  { key: P.shareholdersDistributionsManage, group: "accounting", label: "تهیهٔ تقسیم سود", description: "تهیهٔ پیش‌نویس تقسیم سود فقط از نتیجهٔ سال مالی بسته‌شده و تصویر مالکیت مشخص.", risk: "high", audit: true },
+  { key: P.shareholdersDistributionsAdjust, group: "accounting", label: "تعدیل تقسیم سود", description: "ثبت تعدیل مالیاتی، اندوخته یا تعدیل دستی با دلیل مستند.", risk: "high", audit: true },
+  { key: P.shareholdersDistributionsApprove, group: "accounting", label: "تأیید تقسیم سود", description: "تأیید پیش‌نویس تقسیم سود توسط شخصی غیر از تهیه‌کننده.", risk: "high", audit: true },
+  { key: P.shareholdersDistributionsPay, group: "accounting", label: "پرداخت سود سهام‌دار", description: "تسویهٔ بدهی سود هر سهام‌دار با سند پرداخت و کنترل ماندهٔ پرداختنی.", risk: "high", audit: true },
+  { key: P.shareholdersDistributionsReverse, group: "accounting", label: "برگشت پرداخت یا تقسیم سود", description: "برگشت پرداخت یا توزیع سود با سند معکوس جدید، پس از تعیین تکلیف پرداخت‌ها.", risk: "high", audit: true },
 
   // --- Operational finance -------------------------------------------------
   // Money moving as a consequence of ordinary trading. Separate from the

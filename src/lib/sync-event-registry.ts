@@ -16,7 +16,8 @@ type EffectClass =
   | "inventory"
   | "transfer"
   | "shift"
-  | "commission_settlement";
+  | "commission_settlement"
+  | "shareholder_accounting";
 
 export interface SyncEventDefinition {
   type: string;
@@ -59,6 +60,9 @@ const CLOUD_OWNED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set([
   // #869: a commission payout moves money the cloud already moved; a desktop has
   // no run to apply it to.
   "commission_settlement",
+  // #864: ownership/capital statements and profit-allocation effects are
+  // cloud-owned accounting facts; a site acknowledges pulled copies only.
+  "shareholder_accounting",
 ]);
 
 /** Whether a desktop (runtime role `site`) acknowledges this pulled cloud event instead of applying it. */
@@ -75,6 +79,11 @@ const SHIFT_PERMISSION = "orders.create" as const;
 /** #869: the keys that pay a commission run out and reverse a payout. */
 const COMMISSION_PAYOUT_PERMISSION = "commission.payout" as const;
 const COMMISSION_REVERSE_PERMISSION = "commission.reverse" as const;
+const SHAREHOLDER_CAPITAL_PERMISSION = "shareholders.capital_post" as const;
+const SHAREHOLDER_CAPITAL_REVERSE_PERMISSION = "shareholders.capital_reverse" as const;
+const SHAREHOLDER_DISTRIBUTION_POST_PERMISSION = "ledger.post" as const;
+const SHAREHOLDER_DISTRIBUTION_PAY_PERMISSION = "shareholders.distributions_pay" as const;
+const SHAREHOLDER_DISTRIBUTION_REVERSE_PERMISSION = "shareholders.distributions_reverse" as const;
 
 /**
  * Authoritative, machine-readable sync event catalogue.
@@ -141,6 +150,16 @@ export const SYNC_EVENT_REGISTRY = [
   // sync-domain-handlers.ts), and a desktop acknowledges a pulled copy.
   { type: "commission.payout.recorded", schemaVersion: 1, handler: "commission.payout.recorded", permission: COMMISSION_PAYOUT_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["payoutId", "runId", "runNumber", "amount", "paidDate", "method", "entryId", "allocations"] },
   { type: "commission.payout.reversed", schemaVersion: 1, handler: "commission.payout.reversed", permission: COMMISSION_REVERSE_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedPayoutId", "runId", "runNumber", "amount", "entryId"] },
+
+  // #864: shareholder money effects are written by the cloud in the same
+  // transaction as their journal entry. Site peers receive the business event
+  // for acknowledgement only; replaying it could never post the ledger twice.
+  { type: "shareholder.capital.recorded", schemaVersion: 1, handler: "shareholder.capital.recorded", permission: SHAREHOLDER_CAPITAL_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["eventId", "partyId", "eventType", "capitalClass", "amountRial", "effectiveOn", "journalEntryId"] },
+  { type: "shareholder.capital.reversed", schemaVersion: 1, handler: "shareholder.capital.reversed", permission: SHAREHOLDER_CAPITAL_REVERSE_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedEventId", "partyId", "amountRial", "journalEntryId"] },
+  { type: "shareholder.distribution.posted", schemaVersion: 1, handler: "shareholder.distribution.posted", permission: SHAREHOLDER_DISTRIBUTION_POST_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["distributionId", "fiscalYearId", "amountRial", "snapshotOn", "journalEntryId"] },
+  { type: "shareholder.distribution.payment.recorded", schemaVersion: 1, handler: "shareholder.distribution.payment.recorded", permission: SHAREHOLDER_DISTRIBUTION_PAY_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["paymentId", "distributionId", "shareholderId", "partyId", "amountRial", "paidOn", "journalEntryId"] },
+  { type: "shareholder.distribution.payment.reversed", schemaVersion: 1, handler: "shareholder.distribution.payment.reversed", permission: SHAREHOLDER_DISTRIBUTION_REVERSE_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedPaymentId", "distributionId", "shareholderId", "amountRial", "journalEntryId"] },
+  { type: "shareholder.distribution.reversed", schemaVersion: 1, handler: "shareholder.distribution.reversed", permission: SHAREHOLDER_DISTRIBUTION_REVERSE_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["distributionId", "reversalEntryId"] },
 ] as const satisfies readonly SyncEventDefinition[];
 
 export type SyncEventType = (typeof SYNC_EVENT_REGISTRY)[number]["type"];

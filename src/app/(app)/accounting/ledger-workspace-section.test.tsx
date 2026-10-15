@@ -5,7 +5,7 @@
  * The rules this pins: every permitted ledger tool is reachable from this page
  * at its canonical route (the sidebar disclosure is gone, so this page is the
  * only place the tools gather), the tools are arranged under the accountant's
- * own four divisions, and a member without `payroll.view` sees no payroll —
+ * own five divisions, and a member without `payroll.view` sees no payroll —
  * the same `accountingSectionsFor` gate the section's route enforces.
  */
 import { cleanup, render, screen } from "@testing-library/react";
@@ -48,7 +48,7 @@ describe("LedgerWorkspaceSection — the workspace page lists the permitted tool
     for (const key of LEDGER_WORKSPACE_SECTION_KEYS) {
       expect(hrefs, `«فضای کار حسابداری» must link ${key}`).toContain(accountingSectionHref(key));
     }
-    // Every tool is a real link, arranged under the four divisions the
+    // Every tool is a real link, arranged under the five divisions the
     // accountant's work divides into — the arrangement the sidebar disclosure
     // used to (badly) carry.
     for (const subGroup of LEDGER_WORKSPACE_SUBGROUPS) {

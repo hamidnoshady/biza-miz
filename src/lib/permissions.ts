@@ -226,6 +226,23 @@ export const PERMISSIONS = {
   ledgerPropose: "ledger.propose",
 
   /**
+   * Shareholder capital and profit distribution (issue #864). Party identity
+   * remains in `parties`; this is the narrow Accounting authority for dated
+   * ownership, capital postings, approved distributions, settlement and
+   * permissioned retroactive corrections.
+   */
+  shareholdersView: "shareholders.view",
+  shareholdersManage: "shareholders.manage",
+  shareholdersRetroactive: "shareholders.retroactive",
+  shareholdersCapitalPost: "shareholders.capital_post",
+  shareholdersCapitalReverse: "shareholders.capital_reverse",
+  shareholdersDistributionsManage: "shareholders.distributions_manage",
+  shareholdersDistributionsAdjust: "shareholders.distributions_adjust",
+  shareholdersDistributionsApprove: "shareholders.distributions_approve",
+  shareholdersDistributionsPay: "shareholders.distributions_pay",
+  shareholdersDistributionsReverse: "shareholders.distributions_reverse",
+
+  /**
    * Operational finance — money moving as a consequence of trading, distinct
    * from accounting authority (ledger.post / approve / close_period).
    */
@@ -475,6 +492,17 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.commissionApprove,
   PERMISSIONS.commissionPayout,
   PERMISSIONS.commissionReverse,
+  // Issue #864: the ownership history and the money allocated to it are
+  // sensitive and irreversible in the book (corrections are mirror entries).
+  PERMISSIONS.shareholdersManage,
+  PERMISSIONS.shareholdersRetroactive,
+  PERMISSIONS.shareholdersCapitalPost,
+  PERMISSIONS.shareholdersCapitalReverse,
+  PERMISSIONS.shareholdersDistributionsManage,
+  PERMISSIONS.shareholdersDistributionsAdjust,
+  PERMISSIONS.shareholdersDistributionsApprove,
+  PERMISSIONS.shareholdersDistributionsPay,
+  PERMISSIONS.shareholdersDistributionsReverse,
   // Issue #839: changing what a car cost (the figure COGS freezes at), selling
   // below the owner's floor, and hiding a vehicle from the lot.
   PERMISSIONS.vehiclesCostEdit,
@@ -486,6 +514,10 @@ const REASON_REQUIRED = new Set<Permission>([
   PERMISSIONS.paymentsRefund,
   PERMISSIONS.crmMerge,
   PERMISSIONS.ledgerClosePeriod,
+  PERMISSIONS.shareholdersRetroactive,
+  PERMISSIONS.shareholdersCapitalReverse,
+  PERMISSIONS.shareholdersDistributionsAdjust,
+  PERMISSIONS.shareholdersDistributionsReverse,
 ]);
 
 /**
@@ -505,7 +537,7 @@ export const PERMISSION_DEFINITIONS: readonly PermissionMetadata[] = ALL_PERMISS
   const risk: PermissionRisk = ownerOnly ? "critical" : HIGH_RISK.has(key) ? "high" : "medium";
   return {
     key,
-    group: key.split(".")[0],
+    group: key.startsWith("shareholders.") ? "accounting" : key.split(".")[0],
     label: key,
     description: key,
     risk,
@@ -559,6 +591,9 @@ const {
   workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
   workspaceAdmin,
   ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
+  shareholdersView, shareholdersManage, shareholdersRetroactive, shareholdersCapitalPost,
+  shareholdersCapitalReverse, shareholdersDistributionsManage, shareholdersDistributionsAdjust,
+  shareholdersDistributionsApprove, shareholdersDistributionsPay, shareholdersDistributionsReverse,
   financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
   financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
   payrollView, payrollManage,
@@ -668,6 +703,12 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     vehiclesView, vehiclesCostView,
     partiesView, partiesManage,
     ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
+    // Issue #864: the accountant manages dated ownership/capital and prepares,
+    // approves, posts and pays closed-year distributions. Backdating and
+    // corrections/reversals remain separate grants for an owner to delegate.
+    shareholdersView, shareholdersManage, shareholdersCapitalPost,
+    shareholdersDistributionsManage, shareholdersDistributionsAdjust,
+    shareholdersDistributionsApprove, shareholdersDistributionsPay,
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
     financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
     payrollView, payrollManage,
