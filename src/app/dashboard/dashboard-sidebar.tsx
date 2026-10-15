@@ -10,7 +10,9 @@ import {
   ContactIcon,
   FolderIcon,
   GlobeIcon,
+  HistoryIcon,
   LayoutGridIcon,
+  MessageSquarePlusIcon,
   SparklesIcon,
   TrendingUpIcon,
   UsersIcon,
@@ -92,6 +94,8 @@ import { PlatformUserMenu } from "./platform-user-menu";
 import { ShiftButton } from "./shift-panel";
 import { DeploymentStatusIndicator } from "./deployment-status-indicator";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
+import { AiConversationsSidebar } from "./ai/ai-conversations-sidebar";
+import { useAssistantSidebarBridge } from "./ai/assistant-sidebar-bridge";
 
 
 const SIDEBAR_PREFERENCE_KEY = "dashboard-sidebar-preference";
@@ -218,29 +222,18 @@ function isActive(pathname: string, href: string, search?: ReadonlyURLSearchPara
 }
 
 /**
- * The workspace rail (Phase 35 Wave 2).
+ * The workspace rail (Phase 35 Wave 2 & Issue #905).
  *
- * This is the intentionally small global platform navigation: assistant home,
- * My Workspace, and exactly four business-app launchers. Shared utilities stay
- * in the user menu instead of becoming more rail rows. Clicking an app replaces
- * this launcher with that app's contextual navigation, so the rail never sits
- * beside a second full application menu.
- *
- * The rail carries NO chat navigation: starting a conversation is the chat
- * header's «گفت‌وگوی جدید» alone, and «گفتگوهای اخیر» is the chat page's own
- * left sidebar (search/rename/delete/continue) — see ai-chat-hub.tsx.
+ * This is the global platform navigation: assistant home, My Workspace, and
+ * four business-app launchers, plus on the assistant route (`/dashboard`) the
+ * unified «گفت‌وگوی جدید» action and private «گفتگوهای اخیر» group so the
+ * assistant page never mounts a second permanent sidebar.
  */
 function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: string }) {
-  // The four apps this rail launches, as data rather than four copies of the same
-  // markup. The app registry resolves the best route from this server-filtered
-  // tree, so the rail cannot accidentally turn "open Accounting" into
-  // "may read the ledger".
-  // An app's state («به‌زودی», «در حال تعمیر», …) travels on the nav entries the
-  // layout already resolved — grouped here by *owning app*, so each launcher
-  // wears its own app's badge, exactly what the flat sidebar shows for the
-  // same app, rather than re-deriving it. Looking the state up by the
-  // launcher's resolved href instead is what once badged «حسابداری» with the
-  // old Sales state: now POS and the overview belong to Accounting.
+  const assistantRoute = isAssistantSurface(pathname);
+  const bridge = useAssistantSidebarBridge();
+  const { toggleSidebar, setOpenMobile } = useSidebar();
+
   const stateByApp = new Map<AppKey, NonNullable<NavItem["appState"]>>();
   for (const item of navItems) {
     if (!item.appState) continue;
@@ -261,9 +254,31 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
   });
 
   return (
-    <SidebarContent className="px-3 py-4">
-      <nav aria-label="میز کار" className="space-y-4">
+    <SidebarContent
+      className={
+        assistantRoute
+          ? "flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-3"
+          : "px-3 py-4"
+      }
+    >
+      <nav aria-label="میز کار" className={assistantRoute ? "shrink-0 space-y-3" : "space-y-4"}>
         <SidebarMenu className="space-y-1.5">
+          {assistantRoute ? (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                type="button"
+                tooltip="گفت‌وگوی جدید"
+                onClick={() => {
+                  bridge.onNewConversation?.();
+                  setOpenMobile(false);
+                }}
+                className={`${APP_NAV_BUTTON_CLASS} border border-primary/25 bg-primary/10 font-semibold text-primary hover:bg-primary/15`}
+              >
+                <MessageSquarePlusIcon aria-hidden="true" className="size-5 shrink-0" />
+                <span className={NAV_LABEL_CLASS}>گفت‌وگوی جدید</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ) : null}
           <SidebarMenuItem>
             <SidebarMenuButton
               asChild
@@ -278,10 +293,6 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
-            {/* Phase G — «پروژه‌ها» is the Projects SECTION of «میز کار من»
-                now, so the rail's entry names the module and opens its
-                overview. `/projects` still resolves (middleware forwards it),
-                but nothing in the product links there any more. */}
             <SidebarMenuButton
               asChild
               isActive={isWorkspacePathname(pathname)}
@@ -304,9 +315,6 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
             >
               برنامه‌ها
             </p>
-            {/* Collapsed to icons the heading is gone, so the apps would run
-                into «میز کار من» as one undifferentiated column of glyphs. A
-                hairline keeps the two groups apart at 4rem wide. */}
             <div
               aria-hidden="true"
               className="mx-2 mb-2 hidden border-t border-border/70 group-data-[state=collapsed]/sidebar:block"
@@ -343,17 +351,41 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
           </div>
         ) : null}
 
-        {/* «اتصال‌های فنی» used to render here as a seventh rail row. It is a
-            shell utility, not an app, and its door is the platform user menu
-            (the footer menu lists it beside حقوق اشتراک و تنظیمات کسب‌وکار);
-            the row is gone rather than a second door to the same hub. */}
-
-        {/* Chat history no longer lives here: «گفتگوهای اخیر» is the chat
-            page's own left sidebar (search, rename, delete, continue), and
-            creating a conversation stays in the chat header alone — the rail
-            keeps only the assistant's home, the workspace and the apps, so it
-            carries no second chat navigation. */}
+        {assistantRoute ? (
+          <div className="hidden border-t border-border/70 pt-2 group-data-[state=collapsed]/sidebar:block">
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  type="button"
+                  tooltip="گفتگوهای اخیر"
+                  aria-label="گفتگوهای اخیر"
+                  onClick={() => toggleSidebar()}
+                  className={APP_NAV_BUTTON_CLASS}
+                >
+                  <HistoryIcon aria-hidden="true" className="size-5 shrink-0" />
+                  <span className={NAV_LABEL_CLASS}>گفتگوهای اخیر</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </div>
+        ) : null}
       </nav>
+
+      {assistantRoute ? (
+        <div className="mt-3 flex min-h-48 flex-1 flex-col border-t border-border/70 pt-2 group-data-[state=collapsed]/sidebar:hidden">
+          <AiConversationsSidebar
+            embedded
+            activeId={bridge.activeConversationId}
+            refreshToken={bridge.refreshToken}
+            onSelect={(id) => {
+              bridge.onSelectConversation?.(id);
+              setOpenMobile(false);
+            }}
+            onDeleted={(id) => bridge.onDeleteConversation?.(id)}
+            onRenamed={(conv) => bridge.onRenameConversation?.(conv)}
+          />
+        </div>
+      ) : null}
     </SidebarContent>
   );
 }
@@ -961,7 +993,11 @@ export function DashboardSidebar({
     setPreferenceLoaded(true);
     const storedWidth = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
     if (Number.isFinite(storedWidth) && storedWidth >= SIDEBAR_MIN_WIDTH && storedWidth <= SIDEBAR_MAX_WIDTH) {
-      setSidebarWidth(storedWidth);
+      const viewportCap =
+        window.innerWidth > 0
+          ? Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.floor(window.innerWidth * 0.28)))
+          : SIDEBAR_MAX_WIDTH;
+      setSidebarWidth(Math.min(storedWidth, viewportCap));
     }
   }, []);
 

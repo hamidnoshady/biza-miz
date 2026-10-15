@@ -50,12 +50,21 @@ function money(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
-export function AiResearchPanel() {
+export function AiResearchPanel({
+  deepResearchEnabled = true,
+}: {
+  deepResearchEnabled?: boolean;
+} = {}) {
   const [runs, setRuns] = useState<ResearchRun[]>([]);
   const [question, setQuestion] = useState("");
   const [maxRounds, setMaxRounds] = useState(String(RESEARCH_DEFAULT_MAX_ROUNDS));
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [pendingEstimate, setPendingEstimate] = useState<{
+    question: string;
+    maxRounds: number;
+    estimatedMaxCostUsd: number;
+  } | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [sources, setSources] = useState<ResearchSource[]>([]);
@@ -70,7 +79,11 @@ export function AiResearchPanel() {
     void load();
   }, [load]);
 
-  async function create() {
+  async function create(costApproved = false) {
+    if (!deepResearchEnabled) {
+      toast.error(researchErrorMessage("research_disabled"));
+      return;
+    }
     if (question.trim().length < 8) {
       toast.error("سؤال کوتاه است؛ کمی دقیق‌تر بنویسید.");
       return;
@@ -83,18 +96,28 @@ export function AiResearchPanel() {
       "/api/ai/research",
       {
         method: "POST",
-        body: JSON.stringify({ question: question.trim(), maxRounds: rounds, costApproved: false }),
+        body: JSON.stringify({ question: question.trim(), maxRounds: rounds, costApproved }),
       },
     );
     setCreating(false);
     if (ok && data.run) {
+      setPendingEstimate(null);
+      setQuestion("");
       toast.success("پژوهش ساخته شد؛ برای شروع باید هزینهٔ آن را تأیید کنید.");
       void load();
       return;
     }
-    if (ok) {
+    if (
+      (ok || data.error === "research_cost_not_approved") &&
+      typeof data.estimatedMaxCostUsd === "number"
+    ) {
+      setPendingEstimate({
+        question: question.trim(),
+        maxRounds: rounds,
+        estimatedMaxCostUsd: data.estimatedMaxCostUsd,
+      });
       toast.message(
-        `بازهٔ هزینهٔ این پژوهش حدود ${money(data.estimatedMaxCostUsd ?? 0)} است. برای شروع آن را تأیید کنید.`,
+        `بازهٔ هزینهٔ این پژوهش حدود ${money(data.estimatedMaxCostUsd)} است. برای ثبت پژوهش سقف هزینه را تأیید کنید.`,
       );
       return;
     }
@@ -129,14 +152,24 @@ export function AiResearchPanel() {
         بدون تأیید شما اجرا نمی‌شود.
       </InfoBox>
 
+      {!deepResearchEnabled ? (
+        <InfoBox>
+          پژوهش عمیق در حال حاضر روی این سکو فعال نیست. پس از فعال‌سازی توسط مدیر پلتفرم می‌توانید پژوهش جدید ثبت کنید.
+        </InfoBox>
+      ) : null}
+
       <SectionCard title="پژوهش جدید">
         <div className="space-y-3">
           <Field label="سؤال">
             <textarea
               className={inputClass}
               rows={3}
+              disabled={!deepResearchEnabled || creating}
               value={question}
-              onChange={(event) => setQuestion(event.target.value)}
+              onChange={(event) => {
+                setQuestion(event.target.value);
+                if (pendingEstimate) setPendingEstimate(null);
+              }}
               placeholder="مثلاً: فروش سه ماه گذشته را به تفکیک شعبه و دستهٔ کالا با ذکر منابع گزارش کن."
             />
           </Field>
@@ -144,16 +177,53 @@ export function AiResearchPanel() {
             <input
               className={inputClass}
               inputMode="numeric"
+              disabled={!deepResearchEnabled || creating}
               value={maxRounds}
-              onChange={(event) => setMaxRounds(event.target.value)}
+              onChange={(event) => {
+                setMaxRounds(event.target.value);
+                if (pendingEstimate) setPendingEstimate(null);
+              }}
             />
           </Field>
-          <div className="flex justify-end">
-            <Button type="button" size="sm" className="gap-1.5" disabled={creating} onClick={create}>
-              <SearchIcon className="size-4" aria-hidden="true" />
-              ساخت پژوهش
-            </Button>
-          </div>
+          {pendingEstimate ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/80 bg-muted/40 p-3 text-xs">
+              <span className="font-medium text-foreground">
+                حداکثر هزینهٔ تخمینی این پژوهش: {money(pendingEstimate.estimatedMaxCostUsd)}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={creating}
+                  onClick={() => setPendingEstimate(null)}
+                >
+                  انصراف
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={creating}
+                  onClick={() => void create(true)}
+                >
+                  تأیید سقف هزینه و ثبت پژوهش
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                size="sm"
+                className="gap-1.5"
+                disabled={!deepResearchEnabled || creating}
+                onClick={() => void create(false)}
+              >
+                <SearchIcon className="size-4" aria-hidden="true" />
+                ساخت پژوهش
+              </Button>
+            </div>
+          )}
         </div>
       </SectionCard>
 

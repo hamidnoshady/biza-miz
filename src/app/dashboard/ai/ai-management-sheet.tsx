@@ -69,9 +69,11 @@ const ICONS: Record<AiPanelIconName, LucideIcon> = {
 function AiPanelBody({
   section,
   canAutoApply,
+  deepResearchEnabled,
 }: {
   section: AiPanelSectionKey;
   canAutoApply: boolean;
+  deepResearchEnabled: boolean;
 }) {
   switch (section) {
     case "memory":
@@ -85,7 +87,7 @@ function AiPanelBody({
     case "activity":
       return <AiAutopilotActivity />;
     case "research":
-      return <AiResearchPanel />;
+      return <AiResearchPanel deepResearchEnabled={deepResearchEnabled} />;
     case "usage":
       return <UsageDashboard />;
   }
@@ -94,6 +96,8 @@ function AiPanelBody({
 export function AiManagementSheet({
   section,
   canAutoApply,
+  allowedSections,
+  deepResearchEnabled = true,
   onSectionChange,
   onClose,
 }: {
@@ -101,11 +105,24 @@ export function AiManagementSheet({
   section: AiPanelSectionKey | null;
   /** Owner only: lets coworker jobs and automations apply unattended. */
   canAutoApply: boolean;
+  /** Per-section permission filter; defaults to all sections when omitted. */
+  allowedSections?: readonly AiPanelSectionKey[];
+  /** Whether platform Deep Research is currently enabled. */
+  deepResearchEnabled?: boolean;
   onSectionChange: (key: AiPanelSectionKey) => void;
   onClose: () => void;
 }) {
+  const visibleSections =
+    allowedSections && allowedSections.length > 0
+      ? AI_PANEL_SECTIONS.filter((item) => allowedSections.includes(item.key))
+      : AI_PANEL_SECTIONS;
+  const fallbackKey = visibleSections[0]?.key ?? "memory";
+  const resolvedKey =
+    section && visibleSections.some((item) => item.key === section)
+      ? section
+      : fallbackKey;
   // While closed, keep the last section mounted so the exit slide has content.
-  const active = aiPanelSection(section ?? "memory");
+  const active = aiPanelSection(resolvedKey);
 
   return (
     <Sheet open={section !== null} onOpenChange={(open) => (open ? null : onClose())}>
@@ -131,7 +148,7 @@ export function AiManagementSheet({
             aria-label="بخش‌های مدیریت دستیار"
             className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border/80 px-3 py-2 pb-2"
           >
-            {AI_PANEL_SECTIONS.map((item) => {
+            {visibleSections.map((item) => {
               const Icon = ICONS[item.icon];
               return (
                 <FilterChip
@@ -153,7 +170,11 @@ export function AiManagementSheet({
               <h2 className="text-base font-semibold text-foreground">{active.label}</h2>
               <p className="mt-0.5 text-sm leading-6 text-muted-foreground">{active.description}</p>
             </div>
-            <AiPanelBody section={active.key} canAutoApply={canAutoApply} />
+            <AiPanelBody
+              section={active.key}
+              canAutoApply={canAutoApply}
+              deepResearchEnabled={deepResearchEnabled}
+            />
           </div>
         </div>
       </SheetContent>

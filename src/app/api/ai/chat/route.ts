@@ -229,10 +229,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const appFocusValues = new Set([
     "all",
     "accounting",
+    "inventory",
     "growth",
     "crm",
     "website",
     "workspace",
+    "floor",
   ]);
   const appFocus = typeof body.appFocus === "string" && appFocusValues.has(body.appFocus)
     ? body.appFocus
@@ -243,11 +245,29 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     appFocus === "all"
       ? ""
       : `تمرکز این نوبت روی بخش «${appFocus}» است؛ فقط ابزارهای مجاز همین عضو را استفاده کن و این انتخاب هرگز مجوز تازه‌ای ایجاد نمی‌کند.`;
+  const hasPresetTask =
+    typeof body.task === "string" &&
+    body.task.trim() !== "" &&
+    body.task !== "general" &&
+    body.task !== "custom";
+  const taskIndustry = hasPresetTask
+    ? await getBusinessIndustry(session.businessId).catch(() => null)
+    : null;
   // Issue #812 §7/§8 — the runtime mode's own directive is layer 2 of the
   // resolver, not part of the task directive. What is left here is the task
   // lens and the app focus, both of which narrow rather than widen.
   const taskDirective = [
-    taskDirectiveFor({ task: body.task, customTask: body.customTask, mode }),
+    taskDirectiveFor({
+      task: typeof body.task === "string" ? body.task : null,
+      customTask: typeof body.customTask === "string" ? body.customTask : null,
+      mode: mode === "floor" ? "floor" : "dashboard",
+      eligibility: hasPresetTask
+        ? {
+            industry: taskIndustry,
+            permissions: guard.membership?.permissions ?? null,
+          }
+        : undefined,
+    }),
     appFocusDirective,
   ]
     .filter(Boolean)

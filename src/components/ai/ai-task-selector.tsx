@@ -65,6 +65,7 @@ interface AiTaskSelectorProps {
   task: AiTaskId;
   customTask: string;
   disabled?: boolean;
+  eligibleTaskIds?: readonly AiTaskId[];
   onSelectTask: (id: AiTaskId) => void;
   onCustomTask: (text: string) => void;
 }
@@ -74,6 +75,7 @@ export function AiTaskSelector({
   task,
   customTask,
   disabled,
+  eligibleTaskIds,
   onSelectTask,
   onCustomTask,
 }: AiTaskSelectorProps) {
@@ -84,7 +86,18 @@ export function AiTaskSelector({
   // would just confuse the setup flow.
   if (mode === "wizard") return null;
 
-  const available = AI_TASKS.filter((item) => item.modes.includes(mode));
+  const eligibleSet =
+    eligibleTaskIds && eligibleTaskIds.length > 0
+      ? new Set(eligibleTaskIds)
+      : null;
+  // Filter out "custom" from the preset list so the custom task entry is only
+  // rendered once in its dedicated editor row below the separator.
+  const available = AI_TASKS.filter(
+    (item) =>
+      item.id !== "custom" &&
+      item.modes.includes(mode) &&
+      (!eligibleSet || item.id === "general" || eligibleSet.has(item.id)),
+  );
   const current =
     task === "custom" && customTask
       ? {
@@ -130,6 +143,9 @@ export function AiTaskSelector({
               key={item.id}
               onClick={() => {
                 onSelectTask(item.id);
+                if (customTask) {
+                  onCustomTask("");
+                }
                 setCustomOpen(false);
               }}
               className={cn(
@@ -162,7 +178,7 @@ export function AiTaskSelector({
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => event.stopPropagation()}
               rows={3}
-              placeholder="مثلاً: فقط دربارهٔ منوی نوشیدنی‌ها مشاوره بده و همیشه جدول مقایسه‌ای بنویس…"
+              placeholder="مثلاً: پاسخ‌ها را کوتاه و در قالب جدول مقایسه‌ای بنویس…"
               className="w-full resize-none rounded-lg border border-input bg-transparent px-2.5 py-2 text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50"
             />
             <div className="mt-2 flex items-center justify-between gap-2">
