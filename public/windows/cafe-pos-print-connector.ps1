@@ -124,6 +124,9 @@ public static class CafePosRawPrinter
     private static extern bool EndDocPrinter(IntPtr printer);
 
     [DllImport("winspool.drv", SetLastError = true)]
+    private static extern bool AbortPrinter(IntPtr printer);
+
+    [DllImport("winspool.drv", SetLastError = true)]
     private static extern bool StartPagePrinter(IntPtr printer);
 
     [DllImport("winspool.drv", SetLastError = true)]
@@ -146,6 +149,7 @@ public static class CafePosRawPrinter
         IntPtr unmanaged = IntPtr.Zero;
         bool documentStarted = false;
         bool pageStarted = false;
+        bool completed = false;
 
         try
         {
@@ -166,12 +170,17 @@ public static class CafePosRawPrinter
                 if (written <= 0) throw new Win32Exception("WritePrinter wrote zero bytes.");
                 offset += written;
             }
+            completed = true;
         }
         finally
         {
             if (unmanaged != IntPtr.Zero) Marshal.FreeCoTaskMem(unmanaged);
-            if (pageStarted) EndPagePrinter(printer);
-            if (documentStarted) EndDocPrinter(printer);
+            if (pageStarted && completed) EndPagePrinter(printer);
+            if (documentStarted)
+            {
+                if (completed) EndDocPrinter(printer);
+                else AbortPrinter(printer);
+            }
             if (printer != IntPtr.Zero) ClosePrinter(printer);
         }
     }
@@ -327,6 +336,7 @@ function Get-WindowsPrinters {
         $name = [string]$printer.Name
         [PSCustomObject]@{
             name = $name
+            systemName = $name
             driver = [string]$printer.DriverName
             port = [string]$printer.PortName
             isDefault = [bool]$printer.Default
@@ -644,16 +654,19 @@ function Handle-Request {
             $message = $_.Exception.Message
             Write-ConnectorLog ("Print failed for " + (Describe-Target $target) + ": " + $message)
             $errorCode = "print_failed"
-            $ambiguous = $false
+            $ambiguous = $true
             if ($message -match "write_ambiguous|WritePrinterPartial") {
                 $errorCode = "job_timeout"
                 $ambiguous = $true
+            } elseif ($message -match "WritePrinter") {
+                $errorCode = "print_failed"
+                $ambiguous = $true
             } elseif ($target.Type -eq "windows") {
-                if ($message -match "OpenPrinter|printer name|Invalid printer|printer_not_found") { $errorCode = "printer_not_found" }
-                elseif ($message -match "printer_offline|WorkOffline") { $errorCode = "printer_offline" }
-                elseif ($message -match "StartDocPrinter|StartPagePrinter") { $errorCode = "spooler_rejected" }
+                if ($message -match "OpenPrinter|printer name|Invalid printer|printer_not_found") { $errorCode = "printer_not_found"; $ambiguous = $false }
+                elseif ($message -match "printer_offline|WorkOffline") { $errorCode = "printer_offline"; $ambiguous = $false }
+                elseif ($message -match "StartDocPrinter|StartPagePrinter") { $errorCode = "spooler_rejected"; $ambiguous = $false }
             } else {
-                if ($message -match "timed out|refused|unreachable|No such host") { $errorCode = "network_unreachable" }
+                if ($message -match "timed out|refused|unreachable|No such host") { $errorCode = "network_unreachable"; $ambiguous = $false }
             }
             Write-JsonResponse -Stream $Stream -Status 502 -Value @{ ok = $false; error = $errorCode; ambiguous = $ambiguous; detail = $message } -RequestOrigin $origin
         }
@@ -661,6 +674,9 @@ function Handle-Request {
     }
 
     if ($Request.Path -eq "/print/page" -and $Request.Method -eq "POST") {
+        $temp = $null
+        $image = $null
+        $doc = $null
         try {
             $payload = ConvertFrom-Json -InputObject $Request.Body
             $target = Get-PrintTarget -Payload $payload
@@ -690,16 +706,27 @@ function Handle-Request {
                 $script:pageOffset += $take
                 $e.HasMorePages = $script:pageOffset -lt $script:pageImage.Height
             })
-            $doc.Print()
-            $image.Dispose()
-            $doc.Dispose()
-            Remove-Item -LiteralPath $temp -ErrorAction SilentlyContinue
+            try {
+                $doc.Print()
+            } catch {
+                throw ("print_document_ambiguous: " + $_.Exception.Message)
+            }
             Write-ConnectorLog ("Page handed off to " + $target.SystemName)
             Write-JsonResponse -Stream $Stream -Status 200 -Value @{ ok = $true } -RequestOrigin $origin
         } catch {
-            Write-ConnectorLog ("Page print failed: " + $_.Exception.Message)
-            $code = if ($_.Exception.Message -match "printer_not_found|incompatible") { "printer_not_found" } elseif ($_.Exception.Message -match "printer_offline|WorkOffline") { "printer_offline" } else { "spooler_rejected" }
-            Write-JsonResponse -Stream $Stream -Status 502 -Value @{ ok = $false; error = $code; detail = $_.Exception.Message } -RequestOrigin $origin
+            $msg = $_.Exception.Message
+            Write-ConnectorLog ("Page print failed: " + $msg)
+            $code = "print_failed"
+            $ambiguous = $true
+            if ($msg -match "incompatible_printer") { $code = "incompatible_printer"; $ambiguous = $false }
+            elseif ($msg -match "printer_not_found|Invalid printer") { $code = "printer_not_found"; $ambiguous = $false }
+            elseif ($msg -match "printer_offline|WorkOffline") { $code = "printer_offline"; $ambiguous = $false }
+            elseif ($msg -match "Print data is|The printer target|The Windows printer name") { $code = "invalid_printer"; $ambiguous = $false }
+            Write-JsonResponse -Stream $Stream -Status 502 -Value @{ ok = $false; error = $code; ambiguous = $ambiguous; detail = $msg } -RequestOrigin $origin
+        } finally {
+            if ($null -ne $image) { try { $image.Dispose() } catch {} }
+            if ($null -ne $doc) { try { $doc.Dispose() } catch {} }
+            if ($null -ne $temp) { Remove-Item -LiteralPath $temp -ErrorAction SilentlyContinue }
         }
         return
     }

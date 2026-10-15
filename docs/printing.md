@@ -131,38 +131,56 @@ Two more consequences of the split worth stating plainly, because they are
 what an operator sees:
 
 - **Provenance is recorded.** Every job writes a `print_jobs` row with the
-  printer, the `template_id`/`template_key` and the **template version** that
-  produced it, plus the route (`rule`, `fallback`, `only`, …) and the printer a
-  fallback replaced. The rules screen's «فعالیت اخیر» is that table.
-- **Runtime fallback and duplicate-print protection.** When a rule's primary
-  printer is selected (`route: "rule"`) and a compatible `fallback_printer_id`
-  is configured on the rule, the client attempts delivery to the primary
-  printer first. Delivery outcomes are classified into three operational states
-  (`classifyDeliveryOutcome` in `src/lib/printing/errors.ts`):
+  printer (`printer_id`, `printer_name`), the template (`template_id`,
+  `template_key`, `template_name`, `template_version`, `template_paper`,
+  `template_source`), the attempt linkage (`attempt_number`,
+  `previous_job_id`, `print_request_id`), the routing reason (`route_reason`:
+  `explicit`, `rule`, `fallback`, `runtime_fallback`, `default`, `only`, `none`),
+  the fallback origin (`fallback_from_printer_id`, `fallback_from_printer_name`),
+  and the canonical delivery outcome (`delivery_outcome`: `pending`,
+  `handed_off`, `not_delivered`, `ambiguous`, `connector_unavailable`). The
+  rules screen's «فعالیت اخیر» renders that table directly, preserving the
+  distinction between OS spooler/socket handoff (`handed_off`) and confirmed
+  physical paper output.
+- **Runtime fallback, immutable snapshot binding, and duplicate-print protection.**
+  When a rule's primary printer is selected (`route: "rule"`) and a compatible
+  `fallback_printer_id` is configured on the rule, the client attempts delivery
+  to the primary printer first. Delivery outcomes are classified by
+  `classifyDeliveryOutcome` (`src/lib/printing/errors.ts`), which defaults any
+  unknown or unverified failure to `ambiguous`:
   - **Confirmed handoff (`handed_off`)**: the OS spooler or TCP socket accepted
-    the bytes; the attempt row closes as `handed_off` and no retry occurs.
-  - **Confirmed non-delivery (`not_delivered`)**: the primary printer
-    definitively rejected or could not be reached before any bytes were written
-    (`printer_not_found`, `printer_offline`, pre-write `network_unreachable`,
-    `spooler_rejected`). The client closes attempt 1 as `failed`, requests a
-    fallback plan from `POST /api/printing/print` with `failedPrinterId` (which
-    validates the configured fallback printer, paper, document type,
-    permissions and branch, opens attempt 2 in `print_jobs` with `attempt = 2`,
-    and renders the same resolved document and template), and delivers to the
-    fallback printer. At most one fallback attempt is ever made, and unconfigured
-    printers are never chosen automatically.
-  - **Unknown / ambiguous (`ambiguous`)**: a timeout or socket/spooler error
-    occurred after bytes had already started writing (`job_timeout`,
-    `write_ambiguous`, `WritePrinterPartial`, HTTP timeout on `/print/raw` or
-    `/print/page`). Automatic retry and fallback are **strictly suppressed** so
-    the customer or kitchen never receives a silent duplicate print; the UI
-    warns the operator to check physical output before manually reprinting.
-- **A job always ends.** The server stamps `sending`; the browser (the only
-  side that can talk to the spooler) closes the row as `handed_off` or
-  `failed` with a canonical error code — on refusal, on connector failure, on
-  abort, on timeout. Any row still `sending` after
-  `SENDING_STALE_AFTER_SECONDS` (120 s) is swept to `failed`/`job_timeout` when
-  history is read, so «در حال ارسال» can never be a permanent state.
+    the bytes; the attempt row closes as `handed_off` (`delivery_outcome =
+    'handed_off'`) and no retry occurs.
+  - **Confirmed pre-handoff non-delivery (`not_delivered`)**: the transport
+    positively established that no handoff occurred (`printer_not_found`,
+    `printer_offline`, pre-connect `network_unreachable`, pre-write
+    `spooler_rejected` on `StartDocPrinter`/`StartPagePrinter`,
+    `printer_inactive`, `reconnect_required`, `invalid_printer`,
+    `incompatible_printer`). The client closes attempt 1 as `failed`
+    (`delivery_outcome = 'not_delivered'`) and requests a single fallback
+    attempt from `POST /api/printing/print` with `failedPrinterId` and
+    `previousJobId`. The server verifies that attempt 1 was not handed off or
+    ambiguous, enforces the one-fallback limit (`attempt_number = 2`,
+    `UNIQUE (previous_job_id)`), validates the configured backup printer and
+    its compatibility server-side, and binds attempt 2 to attempt 1's persisted
+    `render_snapshot` (the exact resolved document, template revision,
+    branding, and rendering inputs) so concurrent edits to the order, item,
+    template, or branding between attempt 1 and attempt 2 are never silently
+    reloaded. Unconfigured printers are never chosen automatically.
+  - **Unknown / ambiguous (`ambiguous`)**: any timeout, generic `print_failed`,
+    `WritePrinter` failure (partial or initial after `StartDocPrinter`),
+    exception during or after `PrintDocument.Print`, or lost acknowledgment.
+    Automatic retry and fallback are **strictly suppressed** on both client and
+    server so the customer or kitchen never receives a silent duplicate print;
+    the UI warns the operator to check physical output before manually
+    reprinting.
+- **A job always ends.** The server stamps `sending` (`delivery_outcome =
+  'pending'`); the browser (the only side that can talk to the spooler) closes
+  the row as `handed_off` or `failed` with a canonical error code and
+  `delivery_outcome`. Any row still `sending` after
+  `SENDING_STALE_AFTER_SECONDS` (120 s) is swept to `failed`/`job_timeout` with
+  `delivery_outcome = 'ambiguous'` when history is read, so «در حال ارسال» can
+  never be a permanent state.
 
 ### The Windows connector (browser / cloud)
 
@@ -441,10 +459,10 @@ branch) and resolves in this order — the leftmost thing that exists wins:
 | --- | --- |
 | 1. the template explicitly requested (a gallery test print) | 1. the printer explicitly requested |
 | 2. the rule's saved template (`template_id`) | 2. the rule's printer |
-| 3. the rule's built-in template (`template_key`) | 3. the rule's fallback printer (the primary is gone/incompatible) |
-| 4. a saved template marked default for the document type | 4. the branch's only compatible printer for that document |
-| 5. the `templateKey` a pre-0212 printer row still carries (transition read — see `legacyBehaviorOf`) | 5. the last printer that printed this document type |
-| 6. the built-in for the document type that fits the printer's paper | 6. the default printer for that purpose — otherwise `printer_not_configured` |
+| 3. the rule's built-in template (`template_key`) | 3. the rule's fallback printer (the primary is gone/incompatible or failed pre-handoff delivery) |
+| 4. a saved template marked default for the document type | 4. the default printer for that purpose (`is_default = true`) |
+| 5. the `templateKey` a pre-0212 printer row still carries (transition read — see `legacyBehaviorOf`) | 5. the branch's only compatible printer for that document — otherwise `printer_not_configured` |
+| 6. the built-in for the document type that fits the printer's paper | |
 | 7. the built-in for the document type | |
 
 A rule that names a printer which is inactive, disconnected or incompatible

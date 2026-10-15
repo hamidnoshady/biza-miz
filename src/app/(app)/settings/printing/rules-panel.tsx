@@ -64,12 +64,27 @@ interface ResolvedPlan {
 interface HistoryRow {
   id: string;
   documentType: string;
+  entityId?: string | null;
   status: string;
   errorCode: string | null;
+  errorMessage?: string | null;
+  deliveryOutcome?: "pending" | "handed_off" | "not_delivered" | "ambiguous" | "connector_unavailable";
+  routeReason?: string | null;
+  attemptNumber?: number;
+  previousJobId?: string | null;
+  fallbackFromPrinterId?: string | null;
+  fallbackFromPrinterName?: string | null;
+  printRequestId?: string | null;
   printerName: string | null;
+  templateId?: string | null;
+  templateName?: string | null;
   templateKey: string | null;
   templateVersion: number | null;
-  when: string;
+  templatePaper?: string | null;
+  templateSource?: string | null;
+  createdAt?: string;
+  handedOffAt?: string | null;
+  when?: string;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -83,12 +98,20 @@ const ROUTE_LABEL: Record<string, string> = {
   requested: "چاپگر انتخاب‌شده",
   rule: "قانون این سند",
   fallback: "چاپگر جانشین",
+  runtime_fallback: "چاپگر جانشین (تلاش مجدد خودکار)",
   only: "تنها چاپگر سازگار",
-  last_used: "آخرین چاپگر استفاده‌شده",
   default: "چاپگر پیش‌فرض",
   choose: "انتخاب نشده",
   unavailable: "خارج از دسترس",
   none: "انتخاب نشده",
+};
+
+const OUTCOME_LABEL: Record<string, string> = {
+  handed_off: "تحویل به صف سیستم‌عامل (خروجی کاغذ بررسی شود)",
+  not_delivered: "عدم تحویل پیش از ارسال",
+  ambiguous: "وضعیت تحویل نامشخص — بدون ارسال مجدد خودکار",
+  connector_unavailable: "سرویس چاپ در دسترس نیست",
+  pending: "در حال ارسال",
 };
 
 const RULE_ERROR: Record<string, string> = {
@@ -347,24 +370,70 @@ export function RulesPanel() {
         );
       })}
 
-      <SectionCard title="فعالیت اخیر" description="آخرین ارسال‌ها. «ارسال شد» یعنی ویندوز کار را پذیرفته است.">
+      <SectionCard
+        title="فعالیت اخیر"
+        description="آخرین تلاش‌های چاپ. «ارسال شد» یعنی تحویل به صف سیستم‌عامل یا درگاه شبکه انجام شده است و به‌تنهایی خروج فیزیکی کاغذ را تضمین نمی‌کند."
+      >
         {jobs.length === 0 ? (
           <p className="text-sm text-muted-foreground">هنوز چاپی ثبت نشده است.</p>
         ) : (
-          <ul className="space-y-2 text-sm">
-            {jobs.map((job) => (
-              <li key={job.id} className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-muted-foreground">{job.when}</span>
-                <span>{DOC_TYPE_LABELS[job.documentType as DocType] ?? job.documentType}</span>
-                <span dir="auto">{job.printerName ?? "—"}</span>
-                <span className="text-xs text-muted-foreground">
-                  {job.templateKey ? `${job.templateKey}${job.templateVersion ? ` · v${toPersianDigits(job.templateVersion)}` : ""}` : "—"}
-                </span>
-                <StatusBadge tone={job.status === "handed_off" ? "active" : job.status === "failed" ? "danger" : "neutral"}>
-                  {STATUS_LABEL[job.status] ?? job.status}
-                </StatusBadge>
-              </li>
-            ))}
+          <ul className="divide-y divide-border/60 text-sm">
+            {jobs.map((job) => {
+              const attemptNum = job.attemptNumber ?? 1;
+              const isLinked =
+                attemptNum > 1 ||
+                Boolean(job.previousJobId) ||
+                jobs.some((other) => other.id !== job.id && (other.previousJobId === job.id || (job.printRequestId && other.printRequestId === job.printRequestId)));
+              const templateDisplay = job.templateName ?? job.templateKey;
+              return (
+                <li key={job.id} className="space-y-1 py-2.5 first:pt-0 last:pb-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {job.when ? <span className="text-muted-foreground">{job.when}</span> : null}
+                      <span className="font-medium">{DOC_TYPE_LABELS[job.documentType as DocType] ?? job.documentType}</span>
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                        تلاش {toPersianDigits(attemptNum)}
+                        {isLinked && attemptNum > 1 ? " (مرتبط با تلاش ۱)" : ""}
+                      </span>
+                      <span dir="auto">{job.printerName ?? "—"}</span>
+                      {job.fallbackFromPrinterName ? (
+                        <span className="text-xs text-amber-700 dark:text-amber-300" dir="auto">
+                          (جانشین «{job.fallbackFromPrinterName}»)
+                        </span>
+                      ) : null}
+                    </div>
+                    <StatusBadge tone={job.status === "handed_off" ? "active" : job.status === "failed" ? "danger" : "neutral"}>
+                      {STATUS_LABEL[job.status] ?? job.status}
+                    </StatusBadge>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span>
+                        قالب:{" "}
+                        {templateDisplay
+                          ? `${templateDisplay}${job.templateVersion ? ` · نسخهٔ ${toPersianDigits(job.templateVersion)} (v${toPersianDigits(job.templateVersion)})` : ""}`
+                          : "—"}
+                      </span>
+                      {job.routeReason ? (
+                        <span>مسیر: {ROUTE_LABEL[job.routeReason] ?? job.routeReason}</span>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {job.deliveryOutcome ? (
+                        <span className={job.deliveryOutcome === "ambiguous" ? "text-amber-700 dark:text-amber-300" : ""}>
+                          {OUTCOME_LABEL[job.deliveryOutcome] ?? job.deliveryOutcome}
+                        </span>
+                      ) : null}
+                      {job.status === "failed" && (job.errorMessage || job.errorCode) ? (
+                        <span className="text-red-700 dark:text-red-300">
+                          {job.errorMessage ?? printerErrorMessage(job.errorCode)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </SectionCard>

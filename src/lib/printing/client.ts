@@ -264,9 +264,13 @@ export async function sendRawToPrinter(target: PrinterTarget, bytes: Uint8Array)
     const result = await bridge.sendRaw(target, bytesToBase64(bytes));
     if (!result.ok) {
       const error = (result.error as PrinterErrorCode) ?? classifyDeliveryError(result.detail, target);
-      const ambiguous =
-        error === "job_timeout" ||
-        Boolean(result.detail && /write_ambiguous|writeprinterpartial|powershell timed out/i.test(result.detail));
+      const outcome = classifyDeliveryOutcome({
+        ok: false,
+        error,
+        ambiguous: (result as { ambiguous?: boolean }).ambiguous,
+        detail: result.detail,
+      });
+      const ambiguous = outcome === "ambiguous";
       return {
         ok: false,
         error,
@@ -281,10 +285,13 @@ export async function sendRawToPrinter(target: PrinterTarget, bytes: Uint8Array)
     // A refused queue or an unanswered TCP dial is a different sentence in
     // the operator's world; classify from the connector's detail.
     const error = result.error ?? classifyDeliveryError(result.detail, target);
-    const ambiguous =
-      result.ambiguous === true ||
-      error === "job_timeout" ||
-      Boolean(result.detail && /write_ambiguous|writeprinterpartial/i.test(result.detail));
+    const outcome = classifyDeliveryOutcome({
+      ok: false,
+      error,
+      ambiguous: result.ambiguous,
+      detail: result.detail,
+    });
+    const ambiguous = outcome === "ambiguous";
     return {
       ...result,
       error,
@@ -398,10 +405,14 @@ export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array
   if (bridge?.sendPage) {
     const result = await bridge.sendPage(target.systemName, bytesToBase64(bytes));
     if (!result.ok) {
-      const error = (result.error as PrinterErrorCode) ?? "spooler_rejected";
-      const ambiguous =
-        error === "job_timeout" ||
-        Boolean(result.detail && /powershell timed out|write_ambiguous/i.test(result.detail));
+      const error = (result.error as PrinterErrorCode) ?? classifyDeliveryError(result.detail, target);
+      const outcome = classifyDeliveryOutcome({
+        ok: false,
+        error,
+        ambiguous: (result as { ambiguous?: boolean }).ambiguous,
+        detail: result.detail,
+      });
+      const ambiguous = outcome === "ambiguous";
       return {
         ok: false,
         error,
@@ -415,7 +426,22 @@ export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array
   if (!result.ok && result.error === "print_failed" && result.detail?.includes("not_found")) {
     return { ok: false, error: "connector_outdated", detail: result.detail };
   }
-  return result.ok ? result : { ...result, error: result.error ?? "spooler_rejected" };
+  if (!result.ok && !result.unreachable) {
+    const error = result.error ?? classifyDeliveryError(result.detail, target);
+    const outcome = classifyDeliveryOutcome({
+      ok: false,
+      error,
+      ambiguous: result.ambiguous,
+      detail: result.detail,
+    });
+    const ambiguous = outcome === "ambiguous";
+    return {
+      ...result,
+      error,
+      ...(ambiguous ? { ambiguous: true } : {}),
+    };
+  }
+  return result;
 }
 
 /**
@@ -470,6 +496,7 @@ async function executePrintJob(
 
   async function requestRender(extra: {
     failedPrinterId?: string;
+    previousJobId?: string | null;
     templateIdOverride?: string | null;
     requestIdOverride?: string;
   } = {}): Promise<
@@ -481,12 +508,17 @@ async function executePrintJob(
       const timeout = setTimeout(() => controller.abort(), 45_000);
       let res: Response;
       try {
+        const previousJobId =
+          extra.previousJobId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(extra.previousJobId)
+            ? extra.previousJobId
+            : undefined;
         res = await fetch("/api/printing/print", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             printerId: printerId || undefined,
             ...(extra.failedPrinterId ? { failedPrinterId: extra.failedPrinterId } : {}),
+            ...(previousJobId ? { previousJobId } : {}),
             templateId: (extra.templateIdOverride ?? opts.templateId) || undefined,
             printRequestId: extra.requestIdOverride ?? opts.requestId,
             documentType: opts.documentType,
@@ -649,6 +681,7 @@ async function executePrintJob(
 
     const fallbackAttempt = await requestRender({
       failedPrinterId: rendered.printerId,
+      previousJobId: rendered.jobId,
       templateIdOverride: opts.templateId ?? rendered.templateId,
       requestIdOverride: opts.requestId ?? (rendered.printRequestId || undefined),
     });

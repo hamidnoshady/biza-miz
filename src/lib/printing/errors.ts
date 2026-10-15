@@ -94,22 +94,35 @@ export type DeliveryOutcome =
   | "ambiguous"
   | "connector_unavailable";
 
+/**
+ * Error codes that positively establish no bytes or document handoff reached
+ * the OS spooler or printer socket. Generic `print_failed`, `job_timeout`, and
+ * any unclassified failure are deliberately excluded — they default to
+ * `ambiguous` so automatic fallback can never cause a duplicate print.
+ */
+export const CONFIRMED_PRE_HANDOFF_ERRORS: ReadonlySet<PrinterErrorCode> = new Set<PrinterErrorCode>([
+  "printer_not_found",
+  "printer_inactive",
+  "printer_offline",
+  "network_unreachable",
+  "spooler_rejected",
+  "reconnect_required",
+  "invalid_printer",
+  "incompatible_printer",
+]);
+
+const AMBIGUOUS_DETAIL_PATTERN =
+  /write_ambiguous|writeprinter|after_write|print_document_ambiguous|printdocument\.print|powershell timed out|socket destroyed|econnreset|epipe|broken pipe/i;
+
 export function classifyDeliveryOutcome(result: {
   ok: boolean;
   error?: PrinterErrorCode;
   unreachable?: boolean;
   ambiguous?: boolean;
+  confirmedNonDelivery?: boolean;
   detail?: string;
 }): DeliveryOutcome {
   if (result.ok) return "handed_off";
-  if (
-    result.ambiguous === true ||
-    result.error === "job_timeout" ||
-    (typeof result.detail === "string" &&
-      /write_ambiguous|writeprinterpartial|after_write|powershell timed out/i.test(result.detail))
-  ) {
-    return "ambiguous";
-  }
   if (
     result.unreachable === true ||
     result.error === "connector_not_installed" ||
@@ -119,7 +132,24 @@ export function classifyDeliveryOutcome(result: {
   ) {
     return "connector_unavailable";
   }
-  return "not_delivered";
+  if (
+    result.ambiguous === true ||
+    result.confirmedNonDelivery === false ||
+    result.error === "job_timeout" ||
+    result.error === "print_failed" ||
+    (typeof result.detail === "string" && AMBIGUOUS_DETAIL_PATTERN.test(result.detail))
+  ) {
+    return "ambiguous";
+  }
+  if (
+    result.error !== undefined &&
+    CONFIRMED_PRE_HANDOFF_ERRORS.has(result.error)
+  ) {
+    return "not_delivered";
+  }
+  // Safe default: any unknown, missing, or unverified failure is treated as
+  // ambiguous so automatic fallback never risks printing twice.
+  return "ambiguous";
 }
 
 /**
@@ -132,6 +162,9 @@ export function classifyDeliveryError(detail: string | undefined, target: { type
   const value = (detail ?? "").toLowerCase();
   if (value.includes("write_ambiguous") || value.includes("writeprinterpartial")) {
     return "job_timeout";
+  }
+  if (value.includes("writeprinter") || value.includes("print_document_ambiguous") || value.includes("printdocument.print")) {
+    return "print_failed";
   }
   if (target.type === "network") {
     if (value.includes("refused") || value.includes("unreachable") || value.includes("timed out") || value.includes("timeout")) {

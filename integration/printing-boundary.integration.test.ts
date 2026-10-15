@@ -24,10 +24,68 @@
  * connection would bypass it and prove nothing.
  */
 import { randomUUID } from "node:crypto";
+import { NextResponse, type NextRequest } from "next/server";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import sharp from "sharp";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { createAppRole } from "../src/lib/create-app-role";
+
+const activeAuthContext = {
+  businessId: "",
+  locationId: "",
+  role: "cashier",
+  sub: "user-integration-1",
+};
+
+const capturedRenderedHtml: string[] = [];
+
+vi.mock("@/lib/auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/auth")>();
+  return {
+    ...actual,
+    requirePermission: vi.fn(async () => ({
+      session: {
+        businessId: activeAuthContext.businessId,
+        sub: activeAuthContext.sub,
+        role: activeAuthContext.role,
+      },
+      error: null,
+    })),
+    withTenantScope:
+      (handler: (...args: unknown[]) => Promise<NextResponse>) =>
+      async (...args: unknown[]) => {
+        const dbMod = await import("../src/lib/db");
+        return dbMod.withTenant(activeAuthContext.businessId, () => handler(...args));
+      },
+  };
+});
+
+vi.mock("@/lib/setup-state", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/setup-state")>();
+  return {
+    ...actual,
+    resolveActiveLocation: vi.fn(async () =>
+      activeAuthContext.locationId ? { id: activeAuthContext.locationId } : null,
+    ),
+  };
+});
+
+vi.mock("@/lib/printing/chromium", () => ({
+  renderHtmlToPng: vi.fn(async (html: string) => {
+    capturedRenderedHtml.push(html);
+    return sharp({
+      create: {
+        width: 8,
+        height: 8,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 1 },
+      },
+    })
+      .png()
+      .toBuffer();
+  }),
+}));
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -61,6 +119,8 @@ let loader: typeof import("../src/lib/printing/document-loader");
 let plan: typeof import("../src/lib/printing/plan");
 let labels: typeof import("../src/lib/printing/label-print-data");
 let templates: typeof import("../src/lib/print-templates-service");
+let printRoute: typeof import("../src/app/api/printing/print/route");
+let jobsRoute: typeof import("../src/app/api/printing/jobs/route");
 
 /** One tenant, one branch: what a request is scoped to. */
 interface Branch {
@@ -122,6 +182,8 @@ beforeAll(async () => {
   plan = await import("../src/lib/printing/plan");
   labels = await import("../src/lib/printing/label-print-data");
   templates = await import("../src/lib/print-templates-service");
+  printRoute = await import("../src/app/api/printing/print/route");
+  jobsRoute = await import("../src/app/api/printing/jobs/route");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -211,7 +273,18 @@ async function seedTemplate(businessId: string, locationId: string, name: string
   const saved = await dbLib.withTenant(businessId, () =>
     templates.createPrintTemplate({
       locationId,
-      template: { name, docType: "receipt", paper: "thermal80", blocks: [{ type: "text", text: name }] },
+      template: {
+        name,
+        docType: "receipt",
+        paper: "thermal80",
+        blocks: [
+          { type: "businessName" },
+          { type: "businessMeta" },
+          { type: "text", text: name },
+          { type: "items" },
+          { type: "totals" },
+        ],
+      },
     }),
   );
   if (!saved.template) throw new Error(`template seed failed: ${saved.error}`);
@@ -568,6 +641,231 @@ describe("the history table is branch-scoped underneath the routes", () => {
       { id: attempt1.rows[0].id, printer_id: alphaMain.printerId, status: "failed", error_code: "printer_offline" },
       { id: attempt2.rows[0].id, printer_id: backupId, status: "handed_off", error_code: null },
     ]);
+  });
+
+  it("exercises actual /api/printing/print and /api/printing/jobs persistence, immutable fallback across concurrent DB edits, one-fallback limit, and ambiguous delivery refusal", async () => {
+    activeAuthContext.businessId = alpha.businessId;
+    activeAuthContext.locationId = alphaMain.locationId;
+    capturedRenderedHtml.length = 0;
+    printRoute.clearPrintSnapshotCacheForTests();
+
+    const backupPrinter = await db.query<{ id: string }>(
+      `INSERT INTO printers (location_id, name, kind, printer_class, paper, paper_width_mm, is_active, connection)
+       VALUES ($1, 'چاپگر پشتیبان صندوق', 'receipt', 'thermal', 'thermal80', 80, true, '{"type":"windows","systemName":"Backup-POS"}'::jsonb)
+       RETURNING id`,
+      [alphaMain.locationId],
+    );
+    const backupId = backupPrinter.rows[0].id;
+
+    await db.query(
+      `INSERT INTO print_rules (location_id, document_type, printer_id, fallback_printer_id, template_id)
+       VALUES ($1, 'receipt', $2, $3, $4)
+       ON CONFLICT (location_id, document_type) DO UPDATE
+         SET printer_id = EXCLUDED.printer_id,
+             fallback_printer_id = EXCLUDED.fallback_printer_id,
+             template_id = EXCLUDED.template_id`,
+      [alphaMain.locationId, alphaMain.printerId, backupId, planted.alphaMainTemplateId],
+    );
+
+    const jsonReq = (body: unknown, method = "POST"): NextRequest =>
+      ({
+        json: async () => body,
+        method,
+        headers: { get: () => null },
+      }) as unknown as NextRequest;
+
+    // 1. Primary attempt via POST /api/printing/print:
+    const reqId = `receipt:${planted.alphaMainOrderId}`;
+    const primaryRes = await printRoute.POST(
+      jsonReq({
+        printRequestId: reqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(primaryRes.status).toBe(200);
+    const primaryBody = (await primaryRes.json()) as {
+      ok: boolean;
+      jobId: string;
+      attemptNumber: number;
+      printerId: string;
+      fallbackPrinterId: string | null;
+      templateVersion: number;
+      routeReason: string;
+    };
+    expect(primaryBody).toMatchObject({
+      ok: true,
+      attemptNumber: 1,
+      printerId: alphaMain.printerId,
+      fallbackPrinterId: backupId,
+      templateVersion: 1,
+      routeReason: "rule",
+    });
+    expect(capturedRenderedHtml).toHaveLength(1);
+    const attempt1Html = capturedRenderedHtml[0];
+    expect(attempt1Html).toContain("چای آلفا");
+    expect(attempt1Html).toContain("قالب شعبهٔ مرکزی");
+
+    // 2. Client reports pre-handoff non-delivery (printer_offline) via PATCH /api/printing/jobs:
+    const patch1Res = await jobsRoute.PATCH(
+      jsonReq({ jobId: primaryBody.jobId, status: "failed", errorCode: "printer_offline" }, "PATCH"),
+    );
+    expect(patch1Res.status).toBe(200);
+
+    // 3. Concurrent database modifications BEFORE attempt 2 is requested:
+    //    - mutate order item name & price in PostgreSQL (using factory_reset bypass for settled order trigger)
+    //    - update the saved template in PostgreSQL (bumping version 1 -> 2 and changing custom text)
+    //    - update the business name & branch address in PostgreSQL
+    await db.query("BEGIN");
+    await db.query("SELECT set_config('app.factory_reset', 'true', true)");
+    await db.query(
+      `UPDATE order_items SET name_snapshot = 'آیتم دستکاری‌شده', unit_price = 999000 WHERE order_id = $1`,
+      [planted.alphaMainOrderId],
+    );
+    await db.query(`UPDATE orders SET subtotal = 999000, total = 999000 WHERE id = $1`, [planted.alphaMainOrderId]);
+    await db.query("COMMIT");
+
+    await dbLib.withTenant(alpha.businessId, () =>
+      templates.updatePrintTemplate({
+        locationId: alphaMain.locationId,
+        id: planted.alphaMainTemplateId,
+        template: {
+          name: "قالب نسخهٔ جدید ۲",
+          docType: "receipt",
+          paper: "thermal80",
+          blocks: [{ type: "text", text: "متن تغییریافته در نسخهٔ ۲" }],
+        },
+      }),
+    );
+    await db.query(`UPDATE businesses SET name = 'آلفای تغییریافته' WHERE id = $1`, [alpha.businessId]);
+    await db.query(`UPDATE locations SET address = 'نشانی تغییریافته' WHERE id = $1`, [alphaMain.locationId]);
+
+    // Clear in-memory cache so attempt 2 is proven to restore from PostgreSQL print_jobs.render_snapshot:
+    printRoute.clearPrintSnapshotCacheForTests();
+
+    // 4. Fallback attempt (attempt 2) via POST /api/printing/print:
+    const fallbackRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: alphaMain.printerId,
+        previousJobId: primaryBody.jobId,
+        printRequestId: reqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(fallbackRes.status).toBe(200);
+    const fallbackBody = (await fallbackRes.json()) as {
+      ok: boolean;
+      jobId: string;
+      previousJobId: string | null;
+      attemptNumber: number;
+      printerId: string;
+      printerName: string;
+      fallbackFromPrinterId: string | null;
+      fallbackFromPrinterName: string | null;
+      templateId: string | null;
+      templateVersion: number;
+      routeReason: string;
+      fallbackPrinterId: string | null;
+    };
+    expect(fallbackBody).toMatchObject({
+      ok: true,
+      attemptNumber: 2,
+      previousJobId: primaryBody.jobId,
+      printerId: backupId,
+      printerName: "چاپگر پشتیبان صندوق",
+      fallbackFromPrinterId: alphaMain.printerId,
+      templateId: planted.alphaMainTemplateId,
+      templateVersion: 1,
+      routeReason: "runtime_fallback",
+      fallbackPrinterId: null,
+    });
+
+    // Attempt 2 rendered the exact same HTML from attempt 1's snapshot (never reloading the mutated order/template/branding):
+    expect(capturedRenderedHtml).toHaveLength(2);
+    const attempt2Html = capturedRenderedHtml[1];
+    expect(attempt2Html).toBe(attempt1Html);
+    expect(attempt2Html).toContain("چای آلفا");
+    expect(attempt2Html).not.toContain("آیتم دستکاری‌شده");
+    expect(attempt2Html).not.toContain("متن تغییریافته در نسخهٔ ۲");
+    expect(attempt2Html).not.toContain("نشانی تغییریافته");
+
+    // 5. Close attempt 2 as handed_off via PATCH /api/printing/jobs:
+    const patch2Res = await jobsRoute.PATCH(
+      jsonReq({ jobId: fallbackBody.jobId, status: "handed_off" }, "PATCH"),
+    );
+    expect(patch2Res.status).toBe(200);
+
+    // 6. Verify a 3rd attempt (second fallback) is refused with 409 (one-fallback limit):
+    const thirdRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: backupId,
+        previousJobId: primaryBody.jobId,
+        printRequestId: reqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(thirdRes.status).toBe(409);
+
+    // 7. Read linked history via GET /api/printing/jobs:
+    const historyRes = await jobsRoute.GET();
+    expect(historyRes.status).toBe(200);
+    const historyBody = (await historyRes.json()) as { jobs: Array<Record<string, unknown>> };
+    const opJobs = historyBody.jobs.filter((j) => j.printRequestId === reqId);
+    expect(opJobs).toHaveLength(2);
+    expect(opJobs[0]).toMatchObject({
+      id: fallbackBody.jobId,
+      attemptNumber: 2,
+      previousJobId: primaryBody.jobId,
+      routeReason: "runtime_fallback",
+      deliveryOutcome: "handed_off",
+      status: "handed_off",
+      printerId: backupId,
+      printerName: "چاپگر پشتیبان صندوق",
+      fallbackFromPrinterId: alphaMain.printerId,
+      templateId: planted.alphaMainTemplateId,
+      templateName: "قالب شعبهٔ مرکزی",
+      templateVersion: 1,
+    });
+    expect(opJobs[1]).toMatchObject({
+      id: primaryBody.jobId,
+      attemptNumber: 1,
+      previousJobId: null,
+      routeReason: "rule",
+      deliveryOutcome: "not_delivered",
+      status: "failed",
+      errorCode: "printer_offline",
+      printerId: alphaMain.printerId,
+      templateId: planted.alphaMainTemplateId,
+      templateName: "قالب شعبهٔ مرکزی",
+      templateVersion: 1,
+    });
+
+    // 8. Verify that an ambiguous failure (print_failed) on a new operation refuses fallback server-side:
+    const ambReqId = `receipt:amb-${planted.alphaMainOrderId}`;
+    const ambPrimaryRes = await printRoute.POST(
+      jsonReq({
+        printRequestId: ambReqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    const ambPrimary = (await ambPrimaryRes.json()) as { jobId: string };
+    await jobsRoute.PATCH(
+      jsonReq({ jobId: ambPrimary.jobId, status: "failed", errorCode: "print_failed" }, "PATCH"),
+    );
+    const ambFallbackRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: alphaMain.printerId,
+        previousJobId: ambPrimary.jobId,
+        printRequestId: ambReqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(ambFallbackRes.status).toBe(409);
+    expect(await ambFallbackRes.json()).toMatchObject({ ok: false, error: "job_timeout" });
   });
 });
 

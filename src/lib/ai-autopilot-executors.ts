@@ -289,9 +289,10 @@ import {
   createPrintTemplate,
   updatePrintTemplate,
   deletePrintTemplate,
+  getPrintTemplate,
 } from "./print-templates-service";
 import { builtInTemplate } from "./print-template";
-import { getPrintTemplate, loadRoutablePrinters } from "./printing/plan";
+import { loadRoutablePrinters } from "./printing/plan";
 import { isDocType, printerAcceptsDocument } from "./printing/routing";
 import {
   testConnection,

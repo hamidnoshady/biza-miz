@@ -73,6 +73,12 @@ const native = require("../../electron/native-printing.js") as {
     bytes: Uint8Array,
     opts?: Record<string, unknown>,
   ) => Promise<{ ok: boolean; error?: string }>;
+  sendPageScript: (tempFilePath: string, printerName: string) => string;
+  sendPageToWindowsPrinter: (
+    name: string,
+    bytes: Uint8Array,
+    opts?: { run?: (script: string) => Promise<string>; tmpdir?: string },
+  ) => Promise<{ ok: boolean; error?: string; detail?: string }>;
 };
 
 /** A fake `net.createConnection` that emits exactly one of connect/timeout/error. */
@@ -382,5 +388,42 @@ describe("probeTarget / sendRawToTarget — the one dispatch surface", () => {
       { connect },
     );
     expect(networkResult).toEqual({ ok: true });
+  });
+
+  it("aborts the spooler document on incomplete raw writes and classifies PrintDocument.Print exceptions as print_failed (ambiguous)", async () => {
+    const rawScript = native.sendRawScript("C:\\Temp\\job.bin", "EPSON TM-T20III");
+    expect(rawScript).toContain("AbortPrinter");
+    expect(native.classifyWindowsSendError("WritePrinter failed")).toBe("print_failed");
+    expect(native.classifyWindowsSendError("WritePrinterPartial failed")).toBe("job_timeout");
+    expect(native.classifyWindowsSendError("StartDocPrinter failed")).toBe("spooler_rejected");
+
+    const pageScript = native.sendPageScript("C:\\Temp\\page.png", "HP LaserJet");
+    expect(pageScript).toContain("print_document_ambiguous:");
+
+    const runPrintDocError = vi
+      .fn()
+      .mockRejectedValue(new Error("print_document_ambiguous: ExternalException in GDI+"));
+    const pageFailure = await native.sendPageToWindowsPrinter(
+      "HP LaserJet",
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      { run: runPrintDocError },
+    );
+    expect(pageFailure).toEqual({
+      ok: false,
+      error: "print_failed",
+      detail: "print_document_ambiguous: ExternalException in GDI+",
+    });
+
+    const runOffline = vi.fn().mockRejectedValue(new Error("printer_offline"));
+    const offlineFailure = await native.sendPageToWindowsPrinter(
+      "HP LaserJet",
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      { run: runOffline },
+    );
+    expect(offlineFailure).toEqual({
+      ok: false,
+      error: "printer_offline",
+      detail: "printer_offline",
+    });
   });
 });

@@ -59,6 +59,8 @@ export interface ParsedPrintRequest {
   printerId: string | null;
   /** Primary printer that definitively failed local delivery on attempt 1. */
   failedPrinterId?: string | null;
+  /** Primary print_jobs row id from attempt 1 when requesting a fallback attempt. */
+  previousJobId?: string | null;
   templateId: string | null;
   printRequestId: string | null;
   /** The document type the caller asked for; null means "the kind's own default". */
@@ -99,10 +101,12 @@ export function parsePrintRequest(body: unknown): ParsedPrintRequest | PrintRequ
   // branch, so an id from anywhere else simply does not resolve.
   const printerId = body.printerId == null ? null : id(body.printerId);
   const failedPrinterId = body.failedPrinterId == null ? null : id(body.failedPrinterId);
+  const previousJobId = body.previousJobId == null ? null : id(body.previousJobId);
   const templateId = body.templateId == null ? null : id(body.templateId);
   if (
     (body.printerId != null && !printerId) ||
     (body.failedPrinterId != null && !failedPrinterId) ||
+    (body.previousJobId != null && !previousJobId) ||
     (body.templateId != null && !templateId)
   ) {
     return badRequest();
@@ -124,6 +128,7 @@ export function parsePrintRequest(body: unknown): ParsedPrintRequest | PrintRequ
     ok: true,
     printerId,
     ...(failedPrinterId ? { failedPrinterId } : {}),
+    ...(previousJobId ? { previousJobId } : {}),
     templateId,
     printRequestId,
     documentType,

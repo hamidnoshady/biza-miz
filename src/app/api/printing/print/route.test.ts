@@ -33,7 +33,7 @@ import * as setupState from "@/lib/setup-state";
 import * as planModule from "@/lib/printing/plan";
 import * as renderService from "@/lib/printing/render-service";
 import * as loader from "@/lib/printing/document-loader";
-import { POST } from "./route";
+import { clearPrintSnapshotCacheForTests, POST } from "./route";
 import type { PrintPlan } from "@/lib/printing/plan";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -149,6 +149,7 @@ afterAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearPrintSnapshotCacheForTests();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "loc-1" } as never);
   vi.mocked(planModule.resolvePrintPlan).mockResolvedValue({ ok: true, plan: plan() } as never);
@@ -453,17 +454,44 @@ describe("render, history and provenance", () => {
     expect(body.dataBase64).toBe(bytes.toString("base64"));
   });
 
-  it("opens a history row for every attempt, with the printer, template revision and document", async () => {
+  it("opens a history row for every attempt, with the printer, template revision, diagnostics and snapshot", async () => {
     await POST(
       request({ printerId: PRINTER_ID, printRequestId: "req-2", document: { kind: "order-receipt", orderId: ORDER_ID } }),
     );
     const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
     expect(String(sql)).toContain("INSERT INTO print_jobs");
     expect(String(sql)).toContain("template_version");
+    expect(String(sql)).toContain("attempt_number");
+    expect(String(sql)).toContain("route_reason");
+    expect(String(sql)).toContain("render_snapshot");
     expect(String(sql)).toContain("RETURNING id");
     // No uniqueness key: two prints of one document are two attempts.
     expect(String(sql)).not.toContain("ON CONFLICT");
-    expect(params).toEqual(["loc-1", "receipt", ORDER_ID, PRINTER_ID, TEMPLATE_ID, "saved-1", 12, "req-2"]);
+    expect(params.slice(0, 16)).toEqual([
+      "loc-1",
+      "receipt",
+      ORDER_ID,
+      PRINTER_ID,
+      TEMPLATE_ID,
+      "saved-1",
+      12,
+      "req-2",
+      1,
+      null,
+      "rule",
+      "چاپگر صندوق",
+      null,
+      null,
+      "قالب من",
+      "thermal80",
+    ]);
+    expect(params[16]).toBe("rule");
+    expect(JSON.parse(String(params[17]))).toMatchObject({
+      documentType: "receipt",
+      entityId: ORDER_ID,
+      primaryPrinterId: PRINTER_ID,
+      template: { templateId: TEMPLATE_ID, templateKey: "saved-1", templateVersion: 12 },
+    });
   });
 
   it("records an attempt even when the caller supplies no request id at all", async () => {
@@ -513,22 +541,36 @@ describe("render, history and provenance", () => {
     });
   });
 
-  it("includes fallbackPrinterId on a primary rule plan and forwards failedPrinterId on a fallback retry", async () => {
+  it("includes fallbackPrinterId on a primary rule plan and binds fallback retry to attempt 1's immutable snapshot", async () => {
     const BACKUP_ID = "bbbb1111-2222-4333-8444-555566667777";
     vi.mocked(planModule.resolvePrintPlan).mockResolvedValueOnce({
       ok: true,
       plan: plan({
         reason: "rule",
         backupPrinter: { ...plan().printer, id: BACKUP_ID, name: "پشتیبان" },
+        branding: { name: "کافه اول" },
       }),
     } as never);
     const primaryRes = await POST(request({ printRequestId: "req-fb", document: { kind: "order-receipt", orderId: ORDER_ID } }));
     expect(await primaryRes.json()).toMatchObject({
       route: "rule",
+      routeReason: "rule",
+      attemptNumber: 1,
       printerId: PRINTER_ID,
       fallbackPrinterId: BACKUP_ID,
       fallbackPrinterName: "پشتیبان",
     });
+
+    // Simulate concurrent edits to the order in DB: if loadPrintDocument were
+    // called a second time, it would return the mutated order.
+    vi.mocked(loader.loadPrintDocument).mockResolvedValue({
+      ok: true,
+      document: {
+        job: { type: "receipt", receipt: { business: { name: "کافه تغییریافته" }, total: 999999 } } as never,
+        entityId: ORDER_ID,
+        source: "order-receipt",
+      },
+    } as never);
 
     vi.mocked(planModule.resolvePrintPlan).mockResolvedValueOnce({
       ok: true,
@@ -537,30 +579,105 @@ describe("render, history and provenance", () => {
         reason: "fallback",
         fallbackPrinter: { ...plan().printer, id: PRINTER_ID, name: "چاپگر صندوق" },
         backupPrinter: null,
+        branding: { name: "کافه اول" },
       }),
     } as never);
     const fallbackRes = await POST(
       request({
         failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
         printRequestId: "req-fb",
         document: { kind: "order-receipt", orderId: ORDER_ID },
       }),
     );
-    expect(planModule.resolvePrintPlan).toHaveBeenLastCalledWith({
-      locationId: "loc-1",
-      documentType: "receipt",
-      requestedPrinterId: null,
-      requestedTemplateId: null,
-      failedPrinterId: PRINTER_ID,
+    // resolvePrintPlan was called with lockedTemplate and lockedBranding from attempt 1:
+    expect(planModule.resolvePrintPlan).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        locationId: "loc-1",
+        documentType: "receipt",
+        requestedPrinterId: null,
+        requestedTemplateId: TEMPLATE_ID,
+        failedPrinterId: PRINTER_ID,
+        lockedBranding: { name: "کافه اول" },
+        lockedTemplate: expect.objectContaining({
+          templateId: TEMPLATE_ID,
+          templateKey: "saved-1",
+          templateVersion: 12,
+        }),
+      }),
+    );
+    // loadPrintDocument was called ONLY ONCE (on attempt 1, never on attempt 2):
+    expect(loader.loadPrintDocument).toHaveBeenCalledTimes(1);
+    // preparePrint on attempt 2 received attempt 1's immutable job:
+    expect(vi.mocked(renderService.preparePrint).mock.calls[1][1]).toEqual({
+      type: "receipt",
+      receipt: { business: { name: "کافه" } },
     });
     expect(await fallbackRes.json()).toMatchObject({
       ok: true,
+      attemptNumber: 2,
       printerId: BACKUP_ID,
       printerName: "پشتیبان",
       route: "fallback",
+      routeReason: "runtime_fallback",
       fallbackFromPrinterId: PRINTER_ID,
       fallbackFromPrinterName: "چاپگر صندوق",
       fallbackPrinterId: null,
     });
+
+    // A third attempt (second fallback) is refused by the one-fallback limit:
+    const thirdRes = await POST(
+      request({
+        failedPrinterId: BACKUP_ID,
+        previousJobId: JOB_ID,
+        printRequestId: "req-fb",
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(thirdRes.status).toBe(409);
+    expect(await thirdRes.json()).toMatchObject({ ok: false, error: "printer_unavailable" });
+  });
+
+  it("refuses a fallback request when attempt 1 in print_jobs was handed_off or ambiguous", async () => {
+    vi.mocked(db.query).mockImplementation((async (sql: string) => {
+      if (String(sql).includes("SELECT j.id")) {
+        return {
+          rows: [
+            {
+              id: JOB_ID,
+              document_type: "receipt",
+              entity_id: ORDER_ID,
+              printer_id: PRINTER_ID,
+              printer_name: "چاپگر صندوق",
+              template_id: TEMPLATE_ID,
+              template_key: "saved-1",
+              template_version: 12,
+              status: "failed",
+              error_code: "print_failed",
+              delivery_outcome: "ambiguous",
+              attempt_number: 1,
+              previous_job_id: null,
+              print_request_id: "req-amb",
+              render_snapshot: null,
+              has_fallback_attempt: false,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }) as never);
+
+    const res = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
+        printRequestId: "req-amb",
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, error: "job_timeout" });
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
   });
 });

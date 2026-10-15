@@ -694,5 +694,122 @@ describe("runtime fallback and duplicate-print protection", () => {
       { jobId: "job-ambiguous-1", status: "failed", errorCode: "job_timeout" },
     ]);
   });
+
+  it("defaults unknown failures, generic print_failed, WritePrinter errors, and PrintDocument.Print exceptions to ambiguous and NEVER falls back", async () => {
+    const { classifyDeliveryOutcome } = await import("./errors");
+    expect(classifyDeliveryOutcome({ ok: false })).toBe("ambiguous");
+    expect(classifyDeliveryOutcome({ ok: false, error: "print_failed" })).toBe("ambiguous");
+    expect(classifyDeliveryOutcome({ ok: false, error: "spooler_rejected", detail: "WritePrinter failed" })).toBe("ambiguous");
+    expect(
+      classifyDeliveryOutcome({
+        ok: false,
+        error: "spooler_rejected",
+        detail: "print_document_ambiguous: ExternalException during PrintDocument.Print",
+      }),
+    ).toBe("ambiguous");
+    expect(classifyDeliveryOutcome({ ok: false, error: "printer_offline" })).toBe("not_delivered");
+    expect(classifyDeliveryOutcome({ ok: false, error: "printer_not_found" })).toBe("not_delivered");
+    expect(classifyDeliveryOutcome({ ok: false, error: "network_unreachable" })).toBe("not_delivered");
+    expect(classifyDeliveryOutcome({ ok: false, error: "spooler_rejected", detail: "StartDocPrinter failed" })).toBe("not_delivered");
+
+    // 1. Browser connector returning generic print_failed / WritePrinter failure:
+    let printAttempt = 0;
+    mockFetch({
+      "/api/printing/print": () => {
+        printAttempt += 1;
+        return respondJson({
+          ok: true,
+          jobId: "job-wp-1",
+          printerId: PRIMARY_ID,
+          printerName: "چاپگر اصلی",
+          route: "rule",
+          fallbackPrinterId: BACKUP_ID,
+          fallbackPrinterName: "چاپگر پشتیبان",
+          target: WINDOWS_TARGET,
+          dataBase64: RENDERED_B64,
+        });
+      },
+      [`${CONNECTOR}/print/raw`]: () =>
+        respondJson({ ok: false, error: "print_failed", detail: "WritePrinter failed" }, 502),
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+
+    const rawRes = await printSaleReceipt(null, ORDER_ID, { requestId: "req-wp-amb" });
+    expect(rawRes.ok).toBe(false);
+    expect(rawRes.error).toBe("print_failed");
+    expect(rawRes.ambiguous).toBe(true);
+    expect(rawRes.usedFallback).toBeUndefined();
+    expect(printAttempt).toBe(1);
+
+    // 2. Browser connector returning PrintDocument.Print exception on /print/page:
+    let pageAttempt = 0;
+    mockFetch({
+      "/api/printing/print": () => {
+        pageAttempt += 1;
+        return respondJson({
+          ok: true,
+          jobId: "job-page-amb-1",
+          printerId: PRIMARY_ID,
+          printerName: "چاپگر اداری",
+          route: "rule",
+          fallbackPrinterId: BACKUP_ID,
+          fallbackPrinterName: "چاپگر پشتیبان اداری",
+          delivery: "page",
+          target: WINDOWS_TARGET,
+          dataBase64: RENDERED_B64,
+        });
+      },
+      [`${CONNECTOR}/print/page`]: () =>
+        respondJson(
+          { ok: false, error: "print_failed", ambiguous: true, detail: "print_document_ambiguous: GDI error during PrintDocument.Print" },
+          502,
+        ),
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+
+    const pageRes = await printSaleInvoice(null, ORDER_ID, { requestId: "req-page-amb" });
+    expect(pageRes.ok).toBe(false);
+    expect(pageRes.error).toBe("print_failed");
+    expect(pageRes.ambiguous).toBe(true);
+    expect(pageRes.usedFallback).toBeUndefined();
+    expect(pageAttempt).toBe(1);
+
+    // 3. Electron desktop bridge returning PrintDocument.Print exception on sendPage:
+    let deskPageAttempt = 0;
+    mockFetch({
+      "/api/printing/print": () => {
+        deskPageAttempt += 1;
+        return respondJson({
+          ok: true,
+          jobId: "job-desk-page-amb-1",
+          printerId: PRIMARY_ID,
+          printerName: "چاپگر اداری",
+          route: "rule",
+          fallbackPrinterId: BACKUP_ID,
+          fallbackPrinterName: "چاپگر پشتیبان اداری",
+          delivery: "page",
+          target: WINDOWS_TARGET,
+          dataBase64: RENDERED_B64,
+        });
+      },
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+    const sendPageMock = vi.fn().mockResolvedValue({
+      ok: false,
+      error: "print_failed",
+      detail: "print_document_ambiguous: GDI error during PrintDocument.Print",
+    });
+    vi.stubGlobal("window", {
+      businessSuiteDesktop: { isDesktop: true, printing: { sendRaw: vi.fn(), sendPage: sendPageMock } },
+    });
+
+    const deskPageRes = await printSaleInvoice(null, ORDER_ID, { requestId: "req-desk-page-amb" });
+    expect(deskPageRes.ok).toBe(false);
+    expect(deskPageRes.error).toBe("print_failed");
+    expect(deskPageRes.ambiguous).toBe(true);
+    expect(deskPageRes.usedFallback).toBeUndefined();
+    expect(deskPageAttempt).toBe(1);
+    expect(sendPageMock).toHaveBeenCalledTimes(1);
+  });
 });
 

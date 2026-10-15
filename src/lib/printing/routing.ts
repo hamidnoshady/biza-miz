@@ -98,7 +98,6 @@ export type ResolveReason =
   | "explicit"
   | "rule"
   | "default"
-  | "last_used"
   | "only"
   | "fallback"
   /** The rule names a printer (or fallback) but neither can take the document right now. */
@@ -231,7 +230,6 @@ export function resolvePrinter(input: {
   printers: RoutingPrinter[];
   rules?: PrintRuleRef[];
   requestedPrinterId?: string | null;
-  lastUsedPrinterId?: string | null;
   /** Printers that definitively failed local delivery on an earlier attempt for this job. */
   failedPrinterIds?: readonly string[];
 }): ResolveResult {
@@ -292,9 +290,6 @@ export function resolvePrinter(input: {
   const defaults = compatible.filter((printer) => printer.isDefault);
   if (defaults.length === 1) return { printer: defaults[0], fallbackFrom: null, templateKey, templateId, reason: "default" };
 
-  const last = byId(input.lastUsedPrinterId);
-  if (last) return { printer: last, fallbackFrom: null, templateKey, templateId, reason: "last_used" };
-
   if (compatible.length === 1) return { printer: compatible[0], fallbackFrom: null, templateKey, templateId, reason: "only" };
 
   return { printer: null, fallbackFrom: null, templateKey, templateId, reason: "choose" };
@@ -318,14 +313,6 @@ export function isSheetPaper(paper: string | null | undefined): boolean {
 
 export function isLabelPaper(paper: string | null | undefined): boolean {
   return paper === "label57x40";
-}
-
-/** The paper a printer will feed, given the relational columns. Kept for callers holding plain data. */
-export function paperOfPrinter(raw: { paper?: unknown; paper_width_mm?: unknown; paperWidthMm?: unknown }): PaperKey {
-  if (typeof raw.paper === "string" && raw.paper in PAPERS) return raw.paper as PaperKey;
-  const width = Number(raw.paper_width_mm ?? raw.paperWidthMm);
-  if (width === 58) return "thermal58";
-  return "thermal80";
 }
 
 export function isPrinterPurposeValue(value: unknown): value is PrinterPurpose {

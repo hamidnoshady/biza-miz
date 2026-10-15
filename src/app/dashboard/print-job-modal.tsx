@@ -53,6 +53,9 @@ export function PrintJobModal() {
             <div className="space-y-1 py-4">
               <p className="text-lg font-semibold text-foreground">به چاپگر ارسال شد</p>
               {state?.printerName ? <p className="text-sm text-muted-foreground" dir="auto">{state.printerName}</p> : null}
+              <p className="text-xs text-muted-foreground">
+                تحویل به صف سیستم‌عامل انجام شد (خروجی فیزیکی کاغذ را بررسی کنید).
+              </p>
               {state?.usedFallback ? (
                 <p className="text-xs text-amber-700 dark:text-amber-300" dir="auto">
                   {state.fallbackFromPrinterName
@@ -86,7 +89,7 @@ export function PrintJobModal() {
               {phase === "failed" && state?.error ? (
                 <li role="alert" className="text-red-700 dark:text-red-300">{printerErrorMessage(state.error)}</li>
               ) : null}
-              {phase === "failed" && (state?.ambiguous || state?.error === "job_timeout") ? (
+              {phase === "failed" && (state?.ambiguous || state?.error === "job_timeout" || state?.error === "print_failed") ? (
                 <li className="text-xs text-amber-700 dark:text-amber-300">
                   برای جلوگیری از چاپ تکراری، ارسال خودکار مجدد انجام نشد. پیش از چاپ دوباره، خروجی چاپگر را بررسی کنید.
                 </li>

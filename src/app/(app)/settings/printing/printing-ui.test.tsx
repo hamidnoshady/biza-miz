@@ -149,7 +149,7 @@ async function openRules() {
   render(<PrintingManager />);
   await waitFor(() => expect(screen.getByRole("tab", { name: "قوانین چاپ" })).toBeTruthy());
   fireEvent.click(screen.getByRole("tab", { name: "قوانین چاپ" }));
-  await screen.findByText("رسید فروش");
+  await screen.findAllByText("رسید فروش");
 }
 
 /**
@@ -286,6 +286,72 @@ describe("Rules screen — printers", () => {
     await openRules();
     fireEvent.click(screen.getAllByRole("button", { name: "چاپ نمونه روی همین مسیر" })[0]);
     expect(await screen.findByText(/سرویس چاپ را از تب «چاپگرها» نصب کنید/)).toBeTruthy();
+  });
+
+  it("shows linked attempts, routing reason, fallback origin, template revision, and spooler-handoff vs physical-output semantics in recent activity", async () => {
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
+      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED } };
+      if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/printing/jobs") {
+        return {
+          ok: true,
+          data: {
+            jobs: [
+              {
+                id: "job-2",
+                documentType: "receipt",
+                status: "handed_off",
+                errorCode: null,
+                deliveryOutcome: "handed_off",
+                routeReason: "runtime_fallback",
+                attemptNumber: 2,
+                previousJobId: "job-1",
+                printerName: "صندوق پشتیبان",
+                fallbackFromPrinterName: "صندوق",
+                templateName: "قالب سفارشی من",
+                templateKey: "tpl-1",
+                templateVersion: 3,
+                printRequestId: "receipt:order-1",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۰",
+              },
+              {
+                id: "job-1",
+                documentType: "receipt",
+                status: "failed",
+                errorCode: "printer_offline",
+                deliveryOutcome: "not_delivered",
+                routeReason: "rule",
+                attemptNumber: 1,
+                previousJobId: null,
+                printerName: "صندوق",
+                fallbackFromPrinterName: null,
+                templateName: "قالب سفارشی من",
+                templateKey: "tpl-1",
+                templateVersion: 3,
+                printRequestId: "receipt:order-1",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۰",
+              },
+            ],
+          },
+        };
+      }
+      if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
+      if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
+      return { ok: true, data: {} };
+    });
+
+    await openRules();
+    const text = bodyText();
+    expect(text).toContain("تحویل به صف سیستم‌عامل یا درگاه شبکه انجام شده است و به‌تنهایی خروج فیزیکی کاغذ را تضمین نمی‌کند");
+    expect(text).toContain("تلاش ۲ (مرتبط با تلاش ۱)");
+    expect(text).toContain("تلاش ۱");
+    expect(text).toContain("(جانشین «صندوق»)");
+    expect(text).toContain("مسیر: چاپگر جانشین (تلاش مجدد خودکار)");
+    expect(text).toContain("قالب سفارشی من · نسخهٔ ۳ (v۳)");
+    expect(text).toContain("تحویل به صف سیستم‌عامل (خروجی کاغذ بررسی شود)");
+    expect(text).toContain("عدم تحویل پیش از ارسال");
   });
 });
 

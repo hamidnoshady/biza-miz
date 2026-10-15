@@ -4,7 +4,8 @@ import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { builtInTemplate, type DocType } from "@/lib/print-template";
-import { getPrintTemplate, loadRoutablePrinters, resolvePrintPlan } from "@/lib/printing/plan";
+import { getPrintTemplate } from "@/lib/print-templates-service";
+import { loadRoutablePrinters, resolvePrintPlan } from "@/lib/printing/plan";
 import { isDocType, printerAcceptsDocument } from "@/lib/printing/routing";
 
 /**

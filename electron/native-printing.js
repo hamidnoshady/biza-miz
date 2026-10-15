@@ -185,6 +185,9 @@ public static class CafePosNativePrinter
     private static extern bool EndDocPrinter(IntPtr printer);
 
     [DllImport("winspool.drv", SetLastError = true)]
+    private static extern bool AbortPrinter(IntPtr printer);
+
+    [DllImport("winspool.drv", SetLastError = true)]
     private static extern bool StartPagePrinter(IntPtr printer);
 
     [DllImport("winspool.drv", SetLastError = true)]
@@ -207,6 +210,7 @@ public static class CafePosNativePrinter
         IntPtr unmanaged = IntPtr.Zero;
         bool documentStarted = false;
         bool pageStarted = false;
+        bool completed = false;
 
         try
         {
@@ -227,12 +231,17 @@ public static class CafePosNativePrinter
                 if (written <= 0) throw new Win32Exception("WritePrinter wrote zero bytes.");
                 offset += written;
             }
+            completed = true;
         }
         finally
         {
             if (unmanaged != IntPtr.Zero) Marshal.FreeCoTaskMem(unmanaged);
-            if (pageStarted) EndPagePrinter(printer);
-            if (documentStarted) EndDocPrinter(printer);
+            if (pageStarted && completed) EndPagePrinter(printer);
+            if (documentStarted)
+            {
+                if (completed) EndDocPrinter(printer);
+                else AbortPrinter(printer);
+            }
             if (printer != IntPtr.Zero) ClosePrinter(printer);
         }
     }
@@ -258,11 +267,14 @@ function classifyWindowsSendError(message) {
   if (text.includes("printer_offline") || text.includes("workoffline") || text.includes("offline")) {
     return "printer_offline";
   }
-  if (text.includes("startdocprinter") || text.includes("startpageprinter") || text.includes("spooler")) {
-    return "spooler_rejected";
-  }
   if (text.includes("powershell timed out") || text.includes("writeprinterpartial") || text.includes("write_ambiguous")) {
     return "job_timeout";
+  }
+  if (text.includes("writeprinter") || text.includes("print_document_ambiguous") || text.includes("printdocument.print")) {
+    return "print_failed";
+  }
+  if (text.includes("startdocprinter") || text.includes("startpageprinter") || text.includes("spooler")) {
+    return "spooler_rejected";
   }
   return "print_failed";
 }
@@ -469,7 +481,11 @@ public static class CafePosPagePrinter {
         offset += take;
         e.HasMorePages = offset < image.Height;
       };
-      doc.Print();
+      try {
+        doc.Print();
+      } catch (Exception ex) {
+        throw new InvalidOperationException("print_document_ambiguous: " + ex.Message, ex);
+      }
     }
   }
 }
@@ -494,7 +510,11 @@ async function sendPageToWindowsPrinter(printerName, bytes, { run = runPowerShel
         ? "printer_offline"
         : /powershell timed out/i.test(message)
           ? "job_timeout"
-          : "spooler_rejected";
+          : /print_document_ambiguous|PrintDocument\.Print/i.test(message)
+            ? "print_failed"
+            : /pre_handoff_spooler_rejected|StartDocPrinter|StartPagePrinter/i.test(message)
+              ? "spooler_rejected"
+              : "print_failed";
     return { ok: false, error: errorCode, detail: message };
   } finally {
     fs.promises.unlink(tempPath).catch(() => {});

@@ -298,6 +298,80 @@ describe("the printer connection model — after the full migration history", ()
     expect(indexes).toHaveLength(1);
   });
 
+  it("installs durable diagnostics, immutable snapshot column, and one-fallback-per-primary constraint (migration 0222)", async () => {
+    const { rows: cols } = await ownerClient.query<{ column_name: string }>(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_name = 'print_jobs'
+          AND column_name IN (
+            'attempt_number',
+            'previous_job_id',
+            'route_reason',
+            'delivery_outcome',
+            'printer_name',
+            'fallback_from_printer_id',
+            'fallback_from_printer_name',
+            'template_name',
+            'template_paper',
+            'template_source',
+            'render_snapshot'
+          )
+        ORDER BY column_name`,
+    );
+    expect(cols.map((c) => c.column_name)).toEqual([
+      "attempt_number",
+      "delivery_outcome",
+      "fallback_from_printer_id",
+      "fallback_from_printer_name",
+      "previous_job_id",
+      "printer_name",
+      "render_snapshot",
+      "route_reason",
+      "template_name",
+      "template_paper",
+      "template_source",
+    ]);
+
+    const { rows: primary } = await ownerClient.query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, printer_id, status, error_code, delivery_outcome, attempt_number, route_reason)
+       VALUES ($1, 'receipt', $2, 'failed', 'printer_offline', 'not_delivered', 1, 'rule')
+       RETURNING id`,
+      [seededLocationId, seededPrinterId],
+    );
+    const primaryId = primary[0].id;
+
+    // First fallback attempt linked via previous_job_id succeeds:
+    const { rows: fallback1 } = await ownerClient.query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, printer_id, status, delivery_outcome, attempt_number, previous_job_id, route_reason)
+       VALUES ($1, 'receipt', $2, 'handed_off', 'handed_off', 2, $3, 'runtime_fallback')
+       RETURNING id`,
+      [seededLocationId, seededPrinterId, primaryId],
+    );
+    expect(fallback1[0].id).toMatch(/^[0-9a-f-]{36}$/i);
+
+    // A second fallback attempt for the same primary job row is rejected by idx_print_jobs_unique_previous_job:
+    await expect(
+      ownerClient.query(
+        `INSERT INTO print_jobs
+           (location_id, document_type, printer_id, status, delivery_outcome, attempt_number, previous_job_id, route_reason)
+         VALUES ($1, 'receipt', $2, 'handed_off', 'handed_off', 2, $3, 'runtime_fallback')`,
+        [seededLocationId, seededPrinterId, primaryId],
+      ),
+    ).rejects.toThrow();
+
+    // An attempt_number > 2 is rejected by print_jobs_attempt_number_check:
+    await expect(
+      ownerClient.query(
+        `INSERT INTO print_jobs
+           (location_id, document_type, printer_id, status, attempt_number)
+         VALUES ($1, 'receipt', $2, 'sending', 3)`,
+        [seededLocationId, seededPrinterId],
+      ),
+    ).rejects.toThrow();
+  });
+
   it("keeps every converted row readable by the runtime model", async () => {
     // The settings screen and the resolver read a printer through the row +
     // `connection`; a row that says `type` and a target must be usable, and a
