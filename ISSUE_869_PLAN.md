@@ -34,8 +34,8 @@ business-scope sync documentation. No replacement financial subsystem or balance
 | Warnings | Fixed sale-day effective windows, item/brand scope, missing/inactive assignments without accrual, and inaccurate claim wording (payroll-held is not necessarily paid). Never accrue money from a warning. Historical lines with existing accruals are not re-diagnosed from subsequently edited rules. |
 | Rule-engine/category scope | Pre-existing #764 dependency, not rebuilt: retail producer does not pass category; a category rule no longer hides the warning. Rule edit history is not available to reconstruct past active flags. Warning sales values remain pre-discount, explicitly documented. |
 | Financial permissions / tenant isolation | Existing five permissions, service transitions, API guards and FORCE RLS retained. Added snapshot reporting probes under a non-superuser/non-BYPASSRLS app role. |
-| Browser acceptance | In-repo real-app multi-user script added (`npm run test:e2e:commission`) and wired into the existing production/RLS browser CI job. Local execution and CI results must be recorded below, not inferred from the script's existence. Broader keyboard/theme/filter-race and source navigation acceptance still require evidence. |
-| Synchronization | Existing transactionally appended business-scope recorded/reversed v1 contracts preserved. Existing PostgreSQL tests exercise outbox rollback, duplicate delivery, site refusal, replay and scope. A real central/site two-instance transport run has NOT been completed; no paired deployment or external credentials supplied. Branch-bound devices intentionally do not receive business-scope events; a business-wide feed does. |
+| Browser acceptance | In-repo real-app multi-user script added (`npm run test:e2e:commission`) and wired into the existing production/RLS browser CI job. Full expanded Rial/Toman real-production acceptance passed at `9fdb199`, including both themes, three widths, WCAG, keyboard/focus, filter races/offline recovery, exact source navigation and refusal/correction lifecycle. See the versioned evidence below. |
+| Synchronization | Existing transactionally appended business-scope recorded/reversed v1 contracts preserved. Existing PostgreSQL tests exercise outbox rollback, duplicate delivery, site refusal, replay and scope. Controlled real central/site HTTP acceptance PASSED at `9fdb199` on separate DBs/processes under the non-BYPASSRLS app role. Customer deployment/physical-device pairing/full IAM scheduler are not claimed. Branch-bound devices intentionally do not receive business-scope events; a business-wide feed does. |
 | Cleanup | Cross-reference audit of settlement helpers/API/UI/tests/sync consumers; no confirmed dead financial path removed. The optional non-snapshot runner default on standalone outstanding was removed: its sole consumer must supply the report runner. |
 | Release / closure | BLOCKED until all mandatory gates, live two-instance verification and merge. Keep issue #869 OPEN. No automatic-closing PR keyword while blocked. |
 
@@ -59,7 +59,7 @@ business-scope sync documentation. No replacement financial subsystem or balance
   now use `Field as="div"` with explicit picker names; the E2E asserts the picker closes,
   without force clicks or relaxed timeouts.
 
-### Verification record — implementation candidates `9497ac3` / `25f1c84`
+### Verification record — verified application head `9fdb199`
 
 Evidence as of 2026-10-15. Later candidate results and the live release checklist
 are maintained in [PR #964](https://github.com/hamidnoshady/biza-miz/pull/964), not
@@ -67,15 +67,15 @@ inferred from this historical gate snapshot. Earlier tables below describe #930 
 
 | Gate | Verified result / current continuation |
 | --- | --- |
-| TypeScript / ESLint | Full continuation typecheck and lint passed locally; both passed Actions at `9497ac3`. The retry follow-up typecheck and targeted lint pass locally. |
-| Full unit | 11,428 / 867 files passed locally and full unit passed Actions at `9497ac3`. Follow-up statement retry suite: 3 tests pass. Existing payroll UI 87 and focused source/capability/API regressions passed; focused counts are not added again to the full total. |
+| TypeScript / ESLint | Full continuation typecheck and lint PASS locally and Actions at `9fdb199`. No assertion, timeout, visual baseline or security threshold was weakened. |
+| Full unit | 11,429 tests / 867 files PASS locally at `9fdb199`; full unit PASS in Actions. Existing payroll UI and new source/statement/capability/API tests are included, not added again to that total. |
 | Financial PostgreSQL | 247 / 6 files passed locally: payroll 184, accrual 11, settlement 23, contention 10, sync handlers 12, RLS 7. |
 | Full PostgreSQL | Actions PASS at `03f9cb3`, run `38728481214`, 31m18s. The previous local run's final log is unavailable after workspace rehydration; it is not counted as a pass. A fresh full local run is in progress; no final verdict yet. |
-| Actual-app browser | Original multi-user commission lifecycle PASS on the production/non-BYPASSRLS runtime at `03f9cb3`, job `116401557439`. At `9497ac3`, expanded Rial reached real offline recovery after light-theme/three-width WCAG, keyboard, payroll navigation and actual-upstream stale checks; it failed because the heading-based test locator disappeared on error. Persistent-control locator plus retry regression added; full new-head matrix still requires a pass. |
-| Production build | Actions PASS at `9497ac3` and `03f9cb3` (3m42s at the latter). Local cold builds exceeded the 3.8 GiB sandbox; no local pass or threshold change claimed. |
-| Pinned visual / packaging | Actions pinned visuals PASS (5m54s), packaged Windows E2E PASS (16m42s), desktop shell and production container PASS at `03f9cb3`. Pinned visuals, Windows and shippables also passed at `9497ac3`. No baseline regeneration. |
-| Controlled central/site HTTP | New opt-in harness prepared and the separate-database bootstrap verified locally. Full real-HTTP authority/failure/backoff/recovery/duplicate acceptance awaits new CI. This is not customer deployment/physical pairing/IAM-scheduler evidence. |
-| Actions / merge | All required checks passed at `03f9cb3` (runs `38728487023` / `38728481214`; Windows `38728487272`). This continuation changes code/tests and must earn fresh checks. PR #964 remains draft; #869 OPEN; no merge or closure. |
+| Actual-app browser | Original multi-user commission lifecycle PASS on the production/non-BYPASSRLS runtime at `03f9cb3`, job `116401557439`. Full expanded Rial and Toman PASS at `9fdb199`, production/RLS job `116451226863`, run `38743483853`: both themes, three widths, WCAG, keyboard/focus, delayed real upstream response, offline/retry, exact payroll source, overpay/reject/recalculate/void and final zero tie-out. An initial error-state test-locator defect was fixed without changing UI financial assertions. |
+| Production build | Actions PASS at `9fdb199` (4m34s in the push workflow). Local cold builds exceeded the 3.8 GiB sandbox; no local pass or threshold change claimed. |
+| Pinned visual / packaging | Actions pinned visuals PASS (5m54s), packaged Windows E2E PASS (16m42s), desktop shell and production container PASS at `03f9cb3`. At `9fdb199`: pinned visuals PASS (5m27s), desktop shell PASS (7m2s), production container PASS (10m22s); fresh Windows packaging still running at this evidence snapshot. No baseline regeneration. |
+| Controlled central/site HTTP | PASS at `9fdb199`, job `116451226863`, transport step 36s. Real scope/authority/failure/backoff/recovery/duplicate checks and unchanged site financial counts; non-secret artifact `11976762680`. This is not customer deployment/physical pairing/IAM-scheduler evidence. |
+| Actions / merge | At `9fdb199`, all completed checks PASS; full PostgreSQL and Windows still running. Full required aggregate must pass on the eventual final documentation head too. PR #964 remains draft; #869 OPEN; no merge or closure at this evidence snapshot. Follow the live PR checklist for later gate/merge results. |
 
 ### Continuation delivered after `03f9cb3`
 
@@ -101,11 +101,20 @@ inferred from this historical gate snapshot. Earlier tables below describe #930 
   exact Rial amounts, retry/cursor state and before/after financial counts in the
   `commission-transport-evidence` artifact, never fixture credentials or passwords.
 
-Remaining release work: execute and fix the extended acceptance on the new head, obtain
-all fresh required checks, and resolve any mandatory live-environment evidence beyond
-controlled transport. The #764 category-producer and historical-rule limitations remain
-explicit, not silently rebuilt or bypassed. Keep #869 OPEN until mandatory criteria and
-merge are complete.
+Verified real transport client-event IDs (no tokens):
+`ee6e0092-8ecd-5283-8468-17bf7ff0147b`, `e9e4acb8-d1c7-5e29-9712-eb152f60dd86`,
+`d9498b19-fc2a-5104-bd4c-4934b8178d30`. The
+[retained evidence](https://github.com/hamidnoshady/biza-miz/actions/runs/38743483853/artifacts/11976762680)
+links source payout/reversal/journal IDs to durable site effects and exact cursor/retry state.
+
+Remaining release work at this snapshot: finish full local PostgreSQL and all fresh
+required checks/Windows on the eventual final documentation head, then merge only if
+the mandatory criteria pass. The #764 category-producer and historical-rule limitations
+remain explicit, not silently rebuilt or bypassed. A #764 coordination comment was
+permission-denied (GitHub integration 403); the scope is cross-referenced in PR #964.
+Keep #869 OPEN until mandatory criteria and merge are complete. Physical pairing,
+customer deployment and the full IAM-gated scheduler are not inferred from this
+business-wide production-pull acceptance.
 
 ---
 

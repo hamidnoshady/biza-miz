@@ -466,7 +466,9 @@ re-posting their journals. The harness checks actual unreachable-endpoint failur
 backoff/cursor durability, recovery and duplicate re-delivery. It seeds a starting
 snapshot, not a physical-device pairing ceremony, and does not claim the entire
 IAM-gated modern branch scheduler or a customer's live deployment was verified.
-Until its new Actions step passes, this remains committed acceptance code, not a result.
+This controlled real-HTTP acceptance PASSED at `9fdb199` (run `38743483853`, job
+`116451226863`, transport step 36s); artifact `11976762680` retains the evidence.
+Later candidates must pass again; this is not customer/physical pairing acceptance.
 On success, `commission-transport-evidence` retains whitelisted source/effect identifiers,
 exact Rial amounts, persisted retry/cursor state and before/after financial counts.
 The credentials fixture is deliberately excluded from every artifact.

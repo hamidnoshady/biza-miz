@@ -343,7 +343,7 @@ note (a void's reason is required). The run page shows the trail.
 - Category-scoped commission rules never match: the retail invoice path does not pass a category
   (`retail-invoice-service.ts`). This predates #869 and is unchanged.
 - History pages are bounded at 500, but every row is reachable through paging and filtered export; lifetime sums are never page-limited.
-- Real two-instance central/site transport verification and the full browser acceptance matrix remain release gates; see the completion audit.
+- Any later financial/UI/transport changes must re-pass the real two-instance and full browser acceptance matrix; see the versioned evidence in the completion audit.
 
 
 ### Continuation acceptance (#869)
@@ -373,8 +373,9 @@ on failure, the full production backoff deadline, recovery, duplicate delivery, 
 `cloud_owned` effects and **no second site payout/journal**. This is controlled transport
 acceptance, not a claim of a customer deployment, physical desktop pairing ceremony,
 or the full IAM-gated scheduler using a modern branch credential. Branch credentials
-intentionally do not receive these business-scope envelopes. Results must be recorded
-only after the enhanced CI steps actually pass. The `commission-transport-evidence`
+intentionally do not receive these business-scope envelopes. The full enhanced Rial/Toman browser matrix and controlled real-HTTP transport
+PASSED at `9fdb199`, run `38743483853`, job `116451226863`. Later heads must earn
+their own passing required checks; this does not imply customer/physical pairing acceptance. The `commission-transport-evidence`
 artifact contains only whitelisted event/payout/reversal/journal/effect IDs, exact Rial
 amounts, persisted failure/recovery cursors and before/after financial counts; it never
 contains fixture credentials or passwords. Current candidate results are tracked in
