@@ -455,9 +455,10 @@ describe("native device registry lifecycle", () => {
       pushProvider: null,
       biometricEnabled: true,
       biometricVerifiedAt: null,
+      callerIdRoleHeld: false,
     });
 
-    // Re-register push token, then revoke -> push token and biometricEnabled are both cleared
+    // Re-register push token, then revoke -> push token, biometricEnabled, and callerIdRoleHeld are all cleared
     await asBusiness(alpha.businessId, () =>
       nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, input),
     );
@@ -474,6 +475,7 @@ describe("native device registry lifecycle", () => {
       pushProvider: null,
       biometricEnabled: false,
       biometricVerifiedAt: null,
+      callerIdRoleHeld: false,
     });
   });
 });

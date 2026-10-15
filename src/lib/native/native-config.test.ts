@@ -301,4 +301,22 @@ describe("Android build reads the shared contract", () => {
     expect(encryptedStore).toContain("AES/GCM/NoPadding");
     expect(encryptedStore).toContain("AndroidKeyStore");
   });
+
+  it("keeps docs/android-runtime.md and ISSUE_884_PLAN.md aligned with Bridge v3 and Phase 8", () => {
+    const runtimeDoc = repoFile("docs/android-runtime.md");
+    const planDoc = repoFile("ISSUE_884_PLAN.md");
+
+    expect(runtimeDoc).toContain("### Commands and events (version 3)");
+    expect(runtimeDoc).not.toContain("### Commands and events (version 2)");
+    for (const command of NATIVE_COMMANDS) {
+      expect(runtimeDoc).toContain(`\`${command}\``);
+    }
+    for (const eventName of NATIVE_EVENTS) {
+      expect(runtimeDoc).toContain(`\`${eventName}\``);
+    }
+
+    expect(planDoc).toContain("arena/980efbf2-biza-miz");
+    expect(planDoc).toContain("Phase 8");
+    expect(planDoc).not.toContain("None of those are started.");
+  });
 });

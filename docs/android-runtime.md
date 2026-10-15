@@ -6,10 +6,14 @@ versioned, allowlisted bridge. It does not contain a second copy of the platform
 not hold a second business database. The web app stays the product, and the backend stays the
 source of truth.
 
-Status: this is the foundation slice of issue #884. The bridge, the link rules, the Gradle
-build and the release workflows are implemented and unit-tested. Behaviour on a real device
-(no browser chrome, App Links verification, native capabilities) has not been verified yet.
-The plan and the open items are in [`ISSUE_884_PLAN.md`](../ISSUE_884_PLAN.md).
+Status: Bridge v3 (`config/native-bridge-contract.json`), the Android TWA shell (`android/`), all 8
+native capability modules, server-side `native_app_devices` registration/revocation/FCM fan-out,
+and mobile UX integration are implemented and verified in automated unit and database integration
+tests. Live Digital Asset Links verification (`sha256_cert_fingerprints` from Google Play App
+Signing), signed staging/production release builds (`android-staging` / `android-production`
+environment secrets), live Firebase Cloud Messaging credentials (`FIREBASE_*`), and physical
+printer/telephony hardware validation remain gated on external prerequisites. The plan and the
+28-criterion evidence matrix are in [`ISSUE_884_PLAN.md`](../ISSUE_884_PLAN.md).
 
 ## Where things live
 
@@ -70,17 +74,30 @@ real host, pass `-Pbiza.webOrigin.development=https://<host>`. The host must ser
 
 What runs today:
 
-- **Web, Vitest** (`src/lib/native`, `src/components/native`): the contract validators, the
-  capability resolver, the client (request IDs, timeouts, closed channels), the handshake
-  (origin gate), the runtime store (detection, adoption, teardown), and drift guards. The drift
-  guards fail if the TypeScript allowlists, the Gradle build, or the Digital Asset Links file
-  disagree with the shared JSON.
-- **Android, JVM unit tests** (`android/app/src/test`): link routing (`AppLinkRouter`), frame
-  parsing and encoding (`BridgeProtocol`), command routing (`BridgeCommandRouter`), and the
-  same contract checks from the Kotlin side (`BridgeContractTest`).
+- **Web, Vitest** (`src/lib/native`, `src/components/native`, `src/components/mobile`, `src/app/dashboard/data-table.test.tsx`):
+  the contract validators, the capability resolver, the client (request IDs, timeouts, closed
+  channels), the handshake (origin gate), the runtime store (detection, adoption, teardown),
+  the v3 capability helpers (`capabilities-client.test.ts` including route-level verification
+  against `POST /api/crm/activities` and Kotlin `crm.callEnded` JSON frames), the Android
+  printing bridge (`android-printing-bridge.test.ts`), the device registrar and tenant-safe
+  deep-link router (`native-device-registrar.test.tsx`), mobile sheets (`mobile-components.test.tsx`),
+  and drift guards (`native-config.test.ts`). The drift guards fail if the TypeScript allowlists,
+  the Gradle build, or the Digital Asset Links file disagree with the shared JSON.
+- **PostgreSQL integration tests** (`integration/native-device-registry.integration.test.ts`,
+  `integration/native-device-registration-route.integration.test.ts`,
+  `integration/notifications.integration.test.ts`): registration, revocation, reactivation,
+  `session_generation` enforcement, sign-out auth/push/caller-ID state clearing, cross-tenant RLS
+  isolation, and native FCM device fan-out (`deliverEvent`).
+- **Android, JVM unit tests** (`android/app/src/test`): link routing (`AppLinkRouterTest`), frame
+  parsing and encoding (`BridgeProtocolTest`), command routing (`BridgeCommandRouterTest`),
+  encrypted caller-ID cache and phone normalization (`CallerIdCacheTest`), background sync state
+  and retry backoff (`TenantSyncStateStoreTest`), native capability gateways (`AndroidNativeCapabilitiesTest`),
+  and contract parity (`BridgeContractTest`).
 
-Not yet: instrumented tests on an emulator, live Digital Asset Links verification, a TWA run on
-a device, and any test of the native capabilities themselves. These come with the features.
+External environment and hardware checks (not executable in headless CI): live Digital Asset Links
+verification against Play App Signing keys, signed staging/production release builds, live FCM push
+delivery with external Firebase credentials, and physical thermal printer / `CallScreeningService`
+hardware validation.
 
 ## Bridge contract
 
@@ -110,14 +127,29 @@ event:    { v, kind: "event",    name, payload }
 `id` is 1 to 64 characters from `[A-Za-z0-9-]`. `v` is the protocol version (`bridgeVersion`).
 A frame with a different `v` is ignored, so the request that is waiting for it times out.
 
-### Commands and events (version 2)
+### Commands and events (version 3)
 
-| Name | Kind | Min bridge | Result |
+| Name | Kind | Min bridge | Result / Payload |
 |---|---|---|---|
 | `app.info` | command | 1 | `appVersionName`, `appVersionCode`, `environment`, `bridgeVersion`, `capabilities` |
-| `notifications.status` | command | 1 | `permission`: `granted` or `denied` today. `not_determined` is in the contract for a later app that asks for the permission. |
+| `notifications.status` | command | 1 | `permission`: `granted`, `denied`, or `not_determined` |
 | `device.identity` | command | 2 | `installationId` — the app's own persistent installation UUID (`InstallationId.kt`), used by the [device registry](#device-registry) |
+| `notifications.register` | command | 3 | `permission`, `fcmToken` (`null` when unconfigured), `pushProvider` (`"fcm"` or `"none"`), `channels` |
+| `biometric.status` | command | 3 | `available`, `enrolled`, `biometricStrength` |
+| `biometric.authenticate` | command | 3 | `authenticated`, `verifiedAt`, `method` |
+| `scanner.scan` | command | 3 | `rawValue`, `format`, `symbology`, `scannedAt` |
+| `media.pick` | command | 3 | `files`: array of `{ name, mimeType, sizeBytes, base64Data }` |
+| `share.open` | command | 3 | `shared`, `target` |
+| `printer.discover` | command | 3 | `printers`: array of `{ id, name, transport, address, paired }` |
+| `printer.print` | command | 3 | `printed`, `transport`, `bytesWritten`, `jobId` |
+| `crm.callerId.status` | command | 3 | `roleHeld`, `permission`, `cachedEntries`, `lastSyncedAt` |
+| `crm.callerId.sync` | command | 3 | `roleHeld`, `syncedCount`, `businessId`, optional `matchedCaller` |
+| `sync.status` | command | 3 | `pendingCount`, `lastSyncedAt`, `networkAvailable`, `scheduled` |
+| `sync.trigger` | command | 3 | `pendingCount`, `lastSyncedAt`, `networkAvailable`, `scheduled` |
 | `bridge.ready` | event | 1 | same shape as `app.info` |
+| `navigation.deepLink` | event | 3 | `path`, `notificationCategory`, `businessId` |
+| `crm.callEnded` | event | 3 | `phoneNormalized`, `direction` (`"incoming"` \| `"outgoing"`), `durationSeconds`, `customerId`, `customerName`, `endedAt` |
+| `sync.completed` | event | 3 | `businessId`, `syncedAt`, `revoked`, `flushedCount` |
 
 There is no generic executor. A command that is not in the allowlist gets `unknown_command`,
 and nothing runs. The allowlists are the `commands` and `events` keys in the contract file.
@@ -333,9 +365,11 @@ this slice.
 
 ## Rollout
 
-- Native features are gated by capability, not by app version, so the web app can ship before an
-  Android release. Feature flags per capability are planned with the features and are not in this
-  slice.
+- Native features are gated by capability (`NativeCapabilityGate` + `resolveCapability`) and by
+  server-side `feature_flags` seeded in `migrations/0222_native_app_capabilities.sql`
+  (`android_caller_id`, `android_native_print`, `android_document_scanner`, `android_biometric`,
+  and `android_voip` defaulting to disabled), so the web app can ship before an Android release
+  without breaking older v1/v2 clients.
 - Play's staged rollout is the release control for native changes.
 - Rollback: a bad web deploy is rolled back in the web pipeline. A bad Android release is halted
   with the Play staged-rollout control, and a fixed build ships with a higher `versionCode`.

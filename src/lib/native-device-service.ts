@@ -390,7 +390,8 @@ export async function revokeOwnNativeDevice(deviceId: string, businessId: string
             push_provider = NULL,
             push_channels = '[]'::jsonb,
             biometric_enabled = false,
-            biometric_verified_at = NULL
+            biometric_verified_at = NULL,
+            caller_id_role_held = false
       WHERE id = $1 AND business_id = $2 AND user_id = $3 AND revoked_at IS NULL
       RETURNING id`,
     [deviceId, businessId, userId],
@@ -410,7 +411,8 @@ export async function revokeNativeDeviceAsAdmin(deviceId: string, businessId: st
             push_provider = NULL,
             push_channels = '[]'::jsonb,
             biometric_enabled = false,
-            biometric_verified_at = NULL
+            biometric_verified_at = NULL,
+            caller_id_role_held = false
       WHERE id = $1 AND business_id = $2 AND revoked_at IS NULL
       RETURNING id`,
     [deviceId, businessId, actorId],
@@ -420,9 +422,10 @@ export async function revokeNativeDeviceAsAdmin(deviceId: string, businessId: st
 }
 
 /**
- * Clears push notification token and biometric verification state on sign-out
- * without marking the installation as permanently revoked, while bumping
- * `session_generation` so any cached token for that installation is invalidated.
+ * Clears push notification token, biometric verification state, and caller-ID
+ * role state on sign-out without marking the installation as permanently
+ * revoked, while bumping `session_generation` so any cached token for that
+ * installation is invalidated.
  */
 export async function clearNativeDeviceAuthStateOnSignOut(
   deviceId: string,
@@ -435,6 +438,7 @@ export async function clearNativeDeviceAuthStateOnSignOut(
             push_provider = NULL,
             push_channels = '[]'::jsonb,
             biometric_verified_at = NULL,
+            caller_id_role_held = false,
             session_generation = session_generation + 1
       WHERE id = $1 AND business_id = $2 AND user_id = $3 AND revoked_at IS NULL`,
     [deviceId, businessId, userId],

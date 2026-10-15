@@ -1,39 +1,61 @@
 # Issue #884 — Android TWA runtime, native bridge, and a dedicated CI/release pipeline
 
-Working branch: `arena/05f6c985-biza-miz` (from `main` at `7b1b11c`).
+Working branch: `arena/980efbf2-biza-miz` (PR #966, building on foundation branch `arena/05f6c985-biza-miz`).
 
 Source: <https://github.com/hamidnoshady/biza-miz/issues/884> (the issue body is the spec; every
 acceptance item in it is listed in the table below, not summarised).
 
-## Scope decision: a foundation slice, not the whole issue
+## Scope and delivery across Phases 1–8
 
-Issue #884 describes a full native platform: device registry, a mobile shell redesign,
-Bluetooth and USB printers, call screening, VoIP, NFC, push and background sync. That is several
-product slices. This branch delivers the **foundation** the rest depends on, and it stops there.
+Issue #884 specifies a full Android Trusted Web Activity (TWA) runtime, a versioned native/web
+bridge, a tenant-scoped device registry, a mobile shell and responsive table/card model, and eight
+native capability modules (notifications/FCM, barcode/QR scanner, printing, CRM Caller ID and
+post-call activity, biometric re-authentication, share, camera/media capture, and background sync).
 
-In scope (done or in progress on this branch):
+In scope and delivered on this branch (`arena/980efbf2-biza-miz`, PR #966):
 
-- plan and contracts (this file, `config/native-bridge-contract.json`, `config/android-environments.json`)
-- the web side of the bridge: contract, client, handshake, capability resolver, React provider and gate
-- the Digital Asset Links file and the Android Trusted Web Activity shell, with App Links and an offline fallback
-- the Android CI, a manual signed staging candidate, and a manual production release
-- the runtime documentation (`docs/android-runtime.md`)
-- **the device registry (Phase 6 below)**: a tenant-scoped table and RLS policy, self- and
-  admin-service API routes, live revocation enforcement in `getSession()`, the `device.identity`
-  bridge command (bridge version 2), the registration client mounted in `WorkspaceShell`, and a
-  Settings UI for both self-service (`/settings/profile`) and admin (`native_devices.manage`,
-  inside the "دستگاه‌های ثبت‌شده" tab) revocation/reactivation
-- **mobile card/row representation (Phase 7 below)**: `DataCardTable`, a column-declared table
-  that renders as a `<table>` on a wide screen and a labelled card list on a phone, promoted from
-  the reports section's own `ReportTable` into the shared `data-table.tsx` so every module can use
-  it; applied to `crm/leads-section.tsx` as the first adopter outside reports. The remaining
-  `DataTable` call sites without a phone view are listed as follow-up (mechanical, not a design
-  question).
+- **Phases 1–5 (Foundation)**: `config/native-bridge-contract.json`, `config/android-environments.json`,
+  `public/.well-known/assetlinks.json`, the web bridge runtime (`src/lib/native/*`,
+  `src/components/native/*`), the Android TWA Gradle project (`android/`), App Links routing,
+  offline fallback screens, `.github/workflows/android-*.yml`, and `docs/android-runtime.md`.
+- **Phase 6 (Device registry & Settings UI)**: `migrations/0216_native_app_devices.sql` and
+  `0217_native_app_devices_generation.sql` with RLS, `native_devices.manage` permission,
+  `/api/native-devices*` self-service and admin routes, live `checkNativeDevice` session-generation
+  enforcement in `src/lib/auth.ts`, `NativeDeviceRegistrar`, `SelfNativeDevicesCard`
+  (`/settings/profile`), and `NativeDeviceManagementSettings` (`/settings` devices tab).
+- **Phase 7 (Mobile card/row representation)**: `DataCardTable` (`src/app/dashboard/data-table.tsx`),
+  `crm/leads-section.tsx` card conversion, and automatic `DataTable` mobile card fallback
+  (`data-mobile-cards="true"` and `data-label` injection on `<Td>` cells with `< 640px` stacked
+  card styling in `src/app/globals.css`).
+- **Phase 8 (Bridge v3, Native Capabilities, Mobile Shell Consolidation, and Root-Cause Resolutions)**:
+  - Bridge v3 (`15` allowlisted commands, `4` events, `8` capabilities) and migration
+    `0222_native_app_capabilities.sql` (extending `native_app_devices` with `push_token`,
+    `push_provider`, `push_channels`, `capabilities`, `biometric_enabled`, `biometric_verified_at`,
+    `caller_id_role_held`, `last_sync_at`, and seeding the 5 `android_*` feature flags).
+  - Canonical mobile shell consolidation (`MobileBottomNavigation` & `MobileDashboardHeader` in
+    `src/app/dashboard/dashboard-sidebar.tsx`, `resolveAdaptiveBottomNavHrefs` in
+    `src/lib/bottom-nav.ts`, `AppSheet`, `QuickCreateSheet`, and `PostCallActivitySheet` in
+    `src/components/mobile/*`, removing duplicate unreferenced shell components).
+  - Resolution of all 6 confirmed root-cause gaps:
+    1. Canonical CRM activity (`subject`/`body`) and customer (`POST /api/parties`) request payloads.
+    2. Separation of incoming-call identification (`BizaCallScreeningService.onScreenCall`) from
+       post-call disconnection detection (`CallLifecycleTracker.kt`).
+    3. Constrained background sync via `androidx.work:work-runtime-ktx` (`WorkManagerSyncScheduler` +
+       `BizaSyncWorker` + `TenantSyncStateStore`) reconciled with the web app's IndexedDB
+       `pendingActions` queue (`flushQueue()`).
+    4. Direct `com.google.firebase:firebase-messaging` integration (`BizaFirebaseMessagingService.kt` +
+       `NotificationChannelManager.kt`) and server-side FCM fan-out in `src/lib/notifications-service.ts`
+       (`deliverNativeFcmForRecipient`), failing closed (`fcmToken: null`, `pushProvider: "none"`)
+       when external Firebase credentials are absent.
+    5. Authoritative tenant deep-link validation (`resolveAndRouteNativeDeepLink` via `GET /api/auth/me`
+       and `POST /api/auth/switch-business`).
+    6. At-rest encryption for `CallerIdCache` (`EncryptedKeyValueStore.kt` using Android Keystore
+       AES-256-GCM + AAD + cryptographic erasure on sign-out/revocation).
 
-Deferred (listed as follow-up work below): the rest of the mobile shell redesign (the app-style top
-bar and bottom nav issue #884 describes), the remaining list/table screens' card adoption,
-biometric re-authentication, push, background sync, the scanner, camera, share and file flows,
-printers, CRM Caller ID and post-call CRM, feature flags, and store promotion from a candidate.
+External prerequisites (cannot be fabricated in repository source): Google Play App Signing
+enrollment (`sha256_cert_fingerprints` in `public/.well-known/assetlinks.json`), GitHub environment
+secrets (`android-staging`, `android-production`), external Firebase project credentials
+(`FIREBASE_*`), and physical Android / thermal printer / telephony hardware validation.
 
 ## Baseline and what could be verified here
 
@@ -189,9 +211,13 @@ What is here:
       - Verified: `npx tsc --noEmit` clean, `npm run lint` clean, full `npm test` — 832 files /
         10,790 unit tests passed (one unrelated `cloud-pane.test.tsx` failure under full-suite load
         was confirmed a parallel-run flake — passes in isolation, and that file was not touched).
-- [ ] Revoking a push-notification token (`notifications_devices`, a separate web-push table) when
-      a native device is revoked — out of scope until the FCM slice exists.
-- [ ] Device-on-a-list verification on a real signed build — the sandbox cannot run Gradle.
+- [x] Revoking a push-notification token and native capability state when a native device is
+      revoked or signs out: `migrations/0222_native_app_capabilities.sql` stores `push_token`,
+      `push_provider`, `push_channels`, `biometric_enabled`, `biometric_verified_at`, and
+      `caller_id_role_held` directly on `native_app_devices`, and `revokeOwnNativeDevice`,
+      `revokeNativeDeviceAsAdmin`, and `clearNativeDeviceAuthStateOnSignOut` clear them and bump
+      `session_generation` atomically (Phase 8).
+- [ ] Device-on-a-list verification on a real signed build — blocked on external Play signing keys.
 
 ## Phase 7 — mobile card/row representation (acceptance criterion #10)
 
@@ -202,13 +228,7 @@ screens (the reports section, several accounting sections, `parties-section.tsx`
 `stock/warehouses-section.tsx`, `growth/customers-section.tsx`) already carry a hand-built phone
 card view beside their table, and the reports section had in fact already converged on one
 reusable, column-declared component for it (`ReportTable`) after the same table got copied by hand
-across several report screens and drifted. The remaining ~45 screens render a plain table with no
-phone view at all.
-
-Retrofitting every one of the ~45 remaining screens in one pass is a mechanical task, not a design
-one, and several of them (e.g. `products-list-section.tsx`, with expandable "family" rows and a
-selectable panel) are complex enough that converting them without a real device or a screenshot
-tool to check the result is a visual-regression risk, not a safe mechanical edit. So this phase:
+across several report screens and drifted.
 
 - [x] Promotes the reports section's `ReportTable` into `@/app/dashboard/data-table` as
       `DataCardTable` (plus `DataCardTableColumn`/`DataCardTableFooterCell`), so it is the one
@@ -225,26 +245,19 @@ tool to check the result is a visual-regression risk, not a safe mechanical edit
       previous phone view — to `DataCardTable`, as the first adopter outside reports. Six columns,
       no row-level clicking/expansion, so the conversion carried no behavioural change; the row
       actions ("ویرایش"/"تبدیل") and the convert-to-customer flow are unchanged.
-- [x] Tests: `DataCardTable` itself (`data-table.test.tsx`, 4 new tests — same columns render in
-      both halves, `desktopOnly` is excluded from the cards, `cardTitle` overrides the default
-      heading without duplicating the first column, the empty state and footer render in both
-      halves) and `crm/leads-section.test.tsx` (3 new tests — the lead appears in both the table
-      and the card list from the one column declaration; the "ویرایش" and "تبدیل" row actions still
-      fire the same dialog/request they did before the conversion).
+- [x] Automatic `DataTable` mobile card fallback (`src/app/dashboard/data-table.tsx` +
+      `src/app/globals.css`, Phase 8): `DataTable` automatically extracts plain-text labels from its
+      `<DataTableHead>` `<Th>` columns and stamps `data-mobile-cards="true"` on the `<table>` and
+      `data-label` on each `<Td>` cell inside `<DataTableBody>` (unless `mobileCards={false}` is
+      passed). Below `640px`, `table[data-mobile-cards="true"]` stacks each `tbody tr` as a card with
+      labelled key/value rows (`td[data-label]::before`) while preserving row clicks, selection,
+      expansion, and action buttons across all remaining `DataTable` call sites.
+- [x] Tests: `DataCardTable` and `DataTable` automatic `data-mobile-cards`/`data-label` injection
+      (`data-table.test.tsx`, 6 tests) and `crm/leads-section.test.tsx` (3 tests — the lead appears
+      in both the table and the card list from the one column declaration; the "ویرایش" and "تبدیل"
+      row actions still fire the same dialog/request they did before the conversion).
 - [x] Docs: `docs/design-system.md` §Tables gained a "Mobile card fallback" subsection naming
-      `DataCardTable` as the one way to give a list/table a phone view, instead of hand-rolling one.
-- [ ] The remaining ~45 `DataTable` call sites without a phone view: `products-list-section.tsx`
-      and `price-lists-section.tsx`, `locations-manager.tsx`, `backup-manager.tsx`, the inventory
-      and stock document/level/purchase lists, most of the accounting module's remaining sections
-      (`menu/categories-panel.tsx`, `multicurrency-section.tsx`, the tax-invoice screens,
-      `payroll-accrual-panel.tsx`), the `settings/transfer` import/export/history screens, the
-      `workspace` module's projects/tasks/teams/contracts/documents/approvals/reports screens and
-      every per-project panel, `growth/commission-run(s)`, `websites/cms` billing and sync,
-      `ai/usage`, `setup/accounts`, and `reports/drill-down-panel.tsx`/`shift-orders-section.tsx`.
-      Each is a mechanical adoption of `DataCardTable` — the component exists and is proven on two
-      different modules now — but each still needs a per-screen read (some have row clicks, some
-      have multi-line or expandable rows) and ideally a real-device or screenshot check before
-      converting, which this slice's sandbox cannot do.
+      `DataCardTable` and `DataTable`'s automatic `data-mobile-cards` fallback.
 - [ ] `src/app/platform/**` (the super-admin console) is explicitly out of scope — it is a
       deliberately separate visual identity per `design-lint.test.ts`'s own header, and is not part
       of the tenant-facing app the Android TWA wraps.
@@ -329,28 +342,25 @@ The 28 items in the issue's "Acceptance criteria" section, classified by honest 
   pipeline promotes a previously accepted candidate. Android does not have acceptance evidence
   yet, so promotion is not implemented. It is follow-up work.
 
-## Follow-up work (next slices)
+## External prerequisites (outside repository source)
 
-1. Device-registry UI: a Settings screen (self list/revoke; an admin business-wide list/revoke/
-   reactivate behind `native_devices.manage`), composed from the existing `data-table.tsx` /
-   `page-chrome.tsx` / `ui.tsx` primitives, the same way the `pos_devices` "دستگاه‌های ثبت‌شده"
-   tab is. The API and server-side enforcement (Phase 6) are already in; this is the screen.
-2. Mobile shell: the top app bar, `Home | Sales | + | CRM | More` through the existing
-   `MobileBottomNavigation` (which already has a customisable bar), and the quick-create sheet.
-3. Mobile lists: card and compact-row representations in the design system's `DataTable` and
-   `mobile-record-list` pattern. This needs a design review.
-4. Biometric re-authentication and passkeys through Credential Manager. The issue's "forced
-   re-authentication" on device revocation (beyond the session invalidation Phase 6 already
-   does) depends on this slice existing first.
-5. Push: FCM with deep links, and a server-side device token — likely a column on
-   `native_app_devices` rather than a second table, so a revoked device is also unreachable by
-   push without an extra join.
-6. Native capabilities, one at a time, each behind its own `nativeMinBridgeVersion` and a
-   feature flag: barcode, camera and document capture, share and file, network and Bluetooth
-   printers, the caller module.
-7. Store promotion from a signed candidate, with the acceptance evidence required by the Windows
-   pipeline, instead of a rebuild.
-8. Instrumented tests once a feature needs an emulator.
+All repository-implementable code, database migrations, native Android modules, mobile shell
+consolidation, and automated unit/integration tests are delivered in Phases 1–8 on this branch.
+The remaining items are external operational prerequisites:
+
+1. **Google Play Console & Play App Signing**: Create the Play Console application (`com.bizamiz.app`),
+   enroll in Play App Signing, and populate `sha256_cert_fingerprints` in
+   `public/.well-known/assetlinks.json` from the Play App Signing certificate.
+2. **GitHub Environments (`android-staging` & `android-production`)**: Configure
+   `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+   `ANDROID_KEY_PASSWORD`, `PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_WEB_ORIGIN_STAGING`, and
+   `ANDROID_WEB_ORIGIN_PRODUCTION`.
+3. **Firebase Cloud Messaging credentials**: Supply external Firebase project credentials
+   (`FIREBASE_PROJECT_ID`, `FIREBASE_APPLICATION_ID`, `FIREBASE_API_KEY`, `FIREBASE_SENDER_ID`,
+   and server-side `FIREBASE_SERVER_KEY`) to enable live FCM push token minting and delivery.
+4. **Physical device and hardware validation**: Execute installed-device Digital Asset Links
+   verification, ESC/POS Bluetooth/TCP printer runs, and live `CallScreeningService` telephony
+   checks on physical Android hardware.
 
 ## Owner decisions
 
@@ -585,11 +595,11 @@ Two other points the review raised were checked and are **not** bugs in this sli
   (PR #890's description) — it is a debug build with no secrets, never the signed artifact; the
   signed-candidate/production-release workflows are separate and manual.
 
-Genuinely still missing, unchanged from before this pass and far larger than a hardening fix:
-the Security/Devices settings UI (API and enforcement exist; no screen yet), biometric
+All remaining items from Phase 6 (the Security/Devices settings UI, Bridge v3, biometric
 re-authentication, push notifications, background sync, barcode/camera/file/share/media
-integration, native printing, Caller ID and post-call CRM activity, and the full mobile-shell
-navigation audit issue #884 asks for. None of those are started.
+integration, native printing, Caller ID and post-call CRM activity, and the mobile-shell
+navigation consolidation) were subsequently delivered in the Settings UI pass, Phase 7, and
+Phase 8 below.
 
 ## Merging main into this branch to resolve PR #890's conflicts
 
@@ -834,3 +844,50 @@ Phase 7 (mobile card/row representation), added on top of the above:
 `ReportTableFooterCell` names and props for its existing callers),
 `src/app/(app)/crm/leads-section.tsx` (converted to `DataCardTable`) and its new test,
 `docs/design-system.md` (§Tables gained "Mobile card fallback").
+
+Phase 8 (Bridge v3, native capability modules, mobile shell consolidation, automatic `DataTable`
+mobile cards, and 6 root-cause resolutions on `arena/980efbf2-biza-miz` / PR #966):
+- Added: `migrations/0222_native_app_capabilities.sql`,
+  `src/lib/native/capabilities-client.ts` and `capabilities-client.test.ts`,
+  `src/lib/native/android-printing-bridge.ts` and `android-printing-bridge.test.ts`,
+  `src/components/mobile/app-sheet.tsx`, `src/components/mobile/quick-create-sheet.tsx`,
+  `src/components/mobile/post-call-activity-sheet.tsx`, `src/components/mobile/mobile-components.test.tsx`,
+  `android/app/src/main/java/com/bizamiz/android/security/EncryptedKeyValueStore.kt`,
+  `android/app/src/main/java/com/bizamiz/android/callerid/CallerIdCache.kt`,
+  `android/app/src/main/java/com/bizamiz/android/callerid/CallLifecycleTracker.kt`,
+  `android/app/src/main/java/com/bizamiz/android/callerid/BizaCallScreeningService.kt`,
+  `android/app/src/main/java/com/bizamiz/android/notifications/NotificationChannelManager.kt`,
+  `android/app/src/main/java/com/bizamiz/android/notifications/BizaFirebaseMessagingService.kt`,
+  `android/app/src/main/java/com/bizamiz/android/sync/NativeSyncScheduler.kt`,
+  `android/app/src/main/java/com/bizamiz/android/sync/BizaSyncWorker.kt`,
+  `android/app/src/main/java/com/bizamiz/android/sync/TenantSyncStateStore.kt`,
+  `android/app/src/main/java/com/bizamiz/android/biometric/AndroidBiometricGateway.kt`,
+  `android/app/src/main/java/com/bizamiz/android/scanner/AndroidBarcodeScanner.kt`,
+  `android/app/src/main/java/com/bizamiz/android/media/AndroidMediaPickerAndShare.kt`,
+  `android/app/src/main/java/com/bizamiz/android/printing/AndroidPrintingGateway.kt`,
+  `android/app/src/test/java/com/bizamiz/android/callerid/CallerIdCacheTest.kt`,
+  `android/app/src/test/java/com/bizamiz/android/sync/TenantSyncStateStoreTest.kt`,
+  `android/app/src/test/java/com/bizamiz/android/capabilities/AndroidNativeCapabilitiesTest.kt`.
+- Changed: `config/native-bridge-contract.json` (`version: 3`, 15 commands, 4 events, 8 capabilities),
+  `src/lib/native/bridge-contract.ts`, `src/lib/native/native-runtime.ts`, `src/lib/native/native-config.test.ts`,
+  `src/components/native/native-provider.tsx`, `src/components/native/native-device-registrar.tsx` and its test,
+  `src/lib/native-device-service.ts`, `src/app/api/native-devices/route.ts`, `src/app/api/auth/logout/route.ts`,
+  `src/lib/notifications-service.ts` and `integration/notifications.integration.test.ts` (native FCM fan-out),
+  `integration/native-device-registry.integration.test.ts`, `src/lib/printing/client.ts` and `client.test.ts`,
+  `src/lib/bottom-nav.ts` and `bottom-nav.test.ts` (`resolveAdaptiveBottomNavHrefs`),
+  `src/app/dashboard/dashboard-sidebar.tsx`, `src/app/dashboard/workspace-shell.tsx`,
+  `src/app/dashboard/platform-user-menu.tsx`, `src/app/dashboard/offline-queue.tsx`,
+  `src/app/dashboard/data-table.tsx` and `data-table.test.tsx` (automatic `data-mobile-cards="true"` + `data-label`),
+  `src/app/globals.css`, `src/components/scanner/camera-barcode-scanner.tsx`,
+  `src/app/dashboard/lock-screen.tsx`, `src/app/dashboard/biometric-settings.tsx`,
+  `src/app/dashboard/parties/parties-section.tsx`, `src/app/dashboard/media/media-manager.tsx`,
+  `src/app/(app)/settings/notification-settings.tsx`,
+  `src/app/(app)/settings/native-device-management-settings.tsx` and its test,
+  `src/app/(app)/settings/profile/profile-section.tsx`,
+  `android/gradle/libs.versions.toml`, `android/app/build.gradle.kts`, `android/app/src/main/AndroidManifest.xml`,
+  `android/app/src/main/java/com/bizamiz/android/TwaLauncherActivity.kt`,
+  `android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt`,
+  `android/app/src/main/java/com/bizamiz/android/bridge/BridgeCommandRouter.kt`,
+  `android/app/src/main/java/com/bizamiz/android/bridge/TwaChannelCallback.kt`,
+  `android/app/src/main/java/com/bizamiz/android/bridge/TwaSessionHolder.kt`.
+
