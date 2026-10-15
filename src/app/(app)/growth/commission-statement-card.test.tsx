@@ -43,7 +43,7 @@ describe("statement selection ownership", () => {
     await screen.findByRole("option", { name: "دورهٔ ۱" });
     fireEvent.change(screen.getByRole("combobox", { name: "دوره تسویه" }), { target: { value: ID } });
     const retry = await screen.findByRole("button", { name: "تلاش دوباره" });
-    expect(screen.getByRole("heading", { name: "صورت‌حساب فروشنده", exact: true })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "صورت‌حساب فروشنده" })).toBeTruthy();
     expect(screen.queryByRole("table", { name: "ردیف‌های پورسانت فروشنده" })).toBeNull();
     expect((screen.getByRole("combobox", { name: "دوره تسویه" }) as HTMLSelectElement).value).toBe(ID);
     fireEvent.click(retry);

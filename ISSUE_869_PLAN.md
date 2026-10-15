@@ -4,6 +4,9 @@ Current completion branch: `arena/f54736c8-biza-miz`, audited against `main`
 `916df457eca2fef2123b3cfb6507bd0cfeacfe3e` on 2026-10-15. The original lifecycle
 was merged in PR #930 (`b4b7d22ba9886f589c3af8bff370984ca0f4bdb5`, 2026-10-12).
 The completion audit below supersedes the historical implementation/gate notes.
+Latest `main` `fe486e4e827983efa4062cb83e50272a7eb1a267` was re-audited on the same
+date: automotive/AI/release additions leave commission finances and business-scope
+commission contracts unchanged; PR checks use the current merge ref.
 
 Scope from the issue: complete the commission financial lifecycle *after accrual*.
 Commission rules, seller assignment, effective dates, accrual posting and the rules-and-report
@@ -56,19 +59,21 @@ business-scope sync documentation. No replacement financial subsystem or balance
   now use `Field as="div"` with explicit picker names; the E2E asserts the picker closes,
   without force clicks or relaxed timeouts.
 
-### Current verification record
+### Verification record — implementation candidates `9497ac3` / `25f1c84`
 
-Evidence as of 2026-10-15. Earlier gate tables below describe #930 only.
+Evidence as of 2026-10-15. Later candidate results and the live release checklist
+are maintained in [PR #964](https://github.com/hamidnoshady/biza-miz/pull/964), not
+inferred from this historical gate snapshot. Earlier tables below describe #930 only.
 
 | Gate | Verified result / current continuation |
 | --- | --- |
-| TypeScript / ESLint | Passed locally and in Actions on `03f9cb3`. Continuation typecheck passed; final lint/unit rerun is running. |
-| Full unit | 11,415 / 865 files passed locally; Actions passed at `03f9cb3`. New source-panel/statement/capability/API regressions: 43 / 4 files passed; existing payroll UI 87 passed. |
+| TypeScript / ESLint | Full continuation typecheck and lint passed locally; both passed Actions at `9497ac3`. The retry follow-up typecheck and targeted lint pass locally. |
+| Full unit | 11,428 / 867 files passed locally and full unit passed Actions at `9497ac3`. Follow-up statement retry suite: 3 tests pass. Existing payroll UI 87 and focused source/capability/API regressions passed; focused counts are not added again to the full total. |
 | Financial PostgreSQL | 247 / 6 files passed locally: payroll 184, accrual 11, settlement 23, contention 10, sync handlers 12, RLS 7. |
-| Full PostgreSQL | Actions PASS at `03f9cb3`, run `38728481214`, 31m18s. The previous local run's final log is unavailable after workspace rehydration; it is not counted as a pass. |
-| Actual-app browser | Original multi-user commission lifecycle PASS on the production/non-BYPASSRLS runtime at `03f9cb3`, job `116401557439`. Newly extended Rial/Toman, themes/WCAG, keyboard/focus, filter/late-response/offline recovery, payroll navigation, overpay/reject/void checks await new-head execution. |
-| Production build | Actions PASS at `03f9cb3` (3m42s). Local cold builds exceeded the 3.8 GiB sandbox; no local pass or threshold change claimed. |
-| Pinned visual / packaging | Actions pinned visuals PASS (5m54s), packaged Windows E2E PASS (16m42s), desktop shell and production container PASS at `03f9cb3`. No baseline regeneration. |
+| Full PostgreSQL | Actions PASS at `03f9cb3`, run `38728481214`, 31m18s. The previous local run's final log is unavailable after workspace rehydration; it is not counted as a pass. A fresh full local run is in progress; no final verdict yet. |
+| Actual-app browser | Original multi-user commission lifecycle PASS on the production/non-BYPASSRLS runtime at `03f9cb3`, job `116401557439`. At `9497ac3`, expanded Rial reached real offline recovery after light-theme/three-width WCAG, keyboard, payroll navigation and actual-upstream stale checks; it failed because the heading-based test locator disappeared on error. Persistent-control locator plus retry regression added; full new-head matrix still requires a pass. |
+| Production build | Actions PASS at `9497ac3` and `03f9cb3` (3m42s at the latter). Local cold builds exceeded the 3.8 GiB sandbox; no local pass or threshold change claimed. |
+| Pinned visual / packaging | Actions pinned visuals PASS (5m54s), packaged Windows E2E PASS (16m42s), desktop shell and production container PASS at `03f9cb3`. Pinned visuals, Windows and shippables also passed at `9497ac3`. No baseline regeneration. |
 | Controlled central/site HTTP | New opt-in harness prepared and the separate-database bootstrap verified locally. Full real-HTTP authority/failure/backoff/recovery/duplicate acceptance awaits new CI. This is not customer deployment/physical pairing/IAM-scheduler evidence. |
 | Actions / merge | All required checks passed at `03f9cb3` (runs `38728487023` / `38728481214`; Windows `38728487272`). This continuation changes code/tests and must earn fresh checks. PR #964 remains draft; #869 OPEN; no merge or closure. |
 
@@ -92,6 +97,9 @@ Evidence as of 2026-10-15. Earlier gate tables below describe #930 only.
   recovery re-read, durable cloud-owned effects and no duplicate site payments/journals.
   Branch-bound devices intentionally exclude these business-scope events. This does not
   claim a physical modern-device pairing ceremony or full IAM-gated automatic scheduling.
+  Successful transport runs retain whitelisted event/payout/reversal/journal/effect IDs,
+  exact Rial amounts, retry/cursor state and before/after financial counts in the
+  `commission-transport-evidence` artifact, never fixture credentials or passwords.
 
 Remaining release work: execute and fix the extended acceptance on the new head, obtain
 all fresh required checks, and resolve any mandatory live-environment evidence beyond

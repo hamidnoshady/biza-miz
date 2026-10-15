@@ -309,8 +309,10 @@ every branch. Its event is recorded with `scope = 'business'`, `business_id` set
 
 The #869 follow-up does not change the recorded/reversed v1 wire contracts or
 financial authority. PostgreSQL handler/outbox tests are not evidence of live
-transport between two instances. No real paired central/site transport test has
-been completed in this audit; that remains a mandatory release/issue-closure gate.
+transport between two instances. At the initial audit (`03f9cb3`), real two-instance central/site transport had not
+been completed. The continuation harness below adds that acceptance; its result
+is a mandatory release/issue-closure gate, not inferred from handler tests. Current
+candidate evidence is maintained in [PR #964](https://github.com/hamidnoshady/biza-miz/pull/964).
 To accept it, use separate central and site databases/processes and real credentials:
 commit a central payout and reversal, verify business-wide pull and duplicate retry
 acknowledgements, zero additional site payout/journal effects, tenant denial, and
@@ -465,3 +467,6 @@ backoff/cursor durability, recovery and duplicate re-delivery. It seeds a starti
 snapshot, not a physical-device pairing ceremony, and does not claim the entire
 IAM-gated modern branch scheduler or a customer's live deployment was verified.
 Until its new Actions step passes, this remains committed acceptance code, not a result.
+On success, `commission-transport-evidence` retains whitelisted source/effect identifiers,
+exact Rial amounts, persisted retry/cursor state and before/after financial counts.
+The credentials fixture is deliberately excluded from every artifact.

@@ -502,6 +502,13 @@ jobs:
           DEPLOYMENT_ROLE: site
           DATABASE_URL: postgres://pos_app:ci-only-app-role-password@127.0.0.1:55433/commission_site_e2e
         run: npm run test:e2e:commission:transport
+      - name: Commission transport traceability evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: commission-transport-evidence
+          path: .cache/commission-e2e/transport-evidence.json
+          if-no-files-found: ignore
       - name: Commission browser diagnostics
         if: failure()
         uses: actions/upload-artifact@v7

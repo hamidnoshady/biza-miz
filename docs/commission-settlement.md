@@ -374,4 +374,8 @@ on failure, the full production backoff deadline, recovery, duplicate delivery, 
 acceptance, not a claim of a customer deployment, physical desktop pairing ceremony,
 or the full IAM-gated scheduler using a modern branch credential. Branch credentials
 intentionally do not receive these business-scope envelopes. Results must be recorded
-only after the enhanced CI steps actually pass.
+only after the enhanced CI steps actually pass. The `commission-transport-evidence`
+artifact contains only whitelisted event/payout/reversal/journal/effect IDs, exact Rial
+amounts, persisted failure/recovery cursors and before/after financial counts; it never
+contains fixture credentials or passwords. Current candidate results are tracked in
+[PR #964](https://github.com/hamidnoshady/biza-miz/pull/964).

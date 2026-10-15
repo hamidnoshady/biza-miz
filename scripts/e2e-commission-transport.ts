@@ -1,12 +1,12 @@
 /** Controlled two-instance acceptance: real central HTTP, separate site DB and production pull client. No mocked transport. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { chromium } from "playwright";
 import { getPool, query, withTenant } from "../src/lib/db";
 import { getServerSyncState, runServerPull } from "../src/lib/server-sync";
 import { setSetting, SETTING_KEYS } from "../src/lib/settings";
 
-type Event = { id: number; txid: string; clientEventId: string; type: string; locationId: string | null; businessId: string; schemaVersion: number };
+type Event = { id: number; txid: string; clientEventId: string; type: string; locationId: string | null; businessId: string; schemaVersion: number; payload: { amount: string; payoutId?: string; reversalId?: string; reversedPayoutId?: string; runId: string; entryId: string } };
 async function main() {
   const database = new URL(process.env.DATABASE_URL ?? "");
   assert.ok(process.env.COMMISSION_E2E_SEED === "1" && ["127.0.0.1", "localhost"].includes(database.hostname));
@@ -39,6 +39,13 @@ async function main() {
   assert.equal(payouts.filter((event) => event.type === "commission.payout.recorded").length, 2);
   assert.equal(payouts.filter((event) => event.type === "commission.payout.reversed").length, 1);
   assert.ok(payouts.every((event) => event.locationId === null && event.schemaVersion === 1));
+  assert.ok(payouts.every((event) => event.payload.runId && event.payload.entryId));
+  const recorded = payouts.filter((event) => event.type === "commission.payout.recorded");
+  const reversed = payouts.find((event) => event.type === "commission.payout.reversed")!;
+  assert.deepEqual(recorded.map((event) => event.payload.amount).sort(), ["1000", "4000"]);
+  assert.equal(reversed.payload.amount, "1000");
+  assert.equal(new Set(recorded.map((event) => event.payload.payoutId)).size, 2);
+  assert.ok(reversed.payload.reversalId && recorded.some((event) => event.payload.payoutId === reversed.payload.reversedPayoutId));
   assert.equal((await feed(fixture.branchToken)).filter((event) => event.type.startsWith("commission.")).length, 0, "branch credentials intentionally exclude business-scope envelopes");
 
   const browser = await chromium.launch({ headless: true, executablePath: process.env.VISUAL_CHROMIUM_PATH || undefined });
@@ -87,8 +94,8 @@ async function main() {
     const recovered = await getServerSyncState(fixture.businessId);
     assert.equal(recovered.pullFailures, 0); assert.equal(recovered.lastPullError, null);
     assert.ok(recovered.lastPulledEventId && recovered.lastPulledTxid && recovered.lastPullSuccessAt);
-    const effects = async () => (await query<{ client_event_id: string; status: string; effect_type: string }>(
-      "SELECT client_event_id,status,effect_type FROM sync_domain_effects WHERE business_id=$1 AND event_type LIKE 'commission.payout.%' ORDER BY client_event_id", [fixture.businessId])).rows;
+    const effects = async () => (await query<{ client_event_id: string; status: string; effect_type: string; effect_id: string | null }>(
+      "SELECT client_event_id,status,effect_type,effect_id FROM sync_domain_effects WHERE business_id=$1 AND event_type LIKE 'commission.payout.%' ORDER BY client_event_id", [fixture.businessId])).rows;
     const applied = await effects();
     assert.deepEqual(applied.map((row) => row.client_event_id).sort(), payouts.map((event) => event.clientEventId).sort());
     assert.ok(applied.every((row) => row.status === "applied" && row.effect_type === "cloud_owned"));
@@ -101,6 +108,23 @@ async function main() {
     const dead = await query<{ n: number }>("SELECT count(*)::int AS n FROM sync_event_dead_letters WHERE business_id=$1 AND event_type LIKE 'commission.payout.%'", [fixture.businessId]);
     assert.equal(dead.rows[0].n, 0);
     await setSetting(fixture.businessId, SETTING_KEYS.serverSyncConfig, { ...config, enabled: false, remoteUrl: central });
+    // Whitelist non-secret traceability evidence. Never serialize the fixture,
+    // bearer credentials, login response or config into logs/artifacts.
+    const evidence = {
+      version: 1, acceptance: "controlled_two_instance_http_not_physical_pairing", businessId: fixture.businessId,
+      events: payouts.map(({ id, txid, clientEventId, type, schemaVersion, payload }) => ({
+        id, txid, clientEventId, type, schemaVersion, amount: payload.amount, runId: payload.runId, entryId: payload.entryId,
+        payoutId: payload.payoutId, reversalId: payload.reversalId, reversedPayoutId: payload.reversedPayoutId,
+      })),
+      effects: applied, financialCountsBefore: before, financialCountsAfter: await snapshot(),
+      failure: { cursorBefore: original.lastPulledEventId, cursorAfter: failed.lastPulledEventId,
+        failures: failed.pullFailures, nextAttemptAt: failed.pullNextAttemptAt },
+      recovery: { eventId: recovered.lastPulledEventId, txid: recovered.lastPulledTxid,
+        successAt: recovered.lastPullSuccessAt, failures: recovered.pullFailures },
+    };
+    mkdirSync(".cache/commission-e2e", { recursive: true });
+    writeFileSync(".cache/commission-e2e/transport-evidence.json", JSON.stringify(evidence, null, 2), { mode: 0o600 });
+    console.log(`::notice::Commission transport acknowledged client event IDs: ${payouts.map((event) => event.clientEventId).join(", ")}. Non-secret financial/effect/cursor evidence retained in commission-transport-evidence.`);
   });
   console.log("Commission two-instance HTTP transport passed: scope, authority, real failure/backoff/recovery, durable cloud-owned acknowledgments and duplicate delivery.");
 }
