@@ -8,6 +8,20 @@ Latest `main` `fe486e4e827983efa4062cb83e50272a7eb1a267` was re-audited on the s
 date: automotive/AI/release additions leave commission finances and business-scope
 commission contracts unchanged; PR checks use the current merge ref.
 
+Before merge, `main` advanced again to `ef2c98e0e770a05352603ab384fa184c8648d248`
+(financial accounts/internal transfers #965 and MCP OAuth #960). Integrated that
+target on the same completion branch rather than relying on the older green merge
+ref. The expanded exact-journal writer preserves base-Rial defaults and zero foreign
+legs for commission/payroll callers; existing commission formulas and v1 sync
+contracts are unchanged. Both new Accounting work areas and exact payroll-source
+navigation are preserved. The integrated candidate must earn fresh local/CI gates;
+prior green results below remain explicitly versioned evidence, not a new-head pass.
+Local integrated-tree checks: full typecheck and lint PASS; all three new upstream
+migrations apply successfully; financial PostgreSQL **339 tests / 8 files PASS**
+(commission, both payroll suites, and the new financial transfers). Fresh full unit,
+full PostgreSQL and current-head CI are required before merge; live results remain
+in PR #964 to avoid treating an older green target as verification of this merge.
+
 Scope from the issue: complete the commission financial lifecycle *after accrual*.
 Commission rules, seller assignment, effective dates, accrual posting and the rules-and-report
 screen (#764) are not rebuilt. Payroll's own commission settlement and the 2300 tie-out (#835,

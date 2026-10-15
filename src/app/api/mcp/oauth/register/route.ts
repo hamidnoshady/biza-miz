@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenant } from "@/lib/db";
 import { registerMcpClient } from "@/lib/mcp/oauth-service";
 import { mcpFeatureEnabled } from "@/lib/mcp/auth";
-import { resolveMcpTenant } from "@/lib/mcp/origin";
+import { mcpTenantErrorDescription, resolveMcpTenant } from "@/lib/mcp/origin";
 
 /**
  * RFC 7591 — dynamic client registration.
@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
   if (!tenant.ok) {
     return cors(
       NextResponse.json(
-        { error: "invalid_client_metadata", error_description: `unknown resource host (${tenant.reason})` },
+        { error: "invalid_client_metadata", error_description: mcpTenantErrorDescription(tenant.reason) },
         { status: 400 },
       ),
     );

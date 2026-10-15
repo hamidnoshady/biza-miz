@@ -51,6 +51,17 @@ export type McpTenantResolution =
  */
 export async function resolveMcpTenant(headers: Headers): Promise<McpTenantResolution> {
   if (!hostRoutingEnabled()) {
+    // `SUBDOMAIN_ROUTING=off` with a ROOT_DOMAIN still serves businesses at
+    // `{label}.{root}` — the switch only stops middleware enforcing the
+    // origin. The OAuth flow has no session to name the tenant, so without
+    // this every register/authorize/token call on such a deployment answered
+    // "ambiguous" and no standard MCP client could connect. A label that names
+    // an active business is decisive; anything else keeps the old fallback.
+    const label = labelledBusinessHost(requestHost(headers), rootDomain());
+    if (label) {
+      const business = await resolveBusinessByLabel(label);
+      if (business && business.status === "active") return { ok: true, business };
+    }
     const sole = await resolveSoleBusiness();
     if (!sole) return { ok: false, reason: "ambiguous" };
     return sole.status === "active" ? { ok: true, business: sole } : { ok: false, reason: "suspended" };
@@ -90,4 +101,32 @@ export function mcpHostAllowsBusiness(
 ): boolean {
   if (!resolution.ok) return resolution.reason === "ambiguous";
   return resolution.business.businessId === businessId;
+}
+
+/**
+ * The business label a host carries under ROOT_DOMAIN, or null when it names
+ * none (no root configured, the apex, the admin console, a foreign host).
+ * Pure, so the routing-off fallback above is unit tested.
+ */
+export function labelledBusinessHost(
+  host: string | null | undefined,
+  root: string | null | undefined,
+): string | null {
+  const parsed = parseHost(host, root);
+  return parsed.kind === "business" ? parsed.label : null;
+}
+
+/**
+ * The OAuth `error_description` for a host that names no business. Plain
+ * words for a client to show, never the internal resolution code.
+ */
+export function mcpTenantErrorDescription(reason: Exclude<McpTenantResolution, { ok: true }>["reason"]): string {
+  switch (reason) {
+    case "suspended":
+      return "The business at this address is not active.";
+    case "ambiguous":
+      return "This address serves several businesses. Use the MCP address shown on the business's own Connections page.";
+    default:
+      return "This address does not belong to a business. Use the MCP address shown on the business's Connections page.";
+  }
 }
