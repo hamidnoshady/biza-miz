@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenant } from "@/lib/db";
 import { formatMcpScopeString } from "@/lib/mcp/scopes";
 import { exchangeAuthorizationCode, refreshMcpToken } from "@/lib/mcp/oauth-service";
-import { resolveMcpTenant } from "@/lib/mcp/origin";
+import { mcpTenantErrorDescription, resolveMcpTenant } from "@/lib/mcp/origin";
 
 /**
  * The OAuth token endpoint: code → tokens, and refresh → fresh tokens.
@@ -61,7 +61,7 @@ export async function OPTIONS() {
 
 export async function POST(request: NextRequest) {
   const tenant = await resolveMcpTenant(request.headers);
-  if (!tenant.ok) return oauthError("invalid_request", `unknown resource host (${tenant.reason})`);
+  if (!tenant.ok) return oauthError("invalid_request", mcpTenantErrorDescription(tenant.reason));
 
   const businessId = tenant.business.businessId;
   const params = await readParams(request);

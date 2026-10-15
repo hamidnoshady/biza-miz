@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  canonicalRedirectUri,
+  sameRedirectUri,
   MCP_ACCESS_TOKEN_PREFIX,
   MCP_REFRESH_TOKEN_PREFIX,
   MCP_TOKEN_PREFIX,
@@ -163,8 +165,12 @@ describe("matchesRegisteredRedirectUri", () => {
     );
   });
 
-  it("does not treat localhost and 127.0.0.1 as interchangeable", () => {
-    expect(matchesRegisteredRedirectUri("http://localhost:9/cb", ["http://127.0.0.1:9/cb"])).toBe(false);
+  it("accepts the localhost spelling Next.js rewrites 127.0.0.1 into, and sends the code to the registered one", () => {
+    // NextURL rewrites 127.0.0.1 to localhost everywhere in a request URL,
+    // query string included, so refusing this refused every 127.0.0.1 client.
+    // The code still goes to the registered spelling (canonicalRedirectUri).
+    expect(matchesRegisteredRedirectUri("http://localhost:9/cb", ["http://127.0.0.1:9/cb"])).toBe(true);
+    expect(canonicalRedirectUri("http://localhost:9/cb", ["http://127.0.0.1:9/cb"])).toBe("http://127.0.0.1:9/cb");
   });
 });
 
@@ -216,5 +222,39 @@ describe("discovery documents", () => {
     expect(bearerChallenge(issuer)).toBe(
       `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource", scope="pos.read pos.write"`,
     );
+  });
+});
+
+describe("canonicalRedirectUri — loopback spelling", () => {
+  const registered = ["http://127.0.0.1:6274/oauth/callback"];
+
+  it("maps Next.js's localhost rewrite back to the registered 127.0.0.1", () => {
+    expect(canonicalRedirectUri("http://localhost:6274/oauth/callback", registered)).toBe(
+      "http://127.0.0.1:6274/oauth/callback",
+    );
+  });
+
+  it("keeps the port the client asked for (RFC 8252 §7.3)", () => {
+    expect(canonicalRedirectUri("http://localhost:51234/oauth/callback", registered)).toBe(
+      "http://127.0.0.1:51234/oauth/callback",
+    );
+  });
+
+  it("still refuses a different path, scheme or a non-loopback host", () => {
+    expect(canonicalRedirectUri("http://localhost:6274/other", registered)).toBeNull();
+    expect(canonicalRedirectUri("https://localhost:6274/oauth/callback", registered)).toBeNull();
+    expect(canonicalRedirectUri("http://evil.example:6274/oauth/callback", registered)).toBeNull();
+  });
+
+  it("prefers the exact host and refuses to guess between two loopback spellings", () => {
+    const both = ["http://127.0.0.1/cb", "http://[::1]/cb"];
+    expect(canonicalRedirectUri("http://[::1]:5000/cb", both)).toBe("http://[::1]:5000/cb");
+    expect(canonicalRedirectUri("http://localhost:5000/cb", both)).toBeNull();
+  });
+
+  it("treats the rewritten and registered spellings as the same URI at token time", () => {
+    expect(sameRedirectUri("http://localhost:6274/cb", "http://127.0.0.1:6274/cb")).toBe(true);
+    expect(sameRedirectUri("http://localhost:6275/cb", "http://127.0.0.1:6274/cb")).toBe(false);
+    expect(sameRedirectUri("https://a.example/cb", "https://b.example/cb")).toBe(false);
   });
 });
