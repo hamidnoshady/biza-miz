@@ -104,7 +104,7 @@ object NotificationChannelManager {
         recentMessageTimestamps.entries.removeIf { nowEpochMs - it.value > DEDUP_WINDOW_MS }
 
         if (!messageId.isNullOrBlank()) {
-            val prev = recentMessageTimestamps.putIfAbsent(messageId, nowEpochMs)
+            val prev = recentMessageTimestamps[messageId]
             if (prev != null && nowEpochMs - prev <= DEDUP_WINDOW_MS) {
                 return false
             }
@@ -114,6 +114,10 @@ object NotificationChannelManager {
         val lastCat = lastCategoryTimestamp[safeCategory]
         if (lastCat != null && nowEpochMs - lastCat < MIN_INTERVAL_PER_KEY_MS) {
             return false
+        }
+
+        if (!messageId.isNullOrBlank()) {
+            recentMessageTimestamps[messageId] = nowEpochMs
         }
         lastCategoryTimestamp[safeCategory] = nowEpochMs
         return true
