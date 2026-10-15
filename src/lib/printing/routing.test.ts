@@ -215,3 +215,69 @@ describe("stale sending jobs", () => {
     expect(SENDING_STALE_AFTER_SECONDS).toBeGreaterThan(30);
   });
 });
+
+describe("runtime fallback after primary delivery failure", () => {
+  it("selects the rule's configured compatible fallback when the primary printer failed delivery", () => {
+    const primary = printer({ id: "p-primary", name: "صندوق اصلی" });
+    const backup = printer({ id: "p-backup", name: "صندوق پشتیبان" });
+    const result = resolvePrinter({
+      documentType: "receipt",
+      printers: [primary, backup],
+      rules: [{ documentType: "receipt", printerId: "p-primary", fallbackPrinterId: "p-backup", templateKey: null, templateId: null }],
+      failedPrinterIds: ["p-primary"],
+    });
+    expect(result.printer?.id).toBe("p-backup");
+    expect(result.fallbackFrom?.id).toBe("p-primary");
+    expect(result.reason).toBe("fallback");
+  });
+
+  it("uses the configured fallback even when the primary printer row was deleted (printerId: null)", () => {
+    const backup = printer({ id: "p-backup", name: "صندوق پشتیبان" });
+    const result = resolvePrinter({
+      documentType: "receipt",
+      printers: [backup],
+      rules: [{ documentType: "receipt", printerId: null, fallbackPrinterId: "p-backup", templateKey: null, templateId: null }],
+    });
+    expect(result.printer?.id).toBe("p-backup");
+    expect(result.reason).toBe("fallback");
+  });
+
+  it("never falls back to an arbitrary unconfigured printer when the primary fails delivery", () => {
+    const primary = printer({ id: "p-primary", isDefault: true });
+    const unconfigured = printer({ id: "p-other", isDefault: false });
+
+    // No rule at all:
+    expect(
+      resolvePrinter({
+        documentType: "receipt",
+        printers: [primary, unconfigured],
+        rules: [],
+        failedPrinterIds: ["p-primary"],
+      }),
+    ).toMatchObject({ printer: null, reason: "unavailable" });
+
+    // Rule without fallback:
+    expect(
+      resolvePrinter({
+        documentType: "receipt",
+        printers: [primary, unconfigured],
+        rules: [{ documentType: "receipt", printerId: "p-primary", fallbackPrinterId: null, templateKey: null, templateId: null }],
+        failedPrinterIds: ["p-primary"],
+      }),
+    ).toMatchObject({ printer: null, reason: "unavailable" });
+  });
+
+  it("stops after the fallback printer also fails delivery (no infinite retries)", () => {
+    const primary = printer({ id: "p-primary" });
+    const backup = printer({ id: "p-backup" });
+    expect(
+      resolvePrinter({
+        documentType: "receipt",
+        printers: [primary, backup],
+        rules: [{ documentType: "receipt", printerId: "p-primary", fallbackPrinterId: "p-backup", templateKey: null, templateId: null }],
+        failedPrinterIds: ["p-primary", "p-backup"],
+      }),
+    ).toMatchObject({ printer: null, reason: "unavailable" });
+  });
+});
+

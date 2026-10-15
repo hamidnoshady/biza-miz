@@ -54,7 +54,7 @@ export const PRINTER_ERROR_MESSAGES: Record<PrinterErrorCode, string> = {
   printer_not_configured: "برای این سند چاپگری تنظیم نشده است.",
   incompatible_printer: "این چاپگر برای این نوع سند مناسب نیست.",
   spooler_rejected: "ویندوز این کار چاپ را نپذیرفت.",
-  job_timeout: "ارسال به چاپگر بیش از حد طول کشید.",
+  job_timeout: "ارسال به چاپگر بیش از حد طول کشید؛ پیش از چاپ دوباره، خروجی چاپگر را بررسی کنید.",
   template_invalid: "قالب چاپ قابل استفاده نیست.",
   template_not_found: "قالب چاپ انتخاب‌شده پیدا نشد؛ قوانین چاپ را بازخوانی کنید.",
   // The three document codes only ever arrive from a client that is out of
@@ -74,6 +74,55 @@ export function printerErrorMessage(code: string | undefined | null): string {
 }
 
 /**
+ * Three-state delivery classification for duplicate-print protection and
+ * automatic fallback decisions:
+ *  - `handed_off`: the local bridge or connector confirmed handoff to the
+ *    OS spooler or network socket; do not retry.
+ *  - `not_delivered`: confirmed pre-handoff non-delivery (printer missing,
+ *    offline/paused before job creation, TCP connect failed before writing
+ *    bytes, or spooler rejected document start); safe to attempt a configured
+ *    compatible fallback printer.
+ *  - `ambiguous`: bytes may already have been written (HTTP/PowerShell/socket
+ *    timeout after write started, or partial write failure); NEVER
+ *    automatically resend or fall back — require explicit operator action.
+ *  - `connector_unavailable`: the local connector/bridge itself is missing or
+ *    outdated, so no local printer can be reached through it.
+ */
+export type DeliveryOutcome =
+  | "handed_off"
+  | "not_delivered"
+  | "ambiguous"
+  | "connector_unavailable";
+
+export function classifyDeliveryOutcome(result: {
+  ok: boolean;
+  error?: PrinterErrorCode;
+  unreachable?: boolean;
+  ambiguous?: boolean;
+  detail?: string;
+}): DeliveryOutcome {
+  if (result.ok) return "handed_off";
+  if (
+    result.ambiguous === true ||
+    result.error === "job_timeout" ||
+    (typeof result.detail === "string" &&
+      /write_ambiguous|writeprinterpartial|after_write|powershell timed out/i.test(result.detail))
+  ) {
+    return "ambiguous";
+  }
+  if (
+    result.unreachable === true ||
+    result.error === "connector_not_installed" ||
+    result.error === "connector_outdated" ||
+    result.error === "connector_unreachable" ||
+    result.error === "not_in_browser"
+  ) {
+    return "connector_unavailable";
+  }
+  return "not_delivered";
+}
+
+/**
  * Classify a low-level delivery failure into the canonical code, so callers
  * can word their message for the right family of printer:
  * a Windows queue that exists but refuses the job vs a TCP address nothing
@@ -81,6 +130,9 @@ export function printerErrorMessage(code: string | undefined | null): string {
  */
 export function classifyDeliveryError(detail: string | undefined, target: { type: string }): PrinterErrorCode {
   const value = (detail ?? "").toLowerCase();
+  if (value.includes("write_ambiguous") || value.includes("writeprinterpartial")) {
+    return "job_timeout";
+  }
   if (target.type === "network") {
     if (value.includes("refused") || value.includes("unreachable") || value.includes("timed out") || value.includes("timeout")) {
       return "network_unreachable";
@@ -89,6 +141,12 @@ export function classifyDeliveryError(detail: string | undefined, target: { type
   }
   if (value.includes("not found") || value.includes("printer_not_found") || value.includes("invalid printer name")) {
     return "printer_not_found";
+  }
+  if (value.includes("printer_offline") || value.includes("workoffline") || value.includes("offline")) {
+    return "printer_offline";
+  }
+  if (value.includes("startdocprinter") || value.includes("startpageprinter") || value.includes("spooler")) {
+    return "spooler_rejected";
   }
   return "print_failed";
 }

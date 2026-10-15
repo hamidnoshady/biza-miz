@@ -79,12 +79,15 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const ROUTE_LABEL: Record<string, string> = {
+  explicit: "چاپگر انتخاب‌شده",
   requested: "چاپگر انتخاب‌شده",
   rule: "قانون این سند",
   fallback: "چاپگر جانشین",
   only: "تنها چاپگر سازگار",
   last_used: "آخرین چاپگر استفاده‌شده",
   default: "چاپگر پیش‌فرض",
+  choose: "انتخاب نشده",
+  unavailable: "خارج از دسترس",
   none: "انتخاب نشده",
 };
 

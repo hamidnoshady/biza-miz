@@ -477,4 +477,97 @@ describe("the history table is branch-scoped underneath the routes", () => {
     );
     expect(mineAsRole.rows).toEqual([{ print_request_id: "receipt:mine" }]);
   });
+
+  it("resolves primary and fallback plans on real PostgreSQL rows and records both attempts in print_jobs", async () => {
+    const backupPrinter = await db.query<{ id: string }>(
+      `INSERT INTO printers (location_id, name, kind, printer_class, paper, paper_width_mm, is_active, connection)
+       VALUES ($1, 'چاپگر پشتیبان صندوق', 'receipt', 'thermal', 'thermal80', 80, true, '{"type":"windows","systemName":"Backup-POS"}'::jsonb)
+       RETURNING id`,
+      [alphaMain.locationId],
+    );
+    const backupId = backupPrinter.rows[0].id;
+
+    await db.query(
+      `INSERT INTO print_rules (location_id, document_type, printer_id, fallback_printer_id, template_id)
+       VALUES ($1, 'receipt', $2, $3, $4)
+       ON CONFLICT (location_id, document_type) DO UPDATE
+         SET printer_id = EXCLUDED.printer_id,
+             fallback_printer_id = EXCLUDED.fallback_printer_id,
+             template_id = EXCLUDED.template_id`,
+      [alphaMain.locationId, alphaMain.printerId, backupId, planted.alphaMainTemplateId],
+    );
+
+    const primaryPlan = await dbLib.withTenant(alpha.businessId, () =>
+      plan.resolvePrintPlan({
+        locationId: alphaMain.locationId,
+        documentType: "receipt",
+      }),
+    );
+    expect(primaryPlan.ok).toBe(true);
+    if (!primaryPlan.ok) return;
+    expect(primaryPlan.plan.printer.id).toBe(alphaMain.printerId);
+    expect(primaryPlan.plan.backupPrinter?.id).toBe(backupId);
+    expect(primaryPlan.plan.reason).toBe("rule");
+    expect(primaryPlan.plan.templateId).toBe(planted.alphaMainTemplateId);
+
+    const fallbackPlan = await dbLib.withTenant(alpha.businessId, () =>
+      plan.resolvePrintPlan({
+        locationId: alphaMain.locationId,
+        documentType: "receipt",
+        failedPrinterId: alphaMain.printerId,
+      }),
+    );
+    expect(fallbackPlan.ok).toBe(true);
+    if (!fallbackPlan.ok) return;
+    expect(fallbackPlan.plan.printer.id).toBe(backupId);
+    expect(fallbackPlan.plan.fallbackPrinter?.id).toBe(alphaMain.printerId);
+    expect(fallbackPlan.plan.reason).toBe("fallback");
+    expect(fallbackPlan.plan.templateId).toBe(planted.alphaMainTemplateId);
+    expect(fallbackPlan.plan.templateVersion).toBe(primaryPlan.plan.templateVersion);
+
+    // Record attempt 1 (primary failed) and attempt 2 (fallback handed_off) under the same print_request_id:
+    const reqId = "receipt:fallback-seq";
+    const attempt1 = await db.query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, printer_id, template_id, template_key, template_version, status, error_code, print_request_id)
+       VALUES ($1, 'receipt', $2, $3, $4, $5, 'failed', 'printer_offline', $6)
+       RETURNING id`,
+      [
+        alphaMain.locationId,
+        primaryPlan.plan.printer.id,
+        primaryPlan.plan.templateId,
+        primaryPlan.plan.templateKey,
+        primaryPlan.plan.templateVersion,
+        reqId,
+      ],
+    );
+    const attempt2 = await db.query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, printer_id, template_id, template_key, template_version, status, handed_off_at, print_request_id)
+       VALUES ($1, 'receipt', $2, $3, $4, $5, 'handed_off', now(), $6)
+       RETURNING id`,
+      [
+        alphaMain.locationId,
+        fallbackPlan.plan.printer.id,
+        fallbackPlan.plan.templateId,
+        fallbackPlan.plan.templateKey,
+        fallbackPlan.plan.templateVersion,
+        reqId,
+      ],
+    );
+    expect(attempt1.rows[0].id).not.toBe(attempt2.rows[0].id);
+
+    const history = await db.query<{ id: string; printer_id: string; status: string; error_code: string | null }>(
+      `SELECT id, printer_id, status, error_code
+         FROM print_jobs
+        WHERE location_id = $1 AND print_request_id = $2
+        ORDER BY created_at ASC`,
+      [alphaMain.locationId, reqId],
+    );
+    expect(history.rows).toEqual([
+      { id: attempt1.rows[0].id, printer_id: alphaMain.printerId, status: "failed", error_code: "printer_offline" },
+      { id: attempt2.rows[0].id, printer_id: backupId, status: "handed_off", error_code: null },
+    ]);
+  });
 });
+

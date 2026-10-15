@@ -509,6 +509,58 @@ describe("render, history and provenance", () => {
     expect(await response.json()).toMatchObject({
       route: "fallback",
       fallbackFromPrinterId: "aaaa1111-2222-4333-8444-555566667777",
+      fallbackFromPrinterName: "اصلی",
+    });
+  });
+
+  it("includes fallbackPrinterId on a primary rule plan and forwards failedPrinterId on a fallback retry", async () => {
+    const BACKUP_ID = "bbbb1111-2222-4333-8444-555566667777";
+    vi.mocked(planModule.resolvePrintPlan).mockResolvedValueOnce({
+      ok: true,
+      plan: plan({
+        reason: "rule",
+        backupPrinter: { ...plan().printer, id: BACKUP_ID, name: "پشتیبان" },
+      }),
+    } as never);
+    const primaryRes = await POST(request({ printRequestId: "req-fb", document: { kind: "order-receipt", orderId: ORDER_ID } }));
+    expect(await primaryRes.json()).toMatchObject({
+      route: "rule",
+      printerId: PRINTER_ID,
+      fallbackPrinterId: BACKUP_ID,
+      fallbackPrinterName: "پشتیبان",
+    });
+
+    vi.mocked(planModule.resolvePrintPlan).mockResolvedValueOnce({
+      ok: true,
+      plan: plan({
+        printer: { ...plan().printer, id: BACKUP_ID, name: "پشتیبان" },
+        reason: "fallback",
+        fallbackPrinter: { ...plan().printer, id: PRINTER_ID, name: "چاپگر صندوق" },
+        backupPrinter: null,
+      }),
+    } as never);
+    const fallbackRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        printRequestId: "req-fb",
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(planModule.resolvePrintPlan).toHaveBeenLastCalledWith({
+      locationId: "loc-1",
+      documentType: "receipt",
+      requestedPrinterId: null,
+      requestedTemplateId: null,
+      failedPrinterId: PRINTER_ID,
+    });
+    expect(await fallbackRes.json()).toMatchObject({
+      ok: true,
+      printerId: BACKUP_ID,
+      printerName: "پشتیبان",
+      route: "fallback",
+      fallbackFromPrinterId: PRINTER_ID,
+      fallbackFromPrinterName: "چاپگر صندوق",
+      fallbackPrinterId: null,
     });
   });
 });

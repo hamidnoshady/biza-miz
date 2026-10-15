@@ -285,6 +285,32 @@ describe("sendRawBytesToNetworkPrinter (injected socket)", () => {
     await native.sendRawBytesToNetworkPrinter("10.0.0.5", 0, new Uint8Array([1]), { connect });
     expect(seenPort).toBe(9100);
   });
+  it("distinguishes pre-connect timeout (network_unreachable) from post-write timeout (job_timeout / write_ambiguous)", async () => {
+    const preConnect = vi.fn(() => fakeSocket("timeout"));
+    const preResult = await native.sendRawBytesToNetworkPrinter("10.0.0.5", 9100, new Uint8Array([1, 2]), { connect: preConnect });
+    expect(preResult).toEqual({
+      ok: false,
+      error: "network_unreachable",
+      detail: "The connection timed out.",
+    });
+
+    // Socket connects and begins writing, then times out before closing:
+    const postWrite = vi.fn(() => {
+      const EventEmitter = require("node:events");
+      const sock = new EventEmitter();
+      sock.write = (_bytes: Uint8Array, _cb: (err?: Error) => void) => {
+        setImmediate(() => sock.emit("timeout"));
+      };
+      sock.end = () => {};
+      sock.destroy = () => {};
+      setImmediate(() => sock.emit("connect"));
+      return sock;
+    });
+    const postResult = await native.sendRawBytesToNetworkPrinter("10.0.0.5", 9100, new Uint8Array([1, 2]), { connect: postWrite });
+    expect(postResult.ok).toBe(false);
+    expect(postResult.error).toBe("job_timeout");
+    expect(postResult.detail).toContain("write_ambiguous");
+  });
 });
 
 describe("localSubnets", () => {

@@ -134,6 +134,29 @@ what an operator sees:
   printer, the `template_id`/`template_key` and the **template version** that
   produced it, plus the route (`rule`, `fallback`, `only`, …) and the printer a
   fallback replaced. The rules screen's «فعالیت اخیر» is that table.
+- **Runtime fallback and duplicate-print protection.** When a rule's primary
+  printer is selected (`route: "rule"`) and a compatible `fallback_printer_id`
+  is configured on the rule, the client attempts delivery to the primary
+  printer first. Delivery outcomes are classified into three operational states
+  (`classifyDeliveryOutcome` in `src/lib/printing/errors.ts`):
+  - **Confirmed handoff (`handed_off`)**: the OS spooler or TCP socket accepted
+    the bytes; the attempt row closes as `handed_off` and no retry occurs.
+  - **Confirmed non-delivery (`not_delivered`)**: the primary printer
+    definitively rejected or could not be reached before any bytes were written
+    (`printer_not_found`, `printer_offline`, pre-write `network_unreachable`,
+    `spooler_rejected`). The client closes attempt 1 as `failed`, requests a
+    fallback plan from `POST /api/printing/print` with `failedPrinterId` (which
+    validates the configured fallback printer, paper, document type,
+    permissions and branch, opens attempt 2 in `print_jobs` with `attempt = 2`,
+    and renders the same resolved document and template), and delivers to the
+    fallback printer. At most one fallback attempt is ever made, and unconfigured
+    printers are never chosen automatically.
+  - **Unknown / ambiguous (`ambiguous`)**: a timeout or socket/spooler error
+    occurred after bytes had already started writing (`job_timeout`,
+    `write_ambiguous`, `WritePrinterPartial`, HTTP timeout on `/print/raw` or
+    `/print/page`). Automatic retry and fallback are **strictly suppressed** so
+    the customer or kitchen never receives a silent duplicate print; the UI
+    warns the operator to check physical output before manually reprinting.
 - **A job always ends.** The server stamps `sending`; the browser (the only
   side that can talk to the spooler) closes the row as `handed_off` or
   `failed` with a canonical error code — on refusal, on connector failure, on

@@ -54,6 +54,7 @@ import type { PrintBranding } from "./document-bridge";
 import type { PrinterErrorCode } from "./errors";
 import {
   paperOfPrinter,
+  printerAcceptsDocument,
   printerAcceptsPaper,
   purposeForDocument,
   resolvePrinter,
@@ -65,6 +66,7 @@ import {
   legacyBehaviorOf,
   printerClassOf,
   printerSupportsDrawer,
+  printerTargetOf,
   resolvedPaperOf,
   type PrinterPurpose,
   type StoredPrinter,
@@ -94,6 +96,8 @@ export interface PrintPlan {
   documentType: PrintDocumentType;
   printer: StoredPrinter;
   fallbackPrinter: StoredPrinter | null;
+  /** Configured compatible backup printer that can take over if `printer` fails local delivery at runtime. */
+  backupPrinter?: StoredPrinter | null;
   routingPrinter: RoutingPrinter;
   template: PrintTemplate;
   templateId: string | null;
@@ -416,6 +420,8 @@ export interface ResolvePrintPlanInput {
   requestedTemplateId?: string | null;
   /** Test prints and diagnostics may want the fallback recorded but not used. */
   includeBranding?: boolean;
+  /** Primary printer id that definitively failed local delivery on attempt 1. */
+  failedPrinterId?: string | null;
 }
 
 /**
@@ -445,6 +451,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     printers: routable,
     rules,
     requestedPrinterId: input.requestedPrinterId ?? null,
+    ...(input.failedPrinterId ? { failedPrinterIds: [input.failedPrinterId] } : {}),
   });
 
   if (!resolved.printer) {
@@ -479,6 +486,37 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
   });
   if (!choice.ok) return { ok: false, error: choice.error };
 
+  let backupPrinter: StoredPrinter | null = null;
+  if (!input.requestedPrinterId && !input.failedPrinterId && resolved.reason === "rule" && rule?.fallbackPrinterId) {
+    const candidateRouting = routable.find(
+      (printer) =>
+        printer.id === rule.fallbackPrinterId &&
+        printer.id !== resolved.printer!.id &&
+        printerAcceptsDocument(printer, input.documentType),
+    );
+    const candidateRow = candidateRouting
+      ? printers.find((printer) => String(printer.id) === candidateRouting.id) ?? null
+      : null;
+    if (
+      candidateRouting &&
+      candidateRow &&
+      printerTargetOf(candidateRow.connection) !== null
+    ) {
+      const candidateChoice = resolveTemplateChoice({
+        documentType: input.documentType,
+        printerPaper: candidateRouting.paper,
+        printerClass: candidateRouting.printerClass,
+        requestedTemplateId: input.requestedTemplateId ?? null,
+        rule,
+        saved,
+        legacyPrinterTemplateKey: null,
+      });
+      if (candidateChoice.ok) {
+        backupPrinter = candidateRow;
+      }
+    }
+  }
+
   const branding = input.includeBranding === false ? { name: "" } : await loadPrintBranding(input.locationId);
 
   return {
@@ -488,6 +526,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       documentType: input.documentType,
       printer: printerRow,
       fallbackPrinter: fallbackRow,
+      backupPrinter,
       routingPrinter: resolved.printer,
       template: choice.choice.template,
       templateId: choice.choice.templateId,

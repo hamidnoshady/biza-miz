@@ -162,7 +162,7 @@ public static class CafePosRawPrinter
             {
                 int written;
                 IntPtr cursor = new IntPtr(unmanaged.ToInt64() + offset);
-                if (!WritePrinter(printer, cursor, data.Length - offset, out written)) ThrowLastError("WritePrinter");
+                if (!WritePrinter(printer, cursor, data.Length - offset, out written)) ThrowLastError(offset > 0 ? "WritePrinterPartial" : "WritePrinter");
                 if (written <= 0) throw new Win32Exception("WritePrinter wrote zero bytes.");
                 offset += written;
             }
@@ -446,8 +446,12 @@ function Send-NetworkBytes {
         $stream = $client.GetStream()
         try {
             $stream.WriteTimeout = 15000
-            $stream.Write($Bytes, 0, $Bytes.Length)
-            $stream.Flush()
+            try {
+                $stream.Write($Bytes, 0, $Bytes.Length)
+                $stream.Flush()
+            } catch {
+                throw ("write_ambiguous: " + $_.Exception.Message)
+            }
         } finally {
             $stream.Dispose()
         }
@@ -628,6 +632,8 @@ function Handle-Request {
         }
         try {
             if ($target.Type -eq "windows") {
+                $queue = @(Get-CimInstance -ClassName Win32_Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $target.SystemName }) | Select-Object -First 1
+                if ($null -ne $queue -and ($queue.WorkOffline -eq $true -or [int]$queue.PrinterStatus -eq 7)) { throw "printer_offline" }
                 [CafePosRawPrinter]::Send($target.SystemName, $bytes)
             } else {
                 Send-NetworkBytes -Address $target.Ip -TargetPort $target.Port -Bytes $bytes
@@ -638,12 +644,18 @@ function Handle-Request {
             $message = $_.Exception.Message
             Write-ConnectorLog ("Print failed for " + (Describe-Target $target) + ": " + $message)
             $errorCode = "print_failed"
-            if ($target.Type -eq "windows") {
-                if ($message -match "OpenPrinter|printer name|Invalid printer") { $errorCode = "printer_not_found" }
+            $ambiguous = $false
+            if ($message -match "write_ambiguous|WritePrinterPartial") {
+                $errorCode = "job_timeout"
+                $ambiguous = $true
+            } elseif ($target.Type -eq "windows") {
+                if ($message -match "OpenPrinter|printer name|Invalid printer|printer_not_found") { $errorCode = "printer_not_found" }
+                elseif ($message -match "printer_offline|WorkOffline") { $errorCode = "printer_offline" }
+                elseif ($message -match "StartDocPrinter|StartPagePrinter") { $errorCode = "spooler_rejected" }
             } else {
                 if ($message -match "timed out|refused|unreachable|No such host") { $errorCode = "network_unreachable" }
             }
-            Write-JsonResponse -Stream $Stream -Status 502 -Value @{ ok = $false; error = $errorCode; detail = $message } -RequestOrigin $origin
+            Write-JsonResponse -Stream $Stream -Status 502 -Value @{ ok = $false; error = $errorCode; ambiguous = $ambiguous; detail = $message } -RequestOrigin $origin
         }
         return
     }
@@ -654,6 +666,8 @@ function Handle-Request {
             $target = Get-PrintTarget -Payload $payload
             if ($target.Type -ne "windows") { throw "incompatible_printer" }
             [byte[]]$bytes = ConvertFrom-Base64PrintData -Payload $payload
+            $queue = @(Get-CimInstance -ClassName Win32_Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $target.SystemName }) | Select-Object -First 1
+            if ($null -ne $queue -and ($queue.WorkOffline -eq $true -or [int]$queue.PrinterStatus -eq 7)) { throw "printer_offline" }
             $temp = Join-Path $env:TEMP ("eshobe-page-" + [guid]::NewGuid().ToString("n") + ".png")
             [IO.File]::WriteAllBytes($temp, $bytes)
             Add-Type -AssemblyName System.Drawing
@@ -684,7 +698,7 @@ function Handle-Request {
             Write-JsonResponse -Stream $Stream -Status 200 -Value @{ ok = $true } -RequestOrigin $origin
         } catch {
             Write-ConnectorLog ("Page print failed: " + $_.Exception.Message)
-            $code = if ($_.Exception.Message -match "printer_not_found|incompatible") { "printer_not_found" } else { "spooler_rejected" }
+            $code = if ($_.Exception.Message -match "printer_not_found|incompatible") { "printer_not_found" } elseif ($_.Exception.Message -match "printer_offline|WorkOffline") { "printer_offline" } else { "spooler_rejected" }
             Write-JsonResponse -Stream $Stream -Status 502 -Value @{ ok = $false; error = $code; detail = $_.Exception.Message } -RequestOrigin $origin
         }
         return

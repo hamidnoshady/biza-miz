@@ -94,6 +94,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     documentType,
     requestedPrinterId: parsed.printerId,
     requestedTemplateId: parsed.templateId,
+    ...(parsed.failedPrinterId ? { failedPrinterId: parsed.failedPrinterId } : {}),
   });
   if (!resolved.ok) {
     const status = resolved.error === "printer_not_found" || resolved.error === "template_not_found" ? 404 : 409;
@@ -173,6 +174,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       templateSource: plan.templateSource,
       route: plan.reason,
       fallbackFromPrinterId: plan.fallbackPrinter?.id ?? null,
+      fallbackFromPrinterName: plan.fallbackPrinter?.name ?? null,
+      fallbackPrinterId: plan.reason === "rule" ? (plan.backupPrinter?.id ?? null) : null,
+      fallbackPrinterName: plan.reason === "rule" ? (plan.backupPrinter?.name ?? null) : null,
       dataBase64: Buffer.from(prepared.bytes).toString("base64"),
     });
   } catch (err) {

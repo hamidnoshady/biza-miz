@@ -57,6 +57,8 @@ export type PrintRequestSource =
 export interface ParsedPrintRequest {
   ok: true;
   printerId: string | null;
+  /** Primary printer that definitively failed local delivery on attempt 1. */
+  failedPrinterId?: string | null;
   templateId: string | null;
   printRequestId: string | null;
   /** The document type the caller asked for; null means "the kind's own default". */
@@ -96,8 +98,15 @@ export function parsePrintRequest(body: unknown): ParsedPrintRequest | PrintRequ
   // Hardware ids the caller may name: resolved against the caller's own
   // branch, so an id from anywhere else simply does not resolve.
   const printerId = body.printerId == null ? null : id(body.printerId);
+  const failedPrinterId = body.failedPrinterId == null ? null : id(body.failedPrinterId);
   const templateId = body.templateId == null ? null : id(body.templateId);
-  if ((body.printerId != null && !printerId) || (body.templateId != null && !templateId)) return badRequest();
+  if (
+    (body.printerId != null && !printerId) ||
+    (body.failedPrinterId != null && !failedPrinterId) ||
+    (body.templateId != null && !templateId)
+  ) {
+    return badRequest();
+  }
 
   const documentType = body.documentType == null ? null : body.documentType;
   if (documentType !== null && !isDocType(documentType)) return badRequest();
@@ -111,7 +120,15 @@ export function parsePrintRequest(body: unknown): ParsedPrintRequest | PrintRequ
   if (!source) return badRequest();
   if ("ok" in source) return source;
 
-  return { ok: true, printerId, templateId, printRequestId, documentType, source };
+  return {
+    ok: true,
+    printerId,
+    ...(failedPrinterId ? { failedPrinterId } : {}),
+    templateId,
+    printRequestId,
+    documentType,
+    source,
+  };
 }
 
 function parseSource(body: Record<string, unknown>): PrintRequestSource | PrintRequestFailure | null {

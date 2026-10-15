@@ -453,3 +453,246 @@ describe("labels, kitchen tickets, invoices and template samples", () => {
     expect((client as unknown as Record<string, unknown>).printDocument).toBeUndefined();
   });
 });
+
+describe("runtime fallback and duplicate-print protection", () => {
+  const PRIMARY_ID = "11111111-2222-4333-8444-555566667777";
+  const BACKUP_ID = "22222222-2222-4333-8444-555566667777";
+  const BACKUP_TARGET = { type: "network" as const, ip: "192.168.1.51", port: 9100 };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("retries through the configured fallback printer when primary delivery definitively fails (browser connector)", async () => {
+    let printAttempt = 0;
+    let rawAttempt = 0;
+    const progressEvents: client.PrintProgress[] = [];
+    const unsubscribe = client.subscribePrintProgress((event) => {
+      if (event) progressEvents.push(event);
+    });
+
+    const { calls } = mockFetch({
+      "/api/printing/print": () => {
+        printAttempt += 1;
+        if (printAttempt === 1) {
+          return respondJson({
+            ok: true,
+            jobId: "job-attempt-1",
+            printRequestId: "req-sale-1",
+            printerId: PRIMARY_ID,
+            printerName: "چاپگر اصلی",
+            route: "rule",
+            fallbackPrinterId: BACKUP_ID,
+            fallbackPrinterName: "چاپگر پشتیبان",
+            templateId: "tpl-1",
+            templateKey: "tpl-1",
+            templateVersion: 4,
+            target: WINDOWS_TARGET,
+            dataBase64: RENDERED_B64,
+          });
+        }
+        return respondJson({
+          ok: true,
+          jobId: "job-attempt-2",
+          printRequestId: "req-sale-1",
+          printerId: BACKUP_ID,
+          printerName: "چاپگر پشتیبان",
+          route: "fallback",
+          fallbackFromPrinterId: PRIMARY_ID,
+          fallbackFromPrinterName: "چاپگر اصلی",
+          fallbackPrinterId: null,
+          templateId: "tpl-1",
+          templateKey: "tpl-1",
+          templateVersion: 4,
+          target: BACKUP_TARGET,
+          dataBase64: RENDERED_B64,
+        });
+      },
+      [`${CONNECTOR}/print/raw`]: () => {
+        rawAttempt += 1;
+        if (rawAttempt === 1) {
+          return respondJson({ ok: false, error: "printer_offline", detail: "printer_offline" }, 502);
+        }
+        return respondJson({ ok: true });
+      },
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+
+    const result = await printSaleReceipt(null, ORDER_ID, { requestId: "req-sale-1" });
+    unsubscribe();
+
+    expect(result.ok).toBe(true);
+    expect(result.printerId).toBe(BACKUP_ID);
+    expect(result.printerName).toBe("چاپگر پشتیبان");
+    expect(result.usedFallback).toBe(true);
+    expect(result.fallbackFromPrinterId).toBe(PRIMARY_ID);
+    expect(result.fallbackFromPrinterName).toBe("چاپگر اصلی");
+    expect(result.jobId).toBe("job-attempt-2");
+    expect(result.templateId).toBe("tpl-1");
+    expect(result.templateVersion).toBe(4);
+
+    // Both attempts are recorded in print_jobs: attempt 1 failed, attempt 2 handed_off.
+    const jobPatches = calls
+      .filter((c) => c.url === "/api/printing/jobs")
+      .map((c) => JSON.parse(String(c.init!.body)));
+    expect(jobPatches).toEqual([
+      { jobId: "job-attempt-1", status: "failed", errorCode: "printer_offline" },
+      { jobId: "job-attempt-2", status: "handed_off" },
+    ]);
+
+    // The second /api/printing/print call passed failedPrinterId and preserved document + templateId.
+    const printCalls = calls
+      .filter((c) => c.url === "/api/printing/print")
+      .map((c) => JSON.parse(String(c.init!.body)));
+    expect(printCalls).toHaveLength(2);
+    expect(printCalls[1]).toMatchObject({
+      failedPrinterId: PRIMARY_ID,
+      templateId: "tpl-1",
+      printRequestId: "req-sale-1",
+      documentType: "receipt",
+      document: { kind: "order-receipt", orderId: ORDER_ID },
+    });
+
+    // Progress phases include preparing -> routing -> sending -> routing (fallback) -> sending (fallback) -> handed_off.
+    expect(progressEvents.map((e) => e.phase)).toEqual([
+      "preparing",
+      "routing",
+      "sending",
+      "routing",
+      "sending",
+      "handed_off",
+    ]);
+    expect(progressEvents[progressEvents.length - 1]).toMatchObject({
+      phase: "handed_off",
+      printerName: "چاپگر پشتیبان",
+      usedFallback: true,
+      fallbackFromPrinterName: "چاپگر اصلی",
+    });
+  });
+
+  it("retries through the configured fallback printer consistently in the Electron desktop native bridge", async () => {
+    let printAttempt = 0;
+    const { calls } = mockFetch({
+      "/api/printing/print": () => {
+        printAttempt += 1;
+        if (printAttempt === 1) {
+          return respondJson({
+            ok: true,
+            jobId: "job-desk-1",
+            printerId: PRIMARY_ID,
+            printerName: "چاپگر اصلی",
+            route: "rule",
+            fallbackPrinterId: BACKUP_ID,
+            fallbackPrinterName: "چاپگر پشتیبان",
+            target: WINDOWS_TARGET,
+            dataBase64: RENDERED_B64,
+          });
+        }
+        return respondJson({
+          ok: true,
+          jobId: "job-desk-2",
+          printerId: BACKUP_ID,
+          printerName: "چاپگر پشتیبان",
+          route: "fallback",
+          fallbackFromPrinterId: PRIMARY_ID,
+          fallbackFromPrinterName: "چاپگر اصلی",
+          target: BACKUP_TARGET,
+          dataBase64: RENDERED_B64,
+        });
+      },
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+
+    const sendRawMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: "printer_not_found", detail: "OpenPrinter failed" })
+      .mockResolvedValueOnce({ ok: true });
+    vi.stubGlobal("window", { businessSuiteDesktop: { isDesktop: true, printing: { sendRaw: sendRawMock } } });
+
+    const result = await printSaleReceipt(null, ORDER_ID, { requestId: "req-desk-1" });
+    expect(result.ok).toBe(true);
+    expect(result.printerId).toBe(BACKUP_ID);
+    expect(result.usedFallback).toBe(true);
+    expect(sendRawMock).toHaveBeenCalledTimes(2);
+    expect(calls.filter((c) => c.url === "/api/printing/jobs")).toHaveLength(2);
+  });
+
+  it("stops after the fallback also fails and records both failures (never infinite retries)", async () => {
+    let printAttempt = 0;
+    const { calls } = mockFetch({
+      "/api/printing/print": () => {
+        printAttempt += 1;
+        return respondJson({
+          ok: true,
+          jobId: `job-both-${printAttempt}`,
+          printerId: printAttempt === 1 ? PRIMARY_ID : BACKUP_ID,
+          printerName: printAttempt === 1 ? "اصلی" : "پشتیبان",
+          route: printAttempt === 1 ? "rule" : "fallback",
+          fallbackPrinterId: printAttempt === 1 ? BACKUP_ID : null,
+          fallbackFromPrinterId: printAttempt === 1 ? null : PRIMARY_ID,
+          target: NETWORK_TARGET,
+          dataBase64: RENDERED_B64,
+        });
+      },
+      [`${CONNECTOR}/print/raw`]: () =>
+        respondJson({ ok: false, error: "network_unreachable", detail: "ECONNREFUSED" }, 502),
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+
+    const result = await printSaleReceipt(null, ORDER_ID, { requestId: "req-both-down" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("network_unreachable");
+    expect(result.usedFallback).toBe(true);
+    expect(result.printerId).toBe(BACKUP_ID);
+    expect(result.fallbackFromPrinterId).toBe(PRIMARY_ID);
+    expect(printAttempt).toBe(2);
+    const jobPatches = calls
+      .filter((c) => c.url === "/api/printing/jobs")
+      .map((c) => JSON.parse(String(c.init!.body)));
+    expect(jobPatches).toEqual([
+      { jobId: "job-both-1", status: "failed", errorCode: "network_unreachable" },
+      { jobId: "job-both-2", status: "failed", errorCode: "network_unreachable" },
+    ]);
+  });
+
+  it("NEVER automatically retries or falls back when the delivery outcome is ambiguous (duplicate-print protection)", async () => {
+    let printAttempt = 0;
+    const { calls } = mockFetch({
+      "/api/printing/print": () => {
+        printAttempt += 1;
+        return respondJson({
+          ok: true,
+          jobId: "job-ambiguous-1",
+          printerId: PRIMARY_ID,
+          printerName: "چاپگر اصلی",
+          route: "rule",
+          fallbackPrinterId: BACKUP_ID,
+          fallbackPrinterName: "چاپگر پشتیبان",
+          target: NETWORK_TARGET,
+          dataBase64: RENDERED_B64,
+        });
+      },
+      [`${CONNECTOR}/print/raw`]: () =>
+        respondJson(
+          { ok: false, error: "job_timeout", ambiguous: true, detail: "write_ambiguous: socket timed out after write" },
+          502,
+        ),
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+
+    const result = await printSaleReceipt(null, ORDER_ID, { requestId: "req-ambiguous" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("job_timeout");
+    expect(result.ambiguous).toBe(true);
+    expect(result.usedFallback).toBeUndefined();
+    // Only 1 print attempt was made — fallback was NOT triggered!
+    expect(printAttempt).toBe(1);
+    const jobPatches = calls
+      .filter((c) => c.url === "/api/printing/jobs")
+      .map((c) => JSON.parse(String(c.init!.body)));
+    expect(jobPatches).toEqual([
+      { jobId: "job-ambiguous-1", status: "failed", errorCode: "job_timeout" },
+    ]);
+  });
+});
+
