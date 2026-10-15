@@ -18,6 +18,10 @@ import {
   automotiveStockProjectionHash,
   automotiveStockSucceeded,
   automotiveStockSucceeded as succeeded,
+  compareRequestCursors,
+  encodeRequestCursor,
+  nextRequestCursors,
+  parseRequestCursor,
   availabilityForVehicle,
   duplicateVehicleIdentities,
   mirrorDaysInStock,
@@ -25,6 +29,7 @@ import {
   validateAutomotiveStockProjection,
   vehicleMirrorRowHash,
   type AutomotiveStockProjection,
+  type AutomotiveStockRequest,
   type AutomotiveStockVehicle,
 } from "./automotive-stock-projection";
 
@@ -62,13 +67,21 @@ function vehicle(overrides: Partial<AutomotiveStockVehicle> = {}): AutomotiveSto
   };
 }
 
-function projection(vehicles: AutomotiveStockVehicle[] = [vehicle()]): AutomotiveStockProjection {
+function projection(
+  vehicles: AutomotiveStockVehicle[] = [vehicle()],
+  requests: AutomotiveStockRequest[] = [],
+): AutomotiveStockProjection {
   return {
     schemaVersion: AUTOMOTIVE_STOCK_PROJECTION_SCHEMA_VERSION,
     locationId: LOCATION,
     generatedAt: "2026-01-02T00:00:00.000Z",
     vehicles,
-    requests: [],
+    requests,
+    // The delivery cursors are part of the projection on purpose: they are what the
+    // site echoes back so the cloud knows which answers it already holds (0225).
+    requestsCursor: null,
+    openRequestsCursor: null,
+    requestsHasMore: false,
   };
 }
 
@@ -215,6 +228,9 @@ describe("the hash that decides whether a snapshot is news (§19)", () => {
       generatedAt: canonical.generatedAt,
       locationId: canonical.locationId,
       schemaVersion: canonical.schemaVersion,
+      requestsCursor: null,
+      openRequestsCursor: null,
+      requestsHasMore: false,
     };
     expect(automotiveStockProjectionHash(reordered)).toBe(automotiveStockProjectionHash(canonical));
     const repriced = projection([vehicle({ askingPriceRial: 899_000_000 })]);
@@ -320,5 +336,69 @@ describe("the state the sync panel stores (§19)", () => {
     const checked = succeeded(applied, "hash", false, 7, now);
     expect(checked.appliedAt).toBe(applied.appliedAt);
     expect(checked.checkedAt).toBe(now.toISOString());
+  });
+});
+
+describe("the delivery watermarks the site acknowledges (§19)", () => {
+  const FIRST = "11111111-1111-4111-8111-111111111111";
+  const SECOND = "22222222-2222-4222-8222-222222222222";
+
+  it("orders the same instant written at two precisions the way the column stores it", () => {
+    // `timestamptz` keeps microseconds; a JavaScript `Date` and therefore a cursor
+    // built from `toISOString()` keeps milliseconds. Both spellings reach the
+    // comparator, and a string comparison would call the coarser one *greater*
+    // because `Z` sorts after `1` — which moved a watermark backwards and re-sent a
+    // page forever. The comparator has to read the fraction as a number.
+    const exact = encodeRequestCursor({ resolvedAt: "2026-01-02T00:00:05.123456Z", id: FIRST });
+    const truncated = encodeRequestCursor({ resolvedAt: "2026-01-02T00:00:05.123Z", id: FIRST });
+    expect(compareRequestCursors(exact, truncated)).toBe(1);
+    expect(compareRequestCursors(truncated, exact)).toBe(-1);
+    expect(compareRequestCursors(exact, exact)).toBe(0);
+    // …and the id is only consulted inside the same microsecond.
+    const later = encodeRequestCursor({ resolvedAt: "2026-01-02T00:00:05.123456Z", id: SECOND });
+    expect(compareRequestCursors(later, exact)).toBe(1);
+    expect(compareRequestCursors(FIRST > SECOND ? later : exact, FIRST > SECOND ? exact : later)).toBe(-1);
+  });
+
+  it("treats anything that is not a cursor as absent, never as a value to interpolate", () => {
+    expect(parseRequestCursor(`2026-01-02T00:00:05.123456Z|${FIRST}`)).toEqual({
+      resolvedAt: "2026-01-02T00:00:05.123456Z",
+      id: FIRST,
+    });
+    expect(parseRequestCursor("not-a-cursor'; DROP TABLE sync_events; --")).toBeNull();
+    expect(parseRequestCursor(`${FIRST}|2026-01-02T00:00:05Z`)).toBeNull();
+    expect(parseRequestCursor("")).toBeNull();
+    expect(parseRequestCursor(null)).toBeNull();
+    expect(parseRequestCursor(undefined)).toBeNull();
+  });
+
+  it("advances each stream forward only, and leaves the other where it was", () => {
+    const open = {
+      id: FIRST,
+      status: "pending" as const,
+      requestedAt: "2026-01-02T00:00:01.000000Z",
+      resolvedAt: null,
+    };
+    const answered = {
+      id: SECOND,
+      status: "confirmed" as const,
+      requestedAt: "2026-01-02T00:00:01.000000Z",
+      resolvedAt: "2026-01-02T00:00:02.500000Z",
+    };
+    const advanced = nextRequestCursors([open, answered], { cursor: null, openCursor: null });
+    expect(advanced.openCursor).toBe(encodeRequestCursor({ resolvedAt: open.requestedAt, id: FIRST }));
+    expect(advanced.cursor).toBe(encodeRequestCursor({ resolvedAt: answered.resolvedAt, id: SECOND }));
+
+    // Re-applying an old page (a retry, a re-delivery) cannot move them backwards.
+    const again = nextRequestCursors([answered], { cursor: advanced.cursor, openCursor: advanced.openCursor });
+    expect(again).toEqual(advanced);
+    const older = nextRequestCursors(
+      [{ ...answered, id: "00000000-0000-4000-8000-000000000000", resolvedAt: "2026-01-02T00:00:02.000000Z" }],
+      { cursor: advanced.cursor, openCursor: advanced.openCursor },
+    );
+    expect(older.cursor).toBe(advanced.cursor);
+    // A stream that carried nothing keeps the caller's watermark: the site simply
+    // asks again, and the cloud has nothing to re-serve.
+    expect(nextRequestCursors([], { cursor: advanced.cursor, openCursor: advanced.openCursor })).toEqual(advanced);
   });
 });

@@ -81,7 +81,10 @@ async function dropDatabase(name: string): Promise<void> {
 }
 
 /** Run a block as one side of the link; `deploymentRole()` reads the environment per call. */
-async function asRole<T>(role: "central" | "site", run: () => Promise<T>): Promise<T> {
+async function asRole<T>(
+  role: "central" | "site",
+  run: () => Promise<T>,
+): Promise<T> {
   const previous = process.env.DEPLOYMENT_ROLE;
   process.env.DEPLOYMENT_ROLE = role;
   try {
@@ -167,7 +170,10 @@ function futureDate(days = 30): string {
 }
 
 /** Counts postings of one kind — the probe for "nothing was invented offline". */
-async function postingCount(businessId: string, sourceType: string): Promise<number> {
+async function postingCount(
+  businessId: string,
+  sourceType: string,
+): Promise<number> {
   const { rows } = await dbLib.query<{ n: string }>(
     `SELECT count(*)::text AS n FROM journal_entries WHERE business_id = $1 AND source_type = $2`,
     [businessId, sourceType],
@@ -250,7 +256,10 @@ describe("§19's offline/hybrid vehicle path", () => {
     // must not be in it are the acquisition cost, the capitalized cost and the
     // minimum price — each of which is in the cloud's own row.
     const projection = await dbLib.withTenant(created.businessId, () =>
-      stock.buildAutomotiveStockProjection(created.businessId, created.locationId),
+      stock.buildAutomotiveStockProjection(
+        created.businessId,
+        created.locationId,
+      ),
     );
     expect(projection).not.toBeNull();
     if (!projection) return;
@@ -283,14 +292,28 @@ describe("§19's offline/hybrid vehicle path", () => {
       name: "شعبهٔ نمایشگاه پارس",
       userId: created.userId,
     });
-    const firstApply = await stock.applyAutomotiveStockProjection(created.businessId, created.locationId, projection);
+    const firstApply = await stock.applyAutomotiveStockProjection(
+      created.businessId,
+      created.locationId,
+      projection,
+    );
     expect(firstApply).toMatchObject({ inserted: 1, updated: 0, removed: 0 });
-    const secondApply = await stock.applyAutomotiveStockProjection(created.businessId, created.locationId, projection);
+    const secondApply = await stock.applyAutomotiveStockProjection(
+      created.businessId,
+      created.locationId,
+      projection,
+    );
     expect(secondApply).toMatchObject({ inserted: 0, updated: 0, removed: 0 });
 
-    const mirrorRows = await stock.listMirrorVehicles(created.businessId, created.locationId);
+    const mirrorRows = await stock.listMirrorVehicles(
+      created.businessId,
+      created.locationId,
+    );
     expect(mirrorRows).toHaveLength(1);
-    expect(mirrorRows[0]).toMatchObject({ stock_number: "P-1", availability: "available" });
+    expect(mirrorRows[0]).toMatchObject({
+      stock_number: "P-1",
+      availability: "available",
+    });
 
     // A clerk queues a hold while the cloud is unreachable. The row is pending,
     // nothing is reserved locally, and no posting exists on this side.
@@ -317,11 +340,27 @@ describe("§19's offline/hybrid vehicle path", () => {
         actorRole: "owner",
       }),
     );
-    expect(queued).toEqual({ requestId: reserveRequestId, duplicate: false });
+    // The queue reports what the database holds, not what the caller asked for:
+    // `status` is read back from the row and `adopted` says whether the row that
+    // counts is a *different* open request for the same car.
+    expect(queued).toEqual({
+      requestId: reserveRequestId,
+      duplicate: false,
+      status: "pending",
+      adopted: false,
+    });
 
-    const pendingRows = await stock.listVehicleOfflineRequests(created.businessId, created.locationId, "pending");
-    expect(pendingRows).toHaveLength(1);
-    expect(pendingRows[0]).toMatchObject({ status: "pending", reservation_id: null, stock_number: "P-1" });
+    const pendingPage = await stock.listVehicleOfflineRequests(
+      created.businessId,
+      created.locationId,
+      "pending",
+    );
+    expect(pendingPage.rows).toHaveLength(1);
+    expect(pendingPage.rows[0]).toMatchObject({
+      status: "pending",
+      reservation_id: null,
+      stock_number: "P-1",
+    });
     // The queue is durable: the event that will carry it exists, keyed by the
     // same id, in the same transaction.
     const { rows: eventRows } = await dbLib.query<{
@@ -339,10 +378,15 @@ describe("§19's offline/hybrid vehicle path", () => {
       event_type: "automotive.vehicle.reservation.requested",
       pushed_at: null,
     });
-    expect(eventRows[0].payload).toMatchObject({ requestId: reserveRequestId, serialId: car.serialId });
+    expect(eventRows[0].payload).toMatchObject({
+      requestId: reserveRequestId,
+      serialId: car.serialId,
+    });
     // Nothing posts on the site: a queued hold is not a hold, and a deposit is
     // not a liability until the cloud confirms.
-    expect(await postingCount(created.businessId, "automotive_reservation_deposit")).toBe(0);
+    expect(
+      await postingCount(created.businessId, "automotive_reservation_deposit"),
+    ).toBe(0);
 
     // ---- the cloud applies it ----------------------------------------------
     await useDatabase(serverDb);
@@ -365,7 +409,11 @@ describe("§19's offline/hybrid vehicle path", () => {
     expect(applied.ok).toBe(true);
 
     const cloudRequest = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ status: string; reservation_id: string | null; conflict_code: string | null }>(
+      dbLib.query<{
+        status: string;
+        reservation_id: string | null;
+        conflict_code: string | null;
+      }>(
         `SELECT status, reservation_id, conflict_code FROM automotive_vehicle_offline_requests
           WHERE business_id = $1 AND id = $2`,
         [created.businessId, reserveRequestId],
@@ -375,22 +423,35 @@ describe("§19's offline/hybrid vehicle path", () => {
     const reservationId = cloudRequest.rows[0].reservation_id;
     expect(reservationId).toBeTruthy();
 
-    const { rows: reservationRows } = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ status: string; deposit_amount_rial: string; deposit_ledger_entry_id: string | null }>(
-        `SELECT status, deposit_amount_rial, deposit_ledger_entry_id FROM serial_reservations
+    const { rows: reservationRows } = await dbLib.withTenant(
+      created.businessId,
+      () =>
+        dbLib.query<{
+          status: string;
+          deposit_amount_rial: string;
+          deposit_ledger_entry_id: string | null;
+        }>(
+          `SELECT status, deposit_amount_rial, deposit_ledger_entry_id FROM serial_reservations
           WHERE business_id = $1 AND id = $2`,
-        [created.businessId, reservationId],
-      ),
+          [created.businessId, reservationId],
+        ),
     );
-    expect(reservationRows[0]).toMatchObject({ status: "active", deposit_amount_rial: "5000000" });
+    expect(reservationRows[0]).toMatchObject({
+      status: "active",
+      deposit_amount_rial: "5000000",
+    });
     expect(reservationRows[0].deposit_ledger_entry_id).toBeTruthy();
-    expect(await postingCount(created.businessId, "automotive_reservation_deposit")).toBe(1);
+    expect(
+      await postingCount(created.businessId, "automotive_reservation_deposit"),
+    ).toBe(1);
 
-    const { rows: vehicleRows } = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ state: string }>(
-        `SELECT state FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2`,
-        [created.businessId, car.serialId],
-      ),
+    const { rows: vehicleRows } = await dbLib.withTenant(
+      created.businessId,
+      () =>
+        dbLib.query<{ state: string }>(
+          `SELECT state FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2`,
+          [created.businessId, car.serialId],
+        ),
     );
     expect(vehicleRows[0].state).toBe("reserved");
 
@@ -414,25 +475,32 @@ describe("§19's offline/hybrid vehicle path", () => {
     );
     expect(replay.ok).toBe(true);
     expect(replay.duplicate).toBe(true);
-    expect(await postingCount(created.businessId, "automotive_reservation_deposit")).toBe(1);
-    const { rows: reservationCount } = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ n: string }>(
-        `SELECT count(*)::text AS n FROM serial_reservations WHERE business_id = $1 AND serial_id = $2`,
-        [created.businessId, car.serialId],
-      ),
+    expect(
+      await postingCount(created.businessId, "automotive_reservation_deposit"),
+    ).toBe(1);
+    const { rows: reservationCount } = await dbLib.withTenant(
+      created.businessId,
+      () =>
+        dbLib.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM serial_reservations WHERE business_id = $1 AND serial_id = $2`,
+          [created.businessId, car.serialId],
+        ),
     );
     expect(Number(reservationCount[0].n)).toBe(1);
 
     // ---- a second site asks for the same car -------------------------------
-    const secondCustomer = await dbLib.withTenant(created.businessId, async () => {
-      const { rows } = await dbLib.query<{ id: string }>(
-        `INSERT INTO parties (business_id, name, phone, role, roles)
+    const secondCustomer = await dbLib.withTenant(
+      created.businessId,
+      async () => {
+        const { rows } = await dbLib.query<{ id: string }>(
+          `INSERT INTO parties (business_id, name, phone, role, roles)
          VALUES ($1, 'خانم خریدار', '09124445566', 'customer', ARRAY['customer']::text[])
          RETURNING id`,
-        [created.businessId],
-      );
-      return rows[0].id;
-    });
+          [created.businessId],
+        );
+        return rows[0].id;
+      },
+    );
     const losingRequestId = randomUUID();
     const losingApplied = await asRole("central", () =>
       dbLib.withTenant(created.businessId, () =>
@@ -467,14 +535,19 @@ describe("§19's offline/hybrid vehicle path", () => {
       ),
     );
     expect(losingApplied.ok).toBe(true);
-    const { rows: losingRows } = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ status: string; conflict_code: string }>(
-        `SELECT status, conflict_code FROM automotive_vehicle_offline_requests
+    const { rows: losingRows } = await dbLib.withTenant(
+      created.businessId,
+      () =>
+        dbLib.query<{ status: string; conflict_code: string }>(
+          `SELECT status, conflict_code FROM automotive_vehicle_offline_requests
           WHERE business_id = $1 AND id = $2`,
-        [created.businessId, losingRequestId],
-      ),
+          [created.businessId, losingRequestId],
+        ),
     );
-    expect(losingRows[0]).toMatchObject({ status: "conflict", conflict_code: "vehicle_reserved_by_other" });
+    expect(losingRows[0]).toMatchObject({
+      status: "conflict",
+      conflict_code: "vehicle_reserved_by_other",
+    });
     // …and the refusal changed nothing: still one hold, still one deposit.
     const { rows: stillOne } = await dbLib.withTenant(created.businessId, () =>
       dbLib.query<{ n: string }>(
@@ -483,57 +556,98 @@ describe("§19's offline/hybrid vehicle path", () => {
       ),
     );
     expect(Number(stillOne[0].n)).toBe(1);
-    expect(await postingCount(created.businessId, "automotive_reservation_deposit")).toBe(1);
+    expect(
+      await postingCount(created.businessId, "automotive_reservation_deposit"),
+    ).toBe(1);
     // The refusal is explainable to an operator.
     const resolution = offlineRules.automotiveConflictResolution(
-      losingRows[0].conflict_code as Parameters<typeof offlineRules.automotiveConflictResolution>[0],
+      losingRows[0].conflict_code as Parameters<
+        typeof offlineRules.automotiveConflictResolution
+      >[0],
     );
     expect(resolution.message.length).toBeGreaterThan(10);
     expect(resolution.actions.length).toBeGreaterThan(0);
 
     // ---- the answer travels back down --------------------------------------
     const refreshed = await dbLib.withTenant(created.businessId, () =>
-      stock.buildAutomotiveStockProjection(created.businessId, created.locationId),
+      stock.buildAutomotiveStockProjection(
+        created.businessId,
+        created.locationId,
+      ),
     );
     expect(refreshed).not.toBeNull();
     if (!refreshed) return;
-    expect(projectionContract.validateAutomotiveStockProjection(refreshed)).not.toBeNull();
+    expect(
+      projectionContract.validateAutomotiveStockProjection(refreshed),
+    ).not.toBeNull();
     expect(refreshed.vehicles[0]).toMatchObject({
       availability: "reserved",
       reservationId,
       state: "reserved",
     });
-    const verdicts = new Map(refreshed.requests.map((request) => [request.id, request]));
+    const verdicts = new Map(
+      refreshed.requests.map((request) => [request.id, request]),
+    );
     expect(verdicts.get(reserveRequestId)?.status).toBe("confirmed");
     expect(verdicts.get(losingRequestId)?.status).toBe("conflict");
 
     await useDatabase(localDb);
-    const appliedBack = await stock.applyAutomotiveStockProjection(created.businessId, created.locationId, refreshed);
+    const appliedBack = await stock.applyAutomotiveStockProjection(
+      created.businessId,
+      created.locationId,
+      refreshed,
+    );
     // Exactly one: the site's own pending request. The other refusal belongs to
     // a *different* site, and the applier deliberately does not invent a local
     // request row from the cloud's answer — a queue entry nobody on this branch
     // made would put a customer's name and deposit in the wrong hands.
     expect(appliedBack.requestsApplied).toBe(1);
-    const decided = await stock.listVehicleOfflineRequests(created.businessId, created.locationId);
-    const byId = new Map(decided.map((row) => [row.id as string, row]));
-    expect(byId.get(reserveRequestId)).toMatchObject({ status: "confirmed", reservation_id: reservationId });
+    const decided = await stock.listVehicleOfflineRequests(
+      created.businessId,
+      created.locationId,
+    );
+    const byId = new Map(decided.rows.map((row) => [row.id as string, row]));
+    expect(byId.get(reserveRequestId)).toMatchObject({
+      status: "confirmed",
+      reservation_id: reservationId,
+    });
     expect(byId.has(losingRequestId)).toBe(false);
-    const status = await stock.automotiveMirrorStatus(created.businessId, created.locationId);
+    const status = await stock.automotiveMirrorStatus(
+      created.businessId,
+      created.locationId,
+    );
     // The board shows the hold, nothing is left awaiting the cloud, and — since
     // the refusal was another site's — this branch carries no conflict row of
     // its own.
-    expect(status).toMatchObject({ vehicles: 1, reserved: 1, pendingRequests: 0, conflicts: 0 });
+    expect(status).toMatchObject({
+      vehicles: 1,
+      reserved: 1,
+      pendingRequests: 0,
+      conflicts: 0,
+    });
 
     // An older snapshot that still says «pending» must not resurrect a decided
     // request — the cloud's answer is final.
     const stale = {
       ...refreshed,
-      requests: refreshed.requests.map((request) => ({ ...request, status: "pending" as const, resolvedAt: null })),
+      requests: refreshed.requests.map((request) => ({
+        ...request,
+        status: "pending" as const,
+        resolvedAt: null,
+      })),
     };
-    const reapplied = await stock.applyAutomotiveStockProjection(created.businessId, created.locationId, stale);
+    const reapplied = await stock.applyAutomotiveStockProjection(
+      created.businessId,
+      created.locationId,
+      stale,
+    );
     expect(reapplied.requestsApplied).toBe(0);
-    const afterStale = await stock.listVehicleOfflineRequests(created.businessId, created.locationId, "confirmed");
-    expect(afterStale.map((row) => row.id)).toContain(reserveRequestId);
+    const afterStale = await stock.listVehicleOfflineRequests(
+      created.businessId,
+      created.locationId,
+      "confirmed",
+    );
+    expect(afterStale.rows.map((row) => row.id)).toContain(reserveRequestId);
 
     // ---- a refusal this branch can see, and close ---------------------------
     // A second clerk on the same car: the board still said «آماده فروش» when
@@ -563,7 +677,9 @@ describe("§19's offline/hybrid vehicle path", () => {
         actorRole: "owner",
       }),
     );
-    const { rows: refusedEventRows } = await dbLib.query<{ payload: Record<string, unknown> }>(
+    const { rows: refusedEventRows } = await dbLib.query<{
+      payload: Record<string, unknown>;
+    }>(
       `SELECT payload FROM sync_events WHERE location_id = $1 AND client_event_id = $2`,
       [created.locationId, refusedRequestId],
     );
@@ -589,16 +705,24 @@ describe("§19's offline/hybrid vehicle path", () => {
     // The event applied cleanly *and* was refused: a conflict is an answer, not
     // a transport failure, so the site is never asked to retry it forever.
     expect(refusedApply.ok).toBe(true);
-    const { rows: cloudRefusal } = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ status: string; conflict_code: string }>(
-        `SELECT status, conflict_code FROM automotive_vehicle_offline_requests WHERE business_id = $1 AND id = $2`,
-        [created.businessId, refusedRequestId],
-      ),
+    const { rows: cloudRefusal } = await dbLib.withTenant(
+      created.businessId,
+      () =>
+        dbLib.query<{ status: string; conflict_code: string }>(
+          `SELECT status, conflict_code FROM automotive_vehicle_offline_requests WHERE business_id = $1 AND id = $2`,
+          [created.businessId, refusedRequestId],
+        ),
     );
-    expect(cloudRefusal[0]).toMatchObject({ status: "conflict", conflict_code: "vehicle_reserved_by_other" });
+    expect(cloudRefusal[0]).toMatchObject({
+      status: "conflict",
+      conflict_code: "vehicle_reserved_by_other",
+    });
 
     const withRefusal = await dbLib.withTenant(created.businessId, () =>
-      stock.buildAutomotiveStockProjection(created.businessId, created.locationId),
+      stock.buildAutomotiveStockProjection(
+        created.businessId,
+        created.locationId,
+      ),
     );
     expect(withRefusal).not.toBeNull();
     if (!withRefusal) return;
@@ -609,11 +733,23 @@ describe("§19's offline/hybrid vehicle path", () => {
       withRefusal,
     );
     expect(refusalApplied.requestsApplied).toBe(1);
-    const openConflicts = await stock.listVehicleOfflineRequests(created.businessId, created.locationId, "conflict", {
-      unacknowledgedOnly: true,
-    });
-    expect(openConflicts.map((row) => row.id)).toEqual([refusedRequestId]);
-    expect((await stock.automotiveMirrorStatus(created.businessId, created.locationId)).conflicts).toBe(1);
+    const openConflicts = await stock.listVehicleOfflineRequests(
+      created.businessId,
+      created.locationId,
+      "conflict",
+      {
+        unacknowledgedOnly: true,
+      },
+    );
+    expect(openConflicts.rows.map((row) => row.id)).toEqual([refusedRequestId]);
+    expect(
+      (
+        await stock.automotiveMirrorStatus(
+          created.businessId,
+          created.locationId,
+        )
+      ).conflicts,
+    ).toBe(1);
 
     // The operator reads it and closes it: the count drops, the record does not.
     expect(
@@ -633,8 +769,23 @@ describe("§19's offline/hybrid vehicle path", () => {
         actorId: created.userId,
       }),
     ).toBe(false);
-    expect((await stock.automotiveMirrorStatus(created.businessId, created.locationId)).conflicts).toBe(0);
-    expect(await stock.listVehicleOfflineRequests(created.businessId, created.locationId, "conflict")).toHaveLength(1);
+    expect(
+      (
+        await stock.automotiveMirrorStatus(
+          created.businessId,
+          created.locationId,
+        )
+      ).conflicts,
+    ).toBe(0);
+    expect(
+      (
+        await stock.listVehicleOfflineRequests(
+          created.businessId,
+          created.locationId,
+          "conflict",
+        )
+      ).rows,
+    ).toHaveLength(1);
 
     // ---- the other offline-capable operation: release ----------------------
     const releaseRequestId = randomUUID();
@@ -654,7 +805,9 @@ describe("§19's offline/hybrid vehicle path", () => {
         actorRole: "owner",
       }),
     );
-    const { rows: releaseEventRows } = await dbLib.query<{ payload: Record<string, unknown> }>(
+    const { rows: releaseEventRows } = await dbLib.query<{
+      payload: Record<string, unknown>;
+    }>(
       `SELECT payload FROM sync_events WHERE location_id = $1 AND client_event_id = $2`,
       [created.locationId, releaseRequestId],
     );
@@ -678,20 +831,29 @@ describe("§19's offline/hybrid vehicle path", () => {
       ),
     );
     expect(released.ok).toBe(true);
-    const { rows: releasedReservation } = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ status: string }>(`SELECT status FROM serial_reservations WHERE business_id = $1 AND id = $2`, [
-        created.businessId,
-        reservationId,
-      ]),
+    const { rows: releasedReservation } = await dbLib.withTenant(
+      created.businessId,
+      () =>
+        dbLib.query<{ status: string }>(
+          `SELECT status FROM serial_reservations WHERE business_id = $1 AND id = $2`,
+          [created.businessId, reservationId],
+        ),
     );
     expect(releasedReservation[0].status).toBe("released");
     // The refundable deposit is unwound by the canonical service, not by the site.
-    expect(await postingCount(created.businessId, "automotive_reservation_deposit_refund")).toBe(1);
-    const { rows: releasedVehicle } = await dbLib.withTenant(created.businessId, () =>
-      dbLib.query<{ state: string }>(
-        `SELECT state FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2`,
-        [created.businessId, car.serialId],
+    expect(
+      await postingCount(
+        created.businessId,
+        "automotive_reservation_deposit_refund",
       ),
+    ).toBe(1);
+    const { rows: releasedVehicle } = await dbLib.withTenant(
+      created.businessId,
+      () =>
+        dbLib.query<{ state: string }>(
+          `SELECT state FROM automotive_vehicle_attributes WHERE business_id = $1 AND serial_id = $2`,
+          [created.businessId, car.serialId],
+        ),
     );
     expect(releasedVehicle[0].state).toBe("in_stock");
 
@@ -716,15 +878,24 @@ describe("§19's offline/hybrid vehicle path", () => {
       }
     });
     const afterArchive = await dbLib.withTenant(created.businessId, () =>
-      stock.buildAutomotiveStockProjection(created.businessId, created.locationId),
+      stock.buildAutomotiveStockProjection(
+        created.businessId,
+        created.locationId,
+      ),
     );
     expect(afterArchive).not.toBeNull();
     if (!afterArchive) return;
     expect(afterArchive.vehicles).toHaveLength(0);
     await useDatabase(localDb);
-    const cleared = await stock.applyAutomotiveStockProjection(created.businessId, created.locationId, afterArchive);
+    const cleared = await stock.applyAutomotiveStockProjection(
+      created.businessId,
+      created.locationId,
+      afterArchive,
+    );
     expect(cleared.removed).toBe(1);
-    expect(await stock.listMirrorVehicles(created.businessId, created.locationId)).toHaveLength(0);
+    expect(
+      await stock.listMirrorVehicles(created.businessId, created.locationId),
+    ).toHaveLength(0);
   }, 240_000);
 
   it("keeps the mirror and the queue inside their own tenant", async () => {
@@ -743,11 +914,13 @@ describe("§19's offline/hybrid vehicle path", () => {
     });
 
     await useDatabase(localDb);
-    const { rows: businessRows } = await dbLib.withoutTenantScope("platform", () =>
-      dbLib.query<{ id: string }>(
-        `INSERT INTO businesses (name, slug, industry) VALUES ('نمایشگاه سوم', $1, 'automotive') RETURNING id`,
-        [`third-${randomUUID().slice(0, 8)}`],
-      ),
+    const { rows: businessRows } = await dbLib.withoutTenantScope(
+      "platform",
+      () =>
+        dbLib.query<{ id: string }>(
+          `INSERT INTO businesses (name, slug, industry) VALUES ('نمایشگاه سوم', $1, 'automotive') RETURNING id`,
+          [`third-${randomUUID().slice(0, 8)}`],
+        ),
     );
     const thirdBusinessId = businessRows[0].id;
 
@@ -777,15 +950,17 @@ describe("§19's offline/hybrid vehicle path", () => {
     // Both tables carry a forced tenant policy, so a *bypassing* connection is
     // the only way to see across businesses — and the platform scope is what
     // the export/backup path uses, not application code.
-    const { rows: policyRows } = await dbLib.withoutTenantScope("platform", () =>
-      dbLib.query<{ relname: string; forced: boolean; policed: boolean }>(
-        `SELECT c.relname, c.relrowsecurity AND c.relforcerowsecurity AS forced,
+    const { rows: policyRows } = await dbLib.withoutTenantScope(
+      "platform",
+      () =>
+        dbLib.query<{ relname: string; forced: boolean; policed: boolean }>(
+          `SELECT c.relname, c.relrowsecurity AND c.relforcerowsecurity AS forced,
                 EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid) AS policed
            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
           WHERE n.nspname = 'public'
             AND c.relname IN ('automotive_vehicle_stock_mirror', 'automotive_vehicle_offline_requests')
           ORDER BY c.relname`,
-      ),
+        ),
     );
     expect(policyRows).toHaveLength(2);
     for (const row of policyRows) {

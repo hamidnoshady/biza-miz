@@ -48,7 +48,10 @@ function draft(overrides: Record<string, unknown> = {}) {
 
 describe("what an install may do with a car (§19)", () => {
   it("gives a Local-profile install authority over its own cars and nothing to queue", () => {
-    const capability = resolveAutomotiveOfflineCapability({ profile: "local", runtimeRole: "site" });
+    const capability = resolveAutomotiveOfflineCapability({
+      profile: "local",
+      runtimeRole: "site",
+    });
     expect(capability.mode).toBe("local_authority");
     expect(capability.localStockReads).toBe(true);
     expect(capability.reservationRequests).toBe(false);
@@ -60,7 +63,10 @@ describe("what an install may do with a car (§19)", () => {
 
   it("treats the central role as the authority itself, never as a requester", () => {
     for (const profile of ["cloud", "hybrid"] as const) {
-      const capability = resolveAutomotiveOfflineCapability({ profile, runtimeRole: "central" });
+      const capability = resolveAutomotiveOfflineCapability({
+        profile,
+        runtimeRole: "central",
+      });
       expect(capability.mode, profile).toBe("cloud_authority");
       expect(capability.reservationRequests, profile).toBe(false);
       expect(capability.releaseRequests, profile).toBe(false);
@@ -68,7 +74,10 @@ describe("what an install may do with a car (§19)", () => {
   });
 
   it("gives a paired hybrid site reads and two queued requests, and no financial decision", () => {
-    const capability = resolveAutomotiveOfflineCapability({ profile: "hybrid", runtimeRole: "site" });
+    const capability = resolveAutomotiveOfflineCapability({
+      profile: "hybrid",
+      runtimeRole: "site",
+    });
     expect(capability.mode).toBe("read_only_mirror");
     expect(capability.localStockReads).toBe(true);
     expect(capability.reservationRequests).toBe(true);
@@ -84,8 +93,14 @@ describe("what an install may do with a car (§19)", () => {
     // The resolver's only inputs are the stored profile and this process's
     // role: the same install answers the same way whether the cable is in or
     // out, which is what keeps authority from flipping mid-sale.
-    const offline = resolveAutomotiveOfflineCapability({ profile: "hybrid", runtimeRole: "site" });
-    const again = resolveAutomotiveOfflineCapability({ profile: "hybrid", runtimeRole: "site" });
+    const offline = resolveAutomotiveOfflineCapability({
+      profile: "hybrid",
+      runtimeRole: "site",
+    });
+    const again = resolveAutomotiveOfflineCapability({
+      profile: "hybrid",
+      runtimeRole: "site",
+    });
     expect(again).toEqual(offline);
     expect(Object.keys(offline)).not.toContain("online");
   });
@@ -98,11 +113,17 @@ describe("a queued request is never presented as a decision (§19)", () => {
     expect(validateOfflineRequestTransition("pending", "cancelled")).toBeNull();
     expect(validateOfflineRequestTransition("pending", "pending")).toBeNull();
     for (const terminal of ["confirmed", "conflict", "cancelled"] as const) {
-      for (const next of ["pending", "confirmed", "conflict", "cancelled"] as const) {
+      for (const next of [
+        "pending",
+        "confirmed",
+        "conflict",
+        "cancelled",
+      ] as const) {
         if (next === terminal) continue;
-        expect(validateOfflineRequestTransition(terminal, next), `${terminal}->${next}`).toBe(
-          `invalid_request_transition:${terminal}->${next}`,
-        );
+        expect(
+          validateOfflineRequestTransition(terminal, next),
+          `${terminal}->${next}`,
+        ).toBe(`invalid_request_transition:${terminal}->${next}`);
       }
     }
   });
@@ -111,45 +132,80 @@ describe("a queued request is never presented as a decision (§19)", () => {
     expect(offlineRequestIsOpen("pending")).toBe(true);
     for (const status of ["confirmed", "conflict", "cancelled"] as const) {
       expect(offlineRequestIsOpen(status), status).toBe(false);
-      expect(AUTOMOTIVE_OFFLINE_REQUEST_STATUS_LABELS[status].length).toBeGreaterThan(3);
+      expect(
+        AUTOMOTIVE_OFFLINE_REQUEST_STATUS_LABELS[status].length,
+      ).toBeGreaterThan(3);
     }
   });
 });
 
 describe("every refusal has a reason an operator can act on (§19)", () => {
   it("maps the canonical service's codes onto the conflict vocabulary", () => {
-    expect(conflictCodeForVehicleError("vehicle_not_found")).toBe("vehicle_not_found");
-    expect(conflictCodeForVehicleError("wrong_location")).toBe("wrong_location");
-    expect(conflictCodeForVehicleError("customer_not_found")).toBe("customer_not_found");
-    expect(conflictCodeForVehicleError("reservation_not_found")).toBe("reservation_not_found");
-    expect(conflictCodeForVehicleError("reservation_closed")).toBe("reservation_closed");
-    expect(conflictCodeForVehicleError("deposit_already_refunded")).toBe("reservation_closed");
-    for (const code of ["vehicle_not_available", "vehicle_reserved", "vehicle_sold", "vehicle_archived"]) {
-      expect(conflictCodeForVehicleError(code), code).toBe("vehicle_unavailable");
+    expect(conflictCodeForVehicleError("vehicle_not_found")).toBe(
+      "vehicle_not_found",
+    );
+    expect(conflictCodeForVehicleError("wrong_location")).toBe(
+      "wrong_location",
+    );
+    expect(conflictCodeForVehicleError("customer_not_found")).toBe(
+      "customer_not_found",
+    );
+    expect(conflictCodeForVehicleError("reservation_not_found")).toBe(
+      "reservation_not_found",
+    );
+    expect(conflictCodeForVehicleError("reservation_closed")).toBe(
+      "reservation_closed",
+    );
+    expect(conflictCodeForVehicleError("deposit_already_refunded")).toBe(
+      "reservation_closed",
+    );
+    for (const code of [
+      "vehicle_not_available",
+      "vehicle_reserved",
+      "vehicle_sold",
+      "vehicle_archived",
+    ]) {
+      expect(conflictCodeForVehicleError(code), code).toBe(
+        "vehicle_unavailable",
+      );
     }
     // Total on purpose: an unrecognized refusal is recorded bluntly rather than
     // dropped, so a request never fails silently.
-    expect(conflictCodeForVehicleError("something_new")).toBe("invalid_request");
+    expect(conflictCodeForVehicleError("something_new")).toBe(
+      "invalid_request",
+    );
   });
 
   it("offers a resolution for every conflict code", () => {
-    for (const code of Object.keys(AUTOMOTIVE_OFFLINE_CONFLICT_MESSAGES) as Array<
-      keyof typeof AUTOMOTIVE_OFFLINE_CONFLICT_MESSAGES
-    >) {
+    for (const code of Object.keys(
+      AUTOMOTIVE_OFFLINE_CONFLICT_MESSAGES,
+    ) as Array<keyof typeof AUTOMOTIVE_OFFLINE_CONFLICT_MESSAGES>) {
       const resolution = automotiveConflictResolution(code);
       expect(resolution.message.length, code).toBeGreaterThan(10);
       expect(resolution.actions.length, code).toBeGreaterThan(0);
     }
-    expect(automotiveConflictResolution("vehicle_reserved_by_other").actions).toEqual(["open_vehicle", "cancel"]);
-    expect(automotiveConflictResolution("customer_not_found").actions).toEqual(["retry", "cancel"]);
-    expect(automotiveConflictResolution("vehicle_not_found").actions).toEqual(["cancel"]);
+    expect(
+      automotiveConflictResolution("vehicle_reserved_by_other").actions,
+    ).toEqual(["open_vehicle", "cancel"]);
+    expect(automotiveConflictResolution("customer_not_found").actions).toEqual([
+      "retry",
+      "cancel",
+    ]);
+    expect(automotiveConflictResolution("vehicle_not_found").actions).toEqual([
+      "cancel",
+    ]);
   });
 });
 
 describe("the draft a counter clerk fills in while the cloud is out (§19)", () => {
   it("accepts a complete hold and trims what a person typed", () => {
     const result = validateVehicleReservationDraft(
-      draft({ customerName: "  خانم خریدار  ", expiresAt: "2026-02-01", expiresAtTime: "18:30", note: "  بیعانه  " }),
+      draft({
+        customerName: "  خانم خریدار  ",
+        expiresAt: "2026-02-01",
+        expiresAtTime: "18:30",
+        note: "  بیعانه  ",
+      }),
       { reservableStates: RESERVABLE, today: "2026-01-15" },
     );
     expect(result.ok).toBe(true);
@@ -167,7 +223,10 @@ describe("the draft a counter clerk fills in while the cloud is out (§19)", () 
       [{ depositRial: -1 }, "invalid_amount"],
       [{ depositRial: 1.5 }, "invalid_amount"],
       [{ depositRial: 5_000_000 }, "invalid_deposit_method"],
-      [{ depositRial: 5_000_000, depositMethod: "cheque" }, "invalid_deposit_method"],
+      [
+        { depositRial: 5_000_000, depositMethod: "cheque" },
+        "invalid_deposit_method",
+      ],
       [{ expiresAt: "2026-13-45" }, "invalid_date"],
       [{ expiresAt: "2026-02-30" }, "invalid_date"],
       [{ expiresAt: "2026-02-01", expiresAtTime: "25:00" }, "invalid_date"],
@@ -190,10 +249,13 @@ describe("the draft a counter clerk fills in while the cloud is out (§19)", () 
   });
 
   it("refuses an expiry that is already in the past", () => {
-    const result = validateVehicleReservationDraft(draft({ expiresAt: "2026-01-14" }), {
-      reservableStates: RESERVABLE,
-      today: "2026-01-15",
-    });
+    const result = validateVehicleReservationDraft(
+      draft({ expiresAt: "2026-01-14" }),
+      {
+        reservableStates: RESERVABLE,
+        today: "2026-01-15",
+      },
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toBe("invalid_date");
     // …while the same date is accepted when «today» has not reached it.
@@ -223,12 +285,22 @@ describe("the cloud re-validates the car, it does not replay the intent (§19)",
   };
 
   it("applies an unchanged, still-reservable car and reports a moved version", () => {
-    expect(classifyVehicleRequestReplay({ request, remote, reservableStates: RESERVABLE })).toEqual({
+    expect(
+      classifyVehicleRequestReplay({
+        request,
+        remote,
+        reservableStates: RESERVABLE,
+      }),
+    ).toEqual({
       outcome: "apply",
       versionMoved: false,
     });
     expect(
-      classifyVehicleRequestReplay({ request, remote: { ...remote, sourceVersion: 11 }, reservableStates: RESERVABLE }),
+      classifyVehicleRequestReplay({
+        request,
+        remote: { ...remote, sourceVersion: 11 },
+        reservableStates: RESERVABLE,
+      }),
     ).toEqual({ outcome: "apply", versionMoved: true });
   });
 
@@ -236,24 +308,44 @@ describe("the cloud re-validates the car, it does not replay the intent (§19)",
     expect(
       classifyVehicleRequestReplay({
         request,
-        remote: { ...remote, ownReservationId: "9d4e5f6a-1b2c-4d3e-8f4a-5b6c7d8e9f0a" },
+        remote: {
+          ...remote,
+          ownReservationId: "9d4e5f6a-1b2c-4d3e-8f4a-5b6c7d8e9f0a",
+        },
         reservableStates: RESERVABLE,
       }),
-    ).toEqual({ outcome: "duplicate", reservationId: "9d4e5f6a-1b2c-4d3e-8f4a-5b6c7d8e9f0a" });
+    ).toEqual({
+      outcome: "duplicate",
+      reservationId: "9d4e5f6a-1b2c-4d3e-8f4a-5b6c7d8e9f0a",
+    });
   });
 
   it("refuses with a named reason instead of merging two claims", () => {
-    const cases: Array<[Parameters<typeof classifyVehicleRequestReplay>[0]["remote"], string]> = [
+    const cases: Array<
+      [Parameters<typeof classifyVehicleRequestReplay>[0]["remote"], string]
+    > = [
       [{ ...remote, found: false, state: null }, "vehicle_not_found"],
-      [{ ...remote, locationId: "ffffffff-ffff-4fff-8fff-ffffffffffff" }, "wrong_location"],
-      [{ ...remote, blockingHoldId: "11111111-1111-4111-8111-111111111111" }, "vehicle_reserved_by_other"],
+      [
+        { ...remote, locationId: "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+        "wrong_location",
+      ],
+      [
+        { ...remote, blockingHoldId: "11111111-1111-4111-8111-111111111111" },
+        "vehicle_reserved_by_other",
+      ],
       [{ ...remote, state: "sold" }, "vehicle_unavailable"],
       [{ ...remote, state: "reserved" }, "vehicle_unavailable"],
       [{ ...remote, state: "transferred" }, "vehicle_unavailable"],
       [{ ...remote, state: null }, "vehicle_unavailable"],
     ];
     for (const [facts, code] of cases) {
-      expect(classifyVehicleRequestReplay({ request, remote: facts, reservableStates: RESERVABLE })).toEqual({
+      expect(
+        classifyVehicleRequestReplay({
+          request,
+          remote: facts,
+          reservableStates: RESERVABLE,
+        }),
+      ).toEqual({
         outcome: "conflict",
         code,
       });
@@ -261,7 +353,11 @@ describe("the cloud re-validates the car, it does not replay the intent (§19)",
     // A car that is still free wins even when its price moved in the meantime:
     // a price edit must not cost the customer the car.
     expect(
-      classifyVehicleRequestReplay({ request, remote: { ...remote, sourceVersion: 99 }, reservableStates: RESERVABLE }),
+      classifyVehicleRequestReplay({
+        request,
+        remote: { ...remote, sourceVersion: 99 },
+        reservableStates: RESERVABLE,
+      }),
     ).toEqual({ outcome: "apply", versionMoved: true });
   });
 });
@@ -273,10 +369,22 @@ describe("the mirror says how old it is (§19)", () => {
     expect(mirrorFreshness(null, now)).toBe("never");
     expect(mirrorFreshness("not-a-date", now)).toBe("never");
     expect(mirrorFreshness("2026-01-15T09:59:00.000Z", now)).toBe("fresh");
-    expect(mirrorFreshness(new Date(now.getTime() - AUTOMOTIVE_MIRROR_STALE_AFTER_MS).toISOString(), now)).toBe("fresh");
-    expect(mirrorFreshness(new Date(now.getTime() - AUTOMOTIVE_MIRROR_STALE_AFTER_MS - 1).toISOString(), now)).toBe(
-      "stale",
-    );
+    expect(
+      mirrorFreshness(
+        new Date(
+          now.getTime() - AUTOMOTIVE_MIRROR_STALE_AFTER_MS,
+        ).toISOString(),
+        now,
+      ),
+    ).toBe("fresh");
+    expect(
+      mirrorFreshness(
+        new Date(
+          now.getTime() - AUTOMOTIVE_MIRROR_STALE_AFTER_MS - 1,
+        ).toISOString(),
+        now,
+      ),
+    ).toBe("stale");
     expect(mirrorFreshness("2026-01-15T07:00:00.000Z", now)).toBe("stale");
   });
 
@@ -286,8 +394,12 @@ describe("the mirror says how old it is (§19)", () => {
   });
 
   it("honours a caller-supplied window", () => {
-    expect(mirrorFreshness("2026-01-15T09:59:00.000Z", now, 30_000)).toBe("stale");
-    expect(mirrorFreshness("2026-01-15T09:59:45.000Z", now, 30_000)).toBe("fresh");
+    expect(mirrorFreshness("2026-01-15T09:59:00.000Z", now, 30_000)).toBe(
+      "stale",
+    );
+    expect(mirrorFreshness("2026-01-15T09:59:45.000Z", now, 30_000)).toBe(
+      "fresh",
+    );
   });
 });
 
@@ -298,11 +410,15 @@ describe("a snapshot replaces rows, it never merges them (§19)", () => {
     expect(planMirrorReconcile({ local: null, remote: null })).toBe("skip");
     expect(planMirrorReconcile({ local: null, remote })).toBe("insert");
     expect(planMirrorReconcile({ local, remote: null })).toBe("remove");
-    expect(planMirrorReconcile({ local, remote: { ...remote, contentHash: "h1" } })).toBe("skip");
+    expect(
+      planMirrorReconcile({ local, remote: { ...remote, contentHash: "h1" } }),
+    ).toBe("skip");
     expect(planMirrorReconcile({ local, remote })).toBe("update");
     // Same row, later snapshot: the cloud's word replaces the mirror even when
     // its version looks older, so a site cannot be stuck on stale data.
-    expect(planMirrorReconcile({ local, remote: { ...remote, sourceVersion: 9 } })).toBe("update");
+    expect(
+      planMirrorReconcile({ local, remote: { ...remote, sourceVersion: 9 } }),
+    ).toBe("update");
   });
 });
 
@@ -311,13 +427,13 @@ describe("what the sync panel tells an operator (§19)", () => {
     const summary = automotiveSyncSummary({
       vehicles: 12,
       reserved: 3,
-      pendingRequests: 2,
+      openRequests: 2,
       conflicts: 1,
       freshness: "stale",
     });
     expect(summary).toContain("12 خودرو");
     expect(summary).toContain("3 رزرو");
-    expect(summary).toContain("2 درخواست در انتظار تأیید");
+    expect(summary).toContain("2 درخواست در انتظار پاسخ سرور");
     expect(summary).toContain("1 تعارض");
     expect(summary).toContain("قدیمی");
   });
@@ -326,12 +442,13 @@ describe("what the sync panel tells an operator (§19)", () => {
     const summary = automotiveSyncSummary({
       vehicles: 0,
       reserved: 0,
-      pendingRequests: 0,
+      openRequests: 0,
       conflicts: 0,
       freshness: "never",
     });
     expect(summary).not.toContain("رزرو");
     expect(summary).not.toContain("تعارض");
+    expect(summary).not.toContain("در انتظار پاسخ سرور");
     expect(summary).toContain("هنوز همگام نشده");
   });
 });

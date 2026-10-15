@@ -110,7 +110,8 @@ export function resolveAutomotiveOfflineCapability(input: {
       offlineSaleFinalization: false,
       offlineAcquisition: false,
       label: "ابری — مرجع خودروها همین سرور است",
-      reason: "این سرور مرکزی، مرجع خودروها، رزروها و اسناد مالی است؛ درخواستی برای تأیید وجود ندارد.",
+      reason:
+        "این سرور مرکزی، مرجع خودروها، رزروها و اسناد مالی است؛ درخواستی برای تأیید وجود ندارد.",
     };
   }
   return {
@@ -128,9 +129,13 @@ export function resolveAutomotiveOfflineCapability(input: {
 
 /** The two operations a site may queue. Everything else is cloud-only. */
 export const AUTOMOTIVE_OFFLINE_REQUEST_TYPES = ["reserve", "release"] as const;
-export type AutomotiveOfflineRequestType = (typeof AUTOMOTIVE_OFFLINE_REQUEST_TYPES)[number];
+export type AutomotiveOfflineRequestType =
+  (typeof AUTOMOTIVE_OFFLINE_REQUEST_TYPES)[number];
 
-export const AUTOMOTIVE_OFFLINE_REQUEST_TYPE_LABELS: Record<AutomotiveOfflineRequestType, string> = {
+export const AUTOMOTIVE_OFFLINE_REQUEST_TYPE_LABELS: Record<
+  AutomotiveOfflineRequestType,
+  string
+> = {
   reserve: "رزرو خودرو",
   release: "آزادسازی رزرو",
 };
@@ -138,20 +143,37 @@ export const AUTOMOTIVE_OFFLINE_REQUEST_TYPE_LABELS: Record<AutomotiveOfflineReq
 export const AUTOMOTIVE_OFFLINE_REQUEST_STATUSES = [
   /** Queued, not yet confirmed by the cloud. Never shown as a hold. */
   "pending",
+  /**
+   * The site withdrew it *after* a delivery attempt, so the cloud may already
+   * hold it. The withdrawal travels as a command of its own and this state lasts
+   * until the cloud answers — never presented as «لغوشده», because nothing local
+   * can prove it.
+   */
+  "cancelling",
   /** The cloud applied it: the hold exists (or was released) as of `resolvedAt`. */
   "confirmed",
   /** The cloud refused it; `conflictCode` says why and the UI offers the fix. */
   "conflict",
-  /** Cancelled locally before the cloud ever saw it. */
+  /**
+   * Withdrawn with nothing left to apply: either retracted locally before any
+   * delivery attempt (`retracted_at` on its event proves it), or withdrawn by the
+   * cloud — which, when it had already applied the hold, released it through the
+   * canonical reservation service and recorded that in the request's outcome.
+   */
   "cancelled",
 ] as const;
-export type AutomotiveOfflineRequestStatus = (typeof AUTOMOTIVE_OFFLINE_REQUEST_STATUSES)[number];
+export type AutomotiveOfflineRequestStatus =
+  (typeof AUTOMOTIVE_OFFLINE_REQUEST_STATUSES)[number];
 
-export const AUTOMOTIVE_OFFLINE_REQUEST_STATUS_LABELS: Record<AutomotiveOfflineRequestStatus, string> = {
+export const AUTOMOTIVE_OFFLINE_REQUEST_STATUS_LABELS: Record<
+  AutomotiveOfflineRequestStatus,
+  string
+> = {
   pending: "در انتظار تأیید سرور",
+  cancelling: "در حال لغو — در انتظار سرور",
   confirmed: "تأییدشده توسط سرور",
   conflict: "تعارض — نیازمند تصمیم",
-  cancelled: "لغوشده (بدون ارسال)",
+  cancelled: "لغوشده",
 };
 
 /**
@@ -159,24 +181,91 @@ export const AUTOMOTIVE_OFFLINE_REQUEST_STATUS_LABELS: Record<AutomotiveOfflineR
  * UI cannot disagree. Monotonic on purpose: a terminal answer never goes back
  * to `pending`, and a `confirmed` request never becomes a conflict later — the
  * cloud's answer is the answer.
+ *
+ * `cancelled` is terminal *because it is provable*: the only two ways to reach it
+ * are a local retraction of an event no delivery attempt was ever made for, and
+ * the cloud's own answer to a withdrawal. A row cannot be `cancelled` while a
+ * command that would reserve the car is still on its way — that was the old
+ * defect, and `planOfflineRequestCancel` below is what replaced it.
  */
 export function validateOfflineRequestTransition(
   from: AutomotiveOfflineRequestStatus,
   to: AutomotiveOfflineRequestStatus,
 ): string | null {
   if (from === to) return null;
-  const allowed: Record<AutomotiveOfflineRequestStatus, readonly AutomotiveOfflineRequestStatus[]> = {
-    pending: ["confirmed", "conflict", "cancelled"],
+  const allowed: Record<
+    AutomotiveOfflineRequestStatus,
+    readonly AutomotiveOfflineRequestStatus[]
+  > = {
+    pending: ["cancelling", "confirmed", "conflict", "cancelled"],
+    // A withdrawal in flight is answered by the cloud: withdrawn (cancelled), or
+    // a refusal it had already recorded (conflict). `confirmed` is not expected
+    // — a confirmed hold is released by the withdrawal — but an older cloud that
+    // does not know the withdrawal command would answer exactly that, and the
+    // board must be able to tell the operator to release the hold.
+    cancelling: ["cancelled", "confirmed", "conflict"],
     confirmed: [],
     conflict: [],
     cancelled: [],
   };
-  return allowed[from].includes(to) ? null : `invalid_request_transition:${from}->${to}`;
+  return allowed[from].includes(to)
+    ? null
+    : `invalid_request_transition:${from}->${to}`;
 }
 
-/** A request is still awaiting the cloud. */
-export function offlineRequestIsOpen(status: AutomotiveOfflineRequestStatus): boolean {
-  return status === "pending";
+/** A request is still awaiting the cloud: queued, or being withdrawn. */
+export function offlineRequestIsOpen(
+  status: AutomotiveOfflineRequestStatus,
+): boolean {
+  return status === "pending" || status === "cancelling";
+}
+
+/**
+ * What an operator's «لغو» can actually do, decided in one place and proved by
+ * the site's own delivery record.
+ *
+ * The rule the whole offline module turns on: **a cancellation may only be
+ * reported as done when the cloud cannot apply the command.** There are exactly
+ * two such situations, and they are told apart by one monotonic fact —
+ * `dispatch_attempted_at`, stamped the moment a delivery attempt leaves the
+ * machine:
+ *
+ *   * `retract` — no attempt was ever made, so the event is withdrawn locally in
+ *     the same transaction as the request row. The cancellation is complete
+ *     without a round trip, which is what makes cancelling a queue entry work
+ *     while the branch is offline;
+ *   * `withdraw` — an attempt was made (or the row is already in `cancelling`),
+ *     so the cloud may hold or be about to hold the car. The withdrawal travels
+ *     as its own idempotent command; the cloud cancels an unapplied request, or
+ *     releases an applied hold through the canonical reservation service, and
+ *     answers with what it actually did;
+ *   * `already_decided` — the cloud has answered a *reserve/release* already
+ *     (`confirmed`, `conflict`, `cancelled`); there is nothing to withdraw and
+ *     the honest answer is the row's real status, which the caller returns
+ *     instead of a cheerful `cancelled`.
+ */
+export type AutomotiveCancelAction = "retract" | "withdraw" | "already_decided";
+
+export function planOfflineRequestCancel(input: {
+  status: AutomotiveOfflineRequestStatus;
+  /** An event for this request exists and has not been retracted. */
+  eventPending: boolean;
+  /** …and a delivery attempt has left this machine (monotonic). */
+  dispatchAttempted: boolean;
+  /** …and the cloud acknowledged receiving it. */
+  pushed: boolean;
+}): AutomotiveCancelAction {
+  // A decision the cloud made is not up for local revision: a confirmed hold is
+  // released through the reservation flow, a refusal is acknowledged, and a
+  // proof-carrying cancellation is already done.
+  if (input.status !== "pending" && input.status !== "cancelling")
+    return "already_decided";
+  // An event with no attempt behind it can be proven never to have reached the
+  // cloud. A *missing* event is not proof of that — it may have been delivered
+  // and pruned — so the conservative branch is taken for it.
+  if (input.eventPending && !input.dispatchAttempted && !input.pushed)
+    return "retract";
+  return "withdraw";
 }
 
 /**
@@ -194,12 +283,19 @@ export const AUTOMOTIVE_OFFLINE_CONFLICT_CODES = [
   "reservation_closed",
   "invalid_request",
 ] as const;
-export type AutomotiveOfflineConflictCode = (typeof AUTOMOTIVE_OFFLINE_CONFLICT_CODES)[number];
+export type AutomotiveOfflineConflictCode =
+  (typeof AUTOMOTIVE_OFFLINE_CONFLICT_CODES)[number];
 
-export const AUTOMOTIVE_OFFLINE_CONFLICT_MESSAGES: Record<AutomotiveOfflineConflictCode, string> = {
-  vehicle_unavailable: "این خودرو دیگر در وضعیت قابل رزرو نیست (فروخته، بایگانی یا در حال انتقال است).",
-  vehicle_reserved_by_other: "این خودرو پیش از ارسال درخواست شما برای مشتری دیگری رزرو شده است.",
-  vehicle_not_found: "این خودرو در سرور مرکزی یافت نشد؛ ممکن است شناسهٔ محلی قدیمی باشد.",
+export const AUTOMOTIVE_OFFLINE_CONFLICT_MESSAGES: Record<
+  AutomotiveOfflineConflictCode,
+  string
+> = {
+  vehicle_unavailable:
+    "این خودرو دیگر در وضعیت قابل رزرو نیست (فروخته، بایگانی یا در حال انتقال است).",
+  vehicle_reserved_by_other:
+    "این خودرو پیش از ارسال درخواست شما برای مشتری دیگری رزرو شده است.",
+  vehicle_not_found:
+    "این خودرو در سرور مرکزی یافت نشد؛ ممکن است شناسهٔ محلی قدیمی باشد.",
   wrong_location: "این خودرو در شعبهٔ این نصب نیست.",
   customer_not_found: "مشتری انتخاب‌شده در سرور مرکزی ثبت نشده است.",
   reservation_not_found: "رزرو موردنظر در سرور مرکزی یافت نشد.",
@@ -207,7 +303,8 @@ export const AUTOMOTIVE_OFFLINE_CONFLICT_MESSAGES: Record<AutomotiveOfflineConfl
   invalid_request: "اطلاعات درخواست کامل یا معتبر نبود.",
 };
 
-export type AutomotiveConflictResolutionAction = "retry" | "cancel" | "open_vehicle";
+export type AutomotiveConflictResolutionAction =
+  "retry" | "cancel" | "open_vehicle";
 
 export interface AutomotiveConflictResolution {
   code: AutomotiveOfflineConflictCode;
@@ -215,15 +312,22 @@ export interface AutomotiveConflictResolution {
   actions: readonly AutomotiveConflictResolutionAction[];
 }
 
-export const AUTOMOTIVE_CONFLICT_ACTION_LABELS: Record<AutomotiveConflictResolutionAction, string> = {
+export const AUTOMOTIVE_CONFLICT_ACTION_LABELS: Record<
+  AutomotiveConflictResolutionAction,
+  string
+> = {
   retry: "ارسال دوباره با وضعیت تازه",
   cancel: "لغو درخواست",
   open_vehicle: "مشاهدهٔ خودرو",
 };
 
-export function automotiveConflictResolution(code: AutomotiveOfflineConflictCode): AutomotiveConflictResolution {
+export function automotiveConflictResolution(
+  code: AutomotiveOfflineConflictCode,
+): AutomotiveConflictResolution {
   const actions: AutomotiveConflictResolutionAction[] =
-    code === "vehicle_unavailable" || code === "vehicle_reserved_by_other" || code === "wrong_location"
+    code === "vehicle_unavailable" ||
+    code === "vehicle_reserved_by_other" ||
+    code === "wrong_location"
       ? ["open_vehicle", "cancel"]
       : code === "reservation_not_found" || code === "reservation_closed"
         ? ["open_vehicle", "cancel"]
@@ -239,7 +343,9 @@ export function automotiveConflictResolution(code: AutomotiveOfflineConflictCode
  * `invalid_request` rather than being dropped, because a request that failed
  * for a reason nobody recorded is worse than a blunt one.
  */
-export function conflictCodeForVehicleError(code: string): AutomotiveOfflineConflictCode {
+export function conflictCodeForVehicleError(
+  code: string,
+): AutomotiveOfflineConflictCode {
   switch (code) {
     case "vehicle_not_found":
       return "vehicle_not_found";
@@ -300,56 +406,95 @@ export function validateVehicleReservationDraft(
   raw: unknown,
   options: { reservableStates: readonly VehicleState[]; today?: string },
 ): VehicleRequestDraftValidation {
-  const fail = (error: string, message: string): VehicleRequestDraftValidation => ({ ok: false, error, message });
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return fail("invalid_vehicle", "درخواست نامعتبر است.");
+  const fail = (
+    error: string,
+    message: string,
+  ): VehicleRequestDraftValidation => ({ ok: false, error, message });
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return fail("invalid_vehicle", "درخواست نامعتبر است.");
   const input = raw as Record<string, unknown>;
 
   const text = (value: unknown): string | null =>
-    value === null || value === undefined || value === "" ? null : typeof value === "string" ? value.trim() : null;
+    value === null || value === undefined || value === ""
+      ? null
+      : typeof value === "string"
+        ? value.trim()
+        : null;
 
   const serialId = text(input.serialId);
   if (!serialId) return fail("invalid_vehicle", "خودرو انتخاب نشده است.");
   const customerId = text(input.customerId);
-  if (!customerId) return fail("customer_required", "رزرو بدون مشتری معنا ندارد؛ مشتری را انتخاب کنید.");
+  if (!customerId)
+    return fail(
+      "customer_required",
+      "رزرو بدون مشتری معنا ندارد؛ مشتری را انتخاب کنید.",
+    );
 
-  const depositRial = input.depositRial === undefined || input.depositRial === null ? 0 : input.depositRial;
-  if (typeof depositRial !== "number" || !Number.isSafeInteger(depositRial) || depositRial < 0) {
+  const depositRial =
+    input.depositRial === undefined || input.depositRial === null
+      ? 0
+      : input.depositRial;
+  if (
+    typeof depositRial !== "number" ||
+    !Number.isSafeInteger(depositRial) ||
+    depositRial < 0
+  ) {
     return fail("invalid_amount", "مبلغ ودیعه باید عددی صحیح و نامنفی باشد.");
   }
   const depositMethod =
-    input.depositMethod === null || input.depositMethod === undefined || input.depositMethod === ""
+    input.depositMethod === null ||
+    input.depositMethod === undefined ||
+    input.depositMethod === ""
       ? null
       : typeof input.depositMethod === "string"
         ? input.depositMethod
         : null;
-  if (depositMethod && !["cash", "card", "card_to_card", "online"].includes(depositMethod)) {
+  if (
+    depositMethod &&
+    !["cash", "card", "card_to_card", "online"].includes(depositMethod)
+  ) {
     return fail("invalid_deposit_method", "روش دریافت ودیعه نامعتبر است.");
   }
-  if (depositRial > 0 && !depositMethod) return fail("invalid_deposit_method", "روش دریافت ودیعه الزامی است.");
+  if (depositRial > 0 && !depositMethod)
+    return fail("invalid_deposit_method", "روش دریافت ودیعه الزامی است.");
 
   const expiresAt = text(input.expiresAt);
   if (expiresAt !== null) {
-    if (!ISO_DATE.test(expiresAt)) return fail("invalid_date", "تاریخ انقضای رزرو نامعتبر است.");
+    if (!ISO_DATE.test(expiresAt))
+      return fail("invalid_date", "تاریخ انقضای رزرو نامعتبر است.");
     const parsed = new Date(`${expiresAt}T00:00:00.000Z`);
-    if (!Number.isFinite(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== expiresAt) {
+    if (
+      !Number.isFinite(parsed.valueOf()) ||
+      parsed.toISOString().slice(0, 10) !== expiresAt
+    ) {
       return fail("invalid_date", "تاریخ انقضای رزرو نامعتبر است.");
     }
     // A hold whose expiry already passed would be born expired and would only
     // ever conflict; the counter should pick a real date.
-    if (options.today && expiresAt < options.today) return fail("invalid_date", "تاریخ انقضای رزرو گذشته است.");
+    if (options.today && expiresAt < options.today)
+      return fail("invalid_date", "تاریخ انقضای رزرو گذشته است.");
   }
   const expiresAtTime = text(input.expiresAtTime);
   if (expiresAtTime !== null) {
-    if (!expiresAt) return fail("invalid_date", "ساعت انقضای رزرو باید همراه تاریخ باشد.");
-    if (!CLOCK.test(expiresAtTime)) return fail("invalid_date", "ساعت انقضا باید به‌شکل ساعت:دقیقه باشد.");
+    if (!expiresAt)
+      return fail("invalid_date", "ساعت انقضای رزرو باید همراه تاریخ باشد.");
+    if (!CLOCK.test(expiresAtTime))
+      return fail("invalid_date", "ساعت انقضا باید به‌شکل ساعت:دقیقه باشد.");
   }
 
   const expectedVersion = input.expectedVersion;
-  if (typeof expectedVersion !== "number" || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+  if (
+    typeof expectedVersion !== "number" ||
+    !Number.isSafeInteger(expectedVersion) ||
+    expectedVersion < 1
+  ) {
     return fail("invalid_vehicle", "نسخهٔ خودرو در نمایش محلی نامعتبر است.");
   }
   const expectedState = input.expectedState;
-  if (typeof expectedState !== "string" || !options.reservableStates.includes(expectedState as VehicleState)) {
+  if (
+    typeof expectedState !== "string" ||
+    !options.reservableStates.includes(expectedState as VehicleState)
+  ) {
     return fail("vehicle_not_available", "این خودرو در وضعیت قابل رزرو نیست.");
   }
 
@@ -362,8 +507,12 @@ export function validateVehicleReservationDraft(
       expiresAt,
       expiresAtTime,
       depositRial,
-      depositMethod: depositMethod as VehicleReservationRequestDraft["depositMethod"],
-      depositRefundable: input.depositRefundable === undefined ? true : input.depositRefundable === true,
+      depositMethod:
+        depositMethod as VehicleReservationRequestDraft["depositMethod"],
+      depositRefundable:
+        input.depositRefundable === undefined
+          ? true
+          : input.depositRefundable === true,
       depositNote: text(input.depositNote),
       note: text(input.note),
       expectedVersion,
@@ -413,13 +562,21 @@ export function classifyVehicleRequestReplay(input: {
 }): VehicleReplayOutcome {
   const { request, remote } = input;
   if (!remote.found) return { outcome: "conflict", code: "vehicle_not_found" };
-  if (remote.locationId !== request.locationId) return { outcome: "conflict", code: "wrong_location" };
-  if (remote.ownReservationId) return { outcome: "duplicate", reservationId: remote.ownReservationId };
-  if (remote.blockingHoldId) return { outcome: "conflict", code: "vehicle_reserved_by_other" };
+  if (remote.locationId !== request.locationId)
+    return { outcome: "conflict", code: "wrong_location" };
+  if (remote.ownReservationId)
+    return { outcome: "duplicate", reservationId: remote.ownReservationId };
+  if (remote.blockingHoldId)
+    return { outcome: "conflict", code: "vehicle_reserved_by_other" };
   if (!remote.state || !input.reservableStates.includes(remote.state)) {
     return { outcome: "conflict", code: "vehicle_unavailable" };
   }
-  return { outcome: "apply", versionMoved: remote.sourceVersion !== null && remote.sourceVersion !== request.expectedVersion };
+  return {
+    outcome: "apply",
+    versionMoved:
+      remote.sourceVersion !== null &&
+      remote.sourceVersion !== request.expectedVersion,
+  };
 }
 
 /**
@@ -444,7 +601,10 @@ export function mirrorFreshness(
   return elapsed > staleAfterMs ? "stale" : "fresh";
 }
 
-export const AUTOMOTIVE_MIRROR_FRESHNESS_LABELS: Record<AutomotiveMirrorFreshness, string> = {
+export const AUTOMOTIVE_MIRROR_FRESHNESS_LABELS: Record<
+  AutomotiveMirrorFreshness,
+  string
+> = {
   fresh: "همگام",
   stale: "قدیمی — آخرین همگام‌سازی دیرتر از حد انتظار",
   never: "هنوز همگام نشده",
@@ -461,8 +621,16 @@ export const AUTOMOTIVE_MIRROR_FRESHNESS_LABELS: Record<AutomotiveMirrorFreshnes
 export type MirrorReconcileAction = "insert" | "update" | "skip" | "remove";
 
 export function planMirrorReconcile(input: {
-  local: { serialId: string; sourceVersion: number; contentHash: string } | null;
-  remote: { serialId: string; sourceVersion: number; contentHash: string } | null;
+  local: {
+    serialId: string;
+    sourceVersion: number;
+    contentHash: string;
+  } | null;
+  remote: {
+    serialId: string;
+    sourceVersion: number;
+    contentHash: string;
+  } | null;
 }): MirrorReconcileAction {
   const { local, remote } = input;
   if (local && remote && local.serialId !== remote.serialId) return "insert";
@@ -477,16 +645,26 @@ export function planMirrorReconcile(input: {
 }
 
 /** Counts an operator can see on the sync panel. */
+/**
+ * The one-line status above the board.
+ *
+ * `openRequests` is deliberately one number for two states — queued (`pending`) and
+ * being withdrawn (`cancelling`). Both mean "this branch has handed the cloud
+ * something and has not been answered", which is what the counter needs to know;
+ * splitting them here would let a withdrawal in flight read as if nothing were
+ * outstanding.
+ */
 export function automotiveSyncSummary(input: {
   vehicles: number;
   reserved: number;
-  pendingRequests: number;
+  openRequests: number;
   conflicts: number;
   freshness: AutomotiveMirrorFreshness;
 }): string {
   const parts = [`${input.vehicles} خودرو در موجودی محلی`];
   if (input.reserved > 0) parts.push(`${input.reserved} رزرو فعال`);
-  if (input.pendingRequests > 0) parts.push(`${input.pendingRequests} درخواست در انتظار تأیید`);
+  if (input.openRequests > 0)
+    parts.push(`${input.openRequests} درخواست در انتظار پاسخ سرور`);
   if (input.conflicts > 0) parts.push(`${input.conflicts} تعارض نیازمند تصمیم`);
   parts.push(AUTOMOTIVE_MIRROR_FRESHNESS_LABELS[input.freshness]);
   return parts.join(" · ");
