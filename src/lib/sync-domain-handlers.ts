@@ -20,6 +20,12 @@ import {
 } from "./transfer-service";
 import { isWasteReason, recordWasteInTransaction } from "./waste-service";
 import type { SyncEventDefinition } from "./sync-event-registry";
+import { deploymentRole } from "./deployment-role";
+import {
+  applyVehicleOfflineRequest,
+  recordVehicleOfflineRequestIntent,
+  parseVehicleOfflineRequestPayload,
+} from "./automotive-stock-service";
 import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
 import { applyShiftReplay, parseShiftSyncPayload } from "./shift-sync";
 import { amendClosedOrder, OrderAmendmentError } from "./order-amendment-service";
@@ -408,6 +414,49 @@ export async function applySyncDomainHandler(context: SyncDomainContext): Promis
       requiredString(payload, "reversedPayoutId");
       requiredString(payload, "amount");
       throw new SyncPayloadError("business_event_not_replayable");
+    // #839 §19: the two vehicle operations a paired desktop may queue. The
+    // cloud is the only side that applies them; a *site* that somehow receives
+    // one (a client flush through POST /api/sync/events, say) records the intent
+    // and lets the ordinary push carry it up, rather than holding a car it has
+    // no authority over.
+    case "automotive.vehicle.reservation.requested":
+    case "automotive.vehicle.reservation.released": {
+      const request = parseVehicleOfflineRequestPayload(payload, context.definition.handler);
+      if (deploymentRole() === "site") {
+        await recordVehicleOfflineRequestIntent({
+          client,
+          businessId,
+          locationId,
+          requestType: request.requestType,
+          payload: request.payload,
+          requestId: request.requestId,
+          actorId: actor.userId,
+        });
+        return {
+          effectType: "automotive_offline_request",
+          effectId: request.requestId,
+          result: { outcome: "queued", requestType: request.requestType },
+        };
+      }
+      const outcome = await applyVehicleOfflineRequest({
+        client,
+        businessId,
+        locationId,
+        requestId: request.requestId,
+        actorId: actor.userId,
+        payload: { ...request.payload, requestType: request.requestType },
+      });
+      return {
+        effectType: "automotive_offline_request",
+        effectId: request.requestId,
+        result: {
+          outcome: outcome.status,
+          conflictCode: outcome.conflictCode,
+          reservationId: outcome.reservationId,
+          duplicate: outcome.duplicate,
+        },
+      };
+    }
     default:
       throw new Error(`sync_handler_not_implemented:${context.definition.handler}`);
   }

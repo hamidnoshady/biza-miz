@@ -35,6 +35,7 @@ import { runMigrations } from "../scripts/migrate";
 import {
   automotiveClassifiedTables,
   automotiveCloudOnlyTables,
+  automotiveSiteLocalTables,
   automotiveSyncClassificationProblems,
   isAutomotiveTable,
 } from "../src/lib/automotive-sync-classification";
@@ -140,8 +141,10 @@ describe("§22's classification against the schema", () => {
     try {
       const tables = await schemaTables(client);
       // Four vehicle tables in 0212, two CRM extensions in 0213, the sale
-      // occurrence history in 0215, and the Media Library link in 0216.
-      expect(tables.length).toBe(8);
+      // occurrence history in 0215, the Media Library link in 0216, and — with
+      // §19's Wave 6 — the read-only branch mirror and the offline request
+      // queue from 0222.
+      expect(tables.length).toBe(10);
       expect(automotiveSyncClassificationProblems(tables)).toEqual({ uncovered: [], unknown: [] });
 
       // A sanity check on the guard itself: a table the sweep would see and the
@@ -149,6 +152,11 @@ describe("§22's classification against the schema", () => {
       const invented = automotiveSyncClassificationProblems([...tables, "automotive_vehicle_inspections"]);
       expect(invented.uncovered).toEqual(["automotive_vehicle_inspections"]);
       expect(invented.unknown).toEqual([]);
+
+      // Eight of the ten are cloud-only records; the two §19 tables are the
+      // exception, and the schema has them on this side too.
+      expect(tables).toEqual(expect.arrayContaining(automotiveSiteLocalTables()));
+      expect(automotiveCloudOnlyTables().some((table) => automotiveSiteLocalTables().includes(table))).toBe(false);
     } finally {
       await client.end();
     }
@@ -328,9 +336,22 @@ describe("§22's classification against the schema", () => {
     const snapshotBusiness = redeemed.snapshot.business as { industry?: string };
     expect(snapshotBusiness.industry).toBe("automotive");
     const classification = redeemed.snapshot.dataClassification;
-    expect(classification.ongoingDomainEvents.some((event) => event.includes("automotive"))).toBe(false);
+    // §19 (Wave 6) changed what this half of the audit may say, and the desktop
+    // is told the truth about the change: the trade's *only* ongoing events are
+    // the two hold requests the cloud decides, the authoritative records are
+    // still disclosed as cloud-only, and the branch board is disclosed as a
+    // read-only mirror rather than as a synchronised vehicle record.
+    expect(classification.ongoingDomainEvents.filter((event) => event.includes("automotive")).sort()).toEqual([
+      "automotive.vehicle.reservation.released@1",
+      "automotive.vehicle.reservation.requested@1",
+    ]);
     expect(classification.centralOnlyData.join(" ")).toContain("Automotive vehicle records");
+    // …and the exception is disclosed in the bucket it belongs to, with the
+    // read-only and no-cost properties spelled out, rather than as a second
+    // (contradictory) vehicle-record line.
+    expect(classification.centralOnlyData.join(" ")).not.toContain("vehicle board mirror");
     expect(classification.bootstrapMasterData.join(" ")).not.toContain("Automotive vehicle");
+    expect(classification.bootstrapMasterData.join(" ")).toContain("vehicle board mirror");
 
     const validation = pairingSnapshot.validateSnapshot(JSON.parse(JSON.stringify(redeemed.snapshot)));
     expect(validation).toMatchObject({ ok: true });
@@ -364,7 +385,11 @@ describe("§22's classification against the schema", () => {
 
     // No car crosses, and neither does anything hanging off one — cost, price
     // history, transfer, hold or lead preference. The desktop's till can sell
-    // retail goods from the catalogue; the vehicle it cannot hold is the point.
+    // retail goods from the catalogue; the authoritative vehicle record it
+    // cannot hold is the point. The two §19 tables exist here (the schema is
+    // the same on both sides) but pairing seeds neither: the mirror fills from
+    // the board snapshot on the first sync tick, and an empty queue is exactly
+    // what a freshly paired desktop should have.
     for (const table of automotiveClassifiedTables()) {
       const { rows } = await dbLib.withoutTenantScope("platform", () =>
         dbLib.query<{ n: string }>(`SELECT count(*)::text AS n FROM "${table}" WHERE business_id = $1`, [
@@ -384,6 +409,18 @@ describe("§22's classification against the schema", () => {
       ),
     );
     expect(Number(masterRows[0].n)).toBe(1);
+
+    // …and the two §19 tables carry no capture trigger either: the mirror is
+    // replaced whole from a snapshot and the queue is a site's own intents, so
+    // neither may ever be merged field by field.
+    const { rows: capturedRows } = await dbLib.withoutTenantScope("platform", () =>
+      dbLib.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+          WHERE NOT t.tgisinternal AND t.tgname = 'trg_sync_capture'
+            AND c.relname IN ('automotive_vehicle_stock_mirror', 'automotive_vehicle_offline_requests')`,
+      ),
+    );
+    expect(Number(capturedRows[0].n)).toBe(0);
 
     // Leaving the pool pointed at the laptop database would break every later
     // test in the file, so the server is restored here.
