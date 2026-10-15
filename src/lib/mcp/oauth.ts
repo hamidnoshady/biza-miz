@@ -194,6 +194,7 @@ export function canonicalRedirectUri(requested: string, registered: readonly str
     return null;
   }
   if (want.protocol !== "http:" || !LOOPBACK_HOSTS.has(want.hostname)) return null;
+  const candidates: URL[] = [];
   for (const candidate of registered) {
     let have: URL;
     try {
@@ -203,11 +204,17 @@ export function canonicalRedirectUri(requested: string, registered: readonly str
     }
     if (have.protocol !== "http:" || !LOOPBACK_HOSTS.has(have.hostname)) continue;
     if (have.pathname !== want.pathname || have.search !== want.search) continue;
-    const resolved = new URL(candidate);
-    resolved.port = want.port;
-    return resolved.toString();
+    candidates.push(have);
   }
-  return null;
+  // The same host spelling wins outright. Otherwise the alias is used only
+  // when it is unambiguous: a client that registered both 127.0.0.1 and [::1]
+  // must not have its code sent to whichever was listed first.
+  const exact = candidates.filter((have) => have.hostname === want.hostname);
+  const chosen = exact.length > 0 ? exact : candidates;
+  if (chosen.length !== 1) return null;
+  const resolved = new URL(chosen[0].toString());
+  resolved.port = want.port;
+  return resolved.toString();
 }
 
 /** Whether two redirect URIs name the same place, allowing the loopback rewrite above. */

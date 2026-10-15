@@ -246,6 +246,12 @@ describe("canonicalRedirectUri — loopback spelling", () => {
     expect(canonicalRedirectUri("http://evil.example:6274/oauth/callback", registered)).toBeNull();
   });
 
+  it("prefers the exact host and refuses to guess between two loopback spellings", () => {
+    const both = ["http://127.0.0.1/cb", "http://[::1]/cb"];
+    expect(canonicalRedirectUri("http://[::1]:5000/cb", both)).toBe("http://[::1]:5000/cb");
+    expect(canonicalRedirectUri("http://localhost:5000/cb", both)).toBeNull();
+  });
+
   it("treats the rewritten and registered spellings as the same URI at token time", () => {
     expect(sameRedirectUri("http://localhost:6274/cb", "http://127.0.0.1:6274/cb")).toBe(true);
     expect(sameRedirectUri("http://localhost:6275/cb", "http://127.0.0.1:6274/cb")).toBe(false);
