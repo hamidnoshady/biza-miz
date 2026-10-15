@@ -85,6 +85,26 @@ export const REPLICATION_DOMAIN_DEFINITIONS: readonly ReplicationDomainDefinitio
   // `automotive-sync-classification.ts` audits all eight tenant tables added by
   // 0212/0213/0215/0216 and states what each would need before it could travel.
   { key: "automotive_vehicle_stock", label: "Automotive vehicle records (VIN/chassis identity, landed cost, price and sale history, holds, transfers and media links)", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "single authority over the unit — a VIN is never merged", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "metadata", deploymentProfiles: ["cloud"], notes: "A car is the archetype of a serial: item_serials deliberately does not sync, and a second writer holding the same VINs could sell one car twice. Only the make/model catalogue (items) rides the retail_catalogue feed." },
+  // Issue #839 §19 (Wave 6) — the one part of the trade that *does* reach a
+  // paired desktop, and the shape that makes it safe. It is deliberately a
+  // second domain rather than an edit of the cloud-only one above: the
+  // *records* stay cloud-only, while this domain is the read-only projection a
+  // branch may hold plus the two requests it may queue.
+  //
+  //   * The projection travels as a whole snapshot
+  //     (`GET /api/server-sync/automotive-stock`, the site-profile pattern), not
+  //     as per-field state: the site holds the cloud's row or nothing, so there
+  //     is no merge to get wrong and a missed tick self-heals on the next one.
+  //   * The two events travel site → cloud and carry a *request*, never a
+  //     decision: `requestId` is both the row key and the idempotency key, and
+  //     the cloud re-validates the car's live state inside its own transaction
+  //     (row lock plus the one-active-hold-per-serial index) before it calls the
+  //     canonical reservation service.
+  //   * Nothing here posts money. A deposit becomes a liability only when the
+  //     cloud confirms; a sale is not offline-finalizable at all
+  //     (`offlineSaleFinalization: false` in `automotive-offline.ts`), which is
+  //     why no sale event appears in this domain.
+  { key: "automotive_vehicle_board", label: "Automotive branch board mirror and queued vehicle hold requests", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: ["automotive_vehicle"], conflictPolicy: "cloud decides: a queued hold is confirmed or refused with a named conflict code — never last-write-wins", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "defer", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "The branch's vehicle board is mirrored read-only and refreshed from the cloud every tick; the mirror carries no acquisition cost, capitalized cost or minimum price, so it cannot leak a margin. A paired desktop may queue exactly two operations — hold a car, release a hold it placed — each with an idempotency key, the version the operator saw and a named conflict when the cloud refuses. A pending request is never shown as a hold, and a deposit it records is not a liability until the cloud confirms." },
 ] as const;
 
 export function replicationCatalogue(): ReplicationDomain[] {

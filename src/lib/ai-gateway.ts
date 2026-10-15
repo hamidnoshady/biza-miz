@@ -19,11 +19,35 @@
 
 import type { AiConfig } from "./ai";
 
+/**
+ * The state of a stored AI credential (issue #757 §B).
+ *
+ * - `absent`        — nothing is stored: the credential was never registered,
+ *                     or it was revoked and its record removed.
+ * - `present`       — a credential is stored and this deployment's key
+ *                     decrypts it, so it is usable.
+ * - `undecryptable` — a credential IS stored, but it cannot be decrypted
+ *                     (a rotated `INTEGRATIONS_ENCRYPTION_KEY` / `JWT_SECRET`,
+ *                     or a corrupted ciphertext).
+ *
+ * The third state is the reason this type exists: "stored but unreadable" is
+ * NOT "absent". Treating it as absent would let the platform mint a
+ * replacement credential while the original one is still live inside
+ * LiteLLM — an orphaned credential nobody knows about and nobody can revoke.
+ */
+export type CredentialState = "absent" | "present" | "undecryptable";
+
 export interface AiGatewayConfig {
   enabled: boolean;
   baseUrl: string;
   /** The proxy admin key. Server-side only — never serialised to a client. */
   masterKey: string;
+  /**
+   * Whether the master credential is absent, usable, or stored-but-
+   * undecryptable. Never derive this from `masterKey.length`: an
+   * undecryptable credential decrypts to an empty string.
+   */
+  masterKeyState: CredentialState;
   /** Gateway model alias for chat; empty means "use the platform model". */
   chatModel: string;
   /** Gateway model alias for embeddings; empty means "use the chat model". */
@@ -111,7 +135,15 @@ export interface PublicAiGatewayConfig {
   chatModel: string;
   embeddingModel: string;
   virtualKeysEnabled: boolean;
+  /** A master credential is stored (usable or not) — never the credential itself. */
   hasMasterKey: boolean;
+  /**
+   * Whether the stored master credential can actually be used. An
+   * `undecryptable` credential must be shown as "needs recovery", never as
+   * "not registered": the operator has to restore the deployment key, not
+   * enter a new one.
+   */
+  masterKeyState: CredentialState;
   /** Issue #812 — managed knowledge, safe to render (the key is masked). */
   knowledgeEnabled: boolean;
   knowledgeBaseUrl: string;
@@ -161,6 +193,13 @@ export interface BusinessGateway {
   businessId: string;
   locationId: string | null;
   virtualKey: string | null;
+  /**
+   * Whether a credential is stored for this row and whether it can be read.
+   * `undecryptable` means a credential exists but this deployment cannot
+   * decrypt it — the row must be kept (it is the only memory of a possibly
+   * live LiteLLM key) and never silently replaced.
+   */
+  credentialState: CredentialState;
   keyAlias: string | null;
   spendUsd: number;
   syncedAt: string | null;
@@ -175,7 +214,10 @@ export interface PublicBusinessGateway {
   keyAlias: string | null;
   syncedAt: string | null;
   syncError: string | null;
+  /** A virtual key is stored for this row (usable or not) — never the key itself. */
   hasVirtualKey: boolean;
+  /** Whether the stored credential can actually be used. */
+  credentialState: CredentialState;
   /** Which gateway/platform model alias tenant calls resolve to. */
   effectiveModel: string;
 }
@@ -220,6 +262,7 @@ export function defaultGatewayConfig(): AiGatewayConfig {
     enabled: false,
     baseUrl: DEFAULT_GATEWAY_BASE_URL,
     masterKey: "",
+    masterKeyState: "absent",
     chatModel: "",
     embeddingModel: "",
     virtualKeysEnabled: false,
@@ -250,6 +293,7 @@ export function emptyBusinessGateway(businessId: string, locationId: string | nu
     businessId,
     locationId,
     virtualKey: null,
+    credentialState: "absent",
     keyAlias: null,
     spendUsd: 0,
     syncedAt: null,
@@ -300,7 +344,12 @@ export function toPublicGatewayConfig(config: AiGatewayConfig): PublicAiGatewayC
     chatModel: config.chatModel,
     embeddingModel: config.embeddingModel,
     virtualKeysEnabled: config.virtualKeysEnabled,
-    hasMasterKey: config.masterKey.length > 0,
+    // Derived from the *stored* credential, not from the decrypted value: a
+    // credential that cannot be decrypted is still a credential the operator
+    // has to recover, and hiding it would invite a replacement that orphans
+    // the live one.
+    hasMasterKey: config.masterKeyState !== "absent",
+    masterKeyState: config.masterKeyState,
     knowledgeEnabled: config.knowledgeEnabled,
     knowledgeBaseUrl: config.knowledgeBaseUrl,
     knowledgeModel: config.knowledgeModel,
@@ -421,6 +470,124 @@ export function gatewayStatusMessage(status: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Deleting a virtual key: what the proxy's answer actually proves
+// ---------------------------------------------------------------------------
+
+/**
+ * What a `/key/delete` response proves about the credential it was asked to
+ * remove.
+ *
+ * - `deleted`       — the proxy confirmed it removed exactly this credential.
+ * - `already_absent`— the proxy confirmed the credential was not there.
+ * - `unconfirmed`   — the response proves nothing at all.
+ *
+ * The local `ai_business_gateway` row is the platform's only memory of which
+ * credential is live, so `unconfirmed` must keep it. Deleting the row on
+ * anything weaker is how a credential gets orphaned inside LiteLLM: still
+ * valid, still billable, and unknown to everybody.
+ */
+export type KeyDeleteOutcome = "deleted" | "already_absent" | "unconfirmed";
+
+export interface KeyDeleteClassification {
+  outcome: KeyDeleteOutcome;
+  /** A short, secret-free explanation for the console and the audit trail. */
+  reason: string;
+}
+
+/**
+ * LiteLLM's own wording for "this key is not in the proxy's key table".
+ *
+ * `/key/delete` raises `404 {"error": "No keys found"}` when the key does not
+ * exist, and `/key/info` raises `404 {"error": {"message": "Key not found in
+ * database"}}`. A *route* miss answers `{"detail": "Not Found"}` instead —
+ * which says nothing at all about the key, and must never be read as "the
+ * key is gone".
+ */
+const KEY_ABSENT_PATTERNS = [
+  /no\s+keys?\s+found/i,
+  /key[^.]*\bnot\s+found\b/i,
+  /\bnot\s+found\s+in\s+database\b/i,
+];
+
+/**
+ * The proxy's explanation when it says the key itself is missing, or null
+ * when it said something else (including "the endpoint does not exist").
+ */
+export function keyAbsentSignal(body: unknown): string | null {
+  const detail = parseGatewayErrorDetail(body);
+  if (!detail) return null;
+  return KEY_ABSENT_PATTERNS.some((pattern) => pattern.test(detail)) ? detail : null;
+}
+
+/**
+ * The `deleted_keys` list of a `/key/delete` response, or null when the body
+ * is not the documented shape at all.
+ */
+function deletedKeysFromResponse(body: unknown): string[] | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const list = (body as { deleted_keys?: unknown }).deleted_keys;
+  if (!Array.isArray(list)) return null;
+  return list.filter((item): item is string => typeof item === "string");
+}
+
+/**
+ * Decide what LiteLLM's `/key/delete` answer means for ONE credential.
+ *
+ * The rule is deliberately narrow, because the consequence of being wrong is
+ * asymmetric: a false "deleted" orphans a live credential, while a false
+ * "unconfirmed" only asks the operator to try again.
+ *
+ * - **deleted** — a 2xx whose body is the documented `{ deleted_keys: [...] }`
+ *   shape *and* names the credential we asked it to remove.
+ * - **already_absent** — a 404 whose explanation is about the key itself
+ *   ("No keys found", "Key … not found").
+ * - **unconfirmed** — everything else: a 2xx with an unreadable body, a 2xx
+ *   whose `deleted_keys` does not name our credential (an empty list
+ *   included), a 404 that is really a missing route, and every other status.
+ *
+ * An error response that happens to carry `deleted_keys: []` is *not* a
+ * deletion: the status says the request failed, and the body never named the
+ * credential. Treating it as one is exactly the bug this function exists to
+ * prevent.
+ */
+export function classifyKeyDeleteResponse(input: {
+  status: number;
+  body: unknown;
+  /** The credential the request asked the proxy to remove (key value or alias). */
+  target: string;
+}): KeyDeleteClassification {
+  const { status, body, target } = input;
+  const wanted = target.trim();
+
+  if (status >= 200 && status < 300) {
+    const deleted = deletedKeysFromResponse(body);
+    if (!deleted) {
+      return { outcome: "unconfirmed", reason: "پاسخ حذف کلید در LiteLLM قابل تفسیر نبود." };
+    }
+    if (wanted && deleted.some((key) => key.trim() === wanted)) {
+      return { outcome: "deleted", reason: "LiteLLM حذف کلید را تأیید کرد." };
+    }
+    return {
+      outcome: "unconfirmed",
+      reason: "پاسخ حذف کلید، کلید درخواستی را نام نبرد؛ حذف تأیید نشد.",
+    };
+  }
+
+  if (status === 404) {
+    const absent = keyAbsentSignal(body);
+    if (absent) {
+      return { outcome: "already_absent", reason: "LiteLLM گفت کلید از پیش در دروازه وجود ندارد." };
+    }
+    return {
+      outcome: "unconfirmed",
+      reason: "دروازه ۴۰۴ داد اما دربارهٔ وضعیت همین کلید توضیحی نداد؛ حذف تأیید نشد.",
+    };
+  }
+
+  return { outcome: "unconfirmed", reason: `دروازه پاسخ خطا داد (${status})؛ حذف تأیید نشد.` };
+}
+
+// ---------------------------------------------------------------------------
 // The operator-facing error vocabulary
 // ---------------------------------------------------------------------------
 
@@ -463,6 +630,11 @@ export const GATEWAY_ERROR_TEXT: Record<string, string> = {
   // Revoke/rotate lifecycle safety (issue #748).
   ai_gateway_revoke_failed:
     "ابطال کلید مجازی در LiteLLM ناموفق بود؛ کلید فعلی برای حفظ ایمنی دست‌نخورده باقی ماند. دوباره تلاش کنید.",
+  // A stored credential that this deployment cannot decrypt (issue #757 §B).
+  ai_gateway_credential_undecryptable:
+    "کلید ذخیره‌شده قابل رمزگشایی نیست؛ کلید رمزگشایی این استقرار (INTEGRATIONS_ENCRYPTION_KEY یا JWT_SECRET) تغییر کرده یا نامعتبر است. تا بازیابی آن، هیچ کلید تازه‌ای صادر نمی‌شود تا اعتبارنامهٔ موجود در LiteLLM بلااستفاده و فراموش‌شده باقی نماند.",
+  ai_gateway_credential_recovery_required:
+    "بازیابی اعتبارنامه لازم است: کلید ذخیره‌شده قابل رمزگشایی نیست. ابتدا کلید رمزگشایی استقرار را بازیابی کنید یا اعتبارنامه را در LiteLLM با alias ثبت‌شده باطل کنید.",
 };
 
 /** The console translation of one `ai_gateway_*` code, when it has one. */
@@ -627,6 +799,14 @@ export function buildGatewayRuntime(input: {
   authKey?: string;
   body: Record<string, unknown>;
   virtualKeyResolved: boolean;
+  /**
+   * A branch or business credential is *stored* for this tenant but cannot be
+   * decrypted by this deployment (issue #757 §B) — distinct from "no
+   * credential was ever issued". The caller reports this with its own
+   * runtime-unavailable reason rather than the generic "missing" one, so an
+   * operator is pointed at key recovery instead of re-provisioning.
+   */
+  credentialUndecryptable: boolean;
 } | undefined {
   if (!input.gateway || !isGatewayActive(input.gateway)) return undefined;
   const gateway = input.gateway;
@@ -647,6 +827,8 @@ export function buildGatewayRuntime(input: {
       gateway,
     }),
     virtualKeyResolved: Boolean(trimmed(input.branch?.virtualKey) || trimmed(input.business?.virtualKey)),
+    credentialUndecryptable:
+      input.branch?.credentialState === "undecryptable" || input.business?.credentialState === "undecryptable",
     ...(() => {
       const key = resolveGatewayAuthKey({ gateway, business: input.business, branch: input.branch, tenantScoped: input.tenantScoped });
       return key ? { authKey: key } : {};

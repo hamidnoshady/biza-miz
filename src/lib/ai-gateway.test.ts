@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGatewayRuntime,
+  classifyKeyDeleteResponse,
   defaultGatewayConfig,
   emptyBusinessGateway,
   gatewayErrorText,
@@ -16,6 +17,7 @@ import {
   gatewayTurnPricing,
   gatewayStatusMessage,
   joinGatewayDetail,
+  keyAbsentSignal,
   keyInfoUrl,
   livelinessUrl,
   modelInfoUrl,
@@ -37,7 +39,13 @@ import {
 import { defaultConfig, isProvider, PROVIDERS, type AiConfig } from "./ai";
 
 function gateway(overrides: Partial<AiGatewayConfig> = {}): AiGatewayConfig {
-  return { ...defaultGatewayConfig(), enabled: true, ...overrides };
+  const merged = { ...defaultGatewayConfig(), enabled: true, ...overrides };
+  // A test fixture names `masterKey`; it never has to separately spell out
+  // `masterKeyState` unless it is deliberately testing the undecryptable case.
+  if (overrides.masterKeyState === undefined) {
+    merged.masterKeyState = merged.masterKey ? "present" : "absent";
+  }
+  return merged;
 }
 
 function business(overrides: Partial<BusinessGateway> = {}): BusinessGateway {
@@ -182,6 +190,7 @@ describe("request body", () => {
       embeddingModel: "pos-chat",
       authKey: "sk-master",
       virtualKeyResolved: false,
+      credentialUndecryptable: false,
       body: {},
     });
   });
@@ -355,7 +364,7 @@ describe("a fresh business/branch row", () => {
     expect(row.virtualKey).toBeNull();
     expect(row.spendUsd).toBe(0);
     expect(Object.keys(row).sort()).toEqual(
-      ["businessId", "keyAlias", "locationId", "spendUsd", "syncedAt", "syncError", "virtualKey"].sort(),
+      ["businessId", "credentialState", "keyAlias", "locationId", "spendUsd", "syncedAt", "syncError", "virtualKey"].sort(),
     );
   });
 });
@@ -465,6 +474,7 @@ describe("the public gateway config is technical-only", () => {
       embeddingModel: "",
       virtualKeysEnabled: false,
       hasMasterKey: true,
+      masterKeyState: "present",
       knowledgeEnabled: false,
       knowledgeBaseUrl: "",
       knowledgeModel: "",
@@ -482,5 +492,89 @@ describe("the public gateway config is technical-only", () => {
     const json = JSON.stringify(pub);
     expect(json).not.toContain("sk-secret");
     expect(json).not.toMatch(/usdRialRate|revenueMarginPercent|maxTurnRial|fallbackModels|publishedModels|allowBusinessModels|mcpServers|mcpEnabled|modelOverride/);
+  });
+});
+
+describe("classifying a /key/delete response (issue #757 §A)", () => {
+  it("confirms deletion only on a 2xx whose deleted_keys names the requested credential", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 200, body: { deleted_keys: ["sk-a"] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "deleted" });
+  });
+
+  it("does not confirm deletion when deleted_keys names a different credential", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 200, body: { deleted_keys: ["sk-other"] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+  });
+
+  it("does not confirm deletion on an empty deleted_keys list", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 200, body: { deleted_keys: [] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+  });
+
+  it("does not confirm deletion on a malformed 2xx body", () => {
+    expect(classifyKeyDeleteResponse({ status: 200, body: null, target: "sk-a" })).toMatchObject({
+      outcome: "unconfirmed",
+    });
+    expect(classifyKeyDeleteResponse({ status: 204, body: undefined, target: "sk-a" })).toMatchObject({
+      outcome: "unconfirmed",
+    });
+  });
+
+  it("confirms absence only on a 404 whose explanation is documented and about the key", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 404, body: { error: "No keys found" }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "already_absent" });
+    expect(
+      classifyKeyDeleteResponse({
+        status: 404,
+        body: { error: { message: "Key not found in database" } },
+        target: "sk-a",
+      }),
+    ).toMatchObject({ outcome: "already_absent" });
+  });
+
+  it("does not confirm absence on a generic 404 that says nothing about the key", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 404, body: { detail: "Not Found" }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+    expect(classifyKeyDeleteResponse({ status: 404, body: null, target: "sk-a" })).toMatchObject({
+      outcome: "unconfirmed",
+    });
+  });
+
+  it("rejects an error-status response that happens to carry an empty deleted_keys — the vulnerability issue #757 §A describes", () => {
+    expect(
+      classifyKeyDeleteResponse({
+        status: 400,
+        body: { error: "not all keys deleted", deleted_keys: [] },
+        target: "sk-a",
+      }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+    expect(
+      classifyKeyDeleteResponse({ status: 500, body: { deleted_keys: [] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+  });
+
+  it("never confirms anything on 401/403/5xx or an unreachable proxy (status 0)", () => {
+    for (const status of [401, 403, 500, 502, 0]) {
+      expect(classifyKeyDeleteResponse({ status, body: { deleted_keys: ["sk-a"] }, target: "sk-a" })).toMatchObject({
+        outcome: "unconfirmed",
+      });
+    }
+  });
+});
+
+describe("keyAbsentSignal", () => {
+  it("recognizes LiteLLM's documented key-absent wordings", () => {
+    expect(keyAbsentSignal({ error: "No keys found" })).toBeTruthy();
+    expect(keyAbsentSignal({ error: { message: "Key not found in database" } })).toBeTruthy();
+  });
+
+  it("returns null for a generic missing-route answer", () => {
+    expect(keyAbsentSignal({ detail: "Not Found" })).toBeNull();
+    expect(keyAbsentSignal(null)).toBeNull();
   });
 });

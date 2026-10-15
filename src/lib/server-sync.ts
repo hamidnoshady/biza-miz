@@ -38,6 +38,7 @@ import { refreshAppUpdateStatus } from "./app-update";
 import { expireStalePairingSessions } from "./pairing-service";
 import { runMasterSync } from "./master-sync-transport";
 import { runSiteProfileSync } from "./site-profile-service";
+import { runAutomotiveStockSync } from "./automotive-stock-service";
 import { runDriftCheck } from "./sync-health-service";
 import { attemptDue, nextAttemptAt } from "./sync-backoff";
 
@@ -1285,6 +1286,11 @@ export async function runServerSyncTick(): Promise<void> {
       // Phase 45: the branch settings and switches the cloud owns, before this
       // tick's events, so the bills pulled below land on the cloud's business day.
       await withTenant(row.business_id, () => runSiteProfileSync(row.business_id));
+      // Issue #839 §19: the same tick carries the branch's read-only vehicle
+      // mirror to a paired dealership desktop (and back the cloud's answers to
+      // its queued holds). It is a no-op for any business that is not the
+      // automotive trade, and it never touches the ledger.
+      await withTenant(row.business_id, () => runAutomotiveStockSync(row.business_id));
     } catch (err) {
       console.error(`site profile sync failed for business ${row.business_id}:`, err);
     }

@@ -167,6 +167,8 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "desktop sign-in completion (Phase 46) — signs no one in unless the state matches this window's cookie and the cloud redeems the code for this install's own bearer credential",
   "server-sync/site-profile":
     "server-to-server branch settings and switches (Phase 45) — authenticated by the exact site-device credential (requireSiteCredential); the credential names the business and branch, and the route only reads",
+  "server-sync/automotive-stock":
+    "server-to-server vehicle board for a paired dealership (issue #839 §19) — authenticated by the exact site-device credential (requireSiteCredential); the credential, never the request, names the business and branch, the route only reads, and the payload deliberately carries no acquisition cost, capitalized cost or minimum price",
   "desktop-releases/promote":
     "release-pipeline ingress — authenticated by the timing-safe DESKTOP_RELEASE_PUBLISH_TOKEN, never by a tenant browser session",
   "server-sync/credential-rotation":
