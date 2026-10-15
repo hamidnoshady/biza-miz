@@ -19,7 +19,11 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { ExternalLinkIcon } from "lucide-react";
+import { ExternalLinkIcon, PhoneCallIcon } from "lucide-react";
+import { useNative } from "@/components/native/native-provider";
+import { syncNativeCallerIdCache } from "@/lib/native/capabilities-client";
+import type { NativeCrmCallEndedEvent } from "@/lib/native/bridge-contract";
+import { PostCallActivitySheet } from "@/components/mobile/post-call-activity-sheet";
 import {
   PARTY_COLUMN_LABELS,
   partyOwnerScopeForRole,
@@ -255,7 +259,50 @@ export function PartiesSection({
   const [supplierAliases, setSupplierAliases] = useState<
     Record<string, { supplierId: string; locationName: string | null }>
   >({});
+  const [postCallTarget, setPostCallTarget] = useState<NativeCrmCallEndedEvent | null>(null);
+  const [callerIdSyncBusy, setCallerIdSyncBusy] = useState(false);
   const money = useMoney();
+  const native = useNative();
+  const isAndroidTwa = native.kind === "android-twa";
+
+  const syncCallerIdContacts = useCallback(
+    async (rows: PartyListRow[], tenantBusinessId: string, announce = false) => {
+      if (native.kind !== "android-twa" || native.connection !== "connected" || !tenantBusinessId) {
+        return;
+      }
+      const customers = rows
+        .filter((p) => Boolean(p.phone) && p.status !== false)
+        .map((p) => ({
+          id: p.id,
+          name: p.displayName,
+          phone: String(p.phone),
+          organizationName: p.categoryName ?? null,
+        }));
+      if (customers.length === 0) return;
+      setCallerIdSyncBusy(true);
+      const res = await syncNativeCallerIdCache(native.request, {
+        businessId: tenantBusinessId,
+        customers,
+      });
+      setCallerIdSyncBusy(false);
+      if (announce) {
+        if (res.syncedCount > 0) {
+          setInfo(
+            `مشخصات ${toPersianDigits(res.syncedCount)} مخاطب برای شناسایی تماس اندروید همگام‌سازی شد.`,
+          );
+        } else {
+          setError("همگام‌سازی مخاطبان با سرویس شناسایی تماس اندروید انجام نشد.");
+        }
+      }
+    },
+    [native.kind, native.connection, native.request],
+  );
+
+  useEffect(() => {
+    if (isAndroidTwa && businessId && parties && parties.length > 0) {
+      void syncCallerIdContacts(parties, businessId, false);
+    }
+  }, [isAndroidTwa, businessId, parties, syncCallerIdContacts]);
 
   const columns = useMemo(
     () => scope.columns.filter((column: PartyColumn) => showsColumn(scope, column)),
@@ -622,6 +669,18 @@ export function PartiesSection({
               the dialog already hides its editor behind `canManage`, but a
               view that cannot write should not offer the panel that writes.
             */}
+            {isAndroidTwa && businessId && (parties?.length ?? 0) > 0 ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={callerIdSyncBusy}
+                onClick={() => void syncCallerIdContacts(parties ?? [], businessId, true)}
+              >
+                <PhoneCallIcon aria-hidden="true" className="size-4" />
+                {callerIdSyncBusy ? "در حال همگام‌سازی…" : "همگام‌سازی شناسایی تماس"}
+              </Button>
+            ) : null}
             {!scope.readOnly ? (
               <Button type="button" variant="outline" size="sm" onClick={() => setShowCategories(true)}>
                 دسته‌ها
@@ -924,6 +983,17 @@ export function PartiesSection({
           supplierPartyId={statement.id}
           supplierLocationName={supplierAliases[statement.id]?.locationName}
           onClose={() => setStatement(null)}
+        />
+      ) : null}
+
+      {isAndroidTwa ? (
+        <PostCallActivitySheet
+          manualCall={postCallTarget}
+          onManualClose={() => setPostCallTarget(null)}
+          onLogged={() => {
+            setPostCallTarget(null);
+            setInfo("فعالیت تماس با موفقیت در پروندهٔ مشتری ثبت شد.");
+          }}
         />
       ) : null}
     </div>

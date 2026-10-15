@@ -126,4 +126,20 @@ describe("NativeDeviceManagementSettings", () => {
     render(<NativeDeviceManagementSettings isOwner permissions={[]} />);
     await screen.findByText(/هیچ نصب فعالی/);
   });
+
+  it("renders v3 native capability badges (push, biometric, caller-id) when enabled on a device", async () => {
+    devices = [
+      activeDevice({
+        hasPushToken: true,
+        biometricEnabled: true,
+        callerIdRoleHeld: true,
+        lastSyncAt: "2026-01-05T12:00:00.000Z",
+      }),
+    ];
+    render(<NativeDeviceManagementSettings isOwner permissions={[]} />);
+    await screen.findByText("سارا احمدی");
+    expect(screen.getByText("اعلان بومی فعال")).toBeTruthy();
+    expect(screen.getByText("بیومتریک فعال")).toBeTruthy();
+    expect(screen.getByText("شناسایی تماس فعال")).toBeTruthy();
+  });
 });

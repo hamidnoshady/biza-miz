@@ -75,8 +75,24 @@ describe("bridge contract matches its TypeScript mirror", () => {
     }
   });
 
-  it("keeps the command set small: no generic executor, only named commands", () => {
-    expect(NATIVE_COMMANDS).toEqual(["app.info", "notifications.status", "device.identity"]);
+  it("keeps the command set explicit: no generic executor, only named allowlisted commands", () => {
+    expect(NATIVE_COMMANDS).toEqual([
+      "app.info",
+      "notifications.status",
+      "device.identity",
+      "notifications.register",
+      "biometric.status",
+      "biometric.authenticate",
+      "scanner.scan",
+      "media.pick",
+      "share.open",
+      "printer.discover",
+      "printer.print",
+      "crm.callerId.status",
+      "crm.callerId.sync",
+      "sync.status",
+      "sync.trigger",
+    ]);
   });
 });
 
@@ -101,9 +117,11 @@ describe("environment table", () => {
     }
   });
 
-  it("never ships a placeholder origin for staging or production", () => {
-    expect(environments.environments.staging.webOrigin).toBe("");
-    expect(environments.environments.production.webOrigin).toBe("");
+  it("uses canonical HTTPS origins for staging and production and never ships .invalid", () => {
+    expect(environments.environments.staging.webOrigin).toBe("https://staging.eshobe.com");
+    expect(environments.environments.production.webOrigin).toBe("https://app.eshobe.com");
+    expect(environments.environments.staging.webOrigin.endsWith(".invalid")).toBe(false);
+    expect(environments.environments.production.webOrigin.endsWith(".invalid")).toBe(false);
   });
 
   it("maps every applicationId to its environment on the web side", () => {

@@ -40,6 +40,14 @@ interface RegisterBody {
   appVersionName?: unknown;
   appVersionCode?: unknown;
   bridgeVersion?: unknown;
+  capabilities?: unknown;
+  pushToken?: unknown;
+  pushProvider?: unknown;
+  pushChannels?: unknown;
+  biometricEnabled?: unknown;
+  biometricVerified?: unknown;
+  callerIdRoleHeld?: unknown;
+  syncedNow?: unknown;
 }
 
 /**
@@ -107,6 +115,31 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (typeof bridgeVersion !== "number" || !Number.isSafeInteger(bridgeVersion) || bridgeVersion < 1) {
     return NextResponse.json({ error: "invalid_bridge_version" }, { status: 400 });
   }
+  const pushToken = body.pushToken;
+  if (
+    pushToken !== undefined &&
+    pushToken !== null &&
+    (typeof pushToken !== "string" || pushToken.length < 16 || pushToken.length > 4096)
+  ) {
+    return NextResponse.json({ error: "invalid_push_token" }, { status: 400 });
+  }
+  const pushProvider = body.pushProvider;
+  if (
+    pushProvider !== undefined &&
+    pushProvider !== null &&
+    pushProvider !== "fcm" &&
+    pushProvider !== "webpush" &&
+    pushProvider !== "none"
+  ) {
+    return NextResponse.json({ error: "invalid_push_provider" }, { status: 400 });
+  }
+
+  const normalizedCapabilities = Array.isArray(body.capabilities)
+    ? body.capabilities.filter((c): c is string => typeof c === "string" && c.length <= 64).slice(0, 32)
+    : undefined;
+  const normalizedPushChannels = Array.isArray(body.pushChannels)
+    ? body.pushChannels.filter((c): c is string => typeof c === "string" && c.length <= 64).slice(0, 16)
+    : undefined;
 
   try {
     const { device, created } = await registerNativeDevice(session.businessId, session.sub, {
@@ -115,6 +148,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       appVersionName,
       appVersionCode,
       bridgeVersion,
+      ...(normalizedCapabilities !== undefined ? { capabilities: normalizedCapabilities } : {}),
+      ...(pushToken !== undefined ? { pushToken } : {}),
+      ...(pushProvider !== undefined ? { pushProvider } : {}),
+      ...(normalizedPushChannels !== undefined ? { pushChannels: normalizedPushChannels } : {}),
+      ...(typeof body.biometricEnabled === "boolean" ? { biometricEnabled: body.biometricEnabled } : {}),
+      ...(typeof body.biometricVerified === "boolean" ? { biometricVerified: body.biometricVerified } : {}),
+      ...(typeof body.callerIdRoleHeld === "boolean" ? { callerIdRoleHeld: body.callerIdRoleHeld } : {}),
+      ...(typeof body.syncedNow === "boolean" ? { syncedNow: body.syncedNow } : {}),
     });
     const nextToken = await signSession({
       ...session,

@@ -17,7 +17,15 @@
  */
 import { usePromptDialog } from "../prompt-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CameraIcon, FileUpIcon, Share2Icon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useNative } from "@/components/native/native-provider";
+import {
+  pickNativeMediaFiles,
+  pickedMediaFileToBrowserFile,
+  shareViaNativeOrWeb,
+  validatePickedMediaFile,
+} from "@/lib/native/capabilities-client";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { toPersianDigits } from "@/lib/digits";
@@ -480,13 +488,19 @@ export function MediaManager() {
     });
   }
 
-  async function upload(files: FileList | null) {
-    if (!files || files.length === 0) return;
+  async function uploadBrowserFiles(list: File[]) {
+    if (list.length === 0) return;
     setBusy(true);
     setError("");
     setNotice("");
-    const list = Array.from(files);
-    setUploadEvents(list.map((file, index) => ({ id: `${index}:${file.name}:${file.size}:${file.lastModified}`, file, status: "queued", attempt: 0 })));
+    setUploadEvents(
+      list.map((file, index) => ({
+        id: `${index}:${file.name}:${file.size}:${file.lastModified}`,
+        file,
+        status: "queued",
+        attempt: 0,
+      })),
+    );
     const { done, cancel } = uploadFiles(list, {
       folderId: folderId && folderId !== "root" ? folderId : null,
       onProgress: (event) => {
@@ -509,22 +523,48 @@ export function MediaManager() {
       const firstFailure = results.find((r) => r.status === "error");
       parts.push(`${toPersianDigits(failed)} فایل بارگذاری نشد${firstFailure?.message ? ` (${firstFailure.message})` : ""}`);
     }
-    // Every other mutating action in this screen calls `reload()` only on
-    // its own success path, so it and a freshly-set `error` never collide.
-    // An upload batch is the one action that must `reload()` even after a
-    // *partial* failure (the files that did succeed still belong in the
-    // grid) — so its summary, including the failed count, goes into
-    // `notice`, not the shared `error` state `load()`'s own success handler
-    // unconditionally clears. The per-file "ناموفق" row above already
-    // carries the visual weight of a failure; this line is just the count.
     if (parts.length > 0) setNotice(`${parts.join("؛ ")}.`);
     setBusy(false);
-    // The per-file panel itself is cleared on the *next* click of
-    // "بارگذاری فایل", not immediately — the operator should still see the
-    // finished list (what succeeded, what failed) until they choose to
-    // upload again, not have it vanish under them the instant the batch
-    // settles.
     reload();
+  }
+
+  async function upload(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    await uploadBrowserFiles(Array.from(files));
+  }
+
+  const native = useNative();
+  const isAndroidTwa = native.kind === "android-twa";
+
+  async function pickFromNativeAndroid(source: "camera" | "document") {
+    if (native.kind !== "android-twa" || native.connection !== "connected") {
+      fileInput.current?.click();
+      return;
+    }
+    const res = await pickNativeMediaFiles(native.request, {
+      mode: source,
+      acceptMimeTypes:
+        source === "camera"
+          ? ["image/jpeg", "image/png", "image/webp"]
+          : ["image/jpeg", "image/png", "image/webp", "application/pdf"],
+      multiple: source === "document",
+    });
+    if (res.files.length === 0) {
+      return;
+    }
+    const converted: File[] = [];
+    for (const item of res.files) {
+      const validation = validatePickedMediaFile(item);
+      if (!validation.valid) {
+        setError("نوع یا حجم فایل انتخاب‌شده مجاز نیست.");
+        return;
+      }
+      const file = pickedMediaFileToBrowserFile(item);
+      if (file) converted.push(file);
+    }
+    if (converted.length > 0) {
+      await uploadBrowserFiles(converted);
+    }
   }
 
   function cancelUpload() {
@@ -988,10 +1028,32 @@ export function MediaManager() {
       <SectionCard
         title="پوشه‌ها و فیلترها"
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" variant="outline" onClick={() => setCreatingFolder((v) => !v)}>
               پوشهٔ جدید
             </Button>
+            {isAndroidTwa ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !payload.storage.ready}
+                  onClick={() => void pickFromNativeAndroid("camera")}
+                >
+                  <CameraIcon aria-hidden="true" className="size-4" />
+                  دوربین
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !payload.storage.ready}
+                  onClick={() => void pickFromNativeAndroid("document")}
+                >
+                  <FileUpIcon aria-hidden="true" className="size-4" />
+                  انتخاب از دستگاه
+                </Button>
+              </>
+            ) : null}
             <Button
               size="sm"
               disabled={busy || !payload.storage.ready}
@@ -1518,6 +1580,7 @@ export function AssetDrawer({
   const [assetCollections, setAssetCollections] = useState<{ id: string; name: string }[] | null>(null);
   const [wpConnections, setWpConnections] = useState<WpPushConnection[] | null>(null);
   const [wpBusyId, setWpBusyId] = useState<string | null>(null);
+  const native = useNative();
 
   const loadAssetCollections = useCallback(() => {
     api<{ collections: { id: string; name: string }[] }>(`/api/media/${asset.id}/collections`).then(
@@ -1893,9 +1956,24 @@ export function AssetDrawer({
       <div className={`${cardClass} max-h-[92vh] w-full max-w-2xl overflow-y-auto p-4 sm:p-6`}>
         <div className="mb-4 flex items-start justify-between gap-3">
           <h2 className="text-base font-semibold">{asset.fileName}</h2>
-          <Button size="sm" variant="ghost" onClick={onClose}>
-            بستن
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                void shareViaNativeOrWeb(native.request, {
+                  title: asset.fileName,
+                  url: `${window.location.origin}/api/media/${asset.id}/file`,
+                })
+              }
+            >
+              <Share2Icon aria-hidden="true" className="size-4" />
+              اشتراک‌گذاری
+            </Button>
+            <Button size="sm" variant="ghost" onClick={onClose}>
+              بستن
+            </Button>
+          </div>
         </div>
 
         {asset.kind === "image" && asset.mimeType !== "image/svg+xml" ? (

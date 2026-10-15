@@ -32,6 +32,7 @@ import { classifyDeliveryError, type PrinterErrorCode } from "./errors";
 import type { PrinterPurpose, PrinterTarget } from "./types";
 import type { DesktopPrintingBridge } from "../desktop-bridge";
 import "../desktop-bridge"; // registers the `Window.businessSuiteDesktop` global augmentation
+import { getActiveAndroidPrintingBridge } from "../native/android-printing-bridge";
 
 /** What a caller asks the server to print: a stored document, or the product's own sample. */
 export type PrintRequestPayload = { document: PrintDocumentRef } | { job: PrintSampleJob };
@@ -43,10 +44,13 @@ function connectorBaseUrl(): string {
   return process.env.NEXT_PUBLIC_PRINT_CONNECTOR_URL || `http://127.0.0.1:${CONNECTOR_PORT}`;
 }
 
-/** Are we inside the desktop app, with its direct native-printing bridge available? */
+/** Are we inside the desktop app or Android TWA with its direct native-printing bridge available? */
 function desktopPrintingBridge(): DesktopPrintingBridge | null {
   if (typeof window === "undefined") return null;
-  return window.businessSuiteDesktop?.printing ?? null;
+  if (window.businessSuiteDesktop?.printing) {
+    return window.businessSuiteDesktop.printing;
+  }
+  return getActiveAndroidPrintingBridge();
 }
 
 

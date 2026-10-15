@@ -88,14 +88,152 @@ describe("parseCommandResult and parseEventPayload", () => {
   it("checks a result against the shape of the command that produced it", () => {
     expect(parseCommandResult("app.info", APP_INFO)).toEqual(APP_INFO);
     expect(parseCommandResult("notifications.status", APP_INFO)).toBeNull();
-    expect(parseCommandResult("device.identity", { installationId: "a1b2c3d4e5f647" })).toEqual({
-      installationId: "a1b2c3d4e5f647",
+    expect(parseCommandResult("device.identity", { installationId: "a1b2c3d4e5f64789" })).toEqual({
+      installationId: "a1b2c3d4e5f64789",
+    });
+    expect(
+      parseCommandResult("notifications.register", {
+        permission: "granted",
+        fcmToken: "fcm_token_1234567890abcdef",
+        channels: ["orders", "crm", "unknown_channel"],
+        pushProvider: "fcm",
+      }),
+    ).toEqual({
+      permission: "granted",
+      fcmToken: "fcm_token_1234567890abcdef",
+      channels: ["orders", "crm"],
+      pushProvider: "fcm",
+    });
+    expect(
+      parseCommandResult("biometric.status", {
+        available: true,
+        enrolled: true,
+        strength: "strong",
+        credentialManagerAvailable: true,
+      }),
+    ).toEqual({
+      available: true,
+      enrolled: true,
+      strength: "strong",
+      credentialManagerAvailable: true,
+    });
+    expect(
+      parseCommandResult("biometric.authenticate", {
+        authenticated: true,
+        method: "biometric",
+        verifiedAt: "2026-10-15T10:00:00Z",
+        challengeId: "chal-1",
+      }),
+    ).toEqual({
+      authenticated: true,
+      method: "biometric",
+      verifiedAt: "2026-10-15T10:00:00Z",
+      challengeId: "chal-1",
+    });
+    expect(
+      parseCommandResult("scanner.scan", {
+        value: "6260000000001",
+        format: "ean_13",
+        source: "code_scanner",
+      }),
+    ).toEqual({
+      value: "6260000000001",
+      format: "ean_13",
+      source: "code_scanner",
+    });
+    expect(
+      parseCommandResult("printer.discover", {
+        printers: [
+          {
+            id: "system_print",
+            name: "Android System Print",
+            transport: "system_print",
+            address: null,
+            paperWidthMm: 80,
+            online: true,
+          },
+        ],
+        bluetoothPermission: "not_determined",
+      }),
+    ).toEqual({
+      printers: [
+        {
+          id: "system_print",
+          name: "Android System Print",
+          transport: "system_print",
+          address: null,
+          paperWidthMm: 80,
+          online: true,
+        },
+      ],
+      bluetoothPermission: "not_determined",
+    });
+    expect(
+      parseCommandResult("crm.callerId.status", {
+        roleHeld: true,
+        supported: true,
+        cachedCustomerCount: 14,
+        businessId: "biz-1",
+        lastSyncedAt: "2026-10-15T10:00:00Z",
+      }),
+    ).toEqual({
+      roleHeld: true,
+      supported: true,
+      cachedCustomerCount: 14,
+      businessId: "biz-1",
+      lastSyncedAt: "2026-10-15T10:00:00Z",
+    });
+    expect(
+      parseCommandResult("sync.status", {
+        scheduled: true,
+        networkAvailable: true,
+        businessId: "biz-1",
+        pendingCount: 2,
+        lastSyncedAt: "2026-10-15T10:00:00Z",
+        revoked: false,
+      }),
+    ).toEqual({
+      scheduled: true,
+      networkAvailable: true,
+      businessId: "biz-1",
+      pendingCount: 2,
+      lastSyncedAt: "2026-10-15T10:00:00Z",
+      revoked: false,
     });
   });
 
   it("checks an event payload against its declared shape", () => {
     expect(parseEventPayload("bridge.ready", APP_INFO)).toEqual(APP_INFO);
     expect(parseEventPayload("bridge.ready", { permission: "granted" })).toBeNull();
+    expect(
+      parseEventPayload("navigation.deepLink", {
+        path: "/accounting/orders",
+        notificationCategory: "orders",
+        businessId: "biz-1",
+      }),
+    ).toEqual({
+      path: "/accounting/orders",
+      notificationCategory: "orders",
+      businessId: "biz-1",
+    });
+    expect(parseEventPayload("navigation.deepLink", { path: "//evil.example" })).toBeNull();
+    expect(
+      parseEventPayload("crm.callEnded", {
+        phoneNormalized: "+989121234567",
+        direction: "incoming",
+        durationSeconds: 95,
+        customerId: "cust-1",
+        customerName: "رضا محمدی",
+        endedAt: "2026-10-15T10:05:00Z",
+      }),
+    ).toEqual({
+      phoneNormalized: "+989121234567",
+      direction: "incoming",
+      durationSeconds: 95,
+      customerId: "cust-1",
+      customerName: "رضا محمدی",
+      endedAt: "2026-10-15T10:05:00Z",
+    });
   });
 });
 
@@ -104,6 +242,18 @@ describe("parseNativeEnvelope", () => {
     expect(
       parseNativeEnvelope({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "abc-123", ok: true, result: APP_INFO }),
     ).toEqual({ v: NATIVE_BRIDGE_VERSION, kind: "response", id: "abc-123", ok: true, result: APP_INFO });
+  });
+
+  it("accepts backward-compatible v1 and v2 frames from older Android builds while rejecting v0", () => {
+    expect(parseNativeEnvelope({ v: 1, kind: "response", id: "abc-1", ok: true, result: APP_INFO })).toMatchObject({
+      v: 1,
+      ok: true,
+    });
+    expect(parseNativeEnvelope({ v: 2, kind: "response", id: "abc-2", ok: true, result: APP_INFO })).toMatchObject({
+      v: 2,
+      ok: true,
+    });
+    expect(parseNativeEnvelope({ v: 0, kind: "response", id: "abc-0", ok: true, result: APP_INFO })).toBeNull();
   });
 
   it("maps an unrecognised error code to native_failure rather than trusting the app's wording", () => {

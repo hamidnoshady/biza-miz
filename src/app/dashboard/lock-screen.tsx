@@ -1,8 +1,10 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState } from "react";
-import { LockIcon } from "lucide-react";
+import { FingerprintIcon, LockIcon } from "lucide-react";
 import { PinPad } from "@/components/auth/pin-pad";
+import { useNative } from "@/components/native/native-provider";
+import { authenticateWithNativeBiometric } from "@/lib/native/capabilities-client";
 import { overlayPanelClass } from "./page-chrome";
 import { SIDEBAR_FOOTER_BUTTON_CLASS } from "./sidebar-nav-styles";
 
@@ -59,6 +61,8 @@ function LockOverlay({ fullName, onUnlock }: { fullName: string; onUnlock: () =>
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const { capabilities, request } = useNative();
+  const hasNativeBiometric = capabilities.biometric.provider === "native";
 
   async function submit(pin: string) {
     setBusy(true);
@@ -69,11 +73,46 @@ function LockOverlay({ fullName, onUnlock }: { fullName: string; onUnlock: () =>
       body: JSON.stringify({ pin }),
     });
     setBusy(false);
+    if (res.status === 401 || res.status === 403) {
+      window.location.assign("/login");
+      return;
+    }
     if (res.ok) {
       onUnlock();
     } else {
       setError("پین نادرست است.");
       setAttempt((a) => a + 1);
+    }
+  }
+
+  async function unlockWithNativeBiometric() {
+    setBusy(true);
+    setError(null);
+    try {
+      const bio = await authenticateWithNativeBiometric(request, {
+        title: "بازگشایی قفل بیزا میز",
+        subtitle: fullName,
+      });
+      if (!bio.authenticated) {
+        setError("تأیید بیومتریک انجام نشد. از پین استفاده کنید.");
+        return;
+      }
+      // Server-authoritative session + revocation check: biometric unlock
+      // never bypasses an expired session or a revoked Android installation.
+      const res = await fetch("/api/native-devices/self", { method: "GET" });
+      if (res.status === 401 || res.status === 403) {
+        window.location.assign("/login");
+        return;
+      }
+      if (!res.ok) {
+        setError("نشست معتبر نیست. لطفاً پین را وارد کنید.");
+        return;
+      }
+      onUnlock();
+    } catch {
+      setError("تأیید بیومتریک لغو شد یا در دسترس نیست. لطفاً پین را وارد کنید.");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -83,6 +122,17 @@ function LockOverlay({ fullName, onUnlock }: { fullName: string; onUnlock: () =>
         <p className="mb-1 text-sm text-muted-foreground">صفحه قفل است</p>
         <p className="mb-4 font-semibold">{fullName}</p>
         <PinPad onComplete={submit} busy={busy} error={error} resetKey={attempt} />
+        {hasNativeBiometric ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void unlockWithNativeBiometric()}
+            className="mt-4 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-border bg-secondary px-4 py-2.5 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
+          >
+            <FingerprintIcon className="size-4 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+            <span>بازگشایی با اثر انگشت یا چهره</span>
+          </button>
+        ) : null}
       </div>
     </div>
   );

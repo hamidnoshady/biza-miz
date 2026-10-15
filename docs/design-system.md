@@ -369,10 +369,35 @@ tab and the Android TWA shell.
 This was `ReportTable` (`src/app/dashboard/reports/report-table.tsx`), independently reinvented
 by the reports screens before it converged on one definition; it is now the shared primitive
 for every module, with `ReportTable` kept as a thin, compatible wrapper over it so reports did
-not need to change. `src/app/(app)/crm/leads-section.tsx` is the first adopter outside reports.
-Most other `DataTable` call sites still render a bare, horizontally-scrolling table on a phone —
-`ISSUE_884_PLAN.md`'s acceptance-criteria table tracks adoption as ongoing, mechanical follow-up
-work, not a design question.
+not need to change. `src/app/(app)/crm/leads-section.tsx` and
+`src/app/(app)/growth/commission-runs-section.tsx` adopt `DataCardTable` directly. In addition,
+`DataTable` (`src/app/dashboard/data-table.tsx`) automatically extracts column labels from
+`<DataTableHead>` `<Th>` elements and stamps `data-mobile-cards="true"` on the `<table>` and
+`data-label` on each `<Td>` cell (when the table does not already have a dedicated `hidden
+sm:block` / `md:block` / `lg:block` companion card view), allowing `src/app/globals.css`
+(`@media (max-width: 639px)`) to stack every remaining `DataTable` row as a labelled mobile card
+with the first cell as the card title and subsequent cells as `label — value` rows.
+
+### Mobile shell & native TWA primitives (`src/components/mobile/`)
+
+Phone viewports and the Android TWA runtime share a set of warm-stone/amber/teal mobile
+primitives under `src/components/mobile/`:
+
+- `AppSheet` (`app-sheet.tsx`): bottom-sheet drawer with safe-area padding, drag handle, and
+  optional sticky action footer.
+- `MobileAppHeader` (`app-header.tsx`): compact sticky mobile header with back navigation,
+  title/subtitle, search trigger, barcode scanner trigger (`CameraBarcodeScanner`), and
+  notification badge.
+- `MobileAppBottomNav` (`app-bottom-nav.tsx`): 5-slot adaptive bottom navigation
+  (`Home | Sales | + | CRM | More`) tailored to the business industry (`resolveAdaptiveBottomNavSlots`)
+  and user permissions.
+- `QuickCreateSheet` (`quick-create-sheet.tsx`): permission-filtered `+` quick-create sheet for
+  new orders, customers, receipts, expenses, barcode scans, CRM activities, and workspace tasks.
+- `PostCallActivitySheet` (`post-call-activity-sheet.tsx`): post-call CRM activity logger that
+  opens automatically on the Android bridge's `crm.callEnded` event and posts to
+  `POST /api/crm/activities`.
+- `MobileDetailHeader`, `MobileRecordList`, `MobileFilterSheet`: reusable detail header,
+  card list, and filter/sort bottom sheet.
 
 ### Status badges and live pills
 

@@ -92,6 +92,9 @@ import { PlatformUserMenu } from "./platform-user-menu";
 import { ShiftButton } from "./shift-panel";
 import { DeploymentStatusIndicator } from "./deployment-status-indicator";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
+import { useNative } from "@/components/native/native-provider";
+import { QuickCreateSheet } from "@/components/mobile/quick-create-sheet";
+import { PostCallActivitySheet } from "@/components/mobile/post-call-activity-sheet";
 
 
 const SIDEBAR_PREFERENCE_KEY = "dashboard-sidebar-preference";
@@ -725,6 +728,8 @@ export function MobileBottomNavigation({
   hrefs,
 }: Pick<SidebarProps, "navItems"> & { pathname: string; hrefs: string[] }) {
   const search = useSearchParams();
+  const { kind } = useNative();
+  const [quickCreateOpen, setQuickCreateOpen] = useState(false);
   // Sub-sections are pinnable now, so the lookup has to see them: a pinned
   // «لیست قیمت» silently vanished from the bar when only the top level was read.
   const byHref = new Map(flattenNav(navItems).map((item) => [item.href, item]));
@@ -741,39 +746,62 @@ export function MobileBottomNavigation({
     bestNavMatch(primaryItems, (href) => isActive(pathname, href, search))?.href ?? null;
 
   return (
-    <nav
-      /*
-        Height comes from `--app-bottom-nav` (globals.css) rather than from the
-        sum of this element's own padding: everything that has to sit on top of
-        this bar offsets from that variable, so the bar has to be what the
-        variable says it is.
-      */
-      className="fixed inset-x-0 bottom-0 z-40 flex h-[var(--app-bottom-nav)] gap-0.5 border-t border-border/80 bg-card/95 px-1 pb-[env(safe-area-inset-bottom)] pt-1 shadow-[0_-1px_8px_rgb(41_37_36/0.04)] backdrop-blur md:hidden"
-      aria-label="ناوبری اصلی"
-    >
-      {primaryItems.map((item) => {
-        const Icon = navIconFor(item.href, item.iconKey);
-        const active = item.href === activeHref;
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            aria-current={active ? "page" : undefined}
-            title={item.label}
-            className={`flex min-h-14 min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-xl px-0.5 text-[10px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 active:scale-[0.98] ${active ? "bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300" : "text-muted-foreground"}`}
+    <>
+      <nav
+        /*
+          Height comes from `--app-bottom-nav` (globals.css) rather than from the
+          sum of this element's own padding: everything that has to sit on top of
+          this bar offsets from that variable, so the bar has to be what the
+          variable says it is.
+        */
+        className="fixed inset-x-0 bottom-0 z-40 flex h-[var(--app-bottom-nav)] gap-0.5 border-t border-border/80 bg-card/95 px-1 pb-[env(safe-area-inset-bottom)] pt-1 shadow-[0_-1px_8px_rgb(41_37_36/0.04)] backdrop-blur md:hidden"
+        aria-label="ناوبری اصلی"
+      >
+        {primaryItems.map((item) => {
+          const Icon = navIconFor(item.href, item.iconKey);
+          const active = item.href === activeHref;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              aria-current={active ? "page" : undefined}
+              title={item.label}
+              className={`flex min-h-14 min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-xl px-0.5 text-[10px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 active:scale-[0.98] ${active ? "bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300" : "text-muted-foreground"}`}
+            >
+              <Icon className="size-5 shrink-0" aria-hidden="true" />
+              {/*
+                A long label used to be truncated to a couple of glyphs plus an
+                ellipsis in a quarter of a phone's width («صندوق (فروش)» became
+                «صن…»). Two short lines fit the real names instead, and the clamp
+                keeps the bar at the height `--app-bottom-nav` promises.
+              */}
+              <span className="line-clamp-2 w-full text-center leading-tight break-words">{item.label}</span>
+            </Link>
+          );
+        })}
+        {kind === "android-twa" ? (
+          <button
+            type="button"
+            aria-label="ایجاد سریع"
+            onClick={() => setQuickCreateOpen(true)}
+            className="flex min-h-14 shrink-0 flex-col items-center justify-center gap-1 rounded-xl bg-amber-600 dark:bg-amber-500 px-3 text-[10px] font-semibold text-white dark:text-stone-950 transition-colors"
           >
-            <Icon className="size-5 shrink-0" aria-hidden="true" />
-            {/*
-              A long label used to be truncated to a couple of glyphs plus an
-              ellipsis in a quarter of a phone's width («صندوق (فروش)» became
-              «صن…»). Two short lines fit the real names instead, and the clamp
-              keeps the bar at the height `--app-bottom-nav` promises.
-            */}
-            <span className="line-clamp-2 w-full text-center leading-tight break-words">{item.label}</span>
-          </Link>
-        );
-      })}
-    </nav>
+            <span className="text-base leading-none">+</span>
+            <span className="leading-tight">ایجاد</span>
+          </button>
+        ) : null}
+      </nav>
+      {kind === "android-twa" ? (
+        <>
+          <QuickCreateSheet
+            open={quickCreateOpen}
+            onOpenChange={setQuickCreateOpen}
+            allowedHrefs={new Set(byHref.keys())}
+          />
+          <PostCallActivitySheet />
+        </>
+      ) : null}
+    </>
   );
 }
 

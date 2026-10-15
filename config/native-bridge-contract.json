@@ -1,56 +1,143 @@
 {
-  "$comment": "Single source of truth for the Web <-> Android Trusted Web Activity bridge contract (issue #884). Read by src/lib/native/bridge-contract.ts (web), android/app/src/test/.../BridgeContractTest.kt (Android unit tests) and android/app/build.gradle.kts (BuildConfig.NATIVE_BRIDGE_VERSION). A change here is a contract change: bump bridgeVersion only with a new command or a changed shape, never to rename, and see docs/android-runtime.md#bridge-contract before editing.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "protocol": "biza-native-bridge",
-  "bridgeVersion": 2,
-  "transport": "CustomTabsSession.requestPostMessageChannel inside a Trusted Web Activity (Chrome 115+). The page receives a MessagePort from the app; every frame is a JSON envelope. Requires delegate_permission/common.use_as_origin in public/.well-known/assetlinks.json.",
-  "envelope": {
-    "request": ["v", "kind", "id", "command", "payload"],
-    "response": ["v", "kind", "id", "ok", "result|error"],
-    "event": ["v", "kind", "name", "payload"]
-  },
+  "bridgeVersion": 3,
+  "minCompatibleBridgeVersion": 1,
   "commands": {
     "app.info": {
       "minBridgeVersion": 1,
-      "payload": [],
-      "result": ["appVersionName", "appVersionCode", "environment", "bridgeVersion", "capabilities"]
+      "description": "Read the Android wrapper version, build environment, and enabled native capabilities."
     },
     "notifications.status": {
       "minBridgeVersion": 1,
-      "payload": [],
-      "result": ["permission"]
+      "description": "Read the current Android notification permission state without prompting the user."
     },
     "device.identity": {
       "minBridgeVersion": 2,
-      "payload": [],
-      "result": ["installationId"],
-      "$comment": "Issue #884 device registry. The persistent UUID TwaLauncherActivity's InstallationId keeps in app-private storage, for POST /api/native-devices. Not a login credential — the caller must already hold an authenticated session."
+      "description": "Read this installation's opaque device id so the server can register or check revocation."
+    },
+    "notifications.register": {
+      "minBridgeVersion": 3,
+      "description": "Request Android notification permission if needed, configure notification channels, and return the push registration token and channel status."
+    },
+    "biometric.status": {
+      "minBridgeVersion": 3,
+      "description": "Check Android BiometricPrompt and Credential Manager availability on this device."
+    },
+    "biometric.authenticate": {
+      "minBridgeVersion": 3,
+      "description": "Prompt the user with Android BiometricPrompt or device credential for session unlock or re-authentication."
+    },
+    "scanner.scan": {
+      "minBridgeVersion": 3,
+      "description": "Scan a barcode, QR code, or document using the Android camera scanner."
+    },
+    "media.pick": {
+      "minBridgeVersion": 3,
+      "description": "Capture a photo/document with the camera or pick files from the Android document picker."
+    },
+    "share.open": {
+      "minBridgeVersion": 3,
+      "description": "Open the native Android share sheet for text, URLs, or exported documents/PDFs."
+    },
+    "printer.discover": {
+      "minBridgeVersion": 3,
+      "description": "List available Android print framework, network TCP/IP, and paired Bluetooth thermal printers."
+    },
+    "printer.print": {
+      "minBridgeVersion": 3,
+      "description": "Print a receipt, label, kitchen ticket, or document via Android Print Framework, TCP/IP ESC/POS, or Bluetooth thermal printer."
+    },
+    "crm.callerId.status": {
+      "minBridgeVersion": 3,
+      "description": "Read Android CallScreeningService role status and cached caller lookup state for the active tenant."
+    },
+    "crm.callerId.sync": {
+      "minBridgeVersion": 3,
+      "description": "Sync tenant-scoped normalized customer caller ID entries or request the Android call screening role."
+    },
+    "sync.status": {
+      "minBridgeVersion": 3,
+      "description": "Read Android WorkManager background sync status, network state, and tenant cache isolation state."
+    },
+    "sync.trigger": {
+      "minBridgeVersion": 3,
+      "description": "Schedule or run an immediate tenant-scoped background sync or clear tenant native cache on sign-out/switch."
     }
   },
   "events": {
     "bridge.ready": {
       "minBridgeVersion": 1,
-      "payload": ["appVersionName", "appVersionCode", "environment", "bridgeVersion", "capabilities"]
+      "description": "Emitted once when the native port is bound to the active web frame."
+    },
+    "navigation.deepLink": {
+      "minBridgeVersion": 3,
+      "description": "Emitted when an Android App Link or push notification deep link targets an in-app route."
+    },
+    "crm.callEnded": {
+      "minBridgeVersion": 3,
+      "description": "Emitted when an incoming or outgoing business call completes so the user can log a CRM post-call activity."
+    },
+    "sync.completed": {
+      "minBridgeVersion": 3,
+      "description": "Emitted when a scheduled Android WorkManager sync pass completes or detects device revocation."
     }
   },
   "errorCodes": [
     "unknown_command",
-    "unsupported",
     "invalid_payload",
+    "untrusted_origin",
+    "unsupported_capability",
     "permission_denied",
-    "native_failure",
+    "bridge_version_too_old",
+    "bridge_unavailable",
     "timeout",
     "channel_closed",
-    "bridge_unavailable",
-    "bridge_version_too_old"
+    "native_failure",
+    "user_cancelled"
   ],
-  "permissionStates": ["granted", "denied", "not_determined"],
-  "environments": ["development", "staging", "production"],
+  "permissionStates": [
+    "granted",
+    "denied",
+    "not_determined"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
   "capabilities": {
-    "barcode.scan": { "nativeMinBridgeVersion": 2 },
-    "printer": { "nativeMinBridgeVersion": 2 },
-    "crm.caller-id": { "nativeMinBridgeVersion": 2 },
-    "biometric": { "nativeMinBridgeVersion": 2 },
-    "notifications": { "nativeMinBridgeVersion": 1 },
-    "share": { "nativeMinBridgeVersion": 2 }
+    "barcode.scan": {
+      "nativeMinBridgeVersion": 3,
+      "webFallback": "Camera getUserMedia + BarcodeDetector / manual entry"
+    },
+    "printer": {
+      "nativeMinBridgeVersion": 3,
+      "webFallback": "Browser print dialog / PDF download"
+    },
+    "crm.caller-id": {
+      "nativeMinBridgeVersion": 3,
+      "webFallback": "Manual phone search in CRM"
+    },
+    "biometric": {
+      "nativeMinBridgeVersion": 3,
+      "webFallback": "WebAuthn passkey / password + MFA"
+    },
+    "notifications": {
+      "nativeMinBridgeVersion": 1,
+      "webFallback": "Web Notification API / in-app inbox"
+    },
+    "share": {
+      "nativeMinBridgeVersion": 3,
+      "webFallback": "Web Share API / copy link"
+    },
+    "media.capture": {
+      "nativeMinBridgeVersion": 3,
+      "webFallback": "HTML file input with camera capture"
+    },
+    "background.sync": {
+      "nativeMinBridgeVersion": 3,
+      "webFallback": "Online event + IndexedDB queue flush"
+    }
   }
 }

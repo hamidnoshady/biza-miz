@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { withTenant } from "@/lib/db";
 import { revokeSession } from "@/lib/employee-service";
+import { clearNativeDeviceAuthStateOnSignOut } from "@/lib/native-device-service";
 
 export async function POST() {
   const store = await cookies();
@@ -17,6 +18,12 @@ export async function POST() {
     await withTenant(session.businessId, () => revokeSession(sessionId, session.businessId, session.sub)).catch(
       () => {},
     );
+  }
+  if (session?.nativeDeviceId) {
+    const deviceId = session.nativeDeviceId;
+    await withTenant(session.businessId, () =>
+      clearNativeDeviceAuthStateOnSignOut(deviceId, session.businessId, session.sub),
+    ).catch(() => {});
   }
 
   const res = NextResponse.json({ ok: true });

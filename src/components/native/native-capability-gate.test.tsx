@@ -53,7 +53,7 @@ describe("NativeCapabilityGate", () => {
         appVersionName: "1.0.0",
         appVersionCode: 5,
         environment: "production",
-        bridgeVersion: 2,
+        bridgeVersion: 3,
         capabilities: ["printer"],
       },
     });

@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useMoney } from "@/components/money/money-context";
 import { Button } from "@/components/ui/button";
-import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import { DataCardTable, type DataCardTableColumn } from "@/app/dashboard/data-table";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import {
   CardTitle,
@@ -361,47 +361,84 @@ export function CommissionRunsSection({ permissions }: { permissions: readonly s
             </div>
           ) : (
             <>
-              <DataTable caption="دوره‌های تسویه پورسانت" frame={false}>
-                <DataTableHead>
-                  <Th>دوره</Th>
-                  <Th>بازه</Th>
-                  <Th>وضعیت</Th>
-                  <Th numeric>فروشندگان</Th>
-                  <Th numeric>کل پورسانت</Th>
-                  <Th numeric>پرداخت‌شده</Th>
-                  <Th numeric>باقی‌مانده</Th>
-                  <Th>هشدار</Th>
-                </DataTableHead>
-                <DataTableBody>
-                  {runs.map((run) => (
-                    <DataTableRow key={run.id} onClick={() => router.push(`/growth/commission/runs/${run.id}`)}>
-                      <Td>
-                        <Link href={`/growth/commission/runs/${run.id}`} className="font-medium text-primary underline-offset-4 hover:underline">
+              <DataCardTable<RunRow>
+                caption="دوره‌های تسویه پورسانت"
+                rows={runs}
+                rowKey={(run) => run.id}
+                columns={[
+                  {
+                    key: "runNumber",
+                    header: "دوره",
+                    cell: (run) => (
+                      <>
+                        <Link
+                          href={`/growth/commission/runs/${run.id}`}
+                          className="font-medium text-primary underline-offset-4 hover:underline"
+                        >
                           دورهٔ {formatPersianNumber(run.runNumber)}
                         </Link>
-                        {run.title ? <span className="block text-xs text-muted-foreground">{run.title}</span> : null}
-                      </Td>
-                      <Td nowrap>
-                        {shamsiDate(run.periodFrom)} تا {shamsiDate(run.periodTo)}
-                      </Td>
-                      <Td>
-                        <StatusBadge tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</StatusBadge>
-                      </Td>
-                      <Td numeric>{formatPersianNumber(run.employeeCount)}</Td>
-                      <Td numeric>{money.formatText(run.commissionTotal)}</Td>
-                      <Td numeric>{money.formatText(run.paidTotal)}</Td>
-                      <Td numeric>{money.formatText(run.outstandingTotal)}</Td>
-                      <Td>
-                        {run.warnings.length > 0 ? (
-                          <StatusBadge tone="danger">{formatPersianNumber(run.warnings.length)} مورد</StatusBadge>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
-                      </Td>
-                    </DataTableRow>
-                  ))}
-                </DataTableBody>
-              </DataTable>
+                        {run.title ? (
+                          <span className="block text-xs text-muted-foreground">{run.title}</span>
+                        ) : null}
+                      </>
+                    ),
+                  },
+                  {
+                    key: "period",
+                    header: "بازه",
+                    cell: (run) => `${shamsiDate(run.periodFrom)} تا ${shamsiDate(run.periodTo)}`,
+                  },
+                  {
+                    key: "status",
+                    header: "وضعیت",
+                    cell: (run) => (
+                      <StatusBadge tone={runStatusTone(run.status)}>
+                        {runStatusLabel(run.status)}
+                      </StatusBadge>
+                    ),
+                  },
+                  {
+                    key: "employees",
+                    header: "فروشندگان",
+                    numeric: true,
+                    align: "end",
+                    cell: (run) => formatPersianNumber(run.employeeCount),
+                  },
+                  {
+                    key: "commissionTotal",
+                    header: "کل پورسانت",
+                    numeric: true,
+                    align: "end",
+                    cell: (run) => money.formatText(run.commissionTotal),
+                  },
+                  {
+                    key: "paidTotal",
+                    header: "پرداخت‌شده",
+                    numeric: true,
+                    align: "end",
+                    cell: (run) => money.formatText(run.paidTotal),
+                  },
+                  {
+                    key: "outstandingTotal",
+                    header: "باقی‌مانده",
+                    numeric: true,
+                    align: "end",
+                    cell: (run) => money.formatText(run.outstandingTotal),
+                  },
+                  {
+                    key: "warnings",
+                    header: "هشدار",
+                    cell: (run) =>
+                      run.warnings.length > 0 ? (
+                        <StatusBadge tone="danger">
+                          {formatPersianNumber(run.warnings.length)} مورد
+                        </StatusBadge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      ),
+                  },
+                ] satisfies DataCardTableColumn<RunRow>[]}
+              />
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/80 p-3 text-sm text-muted-foreground">
                 <span>
                   {formatPersianNumber(from)} تا {formatPersianNumber(to)} از {formatPersianNumber(total)}

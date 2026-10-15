@@ -22,12 +22,39 @@
  * this page is.
  */
 import { useEffect } from "react";
+import { validateTenantDeepLink } from "@/lib/native/capabilities-client";
 import { useNative } from "./native-provider";
 
 const REGISTER_URL = "/api/native-devices";
 
 export function NativeDeviceRegistrar() {
-  const { connection, app, request } = useNative();
+  const { connection, app, request, onEvent } = useNative();
+
+  useEffect(() => {
+    const offDeepLink = onEvent("navigation.deepLink", (event) => {
+      const check = validateTenantDeepLink({
+        path: event.path,
+        activeBusinessId: null,
+        targetBusinessId: event.businessId,
+      });
+      if (check.allowed && check.path && typeof window !== "undefined") {
+        window.location.assign(check.path);
+      }
+    });
+    const offSync = onEvent("sync.completed", (event) => {
+      if (event.revoked && typeof window !== "undefined") {
+        void fetch("/api/native-devices/self", { method: "GET" }).then((res) => {
+          if (res.status === 401 || res.status === 403) {
+            window.location.assign("/login");
+          }
+        }).catch(() => {});
+      }
+    });
+    return () => {
+      offDeepLink();
+      offSync();
+    };
+  }, [onEvent]);
 
   // `app` only takes on a new value when the runtime store actually records a
   // new connection (native-runtime.ts's `adopt`), not on every unrelated

@@ -6,7 +6,16 @@
  */
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DataCardTable, type DataCardTableColumn, DataTableRow } from "./data-table";
+import {
+  DataCardTable,
+  type DataCardTableColumn,
+  DataTable,
+  DataTableBody,
+  DataTableHead,
+  DataTableRow,
+  Td,
+  Th,
+} from "./data-table";
 
 afterEach(cleanup);
 
@@ -151,5 +160,30 @@ describe("DataCardTable", () => {
     const cardsList = document.querySelector("ul.sm\\:hidden");
     expect(cardsList?.textContent).toContain("جمع");
     expect(cardsList?.textContent).toContain("۲۰۰٬۰۰۰");
+  });
+});
+
+describe("DataTable automatic mobile data-label injection", () => {
+  it("extracts column headers from DataTableHead and stamps data-label onto each Td cell for mobile card rendering", () => {
+    render(
+      <DataTable caption="لیست هزینه‌ها">
+        <DataTableHead>
+          <Th>عنوان</Th>
+          <Th numeric>مبلغ</Th>
+        </DataTableHead>
+        <DataTableBody>
+          <DataTableRow>
+            <Td>اجاره</Td>
+            <Td numeric>۵٬۰۰۰٬۰۰۰</Td>
+          </DataTableRow>
+        </DataTableBody>
+      </DataTable>,
+    );
+
+    const table = screen.getByRole("table", { name: "لیست هزینه‌ها" });
+    expect(table.getAttribute("data-mobile-cards")).toBe("true");
+    const cells = table.querySelectorAll("tbody td");
+    expect(cells[0]?.getAttribute("data-label")).toBe("عنوان");
+    expect(cells[1]?.getAttribute("data-label")).toBe("مبلغ");
   });
 });

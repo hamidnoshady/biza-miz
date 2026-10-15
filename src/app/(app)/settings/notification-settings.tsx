@@ -22,6 +22,8 @@ import {
   enablePush,
   pushSupport,
 } from "./push-client";
+import { useNative } from "@/components/native/native-provider";
+import { registerNativePushNotifications } from "@/lib/native/capabilities-client";
 
 interface EventMeta {
   key: NotificationEventKey;
@@ -111,6 +113,51 @@ export function NotificationSettings() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
+  const native = useNative();
+  const isAndroidTwa = native.kind === "android-twa";
+
+  async function enableAndroidNativePush() {
+    if (native.kind !== "android-twa" || native.connection !== "connected" || !native.app) {
+      setError("ارتباط با لایهٔ بومی اندروید برقرار نیست.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      const [identity, res] = await Promise.all([
+        native.request("device.identity"),
+        registerNativePushNotifications(native.request),
+      ]);
+      if (res.permission !== "granted" || !res.fcmToken) {
+        setBusy(false);
+        setError(
+          res.permission === "denied"
+            ? "مجوز ارسال اعلان در تنظیمات اندروید رد شده است."
+            : "ثبت اعلان بومی اندروید انجام نشد.",
+        );
+        return;
+      }
+      await api("/api/native-devices", {
+        method: "POST",
+        body: JSON.stringify({
+          installationId: identity.installationId,
+          environment: native.app.environment,
+          appVersionName: native.app.appVersionName,
+          appVersionCode: native.app.appVersionCode,
+          bridgeVersion: native.app.bridgeVersion,
+          pushToken: res.fcmToken,
+          pushProvider: res.pushProvider,
+          pushChannels: res.channels,
+        }),
+      });
+      setBusy(false);
+      setInfo("اعلان‌های بومی اندروید (FCM) برای این دستگاه فعال شد.");
+    } catch {
+      setBusy(false);
+      setError("ثبت اعلان بومی اندروید انجام نشد.");
+    }
+  }
 
   const load = useCallback(async () => {
     const [rules, deviceList] = await Promise.all([
@@ -266,6 +313,16 @@ export function NotificationSettings() {
         description="اعلان‌ها روی گوشی و رایانه — حتی وقتی برنامه بسته است — به هر دستگاهی می‌رسد که اینجا ثبت شده باشد."
         actions={
           <div className="flex flex-wrap gap-2">
+            {isAndroidTwa ? (
+              <Button
+                type="button"
+                variant="default"
+                onClick={() => void enableAndroidNativePush()}
+                disabled={busy}
+              >
+                فعال‌سازی اعلان بومی اندروید
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant={thisEndpoint ? "outline" : "default"}

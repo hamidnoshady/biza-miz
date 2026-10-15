@@ -407,4 +407,73 @@ describe("native device registry lifecycle", () => {
     ]);
     expect(rows.rows).toHaveLength(1);
   });
+
+  it("persists v3 push/biometric/caller-id/sync capabilities and clears sensitive auth/push state on sign-out and revocation", async () => {
+    const input = {
+      ...registration(),
+      pushToken: "fcm:alpha-owner-token-1234567890",
+      pushProvider: "fcm" as const,
+      pushChannels: ["orders_high", "approvals"],
+      capabilities: ["barcode", "biometric", "caller_id"],
+      biometricEnabled: true,
+      biometricVerified: true,
+      callerIdRoleHeld: true,
+      syncedNow: true,
+    };
+
+    const { device } = await asBusiness(alpha.businessId, () =>
+      nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, input),
+    );
+    expect(device.hasPushToken).toBe(true);
+    expect(device.pushProvider).toBe("fcm");
+    expect(device.biometricEnabled).toBe(true);
+    expect(device.biometricVerifiedAt).not.toBeNull();
+    expect(device.callerIdRoleHeld).toBe(true);
+    expect(device.lastSyncAt).not.toBeNull();
+
+    // Sign-out clears the push token and biometric verification timestamp and bumps session_generation
+    const tokenBeforeSignOut = await signDeviceSession(
+      alpha.businessId,
+      alpha.ownerId,
+      device.id,
+      device.sessionGeneration,
+    );
+    expect(await asBusiness(alpha.businessId, () => authLib.resolveSessionFromToken(tokenBeforeSignOut))).not.toBeNull();
+
+    await asBusiness(alpha.businessId, () =>
+      nativeDevices.clearNativeDeviceAuthStateOnSignOut(device.id, alpha.businessId, alpha.ownerId),
+    );
+
+    expect(await asBusiness(alpha.businessId, () => authLib.resolveSessionFromToken(tokenBeforeSignOut))).toBeNull();
+
+    const afterSignOut = await asBusiness(alpha.businessId, () =>
+      nativeDevices.listNativeDevicesForUser(alpha.businessId, alpha.ownerId),
+    );
+    expect(afterSignOut[0]).toMatchObject({
+      id: device.id,
+      hasPushToken: false,
+      pushProvider: null,
+      biometricEnabled: true,
+      biometricVerifiedAt: null,
+    });
+
+    // Re-register push token, then revoke -> push token and biometricEnabled are both cleared
+    await asBusiness(alpha.businessId, () =>
+      nativeDevices.registerNativeDevice(alpha.businessId, alpha.ownerId, input),
+    );
+    await asBusiness(alpha.businessId, () =>
+      nativeDevices.revokeOwnNativeDevice(device.id, alpha.businessId, alpha.ownerId),
+    );
+
+    const afterRevoke = await asBusiness(alpha.businessId, () =>
+      nativeDevices.listNativeDevicesForUser(alpha.businessId, alpha.ownerId),
+    );
+    expect(afterRevoke[0]).toMatchObject({
+      id: device.id,
+      hasPushToken: false,
+      pushProvider: null,
+      biometricEnabled: false,
+      biometricVerifiedAt: null,
+    });
+  });
 });

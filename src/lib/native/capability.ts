@@ -38,6 +38,8 @@ export const WEB_CAPABILITY_PROVIDERS: Readonly<Record<NativeCapability, readonl
   biometric: ["webAuthn"],
   notifications: ["pushManager"],
   share: ["webShare"],
+  "media.capture": [],
+  "background.sync": [],
 });
 
 export type CapabilityProvider = "native" | "web";

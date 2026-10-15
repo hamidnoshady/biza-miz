@@ -152,14 +152,29 @@ fail until all three agree.
   recording is not used.
 - Signing material never enters the repository. See [Secrets](#secrets-and-signing).
 
-## Permissions
+## Permissions and Native Capabilities (Bridge v3)
 
-The manifest asks for `INTERNET` and `ACCESS_NETWORK_STATE`. It requests no runtime permission
-yet. `POST_NOTIFICATIONS`, the camera, Bluetooth and call-screening roles are added with the
-features that need them. `notifications.status` reports the system setting and does not request
-anything.
+`config/native-bridge-contract.json` (`bridgeVersion: 3`, `minCompatibleBridgeVersion: 1`) defines
+the allowlisted commands, events, and capabilities shared between `src/lib/native/bridge-contract.ts`
+and `android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt` (guarded against drift
+by `src/lib/native/native-config.test.ts` and `BridgeContractTest.kt`):
 
-The `<queries>` entries let the app find the Custom Tabs provider on Android 11 and later.
+- **Commands (15)**: `app.info`, `device.identity`, `notification.status`, `notification.register`,
+  `biometric.status`, `biometric.authenticate`, `scanner.scan`, `media.pick`, `share.open`,
+  `printer.discover`, `printer.print`, `callerId.status`, `callerId.sync`, `sync.status`,
+  `sync.trigger`.
+- **Events (6)**: `bridge.ready`, `app.lifecycle`, `notification.opened`, `crm.incomingCall`,
+  `crm.callEnded`, `sync.completed`.
+- **Capabilities (7)**: `notifications` (v1), `biometric` (v2), `barcode.scan` (v2), `camera` (v2),
+  `share` (v2), `printer` (v3), `caller_id` (v3).
+
+The manifest declares `INTERNET`, `ACCESS_NETWORK_STATE`, `POST_NOTIFICATIONS`, `USE_BIOMETRIC`,
+`CAMERA` (`android:required="false"`), and `BLUETOOTH_CONNECT` / `BLUETOOTH_SCAN`
+(`neverForLocation`, `android:required="false"`), plus `BizaCallScreeningService`
+(`android.permission.BIND_SCREENING_SERVICE`). Runtime permissions are requested on-demand only
+when the user triggers a capability that requires them. `BizaCallScreeningService` uses Android's
+official `CallScreeningService` (API 29+) and `RoleManager.ROLE_CALL_SCREENING` — it never records
+call audio or uses accessibility services.
 
 ## Device registry
 
