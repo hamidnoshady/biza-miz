@@ -51,6 +51,7 @@ import {
   postExactCogsEntry,
   postExactMirrorEntry,
   postExactOrderPaymentEntry,
+  resolveOrderReturnAttribution,
 } from "./ledger-service";
 import { getOnlinePlatformsConfig } from "./online-platforms-service";
 import { commissionAmountFor } from "./online-platforms-calculation";
@@ -258,6 +259,14 @@ export async function amendClosedOrder(
   // reversal and replay alike — lands there, so the day's own reports change.
   const entryDate = postings[0]?.entry_date ?? (order.closed_at ?? "").slice(0, 10);
   if (!entryDate) throw new OrderAmendmentError("order_not_completed", 409);
+  // Issue #868 — a correction keeps the sale's own dimension attribution: the
+  // mirrored reversals copy it from the live entries, and the re-posted
+  // revenue/COGS carry the same tuple even if a mapping rule changed since.
+  const saleAttribution = await resolveOrderReturnAttribution(client, {
+    businessId: params.businessId,
+    locationId: params.locationId,
+    orderId: params.orderId,
+  });
 
   const { rows: amendmentRows } = await client.query<{ id: string }>(
     `INSERT INTO order_amendments
@@ -511,6 +520,7 @@ export async function amendClosedOrder(
       orderChannel: order.type,
       tip: rialText(String(newTip)),
       platformCommission: await platformCommissionFor(params.businessId, settlementMethod, amount),
+      dimensions: saleAttribution,
     });
     await postExactCogsEntry(client, {
       businessId: params.businessId,
@@ -522,6 +532,7 @@ export async function amendClosedOrder(
       createdBy: params.actorId,
       totalCost: replayedCost,
       inventoryEventId: replayEventId,
+      dimensions: saleAttribution,
     });
     await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [replayEventId]);
 

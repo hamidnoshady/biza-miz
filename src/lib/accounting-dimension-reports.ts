@@ -324,3 +324,184 @@ function buildUnfilteredProfit(rows: ProfitRow[], costOfSalesCodes: Set<string>)
   }
   return { revenue, totalExpenses, costOfSales, laborCost };
 }
+
+// ---------------------------------------------------------------------------
+// Hierarchy rollup (issue #868, Phase 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * One value of the reported kind with what was posted **on it directly**. A
+ * parent is never a posting target (the service refuses it), so a parent's
+ * `own` is always 0 — its report row exists to show the rollup of its
+ * descendants, nothing else.
+ */
+export interface DimensionRollupValue {
+  id: string;
+  code: string;
+  name: string;
+  parentId: string | null;
+  isActive: boolean;
+  /** Natural signed amount posted directly on this value (the matrix's column total). */
+  own: bigint;
+}
+
+export interface DimensionRollupRow {
+  id: string;
+  code: string;
+  name: string;
+  parentId: string | null;
+  isActive: boolean;
+  /** Tree depth: a root is 0. */
+  depth: number;
+  /** What was posted on this value alone. Parents show 0. */
+  own: number;
+  /** `own` plus every descendant's `own`, counted exactly once per posted line. */
+  rolledUp: number;
+  childCount: number;
+}
+
+export interface DimensionRollupReport {
+  /** Depth-first, a parent immediately followed by its children. */
+  rows: DimensionRollupRow[];
+  /**
+   * The grand total is the sum of `own` over every row — never of `rolledUp`.
+   * A parent subtotal together with its children would count those children
+   * twice; the whole point of the split columns is that a reader never has to.
+   */
+  grandTotal: number;
+  /** Lines of the period that carry no value of this kind. */
+  unassigned: number;
+  /** True when `grandTotal + unassigned` equals the unfiltered journal total. */
+  reconciled: boolean;
+}
+
+/**
+ * Rolls one kind's posted amounts up its hierarchy without double counting.
+ *
+ * - Every line lands in exactly one value's `own` (posting is leaf-only), so
+ *   the grand total sums `own` and reconciles to the journal.
+ * - `rolledUp` is display arithmetic over the tree: a parent includes all
+ *   eligible descendants, nested as deep as the hierarchy goes. Archived
+ *   values stay in the tree — historical reporting still shows them (with
+ *   `isActive: false`), and they roll into their parent like any child.
+ * - A parent cycle cannot be built through the API (the database refuses it),
+ *   but if one is ever fed in, the builder refuses it loudly rather than
+ *   hanging or silently dropping a subtree.
+ */
+export function buildDimensionRollup(input: {
+  values: readonly DimensionRollupValue[];
+  unassigned: bigint;
+  /** The same period's unfiltered natural total over the reported lines. */
+  journalTotal: bigint;
+}): DimensionRollupReport {
+  const byId = new Map(input.values.map((value) => [value.id, value]));
+  const childrenOf = new Map<string, DimensionRollupValue[]>();
+  const roots: DimensionRollupValue[] = [];
+  for (const value of input.values) {
+    if (value.parentId && byId.has(value.parentId)) {
+      const siblings = childrenOf.get(value.parentId) ?? [];
+      siblings.push(value);
+      childrenOf.set(value.parentId, siblings);
+    } else {
+      roots.push(value);
+    }
+  }
+  const byCode = (a: DimensionRollupValue, b: DimensionRollupValue) =>
+    a.code.localeCompare(b.code) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  for (const siblings of childrenOf.values()) siblings.sort(byCode);
+  roots.sort(byCode);
+
+  const rows: DimensionRollupRow[] = [];
+  const rolledUpOf = new Map<string, bigint>();
+  const computed = new Set<string>();
+  const compute = (value: DimensionRollupValue, seen: Set<string>): bigint => {
+    if (seen.has(value.id)) throw new Error("dimension_cycle");
+    seen.add(value.id);
+    let subtree = value.own;
+    for (const child of childrenOf.get(value.id) ?? []) subtree += compute(child, seen);
+    seen.delete(value.id);
+    rolledUpOf.set(value.id, subtree);
+    computed.add(value.id);
+    return subtree;
+  };
+  const emit = (value: DimensionRollupValue, depth: number): void => {
+    const children = childrenOf.get(value.id) ?? [];
+    rows.push({
+      id: value.id,
+      code: value.code,
+      name: value.name,
+      parentId: value.parentId,
+      isActive: value.isActive,
+      depth,
+      own: Number(value.own),
+      rolledUp: Number(rolledUpOf.get(value.id) ?? value.own),
+      childCount: children.length,
+    });
+    for (const child of children) emit(child, depth + 1);
+  };
+  // Roots first, then any node a broken tree left unreachable (a parent loop
+  // that has no root at still hits the cycle guard in `compute`).
+  const order = [...roots, ...[...byId.values()].sort(byCode)];
+  for (const value of order) {
+    if (!computed.has(value.id)) {
+      compute(value, new Set());
+      emit(value, 0);
+    }
+  }
+
+  const grandTotal = input.values.reduce((sum, value) => sum + value.own, 0n);
+  const expected = input.journalTotal;
+  return {
+    rows,
+    grandTotal: Number(grandTotal),
+    unassigned: Number(input.unassigned),
+    reconciled: grandTotal + input.unassigned === expected,
+  };
+}
+
+/**
+ * A value and every descendant of it, deepest last — the ids a «include
+ * children» filter matches. A value with no children answers just itself.
+ */
+export function descendantIds(
+  values: ReadonlyArray<{ id: string; parentId: string | null }>,
+  rootId: string,
+): string[] {
+  const childrenOf = new Map<string, string[]>();
+  for (const value of values) {
+    if (!value.parentId) continue;
+    const siblings = childrenOf.get(value.parentId) ?? [];
+    siblings.push(value.id);
+    childrenOf.set(value.parentId, siblings);
+  }
+  const out: string[] = [];
+  const queue = [rootId];
+  const seen = new Set<string>([rootId]);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    out.push(current);
+    for (const child of childrenOf.get(current) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      queue.push(child);
+    }
+  }
+  return out;
+}
+
+/**
+ * The one-value predicate with its descendants folded in. Same binding rules
+ * as `dimensionLinePredicate`, with a binder for an id array; a value that has
+ * no children matches exactly itself.
+ */
+export function dimensionRollupPredicate(
+  filter: DimensionFilter,
+  values: ReadonlyArray<{ id: string; parentId: string | null }>,
+  bind: (value: string) => string,
+  bindArray: (values: string[]) => string,
+): string {
+  const column = DIMENSION_COLUMN[filter.kind];
+  if (filter.valueId === UNASSIGNED_DIMENSION) return `jl.${column} IS NULL`;
+  const ids = descendantIds(values, filter.valueId);
+  return `jl.${column} = ANY(${bindArray(ids)}::uuid[])`;
+}

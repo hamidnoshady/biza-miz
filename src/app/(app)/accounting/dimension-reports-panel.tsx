@@ -1,10 +1,13 @@
 "use client";
 
 /**
- * «گزارش‌های ابعاد» — the three views a person reads a dimension by:
+ * «گزارش‌های ابعاد» — the four views a person reads a dimension by:
  *
  *   * «ماتریس حساب × بعد»  — every account, against every value of one kind;
  *   * «سود به تفکیک مرکز سود» — profit and loss per profit centre;
+ *   * «خلاصهٔ سلسله‌مراتبی» — one kind rolled up its hierarchy: parents include
+ *     their descendants without double counting, archived centres stay as
+ *     history, and the grand total reconciles to the journal;
  *   * «کارت حساب مرکز هزینه» — one account's lines for one value, with its balance.
  *
  * Every view reads one kind at a time, and every total is the sum of the
@@ -38,15 +41,17 @@ import {
   matrixCellDrill,
   matrixTable,
   profitTable,
+  rollupTable,
   type PlainTable,
 } from "./dimension-report-table";
 import { currentJalaliMonthStartIso, isoToJalaliText } from "./dimension-catalog";
 
-type View = "matrix" | "profit" | "card";
+type View = "matrix" | "profit" | "rollup" | "card";
 
 const VIEWS: readonly { key: View; label: string }[] = [
   { key: "matrix", label: "ماتریس حساب × بعد" },
   { key: "profit", label: "سود به تفکیک مرکز سود" },
+  { key: "rollup", label: "خلاصهٔ سلسله‌مراتبی" },
   { key: "card", label: "کارت حساب مرکز هزینه" },
 ];
 
@@ -96,6 +101,23 @@ interface ProfitReport {
   reconciled: boolean;
 }
 
+interface RollupReport {
+  rows: {
+    id: string;
+    code: string;
+    name: string;
+    parentId: string | null;
+    isActive: boolean;
+    depth: number;
+    own: number;
+    rolledUp: number;
+    childCount: number;
+  }[];
+  grandTotal: number;
+  unassigned: number;
+  reconciled: boolean;
+}
+
 interface CardStatement {
   accountCode: string;
   accountName: string;
@@ -107,6 +129,7 @@ interface CardStatement {
 type Loaded =
   | { view: "matrix"; report: MatrixReport; kind: DimensionKind; dateFrom: string; dateTo: string }
   | { view: "profit"; report: ProfitReport }
+  | { view: "rollup"; report: RollupReport }
   | { view: "card"; report: CardStatement };
 
 function errorText(code: string | undefined): string {
@@ -122,6 +145,7 @@ function errorText(code: string | undefined): string {
 function hasContent(loaded: Loaded): boolean {
   if (loaded.view === "matrix") return loaded.report.rows.length > 0;
   if (loaded.view === "profit") return loaded.report.groups.length > 0;
+  if (loaded.view === "rollup") return loaded.report.rows.length > 0;
   return true;
 }
 
@@ -141,6 +165,7 @@ function matrixDrillHref(loaded: Loaded | null, rowIndex: number, cellIndex: num
 function reportTable(loaded: Loaded): PlainTable {
   if (loaded.view === "matrix") return matrixTable(loaded.report, columnKey);
   if (loaded.view === "profit") return profitTable(loaded.report);
+  if (loaded.view === "rollup") return rollupTable(loaded.report);
   return cardTable(loaded.report);
 }
 
@@ -230,6 +255,8 @@ export function DimensionReportsPanel({
         setLoaded({ view: scope.view, report: r.data.statement as unknown as CardStatement });
       } else if (scope.view === "matrix") {
         setLoaded({ view: scope.view, report: r.data as unknown as MatrixReport, kind: scope.kind, dateFrom: scope.dateFrom, dateTo: scope.dateTo });
+      } else if (scope.view === "rollup") {
+        setLoaded({ view: scope.view, report: r.data as unknown as RollupReport });
       } else {
         setLoaded({ view: scope.view, report: r.data as unknown as ProfitReport });
       }

@@ -31,6 +31,7 @@ vi.mock("@/lib/accounting-dimension-reports-service", async (importOriginal) => 
     ...actual,
     getAccountDimensionMatrix: vi.fn(async () => ({ columns: [], rows: [], columnTotals: {}, grandTotal: 0, reconciled: true })),
     getProfitAndLossByDimension: vi.fn(async () => ({ groups: [], total: {}, reconciled: true })),
+    getDimensionRollup: vi.fn(async () => ({ rows: [], grandTotal: 0, unassigned: 0, reconciled: true })),
   };
 });
 
@@ -128,5 +129,35 @@ describe("GET /api/ledger/dimension-reports — the card", () => {
       request(`?view=card&kind=cost_center&accountId=${ACCOUNT}&value=unassigned&dateFrom=2026-10-01&dateTo=2026-10-31`),
     );
     expect(response.status).toBe(404);
+  });
+});
+
+describe("GET /api/ledger/dimension-reports — the hierarchy rollup", () => {
+  it("refuses a rollup without a kind, rather than rolling up every kind", async () => {
+    const response = await GET(request("?view=rollup&dateFrom=2026-10-01&dateTo=2026-10-31"));
+    expect(response.status).toBe(400);
+    expect(dimensionReports.getDimensionRollup).not.toHaveBeenCalled();
+  });
+
+  it("refuses a rollup whose scope is not two real days in order", async () => {
+    const response = await GET(
+      request("?view=rollup&kind=cost_center&dateFrom=2026-10-31&dateTo=2026-10-01"),
+    );
+    expect(response.status).toBe(400);
+    expect(dimensionReports.getDimensionRollup).not.toHaveBeenCalled();
+  });
+
+  it("answers the scoped rollup on ledger.view", async () => {
+    const response = await GET(
+      request("?view=rollup&kind=profit_center&dateFrom=2026-10-01&dateTo=2026-10-31"),
+    );
+    expect(response.status).toBe(200);
+    expect(dimensionReports.getDimensionRollup).toHaveBeenCalledWith("business-1", {
+      kind: "profit_center",
+      dateFrom: "2026-10-01",
+      dateTo: "2026-10-31",
+    });
+    const body = await response.json();
+    expect(body.reconciled).toBe(true);
   });
 });
