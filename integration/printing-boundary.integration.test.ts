@@ -867,5 +867,262 @@ describe("the history table is branch-scoped underneath the routes", () => {
     expect(ambFallbackRes.status).toBe(409);
     expect(await ambFallbackRes.json()).toMatchObject({ ok: false, error: "job_timeout" });
   });
+
+  it("enforces atomic fallback reservation under real PostgreSQL contention and validates pending, handed-off, missing, wrong-branch, missing-snapshot, and repeated reprint cases", async () => {
+    activeAuthContext.businessId = alpha.businessId;
+    activeAuthContext.locationId = alphaMain.locationId;
+    capturedRenderedHtml.length = 0;
+
+    const backupPrinter = await db.query<{ id: string }>(
+      `INSERT INTO printers (location_id, name, kind, printer_class, paper, paper_width_mm, is_active, connection)
+       VALUES ($1, 'چاپگر پشتیبان رقابت', 'receipt', 'thermal', 'thermal80', 80, true, '{"type":"windows","systemName":"Backup-Contention"}'::jsonb)
+       RETURNING id`,
+      [alphaMain.locationId],
+    );
+    const backupId = backupPrinter.rows[0].id;
+
+    await db.query(
+      `INSERT INTO print_rules (location_id, document_type, printer_id, fallback_printer_id, template_id)
+       VALUES ($1, 'receipt', $2, $3, $4)
+       ON CONFLICT (location_id, document_type) DO UPDATE
+         SET printer_id = EXCLUDED.printer_id,
+             fallback_printer_id = EXCLUDED.fallback_printer_id,
+             template_id = EXCLUDED.template_id`,
+      [alphaMain.locationId, alphaMain.printerId, backupId, planted.alphaMainTemplateId],
+    );
+
+    const jsonReq = (body: unknown, method = "POST"): NextRequest =>
+      ({
+        json: async () => body,
+        method,
+        headers: { get: () => null },
+      }) as unknown as NextRequest;
+
+    // A. Create primary attempt 1 via POST /api/printing/print:
+    const raceReqId = `receipt:race-${planted.alphaMainOrderId}`;
+    const primaryRes = await printRoute.POST(
+      jsonReq({
+        printRequestId: raceReqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(primaryRes.status).toBe(200);
+    const primaryBody = (await primaryRes.json()) as { jobId: string };
+
+    // B. While attempt 1 is still pending ('sending'), fallback must be rejected with 409 fallback_parent_pending:
+    const pendingRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: alphaMain.printerId,
+        previousJobId: primaryBody.jobId,
+        printRequestId: raceReqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(pendingRes.status).toBe(409);
+    expect(await pendingRes.json()).toMatchObject({ ok: false, error: "fallback_parent_pending" });
+
+    // C. Close attempt 1 as confirmed pre-handoff non-delivery ('printer_offline'):
+    const patchRes = await jobsRoute.PATCH(
+      jsonReq({ jobId: primaryBody.jobId, status: "failed", errorCode: "printer_offline" }, "PATCH"),
+    );
+    expect(patchRes.status).toBe(200);
+
+    // D. Deterministic real-PostgreSQL contention:
+    // Hold a row-level FOR UPDATE lock on the parent print_jobs row using `db`
+    // so both concurrent fallback requests pass `loadPriorAttemptForFallback`
+    // (MVCC plain SELECT) and contend directly on `reserveFallbackJobRow`'s
+    // `FOR UPDATE` + `ON CONFLICT (previous_job_id)` in PostgreSQL.
+    const rendersBeforeRace = capturedRenderedHtml.length;
+    await db.query("BEGIN");
+    await db.query("SELECT id FROM print_jobs WHERE id = $1 FOR UPDATE", [primaryBody.jobId]);
+
+    const fallbackPayload = {
+      failedPrinterId: alphaMain.printerId,
+      previousJobId: primaryBody.jobId,
+      printRequestId: raceReqId,
+      documentType: "receipt",
+      document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+    };
+
+    const req1Promise = printRoute.POST(jsonReq(fallbackPayload));
+    const req2Promise = printRoute.POST(jsonReq(fallbackPayload));
+
+    // Wait until both concurrent requests are blocked on the PostgreSQL row lock:
+    let waitersObserved = 0;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const waiting = await appClient.query<{ count: number }>(
+        `SELECT count(DISTINCT pid)::int AS count
+           FROM pg_locks
+          WHERE NOT granted`,
+      );
+      waitersObserved = waiting.rows[0]?.count ?? 0;
+      if (waitersObserved >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(waitersObserved).toBeGreaterThanOrEqual(2);
+
+    // Release the barrier lock so both requests race in PostgreSQL:
+    await db.query("ROLLBACK");
+
+    const [res1, res2] = await Promise.all([req1Promise, req2Promise]);
+    const statuses = [res1.status, res2.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([200, 409]);
+
+    const body1 = (await res1.json()) as Record<string, unknown>;
+    const body2 = (await res2.json()) as Record<string, unknown>;
+    const winner = res1.status === 200 ? body1 : body2;
+    const loser = res1.status === 409 ? body1 : body2;
+
+    expect(winner).toMatchObject({
+      ok: true,
+      attemptNumber: 2,
+      previousJobId: primaryBody.jobId,
+      printerId: backupId,
+      routeReason: "runtime_fallback",
+    });
+    expect(typeof winner.dataBase64).toBe("string");
+    expect((winner.dataBase64 as string).length).toBeGreaterThan(0);
+
+    expect(loser).toMatchObject({
+      ok: false,
+      error: "fallback_already_reserved",
+    });
+    expect(loser.dataBase64).toBeUndefined();
+
+    // Only the winning request rendered HTML:
+    expect(capturedRenderedHtml.length - rendersBeforeRace).toBe(1);
+
+    // Only one fallback row exists in PostgreSQL for this parent:
+    const childRows = await db.query<{ id: string }>(
+      "SELECT id FROM print_jobs WHERE previous_job_id = $1",
+      [primaryBody.jobId],
+    );
+    expect(childRows.rows).toHaveLength(1);
+    expect(childRows.rows[0].id).toBe(winner.jobId);
+
+    // E. Retried / lost-response request for the same parent returns 409 without rendering:
+    const retryRes = await printRoute.POST(jsonReq(fallbackPayload));
+    expect(retryRes.status).toBe(409);
+    const retryBody = (await retryRes.json()) as Record<string, unknown>;
+    expect(retryBody).toMatchObject({ ok: false, error: "fallback_already_reserved" });
+    expect(retryBody.dataBase64).toBeUndefined();
+    expect(capturedRenderedHtml.length - rendersBeforeRace).toBe(1);
+
+    // F. Handed-off parent is rejected with 409 job_timeout:
+    const handedPrimaryRes = await printRoute.POST(
+      jsonReq({
+        printRequestId: `receipt:handed-${planted.alphaMainOrderId}`,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    const handedPrimary = (await handedPrimaryRes.json()) as { jobId: string };
+    await jobsRoute.PATCH(jsonReq({ jobId: handedPrimary.jobId, status: "handed_off" }, "PATCH"));
+    const handedFallbackRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: alphaMain.printerId,
+        previousJobId: handedPrimary.jobId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(handedFallbackRes.status).toBe(409);
+    expect(await handedFallbackRes.json()).toMatchObject({ ok: false, error: "job_timeout" });
+
+    // G. Missing / wrong-branch / cross-tenant parent is rejected with 409 fallback_parent_not_found:
+    const siblingJob = await db.query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, entity_id, printer_id, status, error_code, delivery_outcome)
+       VALUES ($1, 'receipt', $2, $3, 'failed', 'printer_offline', 'not_delivered')
+       RETURNING id`,
+      [alphaOther.locationId, planted.alphaMainOrderId, alphaOther.printerId],
+    );
+    const wrongBranchRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: alphaMain.printerId,
+        previousJobId: siblingJob.rows[0].id,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(wrongBranchRes.status).toBe(409);
+    expect(await wrongBranchRes.json()).toMatchObject({ ok: false, error: "fallback_parent_not_found" });
+
+    // H. Missing render_snapshot on parent row is rejected with 409 fallback_snapshot_missing (never reloads mutable data):
+    const noSnapPrimaryRes = await printRoute.POST(
+      jsonReq({
+        printRequestId: `receipt:nosnap-${planted.alphaMainOrderId}`,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    const noSnapPrimary = (await noSnapPrimaryRes.json()) as { jobId: string };
+    await jobsRoute.PATCH(
+      jsonReq({ jobId: noSnapPrimary.jobId, status: "failed", errorCode: "printer_offline" }, "PATCH"),
+    );
+    await db.query("UPDATE print_jobs SET render_snapshot = NULL WHERE id = $1", [noSnapPrimary.jobId]);
+
+    const rendersBeforeNoSnap = capturedRenderedHtml.length;
+    const noSnapFallbackRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: alphaMain.printerId,
+        previousJobId: noSnapPrimary.jobId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(noSnapFallbackRes.status).toBe(409);
+    expect(await noSnapFallbackRes.json()).toMatchObject({ ok: false, error: "fallback_snapshot_missing" });
+    expect(capturedRenderedHtml.length).toBe(rendersBeforeNoSnap);
+
+    // I. Intentional repeated reprints sharing print_request_id:
+    // Two independent primary prints of the same order share `printRequestId`
+    // (`receipt:${orderId}`). Both are recorded as attempt 1 (`previousJobId: null`),
+    // and if the second reprint fails pre-handoff, its fallback attempt still succeeds!
+    const sharedReprintReqId = `receipt:reprint-${planted.alphaMainOrderId}`;
+    const reprint1Res = await printRoute.POST(
+      jsonReq({
+        printRequestId: sharedReprintReqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    const reprint1 = (await reprint1Res.json()) as { jobId: string; attemptNumber: number; previousJobId: string | null };
+    expect(reprint1).toMatchObject({ attemptNumber: 1, previousJobId: null });
+    await jobsRoute.PATCH(jsonReq({ jobId: reprint1.jobId, status: "handed_off" }, "PATCH"));
+
+    const reprint2Res = await printRoute.POST(
+      jsonReq({
+        printRequestId: sharedReprintReqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    const reprint2 = (await reprint2Res.json()) as { jobId: string; attemptNumber: number; previousJobId: string | null };
+    expect(reprint2).toMatchObject({ attemptNumber: 1, previousJobId: null });
+    await jobsRoute.PATCH(
+      jsonReq({ jobId: reprint2.jobId, status: "failed", errorCode: "printer_offline" }, "PATCH"),
+    );
+
+    const reprint2FallbackRes = await printRoute.POST(
+      jsonReq({
+        failedPrinterId: alphaMain.printerId,
+        previousJobId: reprint2.jobId,
+        printRequestId: sharedReprintReqId,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(reprint2FallbackRes.status).toBe(200);
+    expect(await reprint2FallbackRes.json()).toMatchObject({
+      ok: true,
+      attemptNumber: 2,
+      previousJobId: reprint2.jobId,
+      routeReason: "runtime_fallback",
+    });
+  });
 });
 

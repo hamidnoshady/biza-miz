@@ -104,12 +104,13 @@ const ROUTE_LABEL: Record<string, string> = {
   choose: "انتخاب نشده",
   unavailable: "خارج از دسترس",
   none: "انتخاب نشده",
+  unknown: "نامشخص (تاریخی)",
 };
 
 const OUTCOME_LABEL: Record<string, string> = {
   handed_off: "تحویل به صف سیستم‌عامل (خروجی کاغذ بررسی شود)",
   not_delivered: "عدم تحویل پیش از ارسال",
-  ambiguous: "وضعیت تحویل نامشخص — بدون ارسال مجدد خودکار",
+  ambiguous: "وضعیت تحویل نامشخص — بدون ارسال مجدد خودکار (بررسی چاپگر و چاپ مجدد دستی لازم است)",
   connector_unavailable: "سرویس چاپ در دسترس نیست",
   pending: "در حال ارسال",
 };
@@ -381,9 +382,8 @@ export function RulesPanel() {
             {jobs.map((job) => {
               const attemptNum = job.attemptNumber ?? 1;
               const isLinked =
-                attemptNum > 1 ||
                 Boolean(job.previousJobId) ||
-                jobs.some((other) => other.id !== job.id && (other.previousJobId === job.id || (job.printRequestId && other.printRequestId === job.printRequestId)));
+                jobs.some((other) => other.id !== job.id && other.previousJobId === job.id);
               const templateDisplay = job.templateName ?? job.templateKey;
               return (
                 <li key={job.id} className="space-y-1 py-2.5 first:pt-0 last:pb-0">

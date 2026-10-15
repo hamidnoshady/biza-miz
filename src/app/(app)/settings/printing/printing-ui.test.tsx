@@ -353,6 +353,68 @@ describe("Rules screen — printers", () => {
     expect(text).toContain("تحویل به صف سیستم‌عامل (خروجی کاغذ بررسی شود)");
     expect(text).toContain("عدم تحویل پیش از ارسال");
   });
+
+  it("does not display intentional reprints sharing printRequestId as linked fallback attempts, and shows ambiguous/historical labels", async () => {
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
+      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED } };
+      if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/printing/jobs") {
+        return {
+          ok: true,
+          data: {
+            jobs: [
+              {
+                id: "reprint-2",
+                documentType: "receipt",
+                status: "handed_off",
+                errorCode: null,
+                deliveryOutcome: "handed_off",
+                routeReason: "unknown",
+                attemptNumber: 1,
+                previousJobId: null,
+                printerName: "صندوق",
+                fallbackFromPrinterName: null,
+                templateName: "رسید",
+                templateKey: "receipt-standard",
+                templateVersion: 1,
+                printRequestId: "receipt:order-99",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۵",
+              },
+              {
+                id: "reprint-1",
+                documentType: "receipt",
+                status: "failed",
+                errorCode: "job_timeout",
+                deliveryOutcome: "ambiguous",
+                routeReason: "rule",
+                attemptNumber: 1,
+                previousJobId: null,
+                printerName: "صندوق",
+                fallbackFromPrinterName: null,
+                templateName: "رسید",
+                templateKey: "receipt-standard",
+                templateVersion: 1,
+                printRequestId: "receipt:order-99",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۰",
+              },
+            ],
+          },
+        };
+      }
+      if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
+      if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
+      return { ok: true, data: {} };
+    });
+
+    await openRules();
+    const text = bodyText();
+    expect(text).not.toContain("تلاش ۲");
+    expect(text).not.toContain("مرتبط با تلاش ۱");
+    expect(text).toContain("مسیر: نامشخص (تاریخی)");
+    expect(text).toContain("وضعیت تحویل نامشخص — بدون ارسال مجدد خودکار (بررسی چاپگر و چاپ مجدد دستی لازم است)");
+  });
 });
 
 /* ── the add-printer wizard ───────────────────────────────────────────── */

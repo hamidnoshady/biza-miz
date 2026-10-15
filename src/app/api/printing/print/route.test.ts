@@ -541,8 +541,9 @@ describe("render, history and provenance", () => {
     });
   });
 
-  it("includes fallbackPrinterId on a primary rule plan and binds fallback retry to attempt 1's immutable snapshot", async () => {
+  it("includes fallbackPrinterId on a primary rule plan and binds fallback retry to attempt 1's durable immutable snapshot after atomic reservation", async () => {
     const BACKUP_ID = "bbbb1111-2222-4333-8444-555566667777";
+    const FALLBACK_JOB_ID = "ffff1111-2222-4333-8444-555566667777";
     vi.mocked(planModule.resolvePrintPlan).mockResolvedValueOnce({
       ok: true,
       plan: plan({
@@ -561,6 +562,10 @@ describe("render, history and provenance", () => {
       fallbackPrinterName: "پشتیبان",
     });
 
+    // Capture the durable snapshot persisted by attempt 1 into print_jobs:
+    const [, primaryInsertParams] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const persistedSnapshot = JSON.parse(String(primaryInsertParams[17]));
+
     // Simulate concurrent edits to the order in DB: if loadPrintDocument were
     // called a second time, it would return the mutated order.
     vi.mocked(loader.loadPrintDocument).mockResolvedValue({
@@ -571,6 +576,44 @@ describe("render, history and provenance", () => {
         source: "order-receipt",
       },
     } as never);
+
+    let fallbackReserved = false;
+    vi.mocked(db.query).mockImplementation((async (sql: string) => {
+      const text = String(sql);
+      if (text.includes("SELECT j.id")) {
+        return {
+          rows: [
+            {
+              id: JOB_ID,
+              document_type: "receipt",
+              entity_id: ORDER_ID,
+              printer_id: PRINTER_ID,
+              printer_name: "چاپگر صندوق",
+              template_id: TEMPLATE_ID,
+              template_key: "saved-1",
+              template_version: 12,
+              status: "failed",
+              error_code: "printer_offline",
+              delivery_outcome: "not_delivered",
+              attempt_number: 1,
+              previous_job_id: null,
+              print_request_id: "req-fb",
+              render_snapshot: persistedSnapshot,
+              has_fallback_attempt: fallbackReserved,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (text.includes("WITH locked_parent AS")) {
+        if (fallbackReserved) {
+          return { rows: [], rowCount: 0 };
+        }
+        fallbackReserved = true;
+        return { rows: [{ id: FALLBACK_JOB_ID }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }) as never);
 
     vi.mocked(planModule.resolvePrintPlan).mockResolvedValueOnce({
       ok: true,
@@ -615,6 +658,7 @@ describe("render, history and provenance", () => {
     });
     expect(await fallbackRes.json()).toMatchObject({
       ok: true,
+      jobId: FALLBACK_JOB_ID,
       attemptNumber: 2,
       printerId: BACKUP_ID,
       printerName: "پشتیبان",
@@ -625,50 +669,116 @@ describe("render, history and provenance", () => {
       fallbackPrinterId: null,
     });
 
-    // A third attempt (second fallback) is refused by the one-fallback limit:
-    const thirdRes = await POST(
+    // A retried or duplicate fallback request for the same parent is rejected with 409 fallback_already_reserved:
+    const duplicateFallbackRes = await POST(
       request({
-        failedPrinterId: BACKUP_ID,
+        failedPrinterId: PRINTER_ID,
         previousJobId: JOB_ID,
         printRequestId: "req-fb",
         document: { kind: "order-receipt", orderId: ORDER_ID },
       }),
     );
-    expect(thirdRes.status).toBe(409);
-    expect(await thirdRes.json()).toMatchObject({ ok: false, error: "printer_unavailable" });
+    expect(duplicateFallbackRes.status).toBe(409);
+    expect(await duplicateFallbackRes.json()).toMatchObject({ ok: false, error: "fallback_already_reserved" });
+    expect(renderService.preparePrint).toHaveBeenCalledTimes(2);
   });
 
-  it("refuses a fallback request when attempt 1 in print_jobs was handed_off or ambiguous", async () => {
-    vi.mocked(db.query).mockImplementation((async (sql: string) => {
-      if (String(sql).includes("SELECT j.id")) {
-        return {
-          rows: [
-            {
-              id: JOB_ID,
-              document_type: "receipt",
-              entity_id: ORDER_ID,
-              printer_id: PRINTER_ID,
-              printer_name: "چاپگر صندوق",
-              template_id: TEMPLATE_ID,
-              template_key: "saved-1",
-              template_version: 12,
-              status: "failed",
-              error_code: "print_failed",
-              delivery_outcome: "ambiguous",
-              attempt_number: 1,
-              previous_job_id: null,
-              print_request_id: "req-amb",
-              render_snapshot: null,
-              has_fallback_attempt: false,
-            },
-          ],
-          rowCount: 1,
-        };
-      }
-      return { rows: [], rowCount: 0 };
-    }) as never);
+  it("refuses a fallback request when attempt 1 is missing, pending, handed_off, ambiguous, mismatched, or lacks a valid snapshot", async () => {
+    // 1. Missing previousJobId on fallback request:
+    const missingIdRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(missingIdRes.status).toBe(409);
+    expect(await missingIdRes.json()).toMatchObject({ ok: false, error: "fallback_parent_not_found" });
 
-    const res = await POST(
+    // 2. Parent row not found in caller's branch:
+    vi.mocked(db.query).mockResolvedValueOnce({ rows: [], rowCount: 0 } as never);
+    const notFoundRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(notFoundRes.status).toBe(409);
+    expect(await notFoundRes.json()).toMatchObject({ ok: false, error: "fallback_parent_not_found" });
+
+    // 3. Parent lookup query failure (DB error) does not continue to mutable reload:
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(db.query).mockRejectedValueOnce(new Error("db connection lost") as never);
+    const dbFailureRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    errorSpy.mockRestore();
+    expect(dbFailureRes.status).toBe(503);
+    expect(await dbFailureRes.json()).toMatchObject({ ok: false, error: "printer_unavailable" });
+
+    // 4. Parent still pending (status = 'sending'):
+    vi.mocked(db.query).mockResolvedValueOnce({
+      rows: [
+        {
+          id: JOB_ID,
+          document_type: "receipt",
+          entity_id: ORDER_ID,
+          printer_id: PRINTER_ID,
+          printer_name: "چاپگر صندوق",
+          template_id: TEMPLATE_ID,
+          template_key: "saved-1",
+          template_version: 12,
+          status: "sending",
+          error_code: null,
+          delivery_outcome: "pending",
+          attempt_number: 1,
+          previous_job_id: null,
+          print_request_id: "req-pend",
+          render_snapshot: null,
+          has_fallback_attempt: false,
+        },
+      ],
+      rowCount: 1,
+    } as never);
+    const pendingRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(pendingRes.status).toBe(409);
+    expect(await pendingRes.json()).toMatchObject({ ok: false, error: "fallback_parent_pending" });
+
+    // 5. Parent handed_off or ambiguous:
+    vi.mocked(db.query).mockResolvedValueOnce({
+      rows: [
+        {
+          id: JOB_ID,
+          document_type: "receipt",
+          entity_id: ORDER_ID,
+          printer_id: PRINTER_ID,
+          printer_name: "چاپگر صندوق",
+          template_id: TEMPLATE_ID,
+          template_key: "saved-1",
+          template_version: 12,
+          status: "failed",
+          error_code: "print_failed",
+          delivery_outcome: "ambiguous",
+          attempt_number: 1,
+          previous_job_id: null,
+          print_request_id: "req-amb",
+          render_snapshot: null,
+          has_fallback_attempt: false,
+        },
+      ],
+      rowCount: 1,
+    } as never);
+    const ambRes = await POST(
       request({
         failedPrinterId: PRINTER_ID,
         previousJobId: JOB_ID,
@@ -676,8 +786,159 @@ describe("render, history and provenance", () => {
         document: { kind: "order-receipt", orderId: ORDER_ID },
       }),
     );
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ ok: false, error: "job_timeout" });
+    expect(ambRes.status).toBe(409);
+    expect(await ambRes.json()).toMatchObject({ ok: false, error: "job_timeout" });
+
+    // 6. Parent has confirmed non-delivery, but render_snapshot is missing:
+    vi.mocked(db.query).mockResolvedValueOnce({
+      rows: [
+        {
+          id: JOB_ID,
+          document_type: "receipt",
+          entity_id: ORDER_ID,
+          printer_id: PRINTER_ID,
+          printer_name: "چاپگر صندوق",
+          template_id: TEMPLATE_ID,
+          template_key: "saved-1",
+          template_version: 12,
+          status: "failed",
+          error_code: "printer_offline",
+          delivery_outcome: "not_delivered",
+          attempt_number: 1,
+          previous_job_id: null,
+          print_request_id: "req-nosnap",
+          render_snapshot: null,
+          has_fallback_attempt: false,
+        },
+      ],
+      rowCount: 1,
+    } as never);
+    const noSnapshotRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
+        printRequestId: "req-nosnap",
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(noSnapshotRes.status).toBe(409);
+    expect(await noSnapshotRes.json()).toMatchObject({ ok: false, error: "fallback_snapshot_missing" });
+    expect(loader.loadPrintDocument).not.toHaveBeenCalled();
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
+  });
+
+  it("stops before rendering and never returns printable bytes when atomic fallback reservation loses a race or fails in the database", async () => {
+    const BACKUP_ID = "bbbb1111-2222-4333-8444-555566667777";
+    const snapshot = {
+      job: { type: "receipt", receipt: { business: { name: "کافه" } } },
+      entityId: ORDER_ID,
+      documentSource: "order-receipt",
+      documentType: "receipt",
+      primaryPrinterId: PRINTER_ID,
+      primaryPrinterName: "چاپگر صندوق",
+      template: {
+        templateId: TEMPLATE_ID,
+        templateKey: "saved-1",
+        templateName: "قالب من",
+        templateVersion: 12,
+        paper: "thermal80",
+        source: "rule",
+        template: plan().template,
+      },
+      branding: { name: "کافه" },
+    };
+
+    vi.mocked(planModule.resolvePrintPlan).mockResolvedValue({
+      ok: true,
+      plan: plan({
+        printer: { ...plan().printer, id: BACKUP_ID, name: "پشتیبان" },
+        reason: "fallback",
+        fallbackPrinter: { ...plan().printer, id: PRINTER_ID, name: "چاپگر صندوق" },
+        backupPrinter: null,
+      }),
+    } as never);
+
+    // Case A: Concurrent winner already inserted attempt 2 (ON CONFLICT DO NOTHING returns 0 rows)
+    vi.mocked(db.query).mockImplementationOnce((async () => ({
+      rows: [
+        {
+          id: JOB_ID,
+          document_type: "receipt",
+          entity_id: ORDER_ID,
+          printer_id: PRINTER_ID,
+          printer_name: "چاپگر صندوق",
+          template_id: TEMPLATE_ID,
+          template_key: "saved-1",
+          template_version: 12,
+          status: "failed",
+          error_code: "printer_offline",
+          delivery_outcome: "not_delivered",
+          attempt_number: 1,
+          previous_job_id: null,
+          print_request_id: "req-race",
+          render_snapshot: snapshot,
+          has_fallback_attempt: false,
+        },
+      ],
+      rowCount: 1,
+    })) as never).mockImplementationOnce((async () => ({
+      rows: [],
+      rowCount: 0,
+    })) as never);
+
+    const conflictRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
+        printRequestId: "req-race",
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    expect(conflictRes.status).toBe(409);
+    const conflictBody = (await conflictRes.json()) as Record<string, unknown>;
+    expect(conflictBody).toMatchObject({ ok: false, error: "fallback_already_reserved" });
+    expect(conflictBody.dataBase64).toBeUndefined();
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
+
+    // Case B: Database throws an error during reservation (must return 503 and NOT render)
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(db.query).mockImplementationOnce((async () => ({
+      rows: [
+        {
+          id: JOB_ID,
+          document_type: "receipt",
+          entity_id: ORDER_ID,
+          printer_id: PRINTER_ID,
+          printer_name: "چاپگر صندوق",
+          template_id: TEMPLATE_ID,
+          template_key: "saved-1",
+          template_version: 12,
+          status: "failed",
+          error_code: "printer_offline",
+          delivery_outcome: "not_delivered",
+          attempt_number: 1,
+          previous_job_id: null,
+          print_request_id: "req-race",
+          render_snapshot: snapshot,
+          has_fallback_attempt: false,
+        },
+      ],
+      rowCount: 1,
+    })) as never).mockRejectedValueOnce(new Error("serialization failure") as never);
+
+    const dbErrRes = await POST(
+      request({
+        failedPrinterId: PRINTER_ID,
+        previousJobId: JOB_ID,
+        printRequestId: "req-race",
+        document: { kind: "order-receipt", orderId: ORDER_ID },
+      }),
+    );
+    errorSpy.mockRestore();
+    expect(dbErrRes.status).toBe(503);
+    const dbErrBody = (await dbErrRes.json()) as Record<string, unknown>;
+    expect(dbErrBody).toMatchObject({ ok: false, error: "printer_unavailable" });
+    expect(dbErrBody.dataBase64).toBeUndefined();
     expect(renderService.preparePrint).not.toHaveBeenCalled();
   });
 });

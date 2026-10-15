@@ -14,7 +14,11 @@ import { preparePrint, printerRefusal, type PrintJob } from "@/lib/printing/rend
 import { printerTargetOf } from "@/lib/printing/types";
 import { defaultDocumentTypeFor, documentTypesFor, parsePrintRequest } from "@/lib/printing/document-request";
 import { loadPrintDocument } from "@/lib/printing/document-loader";
-import { CONFIRMED_PRE_HANDOFF_ERRORS, type PrinterErrorCode } from "@/lib/printing/errors";
+import {
+  CONFIRMED_PRE_HANDOFF_ERROR_LIST,
+  isConfirmedNonDeliveryAttempt,
+  type PrinterErrorCode,
+} from "@/lib/printing/errors";
 
 /**
  * The one hardware print endpoint: resolve the print plan for the caller's
@@ -48,9 +52,11 @@ import { CONFIRMED_PRE_HANDOFF_ERRORS, type PrinterErrorCode } from "@/lib/print
  * 0213 explains why attempts must not collapse).
  *
  * On a runtime fallback attempt (`failedPrinterId` / `previousJobId`), attempt
- * 2 is bound to attempt 1's persisted `render_snapshot` (exact resolved
- * document, template revision, branding, and rendering inputs) so concurrent
- * database edits between attempt 1 and attempt 2 are never silently reloaded.
+ * 2 requires a durable parent attempt in the caller's branch with positively
+ * confirmed pre-handoff non-delivery (`status = 'failed'`, `delivery_outcome =
+ * 'not_delivered'`), a valid persisted `render_snapshot`, and an atomic
+ * reservation in `print_jobs` (`idx_print_jobs_unique_previous_job`) before
+ * rendering and returning printable bytes.
  */
 export const runtime = "nodejs";
 
@@ -68,12 +74,13 @@ export type JobRouteReason =
   | "runtime_fallback"
   | "default"
   | "only"
-  | "none";
+  | "none"
+  | "unknown";
 
 export interface PrintOperationSnapshot {
   documentType: PrintDocumentType;
   entityId: string | null;
-   requestedEntityRefId: string | null;
+  requestedEntityRefId: string | null;
   documentSource: string;
   job: PrintJob;
   template: ResolvedTemplate;
@@ -106,41 +113,37 @@ interface PriorAttemptRecord extends Record<string, unknown> {
   has_fallback_attempt: boolean;
 }
 
-interface CachedAttemptEntry {
-  jobId: string | null;
-  locationId: string;
-  printRequestId: string | null;
-  attemptNumber: number;
-  hasFallbackAttempt: boolean;
-  snapshot: PrintOperationSnapshot;
-}
-
-const MAX_CACHED_SNAPSHOTS = 200;
-const snapshotCacheByRequest = new Map<string, CachedAttemptEntry>();
-const snapshotCacheByJobId = new Map<string, CachedAttemptEntry>();
-
-function rememberAttemptSnapshot(entry: CachedAttemptEntry): void {
-  if (entry.printRequestId) {
-    const key = `${entry.locationId}:${entry.printRequestId}`;
-    if (snapshotCacheByRequest.size >= MAX_CACHED_SNAPSHOTS) {
-      const oldest = snapshotCacheByRequest.keys().next().value;
-      if (oldest) snapshotCacheByRequest.delete(oldest);
-    }
-    snapshotCacheByRequest.set(key, entry);
-  }
-  if (entry.jobId) {
-    const key = `${entry.locationId}:${entry.jobId}`;
-    if (snapshotCacheByJobId.size >= MAX_CACHED_SNAPSHOTS) {
-      const oldest = snapshotCacheByJobId.keys().next().value;
-      if (oldest) snapshotCacheByJobId.delete(oldest);
-    }
-    snapshotCacheByJobId.set(key, entry);
-  }
-}
-
+/** Kept as a no-op export for test compatibility; fallback never uses process-local cache state. */
 export function clearPrintSnapshotCacheForTests(): void {
-  snapshotCacheByRequest.clear();
-  snapshotCacheByJobId.clear();
+  // No-op: fallback validation and snapshots are backed exclusively by PostgreSQL.
+}
+
+function isValidPrintOperationSnapshot(value: unknown): value is PrintOperationSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<PrintOperationSnapshot>;
+  if (typeof candidate.documentType !== "string" || candidate.documentType.length === 0) return false;
+  if (typeof candidate.documentSource !== "string" || candidate.documentSource.length === 0) return false;
+  if (typeof candidate.primaryPrinterId !== "string" || candidate.primaryPrinterId.length === 0) return false;
+  if (!candidate.job || typeof candidate.job !== "object") return false;
+  if (typeof (candidate.job as { type?: unknown }).type !== "string") return false;
+  if (!candidate.template || typeof candidate.template !== "object") return false;
+  const tpl = candidate.template as Partial<ResolvedTemplate>;
+  if (!tpl.template || typeof tpl.template !== "object") return false;
+  if (typeof tpl.template.name !== "string" || typeof tpl.template.paper !== "string") return false;
+  if (!Array.isArray(tpl.template.blocks)) return false;
+  if (typeof tpl.templateKey !== "string" || typeof tpl.templateVersion !== "number") return false;
+  if (!candidate.branding || typeof candidate.branding !== "object") return false;
+  return true;
+}
+
+function documentKindMatchesSource(
+  requestDocumentKind: "order-receipt" | "kitchen-ticket" | "item-label",
+  snapshotSource: string,
+): boolean {
+  if (requestDocumentKind === "order-receipt") {
+    return snapshotSource === "order-receipt" || snapshotSource === "retail-invoice";
+  }
+  return snapshotSource === requestDocumentKind;
 }
 
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -192,84 +195,110 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   let boundSnapshot: PrintOperationSnapshot | null = null;
 
   if (isFallbackAttempt) {
-    priorAttempt = await loadPriorAttemptForFallback({
+    if (!parsed.failedPrinterId) {
+      return NextResponse.json({ ok: false, error: "bad_request" }, { status: 400 });
+    }
+    if (parsed.printerId) {
+      return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 409 });
+    }
+    if (!parsed.previousJobId && !parsed.printRequestId) {
+      return NextResponse.json({ ok: false, error: "fallback_parent_not_found" }, { status: 409 });
+    }
+
+    const priorLookup = await loadPriorAttemptForFallback({
       locationId: location.id,
       previousJobId: parsed.previousJobId ?? null,
       printRequestId: parsed.printRequestId,
-      failedPrinterId: parsed.failedPrinterId ?? null,
-      documentType,
     });
+    if (!priorLookup.ok) {
+      if (priorLookup.reason === "lookup_failed") {
+        return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 503 });
+      }
+      return NextResponse.json({ ok: false, error: "fallback_parent_not_found" }, { status: 409 });
+    }
+    priorAttempt = priorLookup.row;
 
-    const cached =
-      (parsed.previousJobId ? snapshotCacheByJobId.get(`${location.id}:${parsed.previousJobId}`) : undefined) ??
-      (parsed.printRequestId ? snapshotCacheByRequest.get(`${location.id}:${parsed.printRequestId}`) : undefined) ??
-      null;
-
-    if (priorAttempt) {
-      // Enforce the strict one-fallback limit (at most 2 attempts per operation).
-      if (priorAttempt.attempt_number >= 2 || priorAttempt.has_fallback_attempt) {
-        return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 409 });
-      }
-      // Delivery safety: never allow automatic fallback when attempt 1 was
-      // already handed off, timed out, or had an ambiguous/unproven outcome.
-      if (
-        priorAttempt.status === "handed_off" ||
-        priorAttempt.delivery_outcome === "handed_off" ||
-        priorAttempt.delivery_outcome === "ambiguous" ||
-        priorAttempt.delivery_outcome === "connector_unavailable" ||
-        priorAttempt.error_code === "job_timeout" ||
-        priorAttempt.error_code === "print_failed" ||
-        (priorAttempt.status === "failed" &&
-          priorAttempt.error_code != null &&
-          !CONFIRMED_PRE_HANDOFF_ERRORS.has(priorAttempt.error_code as PrinterErrorCode))
-      ) {
-        return NextResponse.json({ ok: false, error: "job_timeout" }, { status: 409 });
-      }
-      if (priorAttempt.document_type !== documentType) {
-        return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
-      }
-      if (
-        parsed.failedPrinterId &&
-        priorAttempt.printer_id &&
-        priorAttempt.printer_id !== parsed.failedPrinterId
-      ) {
-        return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 409 });
-      }
-      boundSnapshot = priorAttempt.render_snapshot ?? cached?.snapshot ?? null;
-    } else if (cached) {
-      if (cached.attemptNumber >= 2 || cached.hasFallbackAttempt) {
-        return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 409 });
-      }
-      if (cached.snapshot.documentType !== documentType) {
-        return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
-      }
-      if (
-        parsed.failedPrinterId &&
-        cached.snapshot.primaryPrinterId &&
-        cached.snapshot.primaryPrinterId !== parsed.failedPrinterId
-      ) {
-        return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 409 });
-      }
-      boundSnapshot = cached.snapshot;
+    // Enforce the strict one-fallback limit and reject duplicate fallback reservations.
+    if (priorAttempt.attempt_number >= 2 || priorAttempt.previous_job_id !== null) {
+      const isSecondFallback = priorAttempt.printer_id === parsed.failedPrinterId;
+      return NextResponse.json(
+        { ok: false, error: isSecondFallback ? "printer_unavailable" : "fallback_already_reserved" },
+        { status: 409 },
+      );
+    }
+    if (priorAttempt.has_fallback_attempt) {
+      return NextResponse.json({ ok: false, error: "fallback_already_reserved" }, { status: 409 });
     }
 
+    // Parent identity must match the requested document type and failed printer.
+    if (priorAttempt.document_type !== documentType) {
+      return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+    }
+    if (!priorAttempt.printer_id || priorAttempt.printer_id !== parsed.failedPrinterId) {
+      return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 409 });
+    }
     if (
-      boundSnapshot &&
-      requestedEntityRefId &&
-      boundSnapshot.requestedEntityRefId &&
-      boundSnapshot.requestedEntityRefId !== requestedEntityRefId
+      parsed.printRequestId &&
+      priorAttempt.print_request_id &&
+      priorAttempt.print_request_id !== parsed.printRequestId
+    ) {
+      return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+    }
+
+    // Delivery safety: reject pending/sending, handed_off, ambiguous, or unproven parent attempts.
+    if (
+      priorAttempt.status === "sending" ||
+      priorAttempt.status === "created" ||
+      priorAttempt.status === "preparing" ||
+      priorAttempt.status === "routing" ||
+      priorAttempt.delivery_outcome === "pending"
+    ) {
+      return NextResponse.json({ ok: false, error: "fallback_parent_pending" }, { status: 409 });
+    }
+    if (!isConfirmedNonDeliveryAttempt(priorAttempt)) {
+      return NextResponse.json({ ok: false, error: "job_timeout" }, { status: 409 });
+    }
+
+    // Require a valid immutable snapshot from the parent attempt; never reload mutable data.
+    if (!isValidPrintOperationSnapshot(priorAttempt.render_snapshot)) {
+      return NextResponse.json({ ok: false, error: "fallback_snapshot_missing" }, { status: 409 });
+    }
+    boundSnapshot = priorAttempt.render_snapshot;
+
+    if (
+      boundSnapshot.documentType !== documentType ||
+      boundSnapshot.primaryPrinterId !== priorAttempt.printer_id
+    ) {
+      return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+    }
+    if (priorAttempt.entity_id !== null && boundSnapshot.entityId !== priorAttempt.entity_id) {
+      return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+    }
+    if (parsed.source.kind === "document") {
+      const expectedRefId =
+        boundSnapshot.requestedEntityRefId ?? boundSnapshot.entityId ?? priorAttempt.entity_id;
+      if (
+        !requestedEntityRefId ||
+        !expectedRefId ||
+        requestedEntityRefId !== expectedRefId ||
+        !documentKindMatchesSource(parsed.source.document.kind, boundSnapshot.documentSource)
+      ) {
+        return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+      }
+    } else if (
+      boundSnapshot.documentSource !== "sample" ||
+      boundSnapshot.job.type !== parsed.source.job.type
     ) {
       return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
     }
   }
 
-  const effectiveFailedPrinterId =
-    parsed.failedPrinterId ?? priorAttempt?.printer_id ?? boundSnapshot?.primaryPrinterId ?? null;
+  const effectiveFailedPrinterId = isFallbackAttempt ? parsed.failedPrinterId ?? null : null;
 
   const resolved = await resolvePrintPlan({
     locationId: location.id,
     documentType,
-    requestedPrinterId: parsed.printerId,
+    requestedPrinterId: isFallbackAttempt ? null : parsed.printerId,
     requestedTemplateId: boundSnapshot ? boundSnapshot.template.templateId : parsed.templateId,
     ...(effectiveFailedPrinterId ? { failedPrinterId: effectiveFailedPrinterId } : {}),
     ...(boundSnapshot
@@ -285,14 +314,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
   const { plan } = resolved;
 
+  if (isFallbackAttempt && (plan.reason !== "fallback" || plan.printer.id === effectiveFailedPrinterId)) {
+    return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 409 });
+  }
+
   const refusal = printerRefusal(plan.printer);
   if (refusal) return NextResponse.json({ ok: false, error: refusal }, { status: 409 });
 
   const target = printerTargetOf(plan.printer.connection);
   if (!target) return NextResponse.json({ ok: false, error: "reconnect_required" }, { status: 409 });
 
-  // The document itself: on attempt 1 (or if no snapshot exists), loaded from
-  // this branch's rows; on attempt 2 with a bound snapshot, reused verbatim so
+  // The document itself: on attempt 1, loaded from this branch's rows; on
+  // attempt 2, reused verbatim from the parent attempt's immutable snapshot so
   // concurrent edits to the order, item, template, or branding between attempt
   // 1 and attempt 2 are never silently reloaded.
   let job: PrintJob;
@@ -320,9 +353,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   const attemptNumber: 1 | 2 = isFallbackAttempt ? 2 : 1;
-  const previousJobId: string | null = isFallbackAttempt
-    ? (priorAttempt?.id ?? parsed.previousJobId ?? null)
-    : null;
+  const previousJobId: string | null = isFallbackAttempt ? priorAttempt!.id : null;
   const routeReason: JobRouteReason = isFallbackAttempt
     ? "runtime_fallback"
     : (plan.reason as JobRouteReason);
@@ -354,38 +385,41 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     backupPrinterName: plan.backupPrinter ? String(plan.backupPrinter.name) : null,
   };
 
-  const jobId = await openJobRow({
-    locationId: location.id,
-    documentType,
-    entityId,
-    plan,
-    printRequestId: parsed.printRequestId,
-    attemptNumber,
-    previousJobId,
-    routeReason,
-    fallbackFromPrinterId,
-    fallbackFromPrinterName,
-    snapshot: snapshotToPersist,
-  });
-
-  if (attemptNumber === 1) {
-    rememberAttemptSnapshot({
-      jobId,
+  let jobId: string | null = null;
+  if (isFallbackAttempt) {
+    const reservation = await reserveFallbackJobRow({
       locationId: location.id,
-      printRequestId: parsed.printRequestId,
-      attemptNumber: 1,
-      hasFallbackAttempt: false,
+      documentType,
+      entityId,
+      plan,
+      printRequestId: parsed.printRequestId ?? priorAttempt?.print_request_id ?? null,
+      previousJobId: priorAttempt!.id,
+      routeReason,
+      fallbackFromPrinterId: priorAttempt!.printer_id!,
+      fallbackFromPrinterName,
       snapshot: snapshotToPersist,
     });
+    if (!reservation.ok) {
+      if (reservation.reason === "conflict") {
+        return NextResponse.json({ ok: false, error: "fallback_already_reserved" }, { status: 409 });
+      }
+      return NextResponse.json({ ok: false, error: "printer_unavailable" }, { status: 503 });
+    }
+    jobId = reservation.jobId;
   } else {
-    const existingByReq = parsed.printRequestId
-      ? snapshotCacheByRequest.get(`${location.id}:${parsed.printRequestId}`)
-      : undefined;
-    if (existingByReq) existingByReq.hasFallbackAttempt = true;
-    const existingByJob = previousJobId
-      ? snapshotCacheByJobId.get(`${location.id}:${previousJobId}`)
-      : undefined;
-    if (existingByJob) existingByJob.hasFallbackAttempt = true;
+    jobId = await openJobRow({
+      locationId: location.id,
+      documentType,
+      entityId,
+      plan,
+      printRequestId: parsed.printRequestId,
+      attemptNumber: 1,
+      previousJobId: null,
+      routeReason,
+      fallbackFromPrinterId,
+      fallbackFromPrinterName,
+      snapshot: snapshotToPersist,
+    });
   }
 
   try {
@@ -450,11 +484,12 @@ async function loadPriorAttemptForFallback(input: {
   locationId: string;
   previousJobId: string | null;
   printRequestId: string | null;
-  failedPrinterId: string | null;
-  documentType: string;
-}): Promise<PriorAttemptRecord | null> {
-  if (!input.previousJobId && !input.printRequestId && !input.failedPrinterId) {
-    return null;
+}): Promise<
+  | { ok: true; row: PriorAttemptRecord }
+  | { ok: false; reason: "not_found" | "lookup_failed" }
+> {
+  if (!input.previousJobId && !input.printRequestId) {
+    return { ok: false, reason: "not_found" };
   }
   try {
     const { rows } = await query<PriorAttemptRecord>(
@@ -480,46 +515,144 @@ async function loadPriorAttemptForFallback(input: {
                 SELECT 1
                   FROM print_jobs child
                  WHERE child.location_id = j.location_id
-                   AND (
-                     child.previous_job_id = j.id
-                     OR (
-                       j.print_request_id IS NOT NULL
-                       AND child.print_request_id = j.print_request_id
-                       AND child.attempt_number >= 2
-                     )
-                   )
+                   AND child.previous_job_id = j.id
               ) AS has_fallback_attempt
          FROM print_jobs j
         WHERE j.location_id = $1
           AND (
             ($2::uuid IS NOT NULL AND j.id = $2::uuid)
             OR ($2::uuid IS NULL AND $3::text IS NOT NULL AND j.print_request_id = $3::text)
-            OR ($2::uuid IS NULL AND $3::text IS NULL AND $4::uuid IS NOT NULL AND j.printer_id = $4::uuid AND j.document_type = $5)
           )
-        ORDER BY j.attempt_number DESC, j.created_at DESC
+        ORDER BY j.created_at DESC, j.attempt_number DESC, j.id DESC
         LIMIT 1`,
-      [
-        input.locationId,
-        input.previousJobId,
-        input.printRequestId,
-        input.failedPrinterId,
-        input.documentType,
-      ],
+      [input.locationId, input.previousJobId, input.printRequestId],
     );
-    return rows[0] ?? null;
+    const row = rows[0];
+    if (!row) return { ok: false, reason: "not_found" };
+    return { ok: true, row };
   } catch (err) {
-    console.error("loading prior print attempt skipped", err);
-    return null;
+    console.error("loading prior print attempt failed", err);
+    return { ok: false, reason: "lookup_failed" };
   }
 }
 
 /**
- * Open this attempt's history row before the render starts.
+ * Atomically reserve the single fallback attempt for a confirmed-non-delivered
+ * primary attempt BEFORE rendering.
+ *
+ * Uses `SELECT ... FOR UPDATE` on the parent attempt row inside a single-statement
+ * CTE so concurrent fallback requests serialize on the parent row without holding
+ * a transaction open across Chromium rendering, and `idx_print_jobs_unique_previous_job`
+ * enforces at most one child row per parent at the database constraint level.
+ */
+async function reserveFallbackJobRow(input: {
+  locationId: string;
+  documentType: string;
+  entityId: string | null;
+  plan: PrintPlan;
+  printRequestId: string | null;
+  previousJobId: string;
+  routeReason: JobRouteReason;
+  fallbackFromPrinterId: string;
+  fallbackFromPrinterName: string | null;
+  snapshot: PrintOperationSnapshot;
+}): Promise<
+  | { ok: true; jobId: string }
+  | { ok: false; reason: "conflict" | "db_error" }
+> {
+  try {
+    const { rows } = await query<{ id: string }>(
+      `WITH locked_parent AS (
+         SELECT id
+           FROM print_jobs
+          WHERE id = $10::uuid
+            AND location_id = $1
+            AND document_type = $2
+            AND printer_id = $13::uuid
+            AND attempt_number = 1
+            AND previous_job_id IS NULL
+            AND status = 'failed'
+            AND delivery_outcome = 'not_delivered'
+            AND error_code = ANY($19::text[])
+            AND render_snapshot IS NOT NULL
+          FOR UPDATE
+       )
+       INSERT INTO print_jobs
+         (location_id,
+          document_type,
+          entity_id,
+          printer_id,
+          template_id,
+          template_key,
+          template_version,
+          status,
+          print_request_id,
+          attempt_number,
+          previous_job_id,
+          route_reason,
+          delivery_outcome,
+          printer_name,
+          fallback_from_printer_id,
+          fallback_from_printer_name,
+          template_name,
+          template_paper,
+          template_source,
+          render_snapshot)
+       SELECT
+         $1, $2, $3, $4, $5, $6, $7, 'sending', $8, $9, locked_parent.id, $11, 'pending',
+         $12, $13, $14, $15, $16, $17, $18::jsonb
+       FROM locked_parent
+       WHERE NOT EXISTS (
+         SELECT 1
+           FROM print_jobs existing
+          WHERE existing.previous_job_id = locked_parent.id
+       )
+       ON CONFLICT (previous_job_id) WHERE previous_job_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [
+        input.locationId,
+        input.documentType,
+        input.entityId,
+        input.plan.printer.id,
+        input.plan.templateId,
+        input.plan.templateKey,
+        input.plan.templateVersion,
+        input.printRequestId,
+        2,
+        input.previousJobId,
+        input.routeReason,
+        input.plan.printer.name,
+        input.fallbackFromPrinterId,
+        input.fallbackFromPrinterName,
+        input.plan.template.name,
+        input.plan.template.paper,
+        input.plan.templateSource,
+        JSON.stringify(input.snapshot),
+        CONFIRMED_PRE_HANDOFF_ERROR_LIST,
+      ],
+    );
+    const id = rows[0]?.id;
+    if (!id) {
+      return { ok: false, reason: "conflict" };
+    }
+    return { ok: true, jobId: id };
+  } catch (err) {
+    const pgCode = (err as { code?: string })?.code;
+    if (pgCode === "23505") {
+      return { ok: false, reason: "conflict" };
+    }
+    console.error("fallback print job reservation failed", err);
+    return { ok: false, reason: "db_error" };
+  }
+}
+
+/**
+ * Open a primary attempt's history row before the render starts.
  *
  * Best-effort by contract — history is diagnostics and must never be the
- * reason a receipt does not print — but best-effort means "a failed insert is
- * logged and the print continues", not "only record the prints we feel like".
- * The row's id is what the browser closes the attempt with.
+ * reason a primary receipt does not print — but best-effort means "a failed
+ * insert is logged and the print continues", not "only record the prints we
+ * feel like". The row's id is what the browser closes the attempt with.
  */
 async function openJobRow(input: {
   locationId: string;

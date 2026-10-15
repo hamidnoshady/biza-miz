@@ -7,12 +7,16 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { MAX_PRINT_REQUEST_ID, SENDING_STALE_AFTER_SECONDS } from "@/lib/printing/routing";
 import {
   classifyDeliveryOutcome,
+  CONFIRMED_PRE_HANDOFF_ERROR_LIST,
+  CONNECTOR_UNAVAILABLE_ERROR_LIST,
   printerErrorMessage,
   type DeliveryOutcome,
   type PrinterErrorCode,
 } from "@/lib/printing/errors";
 
 const JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SQL_CONNECTOR_UNAVAILABLE_ERRORS = CONNECTOR_UNAVAILABLE_ERROR_LIST.map((code) => `'${code}'`).join(", ");
+const SQL_CONFIRMED_PRE_HANDOFF_ERRORS = CONFIRMED_PRE_HANDOFF_ERROR_LIST.map((code) => `'${code}'`).join(", ");
 
 interface HistoryJobRow extends Record<string, unknown> {
   id: string;
@@ -127,7 +131,7 @@ export const GET = withTenantScope(async () => {
         errorCode: row.error_code,
         errorMessage: row.error_code ? printerErrorMessage(row.error_code) : null,
         deliveryOutcome: resolveRowDeliveryOutcome(row),
-        routeReason: row.route_reason ?? "rule",
+        routeReason: row.route_reason ?? "unknown",
         attemptNumber: row.attempt_number ?? 1,
         previousJobId: row.previous_job_id ?? null,
         printerId: row.printer_id ?? null,
@@ -199,9 +203,9 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
               handed_off_at = CASE WHEN $3 = 'handed_off' THEN now() ELSE handed_off_at END,
               delivery_outcome = CASE
                 WHEN $3 = 'handed_off' THEN 'handed_off'
-                WHEN $4 IN ('connector_not_installed', 'connector_outdated', 'connector_unreachable', 'not_in_browser')
+                WHEN $4 IN (${SQL_CONNECTOR_UNAVAILABLE_ERRORS})
                   THEN 'connector_unavailable'
-                WHEN $4 IN ('printer_offline', 'printer_not_found', 'network_unreachable', 'spooler_rejected', 'printer_inactive', 'reconnect_required', 'invalid_printer', 'incompatible_printer', 'render_failed')
+                WHEN $4 IN (${SQL_CONFIRMED_PRE_HANDOFF_ERRORS})
                   THEN 'not_delivered'
                 ELSE 'ambiguous'
               END

@@ -16,11 +16,16 @@
 --      server-validated fallback attempt (attempt 2) renders the exact same
 --      inputs without silently reloading concurrently modified orders, items,
 --      templates, or branding from the database.
+--   3. Safe historical provenance: `print_request_id` is derived from the
+--      document (e.g. `receipt:{orderId}`) and is reused across intentional
+--      reprints. Pre-0222 rows therefore keep `attempt_number = 1`,
+--      `previous_job_id = NULL`, and `route_reason = 'unknown'` rather than
+--      inferring fallback linkage from shared `print_request_id` values.
 
 ALTER TABLE print_jobs
   ADD COLUMN IF NOT EXISTS attempt_number integer NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS previous_job_id uuid REFERENCES print_jobs(id) ON DELETE SET NULL,
-  ADD COLUMN IF NOT EXISTS route_reason text NOT NULL DEFAULT 'rule',
+  ADD COLUMN IF NOT EXISTS route_reason text NOT NULL DEFAULT 'unknown',
   ADD COLUMN IF NOT EXISTS delivery_outcome text,
   ADD COLUMN IF NOT EXISTS printer_name text,
   ADD COLUMN IF NOT EXISTS fallback_from_printer_id uuid REFERENCES printers(id) ON DELETE SET NULL,
@@ -30,6 +35,8 @@ ALTER TABLE print_jobs
   ADD COLUMN IF NOT EXISTS template_source text,
   ADD COLUMN IF NOT EXISTS render_snapshot jsonb;
 
+ALTER TABLE print_jobs ALTER COLUMN route_reason SET DEFAULT 'unknown';
+
 ALTER TABLE print_jobs DROP CONSTRAINT IF EXISTS print_jobs_attempt_number_check;
 ALTER TABLE print_jobs
   ADD CONSTRAINT print_jobs_attempt_number_check
@@ -38,7 +45,7 @@ ALTER TABLE print_jobs
 ALTER TABLE print_jobs DROP CONSTRAINT IF EXISTS print_jobs_route_reason_check;
 ALTER TABLE print_jobs
   ADD CONSTRAINT print_jobs_route_reason_check
-  CHECK (route_reason IN ('explicit', 'rule', 'fallback', 'runtime_fallback', 'default', 'only', 'none'));
+  CHECK (route_reason IN ('explicit', 'rule', 'fallback', 'runtime_fallback', 'default', 'only', 'none', 'unknown'));
 
 ALTER TABLE print_jobs DROP CONSTRAINT IF EXISTS print_jobs_delivery_outcome_check;
 ALTER TABLE print_jobs
@@ -97,43 +104,6 @@ UPDATE print_jobs
      ELSE 'pending'
    END
  WHERE delivery_outcome IS NULL;
-
--- Link pre-0222 two-attempt sequences that shared (location_id, print_request_id).
-WITH ranked AS (
-  SELECT id,
-         location_id,
-         print_request_id,
-         printer_id,
-         printer_name,
-         ROW_NUMBER() OVER (
-           PARTITION BY location_id, print_request_id
-           ORDER BY created_at ASC, id ASC
-         ) AS rn,
-         LAG(id) OVER (
-           PARTITION BY location_id, print_request_id
-           ORDER BY created_at ASC, id ASC
-         ) AS prev_id,
-         LAG(printer_id) OVER (
-           PARTITION BY location_id, print_request_id
-           ORDER BY created_at ASC, id ASC
-         ) AS prev_printer_id,
-         LAG(printer_name) OVER (
-           PARTITION BY location_id, print_request_id
-           ORDER BY created_at ASC, id ASC
-         ) AS prev_printer_name
-    FROM print_jobs
-   WHERE print_request_id IS NOT NULL
-)
-UPDATE print_jobs j
-   SET attempt_number = 2,
-       previous_job_id = COALESCE(j.previous_job_id, ranked.prev_id),
-       route_reason = CASE WHEN j.route_reason = 'rule' THEN 'runtime_fallback' ELSE j.route_reason END,
-       fallback_from_printer_id = COALESCE(j.fallback_from_printer_id, ranked.prev_printer_id),
-       fallback_from_printer_name = COALESCE(j.fallback_from_printer_name, ranked.prev_printer_name)
-  FROM ranked
- WHERE j.id = ranked.id
-   AND ranked.rn = 2
-   AND j.attempt_number = 1;
 
 -- Enforce at most one fallback attempt per primary job row.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_print_jobs_unique_previous_job
