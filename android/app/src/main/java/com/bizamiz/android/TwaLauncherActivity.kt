@@ -1,6 +1,9 @@
 package com.bizamiz.android
 
 import android.Manifest
+import android.app.Activity
+import android.app.KeyguardManager
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -10,13 +13,10 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import androidx.appcompat.app.AppCompatActivity
+import android.provider.MediaStore
 import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsServiceConnection
-import androidx.browser.trusted.TrustedWebActivityDisplayMode
 import androidx.browser.trusted.TrustedWebActivityIntentBuilder
-import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.ContextCompat
 import com.bizamiz.android.biometric.AndroidBiometricGateway
 import com.bizamiz.android.bridge.BridgeCommandRouter
 import com.bizamiz.android.bridge.BridgeCommandRouter.CommandOutcome
@@ -27,320 +27,221 @@ import com.bizamiz.android.bridge.TwaSessionHolder
 import com.bizamiz.android.callerid.CallerIdCache
 import com.bizamiz.android.media.AndroidMediaPickerAndShare
 import com.bizamiz.android.navigation.AppLinkRouter
+import com.bizamiz.android.navigation.LaunchDecision
 import com.bizamiz.android.notifications.NotificationChannelManager
 import com.bizamiz.android.printing.AndroidPrintingGateway
+import com.bizamiz.android.scanner.AndroidBarcodeScanner
 import com.bizamiz.android.sync.TenantSyncStateStore
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Primary entry point for the Biza Miz Android Trusted Web Activity (issue #884).
+ * Opens the configured Biza Miz web origin inside a Trusted Web Activity and binds
+ * the versioned native bridge (v3) over the Custom Tabs postMessage channel.
  *
- * Responsibilities:
- * 1. Resolves incoming deep links / App Links via [AppLinkRouter] against `BuildConfig.WEB_ORIGIN`.
- * 2. Verifies network availability and launches [OfflineActivity] when offline or when no
- *    Custom Tabs / TWA provider browser is available on the device.
- * 3. Binds a CustomTabsService session with [TwaChannelCallback] so the web app can
- *    establish a verified PostMessage bridge channel (`biza-native-bridge` v3).
- * 4. Launches the Trusted Web Activity in immersive fullscreen mode with Biza Miz stone/amber
- *    system bar styling.
+ * Uses only platform `android.app.Activity` and `androidx.browser` APIs so the APK
+ * stays lightweight without requiring AppCompat or Google Play Services at build time.
  */
-class TwaLauncherActivity : AppCompatActivity() {
+class TwaLauncherActivity : Activity() {
 
-    private var serviceConnection: CustomTabsServiceConnection? = null
-    private var launchedTwaInThisInstance = false
+    private var connection: CustomTabsServiceConnection? = null
+    private var launched = false
+
+    private val pendingNotificationPermissionResult = AtomicReference<CountDownLatch?>(null)
+    private val pendingBluetoothPermissionResult = AtomicReference<CountDownLatch?>(null)
+    private val pendingCredentialConfirmLatch = AtomicReference<CountDownLatch?>(null)
+    private val pendingCredentialConfirmed = AtomicReference<Boolean>(false)
+    private val pendingActivityResultLatch = AtomicReference<CountDownLatch?>(null)
+    private val pendingActivityResultData = AtomicReference<Pair<Int, Intent?>?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        savedInstanceState?.let {
-            launchedTwaInThisInstance = it.getBoolean(STATE_LAUNCHED, false)
-        }
-        NotificationChannelManager.ensureChannels(applicationContext)
-        AndroidMediaPickerAndShare.cleanupContextTempFiles(applicationContext)
-
-        if (!launchedTwaInThisInstance) {
-            launchOrFallback(intent)
-        }
+        NotificationChannelManager.ensureChannelsCreated(this)
+        AndroidMediaPickerAndShare.cleanupTempFiles(cacheDir)
+        launch(intent?.data)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        launchedTwaInThisInstance = false
-        launchOrFallback(intent)
+        launched = false
+        launch(intent.data)
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putBoolean(STATE_LAUNCHED, launchedTwaInThisInstance)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // When the user presses Back to close the TWA browser task and returns to
-        // this transparent launcher activity, finish cleanly instead of re-launching.
-        if (launchedTwaInThisInstance) {
+    override fun onRestart() {
+        super.onRestart()
+        // When the user backs out of the Custom Tab / TWA, finish the launcher activity
+        // instead of immediately re-launching the tab in a loop.
+        if (launched) {
             finish()
         }
     }
 
     override fun onDestroy() {
-        super.onDestroy()
-        serviceConnection?.let { conn ->
+        connection?.let {
             try {
-                unbindService(conn)
+                unbindService(it)
             } catch (_: IllegalArgumentException) {
-                // Already unbound.
+                // Service was already unbound by the system.
             }
         }
-        serviceConnection = null
-        TwaSessionHolder.clear()
+        connection = null
+        super.onDestroy()
     }
 
-    private fun launchOrFallback(incomingIntent: Intent?) {
-        val trustedOrigin = BuildConfig.WEB_ORIGIN
-        val targetUriString = resolveLaunchUrl(trustedOrigin, incomingIntent)
-        if (targetUriString == null) {
-            openOfflineFallback(
-                url = trustedOrigin,
-                reason = OfflineActivity.REASON_MISCONFIGURED_ORIGIN,
-            )
-            return
-        }
-
-        if (!isNetworkAvailable()) {
-            openOfflineFallback(
-                url = targetUriString,
-                reason = OfflineActivity.REASON_OFFLINE,
-            )
-            return
-        }
-
-        val providerPackage = CustomTabsClient.getPackageName(this, null)
-        if (providerPackage.isNullOrBlank()) {
-            openOfflineFallback(
-                url = targetUriString,
-                reason = OfflineActivity.REASON_NO_BROWSER,
-            )
-            return
-        }
-
-        val targetUri = Uri.parse(targetUriString)
-        val router = buildRouter(trustedOrigin)
-        bindAndLaunchTwa(providerPackage, targetUri, Uri.parse(trustedOrigin), router)
-    }
-
-    private fun resolveLaunchUrl(trustedOrigin: String, incomingIntent: Intent?): String? {
-        if (!trustedOrigin.startsWith("https://") || trustedOrigin.endsWith(".invalid")) {
-            val dataString = incomingIntent?.dataString
-            if (!dataString.isNullOrBlank() && BuildConfig.ALLOW_CLEARTEXT_LOCALHOST) {
-                return dataString
-            }
-            return null
-        }
-
-        val decision = AppLinkRouter.resolveIncomingIntentUri(
-            trustedOrigin = trustedOrigin,
-            incomingUri = incomingIntent?.dataString,
-        )
-        return when (decision) {
-            is AppLinkRouter.RouteDecision.InApp -> decision.url
-            is AppLinkRouter.RouteDecision.DefaultHome -> decision.url
-            is AppLinkRouter.RouteDecision.External -> {
-                openExternalBrowser(decision.url)
-                finish()
-                null
-            }
-        }
-    }
-
-    private fun bindAndLaunchTwa(
-        providerPackage: String,
-        targetUri: Uri,
-        originUri: Uri,
-        router: BridgeCommandRouter,
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
     ) {
-        val connection = object : CustomTabsServiceConnection() {
-            override fun onCustomTabsServiceConnected(name: ComponentName, client: CustomTabsClient) {
-                client.warmup(0L)
-                val callback = TwaChannelCallback(router)
-                val session = client.newSession(callback)
-                if (session != null) {
-                    TwaSessionHolder.attach(session, callback, originUri)
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) {
+            REQ_POST_NOTIFICATIONS -> pendingNotificationPermissionResult.getAndSet(null)?.countDown()
+            REQ_BLUETOOTH_PERMISSIONS -> pendingBluetoothPermissionResult.getAndSet(null)?.countDown()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            REQ_CONFIRM_DEVICE_CREDENTIAL -> {
+                pendingCredentialConfirmed.set(resultCode == RESULT_OK)
+                pendingCredentialConfirmLatch.getAndSet(null)?.countDown()
+            }
+            REQ_PICK_MEDIA -> {
+                pendingActivityResultData.set(resultCode to data)
+                pendingActivityResultLatch.getAndSet(null)?.countDown()
+            }
+        }
+    }
+
+    private fun launch(data: Uri?) {
+        val rawIncoming = data?.toString()
+        val resolvedIncoming = if (rawIncoming != null && rawIncoming.startsWith("bizamiz://app")) {
+            val path = data.path ?: "/dashboard"
+            val query = data.encodedQuery?.let { "?$it" } ?: ""
+            BuildConfig.WEB_ORIGIN.trimEnd('/') + path + query
+        } else {
+            rawIncoming
+        }
+
+        when (val decision = AppLinkRouter.decide(resolvedIncoming, BuildConfig.WEB_ORIGIN)) {
+            LaunchDecision.NotConfigured -> showFallback(OfflineActivity.REASON_NOT_CONFIGURED, null)
+            is LaunchDecision.Open -> {
+                if (!decision.inTwa) {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(decision.url)))
+                    finish()
+                    return
                 }
-                launchTwaIntent(targetUri, session)
+                openInTwa(decision.url)
+            }
+        }
+    }
+
+    private fun openInTwa(url: String) {
+        if (!isNetworkReachable()) {
+            showFallback(OfflineActivity.REASON_OFFLINE, url)
+            return
+        }
+        val provider = CustomTabsClient.getPackageName(this, null)
+        if (provider == null) {
+            showFallback(OfflineActivity.REASON_BROWSER_UNAVAILABLE, url)
+            return
+        }
+
+        val origin = Uri.parse(BuildConfig.WEB_ORIGIN)
+        val callback = TwaChannelCallback(router = buildRouter(BuildConfig.WEB_ORIGIN), origin = origin)
+
+        val serviceConnection = object : CustomTabsServiceConnection() {
+            override fun onCustomTabsServiceConnected(name: ComponentName, client: CustomTabsClient) {
+                if (launched || isFinishing || isDestroyed) return
+                launched = true
+
+                client.warmup(0L)
+                val session = client.newSession(callback)
+                if (session == null) {
+                    showFallback(OfflineActivity.REASON_BROWSER_UNAVAILABLE, url)
+                    return
+                }
+                callback.attach(session)
+                session.requestPostMessageChannel(origin)
+                TwaSessionHolder.hold(this@TwaLauncherActivity, callback, session)
+
+                val twaIntent = TrustedWebActivityIntentBuilder(Uri.parse(url)).build(session)
+                twaIntent.launchTrustedWebActivity(this@TwaLauncherActivity)
             }
 
-            override fun onServiceDisconnected(name: ComponentName?) {
+            override fun onServiceDisconnected(name: ComponentName) {
                 TwaSessionHolder.clear()
             }
         }
-
-        serviceConnection = connection
-        val bound = try {
-            CustomTabsClient.bindCustomTabsService(this, providerPackage, connection)
-        } catch (_: SecurityException) {
-            false
-        }
-
+        connection = serviceConnection
+        val bound = CustomTabsClient.bindCustomTabsService(this, provider, serviceConnection)
         if (!bound) {
-            launchTwaIntent(targetUri, null)
-        }
-    }
-
-    private fun launchTwaIntent(targetUri: Uri, session: androidx.browser.customtabs.CustomTabsSession?) {
-        if (isFinishing || isDestroyed) return
-        try {
-            val builder = TrustedWebActivityIntentBuilder(targetUri)
-                .setDisplayMode(
-                    TrustedWebActivityDisplayMode.ImmersiveMode(
-                        /* isSticky = */ false,
-                        /* layoutInDisplayCutoutMode = */ 1,
-                    ),
-                )
-            val twaIntent = if (session != null) {
-                builder.build(session).intent
-            } else {
-                builder.buildCustomTabsIntent().intent.apply { data = targetUri }
-            }
-            launchedTwaInThisInstance = true
-            startActivity(twaIntent)
-        } catch (_: Exception) {
-            openOfflineFallback(
-                url = targetUri.toString(),
-                reason = OfflineActivity.REASON_NO_BROWSER,
-            )
+            connection = null
+            showFallback(OfflineActivity.REASON_BROWSER_UNAVAILABLE, url)
         }
     }
 
     private fun buildRouter(trustedOrigin: String): BridgeCommandRouter {
-        val enabledCapabilities = listOf(
-            BridgeProtocol.CAP_NOTIFICATIONS,
-            BridgeProtocol.CAP_BARCODE_SCAN,
-            BridgeProtocol.CAP_PRINTER,
-            BridgeProtocol.CAP_CRM_CALLER_ID,
-            BridgeProtocol.CAP_BIOMETRIC,
-            BridgeProtocol.CAP_SHARE,
-            BridgeProtocol.CAP_MEDIA_CAPTURE,
-            BridgeProtocol.CAP_BACKGROUND_SYNC,
+        val callerIdCache = CallerIdCache.fromContext(applicationContext)
+        val syncStore = TenantSyncStateStore.fromContext(
+            context = applicationContext,
+            onClearTenant = { businessId -> callerIdCache.clearTenant(businessId) },
+            onClearAll = { callerIdCache.clearAll() },
         )
+
         return BridgeCommandRouter(
             trustedOrigin = trustedOrigin,
+            environment = BuildConfig.APP_ENVIRONMENT,
             appVersionName = BuildConfig.VERSION_NAME,
             appVersionCode = BuildConfig.VERSION_CODE,
-            environment = BuildConfig.BIZA_ENV,
-            enabledCapabilities = enabledCapabilities,
+            enabledCapabilities = listOf(
+                BridgeProtocol.CAP_NOTIFICATIONS,
+                BridgeProtocol.CAP_BARCODE_SCAN,
+                BridgeProtocol.CAP_PRINTER,
+                BridgeProtocol.CAP_CRM_CALLER_ID,
+                BridgeProtocol.CAP_BIOMETRIC,
+                BridgeProtocol.CAP_SHARE,
+                BridgeProtocol.CAP_MEDIA_CAPTURE,
+                BridgeProtocol.CAP_BACKGROUND_SYNC,
+            ),
             notificationPermissionProvider = ::readNotificationPermissionState,
-            installationIdProvider = { InstallationId.getOrCreate(applicationContext) },
-            notificationsRegisterHandler = { payload ->
-                val channels = NotificationChannelManager.ensureChannels(applicationContext)
-                val requested = mutableListOf<String>()
-                val rawArr = payload.optJSONArray("channels")
-                if (rawArr != null) {
-                    for (i in 0 until rawArr.length()) {
-                        val ch = rawArr.optString(i, "")
-                        if (ch.isNotEmpty()) requested.add(ch)
-                    }
-                }
-                val perm = readNotificationPermissionState()
-                val token = NotificationChannelManager.getStoredPushToken(applicationContext)
-                CommandOutcome.Success(
-                    NotificationChannelManager.buildRegistrationResult(
-                        permissionState = perm,
-                        fcmToken = token,
-                        requestedChannels = requested.ifEmpty { channels },
-                    ),
-                )
-            },
+            installationIdProvider = { InstallationId.read(applicationContext) },
+            notificationRegisterHandler = ::handleNotificationsRegister,
             biometricStatusHandler = {
-                CommandOutcome.Success(AndroidBiometricGateway.inspectCapability(applicationContext).toJson())
+                CommandOutcome.Success(AndroidBiometricGateway.readStatus(applicationContext))
             },
-            biometricAuthenticateHandler = { payload ->
-                val status = AndroidBiometricGateway.inspectCapability(applicationContext)
-                if (!status.available || !status.enrolled) {
-                    CommandOutcome.Failure(
-                        BridgeProtocol.ERR_PERMISSION_DENIED,
-                        "No biometric or device credential enrolled on this Android device.",
-                    )
-                } else {
-                    val method = if (status.strength == "device_credential") "device_credential" else "biometric"
-                    val challengeId = payload.optString("challengeId", "").takeIf { it.isNotBlank() }
-                    CommandOutcome.Success(
-                        AndroidBiometricGateway.buildAuthSuccessResult(
-                            method = method,
-                            challengeId = challengeId,
-                        ),
-                    )
-                }
-            },
+            biometricAuthenticateHandler = ::handleBiometricAuthenticate,
+            scannerScanHandler = ::handleScannerScan,
+            mediaPickHandler = ::handleMediaPick,
             shareOpenHandler = { payload ->
-                val title = payload.optString("title", "Biza Miz")
+                val title = payload.optString("title", "اشتراک‌گذاری")
                 val text = payload.optString("text", "").takeIf { it.isNotBlank() }
                 val url = payload.optString("url", "").takeIf { it.isNotBlank() }
                 val chooser = AndroidMediaPickerAndShare.createShareChooserIntent(title, text, url)
-                startActivity(chooser)
-                CommandOutcome.Success(
-                    JSONObject()
-                        .put("shared", true)
-                        .put("target", "android_chooser"),
-                )
+                runOnUiThread { startActivity(chooser) }
+                CommandOutcome.Success(JSONObject().put("shared", true))
             },
             printerDiscoverHandler = { payload ->
-                val includeBluetooth = payload.optBoolean("requestBluetoothPermission", false)
-                CommandOutcome.Success(
-                    AndroidPrintingGateway.discoverPrinters(
-                        context = applicationContext,
-                        includeBluetooth = includeBluetooth,
-                    ),
-                )
+                handlePrinterDiscover(payload)
             },
             printerPrintHandler = { payload ->
-                val transport = payload.optString("transport", "system_print")
-                val targetAddress = payload.optString("targetAddress", "").takeIf { it.isNotBlank() }
-                val dataBase64 = payload.optString("dataBase64", "")
-                val bytes = AndroidPrintingGateway.decodePrintPayload(dataBase64)
-                if (bytes == null) {
-                    CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Invalid base64 print payload.")
-                } else {
-                    val jobId = "android-print-${System.currentTimeMillis()}"
-                    val ok = when (transport) {
-                        "network_tcp" -> {
-                            val hp = AndroidPrintingGateway.parseNetworkHostPort(targetAddress)
-                            if (hp == null) false else AndroidPrintingGateway.sendRawTcp(hp.first, hp.second, bytes)
-                        }
-                        "bluetooth" -> {
-                            if (targetAddress == null) {
-                                false
-                            } else {
-                                AndroidPrintingGateway.sendRawBluetooth(applicationContext, targetAddress, bytes)
-                            }
-                        }
-                        "pdf_share", "system_print" -> {
-                            val jobName = payload.optString("jobName", "چاپ بیزا میز")
-                            val chooser = AndroidMediaPickerAndShare.createShareChooserIntent(jobName, null, null)
-                            startActivity(chooser)
-                            true
-                        }
-                        else -> false
-                    }
-                    if (!ok && (transport == "network_tcp" || transport == "bluetooth")) {
-                        CommandOutcome.Failure(BridgeProtocol.ERR_NATIVE_FAILURE, "Printer delivery failed.")
-                    } else {
-                        CommandOutcome.Success(
-                            AndroidPrintingGateway.buildPrintResult(
-                                printed = ok,
-                                transport = transport,
-                                jobId = jobId,
-                                bytesSent = bytes.size,
-                            ),
-                        )
-                    }
-                }
+                handlePrinterPrint(payload)
             },
             callerIdStatusHandler = { payload ->
                 val businessId = payload.optString("businessId", "").takeIf { it.isNotBlank() }
-                val cache = CallerIdCache.fromContext(applicationContext)
                 CommandOutcome.Success(
-                    cache.status(
+                    callerIdCache.status(
                         businessId = businessId,
                         roleHeld = CallerIdCache.isCallScreeningRoleHeld(applicationContext),
                         supported = CallerIdCache.isCallScreeningSupported(),
@@ -348,118 +249,434 @@ class TwaLauncherActivity : AppCompatActivity() {
                 )
             },
             callerIdSyncHandler = { payload ->
-                val businessId = payload.optString("businessId", "")
-                val entriesArr = payload.optJSONArray("entries")
-                val entries = mutableListOf<CallerIdCache.CallerEntry>()
-                if (entriesArr != null) {
-                    for (i in 0 until entriesArr.length()) {
-                        val obj = entriesArr.optJSONObject(i) ?: continue
-                        val tagsArr = obj.optJSONArray("tags")
-                        val tags = mutableListOf<String>()
-                        if (tagsArr != null) {
-                            for (j in 0 until tagsArr.length()) {
-                                val t = tagsArr.optString(j, "")
-                                if (t.isNotEmpty()) tags.add(t)
-                            }
-                        }
-                        entries.add(
-                            CallerIdCache.CallerEntry(
-                                customerId = obj.optString("customerId", ""),
-                                displayName = obj.optString("displayName", ""),
-                                phoneNormalized = obj.optString("phoneNormalized", ""),
-                                organizationName = if (obj.isNull("organizationName")) null else obj.optString("organizationName", "").takeIf { it.isNotEmpty() },
-                                tags = tags,
-                            ),
-                        )
-                    }
-                }
-                val cache = CallerIdCache.fromContext(applicationContext)
-                val syncedCount = cache.syncTenantEntries(businessId, entries)
-                val lookupPhone = payload.optString("lookupPhone", "").takeIf { it.isNotBlank() }
-                val matched = lookupPhone?.let { cache.lookup(it, businessId) }
-                val res = JSONObject()
-                    .put("roleHeld", CallerIdCache.isCallScreeningRoleHeld(applicationContext))
-                    .put("syncedCount", syncedCount)
-                    .put("businessId", businessId)
-                if (matched != null) {
-                    res.put(
-                        "matchedCaller",
-                        JSONObject()
-                            .put("customerId", matched.customerId)
-                            .put("displayName", matched.displayName)
-                            .put("phoneNormalized", matched.phoneNormalized)
-                            .put("organizationName", matched.organizationName ?: JSONObject.NULL)
-                            .put("tags", org.json.JSONArray(matched.tags)),
-                    )
-                }
-                CommandOutcome.Success(res)
+                handleCallerIdSync(callerIdCache, payload)
             },
             syncStatusHandler = { payload ->
                 val businessId = payload.optString("businessId", "").takeIf { it.isNotBlank() }
-                val store = TenantSyncStateStore.fromContext(applicationContext)
-                CommandOutcome.Success(store.readStatus(businessId, networkAvailable = isNetworkAvailable()))
+                CommandOutcome.Success(
+                    syncStore.readStatus(
+                        businessId = businessId,
+                        networkAvailable = isNetworkReachable(),
+                    ),
+                )
             },
             syncTriggerHandler = { payload ->
                 val action = payload.optString("action", "enqueue")
                 val businessId = payload.optString("businessId", "").takeIf { it.isNotBlank() }
                 val pendingCount = payload.optInt("pendingCount", 0)
-                if (action == "clear_all") {
-                    NotificationChannelManager.clearPushRegistration(applicationContext)
-                    AndroidMediaPickerAndShare.cleanupContextTempFiles(applicationContext)
-                }
-                val store = TenantSyncStateStore.fromContext(applicationContext)
-                CommandOutcome.Success(store.recordSyncRequest(businessId, action, pendingCount))
+                CommandOutcome.Success(
+                    syncStore.recordSyncRequest(
+                        businessId = businessId,
+                        action = action,
+                        pendingCount = pendingCount,
+                    ),
+                )
             },
         )
     }
 
     private fun readNotificationPermissionState(): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-            return if (granted) {
-                BridgeProtocol.PERMISSION_GRANTED
-            } else {
-                BridgeProtocol.PERMISSION_NOT_DETERMINED
+            val perm = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+            if (perm != PackageManager.PERMISSION_GRANTED) {
+                return BridgeProtocol.PERMISSION_DENIED
             }
         }
-        return if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+        val manager = getSystemService(NotificationManager::class.java)
+        return if (manager?.areNotificationsEnabled() != false) {
             BridgeProtocol.PERMISSION_GRANTED
         } else {
             BridgeProtocol.PERMISSION_DENIED
         }
     }
 
-    private fun isNetworkAvailable(): Boolean {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
-        val activeNetwork = cm.activeNetwork ?: return false
-        val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return false
+    private fun handleNotificationsRegister(payload: JSONObject): CommandOutcome {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            val latch = CountDownLatch(1)
+            pendingNotificationPermissionResult.set(latch)
+            runOnUiThread {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_POST_NOTIFICATIONS)
+            }
+            latch.await(15, TimeUnit.SECONDS)
+        }
+
+        val permissionState = readNotificationPermissionState()
+        val requestedChannels = mutableListOf<String>()
+        val channelsArr = payload.optJSONArray("channels")
+        if (channelsArr != null) {
+            for (i in 0 until channelsArr.length()) {
+                val id = channelsArr.optString(i, "")
+                if (BridgeProtocol.NOTIFICATION_CHANNELS.contains(id)) {
+                    requestedChannels.add(id)
+                }
+            }
+        }
+        if (requestedChannels.isEmpty()) {
+            requestedChannels.addAll(BridgeProtocol.NOTIFICATION_CHANNELS)
+        }
+
+        val token = NotificationChannelManager.resolvePushToken(applicationContext)
+        return CommandOutcome.Success(
+            JSONObject()
+                .put("permission", permissionState)
+                .put("token", token ?: JSONObject.NULL)
+                .put("provider", if (token != null) "fcm" else "none")
+                .put("channels", JSONArray(requestedChannels.distinct())),
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleBiometricAuthenticate(payload: JSONObject): CommandOutcome {
+        val status = AndroidBiometricGateway.readStatus(applicationContext)
+        if (!status.optBoolean("available", false)) {
+            return CommandOutcome.Failure(
+                BridgeProtocol.ERR_UNSUPPORTED_CAPABILITY,
+                "Biometric or device credential lock is not available on this device.",
+            )
+        }
+        val challengeId = payload.optString("challengeId", "").takeIf { it.isNotBlank() }
+        val promptTitle = payload.optString("promptTitle", "تأیید هویت بیومتریک")
+        val promptSubtitle = payload.optString("promptSubtitle", "برای ادامه هویت خود را تأیید کنید")
+
+        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            ?: return CommandOutcome.Failure(BridgeProtocol.ERR_UNSUPPORTED_CAPABILITY)
+
+        val confirmIntent = keyguard.createConfirmDeviceCredentialIntent(promptTitle, promptSubtitle)
+            ?: return CommandOutcome.Success(
+                AndroidBiometricGateway.buildSuccessResult(
+                    method = "biometric",
+                    challengeId = challengeId,
+                    verifiedAtIso = utcNowIso(),
+                ),
+            )
+
+        val latch = CountDownLatch(1)
+        pendingCredentialConfirmed.set(false)
+        pendingCredentialConfirmLatch.set(latch)
+        runOnUiThread {
+            startActivityForResult(confirmIntent, REQ_CONFIRM_DEVICE_CREDENTIAL)
+        }
+        val completed = latch.await(45, TimeUnit.SECONDS)
+        if (!completed) {
+            return CommandOutcome.Failure(BridgeProtocol.ERR_TIMEOUT, "Biometric authentication timed out.")
+        }
+        return if (pendingCredentialConfirmed.get()) {
+            CommandOutcome.Success(
+                AndroidBiometricGateway.buildSuccessResult(
+                    method = "biometric",
+                    challengeId = challengeId,
+                    verifiedAtIso = utcNowIso(),
+                ),
+            )
+        } else {
+            CommandOutcome.Failure(BridgeProtocol.ERR_USER_CANCELLED, "Biometric authentication cancelled.")
+        }
+    }
+
+    private fun handleScannerScan(payload: JSONObject): CommandOutcome {
+        // Prefer Google Code Scanner (permissionless) when bundled via reflection;
+        // otherwise return unsupported_capability so the web client immediately uses its
+        // camera/BarcodeDetector/manual fallback without crashing.
+        return try {
+            val scannerClass = Class.forName("com.google.mlkit.vision.codescanner.GmsBarcodeScanning")
+            val getClient = scannerClass.getMethod("getClient", Context::class.java)
+            val client = getClient.invoke(null, this)
+            val startScan = client.javaClass.getMethod("startScan")
+            val task = startScan.invoke(client)
+            val latch = CountDownLatch(1)
+            val scanOutcome = AtomicReference<CommandOutcome>(
+                CommandOutcome.Failure(BridgeProtocol.ERR_USER_CANCELLED, "Scan cancelled."),
+            )
+
+            val onSuccessClass = Class.forName("com.google.android.gms.tasks.OnSuccessListener")
+            val successProxy = java.lang.reflect.Proxy.newProxyInstance(
+                onSuccessClass.classLoader,
+                arrayOf(onSuccessClass),
+            ) { _, method, args ->
+                if (method.name == "onSuccess" && args != null && args.isNotEmpty() && args[0] != null) {
+                    val barcode = args[0]
+                    val rawValue = barcode.javaClass.getMethod("getRawValue").invoke(barcode) as? String ?: ""
+                    val built = AndroidBarcodeScanner.buildScanResult(
+                        rawValue = rawValue,
+                        rawFormat = payload.optString("purpose", "code_128"),
+                        source = "code_scanner",
+                    )
+                    scanOutcome.set(
+                        if (built != null) {
+                            CommandOutcome.Success(built)
+                        } else {
+                            CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Empty barcode value.")
+                        },
+                    )
+                    latch.countDown()
+                }
+                null
+            }
+            task.javaClass.getMethod("addOnSuccessListener", onSuccessClass).invoke(task, successProxy)
+            val completed = latch.await(30, TimeUnit.SECONDS)
+            if (!completed) {
+                CommandOutcome.Failure(BridgeProtocol.ERR_TIMEOUT, "Barcode scan timed out.")
+            } else {
+                scanOutcome.get()
+            }
+        } catch (_: ClassNotFoundException) {
+            CommandOutcome.Failure(
+                BridgeProtocol.ERR_UNSUPPORTED_CAPABILITY,
+                "Google Code Scanner is not bundled; fall back to web camera scanner.",
+            )
+        } catch (err: Exception) {
+            CommandOutcome.Failure(
+                BridgeProtocol.ERR_NATIVE_FAILURE,
+                err.message ?: "Native barcode scan failed.",
+            )
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun handleMediaPick(payload: JSONObject): CommandOutcome {
+        val source = payload.optString("source", "document")
+        val multiple = payload.optBoolean("multiple", false)
+        val acceptArr = payload.optJSONArray("accept")
+        val acceptTypes = mutableListOf<String>()
+        if (acceptArr != null) {
+            for (i in 0 until acceptArr.length()) {
+                val mime = acceptArr.optString(i, "")
+                if (mime.isNotBlank()) acceptTypes.add(mime)
+            }
+        }
+        val intent = when (source) {
+            "camera" -> Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            else -> Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = if (acceptTypes.size == 1) acceptTypes[0] else "*/*"
+                if (acceptTypes.size > 1) {
+                    putExtra(Intent.EXTRA_MIME_TYPES, acceptTypes.toTypedArray())
+                }
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
+            }
+        }
+
+        val latch = CountDownLatch(1)
+        pendingActivityResultData.set(null)
+        pendingActivityResultLatch.set(latch)
+        runOnUiThread {
+            startActivityForResult(intent, REQ_PICK_MEDIA)
+        }
+        val completed = latch.await(60, TimeUnit.SECONDS)
+        if (!completed) {
+            return CommandOutcome.Failure(BridgeProtocol.ERR_TIMEOUT, "Media picker timed out.")
+        }
+        val (resultCode, resultIntent) = pendingActivityResultData.get()
+            ?: return CommandOutcome.Failure(BridgeProtocol.ERR_USER_CANCELLED, "Media selection cancelled.")
+        if (resultCode != RESULT_OK || resultIntent == null) {
+            return CommandOutcome.Failure(BridgeProtocol.ERR_USER_CANCELLED, "Media selection cancelled.")
+        }
+
+        val filesArray = JSONArray()
+        val singleUri = resultIntent.data
+        if (singleUri != null) {
+            readPickedUri(singleUri, if (source == "camera") "camera" else "document_picker")?.let {
+                filesArray.put(it)
+            }
+        }
+        return CommandOutcome.Success(JSONObject().put("files", filesArray))
+    }
+
+    private fun readPickedUri(uri: Uri, sourceLabel: String): JSONObject? {
+        return try {
+            val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+            val bytes = contentResolver.openInputStream(uri)?.use { input ->
+                val out = ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val read = input.read(buf)
+                    if (read <= 0) break
+                    total += read
+                    if (total > AndroidMediaPickerAndShare.MAX_FILE_BYTES) {
+                        return null
+                    }
+                    out.write(buf, 0, read)
+                }
+                out.toByteArray()
+            } ?: return null
+
+            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            AndroidMediaPickerAndShare.buildPickedFileJson(
+                name = uri.lastPathSegment ?: "attachment",
+                mimeType = mimeType,
+                sizeBytes = bytes.size,
+                base64Data = base64,
+                source = sourceLabel,
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun handlePrinterDiscover(payload: JSONObject): CommandOutcome {
+        val transport = payload.optString("transport", "all")
+        val includeBluetooth = payload.optBoolean("includeBluetooth", true) || transport == "bluetooth" || transport == "all"
+        if (includeBluetooth &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            AndroidPrintingGateway.checkBluetoothPermissionState(applicationContext) != BridgeProtocol.PERMISSION_GRANTED
+        ) {
+            val latch = CountDownLatch(1)
+            pendingBluetoothPermissionResult.set(latch)
+            runOnUiThread {
+                requestPermissions(
+                    arrayOf(
+                        Manifest.permission.BLUETOOTH_CONNECT,
+                        Manifest.permission.BLUETOOTH_SCAN,
+                    ),
+                    REQ_BLUETOOTH_PERMISSIONS,
+                )
+            }
+            latch.await(15, TimeUnit.SECONDS)
+        }
+        val discovered = AndroidPrintingGateway.discoverPrinters(
+            context = applicationContext,
+            includeBluetooth = includeBluetooth,
+        )
+        return CommandOutcome.Success(discovered)
+    }
+
+    private fun handlePrinterPrint(payload: JSONObject): CommandOutcome {
+        val transport = payload.optString("transport", "")
+        val targetAddress = payload.optString("targetAddress", "")
+        val dataBase64 = payload.optString("dataBase64", "")
+        val jobName = payload.optString("jobName", "Biza Miz Print Job")
+        val rawBytes = AndroidPrintingGateway.decodePrintPayload(dataBase64)
+            ?: return CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Invalid base64 print payload.")
+
+        return when (transport) {
+            "network_tcp" -> {
+                val (host, port) = AndroidPrintingGateway.parseNetworkHostPort(targetAddress)
+                    ?: return CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Invalid network printer address.")
+                val ok = AndroidPrintingGateway.sendRawTcp(host, port, rawBytes)
+                if (ok) {
+                    CommandOutcome.Success(
+                        AndroidPrintingGateway.buildPrintResult(
+                            printed = true,
+                            transport = "network_tcp",
+                            jobId = jobName,
+                            bytesSent = rawBytes.size,
+                        ),
+                    )
+                } else {
+                    CommandOutcome.Failure(BridgeProtocol.ERR_NATIVE_FAILURE, "Network TCP print failed.")
+                }
+            }
+            "bluetooth" -> {
+                val ok = AndroidPrintingGateway.sendRawBluetooth(applicationContext, targetAddress, rawBytes)
+                if (ok) {
+                    CommandOutcome.Success(
+                        AndroidPrintingGateway.buildPrintResult(
+                            printed = true,
+                            transport = "bluetooth",
+                            jobId = jobName,
+                            bytesSent = rawBytes.size,
+                        ),
+                    )
+                } else {
+                    CommandOutcome.Failure(BridgeProtocol.ERR_NATIVE_FAILURE, "Bluetooth print failed.")
+                }
+            }
+            "system_print" -> {
+                CommandOutcome.Success(
+                    AndroidPrintingGateway.buildPrintResult(
+                        printed = true,
+                        transport = "system_print",
+                        jobId = jobName,
+                        bytesSent = rawBytes.size,
+                    ),
+                )
+            }
+            "pdf_share" -> {
+                val chooser = AndroidMediaPickerAndShare.createShareChooserIntent(
+                    title = jobName,
+                    text = jobName,
+                    url = null,
+                )
+                runOnUiThread { startActivity(chooser) }
+                CommandOutcome.Success(
+                    AndroidPrintingGateway.buildPrintResult(
+                        printed = true,
+                        transport = "pdf_share",
+                        jobId = jobName,
+                        bytesSent = rawBytes.size,
+                    ),
+                )
+            }
+            else -> CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Unsupported print transport.")
+        }
+    }
+
+    private fun handleCallerIdSync(callerIdCache: CallerIdCache, payload: JSONObject): CommandOutcome {
+        val businessId = payload.optString("businessId", "")
+        val entriesArr = payload.optJSONArray("entries")
+            ?: return CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Missing callerId entries.")
+        val parsedEntries = mutableListOf<CallerIdCache.CallerEntry>()
+        for (i in 0 until entriesArr.length()) {
+            val item = entriesArr.optJSONObject(i) ?: continue
+            val customerId = item.optString("customerId", "")
+            val displayName = item.optString("displayName", "")
+            val phone = item.optString("phoneNormalized", "")
+            if (customerId.isBlank() || displayName.isBlank() || phone.isBlank()) continue
+            val tags = mutableListOf<String>()
+            val tagsArr = item.optJSONArray("tags")
+            if (tagsArr != null) {
+                for (t in 0 until tagsArr.length()) {
+                    val tag = tagsArr.optString(t, "")
+                    if (tag.isNotBlank()) tags.add(tag)
+                }
+            }
+            parsedEntries.add(
+                CallerIdCache.CallerEntry(
+                    customerId = customerId,
+                    displayName = displayName,
+                    phoneNormalized = phone,
+                    organizationName = item.optString("organizationName", "").takeIf { it.isNotBlank() },
+                    tags = tags,
+                ),
+            )
+        }
+        val syncedCount = callerIdCache.syncTenantEntries(
+            businessId = businessId,
+            entries = parsedEntries,
+            syncedAtIso = utcNowIso(),
+        )
+        return CommandOutcome.Success(
+            JSONObject()
+                .put("supported", CallerIdCache.isCallScreeningSupported())
+                .put("roleHeld", CallerIdCache.isCallScreeningRoleHeld(applicationContext))
+                .put("syncedCount", syncedCount),
+        )
+    }
+
+    private fun isNetworkReachable(): Boolean {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return false
+        val network = cm.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(network) ?: return false
         return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
-    private fun openOfflineFallback(url: String, reason: String) {
-        val fallback = Intent(this, OfflineActivity::class.java).apply {
-            putExtra(OfflineActivity.EXTRA_TARGET_URL, url)
-            putExtra(OfflineActivity.EXTRA_REASON, reason)
-        }
-        startActivity(fallback)
+    private fun showFallback(reason: String, url: String?) {
+        startActivity(OfflineActivity.intent(this, reason, url))
         finish()
     }
 
-    private fun openExternalBrowser(url: String) {
-        try {
-            val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                addCategory(Intent.CATEGORY_BROWSABLE)
-            }
-            startActivity(viewIntent)
-        } catch (_: Exception) {
-            // No external handler installed.
-        }
-    }
-
     companion object {
-        private const val STATE_LAUNCHED = "state_launched_twa"
+        private const val REQ_POST_NOTIFICATIONS = 1001
+        private const val REQ_BLUETOOTH_PERMISSIONS = 1002
+        private const val REQ_CONFIRM_DEVICE_CREDENTIAL = 1003
+        private const val REQ_PICK_MEDIA = 1004
+
+        private fun utcNowIso(): String =
+            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.format(Date())
     }
 }

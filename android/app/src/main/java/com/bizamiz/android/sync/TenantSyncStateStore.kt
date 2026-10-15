@@ -3,7 +3,10 @@ package com.bizamiz.android.sync
 import android.content.Context
 import com.bizamiz.android.callerid.CallerIdCache
 import org.json.JSONObject
-import java.time.Instant
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 /**
  * Tenant-scoped operational sync state store and backoff calculator for the
@@ -28,7 +31,7 @@ class TenantSyncStateStore(
         businessId: String?,
         action: String,
         pendingCount: Int = 0,
-        nowIso: String = Instant.now().toString(),
+        nowIso: String = utcNowIso(),
     ): JSONObject {
         val cleanBiz = businessId?.trim()?.takeIf { it.isNotEmpty() }
         return when (action) {
@@ -170,7 +173,11 @@ class TenantSyncStateStore(
             return delay.coerceAtMost(MAX_BACKOFF_MS)
         }
 
-        fun fromContext(context: Context): TenantSyncStateStore {
+        fun fromContext(
+            context: Context,
+            onClearTenant: ((String) -> Unit)? = null,
+            onClearAll: (() -> Unit)? = null,
+        ): TenantSyncStateStore {
             val appContext = context.applicationContext
             val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val callerCache = CallerIdCache.fromContext(appContext)
@@ -187,9 +194,14 @@ class TenantSyncStateStore(
                         prefs.edit().clear().apply()
                     }
                 },
-                onClearTenantCallback = { bizId -> callerCache.clearTenant(bizId) },
-                onClearAllCallback = { callerCache.clearAll() },
+                onClearTenantCallback = onClearTenant ?: { bizId -> callerCache.clearTenant(bizId) },
+                onClearAllCallback = onClearAll ?: { callerCache.clearAll() },
             )
         }
+
+        private fun utcNowIso(): String =
+            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.format(Date())
     }
 }

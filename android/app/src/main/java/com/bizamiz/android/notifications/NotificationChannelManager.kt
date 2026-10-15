@@ -1,7 +1,7 @@
 package com.bizamiz.android.notifications
 
 import android.Manifest
-import android.annotation.SuppressLint
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -10,233 +10,241 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.ContextCompat
 import com.bizamiz.android.R
 import com.bizamiz.android.TwaLauncherActivity
-import com.bizamiz.android.bridge.BridgeProtocol
-import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Manages Android notification channels, FCM/push token storage in app-private
- * preferences, rate/spam protection, and deep-link notification intents (issue #884).
+ * Registers Biza Miz's Android 8+ notification channels and enforces notification
+ * rate/spam deduplication and payload sanitization (issue #884).
+ *
+ * Uses only platform `android.app.Notification` and `NotificationManager` APIs so
+ * the shell compiles without `androidx.core`.
  */
 object NotificationChannelManager {
 
     data class ChannelSpec(
         val id: String,
-        val titleFa: String,
+        val nameFa: String,
         val descriptionFa: String,
-        val highImportance: Boolean = false,
+        val importance: Int,
     )
 
-    val CHANNEL_SPECS: List<ChannelSpec> = listOf(
-        ChannelSpec("orders", "سفارش‌ها", "اعلان سفارش‌های جدید و تغییر وضعیت سفارش", highImportance = true),
-        ChannelSpec("payments", "پرداخت‌ها و رسیدها", "اعلان دریافت و پرداخت وجه و تسویه‌ها"),
-        ChannelSpec("crm", "مشتریان و تماس‌ها", "تشخیص تماس ورودی مشتریان و یادآوری پیگیری‌های CRM", highImportance = true),
-        ChannelSpec("inventory", "انبار و موجودی", "هشدار کسری موجودی و شمارش انبار"),
-        ChannelSpec("approvals", "تأییدیه‌ها", "درخواست‌های نیازمند تأیید مدیر"),
-        ChannelSpec("operations", "عملیات روزانه", "اعلان‌های عملیاتی نوبت، آشپزخانه و تحویل"),
-        ChannelSpec("security", "امنیت و نشست‌ها", "هشدارهای امنیتی و مدیریت دستگاه‌ها", highImportance = true),
+    val CHANNELS: List<ChannelSpec> = listOf(
+        ChannelSpec(
+            id = "orders",
+            nameFa = "سفارش‌ها و فروش",
+            descriptionFa = "اعلان سفارش‌های جدید، تغییر وضعیت و فاکتورها",
+            importance = NotificationManager.IMPORTANCE_HIGH,
+        ),
+        ChannelSpec(
+            id = "payments",
+            nameFa = "دریافت و پرداخت",
+            descriptionFa = "تأییدیه پرداخت‌ها، رسیدها و سررسید چک‌ها",
+            importance = NotificationManager.IMPORTANCE_DEFAULT,
+        ),
+        ChannelSpec(
+            id = "crm",
+            nameFa = "مشتریان و تماس‌ها (CRM)",
+            descriptionFa = "تشخیص تماس مشتری، پیگیری‌ها و یادآورهای CRM",
+            importance = NotificationManager.IMPORTANCE_HIGH,
+        ),
+        ChannelSpec(
+            id = "inventory",
+            nameFa = "انبار و موجودی",
+            descriptionFa = "هشدار کسری موجودی، حواله‌ها و انبارگردانی",
+            importance = NotificationManager.IMPORTANCE_DEFAULT,
+        ),
+        ChannelSpec(
+            id = "approvals",
+            nameFa = "تأییدیه‌ها و کارتابل",
+            descriptionFa = "درخواست‌های منتظر تأیید مدیر یا مسئول مالی",
+            importance = NotificationManager.IMPORTANCE_HIGH,
+        ),
+        ChannelSpec(
+            id = "operations",
+            nameFa = "عملیات روزانه و همگام‌سازی",
+            descriptionFa = "وضعیت همگام‌سازی آفلاین و وظایف تیمی",
+            importance = NotificationManager.IMPORTANCE_LOW,
+        ),
+        ChannelSpec(
+            id = "security",
+            nameFa = "امنیت و نشست‌ها",
+            descriptionFa = "ورود دستگاه جدید، قفل امنیتی و هشدارهای حساب",
+            importance = NotificationManager.IMPORTANCE_HIGH,
+        ),
     )
 
-    private val SENSITIVE_PAYLOAD_KEYS: Set<String> = setOf(
-        "password",
-        "passwordhash",
-        "token",
-        "accesstoken",
-        "refreshtoken",
-        "secret",
-        "pin",
-        "cvv",
-        "cardpan",
-        "nationalid",
-    )
+    private const val MIN_INTERVAL_PER_KEY_MS = 1_500L
+    private const val DEDUP_WINDOW_MS = 60_000L
+    private val recentMessageTimestamps = ConcurrentHashMap<String, Long>()
+    private val lastCategoryTimestamp = ConcurrentHashMap<String, Long>()
 
-    private const val PREFS_NAME = "biza_push_notifications"
-    private const val KEY_FCM_TOKEN = "fcm_token"
-    private const val KEY_TENANT_ID = "business_id"
-    private const val MIN_CATEGORY_INTERVAL_MS = 1_500L
-
-    private val recentMessageIds = LinkedHashSet<String>()
-    private val lastCategoryTimestampMs = HashMap<String, Long>()
-
-    fun ensureChannels(context: Context): List<String> {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = context.getSystemService(NotificationManager::class.java)
-            if (manager != null) {
-                for (spec in CHANNEL_SPECS) {
-                    val importance = if (spec.highImportance) {
-                        NotificationManager.IMPORTANCE_HIGH
-                    } else {
-                        NotificationManager.IMPORTANCE_DEFAULT
-                    }
-                    val channel = NotificationChannel(spec.id, spec.titleFa, importance).apply {
-                        description = spec.descriptionFa
-                    }
-                    manager.createNotificationChannel(channel)
-                }
+    fun ensureChannelsCreated(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        for (spec in CHANNELS) {
+            val channel = NotificationChannel(spec.id, spec.nameFa, spec.importance).apply {
+                description = spec.descriptionFa
             }
+            manager.createNotificationChannel(channel)
         }
-        return CHANNEL_SPECS.map { it.id }
-    }
-
-    fun getStoredPushToken(context: Context): String? {
-        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getString(KEY_FCM_TOKEN, null)?.takeIf { it.length in 16..4096 }
-    }
-
-    fun storePushToken(context: Context, token: String?, businessId: String? = null) {
-        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val editor = prefs.edit()
-        if (token.isNullOrBlank()) {
-            editor.remove(KEY_FCM_TOKEN)
-        } else {
-            editor.putString(KEY_FCM_TOKEN, token.trim().take(4096))
-        }
-        if (!businessId.isNullOrBlank()) {
-            editor.putString(KEY_TENANT_ID, businessId.trim().take(64))
-        }
-        editor.apply()
-    }
-
-    fun clearPushRegistration(context: Context) {
-        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().clear().apply()
-        synchronized(this) {
-            recentMessageIds.clear()
-            lastCategoryTimestampMs.clear()
-        }
-    }
-
-    fun buildRegistrationResult(
-        permissionState: String,
-        fcmToken: String?,
-        requestedChannels: List<String>,
-    ): JSONObject {
-        val safePermission = if (BridgeProtocol.PERMISSION_STATES.contains(permissionState)) {
-            permissionState
-        } else {
-            BridgeProtocol.PERMISSION_NOT_DETERMINED
-        }
-        val channels = requestedChannels
-            .filter { BridgeProtocol.NOTIFICATION_CHANNELS.contains(it) }
-            .distinct()
-            .ifEmpty { CHANNEL_SPECS.map { it.id } }
-
-        val validToken = fcmToken?.takeIf { it.length in 16..4096 && safePermission == BridgeProtocol.PERMISSION_GRANTED }
-        return JSONObject()
-            .put("permission", safePermission)
-            .put("fcmToken", validToken ?: JSONObject.NULL)
-            .put("channels", JSONArray(channels))
-            .put("pushProvider", if (validToken != null) "fcm" else "none")
     }
 
     /**
-     * Deduplicates notification IDs and enforces per-category burst rate limits.
+     * Rate-limit and deduplicate incoming notifications so a burst or retry loop cannot
+     * spam the device tray.
      */
-    @Synchronized
-    fun shouldDeliverNotification(category: String, messageId: String?, nowMs: Long): Boolean {
-        if (!BridgeProtocol.NOTIFICATION_CHANNELS.contains(category)) return false
+    fun shouldDeliverNotification(
+        category: String,
+        messageId: String?,
+        nowEpochMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        recentMessageTimestamps.entries.removeIf { nowEpochMs - it.value > DEDUP_WINDOW_MS }
+
         if (!messageId.isNullOrBlank()) {
-            if (recentMessageIds.contains(messageId)) return false
-            recentMessageIds.add(messageId)
-            if (recentMessageIds.size > 200) {
-                val first = recentMessageIds.iterator().next()
-                recentMessageIds.remove(first)
+            val prev = recentMessageTimestamps.putIfAbsent(messageId, nowEpochMs)
+            if (prev != null && nowEpochMs - prev <= DEDUP_WINDOW_MS) {
+                return false
             }
         }
-        val lastAt = lastCategoryTimestampMs[category] ?: 0L
-        if (nowMs - lastAt < MIN_CATEGORY_INTERVAL_MS) return false
-        lastCategoryTimestampMs[category] = nowMs
+
+        val safeCategory = if (CHANNELS.any { it.id == category }) category else "operations"
+        val lastCat = lastCategoryTimestamp[safeCategory]
+        if (lastCat != null && nowEpochMs - lastCat < MIN_INTERVAL_PER_KEY_MS) {
+            return false
+        }
+        lastCategoryTimestamp[safeCategory] = nowEpochMs
         return true
     }
 
     /**
-     * Strips sensitive keys and validates deep-link paths so push payloads
-     * never expose confidential fields or navigate off-origin.
+     * Strips any sensitive or non-display fields from an incoming push payload before
+     * rendering or routing.
      */
     fun sanitizeNotificationPayload(raw: JSONObject): JSONObject {
-        val out = JSONObject()
-        val keys = raw.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            if (SENSITIVE_PAYLOAD_KEYS.contains(key.lowercase())) continue
-            if (key == "path") {
-                val p = raw.optString("path", "").trim()
-                if (p.startsWith("/") && !p.startsWith("//") && !p.contains("\\")) {
-                    out.put("path", p.take(512))
-                }
-                continue
-            }
-            val value = raw.opt(key)
-            if (value is String) {
-                out.put(key, value.take(300))
-            } else if (value is Number || value is Boolean) {
-                out.put(key, value)
-            }
+        val safe = JSONObject()
+        val category = raw.optString("category", "operations")
+        safe.put(
+            "category",
+            if (CHANNELS.any { it.id == category }) category else "operations",
+        )
+        safe.put("title", raw.optString("title", "بیزمیز").take(120))
+        safe.put("body", raw.optString("body", "").take(240))
+
+        val path = raw.optString("path", "").trim()
+        if (path.startsWith("/") && !path.startsWith("//") && !path.contains("://")) {
+            safe.put("path", path.take(256))
         }
-        return out
+        val businessId = raw.optString("businessId", "").trim()
+        if (businessId.isNotEmpty() && businessId.length <= 64) {
+            safe.put("businessId", businessId)
+        }
+        return safe
     }
 
-    @SuppressLint("MissingPermission")
-    fun showCallerIdNotification(
+    /**
+     * Resolves an FCM registration token via reflection if `com.google.firebase:firebase-messaging`
+     * is linked into the build, or returns `null` when building without `google-services.json`.
+     */
+    fun resolvePushToken(context: Context): String? {
+        return try {
+            val prefs = context.applicationContext.getSharedPreferences(
+                "biza_push_state",
+                Context.MODE_PRIVATE,
+            )
+            val cached = prefs.getString("fcm_token", null)
+            if (!cached.isNullOrBlank()) return cached
+
+            val firebaseMessagingClass = Class.forName("com.google.firebase.messaging.FirebaseMessaging")
+            val getInstance = firebaseMessagingClass.getMethod("getInstance")
+            val instance = getInstance.invoke(null) ?: return null
+            val getToken = firebaseMessagingClass.getMethod("getToken")
+            val task = getToken.invoke(instance) ?: return null
+            val tasksClass = Class.forName("com.google.android.gms.tasks.Tasks")
+            val awaitMethod = tasksClass.getMethod(
+                "await",
+                Class.forName("com.google.android.gms.tasks.Task"),
+                Long::class.javaPrimitiveType,
+                java.util.concurrent.TimeUnit::class.java,
+            )
+            val token = awaitMethod.invoke(null, task, 5L, java.util.concurrent.TimeUnit.SECONDS) as? String
+            if (!token.isNullOrBlank()) {
+                prefs.edit().putString("fcm_token", token).apply()
+            }
+            token
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun clearPushToken(context: Context) {
+        val prefs = context.applicationContext.getSharedPreferences(
+            "biza_push_state",
+            Context.MODE_PRIVATE,
+        )
+        prefs.edit().remove("fcm_token").apply()
+    }
+
+    @Suppress("DEPRECATION")
+    fun postCallerIdNotification(
         context: Context,
         customerId: String,
         displayName: String,
-        organizationName: String?,
         phoneNormalized: String,
+        organizationName: String?,
+        tags: List<String>,
     ) {
-        if (!hasPostNotificationPermission(context)) return
-        ensureChannels(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+            if (!granted) return
+        }
+        if (!shouldDeliverNotification("crm", "caller:$customerId:$phoneNormalized")) return
+
+        ensureChannelsCreated(context)
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        if (!manager.areNotificationsEnabled()) return
 
         val deepLinkUri = Uri.parse(
             "bizamiz://app/crm/customers/${Uri.encode(customerId)}?callPhone=${Uri.encode(phoneNormalized)}",
         )
-        val launchIntent = Intent(context, TwaLauncherActivity::class.java).apply {
+        val openIntent = Intent(context, TwaLauncherActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             data = deepLinkUri
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
         val pendingIntent = PendingIntent.getActivity(
             context,
             customerId.hashCode(),
-            launchIntent,
-            pendingFlags,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val contentText = if (!organizationName.isNullOrBlank()) {
-            "$displayName ($organizationName) — ثبت گزارش تماس در CRM"
+        val subtitleParts = mutableListOf<String>()
+        if (!organizationName.isNullOrBlank()) subtitleParts.add(organizationName)
+        if (tags.isNotEmpty()) subtitleParts.add(tags.joinToString(" • "))
+        val bodyText = if (subtitleParts.isNotEmpty()) {
+            "${subtitleParts.joinToString(" — ")} ($phoneNormalized)"
         } else {
-            "$displayName — ثبت گزارش تماس در CRM"
+            "تماس ورودی از $phoneNormalized — ثبت نتیجه تماس در CRM"
         }
 
-        val notification = NotificationCompat.Builder(context, "crm")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(context, "crm")
+        } else {
+            Notification.Builder(context)
+        }
+
+        val notification = builder
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("تماس مشتری: $displayName")
-            .setContentText(contentText)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentText(bodyText)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()
 
-        NotificationManagerCompat.from(context).notify(customerId.hashCode(), notification)
-    }
-
-    private fun hasPostNotificationPermission(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            return ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-        }
-        return NotificationManagerCompat.from(context).areNotificationsEnabled()
+        manager.notify(customerId.hashCode(), notification)
     }
 }

@@ -1,21 +1,23 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Per-environment Android applicationId and web origin configuration for Biza Miz TWA builds. Override at build time with -PstagingWebOrigin=... or -PproductionWebOrigin=...",
+  "$schema": "./android-environments.schema.json",
   "environments": {
     "development": {
       "applicationId": "com.bizamiz.app.dev",
-      "appName": "Biza Miz Dev",
+      "label": "Biza Miz Dev",
+      "appName": "Biza Miz (Dev)",
       "webOrigin": "https://app.invalid",
       "allowCleartextLocalhost": true
     },
     "staging": {
       "applicationId": "com.bizamiz.app.staging",
-      "appName": "Biza Miz Staging",
+      "label": "Biza Miz Staging",
+      "appName": "Biza Miz (Staging)",
       "webOrigin": "https://staging.eshobe.com",
       "allowCleartextLocalhost": false
     },
     "production": {
       "applicationId": "com.bizamiz.app",
+      "label": "Biza Miz",
       "appName": "Biza Miz",
       "webOrigin": "https://app.eshobe.com",
       "allowCleartextLocalhost": false

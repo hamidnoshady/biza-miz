@@ -1,40 +1,63 @@
 package com.bizamiz.android.callerid
 
+import android.os.Build
 import android.telecom.Call
 import android.telecom.CallScreeningService
+import com.bizamiz.android.bridge.BridgeProtocol
+import com.bizamiz.android.bridge.TwaSessionHolder
 import com.bizamiz.android.notifications.NotificationChannelManager
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
- * Android `CallScreeningService` for Biza Miz CRM Caller ID (issue #884).
+ * Android 10+ `CallScreeningService` for Biza Miz CRM Caller ID (issue #884).
  *
- * Never blocks, rejects, silences, or records calls. When an incoming call
- * matches a customer in the active tenant's [CallerIdCache], posts a high-priority
- * CRM caller identification notification that deep-links to the customer detail
- * and post-call activity logging flow.
+ * Security & privacy invariants:
+ * - Never blocks, rejects, or silences any call.
+ * - Never records call audio or call content.
+ * - Only looks up numbers in the active tenant's local `CallerIdCache`.
+ * - Posts a local CRM notification with a deep link to the customer's post-call
+ *   activity sheet and emits `crm.callEnded` over the active TWA bridge channel.
  */
 class BizaCallScreeningService : CallScreeningService() {
 
     override fun onScreenCall(callDetails: Call.Details) {
-        val response = CallResponse.Builder()
+        val builder = CallResponse.Builder()
             .setDisallowCall(false)
             .setRejectCall(false)
-            .setSilenceCall(false)
             .setSkipCallLog(false)
             .setSkipNotification(false)
-            .build()
-        respondToCall(callDetails, response)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setSilenceCall(false)
+        }
+        respondToCall(callDetails, builder.build())
 
-        val handle = callDetails.handle ?: return
-        val rawNumber = handle.schemeSpecificPart ?: return
+        val handleUri = callDetails.handle ?: return
+        val rawNumber = handleUri.schemeSpecificPart ?: return
+        if (rawNumber.isBlank()) return
+
         val cache = CallerIdCache.fromContext(applicationContext)
-        val matched = cache.lookup(rawNumber) ?: return
+        val activeBusinessId = cache.getActiveBusinessId() ?: return
+        val match = cache.lookup(rawNumber, activeBusinessId) ?: return
 
-        NotificationChannelManager.showCallerIdNotification(
+        NotificationChannelManager.postCallerIdNotification(
             context = applicationContext,
-            customerId = matched.customerId,
-            displayName = matched.displayName,
-            organizationName = matched.organizationName,
-            phoneNormalized = matched.phoneNormalized,
+            customerId = match.customerId,
+            displayName = match.displayName,
+            phoneNormalized = match.phoneNormalized,
+            organizationName = match.organizationName,
+            tags = match.tags,
         )
+
+        val payload = JSONObject()
+            .put("businessId", activeBusinessId)
+            .put("customerId", match.customerId)
+            .put("displayName", match.displayName)
+            .put("phoneNormalized", match.phoneNormalized)
+            .put("organizationName", match.organizationName ?: JSONObject.NULL)
+            .put("tags", JSONArray(match.tags))
+            .put("direction", "incoming")
+
+        TwaSessionHolder.postEvent(BridgeProtocol.EVENT_CRM_CALL_ENDED, payload)
     }
 }

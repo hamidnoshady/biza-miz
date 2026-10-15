@@ -6,7 +6,10 @@ import android.content.pm.PackageManager
 import android.hardware.biometrics.BiometricManager
 import android.os.Build
 import org.json.JSONObject
-import java.time.Instant
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 /**
  * Android biometric & device-credential capability detector and response builder
@@ -95,10 +98,12 @@ object AndroidBiometricGateway {
         )
     }
 
+    fun readStatus(context: Context): JSONObject = inspectCapability(context).toJson()
+
     fun buildAuthSuccessResult(
         method: String,
         challengeId: String?,
-        verifiedAtIso: String = Instant.now().toString(),
+        verifiedAtIso: String = utcNowIso(),
     ): JSONObject {
         val safeMethod = when (method) {
             "biometric", "device_credential", "passkey" -> method
@@ -110,4 +115,15 @@ object AndroidBiometricGateway {
             .put("verifiedAt", verifiedAtIso)
             .put("challengeId", challengeId?.takeIf { it.isNotBlank() }?.take(128) ?: JSONObject.NULL)
     }
+
+    fun buildSuccessResult(
+        method: String,
+        challengeId: String?,
+        verifiedAtIso: String = utcNowIso(),
+    ): JSONObject = buildAuthSuccessResult(method, challengeId, verifiedAtIso)
+
+    private fun utcNowIso(): String =
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
 }

@@ -269,6 +269,14 @@ class BridgeCommandRouter(
             capabilities = enabledCapabilities,
         )
 
+    /** The announcement sent once the channel is ready. The page can also ask with `app.info`. */
+    fun readyEvent(): String =
+        BridgeProtocol.encodeEvent(BridgeProtocol.EVENT_BRIDGE_READY, buildAppInfoResult())
+
+    /** Handles a postMessage frame from the trusted TWA session channel. */
+    fun handleFrame(frame: String): String? =
+        handleMessage(trustedOrigin, frame)
+
     private fun buildNotificationStatusResult(): JSONObject {
         val rawState = notificationPermissionProvider()
         val safeState = if (BridgeProtocol.PERMISSION_STATES.contains(rawState)) {

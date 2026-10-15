@@ -12,7 +12,8 @@ import org.json.JSONObject
  * shared JSON contract file in the repository root.
  */
 object BridgeProtocol {
-    const val PROTOCOL_NAME: String = "biza-native-bridge"
+    const val PROTOCOL: String = "biza-native-bridge"
+    const val PROTOCOL_NAME: String = PROTOCOL
     const val BRIDGE_VERSION: Int = 3
     const val MIN_COMPATIBLE_BRIDGE_VERSION: Int = 1
 
@@ -50,6 +51,8 @@ object BridgeProtocol {
         CMD_SYNC_TRIGGER,
     )
 
+    val COMMANDS: Set<String> = ALLOWLISTED_COMMANDS
+
     val COMMAND_MIN_BRIDGE: Map<String, Int> = mapOf(
         CMD_APP_INFO to 1,
         CMD_NOTIFICATIONS_STATUS to 1,
@@ -73,12 +76,19 @@ object BridgeProtocol {
     const val EVENT_CRM_CALL_ENDED: String = "crm.callEnded"
     const val EVENT_SYNC_COMPLETED: String = "sync.completed"
 
+    const val EVT_BRIDGE_READY: String = EVENT_BRIDGE_READY
+    const val EVT_NAVIGATION_DEEP_LINK: String = EVENT_NAVIGATION_DEEP_LINK
+    const val EVT_CRM_CALL_ENDED: String = EVENT_CRM_CALL_ENDED
+    const val EVT_SYNC_COMPLETED: String = EVENT_SYNC_COMPLETED
+
     val ALLOWLISTED_EVENTS: Set<String> = setOf(
         EVENT_BRIDGE_READY,
         EVENT_NAVIGATION_DEEP_LINK,
         EVENT_CRM_CALL_ENDED,
         EVENT_SYNC_COMPLETED,
     )
+
+    val EVENTS: Set<String> = ALLOWLISTED_EVENTS
 
     const val ERR_UNKNOWN_COMMAND: String = "unknown_command"
     const val ERR_INVALID_PAYLOAD: String = "invalid_payload"

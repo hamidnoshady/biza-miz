@@ -6,7 +6,10 @@ import android.content.Intent
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
-import java.time.Instant
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 /**
  * Tenant-isolated local caller lookup cache for CRM Caller ID (issue #884).
@@ -50,7 +53,7 @@ class CallerIdCache(
     fun syncTenantEntries(
         businessId: String,
         entries: List<CallerEntry>,
-        syncedAtIso: String = Instant.now().toString(),
+        syncedAtIso: String = utcNowIso(),
     ): Int {
         val cleanBusinessId = businessId.trim()
         require(cleanBusinessId.isNotEmpty() && cleanBusinessId.length <= 64) { "Invalid businessId" }
@@ -220,5 +223,10 @@ class CallerIdCache(
             if (!roleManager.isRoleAvailable(RoleManager.ROLE_CALL_SCREENING)) return null
             return roleManager.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING)
         }
+
+        private fun utcNowIso(): String =
+            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.format(Date())
     }
 }

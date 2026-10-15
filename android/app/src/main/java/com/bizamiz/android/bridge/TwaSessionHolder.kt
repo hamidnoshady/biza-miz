@@ -1,32 +1,42 @@
 package com.bizamiz.android.bridge
 
-import androidx.browser.customtabs.CustomTabsServiceConnection
+import android.content.Context
+import androidx.browser.customtabs.CustomTabsCallback
 import androidx.browser.customtabs.CustomTabsSession
+import org.json.JSONObject
+import java.lang.ref.WeakReference
 
 /**
- * Keeps the Custom Tabs connection, callback and session reachable while the TWA runs.
- *
- * The launcher activity finishes once the TWA is on screen, so nothing else holds these objects.
- * Without this, the binder that Chrome uses to reach the callback can be collected, and the page
- * silently loses its native channel.
+ * Keeps the active [CustomTabsSession] and its callback reachable while the browser is in the
+ * foreground. [CustomTabsClient.newSession] stores the callback inside the framework's stub via a
+ * weak reference on some Android versions, and our launcher activity may stop once the browser
+ * covers it, so we hold a weak reference here tied to the service connection's lifetime.
  */
-object TwaSessionHolder {
-    @Volatile
-    private var connection: CustomTabsServiceConnection? = null
+internal object TwaSessionHolder {
+    private var contextRef: WeakReference<Context>? = null
+    private var callbackRef: WeakReference<CustomTabsCallback>? = null
+    private var sessionRef: WeakReference<CustomTabsSession>? = null
 
-    @Volatile
-    private var callback: TwaChannelCallback? = null
+    fun hold(context: Context, callback: CustomTabsCallback, session: CustomTabsSession) {
+        contextRef = WeakReference(context)
+        callbackRef = WeakReference(callback)
+        sessionRef = WeakReference(session)
+    }
 
-    @Volatile
-    private var session: CustomTabsSession? = null
+    fun postEvent(name: String, payload: JSONObject): Boolean {
+        val session = sessionRef?.get() ?: return false
+        return try {
+            val frame = BridgeProtocol.encodeEvent(name, payload)
+            session.postMessage(frame, null)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
 
-    fun hold(
-        connection: CustomTabsServiceConnection,
-        callback: TwaChannelCallback,
-        session: CustomTabsSession,
-    ) {
-        this.connection = connection
-        this.callback = callback
-        this.session = session
+    fun clear() {
+        contextRef = null
+        callbackRef = null
+        sessionRef = null
     }
 }

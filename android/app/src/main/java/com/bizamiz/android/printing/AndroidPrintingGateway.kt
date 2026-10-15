@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Base64
-import androidx.core.content.ContextCompat
 import com.bizamiz.android.bridge.BridgeProtocol
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,14 +32,12 @@ object AndroidPrintingGateway {
 
     fun checkBluetoothPermissionState(context: Context): String {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val granted = ContextCompat.checkSelfPermission(
-                context,
+            val granted = context.checkSelfPermission(
                 Manifest.permission.BLUETOOTH_CONNECT,
             ) == PackageManager.PERMISSION_GRANTED
             if (granted) BridgeProtocol.PERMISSION_GRANTED else BridgeProtocol.PERMISSION_NOT_DETERMINED
         } else {
-            val granted = ContextCompat.checkSelfPermission(
-                context,
+            val granted = context.checkSelfPermission(
                 Manifest.permission.BLUETOOTH,
             ) == PackageManager.PERMISSION_GRANTED
             if (granted) BridgeProtocol.PERMISSION_GRANTED else BridgeProtocol.PERMISSION_DENIED
