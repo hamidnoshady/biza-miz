@@ -55,6 +55,12 @@ export const SETTING_KEYS = {
   syncDriftState: "server_sync.drift_state",
   /** Phase 45: the desktop's copy of the cloud's branch settings and switches (site-profile-service.ts). */
   siteProfileState: "server_sync.site_profile_state",
+  /**
+   * AutomotiveStockState (src/lib/automotive-stock-projection.ts) — the paired
+   * desktop's read-only vehicle mirror: last applied snapshot hash, freshness
+   * and backoff (issue #839 §19).
+   */
+  automotiveStockState: "server_sync.automotive_stock_state",
   /** BackupConfig (src/lib/backup.ts) — schedule/retention/cloud settings (Phase 10) */
   backupConfig: "backup.config",
   /** PricingConfig — menu cost-plus margin, overhead policy and cost-drift threshold */
