@@ -136,14 +136,11 @@ class TwaLauncherActivity : Activity() {
 
         when (val decision = AppLinkRouter.decide(resolvedIncoming, BuildConfig.WEB_ORIGIN)) {
             LaunchDecision.NotConfigured -> showFallback(OfflineActivity.REASON_NOT_CONFIGURED, null)
-            is LaunchDecision.Open -> {
-                if (!decision.inTwa) {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(decision.url)))
-                    finish()
-                    return
-                }
-                openInTwa(decision.url)
+            is LaunchDecision.OpenExternal -> {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(decision.url)))
+                finish()
             }
+            is LaunchDecision.OpenInTwa -> openInTwa(decision.url)
         }
     }
 
@@ -217,7 +214,7 @@ class TwaLauncherActivity : Activity() {
             ),
             notificationPermissionProvider = ::readNotificationPermissionState,
             installationIdProvider = { InstallationId.read(applicationContext) },
-            notificationRegisterHandler = ::handleNotificationsRegister,
+            notificationsRegisterHandler = ::handleNotificationsRegister,
             biometricStatusHandler = {
                 CommandOutcome.Success(AndroidBiometricGateway.readStatus(applicationContext))
             },

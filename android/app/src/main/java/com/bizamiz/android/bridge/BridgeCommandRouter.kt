@@ -275,7 +275,7 @@ class BridgeCommandRouter(
 
     /** Handles a postMessage frame from the trusted TWA session channel. */
     fun handleFrame(frame: String): String? =
-        handleMessage(trustedOrigin, frame)
+        handleMessage(normalizedTrustedOrigin, frame)
 
     private fun buildNotificationStatusResult(): JSONObject {
         val rawState = notificationPermissionProvider()
