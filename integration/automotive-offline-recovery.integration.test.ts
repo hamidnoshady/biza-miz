@@ -265,13 +265,16 @@ async function postingCount(
   return Number(rows[0].n);
 }
 
-interface EventFacts {
+// A type alias, not an interface: `query<T>` wants a record shape, and TypeScript
+// gives anonymous object types the implicit index signature an interface has to
+// declare (see the same note in `automotive-stock-service.ts`).
+type EventFacts = {
   eventId: string;
   pushedAt: Date | null;
   dispatchAttemptedAt: Date | null;
   retractedAt: Date | null;
   retractedReason: string | null;
-}
+};
 
 async function eventFacts(
   locationId: string,
