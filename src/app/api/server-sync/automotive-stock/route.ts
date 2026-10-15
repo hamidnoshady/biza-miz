@@ -5,7 +5,15 @@ import { buildAutomotiveStockProjection } from "@/lib/automotive-stock-service";
 
 /**
  * Issue #839 §19 — a paired dealership desktop's read-only view of its branch's
- * vehicle stock, read on the ordinary sync tick. The counterpart of
+ * vehicle stock, read on the ordinary sync tick.
+ *
+ * The two optional query parameters are the site's delivery watermarks
+ * (`requestsCursor` for settled answers, `openRequestsCursor` for the open work it
+ * has already seen). They are what replaced `ORDER BY requested_at DESC LIMIT 200`:
+ * a page is a keyset range, and `requestsHasMore` tells the desktop to fetch again,
+ * so every request eventually reaches the counter and every answer eventually
+ * reaches the site. A malformed cursor is treated as absent — a re-sent page costs
+ * one idempotent apply, and it can never be a correctness problem. The counterpart of
  * `/api/server-sync/site-profile` (Phase 45), with the same three properties:
  *
  *  * bearer-authenticated with the *site device* credential, which — never a
@@ -26,11 +34,17 @@ export async function GET(request: NextRequest) {
   if ("response" in auth) return auth.response;
   const { identity } = auth;
 
+  const params = request.nextUrl.searchParams;
   const projection = await withTenant(
     identity.businessId,
-    () => buildAutomotiveStockProjection(identity.businessId, identity.locationId),
+    () =>
+      buildAutomotiveStockProjection(identity.businessId, identity.locationId, {
+        requestsCursor: params.get("requestsCursor"),
+        openRequestsCursor: params.get("openRequestsCursor"),
+      }),
     { locationId: identity.locationId },
   );
-  if (!projection) return NextResponse.json({ error: "location_not_found" }, { status: 404 });
+  if (!projection)
+    return NextResponse.json({ error: "location_not_found" }, { status: 404 });
   return NextResponse.json(projection);
 }

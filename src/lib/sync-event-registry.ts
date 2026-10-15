@@ -71,7 +71,9 @@ const CLOUD_OWNED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set([
 ]);
 
 /** Whether a desktop (runtime role `site`) acknowledges this pulled cloud event instead of applying it. */
-export function siteSkipsPulledEvent(definition: Pick<SyncEventDefinition, "effectClass">): boolean {
+export function siteSkipsPulledEvent(
+  definition: Pick<SyncEventDefinition, "effectClass">,
+): boolean {
   return CLOUD_OWNED_EFFECT_CLASSES.has(definition.effectClass);
 }
 
@@ -93,19 +95,137 @@ const COMMISSION_REVERSE_PERMISSION = "commission.reverse" as const;
  * catalogue tests, so those surfaces cannot silently drift apart.
  */
 export const SYNC_EVENT_REGISTRY = [
-  { type: "order.create", schemaVersion: 1, handler: "legacy.order.create", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: [], payloadFields: ["orderId", "type", "tableId", "customerId", "guestCount", "note", "discount", "items", "delivery"], legacy: true },
-  { type: "order.add_items", schemaVersion: 1, handler: "legacy.order.add_items", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: ["order_not_found"], payloadFields: ["orderId", "items"], legacy: true },
-  { type: "order_item.status", schemaVersion: 1, handler: "legacy.order_item.status", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: ["item_not_found"], payloadFields: ["itemId", "status"], legacy: true },
+  {
+    type: "order.create",
+    schemaVersion: 1,
+    handler: "legacy.order.create",
+    permission: ORDER_PERMISSION,
+    effectClass: "order",
+    locationRule: "event_location",
+    dependencyErrors: [],
+    payloadFields: [
+      "orderId",
+      "type",
+      "tableId",
+      "customerId",
+      "guestCount",
+      "note",
+      "discount",
+      "items",
+      "delivery",
+    ],
+    legacy: true,
+  },
+  {
+    type: "order.add_items",
+    schemaVersion: 1,
+    handler: "legacy.order.add_items",
+    permission: ORDER_PERMISSION,
+    effectClass: "order",
+    locationRule: "event_location",
+    dependencyErrors: ["order_not_found"],
+    payloadFields: ["orderId", "items"],
+    legacy: true,
+  },
+  {
+    type: "order_item.status",
+    schemaVersion: 1,
+    handler: "legacy.order_item.status",
+    permission: ORDER_PERMISSION,
+    effectClass: "order",
+    locationRule: "event_location",
+    dependencyErrors: ["item_not_found"],
+    payloadFields: ["itemId", "status"],
+    legacy: true,
+  },
   // Migration 0190: the whole open order after every change (lines, add-ons,
   // discount, table, customer, kitchen status, void). See order-state-sync.ts.
-  { type: "order.state.synced", schemaVersion: 1, handler: "order.state.synced", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: ["customer_not_found", "menu_item_not_found"], payloadFields: ["orderId", "stateHlc", "order", "items"] },
+  {
+    type: "order.state.synced",
+    schemaVersion: 1,
+    handler: "order.state.synced",
+    permission: ORDER_PERMISSION,
+    effectClass: "order",
+    locationRule: "event_location",
+    dependencyErrors: ["customer_not_found", "menu_item_not_found"],
+    payloadFields: ["orderId", "stateHlc", "order", "items"],
+  },
   // Migration 0190: a closed-order amendment, replayed through the same
   // service with the new lines' ids so a later amendment finds them.
-  { type: "order.amendment.posted", schemaVersion: 1, handler: "order.amendment.posted", permission: "orders.amend_closed", effectClass: "order", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_completed"], payloadFields: ["orderId", "input", "newItemIds"] },
+  {
+    type: "order.amendment.posted",
+    schemaVersion: 1,
+    handler: "order.amendment.posted",
+    permission: "orders.amend_closed",
+    effectClass: "order",
+    locationRule: "event_location",
+    dependencyErrors: ["order_not_found", "order_not_completed"],
+    payloadFields: ["orderId", "input", "newItemIds"],
+  },
 
-  { type: "order.payment.completed", schemaVersion: 1, handler: "order.payment.completed", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found"], payloadFields: ["orderId", "method", "reference", "customerId", "tipAmount", "businessDate"] },
-  { type: "order.payment.completed", schemaVersion: 2, handler: "order.payment.completed.v2", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found", "customer_required"], payloadFields: ["orderId", "tenders", "customerId", "tipAmount", "businessDate", "entryDate"] },
-  { type: "order.customer_return.created", schemaVersion: 1, handler: "order.customer_return.created", permission: REFUND_PERMISSION, effectClass: "refund", locationRule: "event_location", dependencyErrors: ["completed_order_not_found", "order_item_not_found", "historical_cogs_unavailable"], payloadFields: ["orderId", "refundMethod", "refundAmount", "reason", "lines"] },
+  {
+    type: "order.payment.completed",
+    schemaVersion: 1,
+    handler: "order.payment.completed",
+    permission: PAYMENT_PERMISSION,
+    effectClass: "payment",
+    locationRule: "event_location",
+    dependencyErrors: [
+      "order_not_found",
+      "order_not_open",
+      "customer_not_found",
+    ],
+    payloadFields: [
+      "orderId",
+      "method",
+      "reference",
+      "customerId",
+      "tipAmount",
+      "businessDate",
+    ],
+  },
+  {
+    type: "order.payment.completed",
+    schemaVersion: 2,
+    handler: "order.payment.completed.v2",
+    permission: PAYMENT_PERMISSION,
+    effectClass: "payment",
+    locationRule: "event_location",
+    dependencyErrors: [
+      "order_not_found",
+      "order_not_open",
+      "customer_not_found",
+      "customer_required",
+    ],
+    payloadFields: [
+      "orderId",
+      "tenders",
+      "customerId",
+      "tipAmount",
+      "businessDate",
+      "entryDate",
+    ],
+  },
+  {
+    type: "order.customer_return.created",
+    schemaVersion: 1,
+    handler: "order.customer_return.created",
+    permission: REFUND_PERMISSION,
+    effectClass: "refund",
+    locationRule: "event_location",
+    dependencyErrors: [
+      "completed_order_not_found",
+      "order_item_not_found",
+      "historical_cogs_unavailable",
+    ],
+    payloadFields: [
+      "orderId",
+      "refundMethod",
+      "refundAmount",
+      "reason",
+      "lines",
+    ],
+  },
   // The cloud owns the ledger (Phase 45; the one authority model, shared with
   // data-ownership.ts and replication-catalogue.ts). A site reversing a manual
   // entry sends this event *up*; the cloud applies it and a desktop
@@ -117,39 +237,264 @@ export const SYNC_EVENT_REGISTRY = [
   // tagged with the *reversed entry's* branch, not the caller's current one, so
   // reversing branch A's document from branch B cannot deliver a branch-A
   // ledger effect inside a branch-B envelope.
-  { type: "accounting.manual_journal.reversed", schemaVersion: 1, handler: "accounting.manual_journal.reversed", permission: "ledger.approve", effectClass: "journal_reversal", locationRule: "event_location", dependencyErrors: ["entry_not_found"], payloadFields: ["entryId", "memo", "entryDate"] },
+  {
+    type: "accounting.manual_journal.reversed",
+    schemaVersion: 1,
+    handler: "accounting.manual_journal.reversed",
+    permission: "ledger.approve",
+    effectClass: "journal_reversal",
+    locationRule: "event_location",
+    dependencyErrors: ["entry_not_found"],
+    payloadFields: ["entryId", "memo", "entryDate"],
+  },
 
-  { type: "inventory.purchase.created", schemaVersion: 1, handler: "inventory.purchase.created", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["supplier_not_found", "item_not_found"], payloadFields: ["purchaseId", "supplierId", "note", "purchaseDate", "items"] },
-  { type: "inventory.purchase.received", schemaVersion: 1, handler: "inventory.purchase.received", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["purchase_not_found", "supplier_not_found"], payloadFields: ["purchaseId", "settlementMethod", "supplierId"] },
-  { type: "inventory.supplier_return.created", schemaVersion: 1, handler: "inventory.supplier_return.created", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["received_purchase_not_found", "supplier_return_purchase_item_not_found"], payloadFields: ["purchaseId", "settlementMethod", "reason", "lines"] },
+  {
+    type: "inventory.purchase.created",
+    schemaVersion: 1,
+    handler: "inventory.purchase.created",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["supplier_not_found", "item_not_found"],
+    payloadFields: [
+      "purchaseId",
+      "supplierId",
+      "note",
+      "purchaseDate",
+      "items",
+    ],
+  },
+  {
+    type: "inventory.purchase.received",
+    schemaVersion: 1,
+    handler: "inventory.purchase.received",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["purchase_not_found", "supplier_not_found"],
+    payloadFields: ["purchaseId", "settlementMethod", "supplierId"],
+  },
+  {
+    type: "inventory.supplier_return.created",
+    schemaVersion: 1,
+    handler: "inventory.supplier_return.created",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: [
+      "received_purchase_not_found",
+      "supplier_return_purchase_item_not_found",
+    ],
+    payloadFields: ["purchaseId", "settlementMethod", "reason", "lines"],
+  },
 
-  { type: "inventory.transfer.created", schemaVersion: 1, handler: "inventory.transfer.created", permission: INVENTORY_PERMISSION, effectClass: "transfer", locationRule: "business_transfer", dependencyErrors: ["transfer_inventory_item_not_found", "transfer_location_not_found"], payloadFields: ["transferId", "destinationLocationId", "note", "lines"] },
-  { type: "inventory.transfer.shipped", schemaVersion: 1, handler: "inventory.transfer.shipped", permission: INVENTORY_PERMISSION, effectClass: "transfer", locationRule: "business_transfer", dependencyErrors: ["transfer_not_found"], payloadFields: ["transferId"] },
-  { type: "inventory.transfer.received", schemaVersion: 1, handler: "inventory.transfer.received", permission: INVENTORY_PERMISSION, effectClass: "transfer", locationRule: "business_transfer", dependencyErrors: ["transfer_not_found", "invalid_transfer_status"], payloadFields: ["transferId"] },
-  { type: "inventory.transfer.cancelled", schemaVersion: 1, handler: "inventory.transfer.cancelled", permission: INVENTORY_PERMISSION, effectClass: "transfer", locationRule: "business_transfer", dependencyErrors: ["transfer_not_found"], payloadFields: ["transferId"] },
+  {
+    type: "inventory.transfer.created",
+    schemaVersion: 1,
+    handler: "inventory.transfer.created",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "transfer",
+    locationRule: "business_transfer",
+    dependencyErrors: [
+      "transfer_inventory_item_not_found",
+      "transfer_location_not_found",
+    ],
+    payloadFields: ["transferId", "destinationLocationId", "note", "lines"],
+  },
+  {
+    type: "inventory.transfer.shipped",
+    schemaVersion: 1,
+    handler: "inventory.transfer.shipped",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "transfer",
+    locationRule: "business_transfer",
+    dependencyErrors: ["transfer_not_found"],
+    payloadFields: ["transferId"],
+  },
+  {
+    type: "inventory.transfer.received",
+    schemaVersion: 1,
+    handler: "inventory.transfer.received",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "transfer",
+    locationRule: "business_transfer",
+    dependencyErrors: ["transfer_not_found", "invalid_transfer_status"],
+    payloadFields: ["transferId"],
+  },
+  {
+    type: "inventory.transfer.cancelled",
+    schemaVersion: 1,
+    handler: "inventory.transfer.cancelled",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "transfer",
+    locationRule: "business_transfer",
+    dependencyErrors: ["transfer_not_found"],
+    payloadFields: ["transferId"],
+  },
 
   // offlineQueueEligible (Section 5 audit): the only non-order client queue
   // action so far, wired through src/app/dashboard/inventory/waste-section.tsx.
   // The waste handler was already fully transactional/idempotent (Phase 32) —
   // this only opens the existing server behaviour to the client's offline
   // queue, it does not add new server logic.
-  { type: "inventory.waste.recorded", schemaVersion: 1, handler: "inventory.waste.recorded", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["item_not_found"], payloadFields: ["inventoryItemId", "quantity", "reason", "note"], offlineQueueEligible: true },
-  { type: "inventory.stock_count.recorded", schemaVersion: 1, handler: "inventory.stock_count.recorded", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["item_not_found"], payloadFields: ["countId", "note", "lines"] },
-  { type: "inventory.stock_count.reversed", schemaVersion: 1, handler: "inventory.stock_count.reversed", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["count_not_found"], payloadFields: ["countId", "note"] },
-  { type: "retail.stock_count.recorded", schemaVersion: 1, handler: "retail.stock_count.recorded", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["item_not_found"], payloadFields: ["countId", "note", "lines"] },
-  { type: "retail.stock_count.reversed", schemaVersion: 1, handler: "retail.stock_count.reversed", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["count_not_found"], payloadFields: ["countId", "note"] },
-  { type: "inventory.production.recorded", schemaVersion: 1, handler: "inventory.production.recorded", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["formula_not_found", "formula_inactive"], payloadFields: ["runId", "formulaId", "batches", "outputQuantity", "conversionCostRial", "note"] },
-  { type: "inventory.production.reversed", schemaVersion: 1, handler: "inventory.production.reversed", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["run_not_found"], payloadFields: ["runId", "note"] },
+  {
+    type: "inventory.waste.recorded",
+    schemaVersion: 1,
+    handler: "inventory.waste.recorded",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["item_not_found"],
+    payloadFields: ["inventoryItemId", "quantity", "reason", "note"],
+    offlineQueueEligible: true,
+  },
+  {
+    type: "inventory.stock_count.recorded",
+    schemaVersion: 1,
+    handler: "inventory.stock_count.recorded",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["item_not_found"],
+    payloadFields: ["countId", "note", "lines"],
+  },
+  {
+    type: "inventory.stock_count.reversed",
+    schemaVersion: 1,
+    handler: "inventory.stock_count.reversed",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["count_not_found"],
+    payloadFields: ["countId", "note"],
+  },
+  {
+    type: "retail.stock_count.recorded",
+    schemaVersion: 1,
+    handler: "retail.stock_count.recorded",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["item_not_found"],
+    payloadFields: ["countId", "note", "lines"],
+  },
+  {
+    type: "retail.stock_count.reversed",
+    schemaVersion: 1,
+    handler: "retail.stock_count.reversed",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["count_not_found"],
+    payloadFields: ["countId", "note"],
+  },
+  {
+    type: "inventory.production.recorded",
+    schemaVersion: 1,
+    handler: "inventory.production.recorded",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["formula_not_found", "formula_inactive"],
+    payloadFields: [
+      "runId",
+      "formulaId",
+      "batches",
+      "outputQuantity",
+      "conversionCostRial",
+      "note",
+    ],
+  },
+  {
+    type: "inventory.production.reversed",
+    schemaVersion: 1,
+    handler: "inventory.production.reversed",
+    permission: INVENTORY_PERMISSION,
+    effectClass: "inventory",
+    locationRule: "event_location",
+    dependencyErrors: ["run_not_found"],
+    payloadFields: ["runId", "note"],
+  },
   // Phase 45: a shift opened or cashed up at the till reaches the cloud's
   // shift reports; the row travels whole and replays idempotently by id.
-  { type: "shift.opened", schemaVersion: 1, handler: "shift.opened", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
-  { type: "shift.closed", schemaVersion: 1, handler: "shift.closed", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
+  {
+    type: "shift.opened",
+    schemaVersion: 1,
+    handler: "shift.opened",
+    permission: SHIFT_PERMISSION,
+    effectClass: "shift",
+    locationRule: "event_location",
+    dependencyErrors: ["employee_not_found"],
+    payloadFields: [
+      "shiftId",
+      "employeeId",
+      "businessDate",
+      "openingFloat",
+      "closingFloat",
+      "startedAt",
+      "endedAt",
+      "closedBy",
+    ],
+  },
+  {
+    type: "shift.closed",
+    schemaVersion: 1,
+    handler: "shift.closed",
+    permission: SHIFT_PERMISSION,
+    effectClass: "shift",
+    locationRule: "event_location",
+    dependencyErrors: ["employee_not_found"],
+    payloadFields: [
+      "shiftId",
+      "employeeId",
+      "businessDate",
+      "openingFloat",
+      "closingFloat",
+      "startedAt",
+      "endedAt",
+      "closedBy",
+    ],
+  },
   // #869: a commission run's payout and the reversal of one. Business-scope: a run
   // covers every branch, so neither event names a location. The cloud writes each in
   // the same transaction as its journal entry. No replay applies one again (see
   // sync-domain-handlers.ts), and a desktop acknowledges a pulled copy.
-  { type: "commission.payout.recorded", schemaVersion: 1, handler: "commission.payout.recorded", permission: COMMISSION_PAYOUT_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["payoutId", "runId", "runNumber", "amount", "paidDate", "method", "entryId", "allocations"] },
-  { type: "commission.payout.reversed", schemaVersion: 1, handler: "commission.payout.reversed", permission: COMMISSION_REVERSE_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedPayoutId", "runId", "runNumber", "amount", "entryId"] },
+  {
+    type: "commission.payout.recorded",
+    schemaVersion: 1,
+    handler: "commission.payout.recorded",
+    permission: COMMISSION_PAYOUT_PERMISSION,
+    effectClass: "commission_settlement",
+    locationRule: "business",
+    dependencyErrors: [],
+    payloadFields: [
+      "payoutId",
+      "runId",
+      "runNumber",
+      "amount",
+      "paidDate",
+      "method",
+      "entryId",
+      "allocations",
+    ],
+  },
+  {
+    type: "commission.payout.reversed",
+    schemaVersion: 1,
+    handler: "commission.payout.reversed",
+    permission: COMMISSION_REVERSE_PERMISSION,
+    effectClass: "commission_settlement",
+    locationRule: "business",
+    dependencyErrors: [],
+    payloadFields: [
+      "reversalId",
+      "reversedPayoutId",
+      "runId",
+      "runNumber",
+      "amount",
+      "entryId",
+    ],
+  },
 
   // Issue #839 §19 (Wave 6). A paired dealership desktop may queue exactly two
   // operations about a car: hold it for a customer, and release a hold that
@@ -164,18 +509,101 @@ export const SYNC_EVENT_REGISTRY = [
   // The permission is the one the trade already requires for the same action at
   // the counter (`vehicles.reserve` / `vehicles.reservation_cancel`), so a role
   // that may not hold a car offline may not hold one by queueing either.
-  { type: "automotive.vehicle.reservation.requested", schemaVersion: 1, handler: "automotive.vehicle.reservation.requested", permission: "vehicles.reserve", effectClass: "automotive_vehicle", locationRule: "event_location", dependencyErrors: [], payloadFields: ["requestId", "serialId", "stockNumber", "customerId", "customerName", "expiresAt", "expiresAtTime", "depositRial", "depositMethod", "depositRefundable", "depositNote", "note", "expectedVersion", "expectedState", "requestedAt"] },
-  { type: "automotive.vehicle.reservation.released", schemaVersion: 1, handler: "automotive.vehicle.reservation.released", permission: "vehicles.reservation_cancel", effectClass: "automotive_vehicle", locationRule: "event_location", dependencyErrors: [], payloadFields: ["requestId", "reservationId", "serialId", "stockNumber", "reason", "refundDeposit", "expectedVersion", "expectedState", "requestedAt"] },
+  {
+    type: "automotive.vehicle.reservation.requested",
+    schemaVersion: 1,
+    handler: "automotive.vehicle.reservation.requested",
+    permission: "vehicles.reserve",
+    effectClass: "automotive_vehicle",
+    locationRule: "event_location",
+    dependencyErrors: [],
+    payloadFields: [
+      "requestId",
+      "serialId",
+      "stockNumber",
+      "customerId",
+      "customerName",
+      "expiresAt",
+      "expiresAtTime",
+      "depositRial",
+      "depositMethod",
+      "depositRefundable",
+      "depositNote",
+      "note",
+      "expectedVersion",
+      "expectedState",
+      "requestedAt",
+    ],
+  },
+  // …and the one operation that *retracts* a queued one. A cancellation the site
+  // cannot prove — a delivery attempt has left the machine, so the cloud may
+  // already hold the car — travels as this event instead of being written off
+  // locally: the cloud answers with what it actually did (nothing was applied, or
+  // a hold was released through the canonical reservation service). Its
+  // idempotency key is derived from the request id but distinct from it, because
+  // `sync_events` is unique per `(location_id, client_event_id)`, so reusing the
+  // request's own key would be swallowed by the very event it withdraws.
+  {
+    type: "automotive.vehicle.reservation.withdrawn",
+    schemaVersion: 1,
+    handler: "automotive.vehicle.reservation.withdrawn",
+    permission: "vehicles.reservation_cancel",
+    effectClass: "automotive_vehicle",
+    locationRule: "event_location",
+    dependencyErrors: [],
+    payloadFields: [
+      "requestId",
+      "requestType",
+      "serialId",
+      "stockNumber",
+      "reservationId",
+      "reason",
+      "expectedVersion",
+      "expectedState",
+      "requestedAt",
+    ],
+  },
+  {
+    type: "automotive.vehicle.reservation.released",
+    schemaVersion: 1,
+    handler: "automotive.vehicle.reservation.released",
+    permission: "vehicles.reservation_cancel",
+    effectClass: "automotive_vehicle",
+    locationRule: "event_location",
+    dependencyErrors: [],
+    payloadFields: [
+      "requestId",
+      "reservationId",
+      "serialId",
+      "stockNumber",
+      "reason",
+      "refundDeposit",
+      "expectedVersion",
+      "expectedState",
+      "requestedAt",
+    ],
+  },
 ] as const satisfies readonly SyncEventDefinition[];
 
 export type SyncEventType = (typeof SYNC_EVENT_REGISTRY)[number]["type"];
 
 const byKey = new Map<string, SyncEventDefinition>(
-  SYNC_EVENT_REGISTRY.map((entry) => [`${entry.type}@${entry.schemaVersion}`, entry]),
+  SYNC_EVENT_REGISTRY.map((entry) => [
+    `${entry.type}@${entry.schemaVersion}`,
+    entry,
+  ]),
 );
 
-export function syncEventDefinition(type: unknown, schemaVersion: unknown): SyncEventDefinition | null {
-  if (typeof type !== "string" || !Number.isSafeInteger(schemaVersion) || Number(schemaVersion) < 1) return null;
+export function syncEventDefinition(
+  type: unknown,
+  schemaVersion: unknown,
+): SyncEventDefinition | null {
+  if (
+    typeof type !== "string" ||
+    !Number.isSafeInteger(schemaVersion) ||
+    Number(schemaVersion) < 1
+  )
+    return null;
   return byKey.get(`${type}@${schemaVersion}`) ?? null;
 }
 
@@ -185,7 +613,10 @@ export function syncEventDefinition(type: unknown, schemaVersion: unknown): Sync
  * actions (the queue's original scope) and for any definition explicitly
  * opted in via `offlineQueueEligible` (Section 5 audit extension).
  */
-export function isOfflineQueueEligible(type: unknown, schemaVersion: unknown): boolean {
+export function isOfflineQueueEligible(
+  type: unknown,
+  schemaVersion: unknown,
+): boolean {
   const definition = syncEventDefinition(type, schemaVersion);
   if (!definition) return false;
   return Boolean(definition.legacy) || Boolean(definition.offlineQueueEligible);
