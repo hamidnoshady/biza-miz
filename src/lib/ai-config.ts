@@ -27,6 +27,14 @@ export type AiRuntimeUnavailableReason =
   | "invalid_base_url"
   | "missing_runtime_credential"
   | "tenant_virtual_key_missing"
+  /**
+   * A business/branch virtual key IS stored, but this deployment cannot
+   * decrypt it (issue #757 §B) — distinct from `tenant_virtual_key_missing`,
+   * which means no credential was ever issued. The fix is key recovery, not
+   * re-provisioning: minting a replacement here could orphan the credential
+   * still live inside LiteLLM.
+   */
+  | "tenant_credential_undecryptable"
   | "missing_model"
   | "invalid_max_output_tokens"
   | "configuration_load_failed";

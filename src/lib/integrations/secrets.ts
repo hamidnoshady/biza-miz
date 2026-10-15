@@ -12,6 +12,7 @@
  * returning garbage.
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import type { CredentialState } from "../ai-gateway";
 
 const VERSION = "v1";
 const KEY_LENGTH = 32;
@@ -67,5 +68,39 @@ export function decryptSecret(ciphertext: string, key: Buffer): string {
     return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
   } catch {
     throw new Error("decryption failed — wrong key or corrupted ciphertext");
+  }
+}
+
+/**
+ * The state of a stored credential, and its value when it can be read.
+ *
+ * `undecryptable` is the state that must never be flattened into "absent":
+ * the credential is still stored, the provider may still honour it, and the
+ * row that holds it is the only thing that remembers it.
+ */
+export interface StoredSecret {
+  /** The decrypted value, or "" when the secret is absent or unreadable. */
+  value: string;
+  state: CredentialState;
+}
+
+/**
+ * Read a stored ciphertext and say whether it is missing, usable, or merely
+ * unreadable.
+ *
+ * The log line names no secret material — neither the ciphertext nor the
+ * plaintext — because this runs inside request paths whose output may be
+ * captured by a log shipper.
+ */
+export function readStoredSecret(ciphertext: string | null | undefined): StoredSecret {
+  const text = typeof ciphertext === "string" ? ciphertext.trim() : "";
+  if (!text) return { value: "", state: "absent" };
+  try {
+    return { value: decryptSecret(text, resolveEncryptionKey(process.env)), state: "present" };
+  } catch {
+    console.error(
+      "stored secret could not be decrypted with this deployment's key; the credential is kept, not discarded",
+    );
+    return { value: "", state: "undecryptable" };
   }
 }

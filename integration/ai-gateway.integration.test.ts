@@ -211,7 +211,7 @@ describe("one business's gateway row", () => {
     const row = await asBusiness(alpha.businessId, () => gateway.saveBusinessGateway(alpha.businessId));
     expect(gateway.toPublicBusinessGateway(row, config, "gpt-4o-mini").effectiveModel).toBe("pos-chat");
 
-    const withKey = { ...row, virtualKey: "sk-tenant" };
+    const withKey = { ...row, virtualKey: "sk-tenant", credentialState: "present" as const };
     const pub = gateway.toPublicBusinessGateway(withKey, config, "gpt-4o-mini");
     expect(pub.hasVirtualKey).toBe(true);
     expect(JSON.stringify(pub)).not.toContain("sk-tenant");
