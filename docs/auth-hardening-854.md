@@ -412,8 +412,8 @@ parallel session store:
 - `checkEmployeeSession` (`src/lib/auth.ts`) refuses a tenant token that names
   no row, unless it is a support session, which is bound to its grant
   (`checkImpersonation`). `getSession()`, every `require*` guard, the re-mint
-  routes and the WebSocket upgrade (`resolveSessionFromToken`) all go through
-  it. The row lookup is bound to the token's business **and member**
+  routes, the WebSocket upgrade and an open socket's periodic re-check
+  (`resolveSessionFromToken`) all go through it. The row lookup is bound to the token's business **and member**
   (`employee_id = sub`), so a token naming another member's row id — in the same
   business or another — names no session.
 - **Legacy tokens.** A token minted before this change (no row, no grant) is
@@ -520,6 +520,43 @@ reads `E2E_DEPLOYMENT_ROLE`: `site` by default (what a server started without
 site, a Hybrid business's Profile is the cloud pane. On the central server it is
 the local screen: the login phone is read-only and says why, and the staff PIN
 stays self-service.
+
+**An open socket outlived its session.** The upgrade authenticates `/ws` once,
+through `resolveSessionFromToken`. The socket's 30-second re-check
+(`registerConnection` in `src/lib/realtime.ts`) then called only `authorize()`.
+That looks at the membership and the identity's token version, not at the
+`employee_sessions` row or the support grant. So a socket opened before «خروج»
+kept receiving the business's live events for as long as it stayed open. The
+same held after the session was ended from the security center, or after a
+support grant closed.
+
+The upgrade now hands the socket its cookie. Every re-check runs it through
+`resolveSessionFromToken` before `authorize()`, exactly as a request is
+authenticated. A socket whose session has ended closes with `1008 Session
+Ended` within one interval. A check that fails closes it with `1011`, as before.
+Sign-out does not reach into the registry: the registry is per process, and the
+re-check covers whichever server instance holds the socket.
+
+**An owner's socket heard every business.** `broadcast(locationId, …)` matched
+a connection with a null `locationId` to every location on the server. Such a
+connection belongs to an owner or a roaming manager. On a central server
+hosting several businesses, every owner with a screen open received every other
+business's order, table, table-session and low-stock events. Those events carry
+ids, and a low-stock event also carries the item's name and quantity.
+
+An all-locations connection now carries its own business's location ids. They
+are read inside that business's tenant scope when the socket opens, and again
+on every re-check, so a branch opened later reaches it from the next one. Until
+the first read answers, the connection receives nothing; if the read fails, the
+socket closes. A pinned connection is unchanged: location ids are unique, so its
+exact match was always isolated. No caller of `broadcast` changed.
+
+`src/lib/realtime.test.ts` covers both with a stand-in socket (10 cases).
+`integration/realtime-session-854.integration.test.ts` (3 cases) drives the real
+registry, the real session check and the real logout route through an
+unprivileged role, so an unscoped read fails under RLS. Each regression fails
+part of it: without the token re-check, 2 of the 3 cases fail; with an unscoped
+location read, 2 fail; with the old filter, 1 fails.
 
 **Not changed, stated plainly.**
 

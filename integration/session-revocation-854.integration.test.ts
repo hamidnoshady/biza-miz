@@ -11,8 +11,12 @@
  * through the real route handlers against a real schema:
  *
  *   issuance → the row that stores it → request authentication
- *   (`resolveSessionFromToken`, the check `getSession()` and the WebSocket
- *   upgrade both run) → «خروج» → the retained copy refused.
+ *   (`resolveSessionFromToken`, the check `getSession()`, the WebSocket
+ *   upgrade and an open socket's re-check all run) → «خروج» → the retained
+ *   copy refused.
+ *
+ * An open socket closing on that re-check is driven through the real registry
+ * in realtime-session-854.integration.test.ts.
  *
  * Pairing is driven the same way in hybrid-credential-sync.integration.test.ts,
  * where the two-database cloud stub it needs already lives.

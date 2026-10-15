@@ -634,7 +634,7 @@ app.prepare().then(async () => {
 
     const token = readCookie(req.headers.cookie, SESSION_COOKIE);
     const session = token ? await resolveSessionFromToken(token) : null;
-    if (!session) {
+    if (!token || !session) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
@@ -670,7 +670,9 @@ app.prepare().then(async () => {
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      registerConnection(ws, session);
+      // The token goes along so the socket's periodic re-check authenticates
+      // it again, the way every request does — see registerConnection.
+      registerConnection(ws, session, token);
     });
   });
 
