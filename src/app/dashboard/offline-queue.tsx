@@ -20,6 +20,8 @@ import {
   resolveQueueRecordRef,
   type SyncQueueStatus,
 } from "@/lib/sync-queue";
+import { useNative } from "@/components/native/native-provider";
+import { triggerNativeBackgroundSync } from "@/lib/native/capabilities-client";
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -404,6 +406,17 @@ const OfflineQueueContext = createContext<OfflineQueueState | null>(null);
 /** One queue/probe owner for the whole authenticated shell. */
 export function OfflineQueueProvider({ children }: { children: ReactNode }) {
   const state = useOfflineQueueState();
+  const { connection, request } = useNative();
+
+  useEffect(() => {
+    if (connection === "connected" && state.pendingCount > 0) {
+      void triggerNativeBackgroundSync(request, {
+        action: "enqueue",
+        businessId: null,
+      });
+    }
+  }, [connection, request, state.pendingCount]);
+
   return <OfflineQueueContext.Provider value={state}>{children}</OfflineQueueContext.Provider>;
 }
 

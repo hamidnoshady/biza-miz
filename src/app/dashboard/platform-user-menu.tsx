@@ -54,6 +54,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useBugReport } from "@/components/bug-report/bug-report-provider";
+import { useNative } from "@/components/native/native-provider";
+import { triggerNativeBackgroundSync } from "@/lib/native/capabilities-client";
 import { platformUserMenuItems } from "@/lib/platform-user-menu";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
 import { roleLabel } from "@/lib/role-labels";
@@ -76,6 +78,7 @@ export function PlatformUserMenu({
   const pathname = usePathname();
   const router = useRouter();
   const { openReport } = useBugReport();
+  const { connection, request } = useNative();
   const label = roleLabel(role);
   const items = platformUserMenuItems(role);
 
@@ -90,6 +93,12 @@ export function PlatformUserMenu({
     if (signingOut) return;
     setSigningOut(true);
     try {
+      if (connection === "connected") {
+        await triggerNativeBackgroundSync(request, {
+          action: "clear_all",
+          businessId: null,
+        });
+      }
       await fetch("/api/auth/logout", { method: "POST" });
       router.push(returnTo);
       router.refresh();
@@ -110,6 +119,12 @@ export function PlatformUserMenu({
     setSigningOut(true);
     try {
       clearRememberedLoginDoor();
+      if (connection === "connected") {
+        await triggerNativeBackgroundSync(request, {
+          action: "clear_all",
+          businessId: null,
+        });
+      }
       await fetch("/api/auth/logout", { method: "POST" });
       router.push("/login");
       router.refresh();

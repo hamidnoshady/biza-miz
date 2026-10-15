@@ -3,7 +3,7 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_FEATURES } from "@/lib/native/capability";
 import { INITIAL_NATIVE_SNAPSHOT, type NativeRuntimeSnapshot } from "@/lib/native/native-runtime";
-import { NativeDeviceRegistrar } from "./native-device-registrar";
+import { NativeDeviceRegistrar, resolveAndRouteNativeDeepLink } from "./native-device-registrar";
 import { NativeValueProvider, buildNativeContextValue, type NativeRequest } from "./native-provider";
 
 afterEach(() => {
@@ -99,5 +99,189 @@ describe("NativeDeviceRegistrar", () => {
     );
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("resolveAndRouteNativeDeepLink (Root Cause 5)", () => {
+  it("routes when target businessId matches authoritative active business from /api/auth/me", async () => {
+    const navigate = vi.fn();
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe("/api/auth/me");
+      return new Response(JSON.stringify({ user: { id: "u-1", businessId: "biz-active" } }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    const res = await resolveAndRouteNativeDeepLink(
+      {
+        path: "/crm/customers/42",
+        businessId: "biz-active",
+        notificationCategory: "crm",
+      },
+      {
+        fallbackBusinessId: "biz-active",
+        fetchImpl: fetchMock,
+        navigate,
+      },
+    );
+
+    expect(res).toEqual({
+      routed: true,
+      destination: "/crm/customers/42",
+      authoritativeBusinessId: "biz-active",
+      clearedPreviousBusinessId: null,
+      reason: "routed",
+    });
+    expect(navigate).toHaveBeenCalledWith("/crm/customers/42");
+  });
+
+  it("blocks routing when target businessId is specified and active business cannot be resolved (missing tenant)", async () => {
+    const navigate = vi.fn();
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ user: { id: "u-1", businessId: null } }), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const res = await resolveAndRouteNativeDeepLink(
+      {
+        path: "/accounting/orders",
+        businessId: "biz-target",
+        notificationCategory: "orders",
+      },
+      {
+        fallbackBusinessId: null,
+        fetchImpl: fetchMock,
+        navigate,
+      },
+    );
+
+    expect(res.routed).toBe(false);
+    expect(res.reason).toBe("missing_active_tenant");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("switches business and clears previous tenant cache when target businessId is authorized via /api/auth/switch-business", async () => {
+    const navigate = vi.fn();
+    const onClearTenant = vi.fn();
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/auth/me") {
+        return new Response(JSON.stringify({ user: { id: "u-1", businessId: "biz-old" } }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/auth/switch-business") {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(init?.body as string)).toEqual({ businessId: "biz-new" });
+        return new Response(JSON.stringify({ businessId: "biz-new" }), { status: 200 });
+      }
+      throw new Error(`unexpected url: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const res = await resolveAndRouteNativeDeepLink(
+      {
+        path: "/accounting/invoices/99",
+        businessId: "biz-new",
+        notificationCategory: "orders",
+      },
+      {
+        fallbackBusinessId: "biz-old",
+        fetchImpl: fetchMock,
+        navigate,
+        onClearTenant,
+      },
+    );
+
+    expect(res).toEqual({
+      routed: true,
+      destination: "/accounting/invoices/99",
+      authoritativeBusinessId: "biz-new",
+      clearedPreviousBusinessId: "biz-old",
+      reason: "switched_and_routed",
+    });
+    expect(onClearTenant).toHaveBeenCalledWith("biz-old");
+    expect(navigate).toHaveBeenCalledWith("/accounting/invoices/99");
+  });
+
+  it("blocks routing when target businessId is unauthorized (403 on /api/auth/switch-business)", async () => {
+    const navigate = vi.fn();
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") {
+        return new Response(JSON.stringify({ user: { id: "u-1", businessId: "biz-1" } }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ error: "Forbidden" }), { status: 403 });
+    }) as unknown as typeof fetch;
+
+    const res = await resolveAndRouteNativeDeepLink(
+      {
+        path: "/crm/customers",
+        businessId: "biz-unauthorized",
+        notificationCategory: "crm",
+      },
+      {
+        fallbackBusinessId: "biz-1",
+        fetchImpl: fetchMock,
+        navigate,
+      },
+    );
+
+    expect(res.routed).toBe(false);
+    expect(res.reason).toBe("tenant_mismatch_forbidden");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("clears previous tenant cache when authoritative business changed since previous render", async () => {
+    const navigate = vi.fn();
+    const onClearTenant = vi.fn();
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ user: { id: "u-1", businessId: "biz-2" } }), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const res = await resolveAndRouteNativeDeepLink(
+      {
+        path: "/dashboard",
+        businessId: "biz-2",
+        notificationCategory: null,
+      },
+      {
+        fallbackBusinessId: "biz-2",
+        previousBusinessId: "biz-1",
+        fetchImpl: fetchMock,
+        navigate,
+        onClearTenant,
+      },
+    );
+
+    expect(res.routed).toBe(true);
+    expect(res.clearedPreviousBusinessId).toBe("biz-1");
+    expect(onClearTenant).toHaveBeenCalledWith("biz-1");
+  });
+
+  it("wipes all native state and redirects to /login when session is revoked (401 on /api/auth/me)", async () => {
+    const navigate = vi.fn();
+    const onClearAll = vi.fn();
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 }),
+    ) as unknown as typeof fetch;
+
+    const res = await resolveAndRouteNativeDeepLink(
+      {
+        path: "/accounting/orders",
+        businessId: "biz-1",
+        notificationCategory: "orders",
+      },
+      {
+        fallbackBusinessId: "biz-1",
+        fetchImpl: fetchMock,
+        navigate,
+        onClearAll,
+      },
+    );
+
+    expect(res.routed).toBe(false);
+    expect(res.reason).toBe("session_revoked");
+    expect(res.destination).toBe("/login");
+    expect(onClearAll).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledWith("/login");
   });
 });

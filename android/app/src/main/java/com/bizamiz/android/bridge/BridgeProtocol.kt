@@ -258,4 +258,71 @@ object BridgeProtocol {
             .put("bridgeVersion", BRIDGE_VERSION)
             .put("capabilities", JSONArray(validCapabilities))
     }
+
+    /**
+     * Canonical builder for `crm.callEnded` event payloads matching
+     * `parseCrmCallEndedEvent` in `src/lib/native/bridge-contract.ts`:
+     * `{ phoneNormalized, direction, durationSeconds, customerId, customerName, endedAt }`.
+     */
+    fun buildCrmCallEndedEventPayload(
+        phoneNormalized: String,
+        direction: String,
+        durationSeconds: Int,
+        customerId: String?,
+        customerName: String?,
+        endedAt: String,
+    ): JSONObject {
+        require(phoneNormalized.isNotBlank()) { "phoneNormalized is required" }
+        require(direction == "incoming" || direction == "outgoing") {
+            "Invalid call direction: $direction"
+        }
+        require(durationSeconds >= 0) { "durationSeconds must be >= 0" }
+        require(endedAt.isNotBlank()) { "endedAt is required" }
+        return JSONObject()
+            .put("phoneNormalized", phoneNormalized)
+            .put("direction", direction)
+            .put("durationSeconds", durationSeconds)
+            .put("customerId", customerId?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            .put("customerName", customerName?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            .put("endedAt", endedAt)
+    }
+
+    /**
+     * Canonical builder for `navigation.deepLink` event payloads matching
+     * `parseDeepLinkEvent` in `src/lib/native/bridge-contract.ts`:
+     * `{ path, notificationCategory, businessId }`.
+     */
+    fun buildNavigationDeepLinkEventPayload(
+        path: String,
+        businessId: String?,
+        notificationCategory: String? = null,
+    ): JSONObject {
+        require(path.startsWith("/") && !path.startsWith("//")) {
+            "Deep link path must be a single-slash internal path"
+        }
+        val validCategory = notificationCategory?.trim()?.takeIf { NOTIFICATION_CHANNELS.contains(it) }
+        return JSONObject()
+            .put("path", path)
+            .put("notificationCategory", validCategory ?: JSONObject.NULL)
+            .put("businessId", businessId?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+    }
+
+    /**
+     * Canonical builder for `sync.completed` event payloads matching
+     * `parseSyncCompletedEvent` in `src/lib/native/bridge-contract.ts`:
+     * `{ businessId, syncedAt, revoked, flushedCount }`.
+     */
+    fun buildSyncCompletedEventPayload(
+        businessId: String?,
+        syncedAt: String,
+        revoked: Boolean,
+        flushedCount: Int,
+    ): JSONObject {
+        require(syncedAt.isNotBlank()) { "syncedAt is required" }
+        return JSONObject()
+            .put("businessId", businessId?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            .put("syncedAt", syncedAt)
+            .put("revoked", revoked)
+            .put("flushedCount", flushedCount.coerceAtLeast(0))
+    }
 }

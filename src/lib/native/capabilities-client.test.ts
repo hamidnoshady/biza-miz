@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { NextRequest } from "next/server";
 import { NativeBridgeError } from "./bridge";
 import {
   authenticateWithNativeBiometric,
   buildPostCallActivityPayload,
+  buildQuickCrmActivityPayload,
+  buildQuickCustomerPartyPayload,
   getNativeBiometricStatus,
   getNativeCallerIdStatus,
   getNativeSyncStatus,
@@ -15,7 +18,30 @@ import {
   validatePickedMediaFile,
   validateTenantDeepLink,
 } from "./capabilities-client";
+import { parsePartyRequestBody } from "@/lib/parties";
 import type { NativeRequest } from "@/components/native/native-provider";
+
+const createCrmActivityMock = vi.fn(async (businessId: string, input: Record<string, unknown>) => ({
+  id: "act-created-1",
+  businessId,
+  ...input,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  withTenantScope: (fn: (req: Request) => Promise<Response>) => fn,
+  requirePermission: vi.fn(async () => ({
+    session: { id: "user-1", businessId: "biz-1", role: "Owner", fullName: "مدیر" },
+    error: null,
+  })),
+}));
+
+vi.mock("@/lib/crm-service", () => ({
+  createActivity: (businessId: string, input: Record<string, unknown>) =>
+    createCrmActivityMock(businessId, input),
+  listActivities: vi.fn(async () => []),
+}));
+
+import { POST as postCrmActivity } from "@/app/api/crm/activities/route";
 
 describe("normalizeCallerPhone", () => {
   it("normalizes Iranian mobile numbers across local, +98, 0098, and Persian digits", () => {
@@ -81,6 +107,31 @@ describe("validateTenantDeepLink", () => {
       allowed: false,
       path: null,
       reason: "tenant_mismatch",
+    });
+  });
+
+  it("fails closed when targetBusinessId is present but activeBusinessId is null or empty", () => {
+    expect(
+      validateTenantDeepLink({
+        path: "/crm/customers/123",
+        activeBusinessId: null,
+        targetBusinessId: "biz-1",
+      }),
+    ).toEqual({
+      allowed: false,
+      path: null,
+      reason: "missing_active_tenant",
+    });
+    expect(
+      validateTenantDeepLink({
+        path: "/crm/customers/123",
+        activeBusinessId: "   ",
+        targetBusinessId: "biz-1",
+      }),
+    ).toEqual({
+      allowed: false,
+      path: null,
+      reason: "missing_active_tenant",
     });
   });
 });
@@ -212,8 +263,10 @@ describe("CRM caller ID sync and post-call activity payload", () => {
   });
 
   it("builds a CRM call activity payload compatible with POST /api/crm/activities", () => {
+    const validUuid = "11111111-2222-4333-8444-555555555555";
+    const assigneeUuid = "99999999-8888-4777-8666-555555555555";
     const payload = buildPostCallActivityPayload({
-      customerId: "c-1",
+      customerId: validUuid,
       customerName: "علی رضایی",
       phoneNormalized: "+989121112233",
       direction: "incoming",
@@ -221,14 +274,115 @@ describe("CRM caller ID sync and post-call activity payload", () => {
       outcome: "follow_up_needed",
       note: "ارسال پیش‌فاکتور تا فردا",
       followUpAt: "2026-10-16T09:00:00Z",
+      assignedTo: assigneeUuid,
     });
 
     expect(payload.kind).toBe("call");
-    expect(payload.customerId).toBe("c-1");
+    expect(payload.subject).toBe("تماس ورودی — علی رضایی (نیازمند پیگیری)");
+    expect(payload.customerId).toBe(validUuid);
+    expect(payload.assigneeUserId).toBe(assigneeUuid);
+    expect(payload.assignedTo).toBeUndefined();
     expect(payload.completed).toBe(false);
-    expect(payload.dueAt).toBe("2026-10-16T09:00:00Z");
-    expect(payload.description).toContain("۲ دقیقه".replace("۲", "2"));
-    expect(payload.description).toContain("ارسال پیش‌فاکتور تا فردا");
+    expect(payload.dueAt).toBe("2026-10-16T09:00:00.000Z");
+    expect(payload.body).toContain("ارسال پیش‌فاکتور تا فردا");
+    expect(payload.body).toContain("2 دقیقه و 5 ثانیه");
+    expect("title" in payload).toBe(false);
+    expect("description" in payload).toBe(false);
+
+    // Non-UUID customerId is omitted rather than triggering a 400 on /api/crm/activities.
+    const nonUuidPayload = buildPostCallActivityPayload({
+      customerId: "non-uuid-local-id",
+      customerName: "مشتری ناشناس",
+      phoneNormalized: "+989120000000",
+      direction: "incoming",
+      durationSeconds: 0,
+      outcome: "no_answer",
+      note: "",
+      assignedTo: "تیم پشتیبانی",
+    });
+    expect(nonUuidPayload.customerId).toBeUndefined();
+    expect(nonUuidPayload.assigneeUserId).toBeUndefined();
+    expect(nonUuidPayload.assignedTo).toBe("تیم پشتیبانی");
+  });
+
+  it("builds quick-create CRM activity and customer party payloads matching server contracts", () => {
+    const activityPayload = buildQuickCrmActivityPayload({
+      kind: "task",
+      subject: "ارسال قرارداد",
+      body: "ارسال نسخه امضاشده",
+      dueAt: "2026-10-20T10:00:00Z",
+    });
+    expect(activityPayload).toEqual({
+      kind: "task",
+      subject: "ارسال قرارداد",
+      body: "ارسال نسخه امضاشده",
+      completed: false,
+      dueAt: "2026-10-20T10:00:00.000Z",
+    });
+
+    const partyPayload = buildQuickCustomerPartyPayload({
+      displayName: "شرکت سپهر",
+      phone: "۰۹۱۲۱۱۱۲۲۳۳",
+    });
+    expect(partyPayload).toEqual({
+      displayName: "شرکت سپهر",
+      role: "Customer",
+      roles: ["Customer"],
+      phone: "09121112233",
+    });
+    const parsedByServer = parsePartyRequestBody(partyPayload as unknown as Record<string, unknown>);
+    expect(parsedByServer.errors).toEqual({});
+    expect(parsedByServer.input.displayName).toBe("شرکت سپهر");
+    expect(parsedByServer.input.roles).toEqual(["Customer"]);
+  });
+
+  it("submits post-call and quick-create payloads directly to the POST /api/crm/activities route handler with 201 Created", async () => {
+    createCrmActivityMock.mockClear();
+    const customerUuid = "11111111-2222-4333-8444-555555555555";
+    const postCallPayload = buildPostCallActivityPayload({
+      customerId: customerUuid,
+      customerName: "سارا احمدی",
+      phoneNormalized: "+989123334455",
+      direction: "incoming",
+      durationSeconds: 70,
+      outcome: "answered",
+      note: "ارسال لیست قیمت جدید",
+      assignedTo: "واحد فروش",
+    });
+
+    const postCallRes = await postCrmActivity(
+      new NextRequest("https://biza-miz.test/api/crm/activities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(postCallPayload),
+      }),
+    );
+    expect(postCallRes.status).toBe(201);
+    expect(createCrmActivityMock).toHaveBeenCalledWith(
+      "biz-1",
+      expect.objectContaining({
+        kind: "call",
+        subject: "تماس ورودی — سارا احمدی (پاسخ داده شد)",
+        customerId: customerUuid,
+        completed: true,
+        assignedTo: "واحد فروش",
+      }),
+    );
+
+    const quickTaskPayload = buildQuickCrmActivityPayload({
+      kind: "task",
+      subject: "تماس مجدد با مشتری",
+      body: "بررسی تایید پیش‌فاکتور",
+      dueAt: "2026-10-18T08:30:00Z",
+    });
+    const quickTaskRes = await postCrmActivity(
+      new NextRequest("https://biza-miz.test/api/crm/activities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(quickTaskPayload),
+      }),
+    );
+    expect(quickTaskRes.status).toBe(201);
   });
 
   it("degrades safely when caller ID status or background sync bridge commands are unavailable", async () => {

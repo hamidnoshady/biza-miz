@@ -5,10 +5,11 @@
  * Android TWA runtime and mobile CRM flows (issue #884).
  *
  * Automatically opens when the Android wrapper emits `crm.callEnded` over the
- * native bridge, or can be opened manually from CRM customer screens. Logs the
- * call outcome, notes, and optional follow-up date into the existing
- * `POST /api/crm/activities` endpoint without recording call audio or creating
- * a parallel call database.
+ * native bridge after a call genuinely finishes (`CALL_STATE_IDLE`), or can be
+ * opened manually from CRM customer screens. Logs the call outcome, notes,
+ * optional follow-up date, and optional assignee into the canonical
+ * `POST /api/crm/activities` endpoint (`subject` / `body`) without recording
+ * call audio or creating a parallel call database.
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { PhoneIncomingIcon, PhoneOutgoingIcon } from "lucide-react";
@@ -40,6 +41,7 @@ export function PostCallActivitySheet({
   const [outcome, setOutcome] = useState<PostCallOutcome>("answered");
   const [note, setNote] = useState("");
   const [followUpDate, setFollowUpDate] = useState("");
+  const [assignedTo, setAssignedTo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,6 +57,7 @@ export function PostCallActivitySheet({
       setOutcome("answered");
       setNote("");
       setFollowUpDate("");
+      setAssignedTo("");
       setError(null);
     });
   }, [onEvent]);
@@ -80,6 +83,7 @@ export function PostCallActivitySheet({
         outcome,
         note,
         followUpAt: followUpDate ? new Date(followUpDate).toISOString() : null,
+        assignedTo: assignedTo.trim() || undefined,
       });
 
       const res = await fetch("/api/crm/activities", {
@@ -164,22 +168,38 @@ export function PostCallActivitySheet({
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder="خلاصهٔ گفتگو، توافق‌ها یا موارد مهم…"
-              className="w-full rounded-xl border border-border bg-white dark:bg-card p-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+              className="w-full rounded-xl border border-border bg-card p-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
             />
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="post-call-followup">
-              زمان پیگیری بعدی (اختیاری)
-            </label>
-            <input
-              id="post-call-followup"
-              type="datetime-local"
-              dir="ltr"
-              value={followUpDate}
-              onChange={(e) => setFollowUpDate(e.target.value)}
-              className="min-h-11 w-full rounded-xl border border-border bg-white dark:bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
-            />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="post-call-followup">
+                زمان پیگیری بعدی (اختیاری)
+              </label>
+              <input
+                id="post-call-followup"
+                type="datetime-local"
+                dir="ltr"
+                value={followUpDate}
+                onChange={(e) => setFollowUpDate(e.target.value)}
+                className="min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="post-call-assignee">
+                مسئول پیگیری (اختیاری)
+              </label>
+              <input
+                id="post-call-assignee"
+                type="text"
+                value={assignedTo}
+                onChange={(e) => setAssignedTo(e.target.value)}
+                placeholder="نام همکار…"
+                className="min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+              />
+            </div>
           </div>
 
           {error ? <p className="text-xs text-rose-600 dark:text-rose-400">{error}</p> : null}

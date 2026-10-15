@@ -39,6 +39,17 @@ fun webOriginFor(flavorName: String): String {
     return candidates.firstOrNull { !it.isNullOrBlank() }?.trim().orEmpty()
 }
 
+fun firebaseFieldFor(flavorName: String, envKey: String, propKey: String): String {
+    val upper = flavorName.uppercase()
+    val candidates = listOf(
+        System.getenv("BIZA_FIREBASE_${envKey}_$upper"),
+        System.getenv("BIZA_FIREBASE_$envKey"),
+        findProperty("biza.firebase.$propKey.$flavorName") as String?,
+        findProperty("biza.firebase.$propKey") as String?,
+    )
+    return candidates.firstOrNull { !it.isNullOrBlank() }?.trim().orEmpty()
+}
+
 // Used as the App Link host. An unset origin gets a placeholder that can never resolve, so the
 // manifest still merges; the release check below stops such a build from being produced.
 fun hostFor(origin: String): String = if (origin.isEmpty()) "unset.invalid" else URI(origin).host
@@ -70,6 +81,10 @@ android {
                 buildConfigField("String", "WEB_ORIGIN", "\"$origin\"")
                 buildConfigField("String", "APP_ENVIRONMENT", "\"$flavorName\"")
                 buildConfigField("int", "NATIVE_BRIDGE_VERSION", bridgeVersion.toString())
+                buildConfigField("String", "FIREBASE_PROJECT_ID", "\"${firebaseFieldFor(flavorName, "PROJECT_ID", "projectId")}\"")
+                buildConfigField("String", "FIREBASE_APP_ID", "\"${firebaseFieldFor(flavorName, "APP_ID", "appId")}\"")
+                buildConfigField("String", "FIREBASE_API_KEY", "\"${firebaseFieldFor(flavorName, "API_KEY", "apiKey")}\"")
+                buildConfigField("String", "FIREBASE_SENDER_ID", "\"${firebaseFieldFor(flavorName, "SENDER_ID", "senderId")}\"")
                 manifestPlaceholders["appLinkHost"] = hostFor(origin)
             }
         }
@@ -113,6 +128,8 @@ android {
 
 dependencies {
     implementation(libs.androidx.browser)
+    implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.firebase.messaging)
 
     testImplementation(libs.junit)
     // Unit tests run on the JVM, where android.jar's org.json is only a stub. The real parser is

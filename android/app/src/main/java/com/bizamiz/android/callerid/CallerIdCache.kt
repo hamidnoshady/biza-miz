@@ -4,6 +4,7 @@ import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.bizamiz.android.security.EncryptedKeyValueStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -15,10 +16,16 @@ import java.util.TimeZone
  * Tenant-isolated local caller lookup cache for CRM Caller ID (issue #884).
  *
  * Security & privacy invariants:
+ * - At-rest storage uses `EncryptedKeyValueStore` (AES-256-GCM backed by
+ *   AndroidKeyStore with per-key AAD binding), never plain `SharedPreferences`.
  * - Entries are partitioned by `businessId`; a lookup only searches the active
  *   tenant's cache and never leaks contacts across tenants.
- * - Clearing a tenant (`clearTenant`) or signing out (`clearAll`) removes cached
- *   entries immediately.
+ * - Clearing a tenant (`clearTenant`), signing out (`clearAll`), losing
+ *   `ROLE_CALL_SCREENING` (`reconcileRoleState(false)`), or device revocation
+ *   (`onDeviceRevoked()`) removes cached entries immediately.
+ * - Crash-safe wipe recovery (`KEY_PENDING_WIPE`) guarantees that if process
+ *   death interrupts a wipe, the next process start completes the purge before
+ *   serving any lookup.
  * - Never records call audio or call content.
  */
 class CallerIdCache(
@@ -39,14 +46,41 @@ class CallerIdCache(
         val tags: List<String>,
     )
 
-    fun getActiveBusinessId(): String? =
-        store.getString(KEY_ACTIVE_BUSINESS)?.takeIf { it.isNotBlank() }
+    init {
+        recoverInterruptedWipe()
+    }
+
+    private fun recoverInterruptedWipe() {
+        val pending = store.getString(KEY_PENDING_WIPE) ?: return
+        when {
+            pending == WIPE_ALL_MARKER -> {
+                store.clearAll()
+            }
+            pending.startsWith(WIPE_TENANT_PREFIX) -> {
+                val targetBiz = pending.removePrefix(WIPE_TENANT_PREFIX)
+                if (targetBiz.isNotEmpty()) {
+                    store.remove(tenantKey(targetBiz))
+                    if (store.getString(KEY_ACTIVE_BUSINESS) == targetBiz) {
+                        store.remove(KEY_ACTIVE_BUSINESS)
+                    }
+                }
+                store.remove(KEY_PENDING_WIPE)
+            }
+            else -> store.remove(KEY_PENDING_WIPE)
+        }
+    }
+
+    fun getActiveBusinessId(): String? {
+        recoverInterruptedWipe()
+        return store.getString(KEY_ACTIVE_BUSINESS)?.takeIf { it.isNotBlank() }
+    }
 
     fun setActiveBusinessId(businessId: String?) {
-        if (businessId.isNullOrBlank()) {
+        val next = businessId?.trim()?.takeIf { it.isNotEmpty() }
+        if (next == null) {
             store.remove(KEY_ACTIVE_BUSINESS)
         } else {
-            store.putString(KEY_ACTIVE_BUSINESS, businessId.trim())
+            store.putString(KEY_ACTIVE_BUSINESS, next)
         }
     }
 
@@ -81,10 +115,12 @@ class CallerIdCache(
 
         store.putString(tenantKey(cleanBusinessId), wrapper.toString())
         store.putString(KEY_ACTIVE_BUSINESS, cleanBusinessId)
+        store.putString(KEY_ROLE_LAST_HELD, "true")
         return count
     }
 
     fun lookup(rawPhone: String, businessId: String? = getActiveBusinessId()): CallerEntry? {
+        recoverInterruptedWipe()
         val targetBusinessId = businessId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val normalized = normalizePhone(rawPhone)
         if (normalized.isEmpty()) return null
@@ -115,7 +151,25 @@ class CallerIdCache(
         )
     }
 
+    /**
+     * If `ROLE_CALL_SCREENING` was previously held and has now been revoked in
+     * Android system settings, immediately purges the local caller-ID cache so
+     * customer phone metadata does not remain on disk without user consent.
+     */
+    fun reconcileRoleState(roleHeld: Boolean) {
+        if (!roleHeld && store.getString(KEY_ROLE_LAST_HELD) == "true") {
+            clearAll()
+        } else if (roleHeld) {
+            store.putString(KEY_ROLE_LAST_HELD, "true")
+        }
+    }
+
+    fun onDeviceRevoked() {
+        clearAll()
+    }
+
     fun status(businessId: String? = getActiveBusinessId(), roleHeld: Boolean = false, supported: Boolean = true): JSONObject {
+        reconcileRoleState(roleHeld)
         val targetBusinessId = businessId?.trim()?.takeIf { it.isNotEmpty() }
         var count = 0
         var lastSyncedAt: String? = null
@@ -141,22 +195,29 @@ class CallerIdCache(
 
     fun clearTenant(businessId: String) {
         val clean = businessId.trim()
+        if (clean.isEmpty()) return
+        store.putString(KEY_PENDING_WIPE, "$WIPE_TENANT_PREFIX$clean")
         store.remove(tenantKey(clean))
-        if (getActiveBusinessId() == clean) {
+        if (store.getString(KEY_ACTIVE_BUSINESS) == clean) {
             store.remove(KEY_ACTIVE_BUSINESS)
         }
+        store.remove(KEY_PENDING_WIPE)
     }
 
     fun clearAll() {
+        store.putString(KEY_PENDING_WIPE, WIPE_ALL_MARKER)
         store.clearAll()
     }
 
     companion object {
-        private const val PREFS_NAME = "biza_caller_id_cache"
         private const val KEY_ACTIVE_BUSINESS = "active_business_id"
+        private const val KEY_ROLE_LAST_HELD = "role_last_held"
+        internal const val KEY_PENDING_WIPE = "__pending_wipe__"
+        internal const val WIPE_ALL_MARKER = "all"
+        internal const val WIPE_TENANT_PREFIX = "tenant:"
         private const val MAX_ENTRIES_PER_TENANT = 5_000
 
-        private fun tenantKey(businessId: String): String = "tenant_callers:$businessId"
+        internal fun tenantKey(businessId: String): String = "tenant_callers:$businessId"
 
         /**
          * Normalizes Iranian (`09...`, `989...`, `00989...`, Persian/Arabic digits)
@@ -189,23 +250,8 @@ class CallerIdCache(
             }
         }
 
-        fun fromContext(context: Context): CallerIdCache {
-            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return CallerIdCache(
-                object : KeyValueStore {
-                    override fun getString(key: String): String? = prefs.getString(key, null)
-                    override fun putString(key: String, value: String) {
-                        prefs.edit().putString(key, value).apply()
-                    }
-                    override fun remove(key: String) {
-                        prefs.edit().remove(key).apply()
-                    }
-                    override fun clearAll() {
-                        prefs.edit().clear().apply()
-                    }
-                },
-            )
-        }
+        fun fromContext(context: Context): CallerIdCache =
+            CallerIdCache(EncryptedKeyValueStore.fromContext(context))
 
         fun isCallScreeningSupported(): Boolean =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q

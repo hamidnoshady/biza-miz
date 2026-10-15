@@ -159,22 +159,59 @@ the allowlisted commands, events, and capabilities shared between `src/lib/nativ
 and `android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt` (guarded against drift
 by `src/lib/native/native-config.test.ts` and `BridgeContractTest.kt`):
 
-- **Commands (15)**: `app.info`, `device.identity`, `notification.status`, `notification.register`,
+- **Commands (15)**: `app.info`, `notifications.status`, `device.identity`, `notifications.register`,
   `biometric.status`, `biometric.authenticate`, `scanner.scan`, `media.pick`, `share.open`,
-  `printer.discover`, `printer.print`, `callerId.status`, `callerId.sync`, `sync.status`,
+  `printer.discover`, `printer.print`, `crm.callerId.status`, `crm.callerId.sync`, `sync.status`,
   `sync.trigger`.
-- **Events (6)**: `bridge.ready`, `app.lifecycle`, `notification.opened`, `crm.incomingCall`,
-  `crm.callEnded`, `sync.completed`.
-- **Capabilities (7)**: `notifications` (v1), `biometric` (v2), `barcode.scan` (v2), `camera` (v2),
-  `share` (v2), `printer` (v3), `caller_id` (v3).
+- **Events (4)**: `bridge.ready`, `navigation.deepLink`, `crm.callEnded`, `sync.completed`.
+- **Capabilities (8)**: `notifications` (v1), `barcode.scan` (v3), `printer` (v3),
+  `crm.caller-id` (v3), `biometric` (v3), `share` (v3), `media.capture` (v3),
+  `background.sync` (v3).
 
-The manifest declares `INTERNET`, `ACCESS_NETWORK_STATE`, `POST_NOTIFICATIONS`, `USE_BIOMETRIC`,
-`CAMERA` (`android:required="false"`), and `BLUETOOTH_CONNECT` / `BLUETOOTH_SCAN`
-(`neverForLocation`, `android:required="false"`), plus `BizaCallScreeningService`
-(`android.permission.BIND_SCREENING_SERVICE`). Runtime permissions are requested on-demand only
-when the user triggers a capability that requires them. `BizaCallScreeningService` uses Android's
-official `CallScreeningService` (API 29+) and `RoleManager.ROLE_CALL_SCREENING` — it never records
-call audio or uses accessibility services.
+### Native capability modules
+
+1. **Encrypted Caller ID Cache (`EncryptedKeyValueStore.kt` + `CallerIdCache.kt`)**:
+   - Customer caller-ID entries are encrypted at rest with AES-256-GCM (`AES/GCM/NoPadding`, 96-bit
+     random IV, 128-bit authentication tag) using an Android Keystore key
+     (`biza_caller_id_aes_gcm_v1`), with the storage key bound as GCM Additional Authenticated Data
+     (AAD) so ciphertext cannot be substituted across keys or tenants.
+   - Cache entries are strictly partitioned by `businessId`, purged on tenant switch (`clearTenant`),
+     sign-out (`clearAll`, which also deletes/rotates the wrapping key for cryptographic erasure),
+     loss of `ROLE_CALL_SCREENING` (`reconcileRoleState(false)`), or device revocation, and protected
+     by a crash-recovery marker (`__pending_wipe__`) across process death.
+   - **Offline erasure limitation**: If an administrator revokes a device while that device has no
+     network connectivity, server-side sessions and push/sync fan-out are blocked immediately, and
+     local `CallerIdCache` / `WorkManager` state is wiped on the device's next network contact
+     (`/api/health`, `/api/auth/me`, `/api/native-devices`). While completely air-gapped offline,
+     instant remote wipe cannot reach the device; cached caller metadata remains encrypted at rest
+     under Android Keystore AES-256-GCM until the device reconnects, signs out locally, switches
+     tenant, or loses `ROLE_CALL_SCREENING`.
+2. **Incoming Call Identification vs. Post-Call Follow-Up (`BizaCallScreeningService.kt` + `CallLifecycleTracker.kt`)**:
+   - `BizaCallScreeningService.onScreenCall` only identifies the caller in the active business's
+     encrypted `CallerIdCache`, posts a heads-up Caller ID notification, and records the screened
+     call in `CallLifecycleTracker`. It never blocks/silences calls, never records call audio, and
+     never emits `crm.callEnded` during screening.
+   - `CallLifecycleTracker` observes `CALL_STATE_OFFHOOK` and `CALL_STATE_IDLE` and emits
+     `crm.callEnded` (`{ phoneNormalized, direction, durationSeconds, customerId, customerName, endedAt }`)
+     only when the call disconnects, using the measured off-hook duration (or `0` if unanswered).
+3. **Background Sync (`NativeSyncScheduler.kt` + `BizaSyncWorker.kt` + `TenantSyncStateStore.kt`)**:
+   - Uses `androidx.work:work-runtime-ktx` (`WorkManagerSyncScheduler` + `BizaSyncWorker`) with
+     `NetworkType.CONNECTED` constraints and exponential backoff (`MAX_RETRY_ATTEMPTS = 5`).
+   - Android does not maintain a second business database; when `BizaSyncWorker` verifies origin
+     connectivity, it stamps `lastSyncedAt` and emits `sync.completed` to trigger `flushQueue()` on
+     the web app's IndexedDB `pendingActions` queue (`POST /api/sync/events`).
+4. **Firebase Cloud Messaging (`BizaFirebaseMessagingService.kt` + `NotificationChannelManager.kt`)**:
+   - Integrates `com.google.firebase:firebase-messaging` directly (no reflection) with auto-init
+     disabled until explicit user opt-in and credential verification (`BuildConfig.FIREBASE_*`).
+   - When external Firebase project credentials are not supplied in the build/server environment,
+     `NotificationChannelManager.resolvePushToken` explicitly returns `null` (`pushProvider: "none"`)
+     without simulating success. When configured, `src/lib/notifications-service.ts` (`deliverEvent`)
+     fans out notification outbox events to active FCM `native_app_devices` alongside Web Push.
+5. **Tenant-Safe Deep Links (`NativeDeviceRegistrar.tsx`)**:
+   - Resolves the authoritative active business from `WorkspaceShell` and `GET /api/auth/me` before
+     routing any `navigation.deepLink` event. Mismatched target tenants are authorized via
+     `POST /api/auth/switch-business` (wiping the previous tenant's local native caches first) or
+     blocked when unauthorized; missing or revoked sessions fail closed.
 
 ## Device registry
 

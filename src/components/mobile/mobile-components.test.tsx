@@ -1,17 +1,26 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveAdaptiveBottomNavSlots, MobileAppBottomNav } from "./app-bottom-nav";
-import { MobileAppHeader } from "./app-header";
-import { resolveAuthorizedQuickActions } from "./quick-create-sheet";
-import { MobileFilterSheet } from "./mobile-filter-sheet";
-import { MobileRecordList } from "./mobile-record-list";
-import { MobileDetailHeader } from "./mobile-detail-header";
+import { resolveAdaptiveBottomNavHrefs } from "@/lib/bottom-nav";
+import { NO_BROWSER_FEATURES } from "@/lib/native/capability";
+import type { NativeEventName, NativeEventPayloads } from "@/lib/native/bridge-contract";
+import { type NativeRuntimeSnapshot } from "@/lib/native/native-runtime";
+import {
+  NativeValueProvider,
+  buildNativeContextValue,
+  type NativeOnEvent,
+  type NativeRequest,
+} from "@/components/native/native-provider";
+import { AppSheet } from "./app-sheet";
+import { PostCallActivitySheet } from "./post-call-activity-sheet";
+import { QuickCreateSheet, resolveAuthorizedQuickActions } from "./quick-create-sheet";
 
+const pushMock = vi.fn();
 vi.mock("next/navigation", () => ({
   usePathname: () => "/dashboard",
+  useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({
-    push: vi.fn(),
+    push: pushMock,
     back: vi.fn(),
     refresh: vi.fn(),
   }),
@@ -19,30 +28,67 @@ vi.mock("next/navigation", () => ({
 
 afterEach(() => {
   cleanup();
+  pushMock.mockReset();
+  vi.unstubAllGlobals();
 });
 
-describe("resolveAdaptiveBottomNavSlots", () => {
-  it("adapts the sales slot to the business industry and user permissions", () => {
-    const foodHrefs = new Set(["/dashboard", "/pos", "/crm", "/accounting/orders"]);
-    expect(resolveAdaptiveBottomNavSlots({ industry: "food_service", allowedHrefs: foodHrefs })).toEqual({
-      home: { key: "home", href: "/dashboard", label: "خانه" },
-      sales: { key: "sales", href: "/pos", label: "فروش" },
-      crm: { key: "crm", href: "/crm", label: "مشتریان" },
-    });
+const CONNECTED_TWA_SNAPSHOT: NativeRuntimeSnapshot = {
+  kind: "android-twa",
+  connection: "connected",
+  androidPackage: "com.bizamiz.app",
+  environment: "production",
+  app: {
+    appVersionName: "0.2.0",
+    appVersionCode: 10,
+    environment: "production",
+    bridgeVersion: 3,
+    capabilities: [
+      "barcode.scan",
+      "biometric",
+      "notifications",
+      "share",
+      "media.capture",
+      "crm.caller-id",
+      "printer",
+      "background.sync",
+    ],
+  },
+};
 
-    const clinicHrefs = new Set(["/dashboard", "/appointments", "/crm/customers"]);
-    expect(resolveAdaptiveBottomNavSlots({ industry: "healthcare", allowedHrefs: clinicHrefs })).toEqual({
-      home: { key: "home", href: "/dashboard", label: "خانه" },
-      sales: { key: "sales", href: "/appointments", label: "نوبت‌ها" },
-      crm: { key: "crm", href: "/crm/customers", label: "مشتریان" },
-    });
+describe("resolveAdaptiveBottomNavHrefs", () => {
+  it("prioritizes enabled modules up to 4 primary slots and puts remaining authorized modules into moreHrefs", () => {
+    const availableHrefs = [
+      "/dashboard",
+      "/accounting/pos",
+      "/accounting/orders",
+      "/crm/customers",
+      "/inventory/items",
+      "/accounting/reports",
+      "/settings",
+    ];
+    const resolved = resolveAdaptiveBottomNavHrefs(null, availableHrefs, false);
+    expect(resolved.primaryHrefs).toEqual([
+      "/dashboard",
+      "/accounting/orders",
+      "/accounting/reports",
+      "/accounting/pos",
+    ]);
+    expect(resolved.moreHrefs).toEqual([
+      "/crm/customers",
+      "/inventory/items",
+      "/settings",
+    ]);
+  });
 
-    const aecHrefs = new Set(["/dashboard", "/projects", "/accounting/customers"]);
-    expect(resolveAdaptiveBottomNavSlots({ industry: "aec", allowedHrefs: aecHrefs })).toEqual({
-      home: { key: "home", href: "/dashboard", label: "خانه" },
-      sales: { key: "sales", href: "/projects", label: "پروژه‌ها" },
-      crm: { key: "crm", href: "/accounting/customers", label: "مشتریان" },
-    });
+  it("honors user-stored shortcuts and never exposes unauthorized hrefs", () => {
+    const availableHrefs = ["/dashboard", "/accounting/orders", "/settings"];
+    const resolved = resolveAdaptiveBottomNavHrefs(
+      ["/dashboard", "/crm/customers", "/settings"],
+      availableHrefs,
+      false,
+    );
+    expect(resolved.primaryHrefs).toEqual(["/dashboard", "/settings"]);
+    expect(resolved.moreHrefs).toEqual(["/accounting/orders"]);
   });
 });
 
@@ -82,98 +128,174 @@ describe("resolveAuthorizedQuickActions", () => {
   });
 });
 
-describe("MobileAppBottomNav, MobileRecordList, and MobileDetailHeader", () => {
-  it("renders the 5-slot adaptive bottom bar and opens the quick-create sheet", () => {
-    const onOpenMore = vi.fn();
+describe("QuickCreateSheet API contract", () => {
+  it("submits new_customer to POST /api/parties with displayName, role, and roles", async () => {
+    const fetchMock = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(
+      async () => new Response(JSON.stringify({ id: "p-1" }), { status: 201 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onOpenChange = vi.fn();
+
     render(
-      <MobileAppBottomNav
-        industry="retail"
-        allowedHrefs={new Set(["/dashboard", "/pos", "/crm"])}
-        onOpenMore={onOpenMore}
+      <QuickCreateSheet
+        open={true}
+        onOpenChange={onOpenChange}
+        allowedHrefs={new Set(["/crm/customers", "/crm/activities", "/workspace/tasks"])}
       />,
     );
 
-    expect(screen.getByText("خانه")).toBeTruthy();
-    expect(screen.getByText("فروش")).toBeTruthy();
-    expect(screen.getByText("مشتریان")).toBeTruthy();
-    expect(screen.getByText("بیشتر")).toBeTruthy();
+    fireEvent.click(screen.getByText("افزودن مشتری جدید"));
+    fireEvent.change(screen.getByPlaceholderText("مثلاً علی رضایی"), {
+      target: { value: "سارا احمدی" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("09123456789"), {
+      target: { value: "09123334455" },
+    });
+    fireEvent.click(screen.getByText("ثبت مشتری"));
 
-    fireEvent.click(screen.getByText("بیشتر"));
-    expect(onOpenMore).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(screen.getByLabelText("ایجاد سریع"));
-    expect(screen.getByText("ثبت سفارش / فروش جدید")).toBeTruthy();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/parties");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({
+      displayName: "سارا احمدی",
+      role: "Customer",
+      roles: ["Customer"],
+      phone: "09123334455",
+    });
   });
 
-  it("renders scannable mobile record cards and empty state", () => {
-    const onSelect = vi.fn();
-    render(
-      <MobileRecordList
-        items={[
-          {
-            id: "rec-1",
-            title: "فاکتور شماره ۱۰۴",
-            subtitle: "رضا محمدی",
-            amount: "۲,۵۰۰,۰۰۰ ریال",
-            fields: [{ label: "وضعیت", value: "پرداخت‌شده" }],
-            onSelect,
-          },
-        ]}
+  it("submits crm_activity and new_task to POST /api/crm/activities with subject and body", async () => {
+    const fetchMock = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(
+      async () => new Response(JSON.stringify({ id: "act-1" }), { status: 201 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rerender } = render(
+      <QuickCreateSheet
+        open={true}
+        onOpenChange={vi.fn()}
+        allowedHrefs={new Set(["/crm/activities", "/workspace/tasks"])}
       />,
     );
 
-    expect(screen.getByText("فاکتور شماره ۱۰۴")).toBeTruthy();
-    expect(screen.getByText("۲,۵۰۰,۰۰۰ ریال")).toBeTruthy();
-    fireEvent.click(screen.getByText("فاکتور شماره ۱۰۴"));
-    expect(onSelect).toHaveBeenCalledTimes(1);
-  });
+    fireEvent.click(screen.getByText("ثبت تماس یا پیگیری CRM"));
+    fireEvent.change(screen.getByLabelText("موضوع"), {
+      target: { value: "پیگیری پیش‌فاکتور" },
+    });
+    fireEvent.change(screen.getByLabelText("توضیحات (اختیاری)"), {
+      target: { value: "ارسال نمونه قیمت در واتساپ" },
+    });
+    fireEvent.click(screen.getByText("ذخیره"));
 
-  it("renders MobileDetailHeader with primary and overflow actions", () => {
-    const onSecondary = vi.fn();
-    render(
-      <MobileDetailHeader
-        title="مشتری: علی رضایی"
-        subtitle="شماره: ۰۹۱۲۱۱۱۲۲۳۳"
-        backHref="/crm/customers"
-        secondaryActions={[{ key: "log_call", label: "ثبت تماس", onSelect: onSecondary }]}
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [actUrl, actInit] = fetchMock.mock.calls[0]!;
+    expect(actUrl).toBe("/api/crm/activities");
+    expect(JSON.parse(actInit?.body as string)).toEqual({
+      kind: "call",
+      subject: "پیگیری پیش‌فاکتور",
+      body: "ارسال نمونه قیمت در واتساپ",
+      completed: false,
+    });
+
+    rerender(
+      <QuickCreateSheet
+        open={true}
+        onOpenChange={vi.fn()}
+        allowedHrefs={new Set(["/crm/activities", "/workspace/tasks"])}
       />,
     );
+    fireEvent.click(screen.getByText("ایجاد وظیفه یا یادآور"));
+    fireEvent.change(screen.getByLabelText("موضوع"), {
+      target: { value: "ارسال قرارداد نهایی" },
+    });
+    fireEvent.click(screen.getByText("ذخیره"));
 
-    expect(screen.getByText("مشتری: علی رضایی")).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("عملیات بیشتر"));
-    fireEvent.click(screen.getByText("ثبت تماس"));
-    expect(onSecondary).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [taskUrl, taskInit] = fetchMock.mock.calls[1]!;
+    expect(taskUrl).toBe("/api/crm/activities");
+    expect(JSON.parse(taskInit?.body as string)).toEqual({
+      kind: "task",
+      subject: "ارسال قرارداد نهایی",
+      body: "",
+      completed: false,
+    });
   });
+});
 
-  it("renders MobileAppHeader with back button, search, and notification badge", () => {
-    const onSearchClick = vi.fn();
+describe("PostCallActivitySheet API contract", () => {
+  it("opens on crm.callEnded and submits valid subject/body/customerId payload to POST /api/crm/activities", async () => {
+    const fetchMock = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(
+      async () => new Response(JSON.stringify({ id: "call-1" }), { status: 201 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    let callEndedListener: ((payload: NativeEventPayloads["crm.callEnded"]) => void) | null = null;
+    const onEvent: NativeOnEvent = (name: NativeEventName, listener: (payload: never) => void) => {
+      if (name === "crm.callEnded") {
+        callEndedListener = listener as unknown as (payload: NativeEventPayloads["crm.callEnded"]) => void;
+      }
+      return () => {};
+    };
+    const request = vi.fn() as unknown as NativeRequest;
+    const ctxValue = {
+      ...buildNativeContextValue(CONNECTED_TWA_SNAPSHOT, NO_BROWSER_FEATURES, request),
+      onEvent,
+    };
+
     render(
-      <MobileAppHeader
-        title="سفارش‌ها"
-        subtitle="فروش روزانه"
-        backHref="/dashboard"
-        onSearchClick={onSearchClick}
-        unreadNotifications={5}
-      />,
+      <NativeValueProvider value={ctxValue}>
+        <PostCallActivitySheet />
+      </NativeValueProvider>,
     );
 
-    expect(screen.getByText("سفارش‌ها")).toBeTruthy();
-    expect(screen.getByLabelText("بازگشت")).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("جستجو"));
-    expect(onSearchClick).toHaveBeenCalledTimes(1);
+    expect(callEndedListener).not.toBeNull();
+    act(() => {
+      callEndedListener!({
+        phoneNormalized: "+989121112233",
+        direction: "incoming",
+        durationSeconds: 95,
+        customerId: "11111111-2222-4333-8444-555555555555",
+        customerName: "رضا محمدی",
+        endedAt: "2026-10-15T12:00:00.000Z",
+      });
+    });
+
+    expect(screen.getByText("رضا محمدی")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("یادداشت تماس"), {
+      target: { value: "هماهنگی ارسال سفارش فردا صبح" },
+    });
+    fireEvent.change(screen.getByLabelText("مسئول پیگیری (اختیاری)"), {
+      target: { value: "واحد فروش" },
+    });
+    fireEvent.click(screen.getByText("ثبت در فعالیت‌های CRM"));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/crm/activities");
+    const parsed = JSON.parse(init?.body as string);
+    expect(parsed).toEqual({
+      kind: "call",
+      subject: "تماس ورودی — رضا محمدی (پاسخ داده شد)",
+      body: "نتیجه تماس: پاسخ داده شد\nشماره: +989121112233\nمدت مکالمه: 1 دقیقه و 35 ثانیه\nیادداشت: هماهنگی ارسال سفارش فردا صبح",
+      customerId: "11111111-2222-4333-8444-555555555555",
+      completed: true,
+      assignedTo: "واحد فروش",
+    });
   });
+});
 
-  it("renders MobileFilterSheet and triggers apply and reset handlers", () => {
-    const onReset = vi.fn();
+describe("AppSheet", () => {
+  it("renders title, children, and closes on close button click", () => {
+    const onOpenChange = vi.fn();
     render(
-      <MobileFilterSheet activeCount={2} onReset={onReset}>
-        <div>فیلتر وضعیت</div>
-      </MobileFilterSheet>,
+      <AppSheet open={true} onOpenChange={onOpenChange} title="سایر بخش‌ها" description="توضیح شیت">
+        <div>محتوای شیت</div>
+      </AppSheet>,
     );
-
-    fireEvent.click(screen.getByRole("button", { name: /فیلتر و مرتب‌سازی/ }));
-    expect(screen.getByText("فیلتر وضعیت")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "پاک کردن فیلترها" }));
-    expect(onReset).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("سایر بخش‌ها")).toBeTruthy();
+    expect(screen.getByText("محتوای شیت")).toBeTruthy();
+    fireEvent.click(screen.getByText("بستن"));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

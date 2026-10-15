@@ -10,19 +10,44 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import com.bizamiz.android.BuildConfig
 import com.bizamiz.android.R
 import com.bizamiz.android.TwaLauncherActivity
+import com.bizamiz.android.bridge.BridgeProtocol
+import com.google.android.gms.tasks.Tasks
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
+import com.google.firebase.messaging.FirebaseMessaging
 import org.json.JSONObject
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
- * Registers Biza Miz's Android 8+ notification channels and enforces notification
- * rate/spam deduplication and payload sanitization (issue #884).
+ * Registers Biza Miz's Android 8+ notification channels, manages safe Firebase
+ * Cloud Messaging (FCM) initialization and token lifecycle, and enforces
+ * notification deduplication, category preferences, and payload sanitization
+ * (issue #884, Root Cause 4).
  *
- * Uses only platform `android.app.Notification` and `NotificationManager` APIs so
- * the shell compiles without `androidx.core`.
+ * Invariants:
+ * - Uses the real `com.google.firebase:firebase-messaging` SDK (no reflection).
+ * - When external Firebase project credentials (`BuildConfig.FIREBASE_*`) are not
+ *   configured in the build environment, [ensureFirebaseInitialized] and
+ *   [resolvePushToken] explicitly return `false` / `null` (`pushProvider = "none"`)
+ *   and never fabricate a token or crash startup.
+ * - Sign-out or revocation ([clearPushToken]) wipes local token/preferences and
+ *   requests `FirebaseMessaging.getInstance().deleteToken()`.
  */
 object NotificationChannelManager {
+
+    const val EXTRA_NOTIFICATION_PATH = "com.bizamiz.android.extra.NOTIFICATION_PATH"
+    const val EXTRA_NOTIFICATION_BUSINESS_ID = "com.bizamiz.android.extra.NOTIFICATION_BUSINESS_ID"
+    const val EXTRA_NOTIFICATION_CATEGORY = "com.bizamiz.android.extra.NOTIFICATION_CATEGORY"
+
+    private const val PREFS_NAME = "biza_push_state"
+    private const val KEY_FCM_TOKEN = "fcm_token"
+    private const val KEY_ENABLED_CHANNELS = "enabled_channels"
 
     data class ChannelSpec(
         val id: String,
@@ -80,6 +105,7 @@ object NotificationChannelManager {
     private const val DEDUP_WINDOW_MS = 60_000L
     private val recentMessageTimestamps = ConcurrentHashMap<String, Long>()
     private val lastCategoryTimestamp = ConcurrentHashMap<String, Long>()
+    private val tokenExecutor = Executors.newSingleThreadExecutor()
 
     fun ensureChannelsCreated(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -90,6 +116,51 @@ object NotificationChannelManager {
             }
             manager.createNotificationChannel(channel)
         }
+    }
+
+    fun isNotificationPermissionGranted(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager?.areNotificationsEnabled() ?: true
+        }
+    }
+
+    fun resolvePermissionState(context: Context): String =
+        if (isNotificationPermissionGranted(context)) {
+            BridgeProtocol.PERMISSION_GRANTED
+        } else {
+            BridgeProtocol.PERMISSION_DENIED
+        }
+
+    fun setEnabledChannels(context: Context, channels: Collection<String>): List<String> {
+        val valid = channels
+            .map { it.trim() }
+            .filter { BridgeProtocol.NOTIFICATION_CHANNELS.contains(it) }
+            .distinct()
+        val effective = if (valid.isEmpty()) CHANNELS.map { it.id } else valid
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_ENABLED_CHANNELS, effective.toSet())
+            .apply()
+        return effective
+    }
+
+    fun getEnabledChannels(context: Context): List<String> {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val stored = prefs.getStringSet(KEY_ENABLED_CHANNELS, null)
+        if (stored.isNullOrEmpty()) {
+            return CHANNELS.map { it.id }
+        }
+        return CHANNELS.map { it.id }.filter { stored.contains(it) }
+    }
+
+    fun isCategoryEnabled(context: Context, category: String): Boolean {
+        if (category == "security") return true
+        return getEnabledChannels(context).contains(category)
     }
 
     /**
@@ -149,33 +220,70 @@ object NotificationChannelManager {
     }
 
     /**
-     * Resolves an FCM registration token via reflection if `com.google.firebase:firebase-messaging`
-     * is linked into the build, or returns `null` when building without `google-services.json`.
+     * Returns `true` only when explicit Firebase credentials were supplied at build time
+     * (`BIZA_FIREBASE_*` / `-Pbiza.firebase.*`) or via a default `FirebaseApp` resource.
+     */
+    fun isFirebaseConfigured(): Boolean =
+        BuildConfig.FIREBASE_PROJECT_ID.isNotBlank() &&
+            BuildConfig.FIREBASE_APP_ID.isNotBlank() &&
+            BuildConfig.FIREBASE_API_KEY.isNotBlank() &&
+            BuildConfig.FIREBASE_SENDER_ID.isNotBlank()
+
+    @Synchronized
+    fun ensureFirebaseInitialized(context: Context): Boolean {
+        val appContext = context.applicationContext
+        return try {
+            if (FirebaseApp.getApps(appContext).isNotEmpty()) {
+                return true
+            }
+            if (!isFirebaseConfigured()) {
+                return false
+            }
+            val options = FirebaseOptions.Builder()
+                .setProjectId(BuildConfig.FIREBASE_PROJECT_ID)
+                .setApplicationId(BuildConfig.FIREBASE_APP_ID)
+                .setApiKey(BuildConfig.FIREBASE_API_KEY)
+                .setGcmSenderId(BuildConfig.FIREBASE_SENDER_ID)
+                .build()
+            FirebaseApp.initializeApp(appContext, options) != null
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun storePushToken(context: Context, token: String?) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (token.isNullOrBlank()) {
+            prefs.edit().remove(KEY_FCM_TOKEN).apply()
+        } else {
+            prefs.edit().putString(KEY_FCM_TOKEN, token.trim()).apply()
+        }
+    }
+
+    /**
+     * Resolves an FCM registration token using the `FirebaseMessaging` SDK when
+     * Firebase credentials are configured, or returns `null` (`pushProvider = "none"`)
+     * when unconfigured. Never fabricates a token.
      */
     fun resolvePushToken(context: Context): String? {
+        val appContext = context.applicationContext
+        if (!ensureFirebaseInitialized(appContext)) {
+            return null
+        }
+        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val cached = prefs.getString(KEY_FCM_TOKEN, null)?.takeIf { it.isNotBlank() }
+        if (cached != null) {
+            return cached
+        }
         return try {
-            val prefs = context.applicationContext.getSharedPreferences(
-                "biza_push_state",
-                Context.MODE_PRIVATE,
+            val future = tokenExecutor.submit(
+                Callable {
+                    Tasks.await(FirebaseMessaging.getInstance().token, 4L, TimeUnit.SECONDS)
+                },
             )
-            val cached = prefs.getString("fcm_token", null)
-            if (!cached.isNullOrBlank()) return cached
-
-            val firebaseMessagingClass = Class.forName("com.google.firebase.messaging.FirebaseMessaging")
-            val getInstance = firebaseMessagingClass.getMethod("getInstance")
-            val instance = getInstance.invoke(null) ?: return null
-            val getToken = firebaseMessagingClass.getMethod("getToken")
-            val task = getToken.invoke(instance) ?: return null
-            val tasksClass = Class.forName("com.google.android.gms.tasks.Tasks")
-            val awaitMethod = tasksClass.getMethod(
-                "await",
-                Class.forName("com.google.android.gms.tasks.Task"),
-                Long::class.javaPrimitiveType,
-                java.util.concurrent.TimeUnit::class.java,
-            )
-            val token = awaitMethod.invoke(null, task, 5L, java.util.concurrent.TimeUnit.SECONDS) as? String
-            if (!token.isNullOrBlank()) {
-                prefs.edit().putString("fcm_token", token).apply()
+            val token = future.get(5L, TimeUnit.SECONDS)?.trim()?.takeIf { it.isNotEmpty() }
+            if (token != null) {
+                storePushToken(appContext, token)
             }
             token
         } catch (_: Throwable) {
@@ -183,40 +291,122 @@ object NotificationChannelManager {
         }
     }
 
+    fun fetchFcmTokenIfAvailable(context: Context): String? = resolvePushToken(context)
+
     fun clearPushToken(context: Context) {
-        val prefs = context.applicationContext.getSharedPreferences(
-            "biza_push_state",
-            Context.MODE_PRIVATE,
+        val appContext = context.applicationContext
+        appContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_FCM_TOKEN)
+            .remove(KEY_ENABLED_CHANNELS)
+            .apply()
+        if (ensureFirebaseInitialized(appContext)) {
+            tokenExecutor.execute {
+                try {
+                    Tasks.await(FirebaseMessaging.getInstance().deleteToken(), 4L, TimeUnit.SECONDS)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    fun postPushNotification(
+        context: Context,
+        rawPayload: JSONObject,
+        messageId: String? = null,
+    ): Boolean {
+        if (!isNotificationPermissionGranted(context)) return false
+        val safe = sanitizeNotificationPayload(rawPayload)
+        val category = safe.optString("category", "operations")
+        if (!isCategoryEnabled(context, category)) return false
+        if (!shouldDeliverNotification(category, messageId)) return false
+
+        ensureChannelsCreated(context)
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        if (!manager.areNotificationsEnabled()) return false
+
+        val path = safe.optString("path", "/dashboard").ifBlank { "/dashboard" }
+        val businessId = safe.optString("businessId", "").takeIf { it.isNotEmpty() }
+        val title = safe.optString("title", "بیزمیز").ifBlank { "بیزمیز" }
+        val body = safe.optString("body", "")
+
+        val deepLinkBuilder = Uri.parse("bizamiz://app$path").buildUpon()
+        if (businessId != null) {
+            deepLinkBuilder.appendQueryParameter("businessId", businessId)
+        }
+        deepLinkBuilder.appendQueryParameter("category", category)
+
+        val openIntent = Intent(context, TwaLauncherActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            data = deepLinkBuilder.build()
+            putExtra(EXTRA_NOTIFICATION_PATH, path)
+            if (businessId != null) {
+                putExtra(EXTRA_NOTIFICATION_BUSINESS_ID, businessId)
+            }
+            putExtra(EXTRA_NOTIFICATION_CATEGORY, category)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val notificationId = (messageId ?: "$category:$path:${System.currentTimeMillis()}").hashCode()
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            notificationId,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        prefs.edit().remove("fcm_token").apply()
+
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(context, category)
+        } else {
+            Notification.Builder(context)
+        }
+
+        val notification = builder
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        manager.notify(notificationId, notification)
+        return true
     }
 
     @Suppress("DEPRECATION")
     fun postCallerIdNotification(
         context: Context,
+        businessId: String? = null,
         customerId: String,
         displayName: String,
         phoneNormalized: String,
         organizationName: String?,
         tags: List<String>,
     ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-                PackageManager.PERMISSION_GRANTED
-            if (!granted) return
-        }
+        if (!isNotificationPermissionGranted(context)) return
+        if (!isCategoryEnabled(context, "crm")) return
         if (!shouldDeliverNotification("crm", "caller:$customerId:$phoneNormalized")) return
 
         ensureChannelsCreated(context)
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         if (!manager.areNotificationsEnabled()) return
 
-        val deepLinkUri = Uri.parse(
-            "bizamiz://app/crm/customers/${Uri.encode(customerId)}?callPhone=${Uri.encode(phoneNormalized)}",
-        )
+        val path = "/crm/customers/${Uri.encode(customerId)}?callPhone=${Uri.encode(phoneNormalized)}"
+        val deepLinkBuilder = Uri.parse("bizamiz://app$path").buildUpon()
+        if (!businessId.isNullOrBlank()) {
+            deepLinkBuilder.appendQueryParameter("businessId", businessId)
+        }
+        deepLinkBuilder.appendQueryParameter("category", "crm")
+
         val openIntent = Intent(context, TwaLauncherActivity::class.java).apply {
             action = Intent.ACTION_VIEW
-            data = deepLinkUri
+            data = deepLinkBuilder.build()
+            putExtra(EXTRA_NOTIFICATION_PATH, path)
+            if (!businessId.isNullOrBlank()) {
+                putExtra(EXTRA_NOTIFICATION_BUSINESS_ID, businessId)
+            }
+            putExtra(EXTRA_NOTIFICATION_CATEGORY, "crm")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pendingIntent = PendingIntent.getActivity(

@@ -22,8 +22,15 @@ import {
   NATIVE_EVENTS,
   NATIVE_PERMISSION_STATES,
   NATIVE_BRIDGE_VERSION,
+  parseCrmCallEndedEvent,
+  parseDeepLinkEvent,
+  parseSyncCompletedEvent,
 } from "./bridge-contract";
 import { ANDROID_PACKAGE_ENVIRONMENTS } from "./native-environment";
+import {
+  buildNativeFcmPayload,
+  mapNotificationEventToNativeCategory,
+} from "@/lib/notifications-service";
 
 function repoFile(relative: string): string {
   return readFileSync(fileURLToPath(new URL(`../../../${relative}`, import.meta.url)), "utf8");
@@ -169,5 +176,129 @@ describe("Android build reads the shared contract", () => {
     expect(properties).toMatch(/^distributionUrl=https\\:\/\/services\.gradle\.org\/distributions\/gradle-8\.14\.3-bin\.zip$/m);
     expect(properties).toMatch(/^distributionSha256Sum=[0-9a-f]{64}$/m);
     expect(properties).toMatch(/^validateDistributionUrl=true$/m);
+  });
+
+  it("enforces Kotlin-to-TypeScript event schema parity and root-cause guards (#884)", () => {
+    const screeningService = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/callerid/BizaCallScreeningService.kt",
+    );
+    const bridgeProtocol = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt",
+    );
+    const callerCache = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/callerid/CallerIdCache.kt",
+    );
+    const encryptedStore = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/security/EncryptedKeyValueStore.kt",
+    );
+    const syncStore = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/sync/TenantSyncStateStore.kt",
+    );
+    const notifManager = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/notifications/NotificationChannelManager.kt",
+    );
+    const manifest = repoFile("android/app/src/main/AndroidManifest.xml");
+
+    // Root Cause 2: onScreenCall only identifies incoming calls and never fabricates crm.callEnded with displayName.
+    expect(screeningService).toContain("CallLifecycleTracker.shared.onCallScreened");
+    expect(screeningService).not.toContain('.put("displayName"');
+    expect(bridgeProtocol).toContain("fun buildCrmCallEndedEventPayload");
+
+    // Legacy invalid payload (displayName without durationSeconds/endedAt) is rejected by TS parser.
+    expect(
+      parseCrmCallEndedEvent({
+        businessId: "biz-1",
+        customerId: "c-1",
+        displayName: "رضا محمدی",
+        phoneNormalized: "+989121112233",
+        direction: "incoming",
+      }),
+    ).toBeNull();
+
+    // Canonical payload produced by BridgeProtocol.buildCrmCallEndedEventPayload is accepted by TS parser.
+    const validCallEnded = parseCrmCallEndedEvent({
+      phoneNormalized: "+989121112233",
+      direction: "incoming",
+      durationSeconds: 95,
+      customerId: "11111111-2222-4333-8444-555555555555",
+      customerName: "رضا محمدی",
+      endedAt: "2026-10-15T12:00:00.000Z",
+    });
+    expect(validCallEnded).toEqual({
+      phoneNormalized: "+989121112233",
+      direction: "incoming",
+      durationSeconds: 95,
+      customerId: "11111111-2222-4333-8444-555555555555",
+      customerName: "رضا محمدی",
+      endedAt: "2026-10-15T12:00:00.000Z",
+    });
+
+    // Root Cause 3: TenantSyncStateStore delegates scheduling to WorkManagerSyncScheduler and never stamps lastSyncedAt on enqueue.
+    expect(syncStore).toContain("WorkManagerSyncScheduler");
+    expect(syncStore).not.toContain('.put("lastSyncedAt", nowIso)');
+    expect(
+      parseSyncCompletedEvent({
+        businessId: "biz-1",
+        syncedAt: "2026-10-15T12:05:00.000Z",
+        revoked: false,
+        flushedCount: 3,
+      }),
+    ).toEqual({
+      businessId: "biz-1",
+      syncedAt: "2026-10-15T12:05:00.000Z",
+      revoked: false,
+      flushedCount: 3,
+    });
+
+    // Root Cause 4: Real FirebaseMessaging SDK & BizaFirebaseMessagingService (no Class.forName reflection).
+    expect(notifManager).toContain("FirebaseMessaging.getInstance()");
+    expect(notifManager).not.toContain('Class.forName("com.google.firebase.messaging.FirebaseMessaging")');
+    expect(manifest).toContain(".notifications.BizaFirebaseMessagingService");
+    expect(manifest).toContain("com.google.firebase.MESSAGING_EVENT");
+
+    expect(
+      parseDeepLinkEvent({
+        path: "/accounting/orders/109",
+        notificationCategory: "orders",
+        businessId: "biz-42",
+      }),
+    ).toEqual({
+      path: "/accounting/orders/109",
+      notificationCategory: "orders",
+      businessId: "biz-42",
+    });
+
+    expect(mapNotificationEventToNativeCategory("orders.ready")).toBe("orders");
+    expect(mapNotificationEventToNativeCategory("crm.follow_up")).toBe("crm");
+    expect(mapNotificationEventToNativeCategory("inventory.low_stock")).toBe("inventory");
+    expect(
+      buildNativeFcmPayload({
+        businessId: "biz-42",
+        eventId: "ev-1",
+        eventKey: "orders.ready",
+        title: "سفارش آماده تحویل",
+        body: "سفارش شماره ۱۰۹ آماده است",
+        url: "/accounting/orders/109",
+        pushToken: "fcm_token_example_1234567890",
+      }),
+    ).toEqual({
+      message: {
+        token: "fcm_token_example_1234567890",
+        data: {
+          businessId: "biz-42",
+          eventId: "ev-1",
+          eventType: "orders.ready",
+          category: "orders",
+          title: "سفارش آماده تحویل",
+          body: "سفارش شماره ۱۰۹ آماده است",
+          path: "/accounting/orders/109",
+        },
+      },
+    });
+
+    // Root Cause 6: CallerIdCache uses EncryptedKeyValueStore (AES/GCM/NoPadding) at rest.
+    expect(callerCache).toContain("EncryptedKeyValueStore.fromContext(context)");
+    expect(encryptedStore).toContain("AES/GCM/NoPadding");
+    expect(encryptedStore).toContain("AndroidKeyStore");
   });
 });

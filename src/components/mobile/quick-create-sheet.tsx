@@ -6,7 +6,7 @@
  *
  * Shows only actions that are enabled for the active business and authorized
  * for the signed-in user (derived from `allowedHrefs` and `enabledFeatures`),
- * and reuses existing Biza Miz APIs (`POST /api/crm/customers`,
+ * and reuses canonical Biza Miz APIs (`POST /api/parties`,
  * `POST /api/crm/activities`) and canonical module routes.
  */
 import { useRouter } from "next/navigation";
@@ -22,6 +22,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CameraBarcodeScanner } from "@/components/scanner/camera-barcode-scanner";
+import {
+  buildQuickCrmActivityPayload,
+  buildQuickCustomerPartyPayload,
+} from "@/lib/native/capabilities-client";
 import { AppSheet } from "./app-sheet";
 
 export interface QuickCreateActionSpec {
@@ -46,12 +50,12 @@ export function resolveAuthorizedQuickActions(input: {
   const { allowedHrefs, crmEnabled = true, inventoryEnabled = true } = input;
   const actions: QuickCreateActionSpec[] = [];
 
-  if (allowedHrefs.has("/pos")) {
+  if (allowedHrefs.has("/pos") || allowedHrefs.has("/accounting/pos")) {
     actions.push({
       id: "new_order",
       label: "ثبت سفارش / فروش جدید",
       description: "باز کردن صندوق فروش و ثبت سفارش مشتری",
-      href: "/pos",
+      href: allowedHrefs.has("/pos") ? "/pos" : "/accounting/pos",
     });
   } else if (allowedHrefs.has("/accounting/orders")) {
     actions.push({
@@ -66,7 +70,7 @@ export function resolveAuthorizedQuickActions(input: {
     actions.push({
       id: "new_customer",
       label: "افزودن مشتری جدید",
-      description: "ثبت سریع نام و شماره تماس مشتری در CRM",
+      description: "ثبت سریع نام و شماره تماس مشتری در فهرست اشخاص",
       href: allowedHrefs.has("/crm/customers") ? "/crm/customers" : "/accounting/customers",
     });
   }
@@ -93,7 +97,8 @@ export function resolveAuthorizedQuickActions(input: {
     inventoryEnabled &&
     (allowedHrefs.has("/accounting/inventory") ||
       allowedHrefs.has("/accounting/products") ||
-      allowedHrefs.has("/pos"))
+      allowedHrefs.has("/pos") ||
+      allowedHrefs.has("/accounting/pos"))
   ) {
     actions.push({
       id: "scan_barcode",
@@ -146,8 +151,9 @@ export function QuickCreateSheet({
 
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
-  const [activityTitle, setActivityTitle] = useState("");
-  const [activityNote, setActivityNote] = useState("");
+  const [activitySubject, setActivitySubject] = useState("");
+  const [activityBody, setActivityBody] = useState("");
+  const [activityDueDate, setActivityDueDate] = useState("");
 
   const actions = resolveAuthorizedQuickActions({
     allowedHrefs,
@@ -160,24 +166,26 @@ export function QuickCreateSheet({
     setError(null);
     setCustomerName("");
     setCustomerPhone("");
-    setActivityTitle("");
-    setActivityNote("");
+    setActivitySubject("");
+    setActivityBody("");
+    setActivityDueDate("");
     onOpenChange(false);
   }
 
   async function submitQuickCustomer(e: FormEvent) {
     e.preventDefault();
-    if (!customerName.trim()) return;
+    const payload = buildQuickCustomerPartyPayload({
+      displayName: customerName,
+      phone: customerPhone,
+    });
+    if (!payload) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/crm/customers", {
+      const res = await fetch("/api/parties", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: customerName.trim(),
-          phone: customerPhone.trim() || null,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         setError("ثبت مشتری انجام نشد. دوباره تلاش کنید.");
@@ -195,19 +203,21 @@ export function QuickCreateSheet({
 
   async function submitQuickActivity(e: FormEvent, kind: "call" | "task") {
     e.preventDefault();
-    if (!activityTitle.trim()) return;
+    const payload = buildQuickCrmActivityPayload({
+      kind,
+      subject: activitySubject,
+      body: activityBody,
+      dueAt: activityDueDate ? new Date(activityDueDate).toISOString() : null,
+      completed: false,
+    });
+    if (!payload) return;
     setBusy(true);
     setError(null);
     try {
       const res = await fetch("/api/crm/activities", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          kind,
-          title: activityTitle.trim(),
-          description: activityNote.trim() || null,
-          completed: false,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         setError("ثبت مورد انجام نشد. دوباره تلاش کنید.");
@@ -324,7 +334,7 @@ export function QuickCreateSheet({
                 value={customerName}
                 onChange={(e) => setCustomerName(e.target.value)}
                 placeholder="مثلاً علی رضایی"
-                className="min-h-11 w-full rounded-xl border border-border bg-white dark:bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+                className="min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
               />
             </div>
             <div>
@@ -338,7 +348,7 @@ export function QuickCreateSheet({
                 value={customerPhone}
                 onChange={(e) => setCustomerPhone(e.target.value)}
                 placeholder="09123456789"
-                className="min-h-11 w-full rounded-xl border border-border bg-white dark:bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+                className="min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
               />
             </div>
             {error ? <p className="text-xs text-rose-600 dark:text-rose-400">{error}</p> : null}
@@ -357,28 +367,41 @@ export function QuickCreateSheet({
             className="space-y-3"
           >
             <div>
-              <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="qc-activity-title">
-                عنوان
+              <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="qc-activity-subject">
+                موضوع
               </label>
               <input
-                id="qc-activity-title"
+                id="qc-activity-subject"
                 required
-                value={activityTitle}
-                onChange={(e) => setActivityTitle(e.target.value)}
+                value={activitySubject}
+                onChange={(e) => setActivitySubject(e.target.value)}
                 placeholder={mode === "task" ? "مثلاً ارسال پیش‌فاکتور" : "مثلاً تماس پیگیری سفارش"}
-                className="min-h-11 w-full rounded-xl border border-border bg-white dark:bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+                className="min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="qc-activity-note">
+              <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="qc-activity-body">
                 توضیحات (اختیاری)
               </label>
               <textarea
-                id="qc-activity-note"
+                id="qc-activity-body"
                 rows={3}
-                value={activityNote}
-                onChange={(e) => setActivityNote(e.target.value)}
-                className="w-full rounded-xl border border-border bg-white dark:bg-card p-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+                value={activityBody}
+                onChange={(e) => setActivityBody(e.target.value)}
+                className="w-full rounded-xl border border-border bg-card p-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-foreground" htmlFor="qc-activity-due">
+                موعد انجام / پیگیری (اختیاری)
+              </label>
+              <input
+                id="qc-activity-due"
+                type="datetime-local"
+                dir="ltr"
+                value={activityDueDate}
+                onChange={(e) => setActivityDueDate(e.target.value)}
+                className="min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-400"
               />
             </div>
             {error ? <p className="text-xs text-rose-600 dark:text-rose-400">{error}</p> : null}
@@ -386,7 +409,7 @@ export function QuickCreateSheet({
               <Button type="button" variant="outline" className="min-h-11 flex-1" onClick={() => setMode("menu")}>
                 بازگشت
               </Button>
-              <Button type="submit" disabled={busy || !activityTitle.trim()} className="min-h-11 flex-1">
+              <Button type="submit" disabled={busy || !activitySubject.trim()} className="min-h-11 flex-1">
                 {busy ? "در حال ثبت…" : "ذخیره"}
               </Button>
             </div>

@@ -475,7 +475,7 @@ export async function WorkspaceShell({
           root layout also wraps the public/marketing pages, which have
           neither (see the component's own header comment).
         */}
-        <NativeDeviceRegistrar />
+        <NativeDeviceRegistrar businessId={session.businessId} />
         <OfflineQueueProvider>
         <BugReportProvider>
         {/*

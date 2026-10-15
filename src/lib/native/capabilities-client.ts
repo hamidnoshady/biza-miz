@@ -15,6 +15,13 @@
  * - Caller ID cache entries and background sync state are strictly partitioned
  *   by `businessId` and wiped on sign-out or tenant switch.
  */
+import {
+  ACTIVITY_ASSIGNEE_MAX,
+  ACTIVITY_BODY_MAX,
+  ACTIVITY_SUBJECT_MAX,
+  type ActivityKind,
+} from "@/lib/crm-shared";
+import { isUuid } from "@/lib/uuid";
 import { NativeBridgeError } from "./bridge";
 import type {
   NativeBarcodeFormat,
@@ -94,7 +101,11 @@ export function validateTenantDeepLink(input: {
   path: string;
   activeBusinessId: string | null;
   targetBusinessId?: string | null;
-}): { allowed: boolean; path: string | null; reason?: "invalid_path" | "tenant_mismatch" } {
+}): {
+  allowed: boolean;
+  path: string | null;
+  reason?: "invalid_path" | "tenant_mismatch" | "missing_active_tenant";
+} {
   const trimmed = input.path.trim();
   if (
     !trimmed.startsWith("/") ||
@@ -105,12 +116,16 @@ export function validateTenantDeepLink(input: {
     return { allowed: false, path: null, reason: "invalid_path" };
   }
 
-  if (
-    input.targetBusinessId &&
-    input.activeBusinessId &&
-    input.targetBusinessId !== input.activeBusinessId
-  ) {
-    return { allowed: false, path: null, reason: "tenant_mismatch" };
+  const targetBusinessId = input.targetBusinessId?.trim() || null;
+  const activeBusinessId = input.activeBusinessId?.trim() || null;
+
+  if (targetBusinessId) {
+    if (!activeBusinessId) {
+      return { allowed: false, path: null, reason: "missing_active_tenant" };
+    }
+    if (targetBusinessId !== activeBusinessId) {
+      return { allowed: false, path: null, reason: "tenant_mismatch" };
+    }
   }
 
   return { allowed: true, path: trimmed };
@@ -351,6 +366,17 @@ export const POST_CALL_OUTCOME_LABELS: Readonly<Record<PostCallOutcome, string>>
   support_resolved: "حل موضوع پشتیبانی",
 });
 
+export interface CrmActivityApiPayload {
+  kind: ActivityKind;
+  subject: string;
+  body: string;
+  customerId?: string;
+  completed: boolean;
+  dueAt?: string;
+  assigneeUserId?: string;
+  assignedTo?: string;
+}
+
 export function buildPostCallActivityPayload(input: {
   customerId: string | null;
   customerName?: string | null;
@@ -360,7 +386,9 @@ export function buildPostCallActivityPayload(input: {
   outcome: PostCallOutcome;
   note?: string;
   followUpAt?: string | null;
-}) {
+  assigneeUserId?: string | null;
+  assignedTo?: string;
+}): CrmActivityApiPayload {
   const directionLabel = input.direction === "incoming" ? "تماس ورودی" : "تماس خروجی";
   const outcomeLabel = POST_CALL_OUTCOME_LABELS[input.outcome];
   const targetLabel = input.customerName?.trim() || input.phoneNormalized;
@@ -380,13 +408,90 @@ export function buildPostCallActivityPayload(input: {
     lines.push(`یادداشت: ${input.note.trim()}`);
   }
 
+  const validCustomerId = isUuid(input.customerId) ? input.customerId : undefined;
+  const rawAssignee = input.assigneeUserId?.trim() || input.assignedTo?.trim() || "";
+  const validAssigneeUserId = isUuid(rawAssignee) ? rawAssignee : undefined;
+  const cleanAssignedTo =
+    !validAssigneeUserId && input.assignedTo?.trim()
+      ? input.assignedTo.trim().slice(0, ACTIVITY_ASSIGNEE_MAX)
+      : undefined;
+
+  let validDueAt: string | undefined;
+  if (input.followUpAt && input.followUpAt.trim()) {
+    const parsed = new Date(input.followUpAt);
+    if (!Number.isNaN(parsed.getTime())) {
+      validDueAt = parsed.toISOString();
+    }
+  }
+
   return {
-    kind: "call" as const,
-    title: `${directionLabel} — ${targetLabel} (${outcomeLabel})`.slice(0, 200),
-    description: lines.join("\n").slice(0, 2000),
-    customerId: input.customerId,
+    kind: "call",
+    subject: `${directionLabel} — ${targetLabel} (${outcomeLabel})`.slice(0, ACTIVITY_SUBJECT_MAX),
+    body: lines.join("\n").slice(0, ACTIVITY_BODY_MAX),
+    ...(validCustomerId ? { customerId: validCustomerId } : {}),
     completed: input.outcome !== "follow_up_needed",
-    ...(input.followUpAt ? { dueAt: input.followUpAt } : {}),
+    ...(validDueAt ? { dueAt: validDueAt } : {}),
+    ...(validAssigneeUserId ? { assigneeUserId: validAssigneeUserId } : {}),
+    ...(cleanAssignedTo ? { assignedTo: cleanAssignedTo } : {}),
+  };
+}
+
+export function buildQuickCrmActivityPayload(input: {
+  kind: ActivityKind;
+  subject: string;
+  body?: string;
+  customerId?: string | null;
+  dueAt?: string | null;
+  assignedTo?: string;
+  assigneeUserId?: string | null;
+  completed?: boolean;
+}): CrmActivityApiPayload | null {
+  const cleanSubject = input.subject.trim().slice(0, ACTIVITY_SUBJECT_MAX);
+  if (!cleanSubject) return null;
+  const cleanBody = (input.body ?? "").trim().slice(0, ACTIVITY_BODY_MAX);
+  const validCustomerId = isUuid(input.customerId) ? input.customerId : undefined;
+  const validAssigneeUserId = isUuid(input.assigneeUserId) ? input.assigneeUserId : undefined;
+  const cleanAssignedTo = input.assignedTo?.trim().slice(0, ACTIVITY_ASSIGNEE_MAX) || undefined;
+
+  let validDueAt: string | undefined;
+  if (input.dueAt && input.dueAt.trim()) {
+    const parsed = new Date(input.dueAt);
+    if (!Number.isNaN(parsed.getTime())) {
+      validDueAt = parsed.toISOString();
+    }
+  }
+
+  return {
+    kind: input.kind,
+    subject: cleanSubject,
+    body: cleanBody,
+    ...(validCustomerId ? { customerId: validCustomerId } : {}),
+    completed: input.completed === true,
+    ...(validDueAt ? { dueAt: validDueAt } : {}),
+    ...(validAssigneeUserId ? { assigneeUserId: validAssigneeUserId } : {}),
+    ...(cleanAssignedTo ? { assignedTo: cleanAssignedTo } : {}),
+  };
+}
+
+export function buildQuickCustomerPartyPayload(input: {
+  displayName: string;
+  phone?: string;
+}): {
+  displayName: string;
+  role: "Customer";
+  roles: ["Customer"];
+  phone?: string;
+} | null {
+  const cleanName = input.displayName.trim();
+  if (!cleanName) return null;
+  const cleanPhone = (input.phone?.trim() ?? "")
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660));
+  return {
+    displayName: cleanName,
+    role: "Customer",
+    roles: ["Customer"],
+    ...(cleanPhone ? { phone: cleanPhone } : {}),
   };
 }
 

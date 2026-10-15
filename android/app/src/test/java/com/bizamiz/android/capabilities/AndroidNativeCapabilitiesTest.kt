@@ -1,6 +1,8 @@
 package com.bizamiz.android.capabilities
 
+import com.bizamiz.android.bridge.BridgeProtocol
 import com.bizamiz.android.media.AndroidMediaPickerAndShare
+import com.bizamiz.android.notifications.BizaFirebaseMessagingService
 import com.bizamiz.android.notifications.NotificationChannelManager
 import com.bizamiz.android.printing.AndroidPrintingGateway
 import com.bizamiz.android.scanner.AndroidBarcodeScanner
@@ -105,5 +107,43 @@ class AndroidNativeCapabilitiesTest {
         assertEquals("192.168.1.50" to 9100, AndroidPrintingGateway.parseNetworkHostPort("192.168.1.50"))
         assertEquals("10.0.0.12" to 9101, AndroidPrintingGateway.parseNetworkHostPort("10.0.0.12:9101"))
         assertNull(AndroidPrintingGateway.parseNetworkHostPort(""))
+    }
+
+    @Test
+    fun `maps FCM remote data and builds canonical bridge event payloads`() {
+        val rawFcm = BizaFirebaseMessagingService.buildNotificationPayloadFromRemoteData(
+            data = mapOf(
+                "eventType" to "new_order",
+                "title" to "سفارش جدید #109",
+                "body" to "مبلغ ۳,۲۰۰,۰۰۰ ریال",
+                "path" to "/accounting/orders/109",
+                "businessId" to "biz-42",
+            ),
+        )
+        val sanitized = NotificationChannelManager.sanitizeNotificationPayload(rawFcm)
+        assertEquals("orders", sanitized.getString("category"))
+        assertEquals("/accounting/orders/109", sanitized.getString("path"))
+        assertEquals("biz-42", sanitized.getString("businessId"))
+
+        val deepLinkPayload = BridgeProtocol.buildNavigationDeepLinkEventPayload(
+            path = sanitized.getString("path"),
+            businessId = sanitized.getString("businessId"),
+            notificationCategory = sanitized.getString("category"),
+        )
+        assertEquals("/accounting/orders/109", deepLinkPayload.getString("path"))
+        assertEquals("orders", deepLinkPayload.getString("notificationCategory"))
+        assertEquals("biz-42", deepLinkPayload.getString("businessId"))
+
+        val callEndedPayload = BridgeProtocol.buildCrmCallEndedEventPayload(
+            phoneNormalized = "+989121112233",
+            direction = "incoming",
+            durationSeconds = 95,
+            customerId = "11111111-2222-4333-8444-555555555555",
+            customerName = "رضا محمدی",
+            endedAt = "2026-10-15T12:00:00.000Z",
+        )
+        assertEquals("+989121112233", callEndedPayload.getString("phoneNormalized"))
+        assertEquals("رضا محمدی", callEndedPayload.getString("customerName"))
+        assertFalse(callEndedPayload.has("displayName"))
     }
 }

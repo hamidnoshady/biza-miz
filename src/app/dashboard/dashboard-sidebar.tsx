@@ -20,6 +20,7 @@ import {
   BOTTOM_NAV_MAX,
   BOTTOM_NAV_STORAGE_KEY,
   parseBottomNavHrefs,
+  resolveAdaptiveBottomNavHrefs,
   resolveBottomNavHrefs,
   toggleBottomNavHref,
 } from "@/lib/bottom-nav";
@@ -93,6 +94,7 @@ import { ShiftButton } from "./shift-panel";
 import { DeploymentStatusIndicator } from "./deployment-status-indicator";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
 import { useNative } from "@/components/native/native-provider";
+import { AppSheet } from "@/components/mobile/app-sheet";
 import { QuickCreateSheet } from "@/components/mobile/quick-create-sheet";
 import { PostCallActivitySheet } from "@/components/mobile/post-call-activity-sheet";
 
@@ -730,13 +732,17 @@ export function MobileBottomNavigation({
   const search = useSearchParams();
   const { kind } = useNative();
   const [quickCreateOpen, setQuickCreateOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   // Sub-sections are pinnable now, so the lookup has to see them: a pinned
   // «لیست قیمت» silently vanished from the bar when only the top level was read.
-  const byHref = new Map(flattenNav(navItems).map((item) => [item.href, item]));
+  const flatItems = flattenNav(navItems);
+  const byHref = new Map(flatItems.map((item) => [item.href, item]));
   const primaryItems = hrefs.flatMap((href) => {
     const item = byHref.get(href);
     return item ? [item] : [];
   });
+  const primaryHrefSet = new Set(primaryItems.map((item) => item.href));
+  const moreItems = flatItems.filter((item) => !primaryHrefSet.has(item.href));
 
   if (primaryItems.length === 0) return null;
 
@@ -744,6 +750,8 @@ export function MobileBottomNavigation({
   // section and one of its tabs no longer paints two active tabs at once.
   const activeHref =
     bestNavMatch(primaryItems, (href) => isActive(pathname, href, search))?.href ?? null;
+  const activeMoreHref =
+    bestNavMatch(moreItems, (href) => isActive(pathname, href, search))?.href ?? null;
 
   return (
     <>
@@ -780,15 +788,28 @@ export function MobileBottomNavigation({
           );
         })}
         {kind === "android-twa" ? (
-          <button
-            type="button"
-            aria-label="ایجاد سریع"
-            onClick={() => setQuickCreateOpen(true)}
-            className="flex min-h-14 shrink-0 flex-col items-center justify-center gap-1 rounded-xl bg-amber-600 dark:bg-amber-500 px-3 text-[10px] font-semibold text-white dark:text-stone-950 transition-colors"
-          >
-            <span className="text-base leading-none">+</span>
-            <span className="leading-tight">ایجاد</span>
-          </button>
+          <>
+            <button
+              type="button"
+              aria-label="ایجاد سریع"
+              onClick={() => setQuickCreateOpen(true)}
+              className="flex min-h-14 shrink-0 flex-col items-center justify-center gap-1 rounded-xl bg-amber-600 dark:bg-amber-500 px-3 text-[10px] font-semibold text-white dark:text-stone-950 transition-colors"
+            >
+              <span className="text-base leading-none">+</span>
+              <span className="leading-tight">ایجاد</span>
+            </button>
+            {moreItems.length > 0 ? (
+              <button
+                type="button"
+                aria-label="بخش‌های بیشتر"
+                onClick={() => setMoreOpen(true)}
+                className={`flex min-h-14 shrink-0 flex-col items-center justify-center gap-1 rounded-xl px-2.5 text-[10px] font-medium transition-colors ${activeMoreHref ? "bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300" : "text-muted-foreground"}`}
+              >
+                <LayoutGridIcon className="size-5 shrink-0" aria-hidden="true" />
+                <span className="leading-tight">بیشتر</span>
+              </button>
+            ) : null}
+          </>
         ) : null}
       </nav>
       {kind === "android-twa" ? (
@@ -798,6 +819,34 @@ export function MobileBottomNavigation({
             onOpenChange={setQuickCreateOpen}
             allowedHrefs={new Set(byHref.keys())}
           />
+          <AppSheet
+            open={moreOpen}
+            onOpenChange={setMoreOpen}
+            title="سایر بخش‌ها"
+            description="دسترسی سریع به سایر ماژول‌های مجاز کسب‌وکار"
+          >
+            <div className="grid grid-cols-2 gap-2.5">
+              {moreItems.map((item) => {
+                const Icon = navIconFor(item.href, item.iconKey);
+                const active = item.href === activeMoreHref;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={() => setMoreOpen(false)}
+                    className={`flex min-h-12 items-center gap-2.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors ${
+                      active
+                        ? "border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/20 dark:text-amber-200"
+                        : "border-stone-200 bg-stone-50/70 text-stone-700 hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-200"
+                    }`}
+                  >
+                    <Icon className="size-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{item.label}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          </AppSheet>
           <PostCallActivitySheet />
         </>
       ) : null}
@@ -957,6 +1006,7 @@ export function DashboardSidebar({
   account,
 }: SidebarProps) {
   const pathname = usePathname();
+  const { kind } = useNative();
   const [preference, setPreference] = useState<DashboardSidebarPreference>("expanded");
   const [preferenceLoaded, setPreferenceLoaded] = useState(false);
   const [tabletMode, setTabletMode] = useState(false);
@@ -1126,7 +1176,19 @@ export function DashboardSidebar({
         <MobileBottomNavigation
           navItems={navItems}
           pathname={pathname}
-          hrefs={resolveBottomNavHrefs(bottomNav, availableHrefs, isActive(pathname, ACCOUNTING_WORKSPACE_HREFS.pos))}
+          hrefs={
+            kind === "android-twa"
+              ? resolveAdaptiveBottomNavHrefs(
+                  bottomNav,
+                  availableHrefs,
+                  isActive(pathname, ACCOUNTING_WORKSPACE_HREFS.pos),
+                ).primaryHrefs
+              : resolveBottomNavHrefs(
+                  bottomNav,
+                  availableHrefs,
+                  isActive(pathname, ACCOUNTING_WORKSPACE_HREFS.pos),
+                )
+          }
         />
       ) : null}
     </SidebarProvider>

@@ -24,6 +24,8 @@ import com.bizamiz.android.bridge.BridgeProtocol
 import com.bizamiz.android.bridge.InstallationId
 import com.bizamiz.android.bridge.TwaChannelCallback
 import com.bizamiz.android.bridge.TwaSessionHolder
+import com.bizamiz.android.callerid.BizaCallScreeningService
+import com.bizamiz.android.callerid.CallLifecycleTracker
 import com.bizamiz.android.callerid.CallerIdCache
 import com.bizamiz.android.media.AndroidMediaPickerAndShare
 import com.bizamiz.android.navigation.AppLinkRouter
@@ -66,14 +68,52 @@ class TwaLauncherActivity : Activity() {
         super.onCreate(savedInstanceState)
         NotificationChannelManager.ensureChannelsCreated(this)
         AndroidMediaPickerAndShare.cleanupTempFiles(cacheDir)
+        enqueueNotificationDeepLinkIfPresent(intent)
         launch(intent?.data)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        enqueueNotificationDeepLinkIfPresent(intent)
         launched = false
         launch(intent.data)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (CallLifecycleTracker.shared.getActiveSession() != null) {
+            BizaCallScreeningService.emitCompletedCallIfAny()
+        }
+    }
+
+    private fun enqueueNotificationDeepLinkIfPresent(incomingIntent: Intent?) {
+        if (incomingIntent == null) return
+        val dataUri = incomingIntent.data
+        val rawPath = incomingIntent.getStringExtra(NotificationChannelManager.EXTRA_NOTIFICATION_PATH)
+            ?: if (dataUri?.scheme == "bizamiz" && dataUri.host == "app") {
+                val p = dataUri.path ?: "/dashboard"
+                val q = dataUri.encodedQuery
+                    ?.split("&")
+                    ?.filterNot { it.startsWith("businessId=") || it.startsWith("category=") }
+                    ?.joinToString("&")
+                    ?.takeIf { it.isNotEmpty() }
+                if (q != null) "$p?$q" else p
+            } else {
+                null
+            }
+        val cleanPath = rawPath?.trim()?.takeIf { it.startsWith("/") && !it.startsWith("//") } ?: return
+        val businessId = incomingIntent.getStringExtra(NotificationChannelManager.EXTRA_NOTIFICATION_BUSINESS_ID)
+            ?: dataUri?.getQueryParameter("businessId")
+        val category = incomingIntent.getStringExtra(NotificationChannelManager.EXTRA_NOTIFICATION_CATEGORY)
+            ?: dataUri?.getQueryParameter("category")
+
+        val payload = BridgeProtocol.buildNavigationDeepLinkEventPayload(
+            path = cleanPath,
+            businessId = businessId,
+            notificationCategory = category,
+        )
+        TwaSessionHolder.postEvent(BridgeProtocol.EVENT_NAVIGATION_DEEP_LINK, payload)
     }
 
     override fun onRestart() {
@@ -190,7 +230,12 @@ class TwaLauncherActivity : Activity() {
         val syncStore = TenantSyncStateStore.fromContext(
             context = applicationContext,
             onClearTenant = { businessId -> callerIdCache.clearTenant(businessId) },
-            onClearAll = { callerIdCache.clearAll() },
+            onClearAll = {
+                callerIdCache.clearAll()
+                NotificationChannelManager.clearPushToken(applicationContext)
+                TwaSessionHolder.clearPendingEvents()
+                CallLifecycleTracker.shared.clear()
+            },
         )
 
         return BridgeCommandRouter(
@@ -223,7 +268,11 @@ class TwaLauncherActivity : Activity() {
                 val url = payload.optString("url", "").takeIf { it.isNotBlank() }
                 val chooser = AndroidMediaPickerAndShare.createShareChooserIntent(title, text, url)
                 runOnUiThread { startActivity(chooser) }
-                CommandOutcome.Success(JSONObject().put("shared", true))
+                CommandOutcome.Success(
+                    JSONObject()
+                        .put("shared", true)
+                        .put("target", "android_sharesheet"),
+                )
             },
             printerDiscoverHandler = { payload ->
                 handlePrinterDiscover(payload)
@@ -284,7 +333,9 @@ class TwaLauncherActivity : Activity() {
     }
 
     private fun handleNotificationsRegister(payload: JSONObject): CommandOutcome {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        val promptIfNeeded = payload.optBoolean("promptIfNeeded", true)
+        if (promptIfNeeded &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             val latch = CountDownLatch(1)
@@ -306,17 +357,22 @@ class TwaLauncherActivity : Activity() {
                 }
             }
         }
-        if (requestedChannels.isEmpty()) {
-            requestedChannels.addAll(BridgeProtocol.NOTIFICATION_CHANNELS)
-        }
+        val effectiveChannels = NotificationChannelManager.setEnabledChannels(
+            applicationContext,
+            requestedChannels,
+        )
 
-        val token = NotificationChannelManager.resolvePushToken(applicationContext)
+        val token = if (permissionState == BridgeProtocol.PERMISSION_GRANTED) {
+            NotificationChannelManager.resolvePushToken(applicationContext)
+        } else {
+            null
+        }
         return CommandOutcome.Success(
             JSONObject()
                 .put("permission", permissionState)
-                .put("token", token ?: JSONObject.NULL)
-                .put("provider", if (token != null) "fcm" else "none")
-                .put("channels", JSONArray(requestedChannels.distinct())),
+                .put("fcmToken", token ?: JSONObject.NULL)
+                .put("pushProvider", if (token != null) "fcm" else "none")
+                .put("channels", JSONArray(effectiveChannels)),
         )
     }
 
@@ -330,8 +386,14 @@ class TwaLauncherActivity : Activity() {
             )
         }
         val challengeId = payload.optString("challengeId", "").takeIf { it.isNotBlank() }
-        val promptTitle = payload.optString("promptTitle", "تأیید هویت بیومتریک")
-        val promptSubtitle = payload.optString("promptSubtitle", "برای ادامه هویت خود را تأیید کنید")
+        val promptTitle = payload.optString(
+            "title",
+            payload.optString("promptTitle", "تأیید هویت بیومتریک"),
+        )
+        val promptSubtitle = payload.optString(
+            "subtitle",
+            payload.optString("promptSubtitle", "برای ادامه هویت خود را تأیید کنید"),
+        )
 
         val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
             ?: return CommandOutcome.Failure(BridgeProtocol.ERR_UNSUPPORTED_CAPABILITY)
@@ -429,9 +491,9 @@ class TwaLauncherActivity : Activity() {
 
     @Suppress("DEPRECATION")
     private fun handleMediaPick(payload: JSONObject): CommandOutcome {
-        val source = payload.optString("source", "document")
+        val source = payload.optString("mode", payload.optString("source", "document"))
         val multiple = payload.optBoolean("multiple", false)
-        val acceptArr = payload.optJSONArray("accept")
+        val acceptArr = payload.optJSONArray("acceptMimeTypes") ?: payload.optJSONArray("accept")
         val acceptTypes = mutableListOf<String>()
         if (acceptArr != null) {
             for (i in 0 until acceptArr.length()) {
@@ -538,7 +600,7 @@ class TwaLauncherActivity : Activity() {
 
     private fun handlePrinterPrint(payload: JSONObject): CommandOutcome {
         val transport = payload.optString("transport", "")
-        val targetAddress = payload.optString("targetAddress", "")
+        val targetAddress = payload.optString("address", payload.optString("targetAddress", ""))
         val dataBase64 = payload.optString("dataBase64", "")
         val jobName = payload.optString("jobName", "Biza Miz Print Job")
         val rawBytes = AndroidPrintingGateway.decodePrintPayload(dataBase64)
@@ -641,9 +703,17 @@ class TwaLauncherActivity : Activity() {
             entries = parsedEntries,
             syncedAtIso = utcNowIso(),
         )
+        if (payload.optBoolean("requestRole", false) && !CallerIdCache.isCallScreeningRoleHeld(applicationContext)) {
+            CallerIdCache.createRoleRequestIntent(applicationContext)?.let { roleIntent ->
+                runOnUiThread {
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(roleIntent, REQ_CALL_SCREENING_ROLE)
+                }
+            }
+        }
         return CommandOutcome.Success(
             JSONObject()
-                .put("supported", CallerIdCache.isCallScreeningSupported())
+                .put("businessId", businessId.trim())
                 .put("roleHeld", CallerIdCache.isCallScreeningRoleHeld(applicationContext))
                 .put("syncedCount", syncedCount),
         )
@@ -666,6 +736,7 @@ class TwaLauncherActivity : Activity() {
         private const val REQ_BLUETOOTH_PERMISSIONS = 1002
         private const val REQ_CONFIRM_DEVICE_CREDENTIAL = 1003
         private const val REQ_PICK_MEDIA = 1004
+        private const val REQ_CALL_SCREENING_ROLE = 1005
 
         private fun utcNowIso(): String =
             SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {

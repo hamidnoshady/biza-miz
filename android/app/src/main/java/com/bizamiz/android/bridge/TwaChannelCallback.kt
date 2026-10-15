@@ -37,6 +37,7 @@ class TwaChannelCallback(
 
     override fun onMessageChannelReady(extras: Bundle?) {
         session?.postMessage(router.readyEvent(), null)
+        TwaSessionHolder.onChannelReady(session)
     }
 
     override fun onPostMessage(message: String, extras: Bundle?) {

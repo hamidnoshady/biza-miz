@@ -199,6 +199,7 @@ beforeEach(async () => {
     "notification_events",
     "notification_rules",
     "notification_devices",
+    "native_app_devices",
     "users",
     "locations",
     "businesses",
@@ -209,6 +210,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  delete process.env.BIZA_FIREBASE_PROJECT_ID;
+  delete process.env.BIZA_FCM_ACCESS_TOKEN;
   vi.unstubAllGlobals();
 });
 
@@ -622,3 +625,114 @@ describe("the test notification", () => {
     expect(result.sent).toBe(0);
   });
 });
+
+describe("native FCM device fan-out", () => {
+  it("delivers push payloads to active FCM native_app_devices honoring channel preferences and skips revoked devices", async () => {
+    process.env.BIZA_FIREBASE_PROJECT_ID = "test-firebase-project";
+    process.env.BIZA_FCM_ACCESS_TOKEN = "test-fcm-access-token";
+    const fcmRequests: { url: string; body: Record<string, unknown> }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      fcmRequests.push({
+        url: String(url),
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {},
+      });
+      return new Response(JSON.stringify({ name: "projects/test/messages/1" }), { status: 200 });
+    });
+
+    // Active device subscribed to "approvals" (matches shift.cash_variance)
+    await db.query(
+      `INSERT INTO native_app_devices (
+        business_id, user_id, install_id, platform, app_environment,
+        app_version_name, app_version_code, bridge_version,
+        push_token, push_provider, push_channels
+      ) VALUES ($1, $2, $3, 'android', 'production', '0.1.0', 1, 3, $4, 'fcm', $5)`,
+      [
+        shop.businessId,
+        shop.owner,
+        randomUUID(),
+        "fcm-token-owner-active-123456",
+        JSON.stringify(["approvals", "orders"]),
+      ],
+    );
+
+    // Active device subscribed ONLY to "crm" (should be skipped for shift.cash_variance)
+    await db.query(
+      `INSERT INTO native_app_devices (
+        business_id, user_id, install_id, platform, app_environment,
+        app_version_name, app_version_code, bridge_version,
+        push_token, push_provider, push_channels
+      ) VALUES ($1, $2, $3, 'android', 'production', '0.1.0', 1, 3, $4, 'fcm', $5)`,
+      [
+        shop.businessId,
+        shop.owner,
+        randomUUID(),
+        "fcm-token-owner-crm-only-123456",
+        JSON.stringify(["crm"]),
+      ],
+    );
+
+    // Revoked device (must never receive FCM push)
+    await db.query(
+      `INSERT INTO native_app_devices (
+        business_id, user_id, install_id, platform, app_environment,
+        app_version_name, app_version_code, bridge_version,
+        push_token, push_provider, push_channels, revoked_at
+      ) VALUES ($1, $2, $3, 'android', 'production', '0.1.0', 1, 3, $4, 'fcm', $5, NOW())`,
+      [
+        shop.businessId,
+        shop.owner,
+        randomUUID(),
+        "fcm-token-owner-revoked-123456",
+        JSON.stringify(["approvals"]),
+      ],
+    );
+
+    await enqueue();
+    await deliver();
+
+    expect(fcmRequests).toHaveLength(1);
+    expect(fcmRequests[0].url).toBe("https://fcm.googleapis.com/v1/projects/test-firebase-project/messages:send");
+    expect(fcmRequests[0].body).toMatchObject({
+      message: {
+        token: "fcm-token-owner-active-123456",
+        data: expect.objectContaining({
+          businessId: shop.businessId,
+          category: "approvals",
+          eventType: "shift.cash_variance",
+        }),
+      },
+    });
+  });
+
+  it("clears push_token and push_provider when FCM returns 410 Gone for a stale registration", async () => {
+    process.env.BIZA_FIREBASE_PROJECT_ID = "test-firebase-project";
+    process.env.BIZA_FCM_ACCESS_TOKEN = "test-fcm-access-token";
+    vi.stubGlobal("fetch", async () => new Response(null, { status: 410 }));
+
+    const installId = randomUUID();
+    await db.query(
+      `INSERT INTO native_app_devices (
+        business_id, user_id, install_id, platform, app_environment,
+        app_version_name, app_version_code, bridge_version,
+        push_token, push_provider, push_channels
+      ) VALUES ($1, $2, $3, 'android', 'production', '0.1.0', 1, 3, $4, 'fcm', $5)`,
+      [
+        shop.businessId,
+        shop.owner,
+        installId,
+        "fcm-token-stale-410-123456",
+        JSON.stringify(["approvals"]),
+      ],
+    );
+
+    await enqueue();
+    await deliver();
+
+    const { rows } = await db.query<{ push_token: string | null; push_provider: string | null }>(
+      `SELECT push_token, push_provider FROM native_app_devices WHERE business_id = $1 AND install_id = $2`,
+      [shop.businessId, installId],
+    );
+    expect(rows[0]).toEqual({ push_token: null, push_provider: null });
+  });
+});
+
