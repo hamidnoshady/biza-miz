@@ -16,11 +16,26 @@ legs for commission/payroll callers; existing commission formulas and v1 sync
 contracts are unchanged. Both new Accounting work areas and exact payroll-source
 navigation are preserved. The integrated candidate must earn fresh local/CI gates;
 prior green results below remain explicitly versioned evidence, not a new-head pass.
-Local integrated-tree checks: full typecheck and lint PASS; all three new upstream
+Local integrated-tree checks at `891fd5d`: full typecheck and lint PASS; all three new upstream
 migrations apply successfully; financial PostgreSQL **339 tests / 8 files PASS**
 (commission, both payroll suites, and the new financial transfers). Fresh full unit,
 full PostgreSQL and current-head CI are required before merge; live results remain
 in PR #964 to avoid treating an older green target as verification of this merge.
+
+Integration audit found a genuine currency-source gap in the existing shared
+payroll/commission resolver: both explicit foreign-bank selection and the legacy
+bank fallback posted a Rial-only document without FX. Two deterministic PostgreSQL
+regressions failed before the fix (both calls incorrectly succeeded). The shared
+selector now excludes explicitly foreign accounts and the resolver rechecks the
+chosen account's currency under `FOR SHARE` through commit. Legacy/IRR accounts,
+legacy method/heading behavior, approval policy, formulas and v1 sync are unchanged;
+no FX engine was built. Pure eligibility/currency-race tests and commission/payroll
+atomic refusal tests cover the fix. The pre-fix `339/8` result is not a pass for
+this new code; full local/CI gates must be rerun before release.
+After the guard: full typecheck/lint PASS; focused financial PostgreSQL **343 / 8
+files PASS**, including both explicit/fallback foreign-bank refusals and all legacy
+Rial payment regressions. Pure selector/recheck tests PASS (8 / 2 files). Fresh full
+unit/full PostgreSQL and CI are running; their final verdict belongs in PR #964.
 
 Scope from the issue: complete the commission financial lifecycle *after accrual*.
 Commission rules, seller assignment, effective dates, accrual posting and the rules-and-report

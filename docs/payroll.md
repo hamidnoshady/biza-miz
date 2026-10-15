@@ -260,6 +260,15 @@ account that did not yet hold it, and the real bank account never moved.
 page.) The screen defaults to cash and offers the shorthand only when the chart
 has no account to pick.
 
+Payroll, advances and commission payouts remain **Rial-only** postings. The shared
+picker excludes GL accounts explicitly tagged with a foreign `currency_code`; legacy
+untagged accounts and `IRR` accounts remain eligible. The transactional resolver
+rechecks the chosen account under `FOR SHARE` (including the legacy cash/bank method
+fallback), preventing a concurrent currency edit between validation and posting.
+Unsupported foreign sources return `400 invalid_payment_account`, with no journal,
+payment or sync effect. No implicit conversion or FX settlement is introduced; the
+existing legacy method/heading policy is otherwise unchanged.
+
 ## Dates
 
 - The accrual date, the payment date and the advance date are ISO `YYYY-MM-DD`.

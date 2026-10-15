@@ -586,6 +586,27 @@ describe("approval and payout", () => {
     expect(await tieOut(t)).toMatchObject({ difference: "0", subledgerDifference: "0" });
   });
 
+  it.each(["explicit", "method"] as const)("refuses a foreign bank for a Rial commission payout (%s), atomically", async (choice) => {
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000);
+    const run = await approvedRun(t);
+    await db.query("UPDATE accounts SET currency_code='USD' WHERE id=$1", [t.accounts.bank]);
+    const before = await tieOut(t);
+    await expectRefusal(settlement.recordCommissionPayout(t.id, t.paymaster, run.id, {
+      allocations: [{ employeeId: t.sellerA, amount: 100n }],
+      paymentAccountId: choice === "explicit" ? t.accounts.bank : null,
+      method: "bank", paidDate: null, memo: null,
+    }, `foreign-bank-${choice}-0001`), "invalid_payment_account", 400);
+    expect((await settlement.listCommissionPaymentAccounts(t.id)).some((account) => account.id === t.accounts.bank)).toBe(false);
+    const counts = await db.query<{ payouts: number; journals: number; events: number }>(`SELECT
+      (SELECT count(*)::int FROM commission_settlement_payouts WHERE business_id=$1) AS payouts,
+      (SELECT count(*)::int FROM journal_entries WHERE business_id=$1 AND source_type='commission_payout') AS journals,
+      (SELECT count(*)::int FROM sync_events WHERE business_id=$1 AND event_type LIKE 'commission.payout.%') AS events`, [t.id]);
+    expect(counts.rows[0]).toEqual({ payouts: 0, journals: 0, events: 0 });
+    expect(await tieOut(t)).toEqual(before);
+    expect((await settlement.getCommissionRun(t.id, run.id, t.paymaster.permissions))?.status).toBe("payable");
+  });
+
   it("refuses a payment dated in the future and a payment made from an account that is not a payment account", async () => {
     const t = await newTenant();
     await accrue(t, t.sellerA, 100_000);

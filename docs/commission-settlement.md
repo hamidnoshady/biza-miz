@@ -105,12 +105,15 @@ run. `outstanding = Σ lines − Σ net allocations`, derived, never stored.
 
 - Each allocation is either a typed amount (integer Rial, positive, at most the member's
   outstanding) or `all: true`, which the server resolves to the exact outstanding at the
-  moment of the payout. `all` exists because the screen may show a unit (toman) that cannot
-  display every Rial; the server, not the form, sets the amount.
+  moment of the payout. The server, not a potentially stale form, sets the amount;
+  both Rial and Toman formatting preserve the final Rial.
 - A payout posts once: **Dr 2300 *حقوق پرداختنی* total / Cr the chosen cash or bank account**,
   `source_type = commission_payout`, `posting_kind = commission_payout`, business-wide
   (no branch). The payment account is validated against the same eligibility rule payroll
-  uses (`resolvePayoutAccount`), so a receivable or a card-clearing account is refused.
+  uses (`resolvePayoutAccount`), so a receivable, card-clearing or explicitly foreign-currency
+  account is refused. This flow has no FX document: foreign amounts are never silently
+  treated as Rial. Explicit choices and the cash/bank fallback recheck currency under
+  `FOR SHARE` until transaction commit; refusals leave no payout, journal or outbox event.
 - The payout document and its allocations are written in the same transaction as the journal
   entry. The status moves to `partially_paid` or `paid` from the net paid total.
 - **Idempotency.** `POST /api/commission/runs/[id]/payouts` requires an `Idempotency-Key`
@@ -287,7 +290,8 @@ preserves a final Rial as a decimal digit, including signed returns/reversals.
 
 Accrual rows include `orderId`, `entryId`, `settlementRunId` and `payrollRunId` when
 available. Growth links the source sale, journal and commission run; legacy payroll
-provenance links to `/accounting/payroll` (no supported direct legacy-run route yet).
+provenance links to `/accounting/payroll?run=<payrollRunId>`, opening the exact read-only
+source through the existing authorized payroll API, independently of history paging.
 The business-wide reconciliation status remains on the runs report; the statement
 does not fabricate an employee-specific GL balance.
 
