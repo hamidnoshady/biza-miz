@@ -142,8 +142,9 @@ describe("the automotive deployment-mode classification (§22)", () => {
     expect(records.notes.length).toBeGreaterThan(30);
 
     // §19's Wave 6 addition: a *projection* plus a request queue, and exactly
-    // the two events that carry a request up. Nothing in this domain decides a
-    // hold, posts money, or names a sale.
+    // the three events that carry a request up — queue it, release a hold it
+    // placed, or withdraw one the counter cancelled before the cloud could decide
+    // it. Nothing in this domain decides a hold, posts money, or names a sale.
     const board = automotiveDomains.find((domain) => domain.key === "automotive_vehicle_board")!;
     expect(board.authority).toBe("cloud_authoritative");
     expect(board.bootstrap).toBe("snapshot");
@@ -151,16 +152,18 @@ describe("the automotive deployment-mode classification (§22)", () => {
     expect(board.eventTypes.sort()).toEqual([
       "automotive.vehicle.reservation.released",
       "automotive.vehicle.reservation.requested",
+      "automotive.vehicle.reservation.withdrawn",
     ]);
     expect(board.notes.length).toBeGreaterThan(30);
 
     // The registry and the discovery copy agree with the catalogue: the trade's
-    // only events are those two requests, and pairing tells the operator about
+    // only events are those three requests, and pairing tells the operator about
     // them instead of promising a synchronised vehicle record.
     const automotiveEvents = SYNC_EVENT_REGISTRY.filter((event) => event.type.startsWith("automotive."));
     expect(automotiveEvents.map((event) => event.type).sort()).toEqual([
       "automotive.vehicle.reservation.released",
       "automotive.vehicle.reservation.requested",
+      "automotive.vehicle.reservation.withdrawn",
     ]);
     for (const event of automotiveEvents) {
       // A desktop *applies* these (the cloud decides them); it must never be
@@ -171,6 +174,7 @@ describe("the automotive deployment-mode classification (§22)", () => {
     const advertised = pairingDataClassification().ongoingDomainEvents;
     expect(advertised).toContain("automotive.vehicle.reservation.requested");
     expect(advertised).toContain("automotive.vehicle.reservation.released");
+    expect(advertised).toContain("automotive.vehicle.reservation.withdrawn");
   });
 
   it("names the automotive bucket in the pairing coverage copy", () => {

@@ -23,9 +23,17 @@ import { getMasterSyncState } from "./master-sync-transport";
  * of the comparison rather than reported as drift. Bucketed by the day the
  * bill was *opened* on (`app_business_date`), which both sides now share.
  */
-export async function computeDayDigests(locationId: string, days: readonly string[]): Promise<DayDigest[]> {
+export async function computeDayDigests(
+  locationId: string,
+  days: readonly string[],
+): Promise<DayDigest[]> {
   if (days.length === 0) return [];
-  const { rows } = await query<{ day: string; orders: number; sales: string; payments: string }>(
+  const { rows } = await query<{
+    day: string;
+    orders: number;
+    sales: string;
+    payments: string;
+  }>(
     `WITH bills AS (
        SELECT o.id, o.total,
               app_business_date(o.opened_at, l.timezone, l.business_day_start_minutes)::text AS day
@@ -49,7 +57,10 @@ export async function computeDayDigests(locationId: string, days: readonly strin
 }
 
 /** The last `count` complete business days of a branch (today excluded — it is still trading). */
-export async function recentBusinessDays(locationId: string, count = 7): Promise<string[]> {
+export async function recentBusinessDays(
+  locationId: string,
+  count = 7,
+): Promise<string[]> {
   const { rows } = await query<{ day: string }>(
     `SELECT (app_business_date(now(), l.timezone, l.business_day_start_minutes) - g)::text AS day
        FROM locations l, generate_series(1, $2::int) g
@@ -71,10 +82,21 @@ export interface DriftState {
   error: string | null;
 }
 
-const EMPTY_DRIFT: DriftState = { checkedAt: null, status: null, days: [], error: null };
+const EMPTY_DRIFT: DriftState = {
+  checkedAt: null,
+  status: null,
+  days: [],
+  error: null,
+};
 
 export async function getDriftState(businessId: string): Promise<DriftState> {
-  return { ...EMPTY_DRIFT, ...((await getSetting<Partial<DriftState>>(businessId, SETTING_KEYS.syncDriftState)) ?? {}) };
+  return {
+    ...EMPTY_DRIFT,
+    ...((await getSetting<Partial<DriftState>>(
+      businessId,
+      SETTING_KEYS.syncDriftState,
+    )) ?? {}),
+  };
 }
 
 /** How often the desktop compares its books with the central server's. */
@@ -85,11 +107,27 @@ export const DRIFT_CHECK_INTERVAL_MS = 60 * 60_000;
  * (status `pending`) while either side still holds unsettled sync work for
  * this branch — a difference then is expected, not drift.
  */
-export async function runDriftCheck(businessId: string, now: Date = new Date()): Promise<DriftState> {
+export async function runDriftCheck(
+  businessId: string,
+  now: Date = new Date(),
+): Promise<DriftState> {
   const previous = await getDriftState(businessId);
-  if (previous.checkedAt && now.getTime() - Date.parse(previous.checkedAt) < DRIFT_CHECK_INTERVAL_MS) return previous;
-  const config = await getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
-  if (!config?.enabled || !config.remoteUrl?.trim() || !config.token?.trim() || !config.locationId) return previous;
+  if (
+    previous.checkedAt &&
+    now.getTime() - Date.parse(previous.checkedAt) < DRIFT_CHECK_INTERVAL_MS
+  )
+    return previous;
+  const config = await getSetting<ServerSyncConfig>(
+    businessId,
+    SETTING_KEYS.serverSyncConfig,
+  );
+  if (
+    !config?.enabled ||
+    !config.remoteUrl?.trim() ||
+    !config.token?.trim() ||
+    !config.locationId
+  )
+    return previous;
 
   const save = async (state: DriftState) => {
     await setSetting(businessId, SETTING_KEYS.syncDriftState, state);
@@ -97,28 +135,57 @@ export async function runDriftCheck(businessId: string, now: Date = new Date()):
   };
   const backlog = await localBacklog(businessId);
   if (backlog.unsent > 0 || backlog.deferred > 0) {
-    return save({ checkedAt: now.toISOString(), status: "pending", days: [], error: null });
+    return save({
+      checkedAt: now.toISOString(),
+      status: "pending",
+      days: [],
+      error: null,
+    });
   }
   const days = await recentBusinessDays(config.locationId);
   const site = await computeDayDigests(config.locationId, days);
   try {
-    const response = await fetch(`${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/digest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token.trim()}` },
-      body: JSON.stringify({ days, digests: site }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) throw new Error(`digest_rejected: HTTP ${response.status}`);
-    const body = (await response.json()) as { drift?: DriftDay[]; pending?: boolean };
-    if (body.pending) return save({ checkedAt: now.toISOString(), status: "pending", days: [], error: null });
+    const response = await fetch(
+      `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/digest`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.token.trim()}`,
+        },
+        body: JSON.stringify({ days, digests: site }),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`digest_rejected: HTTP ${response.status}`);
+    const body = (await response.json()) as {
+      drift?: DriftDay[];
+      pending?: boolean;
+    };
+    if (body.pending)
+      return save({
+        checkedAt: now.toISOString(),
+        status: "pending",
+        days: [],
+        error: null,
+      });
     const drift = Array.isArray(body.drift) ? body.drift : [];
-    return save({ checkedAt: now.toISOString(), status: drift.length > 0 ? "drift" : "ok", days: drift, error: null });
+    return save({
+      checkedAt: now.toISOString(),
+      status: drift.length > 0 ? "drift" : "ok",
+      days: drift,
+      error: null,
+    });
   } catch (error) {
     return save({
       checkedAt: now.toISOString(),
       status: "error",
       days: previous.days,
-      error: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+      error: (error instanceof Error ? error.message : String(error)).slice(
+        0,
+        300,
+      ),
     });
   }
 }
@@ -160,12 +227,16 @@ async function localBacklog(businessId: string): Promise<{
     conflicts: number;
   }>(
     `SELECT
+       -- A retracted event (0225) was withdrawn by the counter before it ever
+       -- left the machine, so it is not work waiting to go out: counting it would
+       -- leave a permanent "unsent" row on the health screen for a cancellation
+       -- that was completed exactly as intended.
        (SELECT count(*)::int FROM sync_events se JOIN locations l ON l.id = se.location_id
          WHERE l.business_id = $1 AND se.scope = 'location' AND se.origin = 'local' AND se.applied_at IS NOT NULL
-           AND se.error IS NULL AND se.pushed_at IS NULL) AS unsent,
+           AND se.error IS NULL AND se.pushed_at IS NULL AND se.retracted_at IS NULL) AS unsent,
        (SELECT min(se.received_at) FROM sync_events se JOIN locations l ON l.id = se.location_id
          WHERE l.business_id = $1 AND se.scope = 'location' AND se.origin = 'local' AND se.applied_at IS NOT NULL
-           AND se.error IS NULL AND se.pushed_at IS NULL) AS oldest,
+           AND se.error IS NULL AND se.pushed_at IS NULL AND se.retracted_at IS NULL) AS oldest,
        (SELECT count(*)::int FROM sync_events se JOIN locations l ON l.id = se.location_id
          WHERE l.business_id = $1 AND se.scope = 'location' AND se.pushed_at IS NULL AND se.push_attempts > 0) AS refused,
        (SELECT count(*)::int FROM sync_domain_effects WHERE business_id = $1 AND status = 'deferred') AS deferred,
@@ -201,20 +272,28 @@ export interface SyncHealthReport {
   drift: DriftState;
 }
 
-export async function getSyncHealth(businessId: string, now: Date = new Date()): Promise<SyncHealthReport> {
-  const config = await getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
-  const state = (await getSetting<{
-    lastPushSuccessAt?: string | null;
-    lastPullSuccessAt?: string | null;
-    lastPushError?: string | null;
-    lastPullError?: string | null;
-    pushNextAttemptAt?: string | null;
-    pullNextAttemptAt?: string | null;
-  }>(businessId, SETTING_KEYS.serverSyncState)) ?? {};
+export async function getSyncHealth(
+  businessId: string,
+  now: Date = new Date(),
+): Promise<SyncHealthReport> {
+  const config = await getSetting<ServerSyncConfig>(
+    businessId,
+    SETTING_KEYS.serverSyncConfig,
+  );
+  const state =
+    (await getSetting<{
+      lastPushSuccessAt?: string | null;
+      lastPullSuccessAt?: string | null;
+      lastPushError?: string | null;
+      lastPullError?: string | null;
+      pushNextAttemptAt?: string | null;
+      pullNextAttemptAt?: string | null;
+    }>(businessId, SETTING_KEYS.serverSyncState)) ?? {};
   const master = await getMasterSyncState(businessId);
   const drift = await getDriftState(businessId);
   const backlog = await localBacklog(businessId);
-  const lastError = state.lastPushError ?? state.lastPullError ?? master.lastError ?? null;
+  const lastError =
+    state.lastPushError ?? state.lastPullError ?? master.lastError ?? null;
   const assessed = assessSyncHealth(
     {
       enabled: Boolean(config?.enabled),
@@ -226,9 +305,11 @@ export async function getSyncHealth(businessId: string, now: Date = new Date()):
     },
     now,
   );
-  const nextAttempts = [state.pushNextAttemptAt, state.pullNextAttemptAt, master.nextAttemptAt].filter(
-    (value): value is string => Boolean(value),
-  );
+  const nextAttempts = [
+    state.pushNextAttemptAt,
+    state.pullNextAttemptAt,
+    master.nextAttemptAt,
+  ].filter((value): value is string => Boolean(value));
   return {
     ...assessed,
     ...backlog,
