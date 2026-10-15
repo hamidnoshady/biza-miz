@@ -16,7 +16,7 @@ const statement = {
   payouts: [], runs: [{ runId: ID, runNumber: 1 }], page: { hasMoreAccruals: false, hasMorePayouts: false },
 };
 function Card() { return <CommissionStatementCard employeeId="seller" money={useMoney()} onClose={() => {}} />; }
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); request.mockReset(); });
 
 describe("statement selection ownership", () => {
   it("keeps run choices while hiding old financial rows during a filter request", async () => {
@@ -31,6 +31,22 @@ describe("statement selection ownership", () => {
     expect((select as HTMLSelectElement).value).toBe(ID);
     expect(screen.queryByRole("table", { name: "ردیف‌های پورسانت فروشنده" })).toBeNull();
     await act(async () => complete({ ok: true, status: 200, data: { ...statement, accruals: [] }, aborted: false }));
+    expect(await screen.findByRole("table", { name: "ردیف‌های پورسانت فروشنده" })).toBeTruthy();
+    expect(request.mock.calls.at(-1)?.[0]).toContain(`runId=${ID}`);
+  });
+
+  it("keeps filters and retry available when an error replaces the financial heading and rows", async () => {
+    request.mockResolvedValueOnce({ ok: true, status: 200, data: statement, aborted: false });
+    request.mockResolvedValueOnce({ ok: false, status: 0, data: { error: "network_error" }, aborted: false });
+    request.mockResolvedValueOnce({ ok: true, status: 200, data: statement, aborted: false });
+    render(<MoneyProvider unit="rial"><Card /></MoneyProvider>);
+    await screen.findByRole("option", { name: "دورهٔ ۱" });
+    fireEvent.change(screen.getByRole("combobox", { name: "دوره تسویه" }), { target: { value: ID } });
+    const retry = await screen.findByRole("button", { name: "تلاش دوباره" });
+    expect(screen.getByRole("heading", { name: "صورت‌حساب فروشنده", exact: true })).toBeTruthy();
+    expect(screen.queryByRole("table", { name: "ردیف‌های پورسانت فروشنده" })).toBeNull();
+    expect((screen.getByRole("combobox", { name: "دوره تسویه" }) as HTMLSelectElement).value).toBe(ID);
+    fireEvent.click(retry);
     expect(await screen.findByRole("table", { name: "ردیف‌های پورسانت فروشنده" })).toBeTruthy();
     expect(request.mock.calls.at(-1)?.[0]).toContain(`runId=${ID}`);
   });

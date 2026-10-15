@@ -157,7 +157,9 @@ try {
     await accountant.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "از تاریخ صورت‌حساب");
     assert.equal(await date.getAttribute("aria-expanded"), "false");
     await accountant.addScriptTag({ content: axe.source });
-    const panel = accountant.getByRole("heading", { name: "صورت‌حساب فروشنده آزمون", exact: true }).locator("xpath=ancestor::section[1]");
+    // The financial heading intentionally becomes generic during loading/error.
+    // Anchor to a persistent control so real offline retry stays in this card.
+    const panel = accountant.getByRole("combobox", { name: "دوره تسویه", exact: true }).locator("xpath=ancestor::section[1]");
     for (const width of [1440, 768, 390]) {
       await accountant.setViewportSize({ width, height: 1000 });
       assert.equal(await accountant.locator("html").getAttribute("dir"), "rtl");
