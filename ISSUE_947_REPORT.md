@@ -450,7 +450,8 @@ The run that failed on this branch is the one at the **pre-integration** head `0
   3072 MB, kernel OOM at 3600 MB), and therefore `npm run test:visual` (needs the build's
   server). These three are exactly the gates CI owns in this repository, and all three are
   green there at this head.
-- **CI, finished**: every run listed in 8.2. Nothing is pending at the head.
+- **CI, finished**: every run listed in 8.2, plus the PR-triggered set in 8.5. Nothing is
+  pending at the head.
 - Nothing is running when this report was committed; the DB sweep, the unit suite and the
   isolated re-run had all finished. (`node_modules` was re-installed from the lockfile with
   `npm ci` before these runs; `node_modules` is committed on `main` as a symlink blob, which
@@ -460,14 +461,54 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 | Dimension | State |
 |---|---|
-| Source | `11dd6aa3` on `arena/ce58f373-biza-miz`, pushed; `origin/main` (`916df457`) is an ancestor; the report is the commit after it and changes no source, and the code head's own last change added one test file |
+| Source | `11dd6aa3` on `arena/ce58f373-biza-miz`, pushed, in **PR #958**; `origin/main` (`916df457`) is an ancestor; the report is the commit after it and changes no source, and the code head's own last change added one test file |
 | Tests | **11 451** unit/component + **38** design green locally at the code head; **270** database tests re-run green at it (126 + 81 + 63); the 230-file sweep green at `a2f78cf0` except one load-induced timeout that passes alone (75/75 in 13 s); CI's `integration tests (real database)`, `data transfer engine (real database)` and `media E2E tests` green at the code head |
 | Checks | `test.yml` at **`11dd6aa3`: 11/11 jobs green**, including `visual regression` (with the subledger keyboard/WCAG step), `integration tests (real database)` and `production build`; the same 11/11 at `a2f78cf0`; packaging workflows green at `7a3e1cb5`, and not triggered by the final heads' path filters |
 | Mergeability | No conflicts: `git merge-base --is-ancestor origin/main HEAD` holds, and `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries (tree `976fd0a2`). No PR exists for this branch |
 | Deployment | **Nothing deployed, published, tagged or merged**, and nothing was authorised to be. The three migrations are forward-only and unapplied anywhere except this sandbox's database |
 | Runtime acceptance | Not claimed. The gates that exercise a running server (production build, visual regression, subledger keyboard/WCAG, media E2E) passed **in CI on GitHub's runners**, at the head named above; no runtime acceptance was performed against a deployed environment |
 
-**Open PR**: none — this branch has never had one, and no duplicate was opened.
+### 8.5 Pull-request checks
+
+**[PR #958](https://github.com/hamidnoshady/biza-miz/pull/958)** (`arena/ce58f373-biza-miz`
+→ `main`) was opened so the repository's own required suite — including the
+`pull_request`-triggered desktop/container/workflow paths that a branch push skips by path
+filter — runs against the head. On it: `type check`, `ESLint`, `design checks`,
+`API guard and permission tests`, `visual regression`, `production build`,
+`data transfer engine`, `media E2E`, `desktop shell`, `production container`,
+`packaged Windows end-to-end` and `which shippables changed` all **passed**;
+`integration tests (real database)` was still running when this was written.
+
+**`unit tests` failed on the PR run and passed on the push run of the *same commit***
+(`4c3a720`): push run `38655674538` ✅, PR run `38703844576` ❌. The failing annotation is
+
+```
+src/app/(app)/accounting/fiscal-periods-section.test.tsx
+AssertionError: expected false to be true
+ ❯ src/app/(app)/accounting/fiscal-periods-section.test.tsx:214:102
+```
+
+which is `expect(network.calls.some((url) => url === \`/api/ledger/fiscal-years/${fiscalYear.id}/periods\`)).toBe(true)`
+— asserted immediately after a `waitFor` that only waits for the selected-year heading, so
+it reads a request the section's `useEffect` may not have issued yet (that job runs on
+`windows-latest`; the two flaky-test repairs on `main`, PR #955, are the same family). It is
+**not** this branch's code:
+
+| Check | Result |
+|---|---|
+| Same commit, two runs | ✅ `unit tests` on 38655674538 · ❌ on 38703844576 — non-deterministic by construction |
+| The failing file and its subject vs `origin/main` | **byte-identical** (`git diff origin/main HEAD -- <both>` is empty) |
+| This branch's files inside that test's **transitive** import graph (23 modules) | exactly one: `src/app/dashboard/ui.tsx`, **+25 / −0** — nine added `ERROR_MESSAGES` entries (team/role/branch-policy copy) that no request path reads |
+| Local, `11dd6aa3` | the file passed **15/15** focused runs (5 idle + 10 under CPU contention) and in both full-suite runs |
+| Provenance of the test | `bbdcb709` → `1f993daa`, both on `main`, long before this branch |
+
+Re-running the failed job through this session's GitHub App is refused
+(`Resource not accessible by integration`, HTTP 403), so the fresh verdict comes from the
+next push's run; the flake is recorded in §9 rather than papered over, and main's test was
+**not** edited — a change to `main`'s suite belongs in its own PR (#955 is the precedent).
+
+**Open PR**: **[#958](https://github.com/hamidnoshady/biza-miz/pull/958)** — the only PR for
+this branch; no duplicate was opened, and nothing was merged, tagged or deployed.
 
 ## 9. Genuine remaining issues
 
@@ -497,6 +538,14 @@ The run that failed on this branch is the one at the **pre-integration** head `0
   swap): `npm run build` is killed at 3000 MB, `tsc --noEmit` aborts at 3072 MB, and
   `npm run test:visual` needs the build's server. CI is where those gates are meaningful,
   and their results are reported above — nothing here claims a local pass.
+- **A pre-existing flake in `main`'s own unit suite.** On PR #958, `unit tests` failed at
+  `src/app/(app)/accounting/fiscal-periods-section.test.tsx:214` on one run and passed on
+  another run of the *same commit* (see 8.5): the assertion reads a request that a
+  `waitFor` on a heading does not guarantee has been issued. It is outside this issue's
+  scope, and fixing another workstream's test in this branch would blur the ownership this
+  issue is explicitly about — so it is reported, not edited. The remedy is either a
+  re-run/next-push verdict (a re-run is refused to this session's App token) or a one-line
+  change in `main`'s suite: await the request instead of asserting it synchronously.
 - **One inherited database test times out under the full serial sweep.** In a 230-file run,
   `integration/fixed-assets.integration.test.ts` (issue #833, `main`'s code, byte-identical
   to `origin/main`) had one test hit its 30 s budget after the file had already taken 194 s;
