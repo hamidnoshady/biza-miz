@@ -376,3 +376,125 @@ describe("rollback", () => {
     expect(await tieOut(t)).toMatchObject({ difference: "0", subledgerDifference: "0" });
   });
 });
+
+/**
+ * A database barrier, not a timing race: the report has read 2300 before it
+ * reaches commission_accruals. Hold that table until the financial transaction
+ * commits, then let the report finish. READ COMMITTED mixes the two positions.
+ */
+async function commitBetweenReportReads<T>(read: () => Promise<T>, commit: () => Promise<unknown>): Promise<T> {
+  const blocker = new Client({ connectionString: urlFor(databaseName) });
+  await blocker.connect();
+  let pending: Promise<T> | undefined;
+  try {
+    await blocker.query("BEGIN");
+    await blocker.query("LOCK TABLE commission_accruals IN ACCESS EXCLUSIVE MODE");
+    pending = read();
+    // Attach a handler immediately, including on the failure/cleanup path.
+    void pending.catch(() => {});
+    let blocked = false;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const { rows } = await db.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%FROM commission_accruals%'`,
+      );
+      if (rows[0].n > 0) { blocked = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(blocked, "report reached the inter-query database barrier").toBe(true);
+    await commit();
+    await blocker.query("COMMIT");
+    return await pending;
+  } finally {
+    await blocker.query("ROLLBACK");
+    await blocker.end();
+    await pending?.catch(() => {});
+  }
+}
+
+describe("reconciliation uses one MVCC snapshot", () => {
+  it.each(["payout", "reversal"] as const)("commission and payroll reports do not mix a concurrent %s with the earlier GL", async (operation) => {
+    const payroll = await import("../src/lib/payroll-service");
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000);
+    const run = await approvedRun(t);
+    for (const report of ["commission", "payroll"] as const) {
+      let originalId: string | undefined;
+      if (operation === "reversal") {
+        originalId = (await settlement.recordCommissionPayout(t.id, t.paymaster, run.id,
+          payoutFor(t, t.sellerA, 1000n), randomUUID())).payout.id;
+      }
+      const read = () => dbLib.withTenant(t.id, async () => report === "commission"
+        ? await settlement.getCommissionLiability(t.id) : await payroll.getPayrollLiability(t.id));
+      const before = await read();
+      const during = await commitBetweenReportReads(read, () => dbLib.withTenant(t.id, async () => originalId
+        ? await settlement.reverseCommissionPayout(t.id, t.paymaster, originalId, "اصلاح")
+        : await settlement.recordCommissionPayout(t.id, t.paymaster, run.id, payoutFor(t, t.sellerA, 1000n), randomUUID())));
+      expect(during).toEqual(before);
+      const after = await read();
+      expect(after.difference).toBe("0");
+      expect(BigInt(after.ledgerBalance) - BigInt(before.ledgerBalance)).toBe(operation === "payout" ? -1000n : 1000n);
+    }
+  });
+
+  it("commission and payroll reports retain the pre-payment position while real payroll commits", async () => {
+    const payroll = await import("../src/lib/payroll-service");
+    const { todayJalali } = await import("../src/lib/jalali");
+    const today = todayJalali();
+    for (const report of ["commission", "payroll"] as const) {
+      const t = await newTenant();
+      await accrue(t, t.sellerA, 100_000);
+      const run = await payroll.accruePayroll({ businessId: t.id, createdBy: t.approver.userId,
+        periodKey: `${today.jy}-${String(today.jm).padStart(2, "0")}` });
+      expect(run.commissionTotal).toBe("5000");
+      const read = () => dbLib.withTenant(t.id, async () => report === "commission"
+        ? await settlement.getCommissionLiability(t.id) : await payroll.getPayrollLiability(t.id));
+      const before = await read();
+      const during = await commitBetweenReportReads(read, () => dbLib.withTenant(t.id, () => payroll.payPayroll({
+        businessId: t.id, runId: run.id, method: "cash", actorId: t.approver.userId,
+      })));
+      expect(during).toEqual(before);
+      expect(await read()).toMatchObject({ ledgerBalance: "0", difference: "0" });
+    }
+  });
+});
+
+describe("statement reads are coherent too", () => {
+  it("does not combine pre-payout totals and post-payout allocation history", async () => {
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000);
+    const run = await approvedRun(t);
+    const read = () => dbLib.withTenant(t.id, () => settlement.getCommissionStatement(t.id, t.sellerA));
+    const before = await read();
+    const during = await commitBetweenReportReads(read, () => dbLib.withTenant(t.id, () => settlement.recordCommissionPayout(
+      t.id, t.paymaster, run.id, payoutFor(t, t.sellerA, 1000n), randomUUID(),
+    )));
+    expect(during).toEqual(before);
+    const after = await read();
+    expect(after.totals).toMatchObject({ paidThroughRuns: "1000", unpaid: "4000" });
+    expect(after.payouts).toHaveLength(1);
+  });
+});
+
+describe("a snapshot does not conceal a real accounting discrepancy", () => {
+  it("reports a manual 2300 posting exactly, including beyond Number's safe range", async () => {
+    const t = await newTenant();
+    await accrue(t, t.sellerA, 100_000);
+    const { inTransaction, asRial } = await import("../src/lib/payroll-db");
+    const { accountIdsByCode, postExactJournalEntry } = await import("../src/lib/ledger-service");
+    const difference = 9007199254740993n;
+    await dbLib.withTenant(t.id, () => inTransaction(async (client) => {
+      const accounts = await accountIdsByCode(client, t.id, ["5210", "2300"]);
+      await postExactJournalEntry(client, {
+        businessId: t.id, locationId: null, entryDate: await businessDay.businessToday(t.id),
+        memo: "اختلاف واقعی برای آزمون", sourceType: "manual", sourceId: randomUUID(), createdBy: t.approver.userId,
+        lines: [ { accountId: accounts.get("5210")!, debit: asRial(difference), credit: asRial(0n) },
+          { accountId: accounts.get("2300")!, debit: asRial(0n), credit: asRial(difference) } ],
+      });
+    }));
+    expect(await tieOut(t)).toMatchObject({ difference: difference.toString(), subledgerDifference: "0", accruedTotal: "5000" });
+    const payroll = await import("../src/lib/payroll-service");
+    expect((await payroll.getPayrollLiability(t.id)).difference).toBe(difference.toString());
+  });
+});

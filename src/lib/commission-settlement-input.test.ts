@@ -10,6 +10,7 @@ import {
   parseRialAmount,
   parseRunLinesQuery,
   parseRunListQuery,
+  parseStatementQuery,
   parseVoidBody,
 } from "./commission-settlement-input";
 
@@ -181,5 +182,17 @@ describe("lists and exports", () => {
     expect(codeOf(() => parseRunLinesQuery(new URLSearchParams("employeeId=nope")))).toBe("invalid_employee");
     expect(parseEmployeeParam(new URLSearchParams(`employeeId=${EMP}`))).toBe(EMP);
     expect(codeOf(() => parseEmployeeParam(new URLSearchParams("")))).toBe("employee_required");
+  });
+});
+
+describe("statement history pages", () => {
+  it("keeps independent offsets and bounded limits with original-date filters", () => {
+    expect(parseStatementQuery(new URLSearchParams(`limit=100&accrualOffset=500&payoutOffset=600&dateFrom=2026-01-01&dateTo=2026-10-15&runId=${EMP}&format=csv`)))
+      .toEqual({ limit: 100, accrualOffset: 500, payoutOffset: 600, dateFrom: "2026-01-01", dateTo: "2026-10-15", runId: EMP, format: "csv" });
+  });
+  it.each([ ["limit=501", "invalid_limit"], ["payoutOffset=-1", "invalid_offset"],
+    ["accrualOffset=1.5", "invalid_offset"], ["dateFrom=2026-02-30", "invalid_period"],
+    ["dateFrom=2026-10-15&dateTo=2026-10-01", "invalid_period_range"], ["runId=bad", "run_not_found"] ])("refuses %s", (query, code) => {
+    expect(codeOf(() => parseStatementQuery(new URLSearchParams(query)))).toBe(code);
   });
 });

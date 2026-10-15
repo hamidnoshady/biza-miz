@@ -284,3 +284,20 @@ balance and one file.
 - Inventory’s distinct underlying data models and their posting safeguards.
 - Dashboard surfaces that are not in the retirement table, such as
   `/dashboard/orders`.
+
+
+## Commission settlement boundary (#869 completion, 2026-10-15)
+
+Commission approval and standalone payouts remain in Growth at `/growth/commission/runs`
+and `/growth/commission/runs/[id]`; they are not another payroll engine or Accounting menu.
+Their journals link to the existing journal workspace, and seller statements link sales,
+standalone runs and the canonical payroll workspace. Legacy payroll sources use
+`/accounting/payroll?run=<id>`: the existing Accounting page/section gates remain intact,
+and the source panel fetches the exact run through the existing `payroll.view` API,
+not from the first history page. It opens immutable lines read-only, aborts/ignores stale
+responses, and shows explicit missing/foreign/error/retry states. It does not select an
+engine run or create a second payroll navigation item. The normal monthly workspace
+and its permitted mutation controls remain unchanged.
+Both payroll and Growth reconcile against account 2300 through the existing tenant-scoped
+read-only snapshot helper. A real difference stays visible. See
+[commission settlement](commission-settlement.md) for exact contracts and outstanding gates.

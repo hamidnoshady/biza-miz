@@ -147,13 +147,7 @@ interface PaymentAccount {
   role: "cash" | "bank" | "petty_cash";
 }
 
-interface StatementData {
-  employee: { id: string; fullName: string; employeeCode: string | null; isActive: boolean };
-  totals: { accrued: string; paidThroughPayroll: string; paidThroughRuns: string; unpaid: string };
-  accruals: { id: string; saleDate: string | null; sourceLabel: string; orderNumber: string | null; amount: string; settledRef: string | null }[];
-  payouts: { payoutId: string; runNumber: number; kind: "payout" | "reversal"; amount: string; paidDate: string; entryId: string | null }[];
-  truncated: boolean;
-}
+type StatementData = import("@/lib/commission-settlement-service").CommissionStatement;
 
 const PAGE_SIZE = 100;
 
@@ -229,10 +223,6 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
     commissionSettlementErrorMessage,
   );
   const accounts = accountsRequest.data?.accounts ?? [];
-  const statementRequest = useKeyedRequest<StatementData>(
-    statementFor ? `/api/commission/statement?employeeId=${encodeURIComponent(statementFor)}` : null,
-    commissionSettlementErrorMessage,
-  );
 
   const loadRun = useCallback(async () => {
     setLoadError("");
@@ -354,7 +344,7 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
             {run.warnings.some((warning) => warning.code === "claimed_by_payroll") ? (
               <p className="mt-3 text-sm">
                 <Link href={accountingSectionHref("payroll")} className="text-primary underline-offset-4 hover:underline">
-                  دیدن فیش‌های حقوقی که این ردیف‌ها را پرداخته‌اند
+                  دیدن لیست‌های حقوقِ نگهدارندهٔ این ردیف‌ها
                 </Link>
               </p>
             ) : null}
@@ -476,11 +466,9 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
         />
 
         {statementFor ? (
-          <StatementCard
-            status={statementRequest.status}
-            statement={statementRequest.data}
-            error={statementRequest.error}
-            onRetry={statementRequest.retry}
+          <CommissionStatementCard
+            key={statementFor}
+            employeeId={statementFor}
             money={money}
             onClose={() => setStatementFor(null)}
           />
@@ -703,7 +691,7 @@ function PayoutFormCard({
                 <option value="method:bank">{methodLabel("bank")}</option>
               </select>
             </Field>
-            <Field label="تاریخ پرداخت">
+            <Field as="div" label="تاریخ پرداخت">
               <JalaliDatePicker value={paidDate} onChange={setPaidDate} ariaLabel="تاریخ پرداخت" />
             </Field>
             <Field label="یادداشت (اختیاری)">
@@ -827,69 +815,96 @@ function RetryNotice({ message, onRetry }: { message: string; onRetry: () => voi
   );
 }
 
-function StatementCard({
-  status,
-  statement,
-  error,
-  onRetry,
-  money,
-  onClose,
-}: {
-  status: KeyedRequestStatus;
-  statement: StatementData | null;
-  error: string;
-  onRetry: () => void;
+export function CommissionStatementCard({ employeeId, money, onClose }: {
+  employeeId: string;
   money: MoneyApi;
   onClose: () => void;
 }) {
+  const [accrualOffset, setAccrualOffset] = useState(0);
+  const [payoutOffset, setPayoutOffset] = useState(0);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [runId, setRunId] = useState("");
+  // Selection labels survive a request; financial rows/totals still belong
+  // exclusively to the current URL. The card is keyed by employeeId.
+  const [runOptions, setRunOptions] = useState<{ runId: string; runNumber: number }[]>([]);
+  const params = new URLSearchParams({ employeeId, limit: String(PAGE_SIZE),
+    accrualOffset: String(accrualOffset), payoutOffset: String(payoutOffset) });
+  if (dateFrom) params.set("dateFrom", dateFrom);
+  if (dateTo) params.set("dateTo", dateTo);
+  if (runId) params.set("runId", runId);
+  const request = useKeyedRequest<StatementData>(`/api/commission/statement?${params}`, commissionSettlementErrorMessage);
+  const statement = request.data;
+  useEffect(() => {
+    if (statement) setRunOptions(statement.runs.map(({ runId, runNumber }) => ({ runId, runNumber })));
+  }, [statement]);
+  const csvParams = new URLSearchParams(params);
+  csvParams.set("format", "csv");
+  function filter(set: (value: string) => void, value: string) {
+    setAccrualOffset(0); setPayoutOffset(0); set(value);
+  }
+  const pager = (kind: "accrual" | "payout", more: boolean) => {
+    const offset = kind === "accrual" ? accrualOffset : payoutOffset;
+    const set = kind === "accrual" ? setAccrualOffset : setPayoutOffset;
+    return <div className="flex flex-wrap gap-2">
+      <Button variant="outline" size="sm" aria-label={kind === "accrual" ? "ثبت‌های قبلی" : "پرداخت‌های قبلی"}
+        disabled={offset === 0} onClick={() => set(Math.max(0, offset - PAGE_SIZE))}>قبلی</Button>
+      <Button variant="outline" size="sm" aria-label={kind === "accrual" ? "ثبت‌های بعدی" : "پرداخت‌های بعدی"}
+        disabled={!more} onClick={() => set(offset + PAGE_SIZE)}>بعدی</Button>
+    </div>;
+  };
   return (
     <SectionCard
       title={<CardTitle eyebrow="صورت‌حساب" title={statement ? `صورت‌حساب ${statement.employee.fullName}` : "صورت‌حساب فروشنده"} />}
-      actions={
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          بستن
-        </Button>
-      }
+      actions={<Button variant="ghost" size="sm" onClick={onClose}>بستن</Button>}
     >
-      {status === "error" ? (
-        <div className="p-4">
-          <RetryNotice message={error} onRetry={onRetry} />
+      <div className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field as="div" label="از تاریخ فروش یا پرداخت"><JalaliDatePicker value={dateFrom} onChange={(value) => filter(setDateFrom, value)} ariaLabel="از تاریخ صورت‌حساب" /></Field>
+          <Field as="div" label="تا تاریخ فروش یا پرداخت"><JalaliDatePicker value={dateTo} onChange={(value) => filter(setDateTo, value)} ariaLabel="تا تاریخ صورت‌حساب" /></Field>
+          <Field label="دوره تسویه"><select className={inputClass} value={runId} onChange={(e) => filter(setRunId, e.target.value)}>
+            <option value="">همهٔ دوره‌ها</option>
+            {runOptions.map((run) => <option key={run.runId} value={run.runId}>دورهٔ {formatPersianNumber(run.runNumber)}</option>)}
+          </select></Field>
         </div>
-      ) : status !== "ready" || !statement ? (
-        <LoadingSkeleton rows={3} compact />
-      ) : (
-        <div className="space-y-4">
+        <Button variant="outline" size="sm" asChild><a href={`/api/commission/statement?${csvParams}`} download>خروجی کامل CSV</a></Button>
+        <InfoBox>جمع‌ها مربوط به کل سابقهٔ فروشنده‌اند، نه صفحه یا بازهٔ انتخاب‌شده. ردیف‌های ثبت و پرداخت جداگانه صفحه‌بندی می‌شوند.</InfoBox>
+        {request.status === "error" ? <RetryNotice message={request.error} onRetry={request.retry} />
+          : request.status !== "ready" || !statement ? <LoadingSkeleton rows={3} compact /> : <>
           <KpiRow>
             <KpiCard label="کل پورسانت ثبت‌شده" value={money.formatText(statement.totals.accrued)} />
             <KpiCard label="پرداخت از طریق حقوق" value={money.formatText(statement.totals.paidThroughPayroll)} />
             <KpiCard label="پرداخت از طریق دوره‌های تسویه" value={money.formatText(statement.totals.paidThroughRuns)} />
             <KpiCard label="هنوز پرداخت‌نشده" value={money.formatText(statement.totals.unpaid)} />
           </KpiRow>
-          {statement.accruals.length === 0 ? (
-            <EmptyState>برای این فروشنده هنوز پورسانتی ثبت نشده است.</EmptyState>
-          ) : (
-            <DataTable caption="ردیف‌های پورسانت فروشنده" frame>
-              <DataTableHead>
-                <Th>تاریخ فروش</Th>
-                <Th>منبع</Th>
-                <Th numeric>مبلغ</Th>
-                <Th>وضعیت</Th>
-              </DataTableHead>
-              <DataTableBody>
-                {statement.accruals.map((row) => (
-                  <DataTableRow key={row.id}>
-                    <Td nowrap>{shamsiDate(row.saleDate)}</Td>
-                    <Td>{row.sourceLabel}</Td>
-                    <Td numeric>{money.formatText(row.amount)}</Td>
-                    <Td>{row.settledRef ?? "در انتظار تسویه"}</Td>
-                  </DataTableRow>
-                ))}
-              </DataTableBody>
-            </DataTable>
-          )}
-          {statement.truncated ? <InfoBox>فقط بخشی از ردیف‌ها نمایش داده شده است؛ برای همهٔ آن‌ها از گزارش استفاده کنید.</InfoBox> : null}
-        </div>
-      )}
+          <DataTable caption="ردیف‌های پورسانت فروشنده" frame>
+            <DataTableHead><Th>تاریخ فروش</Th><Th>منبع</Th><Th numeric>مبلغ</Th><Th>وضعیت</Th><Th>سند</Th></DataTableHead>
+            <DataTableBody>
+              {statement.accruals.map((row) => <DataTableRow key={row.id}>
+                <Td nowrap>{shamsiDate(row.saleDate)}</Td>
+                <Td>{row.orderId ? <Link href={`/accounting/orders?order=${encodeURIComponent(row.orderId)}`} className="text-primary hover:underline">{row.sourceLabel}</Link> : row.sourceLabel}</Td>
+                <Td numeric>{money.formatText(row.amount)}</Td>
+                <Td>{row.settlementRunId ? <Link href={`/growth/commission/runs/${row.settlementRunId}`} className="text-primary hover:underline">{row.settledRef}</Link>
+                  : row.payrollRunId ? <Link href={`${accountingSectionHref("payroll")}?run=${encodeURIComponent(row.payrollRunId)}`} className="text-primary hover:underline">{row.settledRef}</Link>
+                  : "در انتظار تسویه"}</Td>
+                <Td>{row.entryId ? <Link href={journalHref(row.entryId)!} className="text-primary hover:underline">سند</Link> : "—"}</Td>
+              </DataTableRow>)}
+            </DataTableBody>
+          </DataTable>
+          {statement.accruals.length === 0 ? <EmptyState>ردیفی برای این انتخاب نیست.</EmptyState> : null}
+          {pager("accrual", statement.page.hasMoreAccruals)}
+          <DataTable caption="پرداخت‌های پورسانت فروشنده" frame>
+            <DataTableHead><Th>تاریخ</Th><Th>نوع</Th><Th numeric>مبلغ</Th><Th>دوره</Th><Th>سند</Th></DataTableHead>
+            <DataTableBody>{statement.payouts.map((row) => <DataTableRow key={row.payoutId}>
+              <Td nowrap>{shamsiDate(row.paidDate)}</Td><Td>{payoutKindLabel(row.kind)}</Td><Td numeric>{money.formatText(row.amount)}</Td>
+              <Td><Link href={`/growth/commission/runs/${row.runId}`} className="text-primary hover:underline">{formatPersianNumber(row.runNumber)}</Link></Td>
+              <Td>{row.entryId ? <Link href={journalHref(row.entryId)!} className="text-primary hover:underline">سند</Link> : "—"}</Td>
+            </DataTableRow>)}</DataTableBody>
+          </DataTable>
+          {statement.payouts.length === 0 ? <EmptyState>پرداختی برای این انتخاب نیست.</EmptyState> : null}
+          {pager("payout", statement.page.hasMorePayouts)}
+        </>}
+      </div>
     </SectionCard>
   );
 }

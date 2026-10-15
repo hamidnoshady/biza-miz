@@ -24,6 +24,13 @@ import type { PayrollPaymentAccount } from "./payroll-types";
 
 export interface ChartAccountRow extends ClassifiableAccount {
   name: string;
+  /** Null/absent is a legacy Rial account; explicit foreign currency needs an FX document. */
+  currencyCode?: string | null;
+}
+
+/** Payroll/commission are integer-Rial flows, not foreign-currency settlements. */
+export function isRialPayoutCurrency(currencyCode: string | null | undefined): boolean {
+  return currencyCode == null || currencyCode === "IRR";
 }
 
 /**
@@ -37,7 +44,7 @@ export function usablePaymentAccounts(chart: readonly ChartAccountRow[]): Payrol
   for (const account of chart) if (account.parentId) parents.add(account.parentId);
 
   return chart
-    .filter((account) => account.type === "asset" && !parents.has(account.id))
+    .filter((account) => account.type === "asset" && !parents.has(account.id) && isRialPayoutCurrency(account.currencyCode))
     .flatMap((account) => {
       const role = roles.get(account.id);
       if (!isUsableLiquidity(role)) return [];

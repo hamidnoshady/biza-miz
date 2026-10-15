@@ -95,7 +95,7 @@ export interface PayrollClaim {
 }
 
 export interface UnmappedSeller {
-  employeeId: string;
+  employeeId: string | null;
   fullName: string;
   /** Sale lines the seller rang up in the period. */
   lines: number;
@@ -135,7 +135,7 @@ export type PlanWarning =
   | { code: "earlier_rows_included"; rows: number; before: string }
   | { code: "inactive_member"; employees: { employeeId: string; fullName: string }[] }
   | { code: "rule_missing"; rows: number }
-  | { code: "unmapped_seller"; lines: number; sellers: { employeeId: string; fullName: string; lines: number; salesValue: string }[] };
+  | { code: "unmapped_seller"; lines: number; sellers: { employeeId: string | null; fullName: string; lines: number; salesValue: string }[] };
 
 export interface PlanMember {
   employeeId: string;

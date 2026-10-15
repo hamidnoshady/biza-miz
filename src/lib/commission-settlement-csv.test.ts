@@ -51,6 +51,13 @@ describe("the lines export", () => {
   });
 });
 
+describe("signed return exports", () => {
+  it("keeps negative adjustments and the final Rial digit", () => {
+    expect(runLinesToCsv([{ ...LINE, amount: "-21" }], "toman")).toContain("'-2.1");
+    expect(runLinesToCsv([{ ...LINE, amount: "-21" }], "rial")).toContain("'-21");
+  });
+});
+
 describe("the runs export", () => {
   it("lists status in words and the outstanding balance", () => {
     const csv = runsToCsv(
@@ -76,5 +83,27 @@ describe("the runs export", () => {
     expect(header).toContain("باقی‌مانده (ریال)");
     expect(row).toContain("پرداخت بخشی");
     expect(row).toContain(",300000,");
+  });
+});
+
+describe("statement export", () => {
+  it("exports signed history, drill-down ids, lifetime totals, Shamsi dates and safe text in the selected unit", async () => {
+    const { statementToCsv } = await import("./commission-settlement-csv");
+    const csv = statementToCsv({
+      employee: { id: "seller", fullName: "=1+1", employeeCode: null, role: null, isActive: true },
+      totals: { accrued: "90071992547409930", paidThroughPayroll: "10", paidThroughRuns: "20", unpaid: "90071992547409900" },
+      accruals: [{ id: "accrual", saleDate: "2026-10-05", sourceLabel: "فروش", orderNumber: "1", orderId: "sale",
+        entryId: "journal", settlementRunId: "run", payrollRunId: null, amount: "100", settledBy: "run", settledRef: null }],
+      payouts: [{ payoutId: "reversal", runId: "run", runNumber: 1, kind: "reversal", amount: "-20", paidDate: "2026-10-05", entryId: "mirror" }],
+      runs: [], page: { limit: 500, accrualOffset: 0, payoutOffset: 0, hasMoreAccruals: false, hasMorePayouts: false }, truncated: false,
+    }, "toman");
+    expect(csv.startsWith("\uFEFF")).toBe(true);
+    expect(csv).toContain("9007199254740993");
+    expect(csv).not.toContain("2026-10-05");
+    expect(csv).not.toContain(",=1+1,");
+    expect(csv).toContain("برگشت پرداخت");
+    expect(csv).toContain("mirror");
+    expect(csv).toContain("sale");
+    expect(csv).toContain("-2");
   });
 });

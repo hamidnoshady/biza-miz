@@ -136,3 +136,13 @@ export function sumRialText(values: readonly string[]): string {
   for (const value of values) total += BigInt(value);
   return total.toString();
 }
+
+/** Exact signed export text; unlike integer inputs, a Toman file preserves the last Rial digit. */
+export function moneyToExportText(rialText: string, unit: MoneyUnit): string {
+  if (!/^-?\d+$/.test(rialText)) throw new Error(`Not a valid amount: ${rialText}`);
+  const value = BigInt(rialText);
+  if (unit === "rial") return value.toString();
+  const magnitude = value < 0n ? -value : value;
+  const fraction = magnitude % 10n;
+  return `${value < 0n ? "-" : ""}${magnitude / 10n}${fraction ? `.${fraction}` : ""}`;
+}
