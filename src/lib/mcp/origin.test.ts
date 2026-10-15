@@ -4,7 +4,12 @@
  * — which resolutions may serve which business — is pure and pinned here.
  */
 import { describe, expect, it } from "vitest";
-import { mcpHostAllowsBusiness, type McpTenantResolution } from "./origin";
+import {
+  labelledBusinessHost,
+  mcpHostAllowsBusiness,
+  mcpTenantErrorDescription,
+  type McpTenantResolution,
+} from "./origin";
 
 const BIZ_A = "aaaaaaaa-0000-0000-0000-00000000000a";
 const BIZ_B = "bbbbbbbb-0000-0000-0000-00000000000b";
@@ -47,5 +52,29 @@ describe("mcpHostAllowsBusiness", () => {
     // unconnectable. The token still names the business by itself.
     expect(mcpHostAllowsBusiness({ ok: false, reason: "ambiguous" }, BIZ_A)).toBe(true);
     expect(mcpHostAllowsBusiness({ ok: false, reason: "ambiguous" }, BIZ_B)).toBe(true);
+  });
+});
+
+describe("labelledBusinessHost — the routing-off fallback", () => {
+  it("reads a business label under the root, the shape OAuth needs with SUBDOMAIN_ROUTING=off", () => {
+    expect(labelledBusinessHost("titea.app.eshobe.com", "app.eshobe.com")).toBe("titea");
+    expect(labelledBusinessHost("TITEA.app.eshobe.com:443", "app.eshobe.com")).toBe("titea");
+  });
+
+  it("names no business for the apex, the console, a foreign host or a missing root", () => {
+    expect(labelledBusinessHost("app.eshobe.com", "app.eshobe.com")).toBeNull();
+    expect(labelledBusinessHost("admin.app.eshobe.com", "app.eshobe.com")).toBeNull();
+    expect(labelledBusinessHost("titea.example.com", "app.eshobe.com")).toBeNull();
+    expect(labelledBusinessHost("titea.app.eshobe.com", "")).toBeNull();
+  });
+});
+
+describe("mcpTenantErrorDescription", () => {
+  it("never leaks the internal resolution code", () => {
+    for (const reason of ["unknown_host", "not_a_business_host", "suspended", "ambiguous"] as const) {
+      const text = mcpTenantErrorDescription(reason);
+      expect(text).not.toContain(reason);
+      expect(text).not.toContain("unknown resource host");
+    }
   });
 });

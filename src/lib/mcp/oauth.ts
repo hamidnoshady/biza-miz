@@ -168,29 +168,52 @@ export function isAllowedRedirectUri(value: unknown): value is string {
  * registration time.
  */
 export function matchesRegisteredRedirectUri(requested: string, registered: readonly string[]): boolean {
-  if (registered.includes(requested)) return true;
+  return canonicalRedirectUri(requested, registered) !== null;
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * The registered redirect URI a request is for, with the loopback port the
+ * request carried — or null when it matches none.
+ *
+ * Loopback host names are treated as one host because Next.js rewrites them:
+ * `NextURL` replaces every `127.0.0.1` and `[::1]` in a request URL with
+ * `localhost`, *query string included*, so a client that registered
+ * `http://127.0.0.1:6274/cb` arrives at `/authorize` asking for
+ * `http://localhost:6274/cb`. Returning the registered spelling sends the code
+ * back to the address the client actually listens on. All three names are the
+ * caller's own machine, so the equivalence widens nothing beyond it.
+ */
+export function canonicalRedirectUri(requested: string, registered: readonly string[]): string | null {
+  if (registered.includes(requested)) return requested;
   let want: URL;
   try {
     want = new URL(requested);
   } catch {
-    return false;
+    return null;
   }
-  if (want.protocol !== "http:") return false;
-  if (want.hostname !== "127.0.0.1" && want.hostname !== "localhost" && want.hostname !== "[::1]") {
-    return false;
-  }
-  return registered.some((candidate) => {
+  if (want.protocol !== "http:" || !LOOPBACK_HOSTS.has(want.hostname)) return null;
+  for (const candidate of registered) {
+    let have: URL;
     try {
-      const have = new URL(candidate);
-      return (
-        have.protocol === "http:" &&
-        have.hostname === want.hostname &&
-        have.pathname === want.pathname
-      );
+      have = new URL(candidate);
     } catch {
-      return false;
+      continue;
     }
-  });
+    if (have.protocol !== "http:" || !LOOPBACK_HOSTS.has(have.hostname)) continue;
+    if (have.pathname !== want.pathname || have.search !== want.search) continue;
+    const resolved = new URL(candidate);
+    resolved.port = want.port;
+    return resolved.toString();
+  }
+  return null;
+}
+
+/** Whether two redirect URIs name the same place, allowing the loopback rewrite above. */
+export function sameRedirectUri(a: string, b: string): boolean {
+  if (a === b) return true;
+  return canonicalRedirectUri(a, [b]) === b;
 }
 
 /** Builds the redirect back to the client, preserving `state` exactly as it arrived. */

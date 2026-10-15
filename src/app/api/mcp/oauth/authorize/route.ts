@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenant } from "@/lib/db";
 import { buildRedirect } from "@/lib/mcp/oauth";
 import { validateAuthorizationRequest } from "@/lib/mcp/oauth-service";
-import { resolveMcpTenant } from "@/lib/mcp/origin";
+import { mcpTenantErrorDescription, resolveMcpTenant } from "@/lib/mcp/origin";
 
 /**
  * The OAuth authorization endpoint.
@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
   const tenant = await resolveMcpTenant(request.headers);
   if (!tenant.ok) {
     return NextResponse.json(
-      { error: "invalid_request", error_description: `unknown resource host (${tenant.reason})` },
+      { error: "invalid_request", error_description: mcpTenantErrorDescription(tenant.reason) },
       { status: 400 },
     );
   }
