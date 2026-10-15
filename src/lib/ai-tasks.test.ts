@@ -4,9 +4,12 @@ import {
   AI_TASKS,
   CUSTOM_TASK_FRAME,
   SUGGESTED_PROMPTS,
+  isFocusEligible,
   isTaskEligible,
+  resolveAccessibleFocuses,
   resolveEligibleTasks,
   resolveStarterPrompts,
+  resolveTenantTaskFeatures,
   sanitizeCustomTask,
   taskById,
   taskDirectiveFor,
@@ -119,6 +122,31 @@ describe("taskDirectiveFor", () => {
         eligibility: { industry: "wholesale", permissions: ["customers.view"] },
       }),
     ).toBeNull();
+
+    // Feature-flag gating on taskDirectiveFor
+    expect(
+      taskDirectiveFor({
+        task: "inventory",
+        mode: "dashboard",
+        eligibility: {
+          industry: "food_service",
+          features: { inventory: false },
+          permissions: ["inventory.view"],
+        },
+      }),
+    ).toBeNull();
+
+    expect(
+      taskDirectiveFor({
+        task: "accounting",
+        mode: "dashboard",
+        eligibility: {
+          industry: "food_service",
+          features: { ledger: false },
+          permissions: ["ledger.view"],
+        },
+      }),
+    ).toBeNull();
   });
 });
 
@@ -175,5 +203,125 @@ describe("isTaskEligible, resolveEligibleTasks, and resolveStarterPrompts", () =
       projectId: "proj-1",
     });
     expect(projectPrompts[0]).toContain("پروژه");
+  });
+
+  it("normalizes DB feature flags and app availability via resolveTenantTaskFeatures (including retail stock vs F&B inventory)", () => {
+    // Retail trade (`jewelry`) seeds `inventory: false` in DB `defaultDisabledFeatures`,
+    // while using module `stock`. `resolveTenantTaskFeatures` keeps `inventory` task feature enabled for retail stock.
+    const jewelryFeatures = resolveTenantTaskFeatures(
+      { inventory: false, reservations: false, delivery: false, ledger: true, reporting: true },
+      { industry: "jewelry" },
+    );
+    expect(jewelryFeatures.inventory).toBe(true);
+    expect(
+      isTaskEligible("inventory", {
+        mode: "dashboard",
+        industry: "jewelry",
+        features: jewelryFeatures,
+        permissions: ["inventory.view"],
+      }),
+    ).toBe(true);
+
+    // Food service with `inventory: false` in DB disables the `inventory` task
+    const cafeFeatures = resolveTenantTaskFeatures(
+      { inventory: false, reservations: false, delivery: false, ledger: true, reporting: true },
+      { industry: "food_service" },
+    );
+    expect(cafeFeatures.inventory).toBe(false);
+    expect(cafeFeatures.reservations).toBe(false);
+    expect(cafeFeatures.delivery).toBe(false);
+    expect(
+      isTaskEligible("inventory", {
+        mode: "dashboard",
+        industry: "food_service",
+        features: cafeFeatures,
+        permissions: ["inventory.view"],
+      }),
+    ).toBe(false);
+    expect(
+      isTaskEligible("operations", {
+        mode: "dashboard",
+        industry: "food_service",
+        features: cafeFeatures,
+        permissions: ["tables.manage"],
+      }),
+    ).toBe(false);
+    expect(
+      isTaskEligible("delivery", {
+        mode: "dashboard",
+        industry: "food_service",
+        features: cafeFeatures,
+        permissions: ["delivery.manage"],
+      }),
+    ).toBe(false);
+  });
+
+  it("ensures restricted users never receive task options, focuses, or starter suggestions for unavailable functions", () => {
+    // 1. User with ONLY `inventory.view` (no ledger, reports, workspace, CRM, growth, website)
+    const invOnlyContext = {
+      mode: "dashboard" as const,
+      industry: "wholesale" as const,
+      permissions: ["ai.use", "inventory.view"],
+    };
+    const invTasks = resolveEligibleTasks(invOnlyContext, { includeCustom: false }).map(
+      (t) => t.id,
+    );
+    expect(invTasks).toEqual(["general", "inventory"]);
+
+    const invFocuses = resolveAccessibleFocuses(invOnlyContext);
+    expect(invFocuses).toEqual(["all", "accounting"]);
+    expect(isFocusEligible("workspace", invOnlyContext)).toBe(false);
+    expect(isFocusEligible("crm", invOnlyContext)).toBe(false);
+
+    // Default "all" focus starters must ONLY suggest inventory prompts, never sales/ledger/workspace/CRM
+    const invStartersAll = resolveStarterPrompts(invOnlyContext);
+    expect(invStartersAll).toEqual(taskById("inventory")!.suggestions);
+
+    // Even when `appFocus: "accounting"` is active, restricted user only gets inventory prompts (not ledger/sales)
+    const invStartersAccounting = resolveStarterPrompts({
+      ...invOnlyContext,
+      appFocus: "accounting",
+    });
+    expect(invStartersAccounting).toEqual(taskById("inventory")!.suggestions);
+
+    // Even when `projectId` is passed, restricted user without `workspace.view` does NOT get project prompts
+    const invStartersWithProject = resolveStarterPrompts({
+      ...invOnlyContext,
+      projectId: "proj-1",
+    });
+    expect(invStartersWithProject).toEqual(taskById("inventory")!.suggestions);
+    for (const p of invStartersWithProject) {
+      expect(p).not.toContain("پروژه");
+    }
+
+    // 2. User with ONLY `ai.use` and zero domain permissions
+    const chatOnlyContext = {
+      mode: "dashboard" as const,
+      industry: "food_service" as const,
+      permissions: ["ai.use"],
+    };
+    expect(
+      resolveEligibleTasks(chatOnlyContext, { includeCustom: false }).map((t) => t.id),
+    ).toEqual(["general"]);
+    expect(resolveAccessibleFocuses(chatOnlyContext)).toEqual(["all"]);
+    const chatOnlyStarters = resolveStarterPrompts(chatOnlyContext);
+    expect(chatOnlyStarters).toHaveLength(3);
+    for (const prompt of chatOnlyStarters) {
+      expect(prompt).not.toContain("فروش");
+      expect(prompt).not.toContain("حساب");
+      expect(prompt).not.toContain("پروژه");
+      expect(prompt).not.toContain("منو");
+      expect(prompt).not.toContain("مشتریان در خطر");
+    }
+
+    // 3. Floor mode with `reservations: false` excludes table bill-split prompt
+    const floorNoTables = resolveStarterPrompts({
+      mode: "floor",
+      industry: "food_service",
+      features: { reservations: false },
+      permissions: ["menu.view"],
+    });
+    expect(floorNoTables.some((p) => p.includes("میز"))).toBe(false);
+    expect(floorNoTables.some((p) => p.includes("منو"))).toBe(true);
   });
 });

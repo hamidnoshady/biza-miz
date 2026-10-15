@@ -49,12 +49,14 @@ vi.mock("@/lib/auth", () => ({
 
 const listConversations = vi.fn();
 const listConversationsByProject = vi.fn();
+const getConversationMode = vi.fn();
 const getConversationMessages = vi.fn();
 const renameConversation = vi.fn();
 const deleteConversation = vi.fn();
 vi.mock("@/lib/ai-conversations", () => ({
   listConversations: (...args: unknown[]) => listConversations(...args),
   listConversationsByProject: (...args: unknown[]) => listConversationsByProject(...args),
+  getConversationMode: (...args: unknown[]) => getConversationMode(...args),
   getConversationMessages: (...args: unknown[]) => getConversationMessages(...args),
   renameConversation: (...args: unknown[]) => renameConversation(...args),
   deleteConversation: (...args: unknown[]) => deleteConversation(...args),
@@ -190,18 +192,19 @@ function jsonRequest(url: string, method: string, body?: unknown) {
  * asked-for capability is absent, so a boundary is asserted by status instead
  * of inferred from the fact that the route asked.
  */
-function asCaller(permissions: string[]) {
+function asCaller(permissions: string[], role = SESSION.role) {
+  const sessionWithRole = { ...SESSION, role };
   requirePermission.mockImplementation(async (capability: string) => {
     if (!permissions.includes(capability)) {
       return {
-        session: SESSION,
-        membership: { permissions: new Set(permissions) },
+        session: sessionWithRole,
+        membership: { permissions: new Set(permissions), role },
         error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
       };
     }
     return {
-      session: SESSION,
-      membership: { permissions: new Set(permissions) },
+      session: sessionWithRole,
+      membership: { permissions: new Set(permissions), role },
       error: null,
     };
   });
@@ -209,18 +212,35 @@ function asCaller(permissions: string[]) {
     const allowed = capabilities.some((c) => permissions.includes(c));
     if (!allowed) {
       return {
-        session: SESSION,
-        membership: { permissions: new Set(permissions) },
+        session: sessionWithRole,
+        membership: { permissions: new Set(permissions), role },
         error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
       };
     }
     return {
-      session: SESSION,
-      membership: { permissions: new Set(permissions) },
+      session: sessionWithRole,
+      membership: { permissions: new Set(permissions), role },
       error: null,
     };
   });
-  getSession.mockImplementation(async () => SESSION);
+  requireFloorAssistant.mockImplementation(async () => {
+    if (
+      !permissions.includes(PERMISSIONS.menuView) ||
+      (role !== "cashier" && role !== "waiter")
+    ) {
+      return {
+        session: null,
+        membership: { permissions: new Set(permissions), role },
+        error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+      };
+    }
+    return {
+      session: sessionWithRole,
+      membership: { permissions: new Set(permissions), role },
+      error: null,
+    };
+  });
+  getSession.mockImplementation(async () => sessionWithRole);
 }
 
 /** The widget every widget test runs, overridable per case. */
@@ -541,6 +561,133 @@ describe("Issue #905 §10 — /api/ai/conversations transcript access and pagina
       { params: Promise.resolve({ id: convId }) },
     );
     expect(deleteRes.status).toBe(403);
+  });
+
+  it("blocks detail, rename, and delete on a dashboard conversation when ai.use is revoked even if menu.view remains", async () => {
+    asCaller([PERMISSIONS.menuView], "cashier");
+    getConversationMode.mockResolvedValue("dashboard");
+    const detailRoute = await import("./conversations/[id]/route");
+
+    const detailRes = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(detailRes.status).toBe(403);
+    expect(getConversationMessages).not.toHaveBeenCalled();
+
+    const renameRes = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "عنوان تازه",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(renameRes.status).toBe(403);
+    expect(renameConversation).not.toHaveBeenCalled();
+
+    const deleteRes = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(deleteRes.status).toBe(403);
+    expect(deleteConversation).not.toHaveBeenCalled();
+  });
+
+  it("enforces canonical requireFloorAssistant on floor conversations across GET, PATCH, and DELETE", async () => {
+    getConversationMode.mockResolvedValue("floor");
+    const detailRoute = await import("./conversations/[id]/route");
+
+    // A manager holding ai.use + menu.view is NOT a floor role (cashier/waiter)
+    asCaller([PERMISSIONS.aiUse, PERMISSIONS.menuView], "manager");
+    const managerGet = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(managerGet.status).toBe(403);
+
+    const managerPatch = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "میز ۳",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(managerPatch.status).toBe(403);
+    expect(renameConversation).not.toHaveBeenCalled();
+
+    const managerDelete = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(managerDelete.status).toBe(403);
+    expect(deleteConversation).not.toHaveBeenCalled();
+
+    // An active waiter with menu.view passes requireFloorAssistant across GET, PATCH, DELETE
+    asCaller([PERMISSIONS.menuView], "waiter");
+    getConversationMessages.mockResolvedValueOnce({
+      conversation: {
+        id: convId,
+        mode: "floor",
+        title: "میز ۳",
+        lastMessageAt: "2026-03-01T12:00:00.000Z",
+        createdAt: "2026-03-01T11:00:00.000Z",
+        projectId: null,
+      },
+      messages: [],
+    });
+    renameConversation.mockResolvedValueOnce({
+      id: convId,
+      mode: "floor",
+      title: "میز ۴",
+      lastMessageAt: "2026-03-01T12:00:00.000Z",
+      createdAt: "2026-03-01T11:00:00.000Z",
+      projectId: null,
+    });
+    deleteConversation.mockResolvedValueOnce(true);
+
+    const waiterGet = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterGet.status).toBe(200);
+
+    const waiterPatch = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "میز ۴",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterPatch.status).toBe(200);
+
+    const waiterDelete = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterDelete.status).toBe(200);
+  });
+
+  it("returns 404 without leaking existence when conversation belongs to another member or business", async () => {
+    asCaller([PERMISSIONS.aiUse]);
+    getConversationMode.mockResolvedValue(null);
+    const detailRoute = await import("./conversations/[id]/route");
+
+    const getRes = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(getRes.status).toBe(404);
+
+    const patchRes = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "عنوان",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(patchRes.status).toBe(404);
+
+    const deleteRes = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(deleteRes.status).toBe(404);
   });
 
   it("forwards server-side q and compound cursor params and returns hasMore + nextCursor", async () => {

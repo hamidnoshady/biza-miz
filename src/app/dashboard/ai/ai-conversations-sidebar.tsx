@@ -13,6 +13,9 @@
  *   («پیش‌تر») in the Persian/Shamsi calendar.
  * - Distinguishes loading, persistent inline error with Retry («تلاش مجدد»),
  *   search-empty, and empty-history states.
+ * - Strict request ownership across list reload, search, refreshToken, older-page
+ *   pagination, failures, and unmount so delayed responses never overwrite or
+ *   append onto a newer list or cursor.
  * - Uses a keyboard- and touch-accessible row action menu (`DropdownMenu`) with
  *   inline rename and explicit labelled destructive confirmation (no false Undo
  *   for hard deletion).
@@ -68,6 +71,17 @@ const BUCKET_ORDER: readonly ConversationDateBucket[] = [
   "earlier",
 ];
 
+function resolvePersianErrorMessage(reason: unknown, fallback: string): string {
+  if (!(reason instanceof Error) || !reason.message) return fallback;
+  if (
+    reason instanceof TypeError ||
+    /^(failed to fetch|networkerror|load failed|fetch failed)/i.test(reason.message.trim())
+  ) {
+    return fallback;
+  }
+  return reason.message;
+}
+
 export function AiConversationsSidebar({
   activeId,
   /** Bumped by the parent when a new conversation may have been created. */
@@ -92,76 +106,165 @@ export function AiConversationsSidebar({
   const [nextCursor, setNextCursor] = useState<NextCursor | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const locked = useFeatureLocked();
+
+  const mountedRef = useRef(true);
   const requestSeqRef = useRef(0);
+  const pageSeqRef = useRef(0);
+  const listAbortRef = useRef<AbortController | null>(null);
+  const pageAbortRef = useRef<AbortController | null>(null);
+  const prevQueryRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestSeqRef.current += 1;
+      pageSeqRef.current += 1;
+      listAbortRef.current?.abort();
+      pageAbortRef.current?.abort();
+    };
+  }, []);
+
+  const invalidateInFlightRequests = useCallback(() => {
+    requestSeqRef.current += 1;
+    pageSeqRef.current += 1;
+    listAbortRef.current?.abort();
+    pageAbortRef.current?.abort();
+    listAbortRef.current = null;
+    pageAbortRef.current = null;
+    if (mountedRef.current) {
+      setLoadingMore(false);
+    }
+  }, []);
+
+  const reload = useCallback(
+    async (searchOverride?: string) => {
+      const searchNeedle = (searchOverride ?? query).trim();
+      invalidateInFlightRequests();
+
+      if (locked) {
+        if (!mountedRef.current) return;
+        setActiveQuery(searchNeedle);
+        setItems([]);
+        setError(null);
+        setHasMore(false);
+        setNextCursor(null);
+        return;
+      }
+
+      const seq = requestSeqRef.current;
+      const controller = new AbortController();
+      listAbortRef.current = controller;
+
+      setActiveQuery(searchNeedle);
+      setError(null);
+
+      try {
+        const params = new URLSearchParams({ limit: "30", mode: "dashboard" });
+        if (searchNeedle) {
+          params.set("q", searchNeedle);
+        }
+        const response = await fetch(
+          `/api/ai/conversations?${params.toString()}`,
+          { signal: controller.signal },
+        );
+        if (
+          !mountedRef.current ||
+          controller.signal.aborted ||
+          requestSeqRef.current !== seq
+        ) {
+          return;
+        }
+        const data = (await response.json().catch(() => ({}))) as {
+          conversations?: ConversationSummary[];
+          hasMore?: boolean;
+          nextCursor?: NextCursor | null;
+          error?: string;
+          message?: string;
+        };
+        if (
+          !mountedRef.current ||
+          controller.signal.aborted ||
+          requestSeqRef.current !== seq
+        ) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(data.message ?? "خواندن گفتگوهای اخیر ممکن نشد.");
+        }
+        const list = (data.conversations ?? []).filter(
+          (item) => item.mode === "dashboard",
+        );
+        setItems(list);
+        setHasMore(Boolean(data.hasMore));
+        setNextCursor(data.nextCursor ?? null);
+        setError(null);
+      } catch (reason) {
+        if (
+          !mountedRef.current ||
+          controller.signal.aborted ||
+          requestSeqRef.current !== seq
+        ) {
+          return;
+        }
+        const msg = resolvePersianErrorMessage(
+          reason,
+          "خواندن گفتگوهای اخیر ممکن نشد.",
+        );
+        setError(msg);
+        setItems((current) => current ?? []);
+        setHasMore(false);
+        setNextCursor(null);
+      }
+    },
+    [invalidateInFlightRequests, locked, query],
+  );
 
   useEffect(() => {
     const trimmed = query.trim();
-    if (!trimmed) {
-      setDebouncedQuery("");
+    const queryChanged =
+      prevQueryRef.current !== null && prevQueryRef.current !== trimmed;
+    prevQueryRef.current = trimmed;
+
+    // Immediately invalidate any in-flight list or pagination request whenever
+    // query, refreshToken, or lock state changes, even before debounce fires.
+    invalidateInFlightRequests();
+
+    if (!queryChanged || !trimmed) {
+      void reload(trimmed);
       return;
     }
+
     const timer = window.setTimeout(() => {
-      setDebouncedQuery(trimmed);
+      void reload(trimmed);
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [query]);
-
-  const reload = useCallback(async () => {
-    if (locked) {
-      setItems([]);
-      setError(null);
-      setHasMore(false);
-      setNextCursor(null);
-      return;
-    }
-    const seq = ++requestSeqRef.current;
-    setError(null);
-    try {
-      const params = new URLSearchParams({ limit: "30", mode: "dashboard" });
-      if (debouncedQuery) {
-        params.set("q", debouncedQuery);
-      }
-      const response = await fetch(`/api/ai/conversations?${params.toString()}`);
-      const data = (await response.json().catch(() => ({}))) as {
-        conversations?: ConversationSummary[];
-        hasMore?: boolean;
-        nextCursor?: NextCursor | null;
-        error?: string;
-        message?: string;
-      };
-      if (!response.ok) {
-        throw new Error(data.message ?? "خواندن گفتگوهای اخیر ممکن نشد.");
-      }
-      if (requestSeqRef.current !== seq) return;
-      const list = (data.conversations ?? []).filter(
-        (item) => item.mode === "dashboard",
-      );
-      setItems(list);
-      setHasMore(Boolean(data.hasMore));
-      setNextCursor(data.nextCursor ?? null);
-    } catch (reason) {
-      if (requestSeqRef.current !== seq) return;
-      const msg =
-        reason instanceof Error && reason.message
-          ? reason.message
-          : "خواندن گفتگوهای اخیر ممکن نشد.";
-      setError(msg);
-      setItems((current) => current ?? []);
-    }
-  }, [debouncedQuery, locked]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload, refreshToken]);
+  }, [invalidateInFlightRequests, locked, query, refreshToken, reload]);
 
   async function loadOlder() {
-    if (locked || loadingMore || !hasMore || !nextCursor) return;
+    const trimmed = query.trim();
+    if (
+      locked ||
+      loadingMore ||
+      !hasMore ||
+      !nextCursor ||
+      trimmed !== activeQuery
+    ) {
+      return;
+    }
+
+    const listSeq = requestSeqRef.current;
+    const pSeq = ++pageSeqRef.current;
+    pageAbortRef.current?.abort();
+    const controller = new AbortController();
+    pageAbortRef.current = controller;
+
     setLoadingMore(true);
     try {
       const params = new URLSearchParams({
@@ -170,16 +273,35 @@ export function AiConversationsSidebar({
         before: nextCursor.before,
         beforeId: nextCursor.beforeId,
       });
-      if (debouncedQuery) {
-        params.set("q", debouncedQuery);
+      if (activeQuery) {
+        params.set("q", activeQuery);
       }
-      const response = await fetch(`/api/ai/conversations?${params.toString()}`);
+      const response = await fetch(
+        `/api/ai/conversations?${params.toString()}`,
+        { signal: controller.signal },
+      );
+      if (
+        !mountedRef.current ||
+        controller.signal.aborted ||
+        requestSeqRef.current !== listSeq ||
+        pageSeqRef.current !== pSeq
+      ) {
+        return;
+      }
       const data = (await response.json().catch(() => ({}))) as {
         conversations?: ConversationSummary[];
         hasMore?: boolean;
         nextCursor?: NextCursor | null;
         message?: string;
       };
+      if (
+        !mountedRef.current ||
+        controller.signal.aborted ||
+        requestSeqRef.current !== listSeq ||
+        pageSeqRef.current !== pSeq
+      ) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(data.message ?? "خواندن گفتگوهای قدیمی‌تر ممکن نشد.");
       }
@@ -194,11 +316,26 @@ export function AiConversationsSidebar({
       setHasMore(Boolean(data.hasMore));
       setNextCursor(data.nextCursor ?? null);
     } catch (reason) {
+      if (
+        !mountedRef.current ||
+        controller.signal.aborted ||
+        requestSeqRef.current !== listSeq ||
+        pageSeqRef.current !== pSeq
+      ) {
+        return;
+      }
       toast.error(
-        reason instanceof Error ? reason.message : "خواندن گفتگوهای قدیمی‌تر ممکن نشد.",
+        resolvePersianErrorMessage(reason, "خواندن گفتگوهای قدیمی‌تر ممکن نشد."),
       );
     } finally {
-      setLoadingMore(false);
+      if (
+        mountedRef.current &&
+        !controller.signal.aborted &&
+        requestSeqRef.current === listSeq &&
+        pageSeqRef.current === pSeq
+      ) {
+        setLoadingMore(false);
+      }
     }
   }
 
@@ -207,9 +344,9 @@ export function AiConversationsSidebar({
   const visibleItems = useMemo(() => {
     const base = items ?? [];
     const trimmed = query.trim();
-    if (!trimmed || trimmed === debouncedQuery) return base;
+    if (!trimmed || trimmed === activeQuery) return base;
     return base.filter((item) => item.title.includes(trimmed));
-  }, [debouncedQuery, items, query]);
+  }, [activeQuery, items, query]);
 
   const grouped = useMemo(() => {
     const now = new Date();
@@ -242,11 +379,13 @@ export function AiConversationsSidebar({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
       });
+      if (!mountedRef.current) return;
       const data = (await response.json().catch(() => ({}))) as {
         conversation?: ConversationSummary;
         error?: string;
         message?: string;
       };
+      if (!mountedRef.current) return;
       if (!response.ok || !data.conversation) {
         throw new Error(data.message ?? "تغییر نام ممکن نشد.");
       }
@@ -259,9 +398,12 @@ export function AiConversationsSidebar({
       onRenamed?.(renamed);
       setRenamingId(null);
     } catch (reason) {
-      toast.error(reason instanceof Error ? reason.message : "تغییر نام ممکن نشد.");
+      if (!mountedRef.current) return;
+      toast.error(resolvePersianErrorMessage(reason, "تغییر نام ممکن نشد."));
     } finally {
-      setBusyId(null);
+      if (mountedRef.current) {
+        setBusyId(null);
+      }
     }
   }
 
@@ -271,15 +413,19 @@ export function AiConversationsSidebar({
       const response = await fetch(`/api/ai/conversations/${id}`, {
         method: "DELETE",
       });
+      if (!mountedRef.current) return;
       if (!response.ok) throw new Error("حذف گفتگو ممکن نشد.");
       setItems((current) => (current ?? []).filter((item) => item.id !== id));
       onDeleted?.(id);
       toast.success("گفتگو برای همیشه حذف شد.");
     } catch (reason) {
-      toast.error(reason instanceof Error ? reason.message : "حذف گفتگو ممکن نشد.");
+      if (!mountedRef.current) return;
+      toast.error(resolvePersianErrorMessage(reason, "حذف گفتگو ممکن نشد."));
     } finally {
-      setDeletingId(null);
-      setBusyId(null);
+      if (mountedRef.current) {
+        setDeletingId(null);
+        setBusyId(null);
+      }
     }
   }
 
@@ -369,7 +515,7 @@ export function AiConversationsSidebar({
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => void reload()}
+                  onClick={() => void reload(query)}
                   className="mt-2 h-7 gap-1.5 px-2.5 text-[11px]"
                 >
                   <RotateCcwIcon className="size-3" aria-hidden="true" />

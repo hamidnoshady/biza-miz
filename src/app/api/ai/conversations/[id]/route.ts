@@ -1,37 +1,81 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAnyPermission, withTenantScope } from "@/lib/auth";
+import {
+  requireAnyPermission,
+  requireFloorAssistant,
+  requirePermission,
+  withTenantScope,
+} from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import type { AgentMode } from "@/lib/ai";
 import {
   deleteConversation,
   getConversationMessages,
+  getConversationMode,
   renameConversation,
 } from "@/lib/ai-conversations";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Transcript access policy (Issue #905 §10):
- * - Detail, rename, and delete require active membership and assistant access
- *   (`PERMISSIONS.aiUse` or floor assistant `PERMISSIONS.menuView`) via
- *   `requireAnyPermission()`. Revoking both capabilities or deactivating the
- *   member immediately revokes transcript access (403 Forbidden).
- * - Every query filters by `(id, business_id = session.businessId,
+ * Canonical conversation-mode authorization policy (Issue #905 §10):
+ * - `floor` conversations require `requireFloorAssistant()` (active
+ *   cashier/waiter membership with `PERMISSIONS.menuView`).
+ * - `dashboard` and `wizard` conversations require `requirePermission(PERMISSIONS.aiUse)`.
+ * - Every lookup is scoped by `(id, business_id = session.businessId,
  *   actor_user_id = session.sub)` inside `withTenantScope`, so foreign-member
- *   and foreign-business ids return 404 without leaking existence.
+ *   and foreign-business ids return 404 without leaking existence, while
+ *   revoking the mode's permission immediately blocks detail, rename, and
+ *   delete with 403 Forbidden.
  */
+async function requireConversationModeAccess(mode: AgentMode) {
+  return mode === "floor"
+    ? requireFloorAssistant()
+    : requirePermission(PERMISSIONS.aiUse);
+}
+
+async function authorizeConversationById(id: string) {
+  const baseGuard = await requireAnyPermission(
+    PERMISSIONS.aiUse,
+    PERMISSIONS.menuView,
+  );
+  if (baseGuard.error) {
+    return { error: baseGuard.error, session: null };
+  }
+  const session = baseGuard.session;
+
+  if (!UUID_RE.test(id)) {
+    return {
+      error: NextResponse.json({ error: "not_found" }, { status: 404 }),
+      session: null,
+    };
+  }
+
+  const savedMode = await getConversationMode({
+    businessId: session.businessId,
+    actorUserId: session.sub,
+    conversationId: id,
+  });
+  if (!savedMode) {
+    return {
+      error: NextResponse.json({ error: "not_found" }, { status: 404 }),
+      session: null,
+    };
+  }
+
+  const modeGuard = await requireConversationModeAccess(savedMode);
+  if (modeGuard.error) {
+    return { error: modeGuard.error, session: null };
+  }
+
+  return { error: null, session: modeGuard.session };
+}
+
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireAnyPermission(
-      PERMISSIONS.aiUse,
-      PERMISSIONS.menuView,
-    );
-    if (guard.error) return guard.error;
-    const session = guard.session;
-
     const { id } = await context.params;
-    if (!UUID_RE.test(id)) {
-      return NextResponse.json({ error: "not_found" }, { status: 404 });
-    }
+    const auth = await authorizeConversationById(id);
+    if (auth.error) return auth.error;
+    const session = auth.session;
 
     const result = await getConversationMessages({
       businessId: session.businessId,
@@ -41,32 +85,16 @@ export const GET = withTenantScope(
     if (!result) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
-    if (guard.membership) {
-      const requiredPerm =
-        result.conversation.mode === "floor"
-          ? PERMISSIONS.menuView
-          : PERMISSIONS.aiUse;
-      if (!guard.membership.permissions.has(requiredPerm)) {
-        return NextResponse.json({ error: "forbidden" }, { status: 403 });
-      }
-    }
     return NextResponse.json(result);
   },
 );
 
 export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireAnyPermission(
-      PERMISSIONS.aiUse,
-      PERMISSIONS.menuView,
-    );
-    if (guard.error) return guard.error;
-    const session = guard.session;
-
     const { id } = await context.params;
-    if (!UUID_RE.test(id)) {
-      return NextResponse.json({ error: "not_found" }, { status: 404 });
-    }
+    const auth = await authorizeConversationById(id);
+    if (auth.error) return auth.error;
+    const session = auth.session;
 
     let body: { title?: unknown };
     try {
@@ -93,17 +121,10 @@ export const PATCH = withTenantScope(
 
 export const DELETE = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireAnyPermission(
-      PERMISSIONS.aiUse,
-      PERMISSIONS.menuView,
-    );
-    if (guard.error) return guard.error;
-    const session = guard.session;
-
     const { id } = await context.params;
-    if (!UUID_RE.test(id)) {
-      return NextResponse.json({ error: "not_found" }, { status: 404 });
-    }
+    const auth = await authorizeConversationById(id);
+    if (auth.error) return auth.error;
+    const session = auth.session;
 
     const ok = await deleteConversation({
       businessId: session.businessId,

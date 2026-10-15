@@ -87,9 +87,7 @@ export function AiTaskSelector({
   if (mode === "wizard") return null;
 
   const eligibleSet =
-    eligibleTaskIds && eligibleTaskIds.length > 0
-      ? new Set(eligibleTaskIds)
-      : null;
+    eligibleTaskIds !== undefined ? new Set(eligibleTaskIds) : null;
   // Filter out "custom" from the preset list so the custom task entry is only
   // rendered once in its dedicated editor row below the separator.
   const available = AI_TASKS.filter(

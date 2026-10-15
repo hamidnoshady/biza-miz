@@ -9,9 +9,10 @@
  * so the server bundle never pulls lucide-react.
  *
  * Eligibility is evaluated from a single shared definition (`isTaskEligible`,
- * `resolveEligibleTasks`, `resolveStarterPrompts`) used by both `/dashboard`,
+ * `resolveEligibleTasks`, `resolveAccessibleFocuses`, `isFocusEligible`,
+ * `resolveStarterPrompts`, `resolveTenantTaskFeatures`) used by `/dashboard`,
  * `/api/ai/chat`, and the client task/starter UI so industry, module, feature,
- * permission, and focus constraints cannot drift.
+ * permission, focus, and project constraints cannot drift.
  */
 
 import type { AgentMode } from "./ai";
@@ -34,11 +35,17 @@ export type AiTaskId =
 
 export type AiTaskFeatureKey =
   | "inventory"
+  | "stock"
   | "crm"
   | "accounting"
+  | "ledger"
+  | "reporting"
+  | "reservations"
+  | "delivery"
   | "workspace"
   | "growth"
-  | "website";
+  | "website"
+  | "integrations";
 
 export type AiTaskAppFocus =
   | "all"
@@ -51,8 +58,10 @@ export type AiTaskAppFocus =
 export interface AiTaskEligibilityContext {
   mode?: AgentMode;
   industry?: Industry | string | null;
-  features?: Partial<Record<AiTaskFeatureKey, boolean>> | null;
+  features?: Partial<Record<AiTaskFeatureKey, boolean>> | Record<string, boolean> | null;
   permissions?: Iterable<string> | null;
+  eligibleTaskIds?: Iterable<AiTaskId> | null;
+  accessibleFocuses?: Iterable<AiTaskAppFocus> | null;
   appFocus?: AiTaskAppFocus | null;
   projectId?: string | null;
 }
@@ -73,6 +82,8 @@ export interface AiTask {
   requiredAnyModules?: readonly ModuleKey[];
   /** Tenant feature flags required for this task. */
   requiredFeatures?: readonly AiTaskFeatureKey[];
+  /** All of these permissions must be held when permissions are supplied. */
+  requiredPermissions?: readonly string[];
   /** At least one of these permissions must be held when permissions are supplied. */
   requiredAnyPermissions?: readonly string[];
   /** Optional app focus affinity used to rank/filter contextual starters. */
@@ -81,6 +92,55 @@ export interface AiTask {
   directive?: string;
   /** Starter chips while the conversation is empty (per-mode fallbacks below). */
   suggestions?: string[];
+}
+
+/**
+ * Normalizes raw database feature flags (`effectiveFeatures(businessId)`) and
+ * optional app availability states into the canonical `AiTaskFeatureKey` map.
+ */
+export function resolveTenantTaskFeatures(
+  rawFeatures?: Record<string, boolean> | null,
+  options?: {
+    industry?: Industry | string | null;
+    usableApps?: Partial<Record<"accounting" | "crm" | "growth" | "website", boolean>> | null;
+  },
+): Partial<Record<AiTaskFeatureKey, boolean>> {
+  const raw = rawFeatures ?? {};
+  const validIndustry =
+    typeof options?.industry === "string" && isIndustry(options.industry)
+      ? options.industry
+      : null;
+  const usableApps = options?.usableApps;
+
+  // Retail trades with `stock` and without F&B `inventory` are not gated by
+  // the F&B `inventory` feature flag (`defaultDisabledFeatures` in
+  // industry-profile.ts seeds `inventory: false` for retail trades).
+  const isRetailStockOnly =
+    Boolean(validIndustry) &&
+    hasModule(validIndustry!, "stock") &&
+    !hasModule(validIndustry!, "inventory");
+
+  const accountingAppUsable = usableApps?.accounting !== false;
+  const crmAppUsable = usableApps?.crm !== false;
+  const growthAppUsable = usableApps?.growth !== false;
+  const websiteAppUsable = usableApps?.website !== false;
+
+  return {
+    inventory: isRetailStockOnly
+      ? raw.stock !== false && accountingAppUsable
+      : raw.inventory !== false && accountingAppUsable,
+    stock: raw.stock !== false && accountingAppUsable,
+    ledger: raw.ledger !== false && raw.accounting !== false && accountingAppUsable,
+    accounting: raw.accounting !== false && raw.ledger !== false && accountingAppUsable,
+    reporting: raw.reporting !== false && accountingAppUsable,
+    reservations: raw.reservations !== false && accountingAppUsable,
+    delivery: raw.delivery !== false && accountingAppUsable,
+    crm: raw.crm !== false && crmAppUsable,
+    growth: raw.growth !== false && growthAppUsable,
+    website: raw.website !== false && websiteAppUsable,
+    integrations: raw.integrations !== false && websiteAppUsable,
+    workspace: raw.workspace !== false,
+  };
 }
 
 /**
@@ -120,6 +180,7 @@ export const AI_TASKS: AiTask[] = [
     description: "روندها، مقایسهٔ بازه‌ها، پرفروش‌ها و عملکرد فروش",
     modes: ["dashboard"],
     requiredModules: ["reports"],
+    requiredFeatures: ["reporting"],
     requiredAnyPermissions: ["reports.view", "orders.view", "ledger.view", "accounting.view"],
     focusAffinity: ["all", "accounting"],
     directive:
@@ -152,8 +213,8 @@ export const AI_TASKS: AiTask[] = [
     label: "حسابداری و هزینه‌ها",
     description: "مطالبات، بدهی‌ها، مغایرت بانکی، حقوق، مالیات و ممیزی",
     modes: ["dashboard"],
-    requiredModules: ["reports"],
-    requiredFeatures: ["accounting"],
+    requiredModules: ["ledger", "reports"],
+    requiredFeatures: ["accounting", "ledger"],
     requiredAnyPermissions: ["ledger.view", "ledger.post", "accounting.view", "accounting.post", "reports.view"],
     focusAffinity: ["all", "accounting"],
     directive:
@@ -202,18 +263,18 @@ export const AI_TASKS: AiTask[] = [
     label: "رشد و بازاریابی",
     description: "ایدهٔ کمپین بر اساس بخش‌های مشتریان و ریزش",
     modes: ["dashboard"],
-    requiredAnyModules: ["promotions", "messaging", "crm"],
+    requiredAnyModules: ["loyalty", "promotions", "messaging"],
     requiredFeatures: ["growth"],
     requiredAnyPermissions: [
       "growth.view",
       "campaigns.view",
       "campaigns.manage",
       "loyalty.view",
+      "loyalty.manage",
       "promotions.view",
       "promotions.edit",
       "messaging.view",
       "messaging.send",
-      "customers.view",
     ],
     focusAffinity: ["all", "growth"],
     directive:
@@ -221,6 +282,7 @@ export const AI_TASKS: AiTask[] = [
     suggestions: [
       "بر اساس بخش‌بندی مشتریان یک کمپین پیشنهاد بده.",
       "برای برگرداندن مشتریان در خطر ریزش چه کنم؟",
+      "عملکرد کدهای تخفیف و کمپین‌های اخیر را بررسی کن.",
     ],
   },
   {
@@ -230,8 +292,9 @@ export const AI_TASKS: AiTask[] = [
     modes: ["dashboard"],
     industries: ["food_service"],
     requiredAnyModules: ["tables", "reservations"],
-    requiredAnyPermissions: ["tables.manage", "tables.edit", "tables.view", "reservations.view", "reservations.manage", "orders.view"],
-    focusAffinity: ["all"],
+    requiredFeatures: ["reservations"],
+    requiredAnyPermissions: ["tables.manage", "tables.edit", "tables.view", "reservations.view", "reservations.manage"],
+    focusAffinity: ["all", "accounting"],
     directive:
       "تمرکز این گفتگو رزرو و میزها است: get_reservation_conflicts و get_table_turnover_rate. تداخل‌ها را با زمان و نام میز گزارش کن و پیشنهاد ساده بده.",
     suggestions: [
@@ -246,8 +309,9 @@ export const AI_TASKS: AiTask[] = [
     modes: ["dashboard"],
     industries: ["food_service"],
     requiredModules: ["delivery"],
-    requiredAnyPermissions: ["delivery.manage", "delivery.configure", "delivery.view", "orders.view"],
-    focusAffinity: ["all"],
+    requiredFeatures: ["delivery"],
+    requiredAnyPermissions: ["delivery.manage", "delivery.configure", "delivery.view"],
+    focusAffinity: ["all", "accounting"],
     directive:
       "تمرکز این گفتگو پیک و تحویل سفارش است: از get_courier_performance استفاده کن و مقایسهٔ پیک‌ها را با زمان تحویل و تعداد سفارش خلاصه کن.",
     suggestions: ["عملکرد پیک‌ها را مقایسه کن."],
@@ -259,6 +323,8 @@ export const AI_TASKS: AiTask[] = [
     modes: ["floor"],
     industries: ["food_service"],
     requiredModules: ["tables"],
+    requiredFeatures: ["reservations"],
+    requiredAnyPermissions: ["menu.view", "tables.manage", "orders.view"],
     directive:
       "تمرکز این گفتگو تقسیم صورتحساب میز است: فقط پیش‌نمایشِ تقسیم بده، همیشه بگو پیش‌نمایش است و هرگز چیزی ثبت نکن.",
     suggestions: [
@@ -309,10 +375,37 @@ const PROJECT_STARTER_PROMPTS: readonly string[] = [
   "اسناد، قراردادها و تصمیم‌های باز این پروژه را مرور کن.",
 ];
 
+const GENERAL_ONLY_STARTER_PROMPTS: readonly string[] = [
+  "امروز در چه زمینه‌ای می‌توانی به من کمک کنی؟",
+  "یک متن یا پیام کاری کوتاه برایم پیش‌نویس کن.",
+  "نکات کلیدی یک موضوع کاری را به زبان ساده خلاصه کن.",
+];
+
+const WORKSPACE_PERMISSIONS = [
+  "workspace.view",
+  "workspace.manage",
+  "workspace.admin",
+  "projects.view",
+  "projects.manage",
+  "tasks.view",
+  "tasks.manage",
+] as const;
+
+const WEBSITE_PERMISSIONS = [
+  "website.view",
+  "website.manage",
+  "integrations.manage",
+] as const;
+
 const TASKS_BY_ID = new Map(AI_TASKS.map((task) => [task.id, task]));
 
 export function taskById(id: string): AiTask | undefined {
   return TASKS_BY_ID.get(id as AiTaskId);
+}
+
+function toSet<T>(items: Iterable<T> | null | undefined): Set<T> | null {
+  if (!items) return null;
+  return items instanceof Set ? items : new Set(items);
 }
 
 /**
@@ -331,6 +424,16 @@ export function isTaskEligible(
 
   const mode: AgentMode = context?.mode ?? "dashboard";
   if (!task.modes.includes(mode)) return false;
+
+  const eligibleTaskSet = toSet(context?.eligibleTaskIds);
+  if (
+    eligibleTaskSet &&
+    task.id !== "general" &&
+    task.id !== "custom" &&
+    !eligibleTaskSet.has(task.id)
+  ) {
+    return false;
+  }
 
   const industryRaw = context?.industry;
   const validIndustry: Industry | null =
@@ -362,22 +465,22 @@ export function isTaskEligible(
   }
 
   if (context?.features && task.requiredFeatures && task.requiredFeatures.length > 0) {
+    const featuresRecord = context.features as Record<string, boolean | undefined>;
     for (const feat of task.requiredFeatures) {
-      if (context.features[feat] === false) return false;
+      if (featuresRecord[feat] === false) return false;
     }
   }
 
-  if (
-    context?.permissions &&
-    task.requiredAnyPermissions &&
-    task.requiredAnyPermissions.length > 0
-  ) {
-    const permSet =
-      context.permissions instanceof Set
-        ? context.permissions
-        : new Set(context.permissions);
-    const hasAny = task.requiredAnyPermissions.some((perm) => permSet.has(perm));
-    if (!hasAny) return false;
+  const permSet = toSet(context?.permissions);
+  if (permSet) {
+    if (task.requiredPermissions && task.requiredPermissions.length > 0) {
+      const hasAll = task.requiredPermissions.every((perm) => permSet.has(perm));
+      if (!hasAll) return false;
+    }
+    if (task.requiredAnyPermissions && task.requiredAnyPermissions.length > 0) {
+      const hasAny = task.requiredAnyPermissions.some((perm) => permSet.has(perm));
+      if (!hasAny) return false;
+    }
   }
 
   if (
@@ -394,28 +497,159 @@ export function isTaskEligible(
 }
 
 /**
+ * Evaluates whether an app focus option (`all`, `workspace`, `accounting`,
+ * `crm`, `growth`, `website`) is accessible and enabled for the caller.
+ */
+export function isFocusEligible(
+  focus: AiTaskAppFocus,
+  context?: AiTaskEligibilityContext,
+): boolean {
+  if (focus === "all") return true;
+
+  const accessibleSet = toSet(context?.accessibleFocuses);
+  if (accessibleSet && !accessibleSet.has(focus)) {
+    return false;
+  }
+
+  const featuresRecord = (context?.features ?? null) as Record<
+    string,
+    boolean | undefined
+  > | null;
+  const permSet = toSet(context?.permissions);
+  const validIndustry =
+    typeof context?.industry === "string" && isIndustry(context.industry)
+      ? context.industry
+      : null;
+
+  if (focus === "workspace") {
+    if (featuresRecord?.workspace === false) return false;
+    if (permSet) {
+      return WORKSPACE_PERMISSIONS.some((perm) => permSet.has(perm));
+    }
+    return true;
+  }
+
+  if (focus === "crm") {
+    return isTaskEligible("customers", {
+      ...context,
+      mode: "dashboard",
+      appFocus: "all",
+    });
+  }
+
+  if (focus === "growth") {
+    return isTaskEligible("marketing", {
+      ...context,
+      mode: "dashboard",
+      appFocus: "all",
+    });
+  }
+
+  if (focus === "website") {
+    if (featuresRecord?.website === false) return false;
+    if (
+      validIndustry &&
+      !hasModule(validIndustry, "website") &&
+      !hasModule(validIndustry, "integrations")
+    ) {
+      return false;
+    }
+    if (permSet) {
+      const hasWebsitePerm =
+        permSet.has("website.view") || permSet.has("website.manage");
+      const hasIntegrationsPerm =
+        permSet.has("integrations.manage") &&
+        featuresRecord?.integrations !== false;
+      return hasWebsitePerm || hasIntegrationsPerm;
+    }
+    return true;
+  }
+
+  if (focus === "accounting") {
+    if (featuresRecord?.accounting === false) return false;
+    const accountingTasks: readonly AiTaskId[] = [
+      "sales",
+      "inventory",
+      "accounting",
+      "menu",
+      "operations",
+      "delivery",
+    ];
+    return accountingTasks.some((taskId) =>
+      isTaskEligible(taskId, {
+        ...context,
+        mode: "dashboard",
+        appFocus: "all",
+      }),
+    );
+  }
+
+  return false;
+}
+
+/**
+ * Returns the ordered list of app focuses accessible to this caller.
+ */
+export function resolveAccessibleFocuses(
+  context?: AiTaskEligibilityContext | Iterable<string> | null,
+): AiTaskAppFocus[] {
+  const normalizedContext: AiTaskEligibilityContext | undefined =
+    context &&
+    (context instanceof Set ||
+      Array.isArray(context) ||
+      typeof (context as Iterable<string>)[Symbol.iterator] === "function")
+      ? { permissions: context as Iterable<string> }
+      : (context as AiTaskEligibilityContext | undefined);
+
+  const allFocuses: readonly AiTaskAppFocus[] = [
+    "all",
+    "workspace",
+    "accounting",
+    "crm",
+    "growth",
+    "website",
+  ];
+  return allFocuses.filter((focus) => isFocusEligible(focus, normalizedContext));
+}
+
+/**
  * Returns the ordered list of tasks eligible for the given context.
  * Set `includeCustom: false` when rendering preset lists that already have a
  * dedicated custom-task editor row so "custom" is never rendered twice.
  */
 export function resolveEligibleTasks(
   context?: AiTaskEligibilityContext,
-  options?: { includeCustom?: boolean },
+  options?: { includeCustom?: boolean; respectAppFocus?: boolean },
 ): AiTask[] {
   const includeCustom = options?.includeCustom ?? true;
-  const baseContext: AiTaskEligibilityContext | undefined = context
-    ? { ...context, appFocus: "all" }
-    : undefined;
+  const evalContext: AiTaskEligibilityContext | undefined =
+    context && !options?.respectAppFocus
+      ? { ...context, appFocus: "all" }
+      : context;
   return AI_TASKS.filter((task) => {
     if (!includeCustom && task.id === "custom") return false;
-    return isTaskEligible(task, baseContext);
+    return isTaskEligible(task, evalContext);
   });
+}
+
+function appendUniquePrompts(
+  target: string[],
+  candidates: readonly string[],
+  maxCount: number,
+): void {
+  for (const item of candidates) {
+    if (target.length >= maxCount) break;
+    if (!target.includes(item)) {
+      target.push(item);
+    }
+  }
 }
 
 /**
  * Resolves up to `count` (default 3) starter prompts appropriate for the
  * caller's industry, enabled modules/features, permissions, active focus,
- * project context, and selected task.
+ * project context, and selected task. Restricted users never receive
+ * suggestions for unavailable functions.
  */
 export function resolveStarterPrompts(
   context?: AiTaskEligibilityContext & {
@@ -427,11 +661,12 @@ export function resolveStarterPrompts(
   const count = Math.max(1, Math.min(context?.count ?? 3, 6));
   const mode: AgentMode = context?.mode ?? "dashboard";
 
+  // 1. Explicit preset task selected by user (when eligible for current context & focus)
   if (
     context?.task &&
     context.task !== "general" &&
     context.task !== "custom" &&
-    isTaskEligible(context.task, { ...context, appFocus: "all" })
+    isTaskEligible(context.task, context)
   ) {
     const task = taskById(context.task);
     if (task?.suggestions?.length) {
@@ -439,55 +674,204 @@ export function resolveStarterPrompts(
     }
   }
 
-  if (context?.projectId) {
-    return PROJECT_STARTER_PROMPTS.slice(0, count);
-  }
-
   if (mode === "wizard") {
     return (context?.fallback ?? SUGGESTED_PROMPTS.wizard).slice(0, count);
-  }
-  if (mode === "floor") {
-    return (context?.fallback ?? SUGGESTED_PROMPTS.floor).slice(0, count);
-  }
-
-  const focus = context?.appFocus ?? "all";
-  if (focus !== "all" && FOCUS_STARTER_PROMPTS[focus]) {
-    return FOCUS_STARTER_PROMPTS[focus].slice(0, count);
   }
 
   const hasSpecificTenantContext =
     Boolean(context?.industry) ||
     Boolean(context?.features) ||
-    Boolean(context?.permissions);
+    Boolean(context?.permissions) ||
+    Boolean(context?.eligibleTaskIds) ||
+    Boolean(context?.accessibleFocuses);
 
+  if (mode === "floor") {
+    if (!hasSpecificTenantContext) {
+      return (context?.fallback ?? SUGGESTED_PROMPTS.floor).slice(0, count);
+    }
+    const floorPrompts: string[] = [];
+    if (isTaskEligible("menu", { ...context, mode: "floor", appFocus: "all" })) {
+      floorPrompts.push("مواد اولیهٔ ثبت‌شدهٔ یک آیتم منو را بگو.");
+    }
+    if (isTaskEligible("split", { ...context, mode: "floor", appFocus: "all" })) {
+      floorPrompts.push("صورت‌حساب میز ۳ را برای ۴ نفر تقسیم کن.");
+    }
+    if (isTaskEligible("menu", { ...context, mode: "floor", appFocus: "all" })) {
+      floorPrompts.push("برای سؤال حساسیت غذایی چه داده‌ای ثبت شده است؟");
+    }
+    if (floorPrompts.length === 0) {
+      return GENERAL_ONLY_STARTER_PROMPTS.slice(0, count);
+    }
+    return floorPrompts.slice(0, count);
+  }
+
+  const requestedFocus: AiTaskAppFocus = context?.appFocus ?? "all";
+  const focus: AiTaskAppFocus = isFocusEligible(requestedFocus, context)
+    ? requestedFocus
+    : "all";
+  const workspaceEligible = isFocusEligible("workspace", context);
+  const websiteEligible = isFocusEligible("website", context);
+
+  // 2. Project context (requires workspace eligibility)
+  if (context?.projectId && workspaceEligible) {
+    if (focus === "all" || focus === "workspace") {
+      return PROJECT_STARTER_PROMPTS.slice(0, count);
+    }
+    // When both a project and a specific non-workspace focus are active and eligible,
+    // combine project context with eligible prompts from that focus.
+    const combined: string[] = [PROJECT_STARTER_PROMPTS[0]!];
+    const focusPrompts = resolveStarterPrompts({
+      ...context,
+      projectId: null,
+      appFocus: focus,
+      count,
+    });
+    appendUniquePrompts(combined, focusPrompts, count);
+    return combined.slice(0, count);
+  }
+
+  // 3. Specific app focus selected (validated for eligibility)
+  if (focus !== "all") {
+    if (focus === "workspace") {
+      return FOCUS_STARTER_PROMPTS.workspace.slice(0, count);
+    }
+    if (focus === "website") {
+      return FOCUS_STARTER_PROMPTS.website.slice(0, count);
+    }
+    if (focus === "crm") {
+      return FOCUS_STARTER_PROMPTS.crm.slice(0, count);
+    }
+    if (focus === "growth") {
+      return FOCUS_STARTER_PROMPTS.growth.slice(0, count);
+    }
+    if (focus === "accounting") {
+      if (!hasSpecificTenantContext) {
+        return FOCUS_STARTER_PROMPTS.accounting.slice(0, count);
+      }
+      const accountingPrompts: string[] = [];
+      const accountingEligible = isTaskEligible("accounting", {
+        ...context,
+        mode: "dashboard",
+        appFocus: "all",
+      });
+      const salesEligible = isTaskEligible("sales", {
+        ...context,
+        mode: "dashboard",
+        appFocus: "all",
+      });
+      if (accountingEligible) {
+        appendUniquePrompts(
+          accountingPrompts,
+          [
+            "حساب‌هایم را کامل بررسی کن و یافته‌ها را بگو.",
+            "مطالبات مشتریان و بدهی‌های آینده چقدر است؟",
+          ],
+          count,
+        );
+      }
+      if (salesEligible) {
+        appendUniquePrompts(
+          accountingPrompts,
+          ["فروش هفتهٔ اخیر را خلاصه و با هفتهٔ قبل مقایسه کن."],
+          count,
+        );
+      }
+      const accountingTasks = resolveEligibleTasks(
+        { ...context, mode: "dashboard", appFocus: "accounting" },
+        { includeCustom: false, respectAppFocus: true },
+      );
+      for (const task of accountingTasks) {
+        if (accountingPrompts.length >= count) break;
+        appendUniquePrompts(accountingPrompts, task.suggestions ?? [], count);
+      }
+      return accountingPrompts.length > 0
+        ? accountingPrompts.slice(0, count)
+        : GENERAL_ONLY_STARTER_PROMPTS.slice(0, count);
+    }
+  }
+
+  // 4. Default "all" focus
   if (!hasSpecificTenantContext) {
     return (context?.fallback ?? SUGGESTED_PROMPTS.dashboard).slice(0, count);
   }
 
   const eligibleTasks = resolveEligibleTasks(context, { includeCustom: false });
   const eligibleIds = new Set(eligibleTasks.map((t) => t.id));
-
   const prompts: string[] = [];
+
   if (eligibleIds.has("sales")) {
-    prompts.push("فروش هفتهٔ اخیر را خلاصه و با هفتهٔ قبل مقایسه کن.");
-  } else {
-    prompts.push("وضعیت کارها، پروژه‌ها و پیگیری‌های باز امروز را مرور کن.");
+    appendUniquePrompts(
+      prompts,
+      ["فروش هفتهٔ اخیر را خلاصه و با هفتهٔ قبل مقایسه کن."],
+      count,
+    );
   }
-
   if (eligibleIds.has("accounting")) {
-    prompts.push("خلاصهٔ وضعیت مالی، مطالبات و هزینه‌های این ماه را نشان بده.");
-  } else if (eligibleIds.has("customers")) {
-    prompts.push("مشتریان در خطر ریزش و فرصت‌های خرید مجدد را نشان بده.");
-  } else {
-    prompts.push("مهم‌ترین اولویت‌ها و هشدارهای امروز کسب‌وکار چیست؟");
+    appendUniquePrompts(
+      prompts,
+      ["خلاصهٔ وضعیت مالی، مطالبات و هزینه‌های این ماه را نشان بده."],
+      count,
+    );
+  }
+  if (workspaceEligible) {
+    appendUniquePrompts(
+      prompts,
+      ["وضعیت کارها، پروژه‌ها و پیگیری‌های باز امروز را مرور کن."],
+      count,
+    );
+  }
+  if (eligibleIds.has("inventory")) {
+    appendUniquePrompts(
+      prompts,
+      ["کدام اقلام رو به اتمام‌اند و باید خرید شوند؟"],
+      count,
+    );
+  }
+  if (eligibleIds.has("customers")) {
+    appendUniquePrompts(
+      prompts,
+      ["مشتریان در خطر ریزش چه کسانی‌اند؟"],
+      count,
+    );
+  }
+  if (eligibleIds.has("marketing")) {
+    appendUniquePrompts(
+      prompts,
+      ["بر اساس بخش‌بندی مشتریان یک کمپین پیشنهاد بده."],
+      count,
+    );
+  }
+  if (eligibleIds.has("menu")) {
+    appendUniquePrompts(prompts, ["عملکرد آیتم‌های منو را تحلیل کن."], count);
+  }
+  if (eligibleIds.has("operations")) {
+    appendUniquePrompts(prompts, ["تداخل رزروهای امروز را بررسی کن."], count);
+  }
+  if (eligibleIds.has("delivery")) {
+    appendUniquePrompts(prompts, ["عملکرد پیک‌ها را مقایسه کن."], count);
+  }
+  if (websiteEligible) {
+    appendUniquePrompts(
+      prompts,
+      ["وضعیت صفحات، فرم‌ها و سفارش‌های آنلاین وب‌سایت را بررسی کن."],
+      count,
+    );
   }
 
-  if (eligibleIds.has("inventory")) {
-    prompts.push("کدام اقلام رو به اتمام‌اند و باید خرید شوند؟");
-  } else if (eligibleIds.has("menu")) {
-    prompts.push("عملکرد آیتم‌های منو را تحلیل کن.");
-  } else {
-    prompts.push("کدام وظایف یا پیگیری‌ها نیاز به تصمیم فوری من دارند؟");
+  // Fill remaining slots from eligible task suggestions or eligible focus prompts
+  for (const task of eligibleTasks) {
+    if (prompts.length >= count) break;
+    appendUniquePrompts(prompts, task.suggestions ?? [], count);
+  }
+  if (workspaceEligible && prompts.length < count) {
+    appendUniquePrompts(prompts, FOCUS_STARTER_PROMPTS.workspace, count);
+  }
+  if (websiteEligible && prompts.length < count) {
+    appendUniquePrompts(prompts, FOCUS_STARTER_PROMPTS.website, count);
+  }
+
+  if (prompts.length === 0) {
+    return GENERAL_ONLY_STARTER_PROMPTS.slice(0, count);
   }
 
   return prompts.slice(0, count);
@@ -555,7 +939,7 @@ export function taskDirectiveFor(input: {
   if (!task || !task.modes.includes(input.mode) || !task.directive) return null;
   if (
     input.eligibility &&
-    !isTaskEligible(task, { ...input.eligibility, mode: input.mode, appFocus: "all" })
+    !isTaskEligible(task, { ...input.eligibility, mode: input.mode })
   ) {
     return null;
   }

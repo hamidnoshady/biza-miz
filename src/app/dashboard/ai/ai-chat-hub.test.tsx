@@ -430,4 +430,47 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
     expect(onSelectTask).toHaveBeenCalledWith("sales");
     expect(onCustomTask).toHaveBeenCalledWith("");
   });
+
+  it("keeps starter cards and project controls restricted to eligible functions when focus or URL project changes in AiChatHub", async () => {
+    currentSearchParams = new URLSearchParams({
+      focus: "accounting",
+      project: "proj-1",
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ projects: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AiChatHub
+        canManageAi={false}
+        canAutoApply={false}
+        allowedPanelSections={[]}
+        deepResearchEnabled={false}
+        eligibleTaskIds={["general", "inventory"]}
+        accessibleFocuses={["all", "accounting"]}
+        industry="wholesale"
+      />,
+    );
+
+    // Because `workspace` is not in `accessibleFocuses`, the project selector is hidden
+    // and `?project=proj-1` does not leak project starter prompts.
+    expect(screen.queryByLabelText("پروژه")).toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: "کدام اقلام رو به اتمام‌اند و باید خرید شوند؟",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", {
+        name: "حساب‌هایم را کامل بررسی کن و یافته‌ها را بگو.",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: /وضعیت وظایف و موانع این پروژه/,
+      }),
+    ).toBeNull();
+  });
 });

@@ -45,7 +45,11 @@ import {
   prepareAttachments,
   withAttachmentContext,
 } from "@/lib/ai-attachment";
-import { taskDirectiveFor } from "@/lib/ai-tasks";
+import {
+  resolveTenantTaskFeatures,
+  taskDirectiveFor,
+} from "@/lib/ai-tasks";
+import { effectiveFeatures } from "@/lib/features";
 import {
   AiError,
   accruedUsageOf,
@@ -250,8 +254,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     body.task.trim() !== "" &&
     body.task !== "general" &&
     body.task !== "custom";
-  const taskIndustry = hasPresetTask
-    ? await getBusinessIndustry(session.businessId).catch(() => null)
+  const [taskIndustry, rawTaskFeatures] = hasPresetTask
+    ? await Promise.all([
+        getBusinessIndustry(session.businessId).catch(() => null),
+        effectiveFeatures(session.businessId).catch(() => null),
+      ])
+    : [null, null];
+  const taskFeatures = rawTaskFeatures
+    ? resolveTenantTaskFeatures(rawTaskFeatures, { industry: taskIndustry })
     : null;
   // Issue #812 §7/§8 — the runtime mode's own directive is layer 2 of the
   // resolver, not part of the task directive. What is left here is the task
@@ -264,6 +274,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       eligibility: hasPresetTask
         ? {
             industry: taskIndustry,
+            features: taskFeatures,
             permissions: guard.membership?.permissions ?? null,
           }
         : undefined,

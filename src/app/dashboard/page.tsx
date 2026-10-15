@@ -2,17 +2,24 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { authorize } from "@/lib/authorize";
 import { PERMISSIONS } from "@/lib/permissions";
-import { featureLockedForPage, isFeatureEnabled } from "@/lib/features";
+import {
+  effectiveFeatures,
+  featureLockedForPage,
+  isFeatureEnabled,
+} from "@/lib/features";
+import { isAppUsable } from "@/lib/app-availability";
+import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import {
   canManageAi,
   resolveAllowedAiPanelSections,
 } from "@/lib/ai-panel";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import {
+  resolveAccessibleFocuses,
   resolveEligibleTasks,
   resolveStarterPrompts,
+  resolveTenantTaskFeatures,
 } from "@/lib/ai-tasks";
-import type { AiAppFocus } from "@/components/ai/use-ai-chat";
 import { FeatureLock } from "@/components/feature-lock";
 import { AiChatHub } from "./ai/ai-chat-hub";
 import { cardClass } from "./page-chrome";
@@ -23,43 +30,6 @@ import { isHybridSite, siteHomeFor } from "@/lib/site-routes";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { hasModule } from "@/lib/industry-profile";
 import { memberAccessFor } from "@/lib/member-access";
-
-function resolveAccessibleFocuses(
-  permissions: ReadonlySet<string>,
-): AiAppFocus[] {
-  const focuses: AiAppFocus[] = ["all"];
-  if (permissions.has(PERMISSIONS.workspaceView)) {
-    focuses.push("workspace");
-  }
-  if (
-    permissions.has(PERMISSIONS.ledgerView) ||
-    permissions.has(PERMISSIONS.reportsView) ||
-    permissions.has(PERMISSIONS.ordersView) ||
-    permissions.has(PERMISSIONS.inventoryView)
-  ) {
-    focuses.push("accounting");
-  }
-  if (
-    permissions.has(PERMISSIONS.partiesView) ||
-    permissions.has(PERMISSIONS.crmView)
-  ) {
-    focuses.push("crm");
-  }
-  if (
-    permissions.has(PERMISSIONS.growthView) ||
-    permissions.has(PERMISSIONS.campaignsView) ||
-    permissions.has(PERMISSIONS.loyaltyView)
-  ) {
-    focuses.push("growth");
-  }
-  if (
-    permissions.has(PERMISSIONS.websiteView) ||
-    permissions.has(PERMISSIONS.integrationsManage)
-  ) {
-    focuses.push("website");
-  }
-  return focuses;
-}
 
 /**
  * `/dashboard` — the tenant's home, and the assistant's one canonical address.
@@ -109,11 +79,20 @@ export default async function DashboardPage() {
     );
   }
 
-  const [locked, access, industry, deepResearchMode] = await Promise.all([
+  const [
+    locked,
+    access,
+    industry,
+    deepResearchMode,
+    rawFeatures,
+    appAvailability,
+  ] = await Promise.all([
     featureLockedForPage(session.businessId, "ai_assistant"),
     authorize(session, { permission: PERMISSIONS.aiUse }),
     getBusinessIndustry(session.businessId).catch(() => null),
     getPlatformAiMode("deep_research").catch(() => ({ is_active: false })),
+    effectiveFeatures(session.businessId).catch(() => null),
+    effectiveAppAvailability(session.businessId).catch(() => undefined),
   ]);
 
   // A universal dashboard must not invite a member to type into a surface that
@@ -139,21 +118,31 @@ export default async function DashboardPage() {
   const allowedPanelSections = resolveAllowedAiPanelSections(permissions, {
     deepResearchEnabled,
   });
-  const eligibleTaskIds = resolveEligibleTasks(
-    {
-      mode: "dashboard",
-      industry,
-      permissions,
-    },
-    { includeCustom: false },
-  ).map((t) => t.id);
-  const starterPrompts = resolveStarterPrompts({
-    mode: "dashboard",
+  const taskFeatures = resolveTenantTaskFeatures(rawFeatures, {
     industry,
+    usableApps: {
+      accounting: isAppUsable(appAvailability, "accounting"),
+      crm: isAppUsable(appAvailability, "crm"),
+      growth: isAppUsable(appAvailability, "growth"),
+      website: isAppUsable(appAvailability, "website"),
+    },
+  });
+  const eligibilityContext = {
+    mode: "dashboard" as const,
+    industry,
+    features: taskFeatures,
     permissions,
+  };
+  const eligibleTaskIds = resolveEligibleTasks(eligibilityContext, {
+    includeCustom: false,
+  }).map((t) => t.id);
+  const accessibleFocuses = resolveAccessibleFocuses(eligibilityContext);
+  const starterPrompts = resolveStarterPrompts({
+    ...eligibilityContext,
+    eligibleTaskIds,
+    accessibleFocuses,
     count: 3,
   });
-  const accessibleFocuses = resolveAccessibleFocuses(permissions);
 
   return (
     <FeatureLock locked={locked} title="دستیار هوشمند">

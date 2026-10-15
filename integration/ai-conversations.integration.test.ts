@@ -138,6 +138,33 @@ describe("conversation ownership within one business", () => {
     );
     expect(aList).toHaveLength(1);
     expect(aList[0].id).toBe(created.id);
+
+    const aMode = await asBusiness(alpha.businessId, () =>
+      ai.getConversationMode({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        conversationId: created.id,
+      }),
+    );
+    expect(aMode).toBe("dashboard");
+
+    const bMode = await asBusiness(alpha.businessId, () =>
+      ai.getConversationMode({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userB,
+        conversationId: created.id,
+      }),
+    );
+    expect(bMode).toBeNull();
+
+    const betaMode = await asBusiness(beta.businessId, () =>
+      ai.getConversationMode({
+        businessId: beta.businessId,
+        actorUserId: alpha.userA,
+        conversationId: created.id,
+      }),
+    );
+    expect(betaMode).toBeNull();
   });
 
   it("never resumes another user's conversation id — starts a new one instead", async () => {

@@ -234,6 +234,24 @@ export async function ownsConversation(
   return rows.length > 0;
 }
 
+/**
+ * Resolves the saved `mode` of a conversation owned by `(businessId, actorUserId)`.
+ * Returns `null` when the conversation does not exist or belongs to another
+ * member/business, allowing route guards to answer 404 before leaking existence
+ * and then enforce the mode-specific authorization policy (`ai.use` vs
+ * `requireFloorAssistant()`).
+ */
+export async function getConversationMode(
+  owner: Owner & { conversationId: string },
+): Promise<AgentMode | null> {
+  const { rows } = await query<{ mode: AgentMode }>(
+    `SELECT mode FROM ai_conversations
+      WHERE id = $1 AND business_id = $2 AND actor_user_id = $3`,
+    [owner.conversationId, owner.businessId, owner.actorUserId],
+  );
+  return rows[0]?.mode ?? null;
+}
+
 export async function getConversationMessages(
   owner: Owner & { conversationId: string },
 ): Promise<{ conversation: AiConversationSummary; messages: AiConversationMessage[] } | null> {

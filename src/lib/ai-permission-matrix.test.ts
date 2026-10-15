@@ -171,7 +171,9 @@ describe("issue #812 §11 — the AI permission matrix", () => {
     const detailRoute = readFileSync("src/app/api/ai/conversations/[id]/route.ts", "utf8");
     expect(detailRoute).not.toMatch(/requireMember\(\)/);
     expect(detailRoute).toMatch(/requireAnyPermission\(\s*PERMISSIONS\.aiUse,\s*PERMISSIONS\.menuView/);
-    expect(detailRoute).toMatch(/guard\.membership\.permissions\.has\(requiredPerm\)/);
+    expect(detailRoute).toMatch(/getConversationMode\(/);
+    expect(detailRoute).toMatch(/requireFloorAssistant\(\)/);
+    expect(detailRoute).toMatch(/requirePermission\(PERMISSIONS\.aiUse\)/);
   });
 
   it("no longer carries the retired AI permissions anywhere", () => {

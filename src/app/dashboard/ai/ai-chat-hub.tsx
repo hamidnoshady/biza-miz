@@ -50,8 +50,10 @@ import { animateStaggerIn } from "@/components/ai/chat-animations";
 import { useStickyScroll } from "@/components/ai/use-sticky-scroll";
 import {
   SUGGESTED_PROMPTS,
+  resolveEligibleTasks,
   resolveStarterPrompts,
   taskById,
+  type AiTaskAppFocus,
   type AiTaskId,
 } from "@/lib/ai-tasks";
 import {
@@ -132,30 +134,39 @@ export function AiChatHub({
     [deepResearchEnabled],
   );
 
+  const canSelectProject =
+    !accessibleFocuses || accessibleFocuses.includes("workspace");
+
   const [appFocus, setAppFocus] = useState<AiAppFocus>(() =>
     normalizeAiAppFocus(rawFocusParam, accessibleFocuses),
   );
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(
-    projectFromUrl,
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(() =>
+    canSelectProject ? projectFromUrl : null,
   );
   const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
   const [widgetsSheetOpen, setWidgetsSheetOpen] = useState<boolean>(widgetsFromUrl);
 
+  const latestSearchRef = useRef(searchParams.toString());
+  useEffect(() => {
+    latestSearchRef.current = searchParams.toString();
+  }, [searchParams]);
+
   const replaceParams = useCallback(
     (mutate: (params: URLSearchParams) => void) => {
-      const params = new URLSearchParams(searchParams.toString());
+      const params = new URLSearchParams(latestSearchRef.current);
       mutate(params);
       const query = params.toString();
+      latestSearchRef.current = query;
       router.replace(query ? `/dashboard?${query}` : "/dashboard", {
         scroll: false,
       });
     },
-    [router, searchParams],
+    [router],
   );
 
   const chat = useAiChat({
     mode: "dashboard",
-    projectId: activeProjectId,
+    projectId: canSelectProject ? activeProjectId : null,
     appFocus,
     runtimeMode: resolveValidMode(rawModeParam),
     onConversationIdChange: (id) => {
@@ -165,39 +176,57 @@ export function AiChatHub({
       });
     },
     onConversationLoaded: (meta) => {
-      setActiveProjectId(meta.projectId);
+      setActiveProjectId(canSelectProject ? meta.projectId : null);
     },
   });
 
   const canOpenManagement =
-    canManageAi || (allowedPanelSections && allowedPanelSections.length > 0);
+    allowedPanelSections !== undefined
+      ? allowedPanelSections.length > 0
+      : canManageAi;
   const defaultPanelSection: AiPanelSectionKey =
     allowedPanelSections && allowedPanelSections.length > 0
       ? allowedPanelSections[0]!
       : "memory";
 
   const panelParam = searchParams.get(AI_PANEL_PARAM);
-  const panelSection: AiPanelSectionKey | null = useMemo(() => {
-    if (!canOpenManagement || !isAiPanelSectionKey(panelParam)) return null;
-    if (
-      allowedPanelSections &&
-      allowedPanelSections.length > 0 &&
-      !allowedPanelSections.includes(panelParam)
-    ) {
-      return allowedPanelSections[0]!;
-    }
-    return panelParam;
-  }, [allowedPanelSections, canOpenManagement, panelParam]);
+  const resolvePanelFromParam = useCallback(
+    (raw: string | null): AiPanelSectionKey | null => {
+      if (!canOpenManagement || !isAiPanelSectionKey(raw)) return null;
+      if (
+        allowedPanelSections &&
+        allowedPanelSections.length > 0 &&
+        !allowedPanelSections.includes(raw)
+      ) {
+        return allowedPanelSections[0]!;
+      }
+      return raw;
+    },
+    [allowedPanelSections, canOpenManagement],
+  );
+
+  const [panelSection, setPanelSection] = useState<AiPanelSectionKey | null>(
+    () => resolvePanelFromParam(panelParam),
+  );
+
+  useEffect(() => {
+    setPanelSection(resolvePanelFromParam(panelParam));
+  }, [panelParam, resolvePanelFromParam]);
 
   const openPanel = useCallback(
-    (key: AiPanelSectionKey) =>
-      replaceParams((params) => params.set(AI_PANEL_PARAM, key)),
-    [replaceParams],
+    (key: AiPanelSectionKey) => {
+      const resolved = resolvePanelFromParam(key);
+      setPanelSection(resolved);
+      if (resolved) {
+        replaceParams((params) => params.set(AI_PANEL_PARAM, resolved));
+      }
+    },
+    [replaceParams, resolvePanelFromParam],
   );
-  const closePanel = useCallback(
-    () => replaceParams((params) => params.delete(AI_PANEL_PARAM)),
-    [replaceParams],
-  );
+  const closePanel = useCallback(() => {
+    setPanelSection(null);
+    replaceParams((params) => params.delete(AI_PANEL_PARAM));
+  }, [replaceParams]);
 
   const handleWidgetsOpenChange = useCallback(
     (open: boolean) => {
@@ -449,11 +478,42 @@ export function AiChatHub({
     { scope: heroRef, dependencies: [isWelcome] },
   );
 
+  const taskFocus: AiTaskAppFocus = appFocus;
+
+  const focusScopedEligibleTaskIds = useMemo(() => {
+    if (eligibleTaskIds === undefined && !industry && taskFocus === "all") {
+      return undefined;
+    }
+    return resolveEligibleTasks(
+      {
+        mode: "dashboard",
+        industry,
+        eligibleTaskIds,
+        accessibleFocuses: accessibleFocuses as
+          | readonly AiTaskAppFocus[]
+          | undefined,
+        appFocus: taskFocus,
+      },
+      { includeCustom: false, respectAppFocus: true },
+    ).map((item) => item.id);
+  }, [accessibleFocuses, eligibleTaskIds, industry, taskFocus]);
+
+  useEffect(() => {
+    if (
+      focusScopedEligibleTaskIds &&
+      task !== "general" &&
+      task !== "custom" &&
+      !focusScopedEligibleTaskIds.includes(task)
+    ) {
+      setTask("general");
+    }
+  }, [focusScopedEligibleTaskIds, setTask, task]);
+
   const suggestions = useMemo(() => {
     if (
       task === "general" &&
-      appFocus === "all" &&
-      !activeProjectId &&
+      taskFocus === "all" &&
+      (!activeProjectId || !canSelectProject) &&
       starterPrompts &&
       starterPrompts.length > 0
     ) {
@@ -462,13 +522,26 @@ export function AiChatHub({
     return resolveStarterPrompts({
       mode: "dashboard",
       industry,
-      appFocus,
-      projectId: activeProjectId,
+      appFocus: taskFocus,
+      projectId: canSelectProject ? activeProjectId : null,
       task,
+      eligibleTaskIds,
+      accessibleFocuses: accessibleFocuses as
+        | readonly AiTaskAppFocus[]
+        | undefined,
       fallback: starterPrompts ?? SUGGESTED_PROMPTS.dashboard,
       count: 3,
     });
-  }, [activeProjectId, appFocus, industry, starterPrompts, task]);
+  }, [
+    accessibleFocuses,
+    activeProjectId,
+    canSelectProject,
+    eligibleTaskIds,
+    industry,
+    starterPrompts,
+    task,
+    taskFocus,
+  ]);
 
   const taskLabel =
     task === "custom" && customTask
@@ -776,7 +849,7 @@ export function AiChatHub({
             onTaskChange={setTask}
             customTask={customTask}
             onCustomTaskChange={setCustomTask}
-            eligibleTaskIds={eligibleTaskIds}
+            eligibleTaskIds={focusScopedEligibleTaskIds}
             contextControls={
               <AiWorkspaceContext
                 compact
@@ -786,9 +859,10 @@ export function AiChatHub({
                 runtimeMode={runtimeMode}
                 onRuntimeModeChange={updateRuntimeMode}
                 deepResearchEnabled={deepResearchEnabled}
-                projectId={activeProjectId}
+                projectId={canSelectProject ? activeProjectId : null}
                 onProjectChange={changeProject}
                 onProjectNameChange={setActiveProjectName}
+                canSelectProject={canSelectProject}
                 disabled={busy || loadingConversation}
               />
             }
@@ -810,7 +884,10 @@ export function AiChatHub({
 
         {/* Starter cards + quiet note in Welcome state */}
         {isWelcome && !loadingConversation ? (
-          <div className="mx-auto mb-auto mt-3 w-full max-w-3xl shrink-0 sm:mt-4">
+          <div
+            aria-label="پیشنهادهای شروع گفتگو"
+            className="mx-auto mb-auto mt-3 w-full max-w-3xl shrink-0 sm:mt-4"
+          >
             <div className="grid w-full gap-2.5 sm:grid-cols-3">
               {suggestions.slice(0, 3).map((suggestion) => (
                 <button
