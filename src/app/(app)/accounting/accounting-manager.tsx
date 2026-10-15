@@ -478,6 +478,7 @@ export function AccountingManager({
               refreshKey={refreshKey}
               canManage={canManagePayroll}
               ownerKey={currentUserId}
+              sourceRunId={searchParams.get("run")}
             />
           ) : null}
           {section === "vat" ? <VatReportSection refreshKey={refreshKey} /> : null}

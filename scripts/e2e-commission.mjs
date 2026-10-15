@@ -10,12 +10,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, mkdirSync } from "node:fs";
 import { chromium } from "playwright";
+import axe from "axe-core";
 
 const base = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
-const fixturePath = ".cache/commission-e2e.json";
-execFileSync(process.execPath, ["--import", "tsx", "scripts/seed-commission-e2e.ts", fixturePath], { stdio: "inherit" });
+const fixturePath = process.env.COMMISSION_E2E_FIXTURE ?? ".cache/commission-e2e.json";
+if (!process.env.COMMISSION_E2E_FIXTURE) execFileSync(process.execPath, ["--import", "tsx", "scripts/seed-commission-e2e.ts", fixturePath], { stdio: "inherit" });
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
-rmSync(fixturePath);
+if (!process.env.COMMISSION_E2E_FIXTURE) rmSync(fixturePath);
 const browser = await chromium.launch({ headless: true, executablePath: process.env.VISUAL_CHROMIUM_PATH || undefined });
 const errors = [];
 const expectedFailures = new Set();
@@ -31,13 +32,13 @@ async function actor(member) {
     if (message.type() === "error" && !message.text().includes("Failed to load resource")) errors.push(message.text());
   });
   page.on("response", (response) => {
-    if (response.status() >= 400 && !expectedFailures.has(new URL(response.url()).pathname)) errors.push(`${response.status()} ${response.url()}`);
+    if (response.status() >= 400 && !expectedFailures.has(`${response.status()} ${new URL(response.url()).pathname}`)) errors.push(`${response.status()} ${response.url()}`);
   });
   await page.goto(`${base}/growth/commission/runs`);
   return page;
 }
 async function api(page, method, path, body, expected = 200, headers = {}) {
-  if (expected >= 400) expectedFailures.add(path.split("?")[0]);
+  if (expected >= 400) expectedFailures.add(`${expected} ${path.split("?")[0]}`);
   const result = await page.evaluate(async ({ method, path, body, headers }) => {
     const response = await fetch(path, { method, headers: { "Content-Type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body) });
@@ -59,7 +60,7 @@ async function pay(page, id, amount) {
   await page.goto(`${base}/growth/commission/runs/${id}`);
   await page.getByRole("button", { name: "پرداخت به فروشندگان", exact: true }).click();
   await page.getByRole("checkbox", { name: "همهٔ مانده برای فروشنده آزمون" }).uncheck();
-  await page.getByRole("textbox", { name: "مبلغ پرداخت به فروشنده آزمون" }).fill(String(amount));
+  await page.getByRole("textbox", { name: "مبلغ پرداخت به فروشنده آزمون" }).fill(String(fixture.unit === "toman" ? amount / 10 : amount));
   const posted = page.waitForResponse((response) => response.url().endsWith(`/runs/${id}/payouts`) && response.request().method() === "POST");
   await page.getByRole("button", { name: "ثبت پرداخت", exact: true }).click();
   const response = await posted;
@@ -102,6 +103,12 @@ try {
   await transition(accountant, run.id, "آزادسازی برای پرداخت", "payable", true);
   const partial = await pay(accountant, run.id, 1000);
   assert.equal((await detail(accountant, run.id)).outstandingTotal, "4000");
+  assert.equal((await detail(accountant, run.id)).status, "partially_paid");
+  const overpay = await api(accountant, "POST", `/api/commission/runs/${run.id}/payouts`, {
+    allocations: [{ employeeId: fixture.seller.id, amount: "4001" }], method: "cash",
+  }, 409, { "Idempotency-Key": crypto.randomUUID() });
+  assert.equal(overpay.error, "allocation_exceeds_outstanding");
+  assert.equal((await detail(accountant, run.id)).paidTotal, "1000");
   const finalPayout = await pay(accountant, run.id, 4000);
   assert.equal((await detail(accountant, run.id)).status, "paid");
   await accountant.getByRole("button", { name: "ابطال", exact: true }).first().click();
@@ -127,10 +134,92 @@ try {
   const csv = Buffer.concat(chunks).toString("utf8");
   assert.ok(csv.startsWith("\uFEFF")); assert.ok(csv.includes("برگشت پرداخت"));
   assert.ok(!csv.includes(fixture.today)); // displayed/exported dates are Jalali
-  for (const width of [1440, 768, 390]) {
-    await accountant.setViewportSize({ width, height: 1000 });
-    assert.equal(await accountant.locator("html").getAttribute("dir"), "rtl");
-    assert.ok(await accountant.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `page overflow at ${width}`);
+  assert.ok(csv.includes(fixture.unit === "toman" ? "تومان" : "ریال"));
+  // Follow the exact historical payroll claim, not just the payroll landing page.
+  const exactSource = accountant.locator(`a[href='/accounting/payroll?run=${fixture.payrollRunId}']`);
+  assert.equal(await exactSource.count(), 1);
+  await exactSource.click();
+  await accountant.getByRole("list", { name: "لیست حقوق پیوندشده", exact: true }).waitFor();
+  assert.ok(await accountant.getByText("فروشنده آزمون", { exact: true }).count());
+  assert.equal(await accountant.getByRole("list", { name: "لیست حقوق پیوندشده", exact: true }).getByRole("button", { name: "ثبت پرداخت حقوق" }).count(), 0);
+  // The source panel is read-only; monthly payroll's normal controls are unchanged.
+  for (const theme of ["light", "dark"]) {
+    await accountant.evaluate((value) => localStorage.setItem("theme", value), theme);
+    await accountant.goto(`${base}/growth/commission/runs/${run.id}`);
+    await accountant.waitForFunction((dark) => document.documentElement.classList.contains("dark") === dark, theme === "dark");
+    await accountant.getByRole("button", { name: "نمایش", exact: true }).click();
+    await accountant.getByRole("table", { name: "ردیف‌های پورسانت فروشنده" }).waitFor();
+    const date = accountant.getByRole("button", { name: "از تاریخ صورت‌حساب", exact: true });
+    await date.focus();
+    await date.press("Enter");
+    assert.equal(await date.getAttribute("aria-expanded"), "true");
+    await accountant.keyboard.press("Escape");
+    await accountant.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "از تاریخ صورت‌حساب");
+    assert.equal(await date.getAttribute("aria-expanded"), "false");
+    await accountant.addScriptTag({ content: axe.source });
+    const panel = accountant.getByRole("heading", { name: "صورت‌حساب فروشنده آزمون", exact: true }).locator("xpath=ancestor::section[1]");
+    for (const width of [1440, 768, 390]) {
+      await accountant.setViewportSize({ width, height: 1000 });
+      assert.equal(await accountant.locator("html").getAttribute("dir"), "rtl");
+      assert.ok(await accountant.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `page overflow at ${width}/${theme}`);
+      const violations = await panel.evaluate(async (element) => (await window.axe.run(element, {
+        runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] },
+      })).violations.map(({ id, nodes }) => ({ id, nodes: nodes.map(({ target }) => target) })));
+      assert.deepEqual(violations, [], `statement accessibility at ${width}/${theme}`);
+    }
+    const totals = (await api(accountant, "GET", `/api/commission/statement?employeeId=${fixture.seller.id}`)).totals;
+    const select = accountant.getByRole("combobox", { name: "دوره تسویه", exact: true });
+    const selected = accountant.waitForResponse((response) => response.url().includes("/api/commission/statement?") && new URL(response.url()).searchParams.get("runId") === run.id);
+    await select.selectOption(run.id);
+    assert.deepEqual((await (await selected).json()).totals, totals, "filters must not change lifetime totals");
+    await accountant.getByRole("table", { name: "ردیف‌های پورسانت فروشنده" }).waitFor();
+    if (theme === "light") {
+      // Delay an actual upstream response (never invent or edit financial data)
+      // so a newer filter deterministically wins over an older answer.
+      let release, announced, completed;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const received = new Promise((resolve) => { announced = resolve; });
+      const finished = new Promise((resolve) => { completed = resolve; });
+      const pattern = /\/api\/commission\/statement\?/;
+      const hold = async (route) => {
+        if (new URL(route.request().url()).searchParams.get("runId")) return route.continue();
+        try {
+          const upstream = await route.fetch();
+          announced();
+          await gate;
+          await route.fulfill({ response: upstream });
+        } catch (error) {
+          if (route.request().failure()?.errorText !== "net::ERR_ABORTED") errors.push(String(error));
+        } finally { completed(); }
+      };
+      await accountant.route(pattern, hold);
+      try {
+        await select.selectOption("");
+        let deadline;
+        try {
+          await Promise.race([received, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Upstream statement did not arrive")), 30_000); })]);
+        } finally { clearTimeout(deadline); }
+        const newer = accountant.waitForResponse((response) => response.url().includes("/api/commission/statement?") && new URL(response.url()).searchParams.get("runId") === run.id);
+        await select.selectOption(run.id);
+        await newer;
+        const table = accountant.getByRole("table", { name: "ردیف‌های پورسانت فروشنده" });
+        await table.waitFor();
+        assert.equal(await table.locator("tbody tr").count(), 1);
+        release(); await finished;
+        await accountant.evaluate(() => new Promise(requestAnimationFrame));
+        assert.equal(await table.locator("tbody tr").count(), 1, "late unfiltered answer must not replace the selected run");
+      } finally { release(); await accountant.unroute(pattern, hold); }
+      // Real browser offline/online recovery, not a fabricated 500 response.
+      await accountant.context().setOffline(true);
+      try {
+        await select.selectOption("");
+        await panel.getByRole("button", { name: "تلاش دوباره", exact: true }).waitFor();
+      } finally { await accountant.context().setOffline(false); }
+      const recovered = accountant.waitForResponse((response) => response.url().includes("/api/commission/statement?") && response.ok());
+      await panel.getByRole("button", { name: "تلاش دوباره", exact: true }).click();
+      assert.deepEqual((await (await recovered).json()).totals, totals);
+      await accountant.getByRole("table", { name: "ردیف‌های پورسانت فروشنده" }).waitFor();
+    }
   }
   await transition(accountant, run.id, "بستن دوره", "closed", true);
   await api(accountant, "POST", `/api/commission/payouts/${finalPayout.id}/reverse`, {}, 409);
@@ -146,6 +235,19 @@ try {
   assert.equal(next.commissionTotal, "1000");
   const lines = await api(manager, "GET", `/api/commission/runs/${next.id}/lines`);
   assert.ok(lines.lines.some((line) => line.carriedFromRunId === run.id && line.amount === "1000"));
+  await transition(reviewer, next.id, "بازگشت به پیش‌نویس", "draft", true);
+  assert.equal((await detail(reviewer, next.id)).lineCount, 0, "rejection must release the unposted snapshot");
+  await transition(manager, next.id, "محاسبهٔ پورسانت‌ها", "calculated");
+  assert.equal((await detail(manager, next.id)).commissionTotal, "1000", "released carry must be reclaimed once");
+  await manager.getByRole("button", { name: "ابطال", exact: true }).click();
+  await manager.getByRole("textbox", { name: "دلیل ابطال", exact: true }).fill("ابطال پیش از پرداخت در آزمون واقعی");
+  const voided = manager.waitForResponse((response) => response.url().endsWith(`/runs/${next.id}/void`) && response.request().method() === "POST");
+  await manager.getByRole("button", { name: "تأیید: ابطال", exact: true }).click();
+  assert.equal((await voided).status(), 200);
+  assert.equal((await detail(manager, next.id)).status, "voided");
+  await api(manager, "POST", `/api/commission/runs/${next.id}/calculate`, {}, 409);
+  const finalTieOut = (await api(accountant, "GET", "/api/commission/liability")).tieOut;
+  assert.equal(finalTieOut.difference, "0"); assert.equal(finalTieOut.subledgerDifference, "0");
   assert.deepEqual(errors, [], "unexpected browser errors");
   console.log("Commission multi-user browser lifecycle passed (real application, PostgreSQL/RLS runtime)");
 } catch (error) {

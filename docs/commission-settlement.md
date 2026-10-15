@@ -198,7 +198,12 @@ Calculation records each warning on the run, with the text the screen shows (`co
 - `balance_not_positive` — a member whose net balance is not positive is not paid; their rows wait for the next run.
 - `claimed_by_payroll` — rows a payroll run already holds or paid. The warning names each payroll run
   (its period label) and its row count. The run does not take those rows. The run screen links
-  to the payroll section (`/accounting/payroll`); there is no per-run deep link yet.
+  to the payroll workspace. A statement's individual payroll-held row links to
+  `/accounting/payroll?run=<payrollRunId>`, which loads that exact legacy run through
+  the existing `payroll.view` API and opens its immutable lines in a read-only panel.
+  This works outside the first history page. A missing/foreign run is an explicit
+  error, not a fallback to a different run. The monthly payroll controls and engine
+  run routes are unchanged.
 - `earlier_rows_included` — unpaid rows dated before the period start are included. Each run takes
   every unclaimed row up to its end date, so nothing is missed and nothing is paid twice. The
   message says so.
@@ -339,3 +344,34 @@ note (a void's reason is required). The run page shows the trail.
   (`retail-invoice-service.ts`). This predates #869 and is unchanged.
 - History pages are bounded at 500, but every row is reachable through paging and filtered export; lifetime sums are never page-limited.
 - Real two-instance central/site transport verification and the full browser acceptance matrix remain release gates; see the completion audit.
+
+
+### Continuation acceptance (#869)
+
+The production browser lifecycle, full integration suite, pinned visuals and packaged
+Windows E2E all passed at PR #964 head `03f9cb3` (Actions runs `38728487023`,
+`38728481214`, `38728487272`). Later changes must earn their own passing checks.
+The extended commission runner now covers both Rial and Toman, both themes, 1440/768/390
+widths, focused WCAG/contrast audit on the statement, calendar keyboard/focus, a delayed
+**real upstream** response, real offline/retry recovery, exact payroll source navigation,
+overpay refusal, rejection/recalculation/void and unchanged reconciliation after carry release.
+No invented financial response, forced click, visual baseline update or reduced assertion.
+
+`/api/commission` now resolves to the existing `app.growth` capability. This closes an
+omitted HTTP-family mapping: a Hybrid site must return `WRONG_EXECUTION_TARGET`, even
+for a fully entitled accountant, rather than becoming an independent payout authority.
+No permission, rule calculation, approved self-approval policy or financial formula changed.
+The broader rule/producer audit remains #764.
+
+Controlled two-instance acceptance is `npm run test:e2e:commission:transport`, after
+`scripts/prepare-commission-sync-e2e.mjs` (opt-in disposable loopback database, before
+app startup). CI clones an initial snapshot into `commission_site_e2e`, runs separate
+central/site HTTP processes with the non-BYPASSRLS application role, and invokes the
+production pull client on the site DB. It checks real recorded/reversed v1 feed envelopes,
+business/branch scope, site mutation refusal, an unreachable endpoint, unchanged cursor
+on failure, the full production backoff deadline, recovery, duplicate delivery, durable
+`cloud_owned` effects and **no second site payout/journal**. This is controlled transport
+acceptance, not a claim of a customer deployment, physical desktop pairing ceremony,
+or the full IAM-gated scheduler using a modern branch credential. Branch credentials
+intentionally do not receive these business-scope envelopes. Results must be recorded
+only after the enhanced CI steps actually pass.

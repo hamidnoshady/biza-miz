@@ -330,6 +330,10 @@ jobs:
         env:
           APP_DB_PASSWORD: ci-only-app-role-password
         run: npm run db:app-role
+      - name: Prepare the controlled central/site commission snapshot
+        env:
+          COMMISSION_E2E_SEED: '1'
+        run: node scripts/prepare-commission-sync-e2e.mjs
       - name: Build
         run: npm run build
       - name: Start the production server
@@ -388,7 +392,9 @@ jobs:
           fi
       - name: Server log (on failure)
         if: failure()
-        run: cat server.log || true
+        run: |
+          cat server.log || true
+          cat site-server.log 2>/dev/null || true
       - name: Upload diffs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -439,6 +445,10 @@ jobs:
         env:
           APP_DB_PASSWORD: ci-only-app-role-password
         run: npm run db:app-role
+      - name: Prepare the controlled central/site commission snapshot
+        env:
+          COMMISSION_E2E_SEED: '1'
+        run: node scripts/prepare-commission-sync-e2e.mjs
       - name: Build
         run: npm run build
       - name: Start the production server
@@ -465,10 +475,33 @@ jobs:
         # Registers its own 220 receivables through the API, on this job's
         # fresh database, so it never touches the visual-regression fixture.
         run: npm run test:e2e:cheques
-      - name: Commission multi-user lifecycle E2E
+      - name: Commission multi-user lifecycle E2E (Rial)
         env:
           COMMISSION_E2E_SEED: '1'
+          COMMISSION_E2E_FIXTURE: .cache/commission-sync-e2e.json
         run: npm run test:e2e:commission
+      - name: Commission multi-user lifecycle E2E (Toman)
+        env:
+          COMMISSION_E2E_SEED: '1'
+          COMMISSION_E2E_UNIT: toman
+        run: npm run test:e2e:commission
+      - name: Start the isolated site runtime
+        run: |
+          BIND_ADDR=127.0.0.1 PORT=3001 DEPLOYMENT_ROLE=site \
+          DATABASE_URL=postgres://pos_app:ci-only-app-role-password@127.0.0.1:55433/commission_site_e2e \
+          npm run start > site-server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3001/api/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat site-server.log
+          exit 1
+      - name: Commission real two-instance transport and authority
+        env:
+          COMMISSION_E2E_SEED: '1'
+          DEPLOYMENT_ROLE: site
+          DATABASE_URL: postgres://pos_app:ci-only-app-role-password@127.0.0.1:55433/commission_site_e2e
+        run: npm run test:e2e:commission:transport
       - name: Commission browser diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
@@ -485,7 +518,9 @@ jobs:
         run: npm run test:e2e:fiscal-opening
       - name: Server log (on failure)
         if: failure()
-        run: cat server.log || true
+        run: |
+          cat server.log || true
+          cat site-server.log 2>/dev/null || true
       - name: Stop PostgreSQL
         if: always()
         continue-on-error: true

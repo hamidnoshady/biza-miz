@@ -27,7 +27,7 @@ business-scope sync documentation. No replacement financial subsystem or balance
 | No duplicate accrual settlement | Complete in #930; same payroll advisory lock, row locks, mutually exclusive claim CHECK and affected-row checks. |
 | Returns, corrections, close/carry | Complete in #930; signed accruals, append-only reversal, posted-history guards and employee-level carries retained. |
 | Consistent GL reconciliation | Defect fixed here: both commission and payroll tie-outs now read via existing `inSnapshot` / explicit client runner. Includes open standalone runs AND unclaimed carries on that same connection. No RLS bypass, mutation lock, rounding or zero-forcing. |
-| Statements | Previously correct lifetime sums but capped history. Added independent accrual/payout paging, date/run filters, full filtered CSV (20,000 rows per history; explicit refusal above cap), sale/journal/run IDs and navigation. All totals remain lifetime DB sums, even for empty filters. Statement reads also use one snapshot. Payroll provenance still links to the payroll workspace: it has no supported direct legacy-run URL. |
+| Statements | Previously correct lifetime sums but capped history. Added independent accrual/payout paging, date/run filters, full filtered CSV (20,000 rows per history; explicit refusal above cap), sale/journal/run IDs and navigation. All totals remain lifetime DB sums, even for empty filters. Statement reads also use one snapshot. Payroll provenance now uses a supported exact `?run=<id>` source panel with the existing permission/RLS API, independent of history paging. |
 | Warnings | Fixed sale-day effective windows, item/brand scope, missing/inactive assignments without accrual, and inaccurate claim wording (payroll-held is not necessarily paid). Never accrue money from a warning. Historical lines with existing accruals are not re-diagnosed from subsequently edited rules. |
 | Rule-engine/category scope | Pre-existing #764 dependency, not rebuilt: retail producer does not pass category; a category rule no longer hides the warning. Rule edit history is not available to reconstruct past active flags. Warning sales values remain pre-discount, explicitly documented. |
 | Financial permissions / tenant isolation | Existing five permissions, service transitions, API guards and FORCE RLS retained. Added snapshot reporting probes under a non-superuser/non-BYPASSRLS app role. |
@@ -58,26 +58,46 @@ business-scope sync documentation. No replacement financial subsystem or balance
 
 ### Current verification record
 
-Current branch evidence, 2026-10-15 (Node 24). Earlier gate tables describe #930 only,
-not verification of this completion branch.
+Evidence as of 2026-10-15. Earlier gate tables below describe #930 only.
 
-| Gate | Current evidence |
+| Gate | Verified result / current continuation |
 | --- | --- |
-| TypeScript | PASS, final `tsc --noEmit` exit 0 after all source/test changes. |
-| ESLint | PASS, final full sequential rerun exit 0. No warning threshold changed. |
-| Focused unit/HTTP | PASS: 74 tests / 5 files, including pagination/view denial and exact CSV download contract. |
-| Financial PostgreSQL | PASS: 247 tests / 6 files, 45.55s: payroll 184, accrual 11, settlement 23, contention 10, sync handlers 12, tenant isolation 7. Includes oversized-export refusal, whole-history paging, exact manual GL drift and deterministic snapshot barriers. |
-| Full unit / full DB | Fresh sequential full unit PASS: 11,415 tests / 865 files, 493.27s. Full PostgreSQL still running. Initial memory-contaminated runs were stopped and are not counted. |
-| Actual-app browser | NOT passed. On unprivileged runtime role, browser reproduced the calendar-label defect; after correction, calendar-close assertion and real run creation/calculation succeeded. Later dev route compilation exhausted sandbox RAM and the server died. Full script remains an unverified gate; no mocked route or forced click was substituted. |
-| Production build | BLOCKED locally: both parallel and isolated attempts were killed (isolated exit 137) during compilation on the 3.8 GiB sandbox. No successful build claim or altered build/test acceptance thresholds. |
-| Pinned visual / Windows packaging | NOT verified here. Available local Chromium 138 is not the pinned visual browser; no baselines regenerated. Windows packaging requires its existing Windows runner. |
-| Live central/site sync | NOT verified. Handler/outbox/RLS tests above are not real transport evidence. |
-| Actions / merge | Draft PR #964. At implementation head `fdb9389`, Actions typecheck, lint, full unit, design, API guards, data transfer, production build and pinned visual PASSED. The production commission browser step reached payout but its retry used Playwright's out-of-page request path and received 401; the runner now repeats the same key/body through the real browser fetch/Origin/tenant-context path, retaining all status/replay/ID assertions. Head `4a918c5` also exposed a pre-existing fiscal-period test render/effect race: its period-request assertion now waits for that actual request, without changing the assertion or timeout. These corrections require new CI verification. Full integration and Windows/package/container checks still pending. No merge or closure. |
+| TypeScript / ESLint | Passed locally and in Actions on `03f9cb3`. Continuation typecheck passed; final lint/unit rerun is running. |
+| Full unit | 11,415 / 865 files passed locally; Actions passed at `03f9cb3`. New source-panel/statement/capability/API regressions: 43 / 4 files passed; existing payroll UI 87 passed. |
+| Financial PostgreSQL | 247 / 6 files passed locally: payroll 184, accrual 11, settlement 23, contention 10, sync handlers 12, RLS 7. |
+| Full PostgreSQL | Actions PASS at `03f9cb3`, run `38728481214`, 31m18s. The previous local run's final log is unavailable after workspace rehydration; it is not counted as a pass. |
+| Actual-app browser | Original multi-user commission lifecycle PASS on the production/non-BYPASSRLS runtime at `03f9cb3`, job `116401557439`. Newly extended Rial/Toman, themes/WCAG, keyboard/focus, filter/late-response/offline recovery, payroll navigation, overpay/reject/void checks await new-head execution. |
+| Production build | Actions PASS at `03f9cb3` (3m42s). Local cold builds exceeded the 3.8 GiB sandbox; no local pass or threshold change claimed. |
+| Pinned visual / packaging | Actions pinned visuals PASS (5m54s), packaged Windows E2E PASS (16m42s), desktop shell and production container PASS at `03f9cb3`. No baseline regeneration. |
+| Controlled central/site HTTP | New opt-in harness prepared and the separate-database bootstrap verified locally. Full real-HTTP authority/failure/backoff/recovery/duplicate acceptance awaits new CI. This is not customer deployment/physical pairing/IAM-scheduler evidence. |
+| Actions / merge | All required checks passed at `03f9cb3` (runs `38728487023` / `38728481214`; Windows `38728487272`). This continuation changes code/tests and must earn fresh checks. PR #964 remains draft; #869 OPEN; no merge or closure. |
 
-Remaining acceptance also includes the broader actual-app theme, keyboard/accessibility,
-Rial/Toman, stale/error/filter and source navigation matrix, a supported payroll-run deep
-link (currently workspace-only), and the #764 category-producer dependency. Keep #869 OPEN
-until mandatory verification, any required fixes and merge are complete.
+### Continuation delivered after `03f9cb3`
+
+- Added supported `/accounting/payroll?run=<id>` source navigation through existing
+  Accounting gates and the `payroll.view` API. Exact immutable lines open read-only,
+  including outside history paging; foreign/missing/error/retry and stale-owner states
+  are explicit. No alternate payroll settlement engine or mutation surface.
+- Fixed statement filter options disappearing during requests. Only run labels persist;
+  old totals/history remain hidden until the current URL's answer is ready.
+- Closed omitted `/api/commission` → `app.growth` capability mapping. A Hybrid site
+  must not become a second HTTP payout authority. Existing permissions, self-approval
+  policy, rule engine and financial formulas are unchanged; broader #764 audit stays there.
+- Extended real-app acceptance for both business units, both themes, three widths,
+  focused WCAG/contrast, keyboard/focus, delayed actual upstream response and actual
+  offline/retry. Added a real payroll claim fixture, overpay denial and reject/recalculate/void.
+- Added controlled central/site processes and separate DB snapshot bootstrap with RLS
+  application roles. The real production pull client checks v1 recorded/reversed envelopes,
+  credential scope, site refusal, actual transport failure, production backoff, recovery,
+  recovery re-read, durable cloud-owned effects and no duplicate site payments/journals.
+  Branch-bound devices intentionally exclude these business-scope events. This does not
+  claim a physical modern-device pairing ceremony or full IAM-gated automatic scheduling.
+
+Remaining release work: execute and fix the extended acceptance on the new head, obtain
+all fresh required checks, and resolve any mandatory live-environment evidence beyond
+controlled transport. The #764 category-producer and historical-rule limitations remain
+explicit, not silently rebuilt or bypassed. Keep #869 OPEN until mandatory criteria and
+merge are complete.
 
 ---
 

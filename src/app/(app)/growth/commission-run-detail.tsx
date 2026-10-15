@@ -344,7 +344,7 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
             {run.warnings.some((warning) => warning.code === "claimed_by_payroll") ? (
               <p className="mt-3 text-sm">
                 <Link href={accountingSectionHref("payroll")} className="text-primary underline-offset-4 hover:underline">
-                  دیدن فیش‌های حقوقی که این ردیف‌ها را پرداخته‌اند
+                  دیدن لیست‌های حقوقِ نگهدارندهٔ این ردیف‌ها
                 </Link>
               </p>
             ) : null}
@@ -466,7 +466,7 @@ export function CommissionRunDetailView({ runId, permissions }: { runId: string;
         />
 
         {statementFor ? (
-          <StatementCard
+          <CommissionStatementCard
             key={statementFor}
             employeeId={statementFor}
             money={money}
@@ -815,7 +815,7 @@ function RetryNotice({ message, onRetry }: { message: string; onRetry: () => voi
   );
 }
 
-function StatementCard({ employeeId, money, onClose }: {
+export function CommissionStatementCard({ employeeId, money, onClose }: {
   employeeId: string;
   money: MoneyApi;
   onClose: () => void;
@@ -825,6 +825,9 @@ function StatementCard({ employeeId, money, onClose }: {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [runId, setRunId] = useState("");
+  // Selection labels survive a request; financial rows/totals still belong
+  // exclusively to the current URL. The card is keyed by employeeId.
+  const [runOptions, setRunOptions] = useState<{ runId: string; runNumber: number }[]>([]);
   const params = new URLSearchParams({ employeeId, limit: String(PAGE_SIZE),
     accrualOffset: String(accrualOffset), payoutOffset: String(payoutOffset) });
   if (dateFrom) params.set("dateFrom", dateFrom);
@@ -832,6 +835,9 @@ function StatementCard({ employeeId, money, onClose }: {
   if (runId) params.set("runId", runId);
   const request = useKeyedRequest<StatementData>(`/api/commission/statement?${params}`, commissionSettlementErrorMessage);
   const statement = request.data;
+  useEffect(() => {
+    if (statement) setRunOptions(statement.runs.map(({ runId, runNumber }) => ({ runId, runNumber })));
+  }, [statement]);
   const csvParams = new URLSearchParams(params);
   csvParams.set("format", "csv");
   function filter(set: (value: string) => void, value: string) {
@@ -858,7 +864,7 @@ function StatementCard({ employeeId, money, onClose }: {
           <Field as="div" label="تا تاریخ فروش یا پرداخت"><JalaliDatePicker value={dateTo} onChange={(value) => filter(setDateTo, value)} ariaLabel="تا تاریخ صورت‌حساب" /></Field>
           <Field label="دوره تسویه"><select className={inputClass} value={runId} onChange={(e) => filter(setRunId, e.target.value)}>
             <option value="">همهٔ دوره‌ها</option>
-            {statement?.runs.map((run) => <option key={run.runId} value={run.runId}>دورهٔ {formatPersianNumber(run.runNumber)}</option>)}
+            {runOptions.map((run) => <option key={run.runId} value={run.runId}>دورهٔ {formatPersianNumber(run.runNumber)}</option>)}
           </select></Field>
         </div>
         <Button variant="outline" size="sm" asChild><a href={`/api/commission/statement?${csvParams}`} download>خروجی کامل CSV</a></Button>
@@ -879,7 +885,7 @@ function StatementCard({ employeeId, money, onClose }: {
                 <Td>{row.orderId ? <Link href={`/accounting/orders?order=${encodeURIComponent(row.orderId)}`} className="text-primary hover:underline">{row.sourceLabel}</Link> : row.sourceLabel}</Td>
                 <Td numeric>{money.formatText(row.amount)}</Td>
                 <Td>{row.settlementRunId ? <Link href={`/growth/commission/runs/${row.settlementRunId}`} className="text-primary hover:underline">{row.settledRef}</Link>
-                  : row.payrollRunId ? <Link href={accountingSectionHref("payroll")} className="text-primary hover:underline">{row.settledRef}</Link>
+                  : row.payrollRunId ? <Link href={`${accountingSectionHref("payroll")}?run=${encodeURIComponent(row.payrollRunId)}`} className="text-primary hover:underline">{row.settledRef}</Link>
                   : "در انتظار تسویه"}</Td>
                 <Td>{row.entryId ? <Link href={journalHref(row.entryId)!} className="text-primary hover:underline">سند</Link> : "—"}</Td>
               </DataTableRow>)}

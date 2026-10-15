@@ -451,3 +451,17 @@ verification, pre-migration backup and rollback.
 - **Phone cannot connect:** use the HTTPS URL/QR from Local Devices, trust the
   generated root certificate, confirm the chosen adapter is Private, and
   verify the gateway—not the internal server—is listening on the LAN.
+
+
+### Commission controlled transport acceptance (#869 continuation)
+
+See [commission acceptance](commission-settlement.md#continuation-acceptance-869).
+The new CI harness uses separate central/site application processes and databases,
+the existing non-BYPASSRLS role and the real production pull implementation over HTTP.
+The branch credential excludes business-scope commission envelopes; the business-wide
+feed receives them and the site records durable `cloud_owned` acknowledgments without
+re-posting their journals. The harness checks actual unreachable-endpoint failure,
+backoff/cursor durability, recovery and duplicate re-delivery. It seeds a starting
+snapshot, not a physical-device pairing ceremony, and does not claim the entire
+IAM-gated modern branch scheduler or a customer's live deployment was verified.
+Until its new Actions step passes, this remains committed acceptance code, not a result.

@@ -452,3 +452,15 @@ The commission report uses the same isolation and the same canonical 2300 accoun
 No financial formula, payout authority, claim policy or self-approval rule changes.
 See [commission settlement](commission-settlement.md) for the identities and the
 PostgreSQL inter-query payout/reversal/payroll-commit barrier tests.
+
+
+### Exact commission source links (#869)
+
+`/accounting/payroll?run=<legacy-payroll-run-id>` opens the linked run above the normal
+workspace tabs. It reads the exact authorized `/api/ledger/payroll/runs/:id`, including
+runs outside paged history, and reuses `PayrollRunItem` with its immutable lines already
+open and mutation controls disabled. The panel is not another payment surface. Existing
+Accounting app/section/feature and API permission/RLS gates still apply. Missing/foreign
+runs show an explicit error; retry never substitutes a different run. A changed URL
+aborts the earlier request and hides its data immediately. Engine run IDs belong to
+the engine's own route, not this legacy source contract.
