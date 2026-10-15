@@ -11,9 +11,11 @@ import { getRealmSecret } from "./jwt-secret";
 import {
   logoutRetryCookieOptions,
   normalizePending,
+  pendingRevocationKey,
   readLogoutRetryTicket,
   signLogoutRetryTicket,
-  type PendingRevocation,
+  type PendingSessionRevocation,
+  type PendingSupportRevocation,
 } from "./logout-retry";
 
 beforeAll(() => {
@@ -22,11 +24,23 @@ beforeAll(() => {
 
 const now = () => Math.floor(Date.now() / 1000);
 
-function entry(overrides: Partial<PendingRevocation> = {}): PendingRevocation {
+function entry(overrides: Partial<PendingSessionRevocation> = {}): PendingSessionRevocation {
   return {
+    kind: "employee_session",
     sessionId: randomUUID(),
     businessId: randomUUID(),
     employeeId: randomUUID(),
+    expiresAt: now() + 3600,
+    ...overrides,
+  };
+}
+
+function grant(overrides: Partial<PendingSupportRevocation> = {}): PendingSupportRevocation {
+  return {
+    kind: "support_grant",
+    grantId: randomUUID(),
+    businessId: randomUUID(),
+    adminId: randomUUID(),
     expiresAt: now() + 3600,
     ...overrides,
   };
@@ -40,6 +54,13 @@ describe("signLogoutRetryTicket / readLogoutRetryTicket", () => {
     expect(ticket).not.toBeNull();
     expect(ticket!.maxAgeSeconds).toBeGreaterThan(7000);
     expect(ticket!.maxAgeSeconds).toBeLessThanOrEqual(7200);
+    await expect(readLogoutRetryTicket(ticket!.token)).resolves.toEqual([a, b]);
+  });
+
+  it("carries a pending support close next to a pending session", async () => {
+    const a = entry();
+    const b = grant();
+    const ticket = await signLogoutRetryTicket([a, b]);
     await expect(readLogoutRetryTicket(ticket!.token)).resolves.toEqual([a, b]);
   });
 
@@ -82,14 +103,26 @@ describe("signLogoutRetryTicket / readLogoutRetryTicket", () => {
 
   it("drops entries that are not well-formed even inside a correctly signed ticket", async () => {
     const good = entry();
+    const goodGrant = grant();
     const token = await new SignJWT({
       realm: "tenant.logout_retry",
-      pending: [good, { ...good, sessionId: "not-a-uuid" }, { sessionId: randomUUID() }],
+      pending: [
+        good,
+        { ...good, sessionId: "not-a-uuid" },
+        { sessionId: randomUUID() },
+        // No kind: an entry must say what it ends.
+        { sessionId: randomUUID(), businessId: randomUUID(), employeeId: randomUUID(), expiresAt: now() + 60 },
+        // A kind with the other kind's fields.
+        { ...goodGrant, kind: "employee_session" },
+        { ...goodGrant, adminId: "not-a-uuid" },
+        { ...goodGrant, kind: "something_else" },
+        goodGrant,
+      ],
     })
       .setProtectedHeader({ alg: "HS256" })
       .setExpirationTime("1h")
       .sign(await getRealmSecret("tenant"));
-    await expect(readLogoutRetryTicket(token)).resolves.toEqual([good]);
+    await expect(readLogoutRetryTicket(token)).resolves.toEqual([good, goodGrant]);
   });
 });
 
@@ -101,8 +134,25 @@ describe("normalizePending", () => {
     const many = Array.from({ length: 7 }, () => entry());
     const result = normalizePending([entry({ expiresAt: now() - 5 }), older, newer, ...many]);
     expect(result).toHaveLength(5);
-    expect(result.some((p) => p.sessionId === sessionId)).toBe(false);
+    expect(result.some((p) => p.kind === "employee_session" && p.sessionId === sessionId)).toBe(false);
     expect(result).toEqual(many.slice(-5));
+  });
+
+  it("de-duplicates by what an entry ends, so a session and a grant with the same id are both kept", () => {
+    const id = randomUUID();
+    const session = entry({ sessionId: id });
+    const support = grant({ grantId: id });
+    expect(normalizePending([session, support])).toEqual([session, support]);
+    expect(pendingRevocationKey(session)).not.toBe(pendingRevocationKey(support));
+  });
+
+  it("a repeated entry counts as the newest", () => {
+    const repeated = grant();
+    const others = Array.from({ length: 5 }, () => entry());
+    const result = normalizePending([repeated, ...others, { ...repeated, expiresAt: now() + 9000 }]);
+    expect(result).toHaveLength(5);
+    expect(result.at(-1)).toEqual({ ...repeated, expiresAt: expect.any(Number) });
+    expect(result.at(-1)!.expiresAt).toBeGreaterThan(now() + 8000);
   });
 });
 

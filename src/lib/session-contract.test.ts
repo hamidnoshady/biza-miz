@@ -10,6 +10,8 @@
  *  - the revoke actions must describe what they *reach*, because that is what
  *    the confirmation dialog shows.
  */
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   SESSION_LOGIN_METHODS,
@@ -85,6 +87,34 @@ describe("login method labels", () => {
     }
     expect(isSessionLoginMethod("fax")).toBe(false);
     expect(sessionLoginMethodLabel(null)).toBeNull();
+  });
+
+  it("gives every door its own label, so two different doors never read the same", () => {
+    const labels = SESSION_LOGIN_METHODS.map((method) => sessionLoginMethodLabel(method));
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+
+  it("names the doors that open a session without a sign-in form (#854 follow-up, third pass)", () => {
+    expect(sessionLoginMethodLabel("business_switch")).toBe("تغییر کسب‌وکار");
+    expect(sessionLoginMethodLabel("setup")).toBe("راه‌اندازی اولیه");
+    expect(sessionLoginMethodLabel("desktop_handoff")).toBe("ورود از برنامهٔ دسکتاپ");
+    expect(sessionLoginMethodLabel("company_handoff")).toBe("ورود از کنسول مدیریت");
+  });
+
+  it("is exactly the list the database constraint accepts, as of the latest migration that defines it", () => {
+    // A door added here but not to the CHECK would make createSession throw at
+    // sign-in; one added to the CHECK but not here would render unlabelled.
+    const dir = join(process.cwd(), "migrations");
+    const latest = readdirSync(dir)
+      .filter((name) => name.endsWith(".sql"))
+      .sort()
+      .map((name) => readFileSync(join(dir, name), "utf8"))
+      .filter((sql) => /ADD CONSTRAINT employee_sessions_login_method_check/.test(sql))
+      .at(-1);
+    expect(latest).toBeTruthy();
+    const list = /employee_sessions_login_method_check[\s\S]*?IN \(([\s\S]*?)\)/.exec(latest!)?.[1] ?? "";
+    const accepted = [...list.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
+    expect([...accepted].sort()).toEqual([...SESSION_LOGIN_METHODS].sort());
   });
 });
 

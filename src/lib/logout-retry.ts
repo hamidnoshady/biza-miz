@@ -19,6 +19,10 @@
  * with the tenant key under a realm claim `verifySession` refuses
  * (`realm !== "tenant"`), so it cannot pass for a session token. It expires
  * with the session it names: after that the token is dead anyway.
+ *
+ * Since the third pass a session is one of two things, and the ticket names
+ * either: a member's `employee_sessions` row, or — for a support operator
+ * signed in as the business — the support grant the session is bound to.
  */
 import { SignJWT } from "jose";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
@@ -29,8 +33,9 @@ const TICKET_REALM = "tenant.logout_retry";
 /** A handful is plenty: one per sign-out this browser could not confirm. */
 const MAX_PENDING = 5;
 
-/** One session a sign-out could not yet confirm ended. */
-export interface PendingRevocation {
+/** One member session a sign-out could not yet confirm ended. */
+export interface PendingSessionRevocation {
+  kind: "employee_session";
   /** `employee_sessions.id`, from the signed session token. */
   sessionId: string;
   businessId: string;
@@ -40,31 +45,58 @@ export interface PendingRevocation {
   expiresAt: number;
 }
 
+/**
+ * One support session a sign-out could not yet confirm closed: the grant the
+ * operator's tenant token is bound to (`imp.grantId`), closed exactly as the
+ * support banner's «پایان نشست پشتیبانی» closes it — by that operator, inside
+ * that business.
+ */
+export interface PendingSupportRevocation {
+  kind: "support_grant";
+  grantId: string;
+  businessId: string;
+  /** The operator the grant belongs to — the close is restricted to their own grant. */
+  adminId: string;
+  /** Epoch seconds after which the session token is dead regardless. */
+  expiresAt: number;
+}
+
+export type PendingRevocation = PendingSessionRevocation | PendingSupportRevocation;
+
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
 function isPending(value: unknown): value is PendingRevocation {
-  const v = value as Partial<PendingRevocation> | null;
-  return Boolean(
-    v &&
-      isUuid(v.sessionId) &&
-      isUuid(v.businessId) &&
-      isUuid(v.employeeId) &&
-      typeof v.expiresAt === "number" &&
-      Number.isFinite(v.expiresAt),
-  );
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  if (!isUuid(v.businessId) || typeof v.expiresAt !== "number" || !Number.isFinite(v.expiresAt)) {
+    return false;
+  }
+  if (v.kind === "employee_session") return isUuid(v.sessionId) && isUuid(v.employeeId);
+  if (v.kind === "support_grant") return isUuid(v.grantId) && isUuid(v.adminId);
+  return false;
+}
+
+/** What an entry ends — the key a ticket de-duplicates on. */
+export function pendingRevocationKey(entry: PendingRevocation): string {
+  return entry.kind === "employee_session"
+    ? `employee_session:${entry.sessionId}`
+    : `support_grant:${entry.grantId}`;
 }
 
 /** Live, de-duplicated, capped — the newest entries win. */
 export function normalizePending(entries: readonly PendingRevocation[]): PendingRevocation[] {
   const now = nowSeconds();
-  const byId = new Map<string, PendingRevocation>();
+  const byKey = new Map<string, PendingRevocation>();
   for (const entry of entries) {
     if (!isPending(entry) || entry.expiresAt <= now) continue;
-    byId.set(entry.sessionId, entry);
+    const key = pendingRevocationKey(entry);
+    // Re-inserted, so a repeated entry counts as the newest.
+    byKey.delete(key);
+    byKey.set(key, entry);
   }
-  return [...byId.values()].slice(-MAX_PENDING);
+  return [...byKey.values()].slice(-MAX_PENDING);
 }
 
 /** Sign a ticket for `entries`, or null when nothing is left pending. */

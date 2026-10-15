@@ -3,6 +3,7 @@ import type { SessionPayload } from "./auth-edge";
 import {
   isSupportSessionExitRequest,
   SUPPORT_SESSION_EXIT_PATH,
+  SUPPORT_SESSION_SIGN_OUT_PATH,
   supportCloseMeta,
   supportMutationAllowed,
   supportSessionRemainingMs,
@@ -59,6 +60,25 @@ describe("ending a support session", () => {
     // The policy PATCH stays a mutation a read-only session may not make.
     expect(supportMutationAllowed(session("read_only"), "PATCH", SUPPORT_SESSION_EXIT_PATH)).toBe(false);
     expect(supportMutationAllowed(session("controlled"), "PATCH", SUPPORT_SESSION_EXIT_PATH)).toBe(false);
+  });
+
+  // #854 follow-up (third pass): the sidebar's and Profile's «خروج» post to
+  // the sign-out route, which closes a support session's grant through the
+  // banner's own service. A read-only guard refusing it left a read-only
+  // operator with a 403 and a live grant.
+  it("lets every support mode sign itself out, and exempts exactly POST on the sign-out path", () => {
+    expect(SUPPORT_SESSION_SIGN_OUT_PATH).toBe("/api/auth/logout");
+    for (const mode of ["read_only", "controlled", "full", "emergency"] as const) {
+      expect(supportMutationAllowed(session(mode), "POST", SUPPORT_SESSION_SIGN_OUT_PATH), mode).toBe(true);
+    }
+    expect(isSupportSessionExitRequest("POST", "/api/auth/logout")).toBe(true);
+    expect(isSupportSessionExitRequest("DELETE", "/api/auth/logout")).toBe(false);
+    expect(isSupportSessionExitRequest("PUT", "/api/auth/logout")).toBe(false);
+    expect(isSupportSessionExitRequest("POST", "/api/auth/logout/retry")).toBe(false);
+    expect(isSupportSessionExitRequest("POST", "/api/auth/logoutx")).toBe(false);
+    // Moving the session elsewhere is not leaving it.
+    expect(supportMutationAllowed(session("read_only"), "POST", "/api/auth/switch-business")).toBe(false);
+    expect(supportMutationAllowed(session("read_only"), "POST", "/api/auth/switch-location")).toBe(false);
   });
 
   it("returns the operator to the business's support tab in the console", () => {

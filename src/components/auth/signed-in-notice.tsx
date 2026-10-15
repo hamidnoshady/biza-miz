@@ -33,6 +33,7 @@ import { roleLabel } from "@/lib/role-labels";
 import {
   browserSignedOut,
   LOGOUT_MESSAGES,
+  signOutDestination,
   signOutResultMessage,
   useSignOut,
   type SignOutResult,
@@ -83,9 +84,10 @@ export function SignedInNotice({
     const outcome = await run();
     if (!outcome || !browserSignedOut(outcome)) return; // the reason is shown inline
     // Signed out in this browser: carry an unconfirmed warning (and its retry)
-    // across the navigation, then show the fresh door.
+    // across the navigation, then show the fresh door — or, for a support
+    // operator whose support session just closed, the console it came from.
     announceSignOutResult(outcome, () => void retryUnconfirmedSignOut());
-    router.replace("/login?changeAccount=1");
+    router.replace(signOutDestination(outcome, "/login?changeAccount=1"));
     router.refresh();
   }
 

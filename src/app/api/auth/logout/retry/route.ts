@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import type { LogoutOutcome } from "@/lib/logout-contract";
 import { LOGOUT_RETRY_COOKIE, readLogoutRetryTicket, type PendingRevocation } from "@/lib/logout-retry";
-import { endSignedOutSession, logoutResponse } from "@/lib/logout-service";
+import { endPendingRevocation, logoutResponse } from "@/lib/logout-service";
 
 /**
  * Finish a sign-out the server could not confirm (#854 follow-up).
@@ -11,9 +11,9 @@ import { endSignedOutSession, logoutResponse } from "@/lib/logout-service";
  * session — except the httpOnly retry ticket the route set
  * (`@/lib/logout-retry`). This route reads that ticket and only that ticket:
  * it takes no body, ends only the sessions the ticket's signed entries name
- * (each restricted to its own member's row), and never touches the session
- * cookie — a member who has signed in again since must not be signed out by a
- * stale retry.
+ * (each restricted to its own member's row, or to its own operator's support
+ * grant), and never touches the session cookie — a member who has signed in
+ * again since must not be signed out by a stale retry.
  *
  * Reachable without a session (middleware's public list, with the Origin
  * mismatch check the sign-in mutations get): the cookie it would need is
@@ -26,7 +26,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const stillPending: PendingRevocation[] = [];
   let revokedAny = false;
   for (const entry of pending) {
-    const result = await endSignedOutSession(entry, "sign_out_retry");
+    const result = await endPendingRevocation(entry, "sign_out_retry", request.headers);
     if (result === "failed") stillPending.push(entry);
     else if (result === "revoked") revokedAny = true;
   }

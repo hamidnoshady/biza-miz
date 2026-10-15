@@ -167,8 +167,8 @@ describe("#854 F10 + logout — sign-out only leaves once the server confirmed i
     expect(router.refresh).toHaveBeenCalled();
   });
 
-  it("treats an already-ended or untracked session as signed out", async () => {
-    for (const outcome of ["already_ended", "not_tracked", "no_session"]) {
+  it("treats an already-ended or missing session as signed out", async () => {
+    for (const outcome of ["already_ended", "no_session"]) {
       router.replace.mockReset();
       routes["POST /api/auth/logout"] = () => signedOutAnswer(outcome);
       const view = mount();
@@ -237,6 +237,55 @@ describe("#854 F10 + logout — sign-out only leaves once the server confirmed i
     fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
     fireEvent.click(await screen.findByRole("button", { name: "رفتن به صفحهٔ ورود" }));
     expect(router.replace).toHaveBeenCalledWith("/login");
+  });
+
+  // #854 follow-up (third pass): a support operator's sign-out closes the
+  // support session and the server names the console as the way back.
+  const consolePath = "/platform/businesses/7198892a-cca7-4e29-80a1-ff9f5f64fa97/support";
+
+  it("a support operator's confirmed sign-out goes back to the console, not the staff sign-in", async () => {
+    routes["POST /api/auth/logout"] = () =>
+      json(200, { ok: true, outcome: "revoked", sessionCookieCleared: true, pendingRevocations: 0, redirectTo: consolePath });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(consolePath));
+    expect(router.replace).not.toHaveBeenCalledWith("/login");
+  });
+
+  it("an unconfirmed support sign-out offers the way back to the console, and the retry keeps it", async () => {
+    routes["POST /api/auth/logout"] = () =>
+      json(503, {
+        ok: false,
+        outcome: "unconfirmed",
+        sessionCookieCleared: true,
+        pendingRevocations: 1,
+        error: "logout_unconfirmed",
+        redirectTo: consolePath,
+      });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/سرور پایان نشست را تأیید نکرد/);
+    expect(screen.queryByRole("button", { name: "رفتن به صفحهٔ ورود" })).toBeNull();
+    expect(screen.getByRole("button", { name: "بازگشت به کنسول" })).toBeTruthy();
+
+    routes["POST /api/auth/logout/retry"] = () =>
+      json(200, { ok: true, outcome: "revoked", sessionCookieCleared: false, pendingRevocations: 0 });
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره برای پایان نشست" }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(consolePath));
+  });
+
+  it("ignores a destination that would leave the origin", async () => {
+    routes["POST /api/auth/logout"] = () =>
+      json(200, {
+        ok: true,
+        outcome: "revoked",
+        sessionCookieCleared: true,
+        pendingRevocations: 0,
+        redirectTo: "https://evil.example/phish",
+      });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "خروج از حساب" }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"));
   });
 });
 

@@ -1,8 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { SESSION_COOKIE, sessionHours, verifySession } from "@/lib/auth";
+import { SESSION_COOKIE, verifySession } from "@/lib/auth";
 import type { LogoutOutcome } from "@/lib/logout-contract";
-import { LOGOUT_RETRY_COOKIE, readLogoutRetryTicket, type PendingRevocation } from "@/lib/logout-retry";
-import { endSignedOutSession, logoutResponse } from "@/lib/logout-service";
+import {
+  LOGOUT_RETRY_COOKIE,
+  pendingRevocationKey,
+  readLogoutRetryTicket,
+  type PendingRevocation,
+} from "@/lib/logout-retry";
+import { endPendingRevocation, logoutResponse, pendingRevocationFor } from "@/lib/logout-service";
+import { supportSessionReturnPath } from "@/lib/support-session";
 
 /**
  * Sign this browser out (Phase 20 Wave 2; #854 follow-up).
@@ -14,9 +20,14 @@ import { endSignedOutSession, logoutResponse } from "@/lib/logout-service";
  *  - the session's `employee_sessions` row is ended together with its audit row
  *    (`revoked`), or was already gone (`already_ended`); either way a copy of the
  *    token kept anywhere else is refused from now on;
- *  - a session minted without a server-side record (`not_tracked`) has nothing
- *    left to end once its cookie is gone;
- *  - if ending the row failed (`unconfirmed`, HTTP 503), the route used to
+ *  - a support operator's session is bound to its grant, not a row: the grant is
+ *    closed through the same service and audit trail as the support banner's
+ *    exit (`revoked`, or `already_ended` when it was already over), and the
+ *    answer carries `redirectTo` — back to the console, not the staff sign-in;
+ *  - a token bound to neither predates the third pass and is already refused on
+ *    every request (`checkEmployeeSession`), so there is nothing left to end
+ *    (`already_ended`). No session reaches this route untracked any more;
+ *  - if ending the session failed (`unconfirmed`, HTTP 503), the route used to
  *    swallow the error and answer `{ ok: true }` while the session stayed valid
  *    on the server. Now the member is told, and an httpOnly retry ticket lets
  *    `POST /api/auth/logout/retry` finish the job without the cookie.
@@ -26,6 +37,9 @@ import { endSignedOutSession, logoutResponse } from "@/lib/logout-service";
  * sign-out must still work for a session the server already considers stale),
  * never by anything in the body. Earlier sign-outs this browser could not
  * confirm ride along in the retry ticket and are retried here too.
+ *
+ * A read-only or controlled support session may call this: ending your own
+ * session only ever removes access (`isSupportSessionExitRequest`).
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const token = request.cookies.get(SESSION_COOKIE)?.value;
@@ -35,33 +49,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const stillPending: PendingRevocation[] = [];
   let outcome: LogoutOutcome;
+  const current = session ? pendingRevocationFor(session) : null;
 
   if (!session) {
     outcome = "no_session";
-  } else if (!session.employeeSessionId) {
-    outcome = "not_tracked";
+  } else if (!current) {
+    outcome = "already_ended";
   } else {
-    const entry: PendingRevocation = {
-      sessionId: session.employeeSessionId,
-      businessId: session.businessId,
-      employeeId: session.sub,
-      expiresAt:
-        typeof session.exp === "number"
-          ? session.exp
-          : Math.floor(Date.now() / 1000) + sessionHours() * 60 * 60,
-    };
-    const result = await endSignedOutSession(entry, "sign_out");
+    const result = await endPendingRevocation(current, "sign_out", request.headers);
     if (result === "failed") {
       outcome = "unconfirmed";
-      stillPending.push(entry);
+      stillPending.push(current);
     } else {
       outcome = result;
     }
   }
 
+  const currentKey = current ? pendingRevocationKey(current) : null;
   for (const entry of pending) {
-    if (entry.sessionId === session?.employeeSessionId) continue;
-    if ((await endSignedOutSession(entry, "sign_out_retry")) === "failed") stillPending.push(entry);
+    if (pendingRevocationKey(entry) === currentKey) continue;
+    if ((await endPendingRevocation(entry, "sign_out_retry", request.headers)) === "failed") {
+      stillPending.push(entry);
+    }
   }
 
   return logoutResponse({
@@ -69,5 +78,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     stillPending,
     clearSessionCookie: true,
     hadTicket: Boolean(ticketCookie),
+    ...(session?.imp ? { redirectTo: supportSessionReturnPath(session.businessId) } : {}),
   });
 }

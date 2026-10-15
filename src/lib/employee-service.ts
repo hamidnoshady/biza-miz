@@ -20,6 +20,7 @@ import type { PoolClient } from "pg";
 import type { AuthenticationResponseJSON, AuthenticatorTransportFuture, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { getPool, query, withTenantTransaction, withoutTenantScope } from "./db";
 import { isUuid } from "./uuid";
+import { isSessionLoginMethod, type SessionLoginMethod } from "./session-contract";
 import { hostRoutingEnabled, leadingHostLabel, parseHost, rootDomain } from "./host";
 import { postgresDateToIso } from "./jalali";
 import { resolveBusinessByLabel } from "./host-resolution";
@@ -559,9 +560,10 @@ export interface CreateSessionInput {
   /**
    * Issue #854 (P2.27): which door minted this session. Recorded so the
    * Profile device card can say how a session was established instead of
-   * showing a raw user-agent next to a timestamp.
+   * showing a raw user-agent next to a timestamp. Typed by the shared list
+   * the database constraint mirrors (`SESSION_LOGIN_METHODS`).
    */
-  loginMethod?: string | null;
+  loginMethod?: SessionLoginMethod | null;
   /** The raw user-agent, kept for the expandable detail on that card. */
   userAgent?: string | null;
 }
@@ -634,6 +636,13 @@ export interface ActiveSessionSummary {
   deviceLabel: string | null;
   /** Presence alone says how this session was opened — see audit.ts's `credentialKindFromId` (null means PIN). */
   credentialId: string | null;
+  /**
+   * The door that opened this session (P2.27), when it was recorded — the
+   * security center labels the row with it before falling back to
+   * `credentialId`. Null for rows that predate migration 0211 and for the
+   * sign-in doors that do not record one.
+   */
+  loginMethod: SessionLoginMethod | null;
   issuedAt: string;
   lastSeenAt: string | null;
   expiresAt: string;
@@ -647,6 +656,7 @@ interface ActiveSessionRow extends Record<string, unknown> {
   location_id: string | null;
   device_label: string | null;
   credential_id: string | null;
+  login_method: string | null;
   issued_at: Date;
   last_seen_at: Date | null;
   expires_at: Date;
@@ -663,7 +673,7 @@ export async function listActiveSessionsForBusiness(businessId: string): Promise
   const { rows } = await query<ActiveSessionRow>(
     `SELECT s.id, s.employee_id, u.full_name AS employee_name, u.role::text AS role,
             s.location_id, coalesce(s.device_label, d.label) AS device_label,
-            s.credential_id, s.issued_at, s.last_seen_at, s.expires_at
+            s.credential_id, s.login_method, s.issued_at, s.last_seen_at, s.expires_at
        FROM employee_sessions s
        JOIN users u ON u.id = s.employee_id
        LEFT JOIN pos_devices d ON d.id = s.device_id
@@ -679,6 +689,7 @@ export async function listActiveSessionsForBusiness(businessId: string): Promise
     locationId: row.location_id,
     deviceLabel: row.device_label,
     credentialId: row.credential_id,
+    loginMethod: isSessionLoginMethod(row.login_method) ? row.login_method : null,
     issuedAt: row.issued_at.toISOString(),
     lastSeenAt: row.last_seen_at ? row.last_seen_at.toISOString() : null,
     expiresAt: row.expires_at.toISOString(),
@@ -820,6 +831,13 @@ export async function touchSession(sessionId: string, businessId: string): Promi
 }
 
 /**
+ * Why a member's own session was ended, recorded on its audit row: a sign-out,
+ * the retry of one the server could not confirm, or the session moving to
+ * another business (`POST /api/auth/switch-business`).
+ */
+export type SessionEndVia = "sign_out" | "sign_out_retry" | "business_switch";
+
+/**
  * End one `employee_sessions` row, with its audit row, atomically.
  *
  * Issue #854 follow-up (logout): the UPDATE and the `employee.session_revoked`
@@ -839,7 +857,7 @@ export async function revokeSession(
   sessionId: string,
   businessId: string,
   actorId: string | null,
-  options: { ownedBy?: string; via?: "sign_out" | "sign_out_retry" } = {},
+  options: { ownedBy?: string; via?: SessionEndVia } = {},
 ): Promise<void> {
   // Its own code: `session_not_found` belongs to table (میز) sessions, whose
   // mapped Persian message reads «نشست میز پیدا نشد.» — nonsense when what the

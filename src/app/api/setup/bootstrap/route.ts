@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
+import { withTenant } from "@/lib/db";
+import { createSession } from "@/lib/employee-service";
 import {
   EmailPasswordMismatchError,
   provisionBusiness,
@@ -19,6 +21,14 @@ import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
  * super-admin provisioning it (Phase 15) or public signup, which is off unless
  * explicitly enabled (see /api/setup/signup). Leaving this route open would
  * have turned every install into an open registration endpoint by accident.
+ *
+ * The Owner's first session is revocable like every other (#854 follow-up,
+ * third pass): an `employee_sessions` row with `login_method = 'setup'`, named
+ * by the cookie. By the time it is opened the business exists and the second
+ * factor below has been minted — and is shown exactly once — so a failure to
+ * open the row must not become a 500 that loses both: the answer still carries
+ * the factor, with `signedIn: false` and no cookie, and the wizard sends the
+ * Owner to the sign-in page instead.
  */
 export async function POST(request: NextRequest) {
   if (await hasAnyUser()) {
@@ -57,18 +67,38 @@ export async function POST(request: NextRequest) {
     throw err;
   }
 
-  const token = await signSession({
-    sub: created.userId,
-    role: "owner",
-    businessId: created.businessId,
-    businessSlug: created.businessSlug,
-    businessSubdomain: created.businessSubdomain,
-    locationId: null,
-    fullName: input.ownerName,
-    platformUserId: created.platformUserId,
+  const userAgent = request.headers.get("user-agent");
+  const opened = await withTenant(created.businessId, () =>
+    createSession(created.userId, created.businessId, {
+      locationId: null,
+      loginMethod: "setup",
+      deviceLabel: userAgent?.slice(0, 120) ?? null,
+      userAgent,
+    }),
+  ).catch((err: unknown) => {
+    console.error(
+      "first-run bootstrap could not open the Owner's session:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+    return null;
   });
+  const token = opened
+    ? await signSession({
+        sub: created.userId,
+        role: "owner",
+        businessId: created.businessId,
+        businessSlug: created.businessSlug,
+        businessSubdomain: created.businessSubdomain,
+        locationId: null,
+        fullName: input.ownerName,
+        platformUserId: created.platformUserId,
+        employeeSessionId: opened.session.id,
+      })
+    : null;
   const res = NextResponse.json({
     ok: true,
+    /** False only when the business exists but its Owner could not be signed in: go to /login. */
+    signedIn: token !== null,
     // Phase 24 Wave 2 — the Owner's second factor, returned exactly once.
     //
     // `provisionBusiness` enrols TOTP on a local install (no internet, so no
@@ -84,6 +114,6 @@ export async function POST(request: NextRequest) {
       recoveryCodes: created.recoveryCodes ?? [],
     },
   });
-  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+  if (token) res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return res;
 }

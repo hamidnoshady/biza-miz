@@ -176,7 +176,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   let verified = false;
-  let failureDetail: string | null = null;
 
   switch (method) {
     case "password": {
@@ -193,7 +192,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
        * being signed out.
        */
       verified = await verifySelfPin(session.businessId, session.sub, toLatinDigits(credential));
-      failureDetail = "invalid_pin_step_up";
       break;
     }
     case "totp":
@@ -218,7 +216,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         }),
       );
       verified = detail.outcome !== "rejected";
-      failureDetail = "invalid_mfa_step_up";
       break;
     }
     case "recovery": {
@@ -235,7 +232,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         }),
       );
       verified = detail.outcome !== "rejected";
-      failureDetail = "invalid_recovery_code_step_up";
       break;
     }
     // No `webauthn` case: the parser refuses it as `unsupported_method` before
@@ -250,19 +246,25 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (!verified) {
-    if (failureDetail) {
-      // Durable (retried once, then loud) rather than `.catch(() => {})` — a
-      // failed re-authentication attempt is exactly the row an incident needs.
-      await recordSecurityAudit({
-        realm: "tenant",
-        businessId: session.businessId,
-        actorUserId: session.sub,
-        action: SELF_CREDENTIAL_AUDIT_ACTIONS.stepUpFailed,
-        entity: "user",
-        entityId: session.sub,
-        payload: { method },
-      });
-    }
+    // Every failed verification is recorded, whichever door it came through.
+    // This used to sit behind a per-method flag that the password case never
+    // set, so a wrong password — the guess an attacker holding a stolen cookie
+    // is most likely to make — left no `auth.step_up_failed` row at all (#854
+    // follow-up, third pass). Only the method is recorded, never the attempt.
+    //
+    // Durable (retried once, then loud) rather than `.catch(() => {})` — a
+    // failed re-authentication attempt is exactly the row an incident needs.
+    // The lockout attempt is recorded before this, so an audit failure (a 500
+    // here) still counts towards the lockout.
+    await recordSecurityAudit({
+      realm: "tenant",
+      businessId: session.businessId,
+      actorUserId: session.sub,
+      action: SELF_CREDENTIAL_AUDIT_ACTIONS.stepUpFailed,
+      entity: "user",
+      entityId: session.sub,
+      payload: { method },
+    });
     return NextResponse.json(
       {
         error:

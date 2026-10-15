@@ -4,7 +4,7 @@
  * retry route, never by a second plain sign-out.
  */
 import { describe, expect, it, vi } from "vitest";
-import { requestSignOut, retrySignOut, signOutAgain } from "./sign-out";
+import { requestSignOut, retrySignOut, signOutAgain, signOutDestination } from "./sign-out";
 
 function answer(status: number, body: unknown) {
   return vi.fn(
@@ -44,10 +44,50 @@ describe("requestSignOut", () => {
   });
 
   it("reads every confirmed outcome as signed out", async () => {
-    for (const outcome of ["revoked", "already_ended", "not_tracked", "no_session"]) {
+    for (const outcome of ["revoked", "already_ended", "no_session"]) {
       await expect(
         requestSignOut(answer(200, confirmed(outcome)) as unknown as typeof fetch),
       ).resolves.toEqual({ kind: "signed_out", outcome });
+    }
+  });
+
+  it("no longer knows `not_tracked`: every session has a server record to end since the third pass", async () => {
+    await expect(
+      requestSignOut(answer(200, confirmed("not_tracked")) as unknown as typeof fetch),
+    ).resolves.toEqual({ kind: "server" });
+  });
+
+  it("carries the server's destination — a support operator goes back to the console", async () => {
+    const path = "/platform/businesses/7198892a-cca7-4e29-80a1-ff9f5f64fa97/support";
+    await expect(
+      requestSignOut(answer(200, { ...confirmed("revoked"), redirectTo: path }) as unknown as typeof fetch),
+    ).resolves.toEqual({ kind: "signed_out", outcome: "revoked", redirectTo: path });
+    await expect(
+      requestSignOut(answer(503, { ...unconfirmed, redirectTo: path }) as unknown as typeof fetch),
+    ).resolves.toEqual({
+      kind: "unconfirmed",
+      pendingRevocations: 1,
+      sessionCookieCleared: true,
+      redirectTo: path,
+    });
+  });
+
+  it("never follows a destination that leaves the origin", async () => {
+    for (const redirectTo of [
+      "https://evil.example/login",
+      "//evil.example/login",
+      "/\\evil.example",
+      "/%2F%2Fevil.example",
+      "javascript:alert(1)",
+      "platform/businesses/x/support",
+      "/line\nbreak",
+      42,
+      null,
+    ]) {
+      await expect(
+        requestSignOut(answer(200, { ...confirmed("revoked"), redirectTo }) as unknown as typeof fetch),
+        String(redirectTo),
+      ).resolves.toEqual({ kind: "signed_out", outcome: "revoked" });
     }
   });
 
@@ -119,6 +159,26 @@ describe("retrySignOut / signOutAgain", () => {
     }
   });
 
+  it("a retry keeps the first answer's destination: the retry route never names one", async () => {
+    const previous = {
+      kind: "unconfirmed",
+      pendingRevocations: 1,
+      sessionCookieCleared: true,
+      redirectTo: "/platform/businesses/b/support",
+    } as const;
+    const finished = answer(200, { ...confirmed("revoked"), sessionCookieCleared: false });
+    await expect(signOutAgain(previous, finished as unknown as typeof fetch)).resolves.toEqual({
+      kind: "signed_out",
+      outcome: "revoked",
+      redirectTo: "/platform/businesses/b/support",
+    });
+    const stillFailing = answer(503, { ...unconfirmed, sessionCookieCleared: false });
+    await expect(signOutAgain(previous, stillFailing as unknown as typeof fetch)).resolves.toMatchObject({
+      kind: "unconfirmed",
+      redirectTo: "/platform/businesses/b/support",
+    });
+  });
+
   it("a retry that fails stays unconfirmed with the cookie still counted as cleared", async () => {
     const previous = { kind: "unconfirmed", pendingRevocations: 2, sessionCookieCleared: true } as const;
     const offline = vi.fn(async () => {
@@ -133,5 +193,24 @@ describe("retrySignOut / signOutAgain", () => {
       pendingRevocations: 1,
       sessionCookieCleared: true,
     });
+  });
+});
+
+describe("signOutDestination", () => {
+  it("is the server's destination when it named one, otherwise the caller's", () => {
+    expect(
+      signOutDestination({ kind: "signed_out", outcome: "revoked", redirectTo: "/platform/businesses/b/support" }, "/login"),
+    ).toBe("/platform/businesses/b/support");
+    expect(
+      signOutDestination(
+        { kind: "unconfirmed", pendingRevocations: 1, sessionCookieCleared: true, redirectTo: "/platform/businesses/b/support" },
+        "/login",
+      ),
+    ).toBe("/platform/businesses/b/support");
+    expect(signOutDestination({ kind: "signed_out", outcome: "revoked" }, "/login?changeAccount=1")).toBe(
+      "/login?changeAccount=1",
+    );
+    expect(signOutDestination({ kind: "server" }, "/login")).toBe("/login");
+    expect(signOutDestination({ kind: "network" }, "/login")).toBe("/login");
   });
 });

@@ -349,12 +349,20 @@ async function addSession(member: Member, label = "تبلت سالن"): Promise<
   return rows[0].id;
 }
 
-/** Sign in as `member`; `recent: false` makes the recent-auth stamp an hour old. */
+/**
+ * Sign in as `member`; `recent: false` makes the recent-auth stamp an hour old.
+ *
+ * Every real door opens an `employee_sessions` row and the server refuses a
+ * tenant token that names none (#854 follow-up, third pass), so a row is
+ * opened here unless the test names one. `sessionId: null` signs the legacy,
+ * row-less token a pre-change door would have minted.
+ */
 async function signIn(
   member: Member,
   options: { sessionId?: string | null; recent?: boolean; activeLocationId?: string | null } = {},
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
+  const sessionId = options.sessionId === undefined ? await addSession(member) : options.sessionId;
   const token = await authLib.signSession({
     sub: member.id,
     role: member.role,
@@ -362,7 +370,7 @@ async function signIn(
     locationId: member.locationId,
     fullName: member.fullName,
     ...(member.platformUserId ? { platformUserId: member.platformUserId } : {}),
-    ...(options.sessionId ? { employeeSessionId: options.sessionId } : {}),
+    ...(sessionId ? { employeeSessionId: sessionId } : {}),
     ...(options.activeLocationId !== undefined ? { activeLocationId: options.activeLocationId } : {}),
     recentAuthAt: options.recent === false ? now - 3600 : now,
   });
@@ -758,7 +766,11 @@ describe("#854 F03 — step-up never treats WebAuthn as a typed code", () => {
     const audit = await auditRows(business.id, "auth.step_up");
     expect(audit.map((row) => row.payload.method)).toEqual(["pin", "password", "totp"]);
     expect(JSON.stringify(audit)).not.toContain(PASSWORD);
-    expect(await auditRows(business.id, "auth.step_up_failed")).toHaveLength(1);
+    // One failure row per failed attempt — the wrong password included (#854
+    // follow-up, third pass) — and none for the successes.
+    const failures = await auditRows(business.id, "auth.step_up_failed");
+    expect(failures.map((row) => row.payload.method)).toEqual(["pin", "password"]);
+    expect(JSON.stringify(failures)).not.toContain("not-the-password");
   });
 
   it("grants no recent-auth window when the success audit cannot be written", async () => {
@@ -770,6 +782,84 @@ describe("#854 F03 — step-up never treats WebAuthn as a typed code", () => {
     const failed = await stepUp({ method: "password", credential: PASSWORD });
     expect(failed.status).toBe(500);
     expect(sessionCookieOf(failed)).toBeUndefined();
+  });
+});
+
+describe("#854 follow-up (third pass) — a failed password step-up leaves an audit row", () => {
+  /** `tenant_password` lockout attempts recorded since the per-test wipe. */
+  async function lockoutAttempts(outcome: "failed" | "success"): Promise<number> {
+    const { rows } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM auth_login_attempts WHERE realm = 'tenant_password' AND outcome = $1`,
+      [outcome],
+    );
+    return rows[0].n;
+  }
+
+  it("one attributed, secret-free row per wrong password; the lockout counts it too", async () => {
+    const business = await seedBusiness("StepUpPasswordFail");
+    const owner = await addMember(business, "owner");
+    await signIn(owner, { recent: false });
+    const guess = "guess-Sw0rdfish-9931";
+
+    const wrong = await stepUp({ method: "password", credential: guess });
+    expect(wrong.status).toBe(401);
+    expect(wrong.body).toMatchObject({ error: "invalid_current_password" });
+    expect(sessionCookieOf(wrong)).toBeUndefined();
+
+    const failures = await auditRows(business.id, "auth.step_up_failed");
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ user_id: owner.id, payload: { method: "password" } });
+    // The method and nothing else: never the attempt, never the real secret.
+    expect(Object.keys(failures[0].payload)).toEqual(["method"]);
+    expect(JSON.stringify(failures)).not.toContain(guess);
+    expect(JSON.stringify(failures)).not.toContain(PASSWORD);
+    expect(await auditRows(business.id, "auth.step_up")).toHaveLength(0);
+    expect(await lockoutAttempts("failed")).toBe(1);
+  });
+
+  it("five wrong passwords lock step-up: the sixth try is 423 and writes no further row", async () => {
+    const business = await seedBusiness("StepUpPasswordLock");
+    const owner = await addMember(business, "owner");
+    await signIn(owner, { recent: false });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await stepUp({ method: "password", credential: `wrong-${attempt}` })).status).toBe(401);
+    }
+    expect(await auditRows(business.id, "auth.step_up_failed")).toHaveLength(5);
+
+    // Locked before the secret is touched — even the right password.
+    const locked = await stepUp({ method: "password", credential: PASSWORD });
+    expect(locked.status).toBe(423);
+    expect(locked.body).toMatchObject({ error: "account_locked" });
+    expect(sessionCookieOf(locked)).toBeUndefined();
+    expect(await auditRows(business.id, "auth.step_up_failed")).toHaveLength(5);
+    expect(await auditRows(business.id, "auth.step_up")).toHaveLength(0);
+  });
+
+  it("when the failure row cannot be written: 500, no cookie, and the attempt still counts towards the lockout", async () => {
+    const business = await seedBusiness("StepUpPasswordAuditFail");
+    const owner = await addMember(business, "owner");
+    await signIn(owner, { recent: false });
+    await failAuditFor("auth.step_up_failed");
+
+    const failed = await stepUp({ method: "password", credential: "wrong-password" });
+    expect(failed.status).toBe(500);
+    expect(sessionCookieOf(failed)).toBeUndefined();
+    expect(await auditRows(business.id, "auth.step_up_failed")).toHaveLength(0);
+    expect(await lockoutAttempts("failed")).toBe(1);
+  });
+
+  it("a successful password step-up writes no failure row", async () => {
+    const business = await seedBusiness("StepUpPasswordOk");
+    const owner = await addMember(business, "owner");
+    await signIn(owner, { recent: false });
+
+    const ok = await stepUp({ method: "password", credential: PASSWORD });
+    expect(ok.status).toBe(200);
+    expect(sessionCookieOf(ok)).toBeTruthy();
+    expect(await auditRows(business.id, "auth.step_up_failed")).toHaveLength(0);
+    expect(await auditRows(business.id, "auth.step_up")).toHaveLength(1);
+    expect(await lockoutAttempts("success")).toBe(1);
   });
 });
 
@@ -1254,7 +1344,7 @@ describe("#854 F13 — the branch facts come from the membership", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Sign-out (#854 follow-up) — confirmed, already ended, untracked, unconfirmed
+// Sign-out (#854 follow-up) — confirmed, already ended, legacy, unconfirmed
 // ---------------------------------------------------------------------------
 
 /** A POST carrying exactly these cookies — the sign-out routes read `request.cookies`. */
@@ -1324,18 +1414,25 @@ describe("#854 follow-up — sign-out says what happened, and an unconfirmed one
     expect(await auditRows(business.id, "employee.session_revoked")).toHaveLength(0);
   });
 
-  it("not tracked: a session with no server-side record only loses its cookie", async () => {
-    const business = await seedBusiness("LogoutUntracked");
+  it("legacy: a token minted before every door opened a row is refused everywhere, and its sign-out is already ended", async () => {
+    const business = await seedBusiness("LogoutLegacy");
     const owner = await addMember(business, "owner");
     const other = await addSession(owner);
-    const token = await signIn(owner); // no employeeSessionId, as after a business switch
+    // No employeeSessionId, as a business switch or setup minted before the third pass.
+    const token = await signIn(owner, { sessionId: null });
 
+    // There is no "untracked" session any more: the server refuses it outright…
+    expect(await tokenStillWorks(token)).toBe(false);
+    expect((await call(() => sessionsSelfRoute.GET())).status).toBe(401);
+
+    // …so signing it out has nothing left to end, and says so truthfully.
     const out = await signOutWith({ [authLib.SESSION_COOKIE]: token });
     expect(out.status).toBe(200);
-    expect(out.body).toMatchObject({ ok: true, outcome: "not_tracked" });
+    expect(out.body).toEqual({ ok: true, outcome: "already_ended", sessionCookieCleared: true, pendingRevocations: 0 });
     expect(out.response?.cookies.get(authLib.SESSION_COOKIE)?.value).toBe("");
     // Nothing else of theirs was touched.
     expect(await sessionRevoked(other)).toBe(false);
+    expect(await auditRows(business.id, "employee.session_revoked")).toHaveLength(0);
   });
 
   it("no session: a missing or forged cookie is still cleared, and ends nothing", async () => {
@@ -1452,8 +1549,8 @@ describe("#854 follow-up — sign-out says what happened, and an unconfirmed one
     // Even a correctly signed ticket (which needs the server key) that pairs
     // someone else's session with the wrong member or business matches no row.
     const forged = await logoutRetry.signLogoutRetryTicket([
-      { sessionId: victimSession, businessId: alpha.id, employeeId: attacker.id, expiresAt: Math.floor(Date.now() / 1000) + 600 },
-      { sessionId: foreignSession, businessId: alpha.id, employeeId: foreign.id, expiresAt: Math.floor(Date.now() / 1000) + 600 },
+      { kind: "employee_session", sessionId: victimSession, businessId: alpha.id, employeeId: attacker.id, expiresAt: Math.floor(Date.now() / 1000) + 600 },
+      { kind: "employee_session", sessionId: foreignSession, businessId: alpha.id, employeeId: foreign.id, expiresAt: Math.floor(Date.now() / 1000) + 600 },
     ]);
     const out = await retrySignOutWith({ [RETRY_COOKIE]: forged!.token });
     expect(out.body).toMatchObject({ ok: true, outcome: "already_ended" });

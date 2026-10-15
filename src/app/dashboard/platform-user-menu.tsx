@@ -56,7 +56,7 @@ import {
 import { useBugReport } from "@/components/bug-report/bug-report-provider";
 import { platformUserMenuItems } from "@/lib/platform-user-menu";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
-import { browserSignedOut, useSignOut } from "@/components/auth/sign-out";
+import { browserSignedOut, signOutDestination, useSignOut } from "@/components/auth/sign-out";
 import { announceSignOutResult, retryUnconfirmedSignOut } from "@/components/auth/sign-out-feedback";
 import { roleLabel } from "@/lib/role-labels";
 
@@ -103,6 +103,10 @@ export function PlatformUserMenu({
    *  - no answer, or not the contract → stay signed in where they are, say so,
    *    and offer the same action again. The busy flag is released either way.
    *
+   * Where it leaves to is the server's call when it makes one: a support
+   * operator's sign-out closes the support session and goes back to the
+   * console (`redirectTo`), not to this business's staff sign-in.
+   *
    * `replace`, not `push`: Back must not return to a page that now belongs to
    * nobody.
    */
@@ -111,7 +115,7 @@ export function PlatformUserMenu({
     if (!result) return; // one already in flight
     if (browserSignedOut(result)) {
       announceSignOutResult(result, () => void retryUnconfirmedSignOut());
-      router.replace(destination);
+      router.replace(signOutDestination(result, destination));
       router.refresh();
       return;
     }

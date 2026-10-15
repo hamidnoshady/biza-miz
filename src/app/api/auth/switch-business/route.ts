@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, getSession, sessionCookieOptions, signSession, withTenantScope } from "@/lib/auth";
-import { withoutTenantScope } from "@/lib/db";
+import { withTenant, withoutTenantScope } from "@/lib/db";
+import { createSession } from "@/lib/employee-service";
 import { hostRoutingEnabled } from "@/lib/host";
+import { endPendingRevocation, pendingRevocationFor } from "@/lib/logout-service";
 import { membershipBlockedReason, membershipForBusiness } from "@/lib/memberships";
 
 /**
@@ -14,6 +16,18 @@ import { membershipBlockedReason, membershipForBusiness } from "@/lib/membership
  * below is what proves they belong to the business they asked for.
  *
  * A PIN-only member has no platform identity and so has nothing to switch to.
+ *
+ * **The session moves; it is not copied (#854 follow-up, third pass).** The
+ * new cookie names a fresh `employee_sessions` row in the target business
+ * (`login_method = 'business_switch'`), so it can be listed, ended from the
+ * security center and signed out like any other session; it used to carry no
+ * row at all, which left «خروج» nothing to end and a retained copy valid. The
+ * row this browser leaves behind in the source business is ended in the same
+ * request (audited `via: "business_switch"`) — the cookie that named it is
+ * being replaced, so nothing legitimate can use it again. The switch is
+ * all-or-nothing: if the old row cannot be ended, the new one is ended again,
+ * the cookie is left as it was and the caller gets `503 switch_unconfirmed`
+ * to retry — never two live sessions for one browser.
  *
  * **Being retired (Phase 23).** Once each business has its own origin this
  * endpoint is exactly the thing the wave removes: it mints, on business A's
@@ -61,6 +75,45 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "business_unavailable", reason: blocked }, { status: 403 });
   }
 
+  // The target business's row first: if it cannot be opened (a database or
+  // audit failure throws), nothing has changed and the old cookie still works.
+  const userAgent = request.headers.get("user-agent");
+  const { session: opened } = await withTenant(membership.businessId, () =>
+    createSession(membership.userId, membership.businessId, {
+      locationId: membership.locationId,
+      loginMethod: "business_switch",
+      deviceLabel: userAgent?.slice(0, 120) ?? null,
+      userAgent,
+    }),
+  );
+
+  // Then the row being left behind. Only ever this browser's own session: the
+  // id comes from the signed cookie and the revocation is restricted to its
+  // own member.
+  const leaving = pendingRevocationFor(session);
+  if (leaving) {
+    const ended = await endPendingRevocation(leaving, "business_switch", request.headers);
+    if (ended === "failed") {
+      const undone = await endPendingRevocation(
+        {
+          kind: "employee_session",
+          sessionId: opened.id,
+          businessId: membership.businessId,
+          employeeId: membership.userId,
+          expiresAt: Math.floor(new Date(opened.expiresAt).getTime() / 1000),
+        },
+        "business_switch",
+        request.headers,
+      );
+      if (undone === "failed") {
+        // No token naming it was ever issued, so the row is unusable; it is
+        // still listed until it expires, and an owner can end it by hand.
+        console.error("business switch could not end the session it had just opened");
+      }
+      return NextResponse.json({ error: "switch_unconfirmed" }, { status: 503 });
+    }
+  }
+
   const token = await signSession({
     sub: membership.userId,
     role: membership.role,
@@ -73,6 +126,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     tokenVersion: session.tokenVersion,
     mfaVerified: session.mfaVerified,
     recentAuthAt: session.recentAuthAt,
+    employeeSessionId: opened.id,
   });
 
   const res = NextResponse.json({

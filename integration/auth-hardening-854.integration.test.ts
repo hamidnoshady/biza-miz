@@ -82,6 +82,7 @@ let mfaVerify: typeof import("../src/lib/mfa-verify");
 let otpChallenge: typeof import("../src/lib/otp-challenge");
 let pinLoginRoute: typeof import("../src/app/api/auth/pin-login/route");
 let authEdge: typeof import("../src/lib/auth-edge");
+let employeeService: typeof import("../src/lib/employee-service");
 let phoneSelfRoute: typeof import("../src/app/api/auth/phone/self/route");
 let phoneOtpRequestRoute: typeof import("../src/app/api/auth/phone-otp/request/route");
 let phoneOtpVerifyRoute: typeof import("../src/app/api/auth/phone-otp/verify/route");
@@ -122,6 +123,7 @@ beforeAll(async () => {
   otpChallenge = await import("../src/lib/otp-challenge");
   pinLoginRoute = await import("../src/app/api/auth/pin-login/route");
   authEdge = await import("../src/lib/auth-edge");
+  employeeService = await import("../src/lib/employee-service");
   phoneSelfRoute = await import("../src/app/api/auth/phone/self/route");
   phoneOtpRequestRoute = await import("../src/app/api/auth/phone-otp/request/route");
   phoneOtpVerifyRoute = await import("../src/app/api/auth/phone-otp/verify/route");
@@ -1085,6 +1087,11 @@ describe("Issue #854 — P1.16 a self phone change pre-checks duplicates before 
    */
 
   async function signIn(seeded: Seed): Promise<void> {
+    // A tenant token must name a revocable session row (#854 follow-up, third
+    // pass) — opened the way every sign-in door opens one.
+    const { session } = await dbLib.withTenant(seeded.businessId, () =>
+      employeeService.createSession(seeded.ownerId, seeded.businessId, { loginMethod: "password" }),
+    );
     const token = await authEdge.signSession({
       sub: seeded.ownerId,
       role: "owner",
@@ -1092,6 +1099,7 @@ describe("Issue #854 — P1.16 a self phone change pre-checks duplicates before 
       locationId: null,
       fullName: "Owner",
       recentAuthAt: Math.floor(Date.now() / 1000),
+      employeeSessionId: session.id,
     });
     cookieJar.set(authEdge.SESSION_COOKIE, token);
   }

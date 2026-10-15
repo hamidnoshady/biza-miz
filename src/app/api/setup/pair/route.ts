@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
+import { withTenant } from "@/lib/db";
+import { createSession } from "@/lib/employee-service";
 import {
   classifyConnectionCode,
   normalizeServerAddress,
@@ -204,18 +206,44 @@ export async function POST(request: NextRequest) {
   );
   const identitySyncPending = credentialSync.status !== "healthy";
 
-  const token = await signSession({
-    sub: applied.ownerUserId,
-    role: "owner",
-    businessId: applied.businessId,
-    businessSlug: applied.businessSlug,
-    businessSubdomain: applied.businessSubdomain,
-    locationId: null,
-    fullName: applied.ownerName,
-    platformUserId: applied.ownerPlatformUserId,
+  // The Owner's first session on this install is revocable like every other
+  // (#854 follow-up, third pass): a local `employee_sessions` row with
+  // `login_method = 'setup'` (the table is never synced), named by the cookie.
+  // The snapshot is already applied, so a failure here answers `ok` with
+  // `signedIn: false` and no cookie — the wizard sends the Owner to the
+  // sign-in page — instead of a 500 that would read as a failed pairing.
+  const userAgent = request.headers.get("user-agent");
+  const opened = await withTenant(applied.businessId, () =>
+    createSession(applied.ownerUserId, applied.businessId, {
+      locationId: null,
+      loginMethod: "setup",
+      deviceLabel: userAgent?.slice(0, 120) ?? null,
+      userAgent,
+    }),
+  ).catch((err: unknown) => {
+    console.error(
+      "pairing could not open the Owner's session:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+    return null;
   });
+  const token = opened
+    ? await signSession({
+        sub: applied.ownerUserId,
+        role: "owner",
+        businessId: applied.businessId,
+        businessSlug: applied.businessSlug,
+        businessSubdomain: applied.businessSubdomain,
+        locationId: null,
+        fullName: applied.ownerName,
+        platformUserId: applied.ownerPlatformUserId,
+        employeeSessionId: opened.session.id,
+      })
+    : null;
   const response = NextResponse.json({
     ok: true,
+    /** False only when the business is paired but its Owner could not be signed in: go to /login. */
+    signedIn: token !== null,
     slug: applied.businessSlug,
     ownerUserId: applied.ownerUserId,
     activationPending,
@@ -239,6 +267,6 @@ export async function POST(request: NextRequest) {
       error: credentialSync.error ?? null,
     },
   });
-  response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+  if (token) response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return response;
 }

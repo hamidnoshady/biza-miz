@@ -22,7 +22,12 @@ import {
 } from "@/lib/logout-contract";
 
 export type { SignOutResult } from "@/lib/logout-contract";
-export { browserSignedOut, signOutResultMessage, LOGOUT_MESSAGES } from "@/lib/logout-contract";
+export {
+  browserSignedOut,
+  signOutDestination,
+  signOutResultMessage,
+  LOGOUT_MESSAGES,
+} from "@/lib/logout-contract";
 
 async function postSignOut(path: string, fetchImpl: typeof fetch): Promise<SignOutResult> {
   let res: Response;
@@ -77,7 +82,10 @@ export async function signOutAgain(
     return requestSignOut(fetchImpl);
   }
   const next = await retrySignOut(fetchImpl);
-  if (next.kind === "signed_out") return next;
+  // The retry answer never names a destination (it has no session to read
+  // one from); the first answer's — a support operator's console — still holds.
+  const redirect = previous.redirectTo ? { redirectTo: previous.redirectTo } : {};
+  if (next.kind === "signed_out") return { ...next, ...redirect };
   // The retry did not finish it — but this browser is still signed out (its
   // cookie went with the first answer). A dropped retry is "still
   // unconfirmed", never "you are still signed in".
@@ -86,6 +94,7 @@ export async function signOutAgain(
     pendingRevocations:
       next.kind === "unconfirmed" ? next.pendingRevocations : previous.pendingRevocations,
     sessionCookieCleared: true,
+    ...redirect,
   };
 }
 

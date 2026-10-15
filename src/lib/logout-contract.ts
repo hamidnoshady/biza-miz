@@ -14,29 +14,33 @@
  *
  * ## Outcomes
  *
- *  - `revoked` — the server ended the session record and committed its audit
- *    row together; a copy of the token kept anywhere else is now refused.
- *  - `already_ended` — the record was already revoked or gone.
- *  - `not_tracked` — the session has no server-side record to end (a session
- *    minted by a business switch, setup or a desktop hand-off carries no
- *    `employeeSessionId`); clearing the browser cookie is all there is.
+ *  - `revoked` — the server ended what the session is bound to — its
+ *    `employee_sessions` row, or a support operator's grant — and committed
+ *    the audit row with it; a copy of the token kept anywhere else is now
+ *    refused.
+ *  - `already_ended` — it was already over on the server: the row revoked or
+ *    gone, the grant ended or expired, or a token from before every door
+ *    opened a row (refused on every request since; see `checkEmployeeSession`).
  *  - `no_session` — no valid session arrived, so there was nothing to end.
  *  - `unconfirmed` — the server could not confirm the end (a database or audit
  *    failure). The browser cookie is cleared anyway (that part is
  *    unconditional), and the server keeps an httpOnly retry ticket so
  *    `POST /api/auth/logout/retry` can finish the job without the cookie.
+ *
+ * The second pass had a fifth outcome, `not_tracked`: a session minted by a
+ * business switch, first-run setup or a desktop/company hand-off had no row,
+ * so clearing the cookie was all a sign-out could do and a retained copy
+ * stayed valid. The third pass gave those doors rows and retired the outcome
+ * — "this browser is signed out" and "the session is over" are the same fact
+ * again for every session.
  */
+
+import { safeLoginNextPath } from "./login-contract";
 
 export const LOGOUT_PATH = "/api/auth/logout";
 export const LOGOUT_RETRY_PATH = "/api/auth/logout/retry";
 
-export const LOGOUT_OUTCOMES = [
-  "revoked",
-  "already_ended",
-  "not_tracked",
-  "no_session",
-  "unconfirmed",
-] as const;
+export const LOGOUT_OUTCOMES = ["revoked", "already_ended", "no_session", "unconfirmed"] as const;
 export type LogoutOutcome = (typeof LOGOUT_OUTCOMES)[number];
 
 export const LOGOUT_UNCONFIRMED_ERROR = "logout_unconfirmed" as const;
@@ -55,6 +59,12 @@ export interface LogoutResponseBody {
   sessionCookieCleared: boolean;
   /** Sign-outs the server still could not confirm; a retry picks them up. */
   pendingRevocations: number;
+  /**
+   * Where the browser should go instead of the sign-in page, when somewhere
+   * else is right: a support operator goes back to the business's support
+   * tab in the console. A same-origin path, never a URL.
+   */
+  redirectTo?: string;
   error?: typeof LOGOUT_UNCONFIRMED_ERROR;
   message?: string;
 }
@@ -65,12 +75,17 @@ export type ConfirmedLogoutOutcome = Exclude<LogoutOutcome, "unconfirmed">;
 /** The caller's reading of one attempt. */
 export type SignOutResult =
   /** Safe to leave: the server confirmed there is nothing left to end. */
-  | { kind: "signed_out"; outcome: ConfirmedLogoutOutcome }
+  | { kind: "signed_out"; outcome: ConfirmedLogoutOutcome; redirectTo?: string }
   /**
    * The browser is signed out (the server cleared the cookie), but the end of
    * the session was not confirmed. Retry with `LOGOUT_RETRY_PATH`.
    */
-  | { kind: "unconfirmed"; pendingRevocations: number; sessionCookieCleared: boolean }
+  | {
+      kind: "unconfirmed";
+      pendingRevocations: number;
+      sessionCookieCleared: boolean;
+      redirectTo?: string;
+    }
   /** The request never got an answer: nothing changed, the member is still signed in. */
   | { kind: "network" }
   /** An answer that is not this contract (a proxy error page, a 5xx elsewhere): treat as still signed in. */
@@ -78,6 +93,17 @@ export type SignOutResult =
 
 function isLogoutOutcome(value: unknown): value is LogoutOutcome {
   return typeof value === "string" && (LOGOUT_OUTCOMES as readonly string[]).includes(value);
+}
+
+/**
+ * A `redirectTo` the browser may follow: a same-origin path, by the same rule
+ * the sign-in page applies to its `next` (`safeLoginNextPath`). A full URL, a
+ * protocol-relative `//host`, a backslash or control-character trick is
+ * dropped, so a tampered answer can never turn a sign-out into an open
+ * redirect.
+ */
+function safeRedirectPath(value: unknown): string | undefined {
+  return safeLoginNextPath(value, "") || undefined;
 }
 
 /**
@@ -96,14 +122,20 @@ export function readLogoutResponse(status: number, body: unknown): SignOutResult
       typeof data.pendingRevocations === "number" && data.pendingRevocations > 0
         ? data.pendingRevocations
         : 0;
+    const redirectTo = safeRedirectPath(data.redirectTo);
     if (!data.ok || data.outcome === "unconfirmed") {
       return {
         kind: "unconfirmed",
         pendingRevocations: Math.max(pendingRevocations, 1),
         sessionCookieCleared: data.sessionCookieCleared === true,
+        ...(redirectTo ? { redirectTo } : {}),
       };
     }
-    return { kind: "signed_out", outcome: data.outcome as ConfirmedLogoutOutcome };
+    return {
+      kind: "signed_out",
+      outcome: data.outcome as ConfirmedLogoutOutcome,
+      ...(redirectTo ? { redirectTo } : {}),
+    };
   }
   if (status === 401 && error === "unauthorized") {
     return { kind: "signed_out", outcome: "no_session" };
@@ -134,6 +166,17 @@ export function signOutResultMessage(result: SignOutResult): string | null {
     case "server":
       return LOGOUT_MESSAGES.server;
   }
+}
+
+/**
+ * Where to go once the browser is signed out: the server's `redirectTo` when
+ * it named one (a support session goes back to the console), otherwise the
+ * caller's own destination (the sign-in page, or the account chooser).
+ */
+export function signOutDestination(result: SignOutResult, fallback: string): string {
+  return (result.kind === "signed_out" || result.kind === "unconfirmed") && result.redirectTo
+    ? result.redirectTo
+    : fallback;
 }
 
 /**

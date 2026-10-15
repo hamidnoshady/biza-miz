@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionCookieOptions, signSession, type Role } from "@/lib/auth";
-import { withoutTenantScope } from "@/lib/db";
+import { withTenant, withoutTenantScope } from "@/lib/db";
+import { createSession } from "@/lib/employee-service";
 import { platformCompanyLog, redeemCompanyHandoff } from "@/lib/platform-company";
 import { platformAudit } from "@/lib/platform-auth";
 import { hostRoutingEnabled, parseHost, preferredProto, requestHost, rootDomain } from "@/lib/host";
@@ -18,6 +19,14 @@ import { hostRoutingEnabled, parseHost, preferredProto, requestHost, rootDomain 
  * No impersonation grant is created and no customer's session is touched. The
  * redeem itself lives in `src/lib/platform-company.ts` so the route and the
  * integration tests exercise exactly the same code.
+ *
+ * The session is the staff member's own, revocable like any other (#854
+ * follow-up, third pass): an `employee_sessions` row in the company with
+ * `login_method = 'company_handoff'`, named by the cookie, so signing out
+ * ends it on the server and the company's security center can end it. If the
+ * row cannot be opened no cookie is issued (`503 session_unavailable`); the
+ * redeemed token stays spent, and a fresh hand-off from the console is the
+ * retry.
  */
 export async function GET(request: NextRequest) {
   const token = request.nextUrl.searchParams.get("token");
@@ -27,6 +36,23 @@ export async function GET(request: NextRequest) {
 
   const result = await redeemCompanyHandoff(token, parsed?.kind === "business" ? parsed.label : null);
   if (!result) return NextResponse.json({ error: "invalid_or_expired" }, { status: 400 });
+
+  const userAgent = request.headers.get("user-agent");
+  const opened = await withTenant(result.businessId, () =>
+    createSession(result.userId, result.businessId, {
+      locationId: result.locationId,
+      loginMethod: "company_handoff",
+      deviceLabel: userAgent?.slice(0, 120) ?? null,
+      userAgent,
+    }),
+  ).catch((err: unknown) => {
+    console.error(
+      "company hand-off could not open a session:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+    return null;
+  });
+  if (!opened) return NextResponse.json({ error: "session_unavailable" }, { status: 503 });
 
   const session = await signSession({
     sub: result.userId,
@@ -38,6 +64,7 @@ export async function GET(request: NextRequest) {
     fullName: result.fullName,
     platformUserId: result.platformUserId,
     tokenVersion: result.tokenVersion ?? undefined,
+    employeeSessionId: opened.session.id,
   });
   await withoutTenantScope("platform", () =>
     platformAudit({

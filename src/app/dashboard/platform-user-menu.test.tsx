@@ -119,6 +119,24 @@ describe("«خروج» from the sidebar menu", () => {
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"));
   });
 
+  it("sends a support operator back to the console the server names (#854 follow-up, third pass)", async () => {
+    const consolePath = "/platform/businesses/7198892a-cca7-4e29-80a1-ff9f5f64fa97/support";
+    answers["/api/auth/logout"] = [{ status: 200, data: { ...signedOut.data, redirectTo: consolePath } }];
+    mount("owner");
+    await choose("خروج");
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(consolePath));
+    expect(router.replace).not.toHaveBeenCalledWith("/admin");
+  });
+
+  it("an unconfirmed support sign-out still goes back to the console, warning that the grant may be open", async () => {
+    const consolePath = "/platform/businesses/7198892a-cca7-4e29-80a1-ff9f5f64fa97/support";
+    answers["/api/auth/logout"] = [{ status: 503, data: { ...unconfirmed.data, redirectTo: consolePath } }];
+    mount("owner");
+    await choose("خروج");
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(consolePath));
+    expect(toast.warning.mock.calls[0][0]).toMatch(/سرور پایان نشست را تأیید نکرد/);
+  });
+
   it("a server failure stays put, says the session may still be open, and the retry works", async () => {
     answers["/api/auth/logout"] = [{ status: 500, data: { error: "internal" } }, signedOut];
     mount("owner");

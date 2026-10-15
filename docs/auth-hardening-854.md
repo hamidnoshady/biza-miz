@@ -320,8 +320,8 @@ status, and the signed-in notice called a *rejected* request a sign-out. Now:
 - The route still clears the cookie on **every** answer — its one unconditional
   job — but now answers the shared contract (`src/lib/logout-contract.ts`):
   `revoked` / `already_ended` / `not_tracked` (a session minted without a
-  server-side record) / `no_session`, or `unconfirmed` (HTTP 503) when ending the
-  row failed.
+  server-side record — retired in the third pass, below, once every door opened
+  one) / `no_session`, or `unconfirmed` (HTTP 503) when ending the row failed.
 - An unconfirmed sign-out is finishable: the route sets an httpOnly,
   `SameSite=Strict` **retry ticket** scoped to `/api/auth/logout`
   (`src/lib/logout-retry.ts`) naming only the session(s) the signed token named,
@@ -365,14 +365,14 @@ sign-out, axe-core on the Profile content, a 390px phone frame, and the sign-out
 paths above — including a real server-side audit failure, the retained-token
 check before and after the retry, the sidebar toast retry and the /login switch.
 
-**Known gap, stated plainly.** A session minted without an `employee_sessions`
-row — a business switch, first-run setup, the desktop hand-off — has nothing a
-sign-out can end: the route clears the cookie and answers `not_tracked`, but a
-copy of that token kept elsewhere stays valid until it expires (or until the
-identity's token version moves, e.g. «خروج از همهٔ کسب‌وکارها» or a password
-change). Giving those doors a session row belongs with the session-coherence
-work (#948), not with this sign-out contract, which already reports the case
-truthfully.
+**Known gap at the end of this pass (closed by the third pass, below).** A
+session minted without an `employee_sessions` row — a business switch,
+first-run setup, the desktop hand-off — had nothing a sign-out could end: the
+route cleared the cookie and answered `not_tracked`, but a copy of that token
+kept elsewhere stayed valid until it expired (or until the identity's token
+version moved, e.g. «خروج از همهٔ کسب‌وکارها» or a password change). This pass
+deferred it to the session-coherence work (#948); #948 closed (PR #950)
+without taking it on, so the third pass fixed it here.
 
 **Still not verified, and why.** A *physical* authenticator and a real SMS
 provider are outside any sandbox run: WebAuthn was exercised with Chromium's
@@ -388,6 +388,124 @@ new stamp-plus-audit transaction (at the "post-commit" comment), never inside it
 `docs/auth-hardening-854.md`, `src/lib/team-service.ts` and `package.json`
 merge cleanly; none of the sign-out, branch, OTP-digit or step-up files is
 touched by #947, and `/settings/team` is not modified here.
+
+### Third pass (2026-10-15): every tenant session is revocable
+
+**The gap.** Six doors set a tenant session cookie with no `employee_sessions`
+row behind it: the business switch, first-run bootstrap, public signup, desktop
+pairing, the desktop app's cloud hand-off and the company staff hand-off. A
+sign-out could only clear the cookie (`not_tracked`). Every server-side
+revocation path — the security center, deactivation, «خروج از همهٔ دستگاه‌ها», a
+password change — works on rows. And the step-up and credential re-mints
+re-signed such a token with a fresh expiry. So a retained copy outlived every
+sign-out. #948 closed (PR #950) without covering these doors, so the fix is here.
+
+**One mechanism, the existing one.** No new token type, no deny-list, no
+parallel session store:
+
+- Every door opens its row through the same `createSession` the sign-in doors
+  use, and signs the row id into the token (`employeeSessionId`). The door is
+  recorded in `login_method`. Migration `0225_employee_session_login_methods.sql`
+  widens 0211's CHECK by exactly `business_switch`, `setup`, `desktop_handoff`
+  and `company_handoff`. `SESSION_LOGIN_METHODS` mirrors that list, and
+  `session-contract.test.ts` reads the newest migration to keep the two equal.
+- `checkEmployeeSession` (`src/lib/auth.ts`) refuses a tenant token that names
+  no row, unless it is a support session, which is bound to its grant
+  (`checkImpersonation`). `getSession()`, every `require*` guard, the re-mint
+  routes and the WebSocket upgrade (`resolveSessionFromToken`) all go through
+  it. The row lookup is bound to the token's business **and member**
+  (`employee_id = sub`), so a token naming another member's row id — in the same
+  business or another — names no session.
+- **Legacy tokens.** A token minted before this change (no row, no grant) is
+  refused on its next request. The member signs in once more, into a session
+  that can be ended. A token-hash deny-list was rejected: re-mints create
+  sibling tokens, so a list could never be complete.
+
+| Door | `login_method` | If the row cannot be opened |
+|---|---|---|
+| `POST /api/auth/switch-business` | `business_switch` | Nothing changes: the target row is opened first, so a failure leaves the old cookie working |
+| `POST /api/setup/bootstrap`, `/api/setup/signup`, `/api/setup/pair` | `setup` | `200 { ok: true, signedIn: false }`, no cookie (see below) |
+| `GET /api/auth/desktop-session` | `desktop_handoff` | No cookie; `303` to `/login?next=…` |
+| `GET /api/auth/company-handoff` | `company_handoff` | `503 session_unavailable`, no cookie; the console issues a fresh hand-off |
+
+**Business switch: the session moves; it is not copied.** The source row is
+ended in the same request (`employee.session_revoked` with `via:
+"business_switch"`). If it cannot be ended, the row just opened is ended again
+and the caller gets `503 switch_unconfirmed` with the old cookie intact. One
+browser never ends up holding two live sessions.
+
+**First-run doors fail without losing the business.** Bootstrap, signup and
+pairing open the row after the business exists, so a failure there cannot be a
+500. A 500 would lose bootstrap's TOTP secret and recovery codes, which are shown
+exactly once. It would also invite a second signup, and so a second business.
+The answer is `ok` with `signedIn: false`:
+
+- the welcome wizard keeps the factor on screen, says the automatic sign-in did
+  not happen, and continues through `/login?next=/setup/business`;
+- the pairing form says the device is connected and offers the sign-in page.
+
+**Support sessions.** A support operator signed in as the business is bound to
+the grant. «خروج» from the sidebar, Profile or the signed-in notice now closes it
+through `closeSupportSession`, the banner's own service. It uses the same
+operator closer and audit trail, recorded with channel `tenant_sign_out`
+(`tenant_sign_out_retry` from the retry ticket). The answer carries `redirectTo`
+(the console's support tab). Clients follow it only after validating it as a
+same-origin path with `safeLoginNextPath`. Fixed alongside: the middleware's
+read-only guard answered `403` to a read-only support session's `POST
+/api/auth/logout`, so its «خروج» did nothing. `isSupportSessionExitRequest` now
+lets exactly that request through.
+
+**Contract.** `not_tracked` is retired. `LOGOUT_OUTCOMES` is now `revoked` /
+`already_ended` / `no_session` / `unconfirmed`, and a legacy token's sign-out is
+`already_ended`. A retry ticket entry names either a member row
+(`employee_session`) or a support grant (`support_grant`), de-duplicated per
+target. Each is restricted to its own member or its own operator and business.
+
+**Security center.** Each row is labelled by its recorded door before falling
+back to the credential. A setup or switch session used to read as «پین».
+
+**Failed password step-up is audited.** A wrong password at `POST
+/api/auth/step-up` wrote no `auth.step_up_failed` row, because the per-method
+flag was never set for `password`. Every failed verification now writes exactly
+one row, carrying `{ method }` only, after the lockout attempt is recorded. If
+the audit write fails, the answer is a 500 and the attempt still counts towards
+the lockout.
+
+**Ownership.** #948 is closed, so this lands in #957. #947's Team, personnel and
+invitation surfaces are untouched. The shared `employee-service` changes are
+additive: a typed `loginMethod`, `SessionEndVia`, and `loginMethod` on the
+business session list.
+
+**Tests.** `integration/session-revocation-854.integration.test.ts` (20 cases)
+covers each door end to end against a real schema: row → authenticated →
+«خروج» `revoked` → the retained copy refused. It also covers:
+
+- the switch's isolation, its failure on either row, and the all-or-nothing
+  rule;
+- legacy tokens, including a step-up re-mint attempt;
+- cross-member and cross-business row ids;
+- support sign-out, an unauditable close finished by the retry ticket, and a
+  forged ticket closing nothing;
+- an unconfirmed switched session finished from a session another door opened.
+
+Pairing's retained-token check lives in `hybrid-credential-sync`, where the
+two-database cloud stub is. `profile-security-854` adds the password step-up
+audit cases (and an audit failure that still counts the attempt). Component
+coverage: `security-center-settings.test.tsx` and `welcome-signed-in.test.tsx`,
+plus the updated sign-out, Profile, sidebar-menu and signed-in-notice suites.
+
+**Not changed, stated plainly.**
+
+- `createSession` writes its row and its `employee.session_created` audit row on
+  two connections, so an audit failure leaves an unused row. No token names that
+  row, so it cannot authenticate; it is listed until it expires and can be ended
+  from the security center. This predates the pass; making it atomic touches
+  every sign-in door.
+- The password door (`/api/auth/login`, and MFA completion of it) and the
+  desktop's cloud-login callback record no `login_method`. The security center
+  still falls back to the credential label for those rows (the P2.27 gap,
+  unchanged).
+- A physical authenticator and a real SMS provider remain unverified, as above.
 
 ## Gate results in this workspace
 

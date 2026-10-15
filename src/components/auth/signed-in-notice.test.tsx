@@ -134,6 +134,15 @@ describe("the explicit «خروج و تغییر حساب»", () => {
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?changeAccount=1"));
   });
 
+  it("a support operator's switch ends the support session and goes back to the console it came from", async () => {
+    const consolePath = "/platform/businesses/7198892a-cca7-4e29-80a1-ff9f5f64fa97/support";
+    answers["/api/auth/logout"] = [{ status: 200, data: { ...signedOut.data, redirectTo: consolePath } }];
+    render(<SignedInNotice fullName="سارا" role="owner" />);
+    fireEvent.click(screen.getByRole("button", { name: "خروج و تغییر حساب" }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(consolePath));
+    expect(router.replace).not.toHaveBeenCalledWith("/login?changeAccount=1");
+  });
+
   it("when the cookie is cleared despite a server error, it switches and carries the warning along", async () => {
     answers["/api/auth/logout"] = [unconfirmed];
     render(<SignedInNotice fullName="سارا" role="owner" />);

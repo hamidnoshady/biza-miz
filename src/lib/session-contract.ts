@@ -35,7 +35,14 @@ export type SessionScope = "business" | "global";
 
 /**
  * Login methods a session can have been minted by, for the device card. Kept
- * narrow on purpose: this is a label, not an authorization input.
+ * narrow on purpose: this is a label, not an authorization input. The same
+ * list is the `employee_sessions_login_method_check` constraint (migrations
+ * 0211 and 0225).
+ *
+ * The last four are the doors that open a session without a sign-in form
+ * (#854 follow-up, third pass): moving the session to another business, the
+ * first-run doors (bootstrap, signup, pairing), the desktop app's one-time
+ * cloud hand-off, and the company staff hand-off from the platform console.
  */
 export const SESSION_LOGIN_METHODS = [
   "password",
@@ -44,6 +51,10 @@ export const SESSION_LOGIN_METHODS = [
   "webauthn",
   "invitation",
   "impersonation",
+  "business_switch",
+  "setup",
+  "desktop_handoff",
+  "company_handoff",
 ] as const;
 
 export type SessionLoginMethod = (typeof SESSION_LOGIN_METHODS)[number];
@@ -151,6 +162,14 @@ export function sessionLoginMethodLabel(method: SessionLoginMethod | null): stri
       return "ورود از طریق دعوت‌نامه";
     case "impersonation":
       return "پشتیبانی فنی";
+    case "business_switch":
+      return "تغییر کسب‌وکار";
+    case "setup":
+      return "راه‌اندازی اولیه";
+    case "desktop_handoff":
+      return "ورود از برنامهٔ دسکتاپ";
+    case "company_handoff":
+      return "ورود از کنسول مدیریت";
     default:
       return null;
   }

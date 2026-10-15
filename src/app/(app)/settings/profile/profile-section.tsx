@@ -33,7 +33,7 @@ import {
   useResendCooldown,
 } from "@/components/auth/use-resend-cooldown";
 import { WebAuthnManager } from "@/components/auth/webauthn-manager";
-import { signOutResultMessage, useSignOut } from "@/components/auth/sign-out";
+import { signOutDestination, signOutResultMessage, useSignOut } from "@/components/auth/sign-out";
 import type { ProfileBranchInfo } from "@/lib/profile-branch";
 import { TwoFactorSettings } from "../two-factor-settings";
 
@@ -97,10 +97,17 @@ export function ProfileSection({
   const signedOutUnconfirmed =
     signOutResult?.kind === "unconfirmed" && signOutResult.sessionCookieCleared;
 
+  /**
+   * Where a signed-out browser goes: the sign-in page, unless the server named
+   * somewhere else — a support operator's sign-out closes the support session
+   * and returns to the console (`redirectTo`).
+   */
+  const signOutTarget = signOutResult ? signOutDestination(signOutResult, "/login") : "/login";
+
   // `replace` keeps Back from returning to a page that now belongs to nobody,
   // and `refresh` drops the cached server tree.
-  function leaveForLogin() {
-    router.replace("/login");
+  function leave(destination: string) {
+    router.replace(destination);
     router.refresh();
   }
 
@@ -115,7 +122,7 @@ export function ProfileSection({
    */
   async function signOut() {
     const result = await runSignOut();
-    if (result?.kind === "signed_out") leaveForLogin();
+    if (result?.kind === "signed_out") leave(signOutDestination(result, "/login"));
   }
 
   return (
@@ -189,8 +196,8 @@ export function ProfileSection({
           <ErrorBox>{signOutMessage}</ErrorBox>
           <div className="flex flex-wrap justify-end gap-2">
             {signedOutUnconfirmed ? (
-              <SecondaryButton onClick={leaveForLogin} disabled={signingOut}>
-                رفتن به صفحهٔ ورود
+              <SecondaryButton onClick={() => leave(signOutTarget)} disabled={signingOut}>
+                {signOutTarget === "/login" ? "رفتن به صفحهٔ ورود" : "بازگشت به کنسول"}
               </SecondaryButton>
             ) : null}
             <SecondaryButton onClick={() => void signOut()} disabled={signingOut}>
