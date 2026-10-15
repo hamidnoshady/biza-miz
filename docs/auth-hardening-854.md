@@ -110,7 +110,7 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.24 "trusted device" wording inaccurate | **resolved (pass 2)** | `otp_login_at` is membership-wide and the wording now says so — the Profile phone card reads «رمز عددی تا ۷ روز برای همهٔ ورودهای این عضویت کار می‌کند (نه فقط یک دستگاه)»; the security-center and login-screen copy already described the window without per-device claims. No per-device trust is claimed anywhere |
 | P2.25 resend UX for phone verification | resolved (pass 2 + pass 3) | server-side cooldown and caps (`checkPhoneOtpRateLimit`: 60 s resend, 5/hour, 20/day; the MFA challenge limiter is the twin) with `retryAfterMs` surfaced by the routes. Pass 3 finished the presentation the issue actually asks for, via one shared hook (`components/auth/use-resend-cooldown.ts`): a **live ticking countdown** seeded from the challenge's real send time (so a reload mid-window shows the honest remainder, not a fresh 60), the limiter's own `retryAfterMs` rewriting the window on a 429, the masked destination, and a live expiry line (`smsChallengeExpiryMessage`) driven by `useNowTick`. Wired into the tenant two-factor card, the platform console card, the Profile login-phone card (whose pending challenge now carries `requestedAt`), and the door's `phone-otp-step` |
 | P2.26 destructive actions confirmed | **resolved (pass 3)** | one shared product confirmation (`components/auth/security-confirm-dialog.tsx`): consequences are a required, rendered list; cancellation sends no mutation; while busy the dialog cannot be closed and both buttons disable, so a retry cannot duplicate the mutation; recent-auth stays a separate gate. It now fronts every destructive personal/membership-security action that used to be a bare `confirm()` or nothing: factor removal and recovery-code regeneration (tenant card + platform console card), the SMS-factor swap, WebAuthn credential removal, team suspension and offboarding, and the IAM card's «ترمیم از نسخهٔ ابری» and detach-to-local. Session revocation keeps its own inline confirmed panel (P1.4). Pinned by `two-factor-settings.test.tsx` and `components/auth/webauthn-manager.test.tsx` |
-| P2.27 weak device/session labels | resolved (pass 1) | device labels + login methods recorded |
+| P2.27 weak device/session labels | **partly open** (pass 1; #957 third pass) | device labels are recorded on every door, and `login_method` on every door except the desktop's cloud-login callback. Pass 1 left the password door unlabelled too; #957's third pass closed that (see "The password door records its door"). The callback is listed under "Not changed, stated plainly" |
 | P2.28 personal security split across surfaces | **resolved (pass 3 + pass 4)** | `/settings/profile` is the canonical personal-security screen **including WebAuthn**: pass 3 extracted the sidebar-only biometric overlay into the reusable `components/auth/webauthn-manager.tsx` card, added it to the profile under the `webauthn_credential` credential surface (server authority unchanged — writable on every profile, read-only contract honoured), and reduced the sidebar's `BiometricSettingsButton` to a link to the profile instead of a duplicate panel. Pass 4 removed the last duplicate: the Security Center's personal phone card (its own mutation form against `/api/auth/phone/self`) is gone from the organisation screen; the Security Center now renders the organisation's MFA policy posture and links to the Profile section that owns the personal phone ceremony. One writer per surface remains: Profile for the signed-in person, Security Center for policy, Team for member administration. Pinned by `components/auth/webauthn-manager.test.tsx` and the Security Center's rendered contract |
 
 ### Second-pass gaps (GAP 1–10) mapped to findings
@@ -558,6 +558,34 @@ unprivileged role, so an unscoped read fails under RLS. Each regression fails
 part of it: without the token re-check, 2 of the 3 cases fail; with an unscoped
 location read, 2 fail; with the old filter, 1 fails.
 
+**Every other producer, end to end.** `session-revocation-854` covers the doors
+that used to mint row-less sessions. `integration/session-producers-854.integration.test.ts`
+(15 cases) covers every other route that hands out a tenant cookie, each through
+its real handler: the password door (directly and through a second factor),
+phone OTP, PIN, WebAuthn, invitation acceptance (directly and through a second
+factor); the re-mints (step-up, branch switch, the member's own password change
+from Profile and from Team, native device registration); and the support doors
+(the console's start route, the host hand-off, resume). For each, the cookie
+names a live row of exactly its member and business (or names the grant),
+«خروج» ends it, and every retained copy — including the copy from before a
+re-mint — is refused by the authenticator and by a real route. The WebAuthn case
+is not stubbed: a software P-256 authenticator signs a real assertion over the
+server's challenge and the unmodified verification checks it (a forged
+challenge is refused). The desktop's cloud-login callback gets the same
+retained-cookie check in `hybrid-credential-sync`, where its cloud stub lives.
+Mutations: letting a revoked row authenticate fails the 12 row cases; letting an
+ended grant authenticate fails the 3 support cases; expecting another RP id fails
+the WebAuthn case.
+
+**The password door records its door (P2.27).** `/api/auth/login` opened its
+row without a `login_method`, and MFA completion recorded one only for the
+phone-OTP door, so password sign-ins — and invitations finished through a
+second factor — were labelled by the credential fallback. The pending-MFA token
+is signed and already names its door (`primaryAuth`, and `invitationId` for an
+invitation), so MFA completion now records `phone_otp`, `invitation` or
+`password` from it, and the direct password door records `password`. No
+migration: both values were already allowed.
+
 **Not changed, stated plainly.**
 
 - `createSession` writes its row and its `employee.session_created` audit row on
@@ -565,10 +593,11 @@ location read, 2 fail; with the old filter, 1 fails.
   row, so it cannot authenticate; it is listed until it expires and can be ended
   from the security center. This predates the pass; making it atomic touches
   every sign-in door.
-- The password door (`/api/auth/login`, and MFA completion of it) and the
-  desktop's cloud-login callback record no `login_method`. The security center
-  still falls back to the credential label for those rows (the P2.27 gap,
-  unchanged).
+- The desktop's cloud-login callback records no `login_method`: none of the
+  recorded doors describes it (the person proved who they are to the cloud, not
+  to this install), and a new value would need a migration of its own. The
+  security center falls back to the credential label for those rows. This is
+  what remains of the P2.27 gap; the password door is closed (below).
 - A physical authenticator and a real SMS provider remain unverified, as above.
 
 ## Gate results in this workspace

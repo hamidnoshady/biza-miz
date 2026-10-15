@@ -585,6 +585,22 @@ describe("hybrid login credential convergence", () => {
     const session = await resolveSessionFromToken(cookie);
     expect(session?.platformUserId).toBe(cloudLoginHandoff.platformUserId);
     expect(session?.tokenVersion).toBe(cloudLoginHandoff.tokenVersion);
+
+    // #854 follow-up (third pass): the hand-back opens a revocable row of its
+    // own member, in its own business; «خروج» ends it, and a retained copy of
+    // the cookie is refused afterwards, like every other door's.
+    expect(session?.employeeSessionId).toBeTruthy();
+    const opened = await withTenant(paired.siteBusinessId, () => query<{ employee_id: string; business_id: string; revoked_at: Date | null }>(
+      `SELECT employee_id, business_id, revoked_at FROM employee_sessions WHERE id = $1`,
+      [session!.employeeSessionId],
+    ));
+    expect(opened.rows[0]).toMatchObject({ employee_id: paired.ownerUserId, business_id: paired.siteBusinessId, revoked_at: null });
+    const signedOut = await logoutRoute(new NextRequest("http://localhost/api/auth/logout", {
+      method: "POST",
+      headers: { cookie: `${SESSION_COOKIE}=${cookie}` },
+    }));
+    expect(await signedOut.json()).toMatchObject({ ok: true, outcome: "revoked", pendingRevocations: 0 });
+    expect(await resolveSessionFromToken(cookie)).toBeNull();
   }, 240_000);
 
   it("persists a failed PIN apply as degraded and repairs it on the next pass", async () => {
