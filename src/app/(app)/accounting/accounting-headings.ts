@@ -52,6 +52,15 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
   receivables: { description: "طلب از مشتریان، سن بدهی و دریافت‌ها." },
   payables: { description: "بدهی به تأمین‌کنندگان، سررسیدها و پرداخت‌ها." },
   receipts: { description: "ثبت دریافت از مشتری و پرداخت به تأمین‌کننده." },
+  "financial-accounts": {
+    title: "حساب‌های مالی",
+    description:
+      "بانک، صندوق، تنخواه و کارت‌خوان‌ها؛ هر حساب به یک سرفصل دفتر کل وصل است و مانده‌اش از دفتر خوانده می‌شود، نه از جایی دیگر.",
+  },
+  transfers: {
+    description:
+      "انتقال وجه بین حساب‌های مالی کسب‌وکار، با سند دوطرفهٔ خودکار، پیش‌نمایش سند و برگشت سند (بدون ویرایش یا حذف).",
+  },
   installments: { description: "فروش اقساطی، سررسید قسط‌ها و وصول آن‌ها." },
   cheques: { description: "چک‌های دریافتی و پرداختی و وضعیت هر کدام." },
   reconciliation: { description: "تطبیق گردش بانک با دفاتر و پیدا کردن اقلام باز." },

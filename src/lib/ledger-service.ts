@@ -65,6 +65,20 @@ export interface ExactJournalLine {
   credit: RialText;
   /** Optional accounting dimensions (issue #868). See `PostJournalEntryInput.dimensionMirror`. */
   dimensions?: LineDimensions | null;
+  /**
+   * Multicurrency (issue #863, extended by #862): the foreign side of this leg,
+   * in minor units of the entry's transaction currency. Absent means zero —
+   * every caller before this one produced base-only lines, and still does.
+   *
+   * A line on a foreign entry is either a *foreign leg* (exactly one of the two
+   * non-zero) or a *base-only leg* (both zero: the FX gain/loss line); the
+   * database's deferred trigger enforces that split and that the foreign side
+   * balances, so a caller cannot post half a foreign document.
+   */
+  foreignDebit?: RialText;
+  foreignCredit?: RialText;
+  /** The party a foreign receivable/payable leg belongs to, when attributed. */
+  partyId?: string | null;
 }
 
 /**
@@ -96,8 +110,10 @@ export async function postExactJournalEntry(
 
   const { rows } = await client.query<{ id: string; entry_date: string }>(
     `INSERT INTO journal_entries
-       (business_id,location_id,entry_date,memo,source_type,source_id,created_by,posting_kind,inventory_event_id,project_id)
-     VALUES($1,$2,COALESCE($3,CURRENT_DATE),$4,$5,$6,$7,$8,$9,$10)
+       (business_id,location_id,entry_date,memo,source_type,source_id,created_by,posting_kind,inventory_event_id,project_id,
+        currency_code,base_currency_code,exchange_rate_id,exchange_rate,rounding_version,rounding_delta,idempotency_key)
+     VALUES($1,$2,COALESCE($3,CURRENT_DATE),$4,$5,$6,$7,$8,$9,$10,
+            $11,COALESCE($12,'IRR'),$13,$14,$15,COALESCE($16,0),$17)
      RETURNING id, entry_date::text AS entry_date`,
     [
       input.businessId,
@@ -110,6 +126,16 @@ export async function postExactJournalEntry(
       input.postingKind ?? null,
       input.inventoryEventId ?? null,
       input.projectId ?? null,
+      input.currencyCode ?? null,
+      input.baseCurrencyCode ?? null,
+      input.exchangeRateId ?? null,
+      input.exchangeRate ?? null,
+      input.roundingVersion ?? null,
+      // A base entry carries no rounding delta — the database's snapshot CHECK
+      // requires exactly that, so a caller that names a currency must name a
+      // rounding policy version or the entry is refused as half-described.
+      input.currencyCode ? (input.roundingDelta ?? "0") : 0,
+      input.journalIdempotencyKey ?? null,
     ],
   );
   await insertJournalLines(client, input, rows[0].id, lines);
@@ -975,6 +1001,25 @@ export interface PostJournalEntryInput {
    * never part of the fiscal-year sequence; `undefined` posts without one.
    */
   voucherReference?: string | null;
+  /**
+   * Multicurrency snapshot (issue #863 / #862). All six are absent for a
+   * base-currency entry, which is what every caller before this one posts.
+   * When `currencyCode` is present the database's `journal_entries_currency_snapshot`
+   * CHECK requires the whole set, so they travel together or not at all.
+   */
+  currencyCode?: string | null;
+  baseCurrencyCode?: string | null;
+  exchangeRateId?: string | null;
+  exchangeRate?: string | null;
+  roundingVersion?: number | null;
+  roundingDelta?: string | null;
+  /**
+   * The entry's own idempotency key (`journal_entries.idempotency_key`, unique
+   * per business). A caller that already has a key for the document it is
+   * posting passes it here so a concurrent retry collides in the database
+   * instead of posting a second entry.
+   */
+  journalIdempotencyKey?: string | null;
 }
 
 /**
@@ -986,7 +1031,15 @@ async function insertJournalLines(
   client: PoolClient,
   input: Pick<PostJournalEntryInput, "businessId" | "locationId" | "entryDate" | "dimensionMirror">,
   entryId: string,
-  lines: ReadonlyArray<{ accountId: string; debit: RialText | number; credit: RialText | number; dimensions?: LineDimensions | null }>,
+  lines: ReadonlyArray<{
+    accountId: string;
+    debit: RialText | number;
+    credit: RialText | number;
+    dimensions?: LineDimensions | null;
+    foreignDebit?: RialText;
+    foreignCredit?: RialText;
+    partyId?: string | null;
+  }>,
 ): Promise<void> {
   if (!input.dimensionMirror && lines.some((line) => hasDimensions(line.dimensions))) {
     await assertDimensionsPostable(client, {
@@ -1000,9 +1053,22 @@ async function insertJournalLines(
     const dims = dimensionColumnValues(line.dimensions);
     await client.query(
       `INSERT INTO journal_lines
-         (entry_id, account_id, debit, credit, cost_center_id, profit_center_id, department_id, detail_dimension_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [entryId, line.accountId, line.debit, line.credit, dims.cost_center_id, dims.profit_center_id, dims.department_id, dims.detail_dimension_id],
+         (entry_id, account_id, debit, credit, cost_center_id, profit_center_id, department_id, detail_dimension_id,
+          foreign_debit, foreign_credit, party_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        entryId,
+        line.accountId,
+        line.debit,
+        line.credit,
+        dims.cost_center_id,
+        dims.profit_center_id,
+        dims.department_id,
+        dims.detail_dimension_id,
+        line.foreignDebit ?? 0,
+        line.foreignCredit ?? 0,
+        line.partyId ?? null,
+      ],
     );
   }
 }
