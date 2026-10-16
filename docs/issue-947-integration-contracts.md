@@ -29,6 +29,20 @@ it cannot:
 - since migration `0223_personnel_file_obligation.sql`, the *obligation* is written by a
   trigger on `users` in the membership's own transaction, so a committed membership can no
   longer be silently file-less — the file is the service's job, the debt is the database's;
+  `0226_personnel_file_obligation_phone_cleared.sql` corrects one arm of that predicate,
+  forward-only: 0223 only looked at the phone when the membership *had* one, so clearing a
+  member's number left the old number on their file with nothing owed. The corrected arm
+  reads a cleared membership phone as canonical — `COALESCE(btrim(NEW.phone_e164), '') = ''
+  AND COALESCE(btrim(file_phone), '') <> ''` — which is what `personnelFileIsStale` and the
+  projection already did, and it re-runs the inventory with the same predicate (existing
+  episodes keep their diagnosis and attempt count, exactly as 0223's did);
+- the same operation is the one failure boundary for the whole synchronization
+  (`canonicalIdentity` included): its callers are membership changes that have *already
+  committed*, so a transient failure has to come back as a result — `{ ok: false, reason,
+  error, recorded }` — never as a 500 about a request that succeeded. What it cannot do is
+  un-fail a transaction: `iam/sync.ts` applies its events inside one, and a statement-level
+  failure there has already aborted it, so the boundary informs the caller rather than
+  making the site's transaction committable;
 - `listPersonnelFileDebts` (`users` × `parties`) is the inventory the sweep reads;
   `personnel_file_drift` is bookkeeping about a debt, never the evidence of one;
 - a conflicting write in the reverse direction is still refused with

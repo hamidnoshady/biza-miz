@@ -1064,6 +1064,128 @@ describe("branch policy of a new membership (issue #947, TEAM-F03)", () => {
       after: { locationScope: "home", locationScopeBasis: "business_default" },
     });
   });
+
+  it("replicates the fallback branch the row actually stored, all the way to access", async () => {
+    /*
+     * The same unnamed-policy creation, followed through the replication seam — the
+     * half a cloud-only assertion cannot see.
+     *
+     * `membership.created` carried `locations.defaultLocationId`, which is **null** in
+     * exactly this case (the caller named no branch, so nothing was assigned), while the
+     * row the cloud wrote holds the business's default branch. `applyIamEvents` writes
+     * the payload value straight into `users.location_id`, so the site ended up with
+     * `location_scope = 'home'` and `location_id = NULL` — and `branchScopeSql`'s home
+     * arm is `location_id = $branch`, which no branch satisfies. The member the cloud had
+     * hired could not be put on floor work anywhere on the replica, although the two
+     * installs agreed about the role, the name and the policy.
+     *
+     * So this case asserts all three links of the chain: the event says the branch the
+     * membership holds, the replica stores it, and the shared eligibility contract then
+     * *admits* the replicated member at that branch.
+     */
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Replicated Fallback Waiter",
+        pin: "7788",
+        actorId: alpha.ownerId,
+      }),
+    );
+
+    // The cloud row: home, bound to the default branch, no explicit assignment.
+    const cloud = await db.query<{ location_scope: string; location_id: string | null }>(
+      "SELECT location_scope, location_id FROM users WHERE id = $1",
+      [userId],
+    );
+    expect(cloud.rows[0]).toEqual({ location_scope: "home", location_id: alpha.locationId });
+
+    const events = await db.query<{ payload: string }>(
+      `SELECT payload::text AS payload FROM iam_events
+        WHERE business_id = $1 AND event_type = 'membership.created' AND entity_id = $2`,
+      [alpha.businessId, userId],
+    );
+    const payload = JSON.parse(events.rows[0].payload) as {
+      membership: { defaultLocationId: string | null; locationScope: string; locationIds: string[] };
+    };
+    // The event describes the row — the fix this case exists for.
+    expect(payload.membership.locationScope).toBe("home");
+    expect(payload.membership.defaultLocationId).toBe(alpha.locationId);
+    expect(payload.membership.locationIds).toEqual([]);
+
+    /*
+     * Apply it the way a Hybrid/Local site does: `applyIamEvents` in the tenant the
+     * event belongs to, with the membership id the site materialised for it (a site
+     * is another install, so its row ids are its own; the branch ids the payload
+     * carries are the tenant's, which is how they resolve at all).
+     */
+    const iamSync = await import("../src/lib/iam/sync");
+    const staff = await import("../src/lib/staff-eligibility");
+    const applyCreated = (membershipId: string, defaultLocationId: string | null) =>
+      asBusiness(alpha.businessId, () =>
+        iamSync.applyIamEvents(alpha.businessId, randomUUID(), 0, [
+          {
+            id: randomUUID(),
+            businessId: alpha.businessId,
+            sequence: 1,
+            eventType: "membership.created",
+            entityType: "membership",
+            entityId: membershipId,
+            schemaVersion: 1,
+            payload: {
+              ...(JSON.parse(events.rows[0].payload) as Record<string, unknown>),
+              membership: {
+                ...payload.membership,
+                id: membershipId,
+                defaultLocationId,
+              },
+            },
+            actorUserId: null,
+            origin: "cloud",
+            createdAt: new Date().toISOString(),
+          },
+        ]),
+      );
+
+    const replicatedId = randomUUID();
+    await applyCreated(replicatedId, payload.membership.defaultLocationId);
+
+    const replica = await db.query<{ location_scope: string; location_id: string | null }>(
+      "SELECT location_scope, location_id FROM users WHERE id = $1",
+      [replicatedId],
+    );
+    expect(replica.rows[0]).toEqual({ location_scope: "home", location_id: alpha.locationId });
+
+    // …and the point of storing it: the replicated member may actually work there.
+    expect(
+      await asBusiness(alpha.businessId, () =>
+        staff.isEligibleStaffAtLocation(alpha.businessId, alpha.locationId, replicatedId),
+      ),
+    ).toBe(true);
+    const roster = await asBusiness(alpha.businessId, () =>
+      staff.listEligibleStaffAtLocation(alpha.businessId, alpha.locationId),
+    );
+    expect(roster.map((row) => row.id)).toContain(replicatedId);
+
+    /*
+     * The control: the same event with the value the payload used to carry. A «home»
+     * member with no home is not eligible *anywhere*, which is the failure this fix
+     * removes — stated here so the reason the field matters cannot be mistaken for a
+     * cosmetic difference between two equal values.
+     */
+    const strandedId = randomUUID();
+    await applyCreated(strandedId, null);
+    const stranded = await db.query<{ location_scope: string; location_id: string | null }>(
+      "SELECT location_scope, location_id FROM users WHERE id = $1",
+      [strandedId],
+    );
+    expect(stranded.rows[0]).toEqual({ location_scope: "home", location_id: null });
+    expect(
+      await asBusiness(alpha.businessId, () =>
+        staff.isEligibleStaffAtLocation(alpha.businessId, alpha.locationId, strandedId),
+      ),
+    ).toBe(false);
+  });
 });
 
 /**

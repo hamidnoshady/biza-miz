@@ -620,9 +620,22 @@ export async function createMembership(
          * actually written, not a second inference of it. The old expression
          * re-derived "all" for the same unnamed-policy case the SQL `CASE`
          * widened, so a Hybrid/Local site was told «همهٔ شعبهها» and stored it.
+         *
+         * `homeLocationId`, not `locations.defaultLocationId` — the value the
+         * `INSERT` above wrote to `location_id`, which is what the replica applies
+         * (`iam/sync.ts` writes `member.defaultLocationId` straight into
+         * `users.location_id`). The two differ in exactly the fallback case: a caller
+         * that named no branch policy gets scope `home` with the business's default
+         * branch as the home, while `locations.defaultLocationId` is **null** there —
+         * the caller named nothing, so nothing was assigned. Publishing the caller's
+         * unnamed field replicated «home» with no home: the site stored
+         * `location_scope = 'home'` and `location_id = NULL`, and a home member with no
+         * home matches no branch in `branchScopeSql`, so the member the cloud had just
+         * hired could not work anywhere on the replica. The rehire event already
+         * publishes `homeLocationId`; this is the same rule on the creation door.
          */
         locationScope: policy.scope,
-        defaultLocationId: locations.defaultLocationId, locationIds: locations.locationIds, revision: 1 }, revision: 1,
+        defaultLocationId: homeLocationId, locationIds: locations.locationIds, revision: 1 }, revision: 1,
         // Issue #854 (P2.4) — the reason travels with the event so a Hybrid or
         // Local site applying this creation holds the same justification.
         reason: accessChangeReason },

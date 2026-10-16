@@ -84,6 +84,12 @@ export interface PersonnelFileSyncResult {
   reason?: PersonnelFileDriftReason;
   /** A machine-readable failure code — never a message from the database. */
   error?: string;
+  /**
+   * On a failure: whether the debt is *written down*. `false` means the obligation could
+   * not be recorded either — the state the reconcile script prints as `recorded:false`,
+   * and the one an operator has to see, because nothing will retry it from the table.
+   */
+  recorded?: boolean;
 }
 
 interface MembershipIdentityRow extends Record<string, unknown> {
@@ -179,6 +185,71 @@ export async function recordPersonnelFileDrift(params: {
   );
 }
 
+/**
+ * Records the debt, and never lets the *recording* become the failure.
+ *
+ * The caller is a membership change that has already committed, so this function has to
+ * answer «is it written down?» rather than raise: if `personnel_file_drift` itself is
+ * unavailable (a locked table, a lost connection, a restore in progress) the request must
+ * still return an explicit result instead of a 500 about a membership that exists. The
+ * answer is returned so the caller can say `recorded: false` out loud.
+ */
+async function recordDriftBestEffort(
+  businessId: string,
+  userId: string,
+  reason: PersonnelFileDriftReason,
+  error: string,
+): Promise<boolean> {
+  try {
+    await recordPersonnelFileDrift({ businessId, userId, reason, error });
+    return true;
+  } catch (recordingFailure) {
+    console.error(
+      `personnel file drift could not be recorded for membership ${userId}: ${
+        (recordingFailure as Error)?.message ?? "unknown"
+      }`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Which debt a failed synchronization leaves: an identity that no longer matches
+ * (`identity_stale`, the file exists but carries someone else's link) or a file that is
+ * missing (`file_missing`). `employee_link_taken` is the only failure that means the
+ * former — the link is held by a row the member cannot adopt.
+ */
+function synchronizationReason(error: unknown): PersonnelFileDriftReason {
+  return error instanceof PartyValidationError && error.code === "employee_link_taken"
+    ? "identity_stale"
+    : "file_missing";
+}
+
+/**
+ * The machine-readable code for a failed synchronization.
+ *
+ * `PartyValidationError` speaks first: its codes are the product's own vocabulary
+ * (`employee_link_taken` is what turns a failure into a stale-identity case rather than a
+ * missing file). Anything else is a statement the database refused, and for those the
+ * honest identifier is PostgreSQL's SQLSTATE plus the object that refused it — a catalog
+ * name, not row data, and the thing an operator looks up. Falling back to the JavaScript
+ * error's own `name` alone would be worse than useless here: node-postgres sets
+ * `name === "error"` for every server error, so the drift row would read `error` and say
+ * nothing about what happened.
+ */
+function synchronizationFailureCode(error: unknown): string {
+  if (error instanceof PartyValidationError) return error.code;
+  const failure = error as { code?: unknown; constraint?: unknown; name?: unknown } | null;
+  if (typeof failure?.code === "string" && failure.code) {
+    return typeof failure.constraint === "string" && failure.constraint
+      ? `${failure.code}:${failure.constraint}`
+      : failure.code;
+  }
+  return typeof failure?.name === "string" && failure.name && failure.name !== "error"
+    ? failure.name
+    : "personnel_file_sync_failed";
+}
+
 /** Closes the open drift row — the file matches the membership again. */
 export async function clearPersonnelFileDrift(businessId: string, userId: string): Promise<void> {
   await query(
@@ -201,25 +272,82 @@ export async function ensurePersonnelFileForMembership(
   businessId: string,
   userId: string,
 ): Promise<PersonnelFileSyncResult> {
-  const identity = await canonicalIdentity(businessId, userId);
-  // The membership is gone (offboarded and purged by a future policy, or a stale
-  // event): there is nothing to guarantee and nothing to owe.
-  if (!identity) return { ok: true, fileId: null };
+  /**
+   * Which step the failure surfaced on. It decides the honest reason and code: a
+   * canonical-identity read that never returned a row compared *nothing*, so calling that
+   * «identity_stale» would claim a measurement nobody made.
+   */
+  let stage: "identity" | "projection" = "identity";
 
-  // A file's display name is a required column, so a nameless membership cannot be
-  // given one. Refusing to invent a name is the deliberate choice: the alternative —
-  // «کارمند» on a payroll row — is the kind of placeholder that ends up on a tax
-  // filing. Creation and rename both require a name, so this is a data-repair case,
-  // and it is recorded as one.
-  if (!identity.displayName) {
-    await recordPersonnelFileDrift({
-      businessId,
-      userId,
-      reason: "file_missing",
-      error: "membership_name_missing",
-    });
-    return { ok: false, fileId: null, reason: "file_missing", error: "membership_name_missing" };
+  /*
+   * ONE boundary around the whole synchronization: the identity lookup, the projection and
+   * its recovery, and the drift bookkeeping itself. Each of those can fail, and until this
+   * boundary was here two of them ran *outside* it — the lookup and the nameless case's
+   * drift write — so a transient failure surfaced as a thrown error from a function whose
+   * callers had already committed: `createMembership` had returned nothing to the client
+   * while its row existed, and a retry answered «این ایمیل قبلاً استفاده شده است», or a
+   * phone verification failed after its stamp. A failure here is a *result*.
+   *
+   * What this boundary does NOT promise: it cannot un-fail a database transaction. The
+   * replica applies (`iam/sync.ts`) call this inside their own transaction, and a
+   * statement-level failure there has already aborted it — the boundary keeps the caller
+   * informed, it does not make the transaction committable, and a site whose transaction
+   * rolled back must not pretend it recorded a membership it did not. The repair
+   * obligation stays what it is: written by the database (migration 0223, and its phone
+   * arm) and cleared by the one comparator in this file.
+   */
+  try {
+    const identity = await canonicalIdentity(businessId, userId);
+    // The membership is gone (offboarded and purged by a future policy, or a stale
+    // event): there is nothing to guarantee and nothing to owe.
+    if (!identity) return { ok: true, fileId: null };
+
+    // A file's display name is a required column, so a nameless membership cannot be
+    // given one. Refusing to invent a name is the deliberate choice: the alternative —
+    // «کارمند» on a payroll row — is the kind of placeholder that ends up on a tax
+    // filing. Creation and rename both require a name, so this is a data-repair case,
+    // and it is recorded as one — through the recorder that cannot throw, because a
+    // failure to write the note down is not a reason to fail the request.
+    if (!identity.displayName) {
+      const recorded = await recordDriftBestEffort(
+        businessId,
+        userId,
+        "file_missing",
+        "membership_name_missing",
+      );
+      return {
+        ok: false,
+        fileId: null,
+        reason: "file_missing",
+        error: "membership_name_missing",
+        recorded,
+      };
+    }
+
+    stage = "projection";
+    return await synchronizePersonnelFile(businessId, userId, identity);
+  } catch (error) {
+    const code =
+      stage === "identity" ? "identity_lookup_failed" : synchronizationFailureCode(error);
+    const reason = synchronizationReason(error);
+    console.error(
+      `personnel file sync failed for membership ${userId} of business ${businessId}: ${code}`,
+    );
+    const recorded = await recordDriftBestEffort(businessId, userId, reason, code);
+    return { ok: false, fileId: null, reason, error: code, recorded };
   }
+}
+
+/**
+ * The projection half: bring an existing file in line, create one, or adopt the winner of
+ * a create race. Extracted so the boundary above can wrap the stages it does not own, and
+ * so this half keeps the recovery that only it can decide (a lost race is not a debt).
+ */
+async function synchronizePersonnelFile(
+  businessId: string,
+  userId: string,
+  identity: MembershipIdentity,
+): Promise<PersonnelFileSyncResult> {
 
   /**
    * Bring an existing file back in line, or confirm it already is.
@@ -290,12 +418,8 @@ export async function ensurePersonnelFileForMembership(
       }
     }
 
-    const reason: PersonnelFileDriftReason =
-      error instanceof PartyValidationError && error.code === "employee_link_taken"
-        ? "identity_stale"
-        : "file_missing";
-    const code =
-      error instanceof PartyValidationError ? error.code : ((error as Error)?.name ?? "personnel_file_sync_failed");
+    const reason = synchronizationReason(error);
+    const code = synchronizationFailureCode(error);
     /*
      * Logged as well as recorded. The drift row is what retries; the log line is what
      * an operator watching the process sees *now*, and this is exactly the failure the
@@ -304,16 +428,8 @@ export async function ensurePersonnelFileForMembership(
     console.error(
       `personnel file sync failed for membership ${userId} of business ${businessId}: ${code}`,
     );
-    try {
-      await recordPersonnelFileDrift({ businessId, userId, reason, error: code });
-    } catch (recordingFailure) {
-      console.error(
-        `personnel file drift could not be recorded for membership ${userId}: ${
-          (recordingFailure as Error)?.message ?? "unknown"
-        }`,
-      );
-    }
-    return { ok: false, fileId: null, reason, error: code };
+    const recorded = await recordDriftBestEffort(businessId, userId, reason, code);
+    return { ok: false, fileId: null, reason, error: code, recorded };
   }
 }
 

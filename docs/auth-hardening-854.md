@@ -290,7 +290,13 @@ at, and its own record is the Team section of the manual plus
   moved the *obligation* into the membership's own transaction (a trigger on `users`), so a
   committed membership can no longer be file-less without a recorded reason, and
   `listPersonnelFileDebts` (`users` × `parties`) is the inventory the sweep reads — the
-  drift table is bookkeeping about a debt, not the evidence of one. The seams this shares
+  drift table is bookkeeping about a debt, not the evidence of one. Migration
+  `0226_personnel_file_obligation_phone_cleared` corrects that trigger's phone arm
+  (forward-only, 0223 is applied and unedited): a membership phone that is *cleared* is
+  canonical and must clear the file's, so it records the debt like every other mismatch. The
+  operation is also the single failure boundary for the propagation — `canonicalIdentity`
+  included — because every caller invokes it after committing, and therefore gets an
+  explicit `{ ok, reason, error, recorded }` instead of an exception. The seams this shares
   with the floor audit (#916) are written down in `docs/issue-947-integration-contracts.md`.
 - **P2.7 (personnel subsection)** — unchanged: the subsection still mounts only behind
   `canViewParties`. What #947 added is the *field* projection behind it: `parties.view`

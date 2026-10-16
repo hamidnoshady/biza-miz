@@ -6,9 +6,10 @@
  * Every membership is supposed to leave the person a personnel file: a `parties` row
  * with the `Employee` role whose `employee_user_id` points back at the membership,
  * carrying the membership's canonical name, phone and email. Since migration 0223 the
- * obligation is written by the membership write itself (a trigger on `users`), the
- * projection lives in `src/lib/personnel-file.ts`, and `GET /api/team` retries a handful
- * of members on each visit.
+ * obligation is written by the membership write itself (a trigger on `users`), with its
+ * phone arm corrected forward-only in 0226 (a *cleared* membership phone is canonical and
+ * must clear the file's), the projection lives in `src/lib/personnel-file.ts`, and
+ * `GET /api/team` retries a handful of members on each visit.
  *
  * This script is the other half of that contract: it walks **the members the platform
  * actually owes a file**, and repairs each one through the app's own projection.
