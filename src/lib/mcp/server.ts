@@ -19,8 +19,8 @@ import { memberAccessForUser } from "../member-access";
 import { resolveActiveLocationForUser } from "../setup-state";
 import type { Permission } from "../permissions";
 import { getBusinessIndustry } from "../industry-guard";
-import { INDUSTRY_LABELS } from "../industries";
-import { industryProfile, labelFor } from "../industry-profile";
+import { INDUSTRY_LABELS, type Industry } from "../industries";
+import { labelFor } from "../industry-profile";
 import { currentAppVersion } from "../app-update";
 import type { McpAuthentication } from "./auth";
 import {
@@ -36,8 +36,22 @@ import {
 import { mcpResourcesFor, readMcpResource } from "./resources";
 import { MCP_SCOPES, hasMcpScope } from "./scopes";
 import { mcpBrancheIds } from "./grants";
-import { findMcpTool, isKnownMcpTool, mcpToolCatalogue } from "./tools";
+import {
+  findMcpTool,
+  isKnownMcpTool,
+  mcpAvailableModules,
+  mcpToolCatalogue,
+  paginateMcpTools,
+} from "./tools";
 import { findMcpWriteStatus, performMcpWrite } from "./write-service";
+
+async function resolveTenantIndustry(businessId: string): Promise<Industry> {
+  try {
+    return (await getBusinessIndustry(businessId)) ?? "food_service";
+  } catch {
+    return "food_service";
+  }
+}
 
 /**
  * The `instructions` field of `initialize` — the one piece of text every client
@@ -49,20 +63,31 @@ import { findMcpWriteStatus, performMcpWrite } from "./write-service";
  * it needs it, rather than in a preamble paid for on every conversation.
  */
 async function buildInstructions(auth: McpAuthentication): Promise<{ title: string; instructions: string }> {
-  const { rows } = await query<{ name: string }>(`SELECT name FROM businesses WHERE id = $1`, [
-    auth.businessId,
-  ]);
-  const businessName = rows[0]?.name?.trim() || "کسب‌وکار";
-  const industry = await getBusinessIndustry(auth.businessId);
+  let businessName = "کسب‌وکار";
+  try {
+    const { rows } = await query<{ name: string }>(`SELECT name FROM businesses WHERE id = $1`, [
+      auth.businessId,
+    ]);
+    businessName = rows[0]?.name?.trim() || "کسب‌وکار";
+  } catch {
+    businessName = "کسب‌وکار";
+  }
+  const industry = await resolveTenantIndustry(auth.businessId);
   const trade = industry ? INDUSTRY_LABELS[industry] : "";
   const saleDoc = industry ? labelFor(industry, "saleDocument") : "سفارش";
   const catalogue = industry ? labelFor(industry, "catalogue") : "منو";
-  const modules = industry ? industryProfile(industry).modules.join(", ") : "";
+  const availableModules = mcpAvailableModules(
+    auth.scopes,
+    auth.permissions,
+    auth.grants,
+    { industry, writeMode: auth.writeMode },
+  );
+  const modules = availableModules.join(", ");
 
   const canWrite = hasMcpScope(auth.scopes, MCP_SCOPES.write);
   const writeLine = canWrite
     ? auth.writeMode === "apply"
-      ? "This connection MAY write, and a write tool takes effect immediately. Confirm every figure with the person before you call one."
+      ? "This connection MAY write, and a write tool takes effect immediately unless its description states it always awaits human approval. Confirm every figure with the person before you call one."
       : "This connection MAY write, but every write waits in an approval list inside the app and changes nothing until a human approves it. Never tell the user a change has been made — say it is waiting for their approval."
     : "This connection is READ-ONLY. There are no write tools. If the user asks for a change, explain what they should do in the app; do not claim you have done it.";
 
@@ -71,9 +96,8 @@ async function buildInstructions(auth: McpAuthentication): Promise<{ title: stri
     `The owner and staff speak Persian; answer in Persian unless asked otherwise. This trade calls one sale a «${saleDoc}» and its item list «${catalogue}».`,
     modules ? `Modules available here: ${modules}.` : "",
     // Issue #883 §1 — the catalogue is already filtered by this connection's
-    // consent document; saying so up front keeps the client from explaining
-    // missing tools as malfunctions.
-    `The owner consented exactly to the tools listed by tools/list — if a section of the app is not there, this connection was not granted it; the owner can widen it from Settings → Connections.`,
+    // consent document and the tenant's enabled modules.
+    `The owner consented exactly to the tools listed by tools/list (paginated up to 100 tools per page; follow nextCursor to see additional pages) — if a section of the app is not there, this connection was not granted it; the owner can widen it from Settings → Connections.`,
     "",
     "Before you interpret any number, read the resource `pos://app/conventions`. In short: money is an integer count of RIAL and people speak in TOMAN (Rial ÷ 10) — tools hand you a preformatted `text` field, use it; dates on the wire are Gregorian ISO while people read Jalali; a trading day is not a calendar day, so never recompute a date range yourself.",
     "Never ask the user for an id and never print one — `find_items` turns a Persian name into the ids the tools need.",
@@ -211,7 +235,11 @@ async function callTool(
     };
   }
 
-  const tool = findMcpTool(name, auth.scopes, auth.permissions, auth.grants);
+  const industry = await resolveTenantIndustry(auth.businessId);
+  const tool = findMcpTool(name, auth.scopes, auth.permissions, auth.grants, {
+    industry,
+    writeMode: auth.writeMode,
+  });
   if (!tool) {
     // "You may not" and "no such thing" are different answers and a model
     // behaves differently for each: the first is worth telling the user about,
@@ -315,6 +343,65 @@ async function callTool(
   };
 }
 
+const MCP_PROMPTS = [
+  {
+    name: "daily_briefing",
+    title: "خلاصهٔ روزانه کسب‌وکار",
+    description:
+      "Daily operational briefing: setup state, today's sales/orders, and items needing attention. — خلاصهٔ عملیاتی روزانه کسب‌وکار.",
+    arguments: [
+      {
+        name: "date",
+        description: "Optional ISO date (YYYY-MM-DD); defaults to today.",
+        required: false,
+      },
+    ],
+  },
+  {
+    name: "closing_checklist",
+    title: "چک‌لیست بستن روز کاری",
+    description:
+      "End-of-day operational checklist: open shifts, unreconciled bank lines, and pending approvals. — چک‌لیست بستن روز کاری و شیفت.",
+    arguments: [],
+  },
+] as const;
+
+function buildPromptMessages(name: string, args: Record<string, unknown>) {
+  if (name === "daily_briefing") {
+    const dateHint =
+      typeof args.date === "string" && args.date.trim()
+        ? ` for date ${args.date.trim()}`
+        : " for today";
+    return {
+      description: MCP_PROMPTS[0].description,
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Please read pos://app/conventions and call describe_app and run_report${dateHint} to prepare a concise Persian daily operational briefing for this business.`,
+          },
+        },
+      ],
+    };
+  }
+  if (name === "closing_checklist") {
+    return {
+      description: MCP_PROMPTS[1].description,
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: "Please check open shifts, unreconciled bank lines, and today's sales summary, then give the owner a concise Persian end-of-day closing checklist.",
+          },
+        },
+      ],
+    };
+  }
+  return null;
+}
+
 /**
  * Dispatch one parsed message.
  *
@@ -350,12 +437,27 @@ export async function dispatchMcpMessage(
     case "ping":
       return jsonRpcResult(id, {});
 
-    case "tools/list":
+    case "tools/list": {
+      const industry = await resolveTenantIndustry(auth.businessId);
+      const allTools = mcpToolCatalogue(
+        auth.scopes,
+        auth.permissions,
+        auth.grants,
+        { industry, writeMode: auth.writeMode },
+      ).map((tool) => tool.descriptor);
+      const page = paginateMcpTools(allTools, params.cursor);
+      if (!page.ok) {
+        return jsonRpcError(
+          id,
+          JSON_RPC_ERRORS.invalidParams,
+          "نشانگر صفحه‌بندی (cursor) معتبر نیست.",
+        );
+      }
       return jsonRpcResult(id, {
-        tools: mcpToolCatalogue(auth.scopes, auth.permissions, auth.grants).map(
-          (tool) => tool.descriptor,
-        ),
+        tools: page.tools,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       });
+    }
 
     case "tools/call": {
       const outcome = await callTool(auth, params);
@@ -367,27 +469,64 @@ export async function dispatchMcpMessage(
     case "resources/list":
       return jsonRpcResult(id, { resources: mcpResourcesFor(auth.permissions, auth.grants) });
 
-    // Nothing here is parameterised by a URI template. Answering with an empty
-    // list is required: a client that gets "method not found" for this stops
-    // asking about resources altogether.
-    case "resources/templates/list":
-      return jsonRpcResult(id, { resourceTemplates: [] });
+    case "resources/templates/list": {
+      const allowedResources = mcpResourcesFor(auth.permissions, auth.grants);
+      const canReadReports = allowedResources.some((r) => r.uri === "pos://reports/catalog");
+      return jsonRpcResult(id, {
+        resourceTemplates: canReadReports
+          ? [
+              {
+                uriTemplate: "pos://reports/{key}",
+                name: "standard-report",
+                title: "گزارش استاندارد با کلید",
+                description:
+                  "Run and read one standard report by its key from pos://reports/catalog. — خواندن یک گزارش استاندارد با کلید آن.",
+                mimeType: "application/json",
+              },
+            ]
+          : [],
+      });
+    }
 
     case "resources/read": {
       const uri = typeof params.uri === "string" ? params.uri : "";
-      // Resources are data like any read: the overview is `describe_app`'s
-      // content and the report catalogue lists reports, so each inherits its
-      // tool's permission (P0-1). Unknown and unauthorized get the same
-      // answer — a resource the authorizer may not see is not one to confirm
-      // the existence of.
-      if (!mcpResourcesFor(auth.permissions, auth.grants).some((resource) => resource.uri === uri)) {
+      const allowedResources = mcpResourcesFor(auth.permissions, auth.grants);
+      const reportTemplateMatch = uri.match(/^pos:\/\/reports\/([a-z0-9_]+)$/);
+      const isReportTemplateUri =
+        Boolean(reportTemplateMatch) && uri !== "pos://reports/catalog";
+      const isAllowedDirectUri = allowedResources.some((resource) => resource.uri === uri);
+      const isAllowedTemplateUri =
+        isReportTemplateUri &&
+        allowedResources.some((resource) => resource.uri === "pos://reports/catalog");
+      if (!isAllowedDirectUri && !isAllowedTemplateUri) {
         return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
       }
       const authority = await mcpReadAuthority(auth);
       if (!authority.pinnedLocationAccessible) {
         return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, "این اتصال دیگر به شعبهٔ مورد تأیید دسترسی ندارد.");
       }
-      const content = await readMcpResource(uri, auth.businessId, authority.permissions, auth.locationId);
+      let content: { uri: string; mimeType: string; text: string } | null = null;
+      if (isAllowedTemplateUri && reportTemplateMatch) {
+        const outcome = await runSystemReadTool(
+          "run_report",
+          { key: reportTemplateMatch[1] },
+          auth.businessId,
+          undefined,
+          authority.actorUserId,
+          authority.permissions,
+          auth.locationId,
+          { allowedBranchIds: mcpBrancheIds(auth.grants) },
+        );
+        if (outcome.ok) {
+          content = {
+            uri,
+            mimeType: "application/json",
+            text: JSON.stringify(outcome.data, null, 2),
+          };
+        }
+      } else {
+        content = await readMcpResource(uri, auth.businessId, authority.permissions, auth.locationId);
+      }
       if (!content) {
         return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
       }
@@ -404,11 +543,22 @@ export async function dispatchMcpMessage(
       return jsonRpcResult(id, { contents: [content] });
     }
 
-    // No prompt templates yet — the `instructions` above carry what a prompt
-    // would. Same reasoning as resources/templates/list for answering rather
-    // than erroring.
     case "prompts/list":
-      return jsonRpcResult(id, { prompts: [] });
+      return jsonRpcResult(id, { prompts: [...MCP_PROMPTS] });
+
+    case "prompts/get": {
+      const promptName = typeof params.name === "string" ? params.name : "";
+      const promptArgs = isRecord(params.arguments) ? params.arguments : {};
+      const built = buildPromptMessages(promptName, promptArgs);
+      if (!built) {
+        return jsonRpcError(
+          id,
+          JSON_RPC_ERRORS.invalidParams,
+          `پرامپت «${promptName}» وجود ندارد.`,
+        );
+      }
+      return jsonRpcResult(id, built);
+    }
 
     // Accepted and ignored: this server writes to the process log, not down a
     // stream the client can subscribe to.

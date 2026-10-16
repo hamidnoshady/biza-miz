@@ -33,7 +33,30 @@
  * branch behaviour and risk before it goes green. That is the issue's
  * "CI parity enforcement" requirement.
  */
+import type { Industry } from "../industries";
+import {
+  industryProfile,
+  MODULE_KEYS,
+  type ModuleKey,
+} from "../industry-profile";
 import type { McpApp } from "./grants";
+
+export const MCP_EXTRA_MODULE_KEYS = [
+  "aec",
+  "workspace",
+  "payroll",
+  "fiscal",
+  "backup",
+  "data",
+] as const;
+
+export type McpExtraModuleKey = (typeof MCP_EXTRA_MODULE_KEYS)[number];
+export type McpModuleKey = ModuleKey | McpExtraModuleKey;
+
+export const ALL_MCP_MODULE_KEYS: readonly McpModuleKey[] = [
+  ...MODULE_KEYS,
+  ...MCP_EXTRA_MODULE_KEYS,
+];
 
 export type McpBranchPolicy = "agnostic" | "business_wide" | "pinned";
 
@@ -756,3 +779,272 @@ export function mcpRegistryEntryForResource(uri: string): McpReadRegistryEntry |
   const tool = RESOURCE_READ_TOOL[uri];
   return tool ? mcpReadRegistryEntry(tool) : null;
 }
+
+// ---------------------------------------------------------------------------
+// Module mapping & tenant module gating (P1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the owning MCP module for a read tool. Every read tool in
+ * `MCP_READ_REGISTRY` maps to a single `McpModuleKey` so `tools/list`,
+ * `tools/call`, and `initialize.instructions` share one source of truth.
+ */
+export function mcpModuleForReadTool(name: string): McpModuleKey {
+  const entry = mcpReadRegistryEntry(name);
+  if (entry?.module) return entry.module;
+  if (name === "list_jewelry_items") return "jewelry";
+  if (name === "list_trade_goods_items") return "wholesale";
+  if (
+    name === "list_product_attributes" ||
+    name === "list_barcode_templates" ||
+    name === "list_price_lists" ||
+    name === "list_price_list_entries" ||
+    name === "list_sales_invoices" ||
+    name === "get_sales_invoice"
+  ) {
+    return "stock";
+  }
+  if (
+    name.includes("_workspace_") ||
+    name.includes("_project") ||
+    name.includes("_contract") ||
+    name.includes("_kb_")
+  ) {
+    return "workspace";
+  }
+  if (name.includes("_payroll_")) return "payroll";
+  if (name.includes("_fiscal_")) return "fiscal";
+  if (name.includes("_backup_")) return "backup";
+  if (name.startsWith("list_data_") || name.includes("_export_job") || name.includes("_import_job")) {
+    return "data";
+  }
+  if (name === "get_setup_state" || name === "describe_app") return "dashboard";
+  if (name === "list_reports" || name === "run_report" || name === "list_saved_reports") {
+    return "reports";
+  }
+  if (name === "get_menu_performance" || name === "get_menu_tree") return "menu";
+  if (name === "get_void_pattern" || name === "list_orders" || name === "get_order") {
+    return "orders";
+  }
+  if (
+    name === "get_stock_valuation" ||
+    name === "get_supplier_performance" ||
+    name === "forecast_demand" ||
+    name === "get_waste_history" ||
+    name === "list_formulas" ||
+    name === "list_production_runs" ||
+    name === "list_suppliers" ||
+    name === "list_warehouse_documents" ||
+    name === "list_inventory_transfers"
+  ) {
+    return "inventory";
+  }
+  if (name === "get_reservation_conflicts") return "reservations";
+  if (name === "get_table_turnover_rate") return "tables";
+  if (name === "get_courier_performance") return "delivery";
+  if (name === "get_staff_commission") return "commission";
+  if (
+    name === "find_items" ||
+    name === "list_shifts" ||
+    name === "list_item_barcodes" ||
+    name === "list_items_without_barcode" ||
+    name === "list_stock_counts" ||
+    name === "get_stock_count"
+  ) {
+    return "pos";
+  }
+  if (
+    name === "get_branch_comparison" ||
+    name === "list_branches" ||
+    name === "list_team_members" ||
+    name === "list_devices" ||
+    name === "list_audit_log"
+  ) {
+    return "settings";
+  }
+  if (name === "list_coworker_jobs") return "ai";
+  if (
+    name === "find_customers" ||
+    name === "get_customer_profile" ||
+    name === "get_customer_timeline" ||
+    name === "get_at_risk_customers" ||
+    name === "list_customer_notes" ||
+    name === "list_customer_segments" ||
+    name === "preview_customer_segment"
+  ) {
+    return "customers";
+  }
+  if (name.includes("_crm_") || name === "list_custom_fields") return "crm";
+  if (name === "get_repurchase_candidates") return "loyalty";
+  if (name === "list_promotions" || name === "get_gift_card_status") return "promotions";
+  if (name === "list_message_templates" || name === "list_message_campaigns") return "messaging";
+  if (name.includes("_website_") || name.includes("_cms_")) return "website";
+  if (name.includes("_wp_")) return "integrations";
+  if (name.includes("_media_")) return "media";
+  return "ledger";
+}
+
+/**
+ * Resolve the owning MCP module for a write action. Every action in
+ * `MCP_WRITE_REGISTRY` maps to a single `McpModuleKey`.
+ */
+export function mcpModuleForWriteAction(actionType: string): McpModuleKey {
+  if (actionType.startsWith("jewelry.")) return "jewelry";
+  if (actionType.startsWith("aec.")) return "aec";
+  if (actionType.startsWith("cosmetics.")) return "cosmetics";
+  if (actionType.startsWith("wholesale.")) return "wholesale";
+  if (actionType.startsWith("haberdashery.")) return "haberdashery";
+  if (actionType.startsWith("tools_fittings.")) return "tools_fittings";
+  if (actionType.startsWith("accessories.")) return "accessories";
+  if (
+    actionType.startsWith("priceList.") ||
+    actionType.startsWith("product.attribute.") ||
+    actionType.startsWith("barcode.template.") ||
+    actionType === "sales.invoice.void"
+  ) {
+    return "stock";
+  }
+  if (
+    actionType.startsWith("workspace.") ||
+    actionType.startsWith("project.") ||
+    actionType.startsWith("task.") ||
+    actionType.startsWith("contract.")
+  ) {
+    return "workspace";
+  }
+  if (actionType.startsWith("payroll.")) return "payroll";
+  if (actionType.startsWith("fiscal.")) return "fiscal";
+  if (actionType.startsWith("backup.")) return "backup";
+  if (actionType.startsWith("data.")) return "data";
+  if (actionType.startsWith("menu.") || actionType === "settings.pricing.save") return "menu";
+  if (actionType.startsWith("order.")) return "orders";
+  if (actionType.startsWith("table.") || actionType.startsWith("floor.")) return "tables";
+  if (actionType.startsWith("kitchen.")) return "kitchen";
+  if (actionType.startsWith("reservation.")) return "reservations";
+  if (
+    actionType.startsWith("courier.") ||
+    actionType.startsWith("delivery.") ||
+    actionType === "settings.onlinePlatforms.save"
+  ) {
+    return "delivery";
+  }
+  if (
+    (actionType.startsWith("inventory.") && actionType !== "inventory.adjustment.propose") ||
+    actionType.startsWith("purchase.") ||
+    actionType.startsWith("supplier.") ||
+    actionType.startsWith("production.") ||
+    actionType === "waste.record" ||
+    actionType.startsWith("writeDown.") ||
+    actionType.startsWith("transfer.") ||
+    actionType.startsWith("warehouseDocument.")
+  ) {
+    return "inventory";
+  }
+  if (
+    actionType === "inventory.adjustment.propose" ||
+    actionType.startsWith("shift.") ||
+    actionType.startsWith("barcode.") ||
+    actionType.startsWith("businessDay.") ||
+    actionType.startsWith("paymentMethod.") ||
+    actionType.startsWith("printer.") ||
+    actionType.startsWith("printTemplate.") ||
+    actionType === "settings.printRules.save"
+  ) {
+    return "pos";
+  }
+  if (
+    actionType.startsWith("customer.") ||
+    actionType.startsWith("party.") ||
+    actionType === "crm.customer.upsert"
+  ) {
+    return "customers";
+  }
+  if (actionType.startsWith("crm.")) return "crm";
+  if (actionType.startsWith("loyalty.")) return "loyalty";
+  if (actionType.startsWith("promotion.") || actionType.startsWith("gift_card.")) {
+    return "promotions";
+  }
+  if (actionType.startsWith("commission.")) return "commission";
+  if (actionType.startsWith("messaging.")) return "messaging";
+  if (actionType.startsWith("website.")) return "website";
+  if (actionType.startsWith("wp.") || actionType.startsWith("integrations.")) {
+    return "integrations";
+  }
+  if (actionType.startsWith("media.")) return "media";
+  if (actionType.startsWith("report.")) return "reports";
+  if (
+    actionType.startsWith("ai.") ||
+    actionType.startsWith("coworker.") ||
+    actionType.startsWith("memory.")
+  ) {
+    return "ai";
+  }
+  if (
+    actionType.startsWith("branch.") ||
+    actionType.startsWith("device.") ||
+    actionType.startsWith("rollup.") ||
+    actionType === "settings.business.save" ||
+    actionType === "settings.tax.save" ||
+    actionType === "settings.mfaPolicy.save"
+  ) {
+    return "settings";
+  }
+  return "ledger";
+}
+
+/**
+ * Compute the ordered list of MCP modules enabled for a tenant's industry.
+ * Includes the industry profile's modules plus cross-industry sub-modules
+ * (`workspace`, `payroll` and `fiscal` under `ledger`, `backup` and `data`
+ * under `settings`, and `aec` on `architecture_construction`).
+ */
+export function mcpTenantEnabledModules(
+  industry: Industry | null | undefined,
+): readonly McpModuleKey[] {
+  if (!industry) {
+    return ALL_MCP_MODULE_KEYS;
+  }
+  const profile = industryProfile(industry);
+  const ordered: McpModuleKey[] = [...profile.modules];
+  const set = new Set<McpModuleKey>(ordered);
+  const add = (key: McpModuleKey) => {
+    if (!set.has(key)) {
+      set.add(key);
+      ordered.push(key);
+    }
+  };
+  add("workspace");
+  if (set.has("ledger")) {
+    add("payroll");
+    add("fiscal");
+  }
+  if (set.has("settings")) {
+    add("backup");
+    add("data");
+  }
+  if (industry === "architecture_construction") {
+    add("aec");
+  }
+  return ordered;
+}
+
+/**
+ * Check whether a tool's owning module is enabled for the tenant.
+ * `list_trade_goods_items` is shared across the three trade-goods verticals
+ * (`wholesale`, `tools_fittings`, `haberdashery`).
+ */
+export function mcpIsToolModuleEnabled(
+  module: McpModuleKey,
+  toolName: string,
+  enabledModules: ReadonlySet<McpModuleKey>,
+): boolean {
+  if (toolName === "list_trade_goods_items") {
+    return (
+      enabledModules.has("wholesale") ||
+      enabledModules.has("tools_fittings") ||
+      enabledModules.has("haberdashery")
+    );
+  }
+  return enabledModules.has(module);
+}
+

@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import {
   listMcpGrantHistory,
   revokeMcpConnection,
+  rotateMcpConnectionToken,
   updateMcpConnectionAccess,
 } from "@/lib/mcp/connections-service";
 
@@ -78,8 +79,40 @@ export const DELETE = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
 
-    const revoked = await revokeMcpConnection(session.businessId, id);
+    const revoked = await revokeMcpConnection(session.businessId, id, session.sub);
     if (!revoked) return NextResponse.json({ error: "connection_not_found" }, { status: 404 });
     return NextResponse.json({ ok: true });
+  },
+);
+
+/**
+ * Rotate a single static token in place without touching other connections.
+ */
+export const POST = withTenantScope(
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { session, error } = await requirePermission(PERMISSIONS.mcpManage);
+    if (error) return error;
+    const { id } = await context.params;
+
+    let body: { expiresInDays?: number | null } = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+
+    const result = await rotateMcpConnectionToken(
+      session.businessId,
+      id,
+      session.sub,
+      body.expiresInDays,
+    );
+    if (!result.ok) {
+      return NextResponse.json(
+        { error: result.error },
+        { status: result.error === "connection_not_found" ? 404 : 400 },
+      );
+    }
+    return NextResponse.json({ connection: result.connection, token: result.token });
   },
 );
