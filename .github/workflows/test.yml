@@ -114,6 +114,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Desktop release atomicity and provenance (real Git remotes)
+        run: node --test scripts/tests/desktop-release.test.mjs
       - run: npm test
 
   build:

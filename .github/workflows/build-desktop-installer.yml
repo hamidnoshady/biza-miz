@@ -37,6 +37,8 @@ on:
       - 'scripts/verify-windows-signatures.ps1'
       - 'config/windows-signing-manifest.json'
       - 'scripts/desktop/**'
+      - 'scripts/record-desktop-release.mjs'
+      - 'scripts/tests/desktop-release.test.mjs'
       - 'server.ts'
       - 'next.config.ts'
       - 'package.json'
@@ -71,6 +73,8 @@ on:
       - 'scripts/verify-windows-signatures.ps1'
       - 'config/windows-signing-manifest.json'
       - 'scripts/desktop/**'
+      - 'scripts/record-desktop-release.mjs'
+      - 'scripts/tests/desktop-release.test.mjs'
       - 'server.ts'
       - 'next.config.ts'
       - 'package.json'
@@ -144,9 +148,9 @@ jobs:
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
-          # A manual run is a release unless it names a source_ref to measure. A
-          # measurement run never commits a version bump or tags desktop-vX.Y.Z.
-          RELEASE_BUILD: ${{ (github.event_name == 'workflow_dispatch' && inputs.source_ref == '') || (github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+          # Only a main run can release; a source_ref is always measurement-only.
+          # Branch/measurement runs never commit a bump or tag desktop-vX.Y.Z.
+          RELEASE_BUILD: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.source_ref == '') }}
         run: |
           $ErrorActionPreference = "Stop"
           function Add-GitHubOutput([string]$line) {
@@ -162,7 +166,7 @@ jobs:
           # an explicit exit - see build-plugin-zip.yml for why a probe's exit
           # code must never decide a step.
           $ErrorActionPreference = "Continue"
-          git fetch --tags --force --quiet
+          git fetch --tags --quiet
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::Could not fetch tags"; exit 1 }
           # Only releases consume desktop-vX.Y.Z. A stale PR/arena branch may
           # propose the same base as an already-shipped stable version, but its
@@ -517,7 +521,9 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "$summary`n", (New-Object System.Text.UTF8Encoding($false)))
 
   # Record the version that was actually built, only once the whole packaged
-  # end-to-end passed: a failed build never burns a number. A fresh checkout,
+  # end-to-end passed. A superseded source records no release. Never rebase a
+  # bump onto untested source, and atomically push main + a new immutable tag.
+  # A fresh checkout,
   # because the build job wrote CI provenance (buildCommit/buildId/channel)
   # into electron/package.json that must never be committed. Pushed with
   # GITHUB_TOKEN, which by design triggers no further workflow runs, so the
@@ -531,6 +537,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v7
         with:
@@ -539,26 +547,12 @@ jobs:
       - name: Commit the bump and tag desktop-vX.Y.Z
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          TESTED_SOURCE_SHA: ${{ github.sha }}
         run: |
-          $ErrorActionPreference = "Continue"
+          $ErrorActionPreference = "Stop"
           git config user.name "github-actions[bot]"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Updates package.json and package-lock.json together, no git tag.
-          npm version $env:VERSION --no-git-tag-version --allow-same-version --prefix electron
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          git add electron/package.json electron/package-lock.json
-          git commit -m "Desktop v$env:VERSION"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          git tag "desktop-v$env:VERSION"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          # The build takes an hour; main may have moved. Replay the one-file
-          # bump on top rather than failing the release on a race.
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            git push origin "HEAD:refs/heads/$env:GITHUB_REF_NAME" "refs/tags/desktop-v$env:VERSION"
-            if ($LASTEXITCODE -eq 0) { exit 0 }
-            git pull --rebase origin $env:GITHUB_REF_NAME
-            if ($LASTEXITCODE -ne 0) { Write-Host "::error::Could not rebase the version bump onto $env:GITHUB_REF_NAME"; exit 1 }
-            git tag -f "desktop-v$env:VERSION"
-          }
-          Write-Host "::error::Could not push desktop-v$env:VERSION"
-          exit 1
+          node scripts/record-desktop-release.mjs
+          exit $LASTEXITCODE

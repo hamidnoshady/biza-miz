@@ -1,6 +1,13 @@
 # Issue #869 — Commission run approval, settlement and payout lifecycle — implementation plan
 
-Current completion branch: `arena/f54736c8-biza-miz`, audited against `main`
+> Release follow-up (2026-10-16): PR #964 is merged. Newer test, shippables and
+> Windows 1.0.59 evidence supersedes the cancelled original post-merge runs, but
+> Coolify deployment remains unverified. See [release verification and operator
+> handoff](docs/commission-release-verification.md) for exact SHAs, failures,
+> supersession, workflow safety fixes and remaining blockers. Keep #869 OPEN.
+> The implementation checkpoints below are historical, not current release status.
+
+Historical completion branch: `arena/f54736c8-biza-miz`, audited against `main`
 `916df457eca2fef2123b3cfb6507bd0cfeacfe3e` on 2026-10-15. The original lifecycle
 was merged in PR #930 (`b4b7d22ba9886f589c3af8bff370984ca0f4bdb5`, 2026-10-12).
 The completion audit below supersedes the historical implementation/gate notes.
