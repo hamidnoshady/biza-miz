@@ -334,7 +334,7 @@ export async function loadPrintRules(locationId: string): Promise<PrintRuleRef[]
       .map((row) => ({
         documentType: row.document_type as DocType,
         printerId: row.printer_id,
-        fallbackPrinterId: row.fallback_printer_id,
+        fallbackPrinterId: row.printer_id ? row.fallback_printer_id : null,
         templateKey: row.template_key,
         templateId: row.template_id,
       }));
@@ -480,7 +480,6 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
   const rule = rules.find((item) => item.documentType === input.documentType) ?? null;
 
   let resolvedChoice: ResolvedTemplate;
-  let savedForBackup: SavedPrintTemplate[] | null = null;
 
   if (input.lockedTemplate) {
     if (input.lockedTemplate.template.docType !== input.documentType) {
@@ -492,24 +491,34 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     resolvedChoice = input.lockedTemplate;
   } else {
     const saved = await listPrintTemplates(input.locationId);
-    savedForBackup = saved;
+
+    const templateOwnerRow =
+      input.failedPrinterId && resolved.fallbackFrom && fallbackRow ? fallbackRow : printerRow;
+    const templateOwnerRouting =
+      input.failedPrinterId && resolved.fallbackFrom ? resolved.fallbackFrom : resolved.printer;
 
     // The pre-0212 template key, read only as the resolver's last resort.
     const legacyTemplateKey =
-      typeof (printerRow.connection as { templateKey?: unknown })?.templateKey === "string"
-        ? ((printerRow.connection as { templateKey: string }).templateKey)
+      typeof (templateOwnerRow.connection as { templateKey?: unknown })?.templateKey === "string"
+        ? ((templateOwnerRow.connection as { templateKey: string }).templateKey)
         : null;
 
     const choice = resolveTemplateChoice({
       documentType: input.documentType,
-      printerPaper: resolved.printer.paper,
-      printerClass: resolved.printer.printerClass,
+      printerPaper: templateOwnerRouting.paper,
+      printerClass: templateOwnerRouting.printerClass,
       requestedTemplateId: input.requestedTemplateId ?? null,
       rule,
       saved,
       legacyPrinterTemplateKey: legacyTemplateKey,
     });
     if (!choice.ok) return { ok: false, error: choice.error };
+    if (
+      input.failedPrinterId &&
+      !printerAcceptsPaper(resolved.printer.printerClass, choice.choice.template.paper)
+    ) {
+      return { ok: false, error: "template_invalid" };
+    }
     resolvedChoice = choice.choice;
   }
 
@@ -528,24 +537,10 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       candidateRouting &&
       candidateRow &&
       printerTargetOf(candidateRow.connection) !== null &&
+      resolvedChoice.template.docType === input.documentType &&
       printerAcceptsPaper(candidateRouting.printerClass, resolvedChoice.template.paper)
     ) {
-      if (savedForBackup) {
-        const candidateChoice = resolveTemplateChoice({
-          documentType: input.documentType,
-          printerPaper: candidateRouting.paper,
-          printerClass: candidateRouting.printerClass,
-          requestedTemplateId: input.requestedTemplateId ?? null,
-          rule,
-          saved: savedForBackup,
-          legacyPrinterTemplateKey: null,
-        });
-        if (candidateChoice.ok) {
-          backupPrinter = candidateRow;
-        }
-      } else {
-        backupPrinter = candidateRow;
-      }
+      backupPrinter = candidateRow;
     }
   }
 

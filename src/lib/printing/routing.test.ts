@@ -231,15 +231,64 @@ describe("runtime fallback after primary delivery failure", () => {
     expect(result.reason).toBe("fallback");
   });
 
-  it("uses the configured fallback even when the primary printer row was deleted (printerId: null)", () => {
-    const backup = printer({ id: "p-backup", name: "صندوق پشتیبان" });
-    const result = resolvePrinter({
+  it("ignores a leftover fallback when primary is automatic (printerId: null) so default/only routing wins", () => {
+    const defaultPrinter = printer({ id: "p-default", name: "صندوق پیش‌فرض", isDefault: true });
+    const leftoverFallback = printer({ id: "p-backup", name: "صندوق پشتیبان", isDefault: false });
+
+    const withDefault = resolvePrinter({
       documentType: "receipt",
-      printers: [backup],
+      printers: [defaultPrinter, leftoverFallback],
+      rules: [
+        {
+          documentType: "receipt",
+          printerId: null,
+          fallbackPrinterId: "p-backup",
+          templateKey: "thermal80-receipt",
+          templateId: "tpl-custom",
+        },
+      ],
+    });
+    expect(withDefault.printer?.id).toBe("p-default");
+    expect(withDefault.reason).toBe("default");
+    expect(withDefault.fallbackFrom).toBeNull();
+    expect(withDefault.templateKey).toBe("thermal80-receipt");
+    expect(withDefault.templateId).toBe("tpl-custom");
+
+    // Even if the leftover fallback printer is offline/inactive, automatic
+    // routing still picks the only compatible printer rather than reporting unavailable.
+    const offlineFallback = printer({ id: "p-backup", name: "صندوق پشتیبان", isActive: false });
+    const onlyPrinter = printer({ id: "p-only", name: "تنها چاپگر", isDefault: false });
+    const withOnly = resolvePrinter({
+      documentType: "receipt",
+      printers: [onlyPrinter, offlineFallback],
       rules: [{ documentType: "receipt", printerId: null, fallbackPrinterId: "p-backup", templateKey: null, templateId: null }],
     });
-    expect(result.printer?.id).toBe("p-backup");
-    expect(result.reason).toBe("fallback");
+    expect(withOnly.printer?.id).toBe("p-only");
+    expect(withOnly.reason).toBe("only");
+    expect(withOnly.fallbackFrom).toBeNull();
+  });
+
+  it("preserves failover to the configured fallback when a configured primary is unavailable or removed", () => {
+    const inactivePrimary = printer({ id: "p-primary", name: "صندوق اصلی", isActive: false, isDefault: true });
+    const backup = printer({ id: "p-backup", name: "صندوق پشتیبان", isDefault: false });
+
+    const whenInactive = resolvePrinter({
+      documentType: "receipt",
+      printers: [inactivePrimary, backup],
+      rules: [{ documentType: "receipt", printerId: "p-primary", fallbackPrinterId: "p-backup", templateKey: null, templateId: null }],
+    });
+    expect(whenInactive.printer?.id).toBe("p-backup");
+    expect(whenInactive.fallbackFrom?.id).toBe("p-primary");
+    expect(whenInactive.reason).toBe("fallback");
+
+    const whenRemoved = resolvePrinter({
+      documentType: "receipt",
+      printers: [backup],
+      rules: [{ documentType: "receipt", printerId: "p-removed", fallbackPrinterId: "p-backup", templateKey: null, templateId: null }],
+    });
+    expect(whenRemoved.printer?.id).toBe("p-backup");
+    expect(whenRemoved.fallbackFrom).toBeNull();
+    expect(whenRemoved.reason).toBe("fallback");
   });
 
   it("never falls back to an arbitrary unconfigured printer when the primary fails delivery", () => {

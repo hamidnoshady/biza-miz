@@ -4938,7 +4938,7 @@ const settingsPrintRulesSave: AutopilotExecutor = async (ctx) => {
   }
   const { routable } = await loadRoutablePrinters(location.id);
   const printerId = typeof ctx.payload.printerId === "string" && ctx.payload.printerId ? ctx.payload.printerId : null;
-  const fallbackPrinterId =
+  const rawFallbackPrinterId =
     typeof ctx.payload.fallbackPrinterId === "string" && ctx.payload.fallbackPrinterId ? ctx.payload.fallbackPrinterId : null;
   const printerError = (id: string | null, role: "primary" | "fallback"): AutopilotExecutionResult | null => {
     if (!id) return null;
@@ -4951,11 +4951,12 @@ const settingsPrintRulesSave: AutopilotExecutor = async (ctx) => {
   };
   const primaryError = printerError(printerId, "primary");
   if (primaryError) return primaryError;
-  const fallbackError = printerError(fallbackPrinterId, "fallback");
+  const fallbackError = printerError(rawFallbackPrinterId, "fallback");
   if (fallbackError) return fallbackError;
-  if (printerId && fallbackPrinterId && printerId === fallbackPrinterId) {
+  if (printerId && rawFallbackPrinterId && printerId === rawFallbackPrinterId) {
     return fail("duplicate_fallback_printer");
   }
+  const fallbackPrinterId = printerId ? rawFallbackPrinterId : null;
   try {
     await query(
       `INSERT INTO print_rules (location_id, document_type, template_key, template_id, printer_id, fallback_printer_id)

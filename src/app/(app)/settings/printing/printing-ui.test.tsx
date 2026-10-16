@@ -274,6 +274,84 @@ describe("Rules screen — printers", () => {
     expect(receiptFallback.some((label) => label.includes("صندوق"))).toBe(false);
   });
 
+  it("clears fallback_printer_id when switching primary printer to automatic («انتخاب خودکار») and handles stale automatic rules", async () => {
+    const backupReceiptPrinter: PrinterRow = {
+      ...RECEIPT_PRINTER,
+      id: "p-receipt-backup",
+      name: "صندوق پشتیبان",
+      is_default: false,
+    };
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
+      if (url === "/api/settings/print-rules") {
+        return {
+          ok: true,
+          data: {
+            rules: [
+              {
+                document_type: "receipt",
+                template_key: null,
+                template_id: "tpl-1",
+                printer_id: "p-receipt",
+                fallback_printer_id: "p-receipt-backup",
+              },
+              {
+                document_type: "kitchen",
+                template_key: "thermal80-kitchen",
+                template_id: null,
+                printer_id: null,
+                fallback_printer_id: "p-kitchen",
+              },
+            ],
+            resolved: RESOLVED,
+          },
+        };
+      }
+      if (url === "/api/settings/printers") {
+        return {
+          ok: true,
+          data: { printers: [RECEIPT_PRINTER, backupReceiptPrinter, KITCHEN_PRINTER, A4_PRINTER] },
+        };
+      }
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/printing/jobs") return { ok: true, data: { jobs: [] } };
+      if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
+      if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
+      return { ok: true, data: {} };
+    });
+
+    await openRules();
+    const primaries = printerSelects();
+    const fallbacks = fallbackSelects();
+
+    // Initially receipt has fixed primary and fallback configured:
+    expect(primaries[0].value).toBe("p-receipt");
+    expect(fallbacks[0].value).toBe("p-receipt-backup");
+    expect(fallbacks[0].disabled).toBe(false);
+
+    // Stale kitchen rule with printer_id: null and fallback_printer_id: "p-kitchen"
+    // is normalized in the UI so fallback is cleared and disabled:
+    expect(primaries[1].value).toBe("");
+    expect(fallbacks[1].value).toBe("");
+    expect(fallbacks[1].disabled).toBe(true);
+
+    // Switching receipt primary to «انتخاب خودکار» clears and disables fallback:
+    fireEvent.change(primaries[0], { target: { value: "" } });
+    expect(primaries[0].value).toBe("");
+    expect(fallbacks[0].value).toBe("");
+    expect(fallbacks[0].disabled).toBe(true);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "ذخیره" })[0]);
+    await waitFor(() =>
+      expect(putBodyOf("receipt")).toMatchObject({
+        documentType: "receipt",
+        templateId: "tpl-1",
+        printerId: null,
+        fallbackPrinterId: null,
+      }),
+    );
+  });
+
   it("prints a sample on the operational path, pinned to the rule's own template", async () => {
     await openRules();
     fireEvent.click(screen.getAllByRole("button", { name: "چاپ نمونه روی همین مسیر" })[0]);

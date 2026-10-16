@@ -250,12 +250,9 @@ export function resolvePrinter(input: {
     if (input.requestedPrinterId) {
       return { printer: null, fallbackFrom: null, templateKey, templateId, reason: "unavailable" };
     }
-    const fallback = byId(rule?.fallbackPrinterId);
-    if (fallback && (!rule?.printerId || excluded.has(rule.printerId))) {
-      const failedId = rule?.printerId ?? [...excluded][0] ?? null;
-      const named = failedId
-        ? (input.printers.find((printer) => printer.id === failedId) ?? null)
-        : null;
+    const fallback = rule?.printerId ? byId(rule.fallbackPrinterId) : null;
+    if (fallback && rule?.printerId && excluded.has(rule.printerId)) {
+      const named = input.printers.find((printer) => printer.id === rule.printerId) ?? null;
       return { printer: fallback, fallbackFrom: named, templateKey, templateId, reason: "fallback" };
     }
     return { printer: null, fallbackFrom: null, templateKey, templateId, reason: "unavailable" };
@@ -269,21 +266,21 @@ export function resolvePrinter(input: {
   const primary = byId(rule?.printerId);
   if (primary) return { printer: primary, fallbackFrom: null, templateKey, templateId, reason: "rule" };
 
-  // The rule's printer exists (or was removed) and cannot take this document
-  // right now (offline, inactive, re-paired, wrong paper): the fallback is
-  // exactly for this, and the caller records `fallbackFrom` so history says why.
-  const fallback = byId(rule?.fallbackPrinterId);
-  if (fallback) {
-    const named = rule?.printerId
-      ? (input.printers.find((printer) => printer.id === rule.printerId) ?? null)
-      : null;
-    return { printer: fallback, fallbackFrom: named, templateKey, templateId, reason: "fallback" };
-  }
+  // The rule's configured primary printer cannot take this document right now
+  // (offline, inactive, re-paired, wrong paper, or removed): the fallback is
+  // for this, and the caller records `fallbackFrom` so history says why.
+  // When `rule.printerId` is null («انتخاب خودکار»), any leftover
+  // `fallbackPrinterId` on a stale rule is ignored so automatic routing wins.
+  if (rule?.printerId) {
+    const fallback = byId(rule.fallbackPrinterId);
+    if (fallback) {
+      const named = input.printers.find((printer) => printer.id === rule.printerId) ?? null;
+      return { printer: fallback, fallbackFrom: named, templateKey, templateId, reason: "fallback" };
+    }
 
-  // A rule that names a printer at all is authoritative: if neither it nor its
-  // fallback is usable we do NOT quietly pick another printer behind the
-  // operator's back — the till must say "this printer is unavailable".
-  if (rule?.printerId || rule?.fallbackPrinterId) {
+    // A rule that names a primary printer is authoritative: if neither it nor
+    // its fallback is usable we do NOT quietly pick another printer behind the
+    // operator's back — the till must say "this printer is unavailable".
     return { printer: null, fallbackFrom: null, templateKey, templateId, reason: "unavailable" };
   }
 

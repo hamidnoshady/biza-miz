@@ -166,7 +166,12 @@ export function RulesPanel() {
     ]);
     if (!ruleRes.ok) setError("قوانین چاپ خوانده نشد.");
     const next: Record<string, RuleRow> = {};
-    for (const row of ruleRes.data.rules ?? []) next[row.document_type] = row;
+    for (const row of ruleRes.data.rules ?? []) {
+      next[row.document_type] = {
+        ...row,
+        fallback_printer_id: row.printer_id ? row.fallback_printer_id : null,
+      };
+    }
     setRules(next);
     setResolved(ruleRes.data.resolved ?? {});
     if (jobRes.ok) setJobs(jobRes.data.jobs ?? []);
@@ -186,6 +191,8 @@ export function RulesPanel() {
 
   async function save(documentType: DocType) {
     const row = rules[documentType];
+    const primaryPrinterId = row?.printer_id ?? null;
+    const fallbackPrinterId = primaryPrinterId ? (row?.fallback_printer_id ?? null) : null;
     setSaving(documentType);
     setError("");
     setNotice("");
@@ -195,8 +202,8 @@ export function RulesPanel() {
         documentType,
         templateKey: row?.template_key ?? null,
         templateId: row?.template_id ?? null,
-        printerId: row?.printer_id ?? null,
-        fallbackPrinterId: row?.fallback_printer_id ?? null,
+        printerId: primaryPrinterId,
+        fallbackPrinterId,
       }),
     });
     setSaving(null);
@@ -230,17 +237,23 @@ export function RulesPanel() {
   }
 
   function patch(documentType: DocType, patchRow: Partial<RuleRow>) {
-    setRules((current) => ({
-      ...current,
-      [documentType]: {
+    setRules((current) => {
+      const merged: RuleRow = {
         document_type: documentType,
         template_key: current[documentType]?.template_key ?? null,
         template_id: current[documentType]?.template_id ?? null,
         printer_id: current[documentType]?.printer_id ?? null,
         fallback_printer_id: current[documentType]?.fallback_printer_id ?? null,
         ...patchRow,
-      },
-    }));
+      };
+      if (!merged.printer_id || merged.fallback_printer_id === merged.printer_id) {
+        merged.fallback_printer_id = null;
+      }
+      return {
+        ...current,
+        [documentType]: merged,
+      };
+    });
   }
 
   if (loading) return <LoadingSkeleton rows={4} />;
@@ -331,8 +344,13 @@ export function RulesPanel() {
                 <span className="mb-1 block text-muted-foreground">چاپگر جانشین (وقتی چاپگر اصلی در دسترس نیست)</span>
                 <select
                   className={inputClass}
-                  value={row?.fallback_printer_id ?? ""}
-                  onChange={(event) => patch(documentType, { fallback_printer_id: event.target.value || null })}
+                  disabled={!row?.printer_id}
+                  value={row?.printer_id ? (row?.fallback_printer_id ?? "") : ""}
+                  onChange={(event) =>
+                    patch(documentType, {
+                      fallback_printer_id: row?.printer_id ? (event.target.value || null) : null,
+                    })
+                  }
                 >
                   <option value="">بدون جانشین</option>
                   {fallbackCandidates.map((printer) => (

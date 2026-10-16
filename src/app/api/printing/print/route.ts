@@ -271,6 +271,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     ) {
       return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
     }
+    if (
+      parsed.templateId &&
+      boundSnapshot.template.templateId !== parsed.templateId &&
+      boundSnapshot.template.templateKey !== parsed.templateId
+    ) {
+      return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+    }
     if (priorAttempt.entity_id !== null && boundSnapshot.entityId !== priorAttempt.entity_id) {
       return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
     }

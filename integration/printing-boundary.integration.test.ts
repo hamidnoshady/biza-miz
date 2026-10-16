@@ -121,6 +121,7 @@ let labels: typeof import("../src/lib/printing/label-print-data");
 let templates: typeof import("../src/lib/print-templates-service");
 let printRoute: typeof import("../src/app/api/printing/print/route");
 let jobsRoute: typeof import("../src/app/api/printing/jobs/route");
+let rulesRoute: typeof import("../src/app/api/settings/print-rules/route");
 
 /** One tenant, one branch: what a request is scoped to. */
 interface Branch {
@@ -184,6 +185,7 @@ beforeAll(async () => {
   templates = await import("../src/lib/print-templates-service");
   printRoute = await import("../src/app/api/printing/print/route");
   jobsRoute = await import("../src/app/api/printing/jobs/route");
+  rulesRoute = await import("../src/app/api/settings/print-rules/route");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -1122,6 +1124,86 @@ describe("the history table is branch-scoped underneath the routes", () => {
       attemptNumber: 2,
       previousJobId: reprint2.jobId,
       routeReason: "runtime_fallback",
+    });
+
+    // J. Automatic routing vs configured-primary failover across PUT/GET /api/settings/print-rules and POST /api/printing/print:
+    // 1) When the configured primary printer is deactivated, routing fails over to the configured fallback:
+    await db.query("UPDATE printers SET is_active = false WHERE id = $1", [alphaMain.printerId]);
+    const failoverRes = await printRoute.POST(
+      jsonReq({
+        printRequestId: `receipt:inactive-primary-${planted.alphaMainOrderId}`,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(failoverRes.status).toBe(200);
+    expect(await failoverRes.json()).toMatchObject({
+      ok: true,
+      printerId: backupId,
+      route: "fallback",
+      routeReason: "fallback",
+      fallbackFromPrinterId: alphaMain.printerId,
+    });
+    await db.query("UPDATE printers SET is_active = true, is_default = true WHERE id = $1", [alphaMain.printerId]);
+
+    // 2) Switching fixed-primary -> automatic via PUT /api/settings/print-rules clears fallback_printer_id in PostgreSQL:
+    const putAutoRes = await rulesRoute.PUT(
+      jsonReq(
+        {
+          documentType: "receipt",
+          templateId: planted.alphaMainTemplateId,
+          printerId: null,
+          fallbackPrinterId: backupId,
+        },
+        "PUT",
+      ),
+    );
+    expect(putAutoRes.status).toBe(200);
+    const persistedRule = await db.query<{ printer_id: string | null; fallback_printer_id: string | null }>(
+      "SELECT printer_id, fallback_printer_id FROM print_rules WHERE location_id = $1 AND document_type = 'receipt'",
+      [alphaMain.locationId],
+    );
+    expect(persistedRule.rows[0]).toEqual({ printer_id: null, fallback_printer_id: null });
+
+    // 3) Even if an existing stale rule in PostgreSQL has printer_id = NULL and fallback_printer_id = backupId,
+    // GET /api/settings/print-rules and POST /api/printing/print preserve automatic default selection:
+    await db.query(
+      "UPDATE print_rules SET printer_id = NULL, fallback_printer_id = $2 WHERE location_id = $1 AND document_type = 'receipt'",
+      [alphaMain.locationId, backupId],
+    );
+    const getRulesRes = await rulesRoute.GET();
+    expect(getRulesRes.status).toBe(200);
+    const getRulesBody = (await getRulesRes.json()) as {
+      rules: Array<{ document_type: string; printer_id: string | null; fallback_printer_id: string | null }>;
+      resolved: Record<string, { ok: boolean; printerId?: string; route?: string }>;
+    };
+    const receiptRuleRow = getRulesBody.rules.find((r) => r.document_type === "receipt");
+    expect(receiptRuleRow).toMatchObject({
+      document_type: "receipt",
+      printer_id: null,
+      fallback_printer_id: null,
+    });
+    expect(getRulesBody.resolved.receipt).toMatchObject({
+      ok: true,
+      printerId: alphaMain.printerId,
+      route: "default",
+    });
+
+    const autoPrintRes = await printRoute.POST(
+      jsonReq({
+        printRequestId: `receipt:auto-default-${planted.alphaMainOrderId}`,
+        documentType: "receipt",
+        document: { kind: "order-receipt", orderId: planted.alphaMainOrderId },
+      }),
+    );
+    expect(autoPrintRes.status).toBe(200);
+    expect(await autoPrintRes.json()).toMatchObject({
+      ok: true,
+      printerId: alphaMain.printerId,
+      route: "default",
+      routeReason: "default",
+      fallbackFromPrinterId: null,
+      fallbackPrinterId: null,
     });
   });
 });

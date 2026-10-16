@@ -146,9 +146,19 @@ what an operator sees:
   that table directly, preserving the distinction between OS spooler/socket
   handoff (`handed_off`) and confirmed physical paper output.
 - **Runtime fallback, atomic reservation, strict parent/snapshot validation, and duplicate-print protection.**
-  When a rule's primary printer is selected (`route: "rule"`) and a compatible
-  `fallback_printer_id` is configured on the rule, the client attempts delivery
-  to the primary printer first. Delivery outcomes are classified by
+  When a rule specifies a fixed primary printer (`printer_id IS NOT NULL`,
+  `route: "rule"`) and a compatible `fallback_printer_id` is configured on the
+  rule (`resolvePrintPlan` only advertises `backupPrinter` when the fallback
+  printer physically accepts the document type AND the primary attempt's
+  resolved snapshot template paper, and never resolves a paper mismatch by
+  silently switching templates), the client attempts delivery to the primary
+  printer first. When a rule is set to automatic printer selection
+  (`printer_id = null`, «انتخاب خودکار»), `fallback_printer_id` is cleared across
+  the UI, API write boundary (`PUT /api/settings/print-rules`), rule loader, and
+  `resolvePrinter` so automatic routing (`default` → `only` → `choose`) is never
+  overridden by a leftover fallback, while failover (`reason: "fallback"`) is
+  preserved whenever a configured primary (`printer_id != null`) becomes
+  unavailable. Delivery outcomes are classified by
   `classifyDeliveryOutcome` (`src/lib/printing/errors.ts`), which defaults any
   unknown or unverified failure to `ambiguous`:
   - **Confirmed handoff (`handed_off`)**: the OS spooler or TCP socket accepted
