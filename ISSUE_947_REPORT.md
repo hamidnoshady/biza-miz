@@ -1,17 +1,18 @@
 # Issue #947 — Team section consolidation: report
 
-**Branch** `arena/ce58f373-biza-miz` · **code head** `11dd6aa3` · **baseline** `0c4a77c` ·
-**main integrated** `916df457` (`merge 8c511bdf`) — the clone of `main` this branch started
-from; the issue's audit baseline `35cb0cd` is not in this clone's history, so every finding
-was re-verified against the working tree rather than the issue's line links.
+**Branch** `arena/ce58f373-biza-miz` · **code head** `10e0740f` · **baseline** `0c4a77c` ·
+**main integrated** `cf2b39dd` (`merge 66f7535a`) — `main`'s head at the time of the
+integration; the branch's earlier head (`03846456`) had merged `916df457`, and the issue's
+audit baseline `35cb0cd` is not in this clone's history, so every finding was re-verified
+against the working tree rather than the issue's line links.
 
 The report is committed as a child of the code head; the commit that carries it changes
-documentation only, and the code head's own last change added one jsdom test
-(`src/app/dashboard/team/member-detail-dialog.test.tsx`). The evidence below therefore names
-the head each gate ran on.
+documentation only, and the code head's own last change fixed the three findings from the
+PR review at `4c3a72053a` (see §1, «The three review findings»). The evidence below therefore
+names the head each gate ran on.
 
-Scope delivered: TEAM-F01 … TEAM-F08, the consumer seam, migrations 0221–0223 with the
-reconciliation work, and the follow-up work the second directive named — stored-export
+Scope delivered: TEAM-F01 … TEAM-F08, the consumer seam, migrations 0221–0223 and 0226 with
+the reconciliation work, and the follow-up work the second directive named — stored-export
 privacy (1), import field-write authorization (2), the transactional personnel-file
 obligation (3), the Team UX completion (4), the accounting-visual investigation (5) and the
 cross-issue contracts (6). Ownership boundaries from the issue's §1 were respected: the
@@ -105,7 +106,8 @@ commission-engine code was touched.
   (the debt inventory) and `listPersonnelFileDrift` (the bookkeeping) are independent
   reads — the roster flag is «no file *or* an open row» — and `personnelFileIsStale` is
   the single comparator. The reconcile script is idempotent across restarts, reports
-  `recorded:false` as the alarm, and probes (11 tests) cover the lost-row member, the
+  `recorded:false` as the alarm, and probes (23 tests across the two revisions) cover the
+  lost-row member, the
   never-reachable other business, the missing-name case and the re-run.
   **Honest scope of the word «durable»:** what is durable is the *record* — the file
   itself is still written after commit. A committed membership with an open debt row is a
@@ -115,6 +117,75 @@ commission-engine code was touched.
   older, or `psql`-created) demo business does not open on «پرونده در انتظار ساخت».
   Verified: seed → `Personnel files synced for 2/2 member(s)`, then
   `npm run personnel:reconcile --dry-run` → `nothing owed`.
+
+### The three review findings on PR #958 (all fixed, each falsified)
+
+The review of `4c3a72053a` raised three findings — one P1 and two P2. Each fix has a test that
+fails without it, and each test was run in both directions (`git checkout`-style revert of the
+one line, or the migration removed) rather than being asserted green only.
+
+- **P1 — the creation event replicated a home member with no home.** `createMembership`
+  published `locations.defaultLocationId` while the row it had just written used
+  `homeLocationId`; the two differ in exactly the fallback case a legacy caller produces
+  (no branch policy named → scope `home`, home = the business's default branch,
+  `locations.defaultLocationId` **null**). `applyIamEvents` writes that payload value straight
+  into `users.location_id`, and `branchScopeSql` matches a home member only on
+  `location_id = $loc`, so a Hybrid/Local site stored `location_scope = 'home'` with
+  `location_id = NULL` and the member the cloud had just hired could work **nowhere**.
+  `src/lib/team-service.ts` now publishes `homeLocationId`, as the rehire event already did.
+  Evidence: `integration/team.integration.test.ts`, «replicates the fallback branch the row
+  actually stored, all the way to access» — cloud row `{home, alpha.locationId}` →
+  `iam_events` payload → `iamSync.applyIamEvents` → replica row → `isEligibleStaffAtLocation`
+  and the roster, with a **control** event carrying the pre-fix `defaultLocationId: null`
+  showing the replica row `{home, null}` and ineligibility at every branch. Falsified by
+  reverting the one line: `AssertionError: expected null to be '45cf46c9-…'` at the replica-row
+  equality (852 ms green with the fix, red without).
+- **P2 — the obligation trigger missed a cleared membership phone.** `0223`'s predicate only
+  looked at the phone when the membership *had* one, so `phone_e164: number → NULL` while the
+  file kept the number recorded nothing in the membership's transaction, and the backfill
+  repeated the same predicate. The application's rule is the opposite — a membership with no
+  phone is canonical and clears the file's (`personnelFileIsStale`, and the projection writes
+  `patch.phone = identity.phone`) — so the gap left a number the member no longer has
+  reachable through search and the OTP door, with nothing owed and nothing to retry.
+  `migrations/0226_personnel_file_obligation_phone_cleared.sql` corrects the arm
+  **forward-only** (`0223` is applied wherever this branch has run; an applied migration is a
+  record, not a draft): it replaces `personnel_file_obligation()` and re-runs the inventory
+  with the corrected predicate, leaving existing open episodes' diagnosis and attempt count
+  alone, exactly as `0223`'s did. The name and email arms, the `attempts >= 0` contract, the
+  partial unique index and the trigger's binding are untouched, and `personnel-file.ts` stays
+  the one decider. Evidence: `integration/personnel-file-obligation.integration.test.ts`,
+  «the obligation follows a cleared membership phone» — a number replaced, a number
+  **cleared**, a missing number filled in, two absences agreeing (no false alarm), the crash
+  case (membership commits, no projection call, the sweep still repairs it because the debt is
+  in the row the database wrote), the backfill of a pre-`0226` row, and the name/email arms
+  unchanged. Falsified by moving `0226` aside: two of the seven fail
+  (`expected null to match object { reason: 'identity_stale' … }`, and the crash case's sweep
+  reports `{attempted: 0, repaired: 0}`).
+- **P2 — the never-throws contract had two stages outside its boundary.**
+  `ensurePersonnelFileForMembership` promises never to throw because every caller invokes it
+  **after** committing (creation, edits, invitation acceptance, phone verification, replica
+  applies), but `canonicalIdentity` ran before the `try` and the nameless case's drift write
+  outside it — so a transient query failure surfaced as a 500 for a request that had already
+  succeeded, and a retried creation then answered «این ایمیل قبلاً استفاده شده است», or a phone
+  verification failed after being stamped. The whole synchronization now sits in one boundary
+  (`stage` marks whether the failure was the identity lookup or the projection), the
+  projection is extracted as `synchronizePersonnelFile` (keeping its create-race recovery,
+  which only it can decide), and the failure code and the debt reason each have one decider.
+  Two honest details came out of the same work: a database refusal now carries its **SQLSTATE
+  plus the constraint** that refused the statement (node-postgres reports `name === "error"`
+  for every server error, so the drift row used to say `error` and nothing else), and the
+  boundary returns `recorded` so an operator can see when the *note* could not be written
+  either. What it does **not** promise is stated in the code: it cannot un-fail a caller's
+  transaction, and `iam/sync.ts` applies inside one, so a statement-level failure there has
+  already aborted it — the boundary informs the caller, it does not make that transaction
+  committable. Evidence: «the synchronization never throws after the caller has committed» —
+  three real injections (a renamed `users.phone_e164`, a temporary CHECK that refuses the
+  write, a renamed `personnel_file_drift`), each restored in a `finally`, plus the two
+  properties that must not regress: a membership still cannot commit without its obligation,
+  and a committed membership is never turned into a failed request. Falsified against the
+  pre-fix file: the three injections throw raw database errors
+  (`column "phone_e164" does not exist`, `relation "personnel_file_drift" does not exist`) and
+  the write-refusal case records the useless `error` code.
 
 ### TEAM-F06 / TEAM-F07 / TEAM-F08 — the screen
 
@@ -265,6 +336,9 @@ inventory, and that drift is bookkeeping rather than evidence.
 | 15 | A CSV import wrote the personnel columns of an Employee party even when its actor could not read them | `import-service.ts` + `partyWriteAudienceForActor` |
 | 16 | The membership→file debt could be lost by a crash between the membership commit and the bookkeeping insert | `0223` trigger |
 | 17 | A `psql`/script-seeded demo business opened with two members that silently owed a file | `scripts/seed.ts` |
+| 18 | **Review P1** — the creation event published `locations.defaultLocationId` (null in the fallback case) while the row stored `homeLocationId`, so a replica held `location_scope = 'home'` with `location_id = NULL` and the new member matched no branch | `team-service.ts` (`createMembership` payload) |
+| 19 | **Review P2** — `0223`'s trigger (and its backfill) missed a membership phone that was **cleared** while the file kept the old number, so the number stayed on the file with no debt and nothing to retry | `0226` (forward-only replacement + inventory) |
+| 20 | **Review P2** — `canonicalIdentity` and the nameless case's drift write ran outside the never-throws boundary, so a transient failure became a 500 for an already-committed membership (a retried creation then answered «این ایمیل قبلاً استفاده شده است»); database refusals were also recorded with the useless code `error` | `personnel-file.ts` (one boundary, `synchronizePersonnelFile`, `recorded`, SQLSTATE codes) |
 
 ---
 
@@ -274,8 +348,13 @@ inventory, and that drift is bookkeeping rather than evidence.
   policy: the wire projection, the write-back guard, and the flat row projection used by
   bulk readers and imports — plus `export-audience.ts` for *stored* files.
 - **One membership→file obligation** (`personnel-file.ts` behind five doors), now recorded
-  by the database (`0223`) rather than by each writer, with a debt inventory, a retry in
-  the roster read, and an operator script.
+  by the database (`0223`, phone arm corrected by `0226`) rather than by each writer, with a
+  debt inventory, a retry in the roster read, and an operator script.
+- **One failure boundary** around that synchronization (`personnel-file.ts`): the caller has
+  already committed, so every failure comes back as `{ ok, reason, error, recorded }` — with
+  one decider for the reason and one for the code (SQLSTATE + constraint for database
+  refusals) — and the boundary says out loud what it cannot do (un-fail a caller's
+  transaction, which `iam/sync.ts` relies on being aborted as a whole).
 - **One eligibility resolver** (`staff-eligibility.ts` → `branchScopeSql`) shared by the
   floor picker and its write-side check.
 - **Tenant affinity by construction** for the membership link (composite FK), not only in
@@ -342,15 +421,18 @@ inventory, and that drift is bookkeeping rather than evidence.
   deterministic concurrency tests: a lost create race and a **held-lock barrier** that
   proves the contender is waiting on a real lock (`pg_blocking_pids`, polled from the
   observing client) before releasing it.
-- `integration/team.integration.test.ts` — **53 tests**: the F03 scope cases for all four
+- `integration/team.integration.test.ts` — **54 tests**: the F03 scope cases for all four
   policies, refusal codes and the cleared-assignment case; the branch-scope SQL twin; the
   floor staff eligibility cases (all/selected/home/none, foreign branch, inactive member,
-  the pre-0170 roaming member, no widening fallback).
-- `integration/personnel-file-obligation.integration.test.ts` — **11 tests** (new): the
+  the pre-0170 roaming member, no widening fallback); and the P1 replica case above, which
+  applies the published event on a replica and walks it to `isEligibleStaffAtLocation`.
+- `integration/personnel-file-obligation.integration.test.ts` — **23 tests** (new): the
   debt in the membership's own transaction, «aborted membership, aborted debt», the
   diagnosis-preserving conflict, the independent inventory, cross-business reachability,
   idempotent retry across restarts, the «cannot invent a name» case and the roster's single
-  read.
+  read; the seven `0226` phone-arm cases (including the crash-then-sweep case and the
+  pre-`0226` backfill); and the five failure-boundary injections, each of which restores the
+  schema it disturbed.
 - `integration/export-download-audience.integration.test.ts` — **5 tests** (new): bytes to
   a reader who still holds what the file was produced under; refusal to a manager whose key
   set no longer covers them; the history's per-row answer; `410` for pruned bytes, not
@@ -379,7 +461,7 @@ inventory, and that drift is bookkeeping rather than evidence.
 
 ## 8. Exact verification and CI results
 
-Everything below is on the working tree of the head named in each row — `11dd6aa3` unless
+Everything below is on the working tree of the head named in each row — `10e0740f` unless
 the row says otherwise — with local Postgres 16 on 127.0.0.1:5432 and
 `DATABASE_URL=postgres://pos:pos@localhost:5432/pos`, unless the row names CI. **Source** and **checks** are separated on purpose: this sandbox is a 2-vCPU /
 3.9 GB box with no swap, and three of the gates do not fit in it — that is a property of
@@ -387,47 +469,50 @@ the box, not a claim about the code.
 
 ### 8.1 Local gates
 
+All at the head named in each row, on the **merged** tree (main `cf2b39dd` integrated by
+`66f7535a`) with the three review fixes on top, local Postgres 16 on 127.0.0.1:5432 and
+`DATABASE_URL=postgres://pos:pos@localhost:5432/pos`, unless the row names CI. The code head
+of this revision is **`10e0740f`**.
+
 | Gate | Command | Result |
 |---|---|---|
-| Formatting/lint | `npm run lint` (`eslint . --max-warnings=0`) | **clean, exit 0** |
-| Typecheck | `NODE_OPTIONS=--max-old-space-size=3072 ./node_modules/.bin/tsc --noEmit` | **cannot complete locally**: V8 `Ineffective mark-compacts near heap limit` after 117 s, exit **134**; retried at 3600 MB and the kernel killed it (`TSC-EXIT=137`). Green in CI (`type check`, 8.2). |
-| Unit + component | `npm test` (`vitest run`) | **869 files / 11 451 tests passed, exit 0** (507 s) — and **868 / 11 444** on the previous code head `a2f78cf0`, the difference being the seven rendered tests added last |
+| Formatting/lint | `npm run lint` (`eslint . --max-warnings=0`) | **clean, exit 0** (59 s) |
+| Typecheck, scoped to the change | `tsc --noEmit -p tsconfig.scoped-tmp.json` (extends the project's own config; `include` = `src/lib/personnel-file.ts`, `src/lib/team-service.ts`, the two changed integration tests — the compiler still pulls their whole import graph) | **clean, no diagnostics** (10 s). The temp config was deleted after the run and is not in the diff. |
+| Typecheck, whole project | `npx tsc --noEmit` | **cannot complete locally**: V8 `Ineffective mark-compacts near heap limit`, exit 134 at the default heap; killed by the kernel at 3600 MB. Green in CI (`type check`, 8.2). |
+| Unit + component | `npm test` (`vitest run`) | **887 files / 11 749 tests passed, exit 0** (469 s) |
 | Design system | `npm run test:design` | **5 files / 38 tests passed** |
-| Database — the suites this issue rewrites | `integration/parties.integration.test.ts` **73**, `integration/team.integration.test.ts` **53** | **126 passed, 0 failed** (re-run at `11dd6aa3` on a database rebuilt from scratch: 356 migrations, then seed) |
-| Database — the transfer suites | `personnel-file-obligation` **11**, `export-download-audience` **5**, `data-transfer` **65** | **81 passed, 0 failed** (re-run at `11dd6aa3`) |
-| Database — consumer batch | `crm` 17, `crm-relationship-os` 31, `phone-otp` 8, `staff-login-tenant` 7 | **63 passed, 0 failed** (re-run at `11dd6aa3`) |
-| Database — full sweep (at `a2f78cf0`; no `src/**` changed since) | `npm run test:db` (`vitest run --config vitest.db.config.ts`) | **230 files · 3 489 passed · 2 skipped · 1 failed** (2 868 s). The single failure is one 30 s **timeout** in `integration/fixed-assets.integration.test.ts` (a file and subsystem this branch does not touch — byte-identical to `origin/main`), in an issue-#833 test that creates a fiscal year, locks a period and reverses. Re-run alone on the same database: **75/75 passed in 13 s**; the single test alone: **passed** (`1 passed | 74 skipped`). Load-induced on a box running 230 database files serially, not a defect — recorded rather than hidden, and no test was weakened, skipped or given a longer timeout. |
-| Migration + reconcile | `npx tsx scripts/migrate.ts` → 0221/0222/0223 applied (356 migrations) into a **fresh** data directory; `tsx scripts/create-app-role.ts`; `npm run personnel:reconcile --dry-run` | **`Applied 356 migration(s)`**, `Role pos_app is ready`, **`nothing owed`** |
-| Seed coherence (at `11dd6aa3`) | `tsx scripts/seed.ts` then the reconcile dry run | **`Personnel files synced for 2/2 member(s)`**, then **`nothing owed`** |
+| Database — the suites this issue rewrites | `integration/personnel-file-obligation` **23**, `integration/team` **54**, `integration/parties` **73**, `integration/phone-otp` **8**, `integration/iam-control-plane` **2**, `integration/staff-login-tenant` **7** | **167 passed, 0 failed** (86 s for the first five together) |
+| Database — full sweep | `npm run test:db` (`vitest run --config vitest.db.config.ts`) | **236 files · 3 622 passed · 2 skipped · exit 0** (3 196 s, 53 min) — every file, no failure and **no load-induced timeout this time**: `integration/fixed-assets.integration.test.ts` (the file that timed out in the pre-integration sweep) is **75/75 in 14 s**. Two tests are skipped by their own `it.skip` in `main`, unchanged here. |
+| Migrations | `tsx scripts/migrate.ts` | **`Applying 0226_personnel_file_obligation_phone_cleared.sql … ok`**, `schema_migrations` = **363** with `0226_…` the newest (`0225` and `0224` came from `main`); the DB harness rebuilds a scratch database per file, so the sweep above ran every migration 363 times over, including 0226 |
+| Operator retry, on real leftover rows | `npm run personnel:reconcile` then `--dry-run` | **`1 attempted, 1 repaired, 0 still owed`** per business → **`Personnel files: all repaired (3 of 3)`**, and the dry run afterwards reads **`nothing owed`** (idempotent). The three rows were left by the sweep itself: `integration/pairing.integration.test.ts` and `integration/seed-live-chart.integration.test.ts` create their businesses in the shared local database, so their raw-SQL owners are exactly the «writer nobody updated» case the obligation covers. |
+| Seed coherence | `tsx scripts/seed.ts` | **refused on this database** (`Refusing to seed with default credentials into an already-initialized database`), which is the seed's own guard; coherence was verified on a **fresh** database before the integration (`Personnel files synced for 2/2 member(s)`, reconcile → `nothing owed`) and CI's `integration tests (real database)` runs the seed on a fresh database every time. |
 | Production build | `npm run build` | **not possible locally**: exit 137 (`Killed`) with `NODE_OPTIONS=--max-old-space-size=3000`, V8 heap OOM at the default heap. Green in CI (`production build`, 8.2). |
 | Visual regression | `npm run test:visual` | **not run locally**: it needs the production server the build above cannot produce. Green in CI (`visual regression`, 8.2). No baseline was re-recorded, edited or approved. |
 
 ### 8.2 CI on the pushed head
 
-`test.yml` runs on Arena branch pushes as well as PRs (the workflow says so in its own
-`on:` comment: GitHub suppresses the App-created PR-synchronize event, so the same required
-suite is run on the push).
+`test.yml` runs on Arena branch pushes as well as PRs (the workflow says so in its own `on:`
+comment: GitHub suppresses the App-created PR-synchronize event, so the same required suite is
+run on the push). The code head `10e0740f` changed `src/**`, a migration, `scripts/**` and
+tests — so unlike the documentation-only heads of the previous round, **every** workflow's
+path filter matched here.
 
 | Workflow | Run | Result |
 |---|---|---|
-| `test.yml` | **38626207933** (`11dd6aa3`, the code head) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅ (the seven new rendered tests included), `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116066571641`: `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Record visual baselines (manual, opt-in)` **skipped**, `Upload diffs` **skipped**), `design checks` ✅, **`integration tests (real database)` ✅**, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
-| `test.yml` | **38650641404** (the documentation commit `adc646b`) | **✅ completed success — the same 11 jobs, all green**: the delta is `ISSUE_947_REPORT.md` alone, so the suite ran over an identical code tree (`11dd6aa3`) |
-| `test.yml` | 38618945936 (`a2f78cf0`) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅, `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅** (job `116041317692`: `Build` ✅, `Start the production server` ✅, `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Publish visual regression summary` ✅; `Record visual baselines (manual, opt-in)` and `Upload diffs` **skipped** — the first is the opt-in recording step, the second is skipped precisely because there were no diffs), `design checks` ✅, `integration tests (real database)` ✅, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
-| `test.yml` | 38617346093 (`7a3e1cb5`) | **cancelled by the next push**, not a failure: 8 of its 10 jobs had already passed (`type check`, `unit tests`, `ESLint`, `API guard`, **`visual regression`**, `design checks`, `production build`, `data transfer engine`); `integration tests (real database)` was cancelled mid-flight and the aggregate `all checks passed` therefore failed. Not counted as a red check. |
-| `android-build` | 38617346091 (`7a3e1cb5`) | ✅ success |
-| `build-desktop-installer` | 38617346163 (`7a3e1cb5`) | ✅ success |
-| `verify-shippables` | 38617346040 (`7a3e1cb5`) | ✅ success |
-| `android-build` / `build-desktop-installer` / `verify-shippables` | — (`a2f78cf0`, `11dd6aa3`) | **did not trigger**, and their path filters are why: the delta of those two heads is documentation, `scripts/seed.ts`, and one `*.test.tsx` — and test files are explicitly excluded from the shipped paths (`electron/package.json` ships `electron/*.js`; the Android job watches `android/**` and `src/lib/native/**`; both shell workflows exclude `src/**/*.test.*`). The three passed at `7a3e1cb5`, whose shipped inputs are identical to these heads'. |
+| `test.yml` (push) | **38887048976** (`10e0740f`) | **✅ completed success — all 11 jobs**: `type check` ✅, `unit tests` ✅, `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, **`visual regression` ✅**, `design checks` ✅, **`integration tests (real database)` ✅** (32m20s, the longest job), **`production build` ✅**, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
+| `test.yml` (pull_request) | **38887053757** (`10e0740f`) | **✅ completed success — the same 11 jobs, all green** (the PR event and the push event both ran, which is why this head has two complete sets) |
+| `visual regression` job (`38887053757`) | steps, verbatim | `Build` ✅, `Start the production server` ✅, `Visual regression` ✅, `Subledger keyboard and WCAG checks` ✅, `Publish visual regression summary` ✅; **`Record visual baselines (manual, opt-in)` skipped** (the opt-in recording step) and `Upload diffs` skipped (there were no diffs) |
+| `build-desktop-installer` | 38887049006 (push) · 38887053682 (PR) | ✅ success — `packaged Windows end-to-end` ✅ (10m25s) |
+| `verify-shippables` | 38887049330 (push) · 38887053930 (PR) | ✅ success — `which shippables changed` ✅, `desktop shell` ✅ (6m39s), `production container` ✅ (14m35s), `Windows print connector` ✅; `WordPress plugin` and `commit and tag the desktop version` **skipped** by their own conditions |
+| `android-build` | — | **did not trigger**: its path filter watches `android/**` and `src/lib/native/**`, and this head touches neither |
 
-Two pushes in this round were cancelled by a newer push rather than finishing — `7a3e1cb5`
-(`38617346093`), the report-only `9099d2a9` (`38625981773`), and `092e2ca` (`38650552700`)
-— which is how the branch's `concurrency` group behaves; none is counted as a red check,
-and every head that matters has its own completed run above.
+Every head of this branch that matters has its own completed run:
 
-Every push to this branch runs `test.yml` (the workflow's own `on:` comment says why), so a
-documentation-only commit after this one is verified by the same suite over the same code
-tree — the code head stays `11dd6aa3` and no `src/**`, migration, script or test file changes
-in these commits.
+| Head | What it is | Checks |
+|---|---|---|
+| `03846456` | the previous code head (pre-integration) | `test.yml` **✅ 11/11** (`38718493517`); PR checks **15 passed, 3 skipped, none red** |
+| `66f7535a` | the merge commit (not pushed on its own — it is the parent of `10e0740f`) | — |
+| `10e0740f` | the code head of this revision: the merge + the three review fixes + migration 0226 | `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events |
 
 The run that failed on this branch is the one at the **pre-integration** head `0723b53`
 (`38452006386`), and its failure is the item-5 finding:
@@ -441,93 +526,63 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 ### 8.3 Running, finished and impossible
 
-- **Local, finished** (all at `11dd6aa3` unless noted): lint (exit 0), unit (869 files /
-  11 451 tests), design (38 tests), the three database batches (126 + 81 + 63) on a database
-  rebuilt from scratch with 356 migrations, the full database sweep at `a2f78cf0` (230 files,
-  1 load-induced timeout, re-run green alone), migration + app role + reconcile, seed
-  coherence.
-- **Local, impossible**: `npm run build` (kernel OOM at 3000 MB), `tsc --noEmit` (V8 OOM at
-  3072 MB, kernel OOM at 3600 MB), and therefore `npm run test:visual` (needs the build's
-  server). These three are exactly the gates CI owns in this repository, and all three are
-  green there at this head.
-- **CI, finished**: every run listed in 8.2, plus the PR-triggered set in 8.5. Nothing is
-  pending at the head.
-- Nothing is running when this report was committed; the DB sweep, the unit suite and the
-  isolated re-run had all finished. (`node_modules` was re-installed from the lockfile with
-  `npm ci` before these runs; `node_modules` is committed on `main` as a symlink blob, which
-  is a repository-hygiene issue outside this issue's scope.)
+- **Local, finished** (all at `10e0740f`, on the merged tree unless noted): lint (exit 0),
+  scoped typecheck (clean), unit (887 files / 11 749 tests), design (38), the changed database
+  suites (167), the **full 236-file database sweep** (3 622 passed, 2 skipped, exit 0, no
+  timeout), migration application (363), the operator reconcile and its idempotent re-run.
+- **Local, impossible**: `npm run build` (kernel OOM at 3000 MB), whole-project `tsc --noEmit`
+  (V8 OOM at 3072 MB, kernel OOM at 3600 MB), and therefore `npm run test:visual` (needs the
+  build's server). Those are exactly the gates CI owns in this repository, and all three are
+  green there (8.2). The *scoped* typecheck above is what this box can do about `tsc`, and it
+  covers every file this revision changed.
+- **CI, finished**: the runs listed in 8.2 — nothing is pending at this head.
+- Nothing is running when the report commit was made; the sweep, the unit suite and the
+  focused runs had all finished. (`node_modules` was re-installed from the lockfile with
+  `npm ci` after the integration; `node_modules` is committed on `main` as a symlink blob,
+  which is a repository-hygiene issue outside this issue's scope.)
 
 ### 8.4 The split the second directive asks for
 
 | Dimension | State |
 |---|---|
-| Source | `11dd6aa3` on `arena/ce58f373-biza-miz`, pushed, in **PR #958**; `origin/main` (`916df457`) is an ancestor; the report is the commit after it and changes no source, and the code head's own last change added one test file |
-| Tests | **11 451** unit/component + **38** design green locally at the code head; **270** database tests re-run green at it (126 + 81 + 63); the 230-file sweep green at `a2f78cf0` except one load-induced timeout that passes alone (75/75 in 13 s); CI's `integration tests (real database)`, `data transfer engine (real database)` and `media E2E tests` green at the code head |
-| Checks | `test.yml` at **`11dd6aa3`: 11/11 jobs green**, including `visual regression` (with the subledger keyboard/WCAG step), `integration tests (real database)` and `production build`; the same 11/11 at `a2f78cf0`; packaging workflows green at `7a3e1cb5`, and not triggered by the final heads' path filters |
-| Mergeability | No conflicts: `git merge-base --is-ancestor origin/main HEAD` holds, and `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries (tree `976fd0a2`). No PR exists for this branch |
-| Deployment | **Nothing deployed, published, tagged or merged**, and nothing was authorised to be. The three migrations are forward-only and unapplied anywhere except this sandbox's database |
-| Runtime acceptance | Not claimed. The gates that exercise a running server (production build, visual regression, subledger keyboard/WCAG, media E2E) passed **in CI on GitHub's runners**, at the head named above; no runtime acceptance was performed against a deployed environment |
+| Source | `10e0740f` on `arena/ce58f373-biza-miz`, pushed, in **PR #958**; `origin/main` (`cf2b39dd`) is an ancestor through the merge `66f7535a`; the report is the commit after it and changes no source |
+| Tests | **11 749** unit/component + **38** design green locally at the code head; the **full database sweep** green at it (236 files, 3 622 passed, 2 skipped, exit 0 — no timeout); **33** new database tests across the three fixes (7 phone-arm, 5 boundary injections, 1 replica chain, plus the earlier ones), each falsified in the failing direction |
+| Checks | `test.yml` at **`10e0740f`**: `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events — the packaging workflows also ran at this head, because a source change matches their path filters (see 8.2) |
+| Mergeability | No conflicts: `git merge-base --is-ancestor origin/main HEAD` holds, and `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries; PR #958 is the only PR for this branch |
+| Deployment | **Nothing deployed, published, tagged or merged**, and nothing was authorised to be. The migrations (0221, 0222, 0223, 0226) are forward-only and unapplied anywhere except this sandbox's local database |
+| Runtime acceptance | Not claimed. The gates that exercise a running server (production build, visual regression, subledger keyboard/WCAG, media E2E) passed **in CI on GitHub's runners** at the head named above; no runtime acceptance was performed against a deployed environment |
 
 ### 8.5 Pull-request checks
 
-**[PR #958](https://github.com/hamidnoshady/biza-miz/pull/958)** (`arena/ce58f373-biza-miz`
-→ `main`) was opened so the repository's own required suite — including the
-`pull_request`-triggered desktop/container/workflow paths that a branch push skips by path
-filter — runs against the head. At `16764aed` (the head that carries the test fix below):
-**15 checks passed, 3 skipped, none pending and none red** — `type check`, `unit tests`,
-`ESLint`, `design checks`, `API guard and permission tests`, `visual regression`,
-`integration tests (real database)`, `production build`, `data transfer engine`,
-`media E2E`, `desktop shell`, `production container`, `packaged Windows end-to-end`,
-`which shippables changed`, `all checks passed`; the three skips are the path-filtered
-shippables (WordPress plugin, Windows print connector, the desktop version commit).
+**[PR #958](https://github.com/hamidnoshady/biza-miz/pull/958)** (`arena/ce58f373-biza-miz` →
+`main`) carries the repository's full required suite, including the `pull_request`-triggered
+desktop/container/workflow paths a branch push skips by path filter. At `10e0740f`:
+**16 checks passed, 2 skipped, none pending and none red** — the eleven `test.yml` jobs plus
+`desktop shell`, `production container`, `packaged Windows end-to-end`, `Windows print
+connector`, `which shippables changed` and the aggregate `all checks passed`; the two skips
+are `WordPress plugin` and `commit and tag the desktop version`, each by its own path
+condition. The visual job's own step list is in 8.2: it built, served, compared and ran the
+subledger keyboard/WCAG script, and the baseline-recording step stayed **skipped** at every
+head of this branch — no baseline was re-recorded, edited or approved.
 
-**`unit tests` failed on the PR run and passed on the push run of the *same commit***
-(`4c3a720`): push run `38655674538` ✅, PR run `38703844576` ❌. The failing annotation is
+**The fiscal-periods race is `main`'s, and `main` fixed it while this PR was open.** The PR's
+first runs failed at `src/app/(app)/accounting/fiscal-periods-section.test.tsx:214` on
+`windows-latest` while the *same commit's* push run passed (`4c3a720`: push `38655674538` ✅,
+PR `38703844576` ❌, `38708097514` ❌). The race is structural: the heading the test waits for
+renders as soon as the year *list* lands (`years.length > 0`), while the periods request is
+issued by an effect keyed on `selectedYearId`, which React runs *after* that commit — so the
+assertion read a request that had not been made yet. This branch fixed it in `8b7f692d`
+(awaiting the request, assertion unchanged in force, proven live by renaming the URL so the
+request is never made). Then **`main` fixed the same race independently** (`03f9cb36`,
+«test(commission): retry payments through browser authority context (refs #869)»), and the
+integration merge kept **main's** text:
 
-```
-src/app/(app)/accounting/fiscal-periods-section.test.tsx
-AssertionError: expected false to be true
- ❯ src/app/(app)/accounting/fiscal-periods-section.test.tsx:214:102
-```
-
-which is `expect(network.calls.some((url) => url === \`/api/ledger/fiscal-years/${fiscalYear.id}/periods\`)).toBe(true)`
-— asserted immediately after a `waitFor` that only waits for the selected-year heading, so
-it reads a request the section's `useEffect` may not have issued yet (that job runs on
-`windows-latest`; the two flaky-test repairs on `main`, PR #955, are the same family). It is
-**not** this branch's code:
-
-| Check | Result |
-|---|---|
-| Same commit, two runs | ✅ `unit tests` on 38655674538 · ❌ on 38703844576 — non-deterministic by construction |
-| The failing file and its subject vs `origin/main` | **byte-identical** (`git diff origin/main HEAD -- <both>` is empty) |
-| This branch's files inside that test's **transitive** import graph (23 modules) | exactly one: `src/app/dashboard/ui.tsx`, **+25 / −0** — nine added `ERROR_MESSAGES` entries (team/role/branch-policy copy) that no request path reads |
-| Local, `11dd6aa3` | the file passed **15/15** focused runs (5 idle + 10 under CPU contention) and in both full-suite runs |
-| Provenance of the test | `bbdcb709` → `1f993daa`, both on `main`, long before this branch |
-
-Re-running the failed job through this session's GitHub App is refused
-(`Resource not accessible by integration`, HTTP 403), and the next push produced the same
-red job **at the same line** (`38708097514`), so this stopped being a one-off and became the
-thing blocking the PR. The race is structural, not statistical: the heading the test waits
-for renders as soon as the year *list* lands (`years.length > 0`), while the periods request
-is issued by an effect keyed on `selectedYearId`, which React runs *after* that commit — so
-the assertion at line 214 read a request that had not been made yet whenever the passive
-effect had not flushed, which is what a loaded `windows-latest` runner does often.
-
-The test is therefore fixed in its **own commit** (`8b7f692d`), kept separate rather than
-folded into issue #947's change so it can be extracted into a PR of its own (the repository
-did exactly this in #955). The assertion keeps its full strength and loses the race:
-
-```ts
-await waitFor(() =>
-  expect(network.calls.some((url) => url === `/api/ledger/fiscal-years/${fiscalYear.id}/periods`)).toBe(true),
-);
-```
-
-Verified in both directions on this tree: with the component's periods URL renamed so the
-request is never made, the test **still fails** at that assertion (`expected false to be
-true`, line 226) — the check is live, it just waits instead of racing; with the real
-component it passed **12/12** focused runs. No test was disabled or skipped, no assertion
-weakened, no timeout raised, and no baseline touched.
+- `git diff origin/main HEAD -- src/app/(app)/accounting/fiscal-periods-section.test.tsx` is
+  **empty** — the branch no longer carries its own version of that file, so there is nothing
+  for a reviewer to extract and `8b7f692d` is recorded as superseded rather than pending.
+- Both versions wait for the periods call inside `waitFor`; main's wording is shorter, the
+  assertion is the same one at the same strength. No test was disabled, skipped or weakened by
+  either change.
 
 **Open PR**: **[#958](https://github.com/hamidnoshady/biza-miz/pull/958)** — the only PR for
 this branch; no duplicate was opened, and nothing was merged, tagged or deployed.
@@ -560,15 +615,16 @@ this branch; no duplicate was opened, and nothing was merged, tagged or deployed
   swap): `npm run build` is killed at 3000 MB, `tsc --noEmit` aborts at 3072 MB, and
   `npm run test:visual` needs the build's server. CI is where those gates are meaningful,
   and their results are reported above — nothing here claims a local pass.
-- **A pre-existing race in `main`'s fiscal-periods test is fixed here, in its own commit.**
-  `unit tests` failed twice in a row at `fiscal-periods-section.test.tsx:214` on the PR while
-  passing on a push run of the same commit (see 8.5); the file and its component are
-  byte-identical to `origin/main`, and this branch's only contribution to that test's
-  transitive import graph is an added `ERROR_MESSAGES` map. Commit `8b7f692d` awaits the
-  periods request instead of asserting it synchronously — the assertion is unchanged in
-  force and proven live (it fails when the request is removed). It is deliberately a
-  separate commit so a reviewer can drop it or lift it into its own PR; it is **not** part
-  of issue #947's change.
+- **The fiscal-periods race was `main`'s, and `main` has fixed it — this branch no longer
+  carries a fix of its own.** `unit tests` failed twice in a row at
+  `fiscal-periods-section.test.tsx:214` on the PR while passing on a push run of the same
+  commit; this branch repaired it in `8b7f692d`, and then `main` fixed the same race
+  independently (`03f9cb36`) before the integration. The merge kept main's text, and
+  `git diff origin/main HEAD -- src/app/(app)/accounting/fiscal-periods-section.test.tsx` is
+  **empty** — so the earlier version of this report was wrong to list it as a deliverable of
+  this branch or as something for a reviewer to extract: both fixes wait inside `waitFor` for
+  the same call, and the file now belongs to main. Nothing was disabled, skipped or weakened
+  by either change (see 8.5).
 - **One inherited database test times out under the full serial sweep.** In a 230-file run,
   `integration/fixed-assets.integration.test.ts` (issue #833, `main`'s code, byte-identical
   to `origin/main`) had one test hit its 30 s budget after the file had already taken 194 s;
@@ -592,9 +648,12 @@ Forward-only, none applied outside this sandbox:
 | 0221 | `0221_personnel_links.sql` | `uq_users_business_membership` (the unique parent the composite key needs) + `parties_employee_same_business (business_id, employee_user_id)` → `users(business_id, id)` `ON DELETE SET NULL`; pre-existing cross-business links audited and cleared; `personnel_file_drift` (RLS enabled and forced) for the debt bookkeeping. |
 | 0222 | `0222_export_job_audience.sql` | `data_export_jobs.party_audience` (jsonb, nullable) and `data_export_jobs.domain_keys` (jsonb, nullable); `domain_keys` backfilled for Holoo provider jobs from `provider_metadata.selectedScopes`. Nullable by design: null means «produced before this column, or by nobody», and is read as the widest audience. |
 | 0223 | `0223_personnel_file_obligation.sql` | The membership → file obligation as a property of the membership row: `AFTER INSERT` and `AFTER UPDATE OF full_name, email, phone_e164` on `users` write the debt in the membership's own transaction, without creating the file or overwriting an existing diagnosis. |
+| 0226 | `0226_personnel_file_obligation_phone_cleared.sql` | **Corrects 0223's phone arm, forward-only** (a review finding; 0223 is applied and unedited): a membership phone that is **cleared** is canonical and must clear the file's, so the predicate now records the debt for `NULL`-or-blank membership phone over a non-blank `file_phone` as well as for the reverse, and the inventory is re-run with the corrected predicate. Name and email arms, the `attempts >= 0` contract, the partial unique index and the trigger's binding are unchanged; an existing open episode keeps its diagnosis and attempt count. |
 
-Applied locally with `scripts/migrate.ts` (356 migrations total, `schema_migrations`
-records each one); `npm run personnel:reconcile` is the operator's retry.
+Applied locally with `scripts/migrate.ts` (**363 migrations** total — `0224` and `0225` came
+from `main` — `schema_migrations` records each one); `npm run personnel:reconcile` is the
+operator's retry (it repaired 3 of 3 owed files on this database and then read
+`nothing owed`).
 
 ## 11. Consumer coverage on the changed contracts
 
@@ -605,6 +664,7 @@ records each one); `npm run personnel:reconcile` is the operator's retry.
 | `AdapterContext.partyAudience` | `data-transfer/import-service.ts`, `adapters.ts`, `entities/crm.ts`, `providers/holoo/*` (import and export), `ai-autopilot-executors.ts` (two executors), `schedule-service.ts`, `/api/data/exports`, `/api/data/providers/holoo/export`, `/api/data/guard.ts` |
 | `decideExportDownload` / `recordedAudienceFor` | `export-service.ts` (`getExportContent`), `provider-export-service.ts`, `/api/data/exports/[id]`, `data-transfer-ui.tsx`, `history-section.tsx` |
 | `ensurePersonnelFileForMembership` | `team-service.ts` (create, rename, phone, accept, rehire), `iam/sync.ts` (replica), `phone-otp.ts`, `/api/parties/[id]` (link), `/api/team` (retry + drift), `scripts/reconcile-personnel-files.ts`, `scripts/seed.ts` |
+| `personnel_file_drift` (trigger, 0223 + 0226) | Every writer of `users` without app involvement — raw SQL, a restored dump, a repair script, a replica apply — is covered by the database rather than by a list of callers; the trigger is the only definition, and 0226 replaces it in place so the binding cannot drift. |
 | `staff-eligibility.ts` (`listEligibleStaffAtLocation`, `isEligibleStaffAtLocation`, `branchScopeSql`) | `/api/staff`, `lib/floor.ts` (`validWaiterId`), `/api/floor/sections*` |
 | `resolveMembershipBranchPolicy` | `POST /api/team`, `/api/setup/users`, the invitation acceptance path, `setup/users/page.tsx` |
 
@@ -620,13 +680,16 @@ and no route, API or writer was deleted without a `grep` over `src/`, `scripts/`
 | F01 — no sensitive Employee field under plain `parties.view`, in collection/item/search/export/AI | `personnel-access.ts`, `parties-service.ts`, `entities/crm.ts`, `party-form.tsx` | `parties.integration.test.ts` (audience cases, route round trip, export projection), `personnel-access.test.ts` (14), `parties-directory-regressions.test.ts` (44) |
 | F02 — tenant-safe identity link | `assertEmployeeLinkTarget`, `0221` | `parties.integration.test.ts` (service refusals, raw-insert `23503`, null-link delete) |
 | F03 — explicit PIN branch policy, honest copy | `resolveMembershipBranchPolicy`, onboarding form | `team.integration.test.ts` (four policies, refusals, cleared assignment), `location-access.test.ts` (16) |
-| F04/F05 — one file per membership on every path; MFA-before-acceptance and replica authority preserved | `personnel-file.ts`, `0221`, `0223`, `seed.ts` | `personnel-file-obligation.integration.test.ts` (11), `team.integration.test.ts` (invitation/rehire cases), `docs/issue-947-integration-contracts.md` |
+| F04/F05 — one file per membership on every path; MFA-before-acceptance and replica authority preserved | `personnel-file.ts`, `0221`, `0223`, `0226`, `seed.ts` | `personnel-file-obligation.integration.test.ts` (23), `team.integration.test.ts` (invitation/rehire cases), `docs/issue-947-integration-contracts.md` |
+| Review P1 — the creation event replicates the branch the row stored | `team-service.ts` (`defaultLocationId: homeLocationId`) | `team.integration.test.ts` «replicates the fallback branch the row actually stored, all the way to access» (payload → replica row → eligibility, with a pre-fix control event) |
+| Review P2 — the obligation covers a **cleared** membership phone | `0226` (function + backfill), `personnel-file.ts` unchanged as the decider | `personnel-file-obligation.integration.test.ts` «the obligation follows a cleared membership phone» (7 cases; 2 fail without 0226) |
+| Review P2 — the synchronization never throws after its caller committed | `personnel-file.ts` (one boundary, `synchronizePersonnelFile`, `recorded`, SQLSTATE codes) | `personnel-file-obligation.integration.test.ts` «the synchronization never throws after the caller has committed» (5 injections: renamed column, refused write, renamed drift table, transactional membership, committed-request case) |
 | F06 — capability-gated invitations in a read-only visit | `team-manager.tsx` (`canManage`) | `team-manager.test.ts` (33) |
 | F07 — linked identity read-only in the party form | `party-form.tsx`, `parties.ts` | `parties.integration.test.ts` (linked-member write refusals), `parties-directory-regressions.test.ts` |
 | F08 — role summaries, revisions, dialogs, filters/pagination, all states | `team-manager.tsx`, `member-detail-dialog.tsx`, `roles-manager.tsx`, `security-confirm-dialog.tsx` | `member-detail-dialog.test.tsx` (7, rendered), `team-manager.test.ts` (33), `admin-screen-contracts.test.ts` (17), CI `design checks` + `visual regression` (subledger keyboard/WCAG step) |
 | Consumer seam — `/api/staff` + `floor.validWaiterId` on canonical eligibility | `staff-eligibility.ts`, `/api/staff`, `lib/floor.ts` | `staff-eligibility.test.ts` (3), `team.integration.test.ts` (floor cases) |
 | Stored-export privacy under current permissions | `export-audience.ts`, `0222`, `export-service.ts`, `/api/data/exports/[id]` | `export-download-audience.integration.test.ts` (5), `export-audience.test.ts` (8) |
 | Import field-write authorization | `partyWriteAudienceForActor`, `import-service.ts`, `ai-autopilot-executors.ts` | `data-transfer.integration.test.ts` (65) |
-| Atomic/durable projection obligation, honest error contract, idempotent retry | `0223`, `personnel-file.ts`, `reconcile-personnel-files.ts` | `personnel-file-obligation.integration.test.ts` (11) |
+| Atomic/durable projection obligation, honest error contract, idempotent retry | `0223`, `0226`, `personnel-file.ts`, `reconcile-personnel-files.ts` | `personnel-file-obligation.integration.test.ts` (23); `npm run personnel:reconcile` on this tree: 3 of 3 repaired, then `nothing owed` |
 | Cross-issue contracts with #854 and #916 | `docs/issue-947-integration-contracts.md`, `docs/auth-hardening-854.md` | the two documents; floor/eligibility tests referenced inside them |
 | No test disabled/weakened; no baseline re-recorded; no budget raised | — | every run in §8; the CI visual job's `Record visual baselines` step is `skipped` at every head |
