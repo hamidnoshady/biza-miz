@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import type { PayrollRun } from "@/lib/payroll-types";
 import { accountingSectionHref } from "./accounting-routes";
 import { PayrollRunItem } from "./payroll-run-item";
+import { useDimensionCatalog } from "./dimension-fields";
 
 type Result = { id: string; attempt: number } & (
   | { status: "ready"; run: PayrollRun }
@@ -17,6 +18,8 @@ const noMutation = () => {};
 
 /** A source link is an exact, read-only run lookup, never a search in the first history page. */
 export function PayrollRunSource({ runId }: { runId: string }) {
+  // For rendering allocation tuples; the run's facts never depend on it.
+  const { catalog: dimCatalog } = useDimensionCatalog();
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<Result | null>(null);
   useEffect(() => {
@@ -44,6 +47,7 @@ export function PayrollRunSource({ runId }: { runId: string }) {
         <Button variant="outline" onClick={() => setAttempt((value) => value + 1)}>تلاش دوباره</Button>
       </div> : <ul aria-label="لیست حقوق پیوندشده">
         <PayrollRunItem key={current.run.id} run={current.run} initialLines={current.run.lines}
+          dimensionValues={dimCatalog?.allValues}
           canManage={false} busy={false} working={false} paymentAccounts={[]} onPay={noMutation} onVoid={noMutation} />
       </ul>}
   </SectionCard>;

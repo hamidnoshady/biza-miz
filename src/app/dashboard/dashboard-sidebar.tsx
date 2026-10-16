@@ -10,7 +10,9 @@ import {
   ContactIcon,
   FolderIcon,
   GlobeIcon,
+  HistoryIcon,
   LayoutGridIcon,
+  MessageSquarePlusIcon,
   SparklesIcon,
   TrendingUpIcon,
   UsersIcon,
@@ -97,6 +99,8 @@ import { useNative } from "@/components/native/native-provider";
 import { AppSheet } from "@/components/mobile/app-sheet";
 import { QuickCreateSheet } from "@/components/mobile/quick-create-sheet";
 import { PostCallActivitySheet } from "@/components/mobile/post-call-activity-sheet";
+import { AiConversationsSidebar } from "./ai/ai-conversations-sidebar";
+import { useAssistantSidebarBridge } from "./ai/assistant-sidebar-bridge";
 
 
 const SIDEBAR_PREFERENCE_KEY = "dashboard-sidebar-preference";
@@ -223,29 +227,18 @@ function isActive(pathname: string, href: string, search?: ReadonlyURLSearchPara
 }
 
 /**
- * The workspace rail (Phase 35 Wave 2).
+ * The workspace rail (Phase 35 Wave 2 & Issue #905).
  *
- * This is the intentionally small global platform navigation: assistant home,
- * My Workspace, and exactly four business-app launchers. Shared utilities stay
- * in the user menu instead of becoming more rail rows. Clicking an app replaces
- * this launcher with that app's contextual navigation, so the rail never sits
- * beside a second full application menu.
- *
- * The rail carries NO chat navigation: starting a conversation is the chat
- * header's «گفت‌وگوی جدید» alone, and «گفتگوهای اخیر» is the chat page's own
- * left sidebar (search/rename/delete/continue) — see ai-chat-hub.tsx.
+ * This is the global platform navigation: assistant home, My Workspace, and
+ * four business-app launchers, plus on the assistant route (`/dashboard`) the
+ * unified «گفت‌وگوی جدید» action and private «گفتگوهای اخیر» group so the
+ * assistant page never mounts a second permanent sidebar.
  */
 function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: string }) {
-  // The four apps this rail launches, as data rather than four copies of the same
-  // markup. The app registry resolves the best route from this server-filtered
-  // tree, so the rail cannot accidentally turn "open Accounting" into
-  // "may read the ledger".
-  // An app's state («به‌زودی», «در حال تعمیر», …) travels on the nav entries the
-  // layout already resolved — grouped here by *owning app*, so each launcher
-  // wears its own app's badge, exactly what the flat sidebar shows for the
-  // same app, rather than re-deriving it. Looking the state up by the
-  // launcher's resolved href instead is what once badged «حسابداری» with the
-  // old Sales state: now POS and the overview belong to Accounting.
+  const assistantRoute = isAssistantSurface(pathname);
+  const bridge = useAssistantSidebarBridge();
+  const { toggleSidebar, setOpenMobile } = useSidebar();
+
   const stateByApp = new Map<AppKey, NonNullable<NavItem["appState"]>>();
   for (const item of navItems) {
     if (!item.appState) continue;
@@ -265,36 +258,58 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
     ];
   });
 
+  const railButtonClass = assistantRoute
+    ? `${APP_NAV_BUTTON_CLASS} !min-h-9 !py-1.5 text-[13px]`
+    : APP_NAV_BUTTON_CLASS;
+
   return (
-    <SidebarContent className="px-3 py-4">
-      <nav aria-label="میز کار" className="space-y-4">
-        <SidebarMenu className="space-y-1.5">
+    <SidebarContent
+      className={
+        assistantRoute
+          ? "flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-2.5"
+          : "px-3 py-4"
+      }
+    >
+      <nav aria-label="میز کار" className={assistantRoute ? "shrink-0 space-y-2" : "space-y-4"}>
+        <SidebarMenu className={assistantRoute ? "space-y-0.5" : "space-y-1.5"}>
+          {assistantRoute ? (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                type="button"
+                tooltip="گفت‌وگوی جدید"
+                onClick={() => {
+                  bridge.onNewConversation?.();
+                  setOpenMobile(false);
+                }}
+                className={`${railButtonClass} border border-primary/25 bg-primary/10 font-semibold text-primary hover:bg-primary/15`}
+              >
+                <MessageSquarePlusIcon aria-hidden="true" className="size-4 shrink-0" />
+                <span className={NAV_LABEL_CLASS}>گفت‌وگوی جدید</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ) : null}
           <SidebarMenuItem>
             <SidebarMenuButton
               asChild
               isActive={pathname === DASHBOARD_HOME}
               tooltip="دستیار هوشمند"
-              className={APP_NAV_BUTTON_CLASS}
+              className={railButtonClass}
             >
               <Link href={DASHBOARD_HOME} aria-current={pathname === DASHBOARD_HOME ? "page" : undefined}>
-                <SparklesIcon aria-hidden="true" className="size-5 shrink-0" />
+                <SparklesIcon aria-hidden="true" className="size-4 shrink-0" />
                 <span className={NAV_LABEL_CLASS}>دستیار هوشمند</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
-            {/* Phase G — «پروژه‌ها» is the Projects SECTION of «میز کار من»
-                now, so the rail's entry names the module and opens its
-                overview. `/projects` still resolves (middleware forwards it),
-                but nothing in the product links there any more. */}
             <SidebarMenuButton
               asChild
               isActive={isWorkspacePathname(pathname)}
               tooltip="میز کار من"
-              className={APP_NAV_BUTTON_CLASS}
+              className={railButtonClass}
             >
               <Link href={WORKSPACE_MODULE_HOME}>
-                <FolderIcon aria-hidden="true" className="size-5 shrink-0" />
+                <FolderIcon aria-hidden="true" className="size-4 shrink-0" />
                 <span className={NAV_LABEL_CLASS}>میز کار من</span>
               </Link>
             </SidebarMenuButton>
@@ -305,18 +320,15 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
           <div role="group" aria-labelledby="workspace-apps-heading">
             <p
               id="workspace-apps-heading"
-              className="px-2 pb-1 text-xs font-medium text-muted-foreground group-data-[state=collapsed]/sidebar:hidden"
+              className="px-2 pb-0.5 text-[11px] font-medium text-muted-foreground group-data-[state=collapsed]/sidebar:hidden"
             >
               برنامه‌ها
             </p>
-            {/* Collapsed to icons the heading is gone, so the apps would run
-                into «میز کار من» as one undifferentiated column of glyphs. A
-                hairline keeps the two groups apart at 4rem wide. */}
             <div
               aria-hidden="true"
-              className="mx-2 mb-2 hidden border-t border-border/70 group-data-[state=collapsed]/sidebar:block"
+              className="mx-2 mb-1.5 hidden border-t border-border/70 group-data-[state=collapsed]/sidebar:block"
             />
-            <SidebarMenu className="space-y-1.5">
+            <SidebarMenu className={assistantRoute ? "space-y-0.5" : "space-y-1.5"}>
               {launchers.map((launcher) => {
                 const Icon = launcher.icon;
                 return (
@@ -327,10 +339,10 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
                       tooltip={
                         launcher.appState ? `${launcher.label} — ${launcher.appState.label}` : launcher.label
                       }
-                      className={APP_NAV_BUTTON_CLASS}
+                      className={railButtonClass}
                     >
                       <Link href={launcher.href} aria-current={launcher.active ? "page" : undefined}>
-                        <Icon aria-hidden="true" className="size-5 shrink-0" />
+                        <Icon aria-hidden="true" className="size-4 shrink-0" />
                         <span className={NAV_LABEL_CLASS}>{launcher.label}</span>
                         {launcher.appState ? (
                           <AppStateBadge
@@ -348,17 +360,41 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
           </div>
         ) : null}
 
-        {/* «اتصال‌های فنی» used to render here as a seventh rail row. It is a
-            shell utility, not an app, and its door is the platform user menu
-            (the footer menu lists it beside حقوق اشتراک و تنظیمات کسب‌وکار);
-            the row is gone rather than a second door to the same hub. */}
-
-        {/* Chat history no longer lives here: «گفتگوهای اخیر» is the chat
-            page's own left sidebar (search, rename, delete, continue), and
-            creating a conversation stays in the chat header alone — the rail
-            keeps only the assistant's home, the workspace and the apps, so it
-            carries no second chat navigation. */}
+        {assistantRoute ? (
+          <div className="hidden border-t border-border/70 pt-1.5 group-data-[state=collapsed]/sidebar:block">
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  type="button"
+                  tooltip="گفتگوهای اخیر"
+                  aria-label="گفتگوهای اخیر"
+                  onClick={() => toggleSidebar()}
+                  className={railButtonClass}
+                >
+                  <HistoryIcon aria-hidden="true" className="size-4 shrink-0" />
+                  <span className={NAV_LABEL_CLASS}>گفتگوهای اخیر</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </div>
+        ) : null}
       </nav>
+
+      {assistantRoute ? (
+        <div className="mt-2 flex min-h-36 flex-1 flex-col border-t border-border/70 pt-1.5 group-data-[state=collapsed]/sidebar:hidden">
+          <AiConversationsSidebar
+            embedded
+            activeId={bridge.activeConversationId}
+            refreshToken={bridge.refreshToken}
+            onSelect={(id) => {
+              bridge.onSelectConversation?.(id);
+              setOpenMobile(false);
+            }}
+            onDeleted={(id) => bridge.onDeleteConversation?.(id)}
+            onRenamed={(conv) => bridge.onRenameConversation?.(conv)}
+          />
+        </div>
+      ) : null}
     </SidebarContent>
   );
 }
@@ -709,7 +745,7 @@ function MobileDashboardHeader({
       {/* On a phone the rail is behind the hamburger, so without this the
           active branch was invisible on every screen until the drawer was
           opened — the one place a mis-set branch does the most damage. */}
-      <BranchSwitcher compact />
+      <BranchSwitcher compact quietLoading />
       <CreditBadge />
       <div className="max-w-36"><DeploymentStatusIndicator profile={deploymentProfile} /></div>
     </header>
@@ -1039,7 +1075,11 @@ export function DashboardSidebar({
     setPreferenceLoaded(true);
     const storedWidth = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
     if (Number.isFinite(storedWidth) && storedWidth >= SIDEBAR_MIN_WIDTH && storedWidth <= SIDEBAR_MAX_WIDTH) {
-      setSidebarWidth(storedWidth);
+      const viewportCap =
+        window.innerWidth > 0
+          ? Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.floor(window.innerWidth * 0.28)))
+          : SIDEBAR_MAX_WIDTH;
+      setSidebarWidth(Math.min(storedWidth, viewportCap));
     }
   }, []);
 

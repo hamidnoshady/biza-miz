@@ -4,7 +4,7 @@
  * policy, and the pure checks that used to be duplicated across routes.
  *
  * The database-touching halves (`redeemOtpChallenge`'s locking, `setPin`'s
- * blind index, `requestMemberPasswordReset`'s delivery choice) are covered by
+ * credential write, `requestMemberPasswordReset`'s delivery choice) are covered by
  * `integration/auth-account-security.integration.test.ts` and
  * `integration/phone-otp.integration.test.ts`, which run against a real
  * Postgres — nothing here pretends to prove a concurrency guarantee.

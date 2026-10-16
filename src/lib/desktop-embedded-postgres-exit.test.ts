@@ -39,18 +39,25 @@ describe("the embedded PostgreSQL exit hook", () => {
   });
 });
 
-describe("the desktop backend's local modules are all packaged", () => {
-  it("lists every ./module that backend-manager.js requires in electron/package.json's build files", async () => {
+describe("the desktop main process's local modules are all packaged", () => {
+  // A module electron-builder leaves out fails at launch with a dialog and no log,
+  // so every ./module any main-process file requires must be in `build.files`.
+  it("lists every ./module the main-process files require in electron/package.json's build files", async () => {
     const fs = await import("node:fs");
-    const backend = fs.readFileSync(path.join(process.cwd(), "electron", "backend-manager.js"), "utf8");
-    const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "electron", "package.json"), "utf8")) as {
+    const dir = path.join(process.cwd(), "electron");
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
       build: { files: string[] };
     };
-    const required = [...backend.matchAll(/require\("\.\/([^"]+)"\)/g)].map((match) =>
-      path.extname(match[1]) ? match[1] : `${match[1]}.js`,
-    );
-    expect(required.length).toBeGreaterThan(0);
-    const missing = required.filter((file) => file !== "package.json" && !pkg.build.files.includes(file));
-    expect(missing, "modules the packaged backend loads but electron-builder would leave out").toEqual([]);
+    const packaged = pkg.build.files.filter((file) => file.endsWith(".js"));
+    const required = new Set<string>();
+    for (const file of packaged) {
+      const source = fs.readFileSync(path.join(dir, file), "utf8");
+      for (const match of source.matchAll(/require\("\.\/([^"]+)"\)/g)) {
+        required.add(path.extname(match[1]) ? match[1] : `${match[1]}.js`);
+      }
+    }
+    expect(required.size).toBeGreaterThan(0);
+    const missing = [...required].filter((file) => file !== "package.json" && !pkg.build.files.includes(file));
+    expect(missing, "modules the packaged desktop loads but electron-builder would leave out").toEqual([]);
   });
 });

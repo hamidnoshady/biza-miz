@@ -159,6 +159,23 @@ describe("issue #812 §11 — the AI permission matrix", () => {
     }
   });
 
+  it("guards conversation list/detail/rename/delete with active assistant permission plus actor ownership", () => {
+    // Issue #905 §10: revoking `ai.use` (or floor assistant access) must
+    // immediately block conversation list, transcript read, rename, and delete
+    // rather than relying on bare `requireMember()`.
+    const listRoute = readFileSync("src/app/api/ai/conversations/route.ts", "utf8");
+    expect(listRoute).not.toMatch(/requireMember\(\)/);
+    expect(listRoute).toMatch(/requirePermission\(PERMISSIONS\.aiUse\)/);
+    expect(listRoute).toMatch(/requireFloorAssistant\(\)/);
+
+    const detailRoute = readFileSync("src/app/api/ai/conversations/[id]/route.ts", "utf8");
+    expect(detailRoute).not.toMatch(/requireMember\(\)/);
+    expect(detailRoute).toMatch(/requireAnyPermission\(\s*PERMISSIONS\.aiUse,\s*PERMISSIONS\.menuView/);
+    expect(detailRoute).toMatch(/getConversationMode\(/);
+    expect(detailRoute).toMatch(/requireFloorAssistant\(\)/);
+    expect(detailRoute).toMatch(/requirePermission\(PERMISSIONS\.aiUse\)/);
+  });
+
   it("no longer carries the retired AI permissions anywhere", () => {
     // §4/§11: the tenant Agent Builder and the tenant knowledge manager are
     // gone, and the widget surface turned out to be protected by an intersection

@@ -53,6 +53,16 @@ export function PrintJobModal() {
             <div className="space-y-1 py-4">
               <p className="text-lg font-semibold text-foreground">به چاپگر ارسال شد</p>
               {state?.printerName ? <p className="text-sm text-muted-foreground" dir="auto">{state.printerName}</p> : null}
+              <p className="text-xs text-muted-foreground">
+                تحویل به صف سیستم‌عامل انجام شد (خروجی فیزیکی کاغذ را بررسی کنید).
+              </p>
+              {state?.usedFallback ? (
+                <p className="text-xs text-amber-700 dark:text-amber-300" dir="auto">
+                  {state.fallbackFromPrinterName
+                    ? `چاپ از طریق چاپگر جایگزین (به‌جای «${state.fallbackFromPrinterName}») انجام شد.`
+                    : "چاپ از طریق چاپگر جایگزین انجام شد."}
+                </p>
+              ) : null}
             </div>
           ) : (
             <ol className="space-y-2 py-3 text-start text-sm">
@@ -68,9 +78,21 @@ export function PrintJobModal() {
                   </li>
                 );
               })}
-              {state?.printerName ? <li className="text-muted-foreground" dir="auto">چاپگر: {state.printerName}</li> : null}
+              {state?.printerName ? (
+                <li className="text-muted-foreground" dir="auto">
+                  {state.usedFallback ? `چاپگر جایگزین: ${state.printerName}` : `چاپگر: ${state.printerName}`}
+                </li>
+              ) : null}
+              {state?.message ? (
+                <li className="text-xs text-muted-foreground" dir="auto">{state.message}</li>
+              ) : null}
               {phase === "failed" && state?.error ? (
                 <li role="alert" className="text-red-700 dark:text-red-300">{printerErrorMessage(state.error)}</li>
+              ) : null}
+              {phase === "failed" && (state?.ambiguous || state?.error === "job_timeout" || state?.error === "print_failed") ? (
+                <li className="text-xs text-amber-700 dark:text-amber-300">
+                  برای جلوگیری از چاپ تکراری، ارسال خودکار مجدد انجام نشد. پیش از چاپ دوباره، خروجی چاپگر را بررسی کنید.
+                </li>
               ) : null}
             </ol>
           )}

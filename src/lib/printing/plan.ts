@@ -38,7 +38,7 @@
  * that does not exist.
  */
 import { query } from "../db";
-import { getPrintTemplate, listPrintTemplates, type SavedPrintTemplate } from "../print-templates-service";
+import { listPrintTemplates, type SavedPrintTemplate } from "../print-templates-service";
 import {
   builtInTemplate,
   BUILT_IN_TEMPLATES,
@@ -53,7 +53,7 @@ import { isStoredLogo, type BusinessLogo } from "../business-logo";
 import type { PrintBranding } from "./document-bridge";
 import type { PrinterErrorCode } from "./errors";
 import {
-  paperOfPrinter,
+  printerAcceptsDocument,
   printerAcceptsPaper,
   purposeForDocument,
   resolvePrinter,
@@ -65,6 +65,7 @@ import {
   legacyBehaviorOf,
   printerClassOf,
   printerSupportsDrawer,
+  printerTargetOf,
   resolvedPaperOf,
   type PrinterPurpose,
   type StoredPrinter,
@@ -94,6 +95,8 @@ export interface PrintPlan {
   documentType: PrintDocumentType;
   printer: StoredPrinter;
   fallbackPrinter: StoredPrinter | null;
+  /** Configured compatible backup printer that can take over if `printer` fails local delivery at runtime. */
+  backupPrinter?: StoredPrinter | null;
   routingPrinter: RoutingPrinter;
   template: PrintTemplate;
   templateId: string | null;
@@ -331,7 +334,7 @@ export async function loadPrintRules(locationId: string): Promise<PrintRuleRef[]
       .map((row) => ({
         documentType: row.document_type as DocType,
         printerId: row.printer_id,
-        fallbackPrinterId: row.fallback_printer_id,
+        fallbackPrinterId: row.printer_id ? row.fallback_printer_id : null,
         templateKey: row.template_key,
         templateId: row.template_id,
       }));
@@ -416,6 +419,20 @@ export interface ResolvePrintPlanInput {
   requestedTemplateId?: string | null;
   /** Test prints and diagnostics may want the fallback recorded but not used. */
   includeBranding?: boolean;
+  /** Primary printer id that definitively failed local delivery on attempt 1. */
+  failedPrinterId?: string | null;
+  /**
+   * Immutable template revision snapshot captured on attempt 1. When present
+   * on a fallback attempt, the backup printer is still validated against this
+   * template's paper/document compatibility, without reloading concurrently
+   * modified template rows from the database.
+   */
+  lockedTemplate?: ResolvedTemplate | null;
+  /**
+   * Immutable branding snapshot captured on attempt 1 so a fallback attempt
+   * never silently reloads concurrently modified business/branch identity.
+   */
+  lockedBranding?: PrintBranding | null;
 }
 
 /**
@@ -445,6 +462,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     printers: routable,
     rules,
     requestedPrinterId: input.requestedPrinterId ?? null,
+    ...(input.failedPrinterId ? { failedPrinterIds: [input.failedPrinterId] } : {}),
   });
 
   if (!resolved.printer) {
@@ -460,26 +478,77 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     : null;
 
   const rule = rules.find((item) => item.documentType === input.documentType) ?? null;
-  const saved = await listPrintTemplates(input.locationId);
 
-  // The pre-0212 template key, read only as the resolver's last resort.
-  const legacyTemplateKey =
-    typeof (printerRow.connection as { templateKey?: unknown })?.templateKey === "string"
-      ? ((printerRow.connection as { templateKey: string }).templateKey)
+  let resolvedChoice: ResolvedTemplate;
+
+  if (input.lockedTemplate) {
+    if (input.lockedTemplate.template.docType !== input.documentType) {
+      return { ok: false, error: "template_invalid" };
+    }
+    if (!printerAcceptsPaper(resolved.printer.printerClass, input.lockedTemplate.template.paper)) {
+      return { ok: false, error: "template_invalid" };
+    }
+    resolvedChoice = input.lockedTemplate;
+  } else {
+    const saved = await listPrintTemplates(input.locationId);
+
+    const templateOwnerRow =
+      input.failedPrinterId && resolved.fallbackFrom && fallbackRow ? fallbackRow : printerRow;
+    const templateOwnerRouting =
+      input.failedPrinterId && resolved.fallbackFrom ? resolved.fallbackFrom : resolved.printer;
+
+    // The pre-0212 template key, read only as the resolver's last resort.
+    const legacyTemplateKey =
+      typeof (templateOwnerRow.connection as { templateKey?: unknown })?.templateKey === "string"
+        ? ((templateOwnerRow.connection as { templateKey: string }).templateKey)
+        : null;
+
+    const choice = resolveTemplateChoice({
+      documentType: input.documentType,
+      printerPaper: templateOwnerRouting.paper,
+      printerClass: templateOwnerRouting.printerClass,
+      requestedTemplateId: input.requestedTemplateId ?? null,
+      rule,
+      saved,
+      legacyPrinterTemplateKey: legacyTemplateKey,
+    });
+    if (!choice.ok) return { ok: false, error: choice.error };
+    if (
+      input.failedPrinterId &&
+      !printerAcceptsPaper(resolved.printer.printerClass, choice.choice.template.paper)
+    ) {
+      return { ok: false, error: "template_invalid" };
+    }
+    resolvedChoice = choice.choice;
+  }
+
+  let backupPrinter: StoredPrinter | null = null;
+  if (!input.requestedPrinterId && !input.failedPrinterId && resolved.reason === "rule" && rule?.fallbackPrinterId) {
+    const candidateRouting = routable.find(
+      (printer) =>
+        printer.id === rule.fallbackPrinterId &&
+        printer.id !== resolved.printer!.id &&
+        printerAcceptsDocument(printer, input.documentType),
+    );
+    const candidateRow = candidateRouting
+      ? printers.find((printer) => String(printer.id) === candidateRouting.id) ?? null
       : null;
+    if (
+      candidateRouting &&
+      candidateRow &&
+      printerTargetOf(candidateRow.connection) !== null &&
+      resolvedChoice.template.docType === input.documentType &&
+      printerAcceptsPaper(candidateRouting.printerClass, resolvedChoice.template.paper)
+    ) {
+      backupPrinter = candidateRow;
+    }
+  }
 
-  const choice = resolveTemplateChoice({
-    documentType: input.documentType,
-    printerPaper: resolved.printer.paper,
-    printerClass: resolved.printer.printerClass,
-    requestedTemplateId: input.requestedTemplateId ?? null,
-    rule,
-    saved,
-    legacyPrinterTemplateKey: legacyTemplateKey,
-  });
-  if (!choice.ok) return { ok: false, error: choice.error };
-
-  const branding = input.includeBranding === false ? { name: "" } : await loadPrintBranding(input.locationId);
+  const branding = input.lockedBranding
+    ? input.lockedBranding
+    : input.includeBranding === false
+      ? { name: "" }
+      : await loadPrintBranding(input.locationId);
 
   return {
     ok: true,
@@ -488,12 +557,13 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       documentType: input.documentType,
       printer: printerRow,
       fallbackPrinter: fallbackRow,
+      backupPrinter,
       routingPrinter: resolved.printer,
-      template: choice.choice.template,
-      templateId: choice.choice.templateId,
-      templateKey: choice.choice.templateKey,
-      templateVersion: choice.choice.templateVersion,
-      templateSource: choice.choice.source,
+      template: resolvedChoice.template,
+      templateId: resolvedChoice.templateId,
+      templateKey: resolvedChoice.templateKey,
+      templateVersion: resolvedChoice.templateVersion,
+      templateSource: resolvedChoice.source,
       paper: resolvedPaperOf({ ...printerRow, kind: printerRow.kind }),
       branding,
       reason: resolved.reason,
@@ -518,12 +588,4 @@ export function selectableTemplates(
   };
 }
 
-/** The saved default template of a document type, if the branch has one. */
-export async function defaultSavedTemplate(locationId: string, documentType: PrintDocumentType): Promise<SavedPrintTemplate | null> {
-  const saved = await listPrintTemplates(locationId);
-  return saved.find((row) => row.docType === documentType && row.isDefault) ?? null;
-}
-
-/** One saved template, validated to belong to this branch. */
-export { getPrintTemplate };
 export type { SavedPrintTemplate };

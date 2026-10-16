@@ -13,10 +13,13 @@ import { api, SecondaryButton } from "@/app/dashboard/ui";
 import type {
   PayrollPaymentAccount,
   PayrollRun,
+  PayrollRunAllocation,
   PayrollRunLine,
   PayrollRunStatus,
   PayrollRunSummary,
 } from "@/lib/payroll-types";
+import type { DimensionValueRecord } from "@/lib/accounting-dimensions";
+import { dimensionValueLabel } from "./dimension-catalog";
 
 /**
  * The run statuses, as the shared `StatusBadge` tones rather than a private
@@ -75,10 +78,13 @@ export function PayrollRunItem({
   onPay,
   onVoid,
   initialLines,
+  dimensionValues,
 }: {
   run: PayrollRunSummary;
   /** Already-authorized source lookup; opens immutable lines without fetching them twice. */
   initialLines?: PayrollRunLine[];
+  /** The dimension catalogue for rendering allocation tuples (issue #868). */
+  dimensionValues?: readonly DimensionValueRecord[];
   canManage: boolean;
   busy: boolean;
   working: boolean;
@@ -92,9 +98,14 @@ export function PayrollRunItem({
   const dateId = useId();
 
   const [open, setOpen] = useState(initialLines !== undefined);
-  const [details, setDetails] = useState<{ state: "idle" | "loading" | "failed" | "ready"; lines: PayrollRunLine[] }>({
+  const [details, setDetails] = useState<{
+    state: "idle" | "loading" | "failed" | "ready";
+    lines: PayrollRunLine[];
+    allocations: PayrollRunAllocation[];
+  }>({
     state: initialLines === undefined ? "idle" : "ready",
     lines: initialLines ?? [],
+    allocations: [],
   });
   const [accountId, setAccountId] = useState("");
   const [paidDate, setPaidDate] = useState("");
@@ -112,10 +123,14 @@ export function PayrollRunItem({
   }, []);
 
   const loadDetails = useCallback(async () => {
-    setDetails({ state: "loading", lines: [] });
+    setDetails({ state: "loading", lines: [], allocations: [] });
     const { ok, data } = await api<{ run: PayrollRun }>(`/api/ledger/payroll/runs/${run.id}`);
     if (!mounted.current) return;
-    setDetails(ok ? { state: "ready", lines: data.run.lines } : { state: "failed", lines: [] });
+    setDetails(
+      ok
+        ? { state: "ready", lines: data.run.lines, allocations: data.run.allocations ?? [] }
+        : { state: "failed", lines: [], allocations: [] },
+    );
   }, [run.id]);
 
   function toggleDetails() {
@@ -218,10 +233,48 @@ export function PayrollRunItem({
           ) : details.state !== "ready" ? (
             <LoadingSkeleton rows={2} compact label="در حال بارگذاری جزئیات لیست حقوق" />
           ) : (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {details.lines.map((line, index) => (
-                <LineDetails key={line.userId ?? `line-${index}`} line={line} />
-              ))}
+            <div className="space-y-3">
+              <div className="grid gap-2 sm:grid-cols-2">
+                {details.lines.map((line, index) => (
+                  <LineDetails key={line.userId ?? `line-${index}`} line={line} />
+                ))}
+              </div>
+              {/* Issue #868 — the dimension split this run was accrued with:
+                  each member's shares with their exact Rial amounts and
+                  attribution tuples. Shares are annotations on the member's
+                  line, never rows of their own — the run total cannot double. */}
+              {details.allocations.length > 0 ? (
+                <details className="rounded-lg bg-muted/60 px-3 py-2.5 text-sm">
+                  <summary className="cursor-pointer font-medium text-foreground">
+                    تخصیص هزینهٔ ابعاد تحلیلی ({toPersianDigits(details.allocations.length)} نفر)
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    {details.allocations.map((allocation) => (
+                      <div key={allocation.userId} className="rounded-md border border-border/60 px-2.5 py-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-medium text-foreground">{allocation.fullName}</span>
+                        </div>
+                        <ul className="mt-1 space-y-1">
+                          {allocation.shares.map((share, shareIndex) => (
+                            <li key={shareIndex} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
+                              <span className="text-muted-foreground">
+                                سهم {toPersianDigits(String(share.shareBp / 100))}٪
+                                {share.label ? ` · ${share.label}` : ""}
+                              </span>
+                              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                <span className="tabular-nums text-foreground">{money.formatText(share.amount)}</span>
+                                <span className="text-muted-foreground">
+                                  {dimensionTupleText(dimensionValues, share.dimensions)}
+                                </span>
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
             </div>
           )}
         </div>
@@ -297,6 +350,17 @@ export function PayrollRunItem({
  * Every figure is the run's snapshot: what the standing terms and the business's
  * rates produced that month, not what they would produce today.
  */
+/** One share's attribution tuple as "kind: value · name" lines, archived included. */
+function dimensionTupleText(
+  values: readonly DimensionValueRecord[] | undefined,
+  dimensions: PayrollRunAllocation["shares"][number]["dimensions"],
+): string {
+  const parts = (["cost_center", "profit_center", "department", "detail"] as const)
+    .filter((kind) => dimensions[kind])
+    .map((kind) => dimensionValueLabel(values, dimensions[kind]));
+  return parts.length > 0 ? parts.join(" · ") : "بدون بُعد";
+}
+
 function LineDetails({ line }: { line: PayrollRunLine }) {
   const money = useMoney();
   const fmt = (value: string) => money.formatText(value, { withUnit: false });

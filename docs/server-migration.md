@@ -18,7 +18,7 @@ rather than the whole install, skip to
 | Thing | Where it lives now | How it moves |
 |---|---|---|
 | **All data** — businesses, orders, ledger, inventory, users/passwords, dashboard settings (incl. S3 + AI keys) | the `pos` database | `pg_dump --format=custom` → `npm run db:restore` |
-| **App code** | git / `ghcr.io/hamidnoshady/cafe-restaurant-pos` | rebuilt or re-pulled on the new host — nothing to copy |
+| **App code** | git / `ghcr.io/hamidnoshady/biza-miz` | rebuilt or re-pulled on the new host — nothing to copy |
 | **Secrets** — `JWT_SECRET`, `POSTGRES_PASSWORD`, `REMOTE_SYNC_TOKEN`, `WEBAUTHN_*` | compose env / `.env` / the platform's env panel | copy by hand, before you start |
 | **Backup artifacts** | `pos-backups` volume (`BACKUP_DIR=/app/backups`) | optional — history only, not needed to run |
 | Uploaded files | — | nothing to move; this app stores no user uploads on disk |
@@ -179,7 +179,7 @@ OpenLiteSpeed → Traefik front door that already terminates TLS on that host.
 
 The image comes from `.github/workflows/publish.yml`, which runs on **every push
 to `main`** (gated by type check, unit tests and a production build on the exact
-merge commit) and pushes `ghcr.io/hamidnoshady/cafe-restaurant-pos` as
+merge commit) and pushes `ghcr.io/hamidnoshady/biza-miz` as
 `sha-<short>` and `latest`. srv1 cannot reach `ghcr.io` — it is filtered at the
 network layer there — so the stack pulls the same image through the
 **`ghcr-mirror.liara.ir`** pull-through cache, which is reachable. That is the

@@ -47,7 +47,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   }
   if (body.color !== undefined) set("color", body.color?.trim() || null);
   if (body.assignedWaiterId !== undefined) {
-    const waiterId = await validWaiterId(location.id, body.assignedWaiterId);
+    const waiterId = await validWaiterId(session.businessId, location.id, body.assignedWaiterId);
     if (waiterId === false) return NextResponse.json({ error: "waiter_not_found" }, { status: 400 });
     set("assigned_waiter_id", waiterId);
   }

@@ -9,6 +9,13 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
 const { computePaths } = require("./app-paths");
+const {
+  AUTO_INSTALL_GRACE_MS,
+  MAX_LOCAL_POSTPONE_MS,
+  decideAutoInstall,
+  evaluateInstallSafety,
+  parsePolicyDocument,
+} = require("./update-policy");
 
 const STATES = new Set([
   "checking", "no_update", "update_available", "downloading", "paused", "verifying",
@@ -128,6 +135,7 @@ class DesktopUpdateEngine extends EventEmitter {
     this.backupDir = path.join(paths.backupDir, "pre-update");
     this.statePath = path.join(paths.configDir, "update-state.json");
     this.targetPath = path.join(paths.configDir, "update-target.json");
+    this.policyPath = path.join(paths.configDir, "update-policy.json");
     this.expectedPublisher = String(expectedPublisher || process.env.WINDOWS_EXPECTED_SIGNER || "").trim();
     this.manifestPublicKey = String(manifestPublicKey || process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM || "").replaceAll("\\n", "\n").trim();
     if (!this.manifestPublicKey) {
@@ -148,6 +156,10 @@ class DesktopUpdateEngine extends EventEmitter {
       errorDetail: null, checkedAt: null, updatedAt: new Date().toISOString(),
       policy: { automaticChecks: true, backgroundDownload: false, automaticInstall: false, channel: "stable" },
       installOnNextRestart: false, previousVersion: null,
+      // Central's resolved policy (see update-policy.js) and the unattended
+      // install's visible status. Both are null on an install Central never
+      // configured, which behaves exactly as before this layer existed.
+      centralPolicy: null, autoInstall: null,
     };
   }
 
@@ -194,7 +206,112 @@ class DesktopUpdateEngine extends EventEmitter {
       automaticInstall: false,
       channel,
     };
+    this.enforceCentralPolicy();
     this.persist(); this.emit("state", this.publicState()); return this.publicState();
+  }
+
+  centralPolicyActive(now = new Date()) {
+    const central = this.state.centralPolicy;
+    return Boolean(central && Date.parse(central.expiresAt) > now.getTime());
+  }
+
+  /**
+   * While an unexpired central policy governs, its check/download/channel
+   * values win over local preferences. Unattended install is never copied into
+   * the local policy: it is read from `centralPolicy` at decision time.
+   */
+  enforceCentralPolicy() {
+    if (!this.centralPolicyActive()) return;
+    const { policy } = this.state.centralPolicy;
+    this.state.policy = {
+      ...this.state.policy,
+      automaticChecks: policy.automaticChecks,
+      backgroundDownload: policy.backgroundDownload && !policy.hold,
+      channel: policy.channel ?? this.state.policy.channel,
+    };
+  }
+
+  /**
+   * Reads the document the local backend wrote after an authenticated Central
+   * exchange. A document is applied only if it validates and is not older than
+   * the one already held: an older policy version is a rollback, and a copy
+   * from the same version only refreshes its lifetime.
+   */
+  applyPersistedPolicy() {
+    try {
+      const metadata = fs.statSync(this.policyPath);
+      if (!metadata.isFile() || metadata.size < 2 || metadata.size > 16 * 1024) throw updateError("persisted_policy_invalid");
+      const parsed = parsePolicyDocument(JSON.parse(fs.readFileSync(this.policyPath, "utf8")));
+      if (!parsed.ok) throw updateError(parsed.error);
+      const held = this.state.centralPolicy;
+      if (held && parsed.document.policyVersion < held.policyVersion) return false;
+      if (held && parsed.document.policyVersion === held.policyVersion && Date.parse(parsed.document.issuedAt) <= Date.parse(held.issuedAt)) return false;
+      this.state.centralPolicy = parsed.document;
+      this.enforceCentralPolicy();
+      this.persist(); this.emit("state", this.publicState());
+      return true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") this.logger.warn("Central update policy ignored", { code: error?.code, detail: error?.message });
+      return false;
+    }
+  }
+
+  setAutoInstall(patch) {
+    const previous = this.state.autoInstall ?? {};
+    const next = { postponedUntil: previous.postponedUntil ?? null, ...patch, evaluatedAt: new Date().toISOString() };
+    const changed = ["allowed", "reason", "scheduledFor", "postponedUntil"].some((key) => previous[key] !== next[key])
+      || JSON.stringify(previous.blockers ?? []) !== JSON.stringify(next.blockers ?? []);
+    this.state.autoInstall = next;
+    if (changed) { this.persist(); this.emit("state", this.publicState()); }
+  }
+
+  /** The user may defer an announced unattended install, but only briefly. */
+  postponeAutoInstall(hours) {
+    if (this.state.state !== "ready_to_install") throw updateError("update_not_ready");
+    const requested = Math.max(0, Number(hours) || 0) * 3_600_000;
+    const until = new Date(Date.now() + Math.min(requested, MAX_LOCAL_POSTPONE_MS)).toISOString();
+    this.setAutoInstall({ ...(this.state.autoInstall ?? {}), scheduledFor: null, postponedUntil: until, reason: "postponed_locally", allowed: false });
+    return this.publicState();
+  }
+
+  /**
+   * One evaluation of the unattended install. Returns what the caller should do;
+   * it never installs by itself. Policy permission, safety facts and a visible
+   * grace period must ALL agree, and any doubt is a "not now".
+   */
+  async autoInstallTick({ now = new Date(), readSafety, readSystem } = {}) {
+    if (this.state.state !== "ready_to_install") {
+      if (this.state.autoInstall) { this.state.autoInstall = null; this.persist(); this.emit("state", this.publicState()); }
+      return { action: "none" };
+    }
+    const central = this.state.centralPolicy;
+    const decision = decideAutoInstall({
+      policy: central?.policy ?? null, expiresAt: central?.expiresAt, now,
+      postponedUntil: this.state.autoInstall?.postponedUntil ?? null,
+    });
+    if (!decision.allowed) {
+      this.setAutoInstall({ allowed: false, reason: decision.reason, scheduledFor: null, blockers: [] });
+      return { action: "blocked", reason: decision.reason };
+    }
+    let facts = null;
+    try { facts = { ...(readSystem ? await readSystem() : {}), ...(await readSafety()) }; } catch (error) {
+      this.logger.warn("Install safety facts unavailable", { detail: error?.message });
+    }
+    const safety = evaluateInstallSafety(facts, central.policy);
+    if (!safety.safe) {
+      this.setAutoInstall({ allowed: false, reason: "unsafe", scheduledFor: null, blockers: safety.blockers });
+      return { action: "blocked", reason: "unsafe", blockers: safety.blockers };
+    }
+    let scheduledFor = this.state.autoInstall?.allowed ? this.state.autoInstall.scheduledFor : null;
+    // A schedule left over from before a restart or a long suspend was announced
+    // for a moment nobody saw; announce it again instead of installing at once.
+    if (scheduledFor && now.getTime() - Date.parse(scheduledFor) > 10 * 60_000) scheduledFor = null;
+    if (!scheduledFor) {
+      this.setAutoInstall({ allowed: true, reason: decision.reason, scheduledFor: new Date(now.getTime() + AUTO_INSTALL_GRACE_MS).toISOString(), blockers: [] });
+      return { action: "scheduled" };
+    }
+    if (Date.parse(scheduledFor) > now.getTime()) return { action: "waiting" };
+    return { action: "install" };
   }
 
   verifyManifestSignature(manifest) {
@@ -214,6 +331,7 @@ class DesktopUpdateEngine extends EventEmitter {
   }
 
   checkPersistedTarget() {
+    this.applyPersistedPolicy();
     if (!this.state.policy.automaticChecks) return this.publicState();
     if (["downloading", "paused", "verifying", "ready_to_install", "backup_in_progress", "installing", "restarting", "recovery_required"].includes(this.state.state)) {
       return this.publicState();

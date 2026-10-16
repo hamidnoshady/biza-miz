@@ -24,3 +24,35 @@ export function formatShortDateTime(value: string): string {
     new Date(value),
   );
 }
+
+export type ConversationDateBucket = "today" | "yesterday" | "earlier";
+
+export const CONVERSATION_BUCKET_LABELS: Record<ConversationDateBucket, string> = {
+  today: "امروز",
+  yesterday: "دیروز",
+  earlier: "پیش‌تر",
+};
+
+const PERSIAN_DAY_FMT = new Intl.DateTimeFormat("fa-IR-u-ca-persian", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/**
+ * Classifies an ISO timestamp into Today («امروز»), Yesterday («دیروز»), or
+ * Earlier («پیش‌تر») in the Persian/Shamsi calendar.
+ */
+export function conversationDateBucket(
+  value: string,
+  now: Date = new Date(),
+): ConversationDateBucket {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "earlier";
+  const todayKey = PERSIAN_DAY_FMT.format(now);
+  if (PERSIAN_DAY_FMT.format(date) === todayKey) return "today";
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const yesterdayKey = PERSIAN_DAY_FMT.format(yesterday);
+  if (PERSIAN_DAY_FMT.format(date) === yesterdayKey) return "yesterday";
+  return "earlier";
+}

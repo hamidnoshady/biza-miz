@@ -298,6 +298,190 @@ describe("the printer connection model — after the full migration history", ()
     expect(indexes).toHaveLength(1);
   });
 
+  it("installs durable diagnostics, immutable snapshot column, one-fallback-per-primary constraint, and safe historical provenance repair (migrations 0222 and 0223)", async () => {
+    const { rows: cols } = await ownerClient.query<{ column_name: string }>(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_name = 'print_jobs'
+          AND column_name IN (
+            'attempt_number',
+            'previous_job_id',
+            'route_reason',
+            'delivery_outcome',
+            'printer_name',
+            'fallback_from_printer_id',
+            'fallback_from_printer_name',
+            'template_name',
+            'template_paper',
+            'template_source',
+            'render_snapshot'
+          )
+        ORDER BY column_name`,
+    );
+    expect(cols.map((c) => c.column_name)).toEqual([
+      "attempt_number",
+      "delivery_outcome",
+      "fallback_from_printer_id",
+      "fallback_from_printer_name",
+      "previous_job_id",
+      "printer_name",
+      "render_snapshot",
+      "route_reason",
+      "template_name",
+      "template_paper",
+      "template_source",
+    ]);
+
+    // The two reprints inserted above under 'receipt:attempt-test' keep attempt_number = 1,
+    // previous_job_id = NULL, and route_reason = 'unknown':
+    const { rows: historicalReprints } = await ownerClient.query<{
+      attempt_number: number;
+      previous_job_id: string | null;
+      route_reason: string;
+    }>(
+      `SELECT attempt_number, previous_job_id, route_reason
+         FROM print_jobs
+        WHERE location_id = $1 AND print_request_id = 'receipt:attempt-test'
+        ORDER BY created_at ASC`,
+      [seededLocationId],
+    );
+    expect(historicalReprints).toEqual([
+      { attempt_number: 1, previous_job_id: null, route_reason: "unknown" },
+      { attempt_number: 1, previous_job_id: null, route_reason: "unknown" },
+    ]);
+
+    const { rows: backupPrinter } = await ownerClient.query<{ id: string }>(
+      `INSERT INTO printers (location_id, name, kind, printer_class, paper, paper_width_mm, is_active, connection)
+       VALUES ($1, 'Backup Mig Printer', 'receipt', 'thermal', 'thermal80', 80, true, '{"type":"windows","systemName":"Backup-Mig"}'::jsonb)
+       RETURNING id`,
+      [seededLocationId],
+    );
+    const backupPrinterId = backupPrinter[0].id;
+
+    const validSnapshot = JSON.stringify({
+      documentType: "receipt",
+      documentSource: "order-receipt",
+      primaryPrinterId: seededPrinterId,
+      job: { type: "receipt" },
+      template: {
+        templateKey: "receipt-standard",
+        templateVersion: 1,
+        template: { name: "رسید", paper: "thermal80", blocks: [] },
+      },
+      branding: {},
+    });
+
+    const { rows: primary } = await ownerClient.query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, printer_id, status, error_code, delivery_outcome, attempt_number, route_reason, render_snapshot)
+       VALUES ($1, 'receipt', $2, 'failed', 'printer_offline', 'not_delivered', 1, 'rule', $3::jsonb)
+       RETURNING id`,
+      [seededLocationId, seededPrinterId, validSnapshot],
+    );
+    const primaryId = primary[0].id;
+
+    // First fallback attempt linked via previous_job_id succeeds:
+    const { rows: fallback1 } = await ownerClient.query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, printer_id, status, delivery_outcome, attempt_number, previous_job_id, route_reason, fallback_from_printer_id, render_snapshot)
+       VALUES ($1, 'receipt', $2, 'handed_off', 'handed_off', 2, $3, 'runtime_fallback', $4, $5::jsonb)
+       RETURNING id`,
+      [seededLocationId, backupPrinterId, primaryId, seededPrinterId, validSnapshot],
+    );
+    expect(fallback1[0].id).toMatch(/^[0-9a-f-]{36}$/i);
+
+    // A second fallback attempt for the same primary job row is rejected by idx_print_jobs_unique_previous_job:
+    await expect(
+      ownerClient.query(
+        `INSERT INTO print_jobs
+           (location_id, document_type, printer_id, status, delivery_outcome, attempt_number, previous_job_id, route_reason)
+         VALUES ($1, 'receipt', $2, 'handed_off', 'handed_off', 2, $3, 'runtime_fallback')`,
+        [seededLocationId, backupPrinterId, primaryId],
+      ),
+    ).rejects.toThrow();
+
+    // An attempt_number > 2 is rejected by print_jobs_attempt_number_check:
+    await expect(
+      ownerClient.query(
+        `INSERT INTO print_jobs
+           (location_id, document_type, printer_id, status, attempt_number)
+         VALUES ($1, 'receipt', $2, 'sending', 3)`,
+        [seededLocationId, seededPrinterId],
+      ),
+    ).rejects.toThrow();
+
+    // Simulate a database that applied the earlier 0222 revision (stored in
+    // schema_migrations with its prior SHA-256 checksum) before 0223 ran,
+    // where the earlier 0222 backfill falsely linked an intentional reprint as attempt 2:
+    const { rows: reprintRows } = await ownerClient.query<{ id: string }>(
+      `SELECT id FROM print_jobs WHERE location_id = $1 AND print_request_id = 'receipt:attempt-test' ORDER BY created_at ASC`,
+      [seededLocationId],
+    );
+    await ownerClient.query(
+      `UPDATE print_jobs
+          SET attempt_number = 2,
+              previous_job_id = $1,
+              route_reason = 'runtime_fallback',
+              fallback_from_printer_id = $2,
+              fallback_from_printer_name = 'Old Primary'
+        WHERE id = $3`,
+      [reprintRows[0].id, seededPrinterId, reprintRows[1].id],
+    );
+    await ownerClient.query(
+      `UPDATE schema_migrations
+          SET checksum = '4450f27e4262cb3586dc553edc5c273f823c0f15643a9ab3886d66c38886f476'
+        WHERE filename = '0222_print_jobs_diagnostics_and_fallback.sql'`,
+    );
+    await ownerClient.query(
+      `DELETE FROM schema_migrations WHERE filename = '0223_print_jobs_correct_historical_provenance.sql'`,
+    );
+
+    // Run `runMigrations`: must repair 0222's checksum and execute 0223:
+    const migResult = await runMigrations({ databaseUrl: urlFor(databaseName), quiet: true });
+    expect(migResult.repairedChecksums).toContain("0222_print_jobs_diagnostics_and_fallback.sql");
+    expect(migResult.applied).toBe(1);
+
+    // Verify 0223 repaired the falsely-linked reprint back to attempt 1 / unknown provenance:
+    const { rows: repairedReprint } = await ownerClient.query<{
+      attempt_number: number;
+      previous_job_id: string | null;
+      route_reason: string;
+      fallback_from_printer_id: string | null;
+      fallback_from_printer_name: string | null;
+    }>(
+      `SELECT attempt_number, previous_job_id, route_reason, fallback_from_printer_id, fallback_from_printer_name
+         FROM print_jobs
+        WHERE id = $1`,
+      [reprintRows[1].id],
+    );
+    expect(repairedReprint[0]).toEqual({
+      attempt_number: 1,
+      previous_job_id: null,
+      route_reason: "unknown",
+      fallback_from_printer_id: null,
+      fallback_from_printer_name: null,
+    });
+
+    // Verify 0223 preserved the legitimate runtime fallback row untouched:
+    const { rows: preservedFallback } = await ownerClient.query<{
+      attempt_number: number;
+      previous_job_id: string | null;
+      route_reason: string;
+      fallback_from_printer_id: string | null;
+    }>(
+      `SELECT attempt_number, previous_job_id, route_reason, fallback_from_printer_id
+         FROM print_jobs
+        WHERE id = $1`,
+      [fallback1[0].id],
+    );
+    expect(preservedFallback[0]).toEqual({
+      attempt_number: 2,
+      previous_job_id: primaryId,
+      route_reason: "runtime_fallback",
+      fallback_from_printer_id: seededPrinterId,
+    });
+  });
+
   it("keeps every converted row readable by the runtime model", async () => {
     // The settings screen and the resolver read a printer through the row +
     // `connection`; a row that says `type` and a target must be usable, and a

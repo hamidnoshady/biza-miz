@@ -70,6 +70,7 @@ function member(id: string, fullName: string, role: string, monthlyWage: string 
     nonTaxableAllowance: "0",
     fixedDeduction: "0",
     advanceOutstanding: "0",
+    defaultDimensions: {},
     ...extra,
   };
 }

@@ -155,7 +155,7 @@ function runLoggedCommand(executable, args, logger, name) {
 }
 
 function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion = "unknown", options = {}) {
-  const { pgToolsDir, emergencyBackupDir, updateStatePath, updateTargetPath } = options;
+  const { pgToolsDir, emergencyBackupDir, updateStatePath, updateTargetPath, updatePolicyPath } = options;
   return {
     DATABASE_URL: runtimeUrl,
     BACKUP_DATABASE_URL: superuserUrl,
@@ -199,6 +199,7 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     ...(emergencyBackupDir ? { RESTORE_EMERGENCY_DIR: emergencyBackupDir } : {}),
     ...(updateStatePath ? { DESKTOP_UPDATE_STATE_PATH: updateStatePath } : {}),
     ...(updateTargetPath ? { DESKTOP_UPDATE_TARGET_PATH: updateTargetPath } : {}),
+    ...(updatePolicyPath ? { DESKTOP_UPDATE_POLICY_PATH: updatePolicyPath } : {}),
   };
 }
 
@@ -485,6 +486,7 @@ class BackendManager {
       emergencyBackupDir,
       updateStatePath: path.join(desktopPaths.configDir, "update-state.json"),
       updateTargetPath: path.join(desktopPaths.configDir, "update-target.json"),
+      updatePolicyPath: path.join(desktopPaths.configDir, "update-policy.json"),
     });
     this.server = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
       cwd: runtimeDir,
@@ -521,6 +523,11 @@ class BackendManager {
     saveConfig(this.configPath, this.config);
   }
 
+  /**
+   * Facts the update engine gates an install on. Every count comes from the
+   * local database; a query that cannot run throws, which the caller treats as
+   * "unsafe" (never as "nothing is open").
+   */
   async preUpdateSafety() {
     if (!this.pg) throw new Error("PostgreSQL is not running.");
     const client = this.pg.getPgClient("pos", "127.0.0.1");
@@ -529,9 +536,14 @@ class BackendManager {
       const { rows } = await client.query(
         `SELECT
            (SELECT count(*)::int FROM employee_shifts WHERE ended_at IS NULL) AS open_shifts,
-           (SELECT count(*)::int FROM orders WHERE status IN ('open','held')) AS open_orders`,
+           (SELECT count(*)::int FROM orders WHERE status IN ('open','held')) AS open_orders,
+           (SELECT count(*)::int FROM print_jobs WHERE status IN ('created','preparing','routing','sending') AND created_at > now() - interval '10 minutes') AS pending_print_jobs`,
       );
-      return { openShifts: Number(rows[0]?.open_shifts ?? 0), openOrders: Number(rows[0]?.open_orders ?? 0) };
+      return {
+        openShifts: Number(rows[0]?.open_shifts ?? 0),
+        openOrders: Number(rows[0]?.open_orders ?? 0),
+        pendingPrintJobs: Number(rows[0]?.pending_print_jobs ?? 0),
+      };
     } finally {
       await client.end().catch(() => {});
     }

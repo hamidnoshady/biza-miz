@@ -12,6 +12,7 @@
  * Types only — safe to import from a client component without dragging `pg`
  * along with it.
  */
+import type { LineDimensions } from "./accounting-dimensions";
 
 export type PayrollRunStatus = "accrued" | "paid" | "voided";
 
@@ -36,6 +37,11 @@ export interface StaffWage {
   fixedDeduction: string;
   /** Salary advances still to be recovered from this member's pay, integer Rial. */
   advanceOutstanding: string;
+  /**
+   * Issue #868 — the member's default dimension tuple: the standing attribution
+   * a run falls back to when its accrual carries no per-run allocation for them.
+   */
+  defaultDimensions: LineDimensions;
 }
 
 /**
@@ -98,6 +104,31 @@ export interface PayrollRunSummary {
 
 export interface PayrollRun extends PayrollRunSummary {
   lines: PayrollRunLine[];
+  /**
+   * Issue #868 — the applied allocation snapshot (`payroll_run_allocations`):
+   * exactly what each member's expense was split into at accrual time. A
+   * member whose expense posted to their default tuple with a configured
+   * default appears here too; a member with nothing attributed does not.
+   */
+  allocations: PayrollRunAllocation[];
+}
+
+/** One share of one member's salary expense, as the run actually charged it. */
+export interface PayrollRunAllocationShare {
+  /** Integer basis points of the member's expense; one member's shares sum to 10 000. */
+  shareBp: number;
+  /** The exact Rial amount charged to this share at accrual time (integer Rial as text). */
+  amount: string;
+  dimensions: LineDimensions;
+  label: string | null;
+}
+
+/** One member's applied allocation — the snapshot, never recomputed. */
+export interface PayrollRunAllocation {
+  userId: string;
+  /** Display name from the run's line (or the live user row for legacy runs); null when unknown. */
+  fullName: string | null;
+  shares: PayrollRunAllocationShare[];
 }
 
 /** An account a payroll payment may leave: cash, a bank account or a petty-cash float. */

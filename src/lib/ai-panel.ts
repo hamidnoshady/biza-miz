@@ -23,12 +23,6 @@
  * the labels and descriptions, and the unit tests read the whole thing — one
  * source of truth, so a section's name can never drift between the panel, the
  * redirects and the tests.
- *
- * Every section is a management surface, so every one is owner/manager — the
- * same rule the old `/ai` workspace applied. The whole assistant is
- * additionally behind the `ai_assistant` feature lock at the page level; this
- * module answers only "which role may open the panel", not "does the business
- * have AI".
  */
 
 import { PERMISSIONS, type Permission } from "./permissions";
@@ -132,24 +126,60 @@ export function aiPanelHref(key: AiPanelSectionKey): string {
 }
 
 /**
- * Whether a role may open the management panel. Every section is management
- * work — the same rule the old `/ai` workspace applied (owner or manager
- * only) — so a cashier or accountant never sees it. Kept as a function, not a
- * constant, so a future per-section rule has one place to live.
- */
-/**
  * Capability-based management check. The role overload is retained only for
  * older non-request callers; request/page code must pass the membership's
  * effective permission set so custom roles and revocations cannot drift from
- * the API.
+ * the API:
+ * - `memory`, `coworkers`, `activity`: `ai.manage`
+ * - `automations`: `ai.automations.manage` or `ai.manage`
+ * - `usage`: `ai.usage.view` or `ai.manage`
+ * - `research`: `ai.manage` (or `ai.use` when `deepResearchEnabled` is true)
  */
 export function canManageAi(
-  effective: ReadonlySet<Permission> | readonly Permission[] | string,
-  _key?: AiPanelSectionKey,
+  effective: ReadonlySet<Permission | string> | readonly (Permission | string)[] | string,
+  key?: AiPanelSectionKey,
+  options?: { deepResearchEnabled?: boolean },
 ): boolean {
   if (typeof effective !== "string") {
     const permissions = effective instanceof Set ? effective : new Set(effective);
-    return permissions.has(PERMISSIONS.aiManage);
+    const hasManage = permissions.has(PERMISSIONS.aiManage);
+    if (!key) {
+      return (
+        hasManage ||
+        permissions.has(PERMISSIONS.aiAutomationsManage) ||
+        permissions.has(PERMISSIONS.aiUsageView)
+      );
+    }
+    switch (key) {
+      case "memory":
+      case "coworkers":
+      case "activity":
+        return hasManage;
+      case "automations":
+        return hasManage || permissions.has(PERMISSIONS.aiAutomationsManage);
+      case "usage":
+        return hasManage || permissions.has(PERMISSIONS.aiUsageView);
+      case "research":
+        return (
+          hasManage ||
+          (Boolean(options?.deepResearchEnabled) && permissions.has(PERMISSIONS.aiUse))
+        );
+      default:
+        return false;
+    }
   }
   return effective === "owner" || effective === "manager";
+}
+
+/**
+ * Returns the ordered list of AI Management panel sections that the caller has
+ * permission to access.
+ */
+export function resolveAllowedAiPanelSections(
+  effective: ReadonlySet<Permission | string> | readonly (Permission | string)[] | string,
+  options?: { deepResearchEnabled?: boolean },
+): AiPanelSectionKey[] {
+  return AI_PANEL_SECTION_KEYS.filter((key) =>
+    canManageAi(effective, key, options),
+  );
 }

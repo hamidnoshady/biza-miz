@@ -18,6 +18,7 @@ import {
   resolveMembershipAuthority,
 } from "@/lib/membership-authority";
 import { listBranches } from "@/lib/branch-service";
+import { listPersonnelFileDrift, retryPersonnelFileDrift } from "@/lib/personnel-file";
 import { canonicalMemberPhone } from "@/lib/phone-otp";
 import { ASSIGNABLE_ROLES } from "@/lib/roles";
 import type { Role } from "@/lib/auth";
@@ -42,6 +43,15 @@ export const GET = withTenantScope(async () => {
   );
   if (error) return error;
 
+  /*
+   * Issue #947 (TEAM-F05) — the Team screen is where a missing personnel file is
+   * visible, so opening it is the moment the repair runs. Bounded to a handful per
+   * request: a member whose file could not be written is retried on the next visit
+   * rather than in a loop here, and the roster it returns already shows the members
+   * that are still owed one (`personnelFileDrift`).
+   */
+  await retryPersonnelFileDrift(session.businessId, { limit: 5 });
+
   const [members, branches, deployment] = await Promise.all([
     listMembers(session.businessId),
     listBranches(session.businessId),
@@ -55,6 +65,10 @@ export const GET = withTenantScope(async () => {
       name: branch.name,
       isActive: branch.isActive,
     })),
+    // The explicit state of the guarantee (F04): which members are still owed a
+    // personnel file, why, and since when. A partial failure is data on the screen,
+    // not a broken page.
+    personnelFileDrift: await listPersonnelFileDrift(session.businessId),
   });
 });
 
@@ -193,28 +207,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       actorId: session.sub,
       reason: body.reason,
     });
-    // Every staff account is also a party of role `Employee` in the shared table —
-    // the same record the payroll row and the personnel phone number come from, so
-    // a wage or a shift note attached to a person never becomes a second person
-    // (`src/lib/parties-scopes.ts`, scope `team`).
-    //
-    // Deliberately *after* `createMembership` returns and deliberately swallowed:
-    // the membership is the account, the party is the file around it, and losing a
-    // login because a display name was blank would be the worse failure by far. The
-    // directory's own add form (or a later edit of this member) creates the row.
-    try {
-      const { ensureEmployeeParty } = await import("@/lib/parties-service");
-      await ensureEmployeeParty(session.businessId, userId, {
-        displayName: body.fullName?.trim() || null,
-        email: body.email ?? null,
-        // Issue #854 (pass 4, gap 5) — the file is seeded with the canonical
-        // login phone too, so the personnel tab never starts out disagreeing
-        // with the membership about it.
-        phone: phone ?? undefined,
-      });
-    } catch {
-      /* no party row yet — see the comment above */
-    }
+    /*
+     * The personnel file is not written here any more (issue #947, F04). It used
+     * to be: this route called the old route-local party writer after the service had
+     * returned and swallowed any failure, which made the file a side effect of *this*
+     * door — the
+     * setup wizard, invitation acceptance, a rehire and a replica applied from the
+     * cloud each had a different answer, and two of them had none. The guarantee now
+     * lives inside `createMembership` (`src/lib/personnel-file.ts`), so every door
+     * that creates a membership gets the same file, derived from the same canonical
+     * identity, with a durable retry when the write fails.
+     */
     return NextResponse.json({ id: userId }, { status: 201 });
   } catch (err) {
     if (err instanceof TeamError) {

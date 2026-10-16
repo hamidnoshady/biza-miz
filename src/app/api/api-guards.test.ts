@@ -346,15 +346,10 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/trusted-devices":
     "lists and revokes only the caller's own trusted devices — the session's own sub is the " +
     "authorization, and no other member's trust is reachable",
-  // AI Hub Wave 1 (issue #141) — a conversation is visible only to the member
-  // who started it (actor_user_id), not by role, so ai-conversations.ts's own
-  // ownership filter is the authorization, the same shape as auth/businesses.
-  "ai/conversations": "lists/creates only the caller's own conversations — ownership is the authorization",
-  "ai/conversations/[id]": "reads/deletes only the caller's own conversation — ownership is the authorization",
   // Phase E — a structured input request reaches tenant scope only through its
   // parent conversation (like ai_messages), and the route re-checks
   // ownsConversation before answering or cancelling, so ownership is the
-  // authorization, the same shape as the conversation routes above.
+  // authorization.
   "ai/conversations/[id]/input-requests/[requestId]":
     "answers/cancels an input request on the caller's own conversation — ownership is the authorization",
   // Phase 35 Wave 3 — projects are scoped to the business by RLS and to the

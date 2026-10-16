@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, withTenantScope } from "@/lib/auth";
+import { requireFloorAssistant, requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { listConversations, listConversationsByProject } from "@/lib/ai-conversations";
+import type { AgentMode } from "@/lib/ai";
 
-const DEFAULT_LIMIT = 30;
+const MODES: readonly AgentMode[] = ["dashboard", "floor", "wizard"];
 
 function parseBefore(raw: string | null): string | null {
   if (!raw) return null;
@@ -10,34 +12,61 @@ function parseBefore(raw: string | null): string | null {
 }
 
 /**
- * A member's own AI conversations, most recently active first. Ownership
- * (not role) is the access control here — see ai-conversations.ts.
+ * List the caller's own conversations for the active surface (`mode=dashboard`
+ * by default).
  *
- * `?project=<id>` narrows the list to one project's threads, scoped in SQL
- * rather than fetched-then-filtered — so a project with more threads than the
- * page limit no longer silently loses the older ones.
+ * Transcript access policy (Issue #905 §10):
+ * - Requires active membership and the surface's assistant capability
+ *   (`PERMISSIONS.aiUse` for dashboard/wizard, `requireFloorAssistant()`
+ *   for floor), which re-reads membership through `authorize()`. Revoking
+ *   `ai.use` / floor assistant access or deactivating a member immediately
+ *   revokes transcript access on the next request.
+ * - Scoped by `(business_id = session.businessId, actor_user_id = session.sub)`
+ *   inside `withTenantScope` so a member never sees another member's or
+ *   another business's conversations.
+ * - Supports server-side `q` search (matching title or message content) and
+ *   compound cursor pagination (`before` + `beforeId`).
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const { searchParams } = new URL(request.url);
+  const rawMode = searchParams.get("mode");
+  const mode: AgentMode =
+    rawMode && (MODES as readonly string[]).includes(rawMode) ? (rawMode as AgentMode) : "dashboard";
 
-  const url = new URL(request.url);
-  const limitParam = Number(url.searchParams.get("limit"));
-  const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : DEFAULT_LIMIT;
-  const before = parseBefore(url.searchParams.get("before"));
-  const projectId = url.searchParams.get("project");
-  // Dashboard history is intentionally mode-scoped; old wizard/floor threads
-  // must not appear as if they were compatible with this workspace.
-  const mode = url.searchParams.get("mode") === "floor" ? "floor" : "dashboard";
+  const guard =
+    mode === "floor"
+      ? await requireFloorAssistant()
+      : await requirePermission(PERMISSIONS.aiUse);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
-  const conversations = projectId
+  const before = parseBefore(searchParams.get("before"));
+  const beforeId = searchParams.get("beforeId");
+  const q = searchParams.get("q");
+  const rawLimit = Number(searchParams.get("limit") ?? 30);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0
+    ? Math.max(1, Math.min(50, Math.floor(rawLimit)))
+    : 30;
+  const projectId = searchParams.get("project")?.trim() || null;
+
+  const fetchLimit = limit + 1;
+  const rows = projectId
     ? await listConversationsByProject(
         { businessId: session.businessId, actorUserId: session.sub, projectId },
-        { limit, before, mode },
+        { mode, before, beforeId, query: q, limit: fetchLimit },
       )
     : await listConversations(
         { businessId: session.businessId, actorUserId: session.sub },
-        { limit, before, mode },
+        { mode, before, beforeId, query: q, limit: fetchLimit },
       );
-  return NextResponse.json({ conversations });
+
+  const hasMore = rows.length > limit;
+  const conversations = hasMore ? rows.slice(0, limit) : rows;
+  const last = conversations[conversations.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? { before: last.lastMessageAt, beforeId: last.id }
+      : null;
+
+  return NextResponse.json({ conversations, hasMore, nextCursor });
 });

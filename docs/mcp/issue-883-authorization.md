@@ -122,10 +122,11 @@ server's rule, carried by the dedicated **owner-only** permission
 
 | Route | Uses |
 | --- | --- |
-| `POST /api/connections/mcp` | mint a static token |
-| `PATCH /api/connections/mcp/[id]` | narrow scopes / switch write mode |
-| `DELETE /api/connections/mcp/[id]` | revoke |
-| `POST /api/connections/mcp/consent` | OAuth "allow" |
+| `POST /api/connections/mcp` | mint a static token (supports read-only `pos.read` or `pos.read` + `pos.write`; 180-day default expiry in UI) |
+| `POST /api/connections/mcp/[id]` | rotate a single static token in place without touching other connections |
+| `PATCH /api/connections/mcp/[id]` | narrow scopes (e.g. drop to `pos.read` only) / switch write mode |
+| `DELETE /api/connections/mcp/[id]` | revoke a single connection without touching others |
+| `POST /api/connections/mcp/consent` | OAuth 2.1 "allow" (recommended authentication path with PKCE S256 and refresh rotation) |
 | `POST /api/connections/mcp/pending/[id]` | decide a queued write |
 
 `GET /api/connections/mcp` (listing) and the consent page's own GET read stay

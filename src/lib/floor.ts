@@ -1,22 +1,25 @@
 /** Small server-side helpers for the floor plan (DB-touching). */
 import { query } from "./db";
+import { isEligibleStaffAtLocation } from "./staff-eligibility";
 
 /**
  * Validate an optional waiter id for a section assignment, scoped to this
  * location. Returns the id (assign), null (clear), or false (invalid id).
+ *
+ * Issue #947 (consumer seam) — the check is `isEligibleStaffAtLocation`, the same
+ * contract `GET /api/staff` lists from. It used to be `location_id IS NULL OR
+ * location_id = $2`, i.e. the member's *default* branch since migration 0170, so a
+ * waiter the picker never offered could still be written into a section — and a waiter
+ * whose policy is «none» (no branch at all) stayed assignable at their old one.
  */
 export async function validWaiterId(
+  businessId: string,
   locationId: string,
   waiterId: string | null | undefined,
 ): Promise<string | null | false> {
   if (!waiterId) return null;
-  const { rows } = await query(
-    `SELECT u.id FROM users u JOIN locations l ON l.business_id = u.business_id
-      WHERE u.id = $1 AND l.id = $2 AND u.role = 'waiter' AND u.is_active
-        AND (u.location_id IS NULL OR u.location_id = $2)`,
-    [waiterId, locationId],
-  );
-  return rows.length > 0 ? waiterId : false;
+  const eligible = await isEligibleStaffAtLocation(businessId, locationId, waiterId);
+  return eligible ? waiterId : false;
 }
 
 /**

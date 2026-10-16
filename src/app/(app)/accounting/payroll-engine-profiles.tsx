@@ -8,13 +8,16 @@
 import { useState } from "react";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { EmptyState, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
+import { EmptyState, LoadingSkeleton, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, InfoBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
+import { DIMENSION_KINDS, type DimensionKind } from "@/lib/accounting-dimensions";
+import { DimensionFields, useDimensionCatalog } from "./dimension-fields";
+import { enabledDimensionKinds, type DimensionDraft } from "./dimension-catalog";
 import { payrollError } from "./payroll-error";
 import {
   shamsi,
@@ -35,7 +38,21 @@ interface ShareDraft {
   locationId: string;
   projectId: string;
   label: string;
+  /**
+   * Issue #868 — the share's accounting-dimension tuple. Held on the draft and
+   * sent every save: the editor used to rebuild shares from just four fields,
+   * silently stripping a tuple saved through the API.
+   */
+  dims: DimensionDraft;
 }
+
+/** The request-body field names `parseCostAllocation` reads per kind. */
+const SHARE_DIM_FIELD: Record<DimensionKind, string> = {
+  cost_center: "costCenterId",
+  profit_center: "profitCenterId",
+  department: "departmentId",
+  detail: "detailDimensionId",
+};
 
 interface ProfileDetail {
   profile: PayrollProfile;
@@ -189,8 +206,24 @@ function ProfileEditor({ profile, onSaved }: { profile: PayrollProfile; onSaved:
   const [iban, setIban] = useState(profile.paymentDestination.iban ?? "");
   const [cardNumber, setCardNumber] = useState(profile.paymentDestination.cardNumber ?? "");
   const [isActive, setIsActive] = useState(profile.isActive);
+  const { catalog: dimCatalog, loaded: dimCatalogLoaded, error: dimCatalogError, retry: retryDimCatalog } = useDimensionCatalog();
+  const dimKindsOn = dimCatalog ? enabledDimensionKinds(dimCatalog.settings) : [];
   const [shares, setShares] = useState<ShareDraft[]>(
-    profile.costAllocation.map((s) => ({ percent: String(s.percent), locationId: s.locationId ?? "", projectId: s.projectId ?? "", label: s.label ?? "" })),
+    profile.costAllocation.map((s) => {
+      // Issue #868 — restore the whole share, dimension tuple included.
+      const dims: DimensionDraft = {};
+      const shareDims: Record<DimensionKind, string | null> = {
+        cost_center: s.costCenterId ?? null,
+        profit_center: s.profitCenterId ?? null,
+        department: s.departmentId ?? null,
+        detail: s.detailDimensionId ?? null,
+      };
+      for (const kind of DIMENSION_KINDS) {
+        const id = shareDims[kind];
+        if (id) dims[kind] = id;
+      }
+      return { percent: String(s.percent), locationId: s.locationId ?? "", projectId: s.projectId ?? "", label: s.label ?? "", dims };
+    }),
   );
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -235,6 +268,9 @@ function ProfileEditor({ profile, onSaved }: { profile: PayrollProfile; onSaved:
           locationId: s.locationId || null,
           projectId: s.projectId || null,
           label: s.label || null,
+          ...Object.fromEntries(
+            DIMENSION_KINDS.map((kind) => [SHARE_DIM_FIELD[kind], s.dims[kind] || null]),
+          ),
         })),
       }),
     });
@@ -326,32 +362,60 @@ function ProfileEditor({ profile, onSaved }: { profile: PayrollProfile; onSaved:
 
       <div className="mt-4 space-y-2">
         <h3 className="text-sm font-semibold">تسهیم هزینه حقوق</h3>
-        <InfoBox>هر سهم، سند جداگانه‌ای با شعبه و پروژهٔ خودش در دفتر می‌گیرد. بدون سهم، کل هزینه بدون بُعد ثبت می‌شود.</InfoBox>
+        <InfoBox>هر سهم، سند جداگانه‌ای با شعبه، پروژه و ابعاد تحلیلی خودش در دفتر می‌گیرد. بدون سهم، کل هزینه بدون بُعد ثبت می‌شود.</InfoBox>
+        {dimCatalogError ? (
+          <p role="alert" className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            ابعاد تحلیلی بارگذاری نشد؛ بدون نمایش آن‌ها این بخش را ذخیره نکنید.{" "}
+            <button type="button" className="font-medium underline" onClick={retryDimCatalog}>
+              تلاش دوباره
+            </button>
+          </p>
+        ) : null}
         {shares.map((s, i) => (
-          <div key={i} className="grid gap-2 sm:grid-cols-[6rem_1fr_1fr_1fr_auto] sm:items-end">
-            <Field label="درصد">
-              <PersianNumberInput className={inputClass} dir="ltr" inputMode="decimal" allowDecimal allowNegative={false} value={s.percent} onChange={(e) => update(i, { percent: e.target.value })} />
-            </Field>
-            <Field label="شعبه">
-              <select className={inputClass} value={s.locationId} onChange={(e) => update(i, { locationId: e.target.value })}>
-                <option value="">—</option>
-                {(locations.data?.locations ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-              </select>
-            </Field>
-            <Field label="پروژه">
-              <select className={inputClass} value={s.projectId} onChange={(e) => update(i, { projectId: e.target.value })}>
-                <option value="">—</option>
-                {(projects.data?.projects ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </Field>
-            <Field label="توضیح">
-              <input className={inputClass} value={s.label} onChange={(e) => update(i, { label: e.target.value })} />
-            </Field>
-            <SecondaryButton onClick={() => setShares((current) => current.filter((_, j) => j !== i))}>حذف</SecondaryButton>
+          <div key={i} className="space-y-2 rounded-xl border border-border/80 p-2">
+            <div className="grid gap-2 sm:grid-cols-[6rem_1fr_1fr_1fr_auto] sm:items-end">
+              <Field label="درصد">
+                <PersianNumberInput className={inputClass} dir="ltr" inputMode="decimal" allowDecimal allowNegative={false} value={s.percent} onChange={(e) => update(i, { percent: e.target.value })} />
+              </Field>
+              <Field label="شعبه">
+                <select className={inputClass} value={s.locationId} onChange={(e) => update(i, { locationId: e.target.value })}>
+                  <option value="">—</option>
+                  {(locations.data?.locations ?? []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </select>
+              </Field>
+              <Field label="پروژه">
+                <select className={inputClass} value={s.projectId} onChange={(e) => update(i, { projectId: e.target.value })}>
+                  <option value="">—</option>
+                  {(projects.data?.projects ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </Field>
+              <Field label="توضیح">
+                <input className={inputClass} value={s.label} onChange={(e) => update(i, { label: e.target.value })} />
+              </Field>
+              <SecondaryButton onClick={() => setShares((current) => current.filter((_, j) => j !== i))}>حذف</SecondaryButton>
+            </div>
+            {/* Issue #868 — the share's accounting-dimension tuple, with the same
+                shared pickers every other form uses. A tuple saved through the
+                API survives an edit here. */}
+            {dimKindsOn.length > 0 || DIMENSION_KINDS.some((kind) => s.dims[kind]) ? (
+              <div>
+                <DimensionFields
+                  idPrefix={`profile-share-${i}`}
+                  catalog={dimCatalog}
+                  locationId={s.locationId || null}
+                  value={s.dims}
+                  onChange={(next) => update(i, { dims: next })}
+                  rowLabel={`سهم ${toPersianDigits(String(i + 1))}`}
+                />
+                {!dimCatalogLoaded && !dimCatalogError ? (
+                  <LoadingSkeleton rows={1} compact label="در حال بارگذاری ابعاد تحلیلی" />
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ))}
         <div className="flex flex-wrap items-center gap-3">
-          <SecondaryButton onClick={() => setShares((current) => [...current, { percent: current.length === 0 ? "100" : "", locationId: "", projectId: "", label: "" }])}>
+          <SecondaryButton onClick={() => setShares((current) => [...current, { percent: current.length === 0 ? "100" : "", locationId: "", projectId: "", label: "", dims: {} }])}>
             افزودن سهم
           </SecondaryButton>
           {shares.length > 0 ? (

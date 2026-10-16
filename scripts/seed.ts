@@ -6,6 +6,16 @@
  *
  * Idempotent: re-running skips anything that already exists.
  *
+ * Issue #947 (TEAM-F04/F05) — the seed is a membership writer like any other, so it also
+ * leaves the personnel-file invariant true: every membership it created (or found) gets
+ * its file through the same `ensurePersonnelFileForMembership` every door uses. Migration
+ * 0223 records the debt for a membership written by raw SQL — the seed used to leave the
+ * demo business with two members who had no file and (before 0223) no record of that — and
+ * syncing here is what makes «the demo business is coherent» true rather than promised.
+ * It runs *after* COMMIT, on the app's own pool, for the same reason the guarantee runs
+ * after a membership write in the product: the file is a second record, not part of this
+ * transaction.
+ *
  * Usage: npm run db:seed
  */
 import "dotenv/config";
@@ -216,6 +226,33 @@ async function main() {
     );
 
     await client.query("COMMIT");
+
+    /*
+     * Issue #947 — after the transaction, give every membership in this business the file
+     * the guarantee owes it. Idempotent, so a re-run over an existing demo business is a
+     * no-op; it also repairs a demo seeded by an older release (or by `psql`).
+     */
+    const { rows: members } = await client.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 ORDER BY created_at",
+      [businessId],
+    );
+    if (members.length > 0) {
+      const { ensurePersonnelFileForMembership } = await import("../src/lib/personnel-file");
+      const { getPool, withTenant } = await import("../src/lib/db");
+      let repaired = 0;
+      for (const member of members) {
+        const result = await withTenant(businessId, () =>
+          ensurePersonnelFileForMembership(businessId, member.id),
+        );
+        if (result.ok) repaired += 1;
+        else console.warn(`Personnel file for member ${member.id} is owed: ${result.error ?? result.reason}`);
+      }
+      console.log(`Personnel files synced for ${repaired}/${members.length} member(s).`);
+      await getPool()
+        .end()
+        .catch(() => {});
+    }
+
     console.log("Seed complete.");
   } catch (err) {
     await client.query("ROLLBACK");

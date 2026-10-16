@@ -138,6 +138,33 @@ describe("conversation ownership within one business", () => {
     );
     expect(aList).toHaveLength(1);
     expect(aList[0].id).toBe(created.id);
+
+    const aMode = await asBusiness(alpha.businessId, () =>
+      ai.getConversationMode({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        conversationId: created.id,
+      }),
+    );
+    expect(aMode).toBe("dashboard");
+
+    const bMode = await asBusiness(alpha.businessId, () =>
+      ai.getConversationMode({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userB,
+        conversationId: created.id,
+      }),
+    );
+    expect(bMode).toBeNull();
+
+    const betaMode = await asBusiness(beta.businessId, () =>
+      ai.getConversationMode({
+        businessId: beta.businessId,
+        actorUserId: alpha.userA,
+        conversationId: created.id,
+      }),
+    );
+    expect(betaMode).toBeNull();
   });
 
   it("never resumes another user's conversation id — starts a new one instead", async () => {
@@ -443,10 +470,96 @@ describe("reopening restores the metadata the transcript renders from", () => {
     const foreign = await asBusiness(alpha.businessId, () =>
       ai.getConversationMessages({
         businessId: alpha.businessId,
-        actorUserId: alpha.userB,
+        actorUserId: alpha.userA === alpha.userB ? "other" : alpha.userB,
         conversationId: created.id,
       }),
     );
     expect(foreign).toBeNull();
+  });
+
+  it("paginates deterministically with compound cursor (before + beforeId) across identical timestamps and supports server-backed query filtering", async () => {
+    const c1 = await asBusiness(alpha.businessId, () =>
+      ai.getOrCreateConversation({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        mode: "dashboard",
+        conversationId: null,
+        firstMessageContent: "بررسی موجودی قهوه",
+      }),
+    );
+    const c2 = await asBusiness(alpha.businessId, () =>
+      ai.getOrCreateConversation({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        mode: "dashboard",
+        conversationId: null,
+        firstMessageContent: "تحلیل سود ماهانه",
+      }),
+    );
+    const c3 = await asBusiness(alpha.businessId, () =>
+      ai.getOrCreateConversation({
+        businessId: alpha.businessId,
+        actorUserId: alpha.userA,
+        mode: "dashboard",
+        conversationId: null,
+        firstMessageContent: "سفارش خرید زعفران",
+      }),
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      ai.appendMessage({
+        conversationId: c2.id,
+        role: "user",
+        content: "کلمه کلیدی منحصر‌به‌فرد داخل متن پیام",
+      }),
+    );
+
+    // Force identical last_message_at on all three to prove compound cursor tie-breaking
+    const fixedTime = "2026-03-01T12:00:00.000Z";
+    await db.query(
+      "UPDATE ai_conversations SET last_message_at = $1::timestamptz WHERE id = ANY($2::uuid[])",
+      [fixedTime, [c1.id, c2.id, c3.id]],
+    );
+
+    const firstPage = await asBusiness(alpha.businessId, () =>
+      ai.listConversations(
+        { businessId: alpha.businessId, actorUserId: alpha.userA },
+        { mode: "dashboard", limit: 2 },
+      ),
+    );
+    expect(firstPage).toHaveLength(2);
+
+    const secondPage = await asBusiness(alpha.businessId, () =>
+      ai.listConversations(
+        { businessId: alpha.businessId, actorUserId: alpha.userA },
+        {
+          mode: "dashboard",
+          before: firstPage[1]!.lastMessageAt,
+          beforeId: firstPage[1]!.id,
+          limit: 2,
+        },
+      ),
+    );
+    expect(secondPage).toHaveLength(1);
+
+    const allIds = [...firstPage.map((c) => c.id), ...secondPage.map((c) => c.id)];
+    expect(new Set(allIds)).toEqual(new Set([c1.id, c2.id, c3.id]));
+
+    // Server-backed query search in listConversations matches both title and message body
+    const byTitle = await asBusiness(alpha.businessId, () =>
+      ai.listConversations(
+        { businessId: alpha.businessId, actorUserId: alpha.userA },
+        { mode: "dashboard", query: "زعفران" },
+      ),
+    );
+    expect(byTitle.map((c) => c.id)).toEqual([c3.id]);
+
+    const byMessage = await asBusiness(alpha.businessId, () =>
+      ai.listConversations(
+        { businessId: alpha.businessId, actorUserId: alpha.userA },
+        { mode: "dashboard", query: "منحصر‌به‌فرد" },
+      ),
+    );
+    expect(byMessage.map((c) => c.id)).toEqual([c2.id]);
   });
 });
