@@ -3,7 +3,7 @@
  * aggregate totals and CSV exports are independent of presentation paging.
  */
 import { createHash } from "node:crypto";
-import { isValidIsoDate } from "./jalali";
+import { formatJalali, isValidIsoDate } from "./jalali";
 import { inSnapshot } from "./payroll-db";
 import { PERMISSIONS } from "./permissions";
 import {
@@ -306,9 +306,11 @@ export async function exportShareholderEventsCsv(
       const rows: EventDbRow[] = result.rows;
       if (rows.length === 0) break;
       for (const row of rows) {
+        // Dates leave the product in Shamsi like every other export; the ISO
+        // values stay on `row` because the keyset cursor below pages on them.
         const values = [
           row.id,
-          row.effectiveOn,
+          formatJalali(row.effectiveOn),
           row.eventType,
           row.partyId,
           row.partyName,
@@ -325,7 +327,7 @@ export async function exportShareholderEventsCsv(
           row.sourceReference,
           row.notes,
           row.createdByName,
-          row.createdAt,
+          formatJalali(row.createdAt, { withTime: true }),
         ];
         lines.push(values.map((value, index) => csvCell(value, [2, 4, 8, 10, 13, 14, 15, 16, 17].includes(index))).join(","));
       }

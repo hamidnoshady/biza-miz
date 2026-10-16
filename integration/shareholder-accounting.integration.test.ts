@@ -381,6 +381,9 @@ describe("effective-dated shareholder ownership and audit", () => {
     await expect(
       shareholders.recordOwnershipEvents(fixture.businessId, accountant, [pastEvent], "retro-denied"),
     ).rejects.toMatchObject({ message: "retroactive_permission_required", status: 403 });
+    await expect(
+      shareholders.updateOwnershipTotalPolicy(fixture.businessId, actor(fixture.ownerId, "owner"), "exactly_100"),
+    ).rejects.toMatchObject({ message: "ownership_total_must_equal_100", status: 409 });
 
     const ownership = await addOwnershipHistory(fixture);
     const owner = actor(fixture.ownerId, "owner");
@@ -486,13 +489,17 @@ describe("effective-dated shareholder ownership and audit", () => {
       await db.query("ROLLBACK").catch(() => {});
     }
 
-    const audits = await db.query<{ action: string; payload: { ownershipBefore?: string; ownershipAfter?: string } }>(
+    const audits = await db.query<{ action: string; payload: { partyId?: string; eventType?: string; ownershipBefore?: string; ownershipAfter?: string } }>(
       `SELECT action, payload FROM audit_log
         WHERE business_id = $1 AND action = 'shareholder.ownership_event.recorded'`,
       [fixture.businessId],
     );
     expect(audits.rows).toHaveLength(4);
     expect(audits.rows.some((row) => row.payload.ownershipAfter === "60")).toBe(true);
+    // The transfer was recorded in the same batch as the founding row, so its
+    // prior ownership is that row's 60%, not the empty register before the call.
+    expect(audits.rows.find((row) => row.payload.partyId === fixture.partyA && row.payload.eventType === "ownership_transfer_out")
+      ?.payload.ownershipBefore).toBe("60");
   }, 30_000);
 
   it("paginates and exports every filtered ownership event beyond the former 500-row boundary", async () => {
@@ -546,6 +553,8 @@ describe("effective-dated shareholder ownership and audit", () => {
     });
     expect(csv.split("\r\n").filter(Boolean)).toHaveLength(502);
     expect(csv).toContain("History boundary change 500");
+    expect(csv).not.toMatch(/\b\d{4}-\d{2}-\d{2}\b/);
+    expect(csv).toMatch(/[۰-۹]{4}\/[۰-۹]{2}\/[۰-۹]{2}/);
   }, 60_000);
 });
 

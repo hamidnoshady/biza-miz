@@ -994,6 +994,11 @@ export async function updateOwnershipTotalPolicy(
   return inTransaction(async (client) => {
     await lockShareholderBusiness(client, businessId);
     const events = await readOwnershipEvents(client, businessId);
+    // An empty register holds 0%, so "exactly 100%" would be violated the
+    // moment it was saved; the timeline check alone has no date to fail on.
+    if (policy === "exactly_100" && events.length === 0) {
+      throw new ShareholderError("ownership_total_must_equal_100", 409);
+    }
     assertTimelineValid(events, policy);
     await client.query(
       `INSERT INTO shareholder_ownership_policies (business_id, total_policy, updated_by, updated_at)
@@ -1115,7 +1120,9 @@ export async function recordOwnershipEvents(
         entity: "shareholder_event", entityId: id,
         payload: {
           partyId: row.partyId, partyName: account.partyName, eventType: row.eventType,
-          effectiveOn: row.effectiveOn, ownershipBefore: eventBefore(before, row.partyId, row.effectiveOn),
+          effectiveOn: row.effectiveOn, // Earlier rows of this same batch count: an add on date A followed by a
+          // change on date B must record A's percentage as B's prior ownership.
+          ownershipBefore: eventBefore([...before, ...newEvents], row.partyId, row.effectiveOn),
           ownershipAfter: row.ownershipPercent, transferPercent: row.transferPercent,
           transferGroupId: row.transferGroupId, reason: row.reason, sourceReference: row.sourceReference,
         },
