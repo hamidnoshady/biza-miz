@@ -22,9 +22,20 @@ export function validSupportReason(reason: unknown): reason is string {
   return typeof reason === "string" && reason.trim().length >= MIN_SUPPORT_REASON_LENGTH;
 }
 
+/**
+ * The sign-out route. For a support session it closes the session's grant
+ * through the same service the banner's exit uses (`closeSupportSession`), so
+ * the sidebar's «خروج» and the Profile card's sign-out end the support session
+ * instead of being refused by the read-only guard (#854 follow-up, third pass).
+ */
+export const SUPPORT_SESSION_SIGN_OUT_PATH = "/api/auth/logout";
+
 /** Ending your own support session only ever removes access, so no mode may refuse it. */
 export function isSupportSessionExitRequest(method: string, path: string): boolean {
-  return method === "DELETE" && path === SUPPORT_SESSION_EXIT_PATH;
+  return (
+    (method === "DELETE" && path === SUPPORT_SESSION_EXIT_PATH) ||
+    (method === "POST" && path === SUPPORT_SESSION_SIGN_OUT_PATH)
+  );
 }
 
 /** Central transport-independent support-session mutation decision. */

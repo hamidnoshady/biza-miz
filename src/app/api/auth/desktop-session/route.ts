@@ -3,7 +3,7 @@ import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
 import { withTenant } from "@/lib/db";
 import { isLoginToken, safeNextPath } from "@/lib/desktop-cloud-login";
 import { redeemSessionLoginCode } from "@/lib/desktop-cloud-login-service";
-import { resolveLoginBusinessId } from "@/lib/employee-service";
+import { createSession, resolveLoginBusinessId } from "@/lib/employee-service";
 import { requestHost } from "@/lib/host";
 
 /**
@@ -14,6 +14,13 @@ import { requestHost } from "@/lib/host";
  * Session-less by necessity, like /api/auth/impersonate-handoff: the code is
  * the credential, single-use and two minutes long. The host names the tenant
  * (the login family's rule); the cookie is host-scoped as always.
+ *
+ * The session it opens is an ordinary revocable one (#854 follow-up, third
+ * pass): an `employee_sessions` row with `login_method = 'desktop_handoff'`,
+ * named by the cookie, so «خروج» in the cloud pane ends it on the server and
+ * the security center can see and end it. If the row cannot be opened, no
+ * cookie is issued at all — the pane lands on the sign-in page instead of
+ * holding a session nothing could revoke.
  */
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
@@ -25,6 +32,22 @@ export async function GET(request: NextRequest) {
   if (!businessId) return relative("/login");
   const member = await withTenant(businessId, () => redeemSessionLoginCode(businessId, code));
   if (!member) return relative(`/login?next=${encodeURIComponent(next)}`);
+  const userAgent = request.headers.get("user-agent");
+  const opened = await withTenant(businessId, () =>
+    createSession(member.userId, businessId, {
+      locationId: member.locationId,
+      loginMethod: "desktop_handoff",
+      deviceLabel: userAgent?.slice(0, 120) ?? null,
+      userAgent,
+    }),
+  ).catch((err: unknown) => {
+    console.error(
+      "desktop hand-off could not open a session:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+    return null;
+  });
+  if (!opened) return relative(`/login?next=${encodeURIComponent(next)}`);
   const token = await signSession({
     sub: member.userId,
     role: member.role,
@@ -35,6 +58,7 @@ export async function GET(request: NextRequest) {
     fullName: member.fullName,
     platformUserId: member.platformUserId,
     ...(member.tokenVersion !== null ? { tokenVersion: member.tokenVersion } : {}),
+    employeeSessionId: opened.session.id,
   });
   const response = relative(next);
   response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());

@@ -2,6 +2,11 @@ import { defineConfig } from "vitest/config";
 import { fileURLToPath } from "node:url";
 
 export default defineConfig({
+  // A database test may import a server page to check the props it computes
+  // against the routes behind it (#854 follow-up); tsconfig keeps
+  // `jsx: "preserve"` for Next's compiler, so esbuild runs the automatic
+  // runtime itself — the same setting as vitest.config.ts.
+  esbuild: { jsx: "automatic" },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

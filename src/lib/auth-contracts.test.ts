@@ -8,16 +8,21 @@
  *   - `parseStepUpRequest` refusing to *default* a missing method is P1.9;
  *   - reading `credential` as well as the legacy `code` is the same finding
  *     from the other side (the route read `code`, the UI sent `mfaCode`);
- *   - `availableStepUpMethods` returning the PIN door is P1.6.
+ *   - `availableStepUpMethods` returning the PIN door is P1.6;
+ *   - WebAuthn being neither advertised nor parseable is the #854 follow-up F03
+ *     (it used to be advertised, refused, and rendered as a text box).
  */
 import { describe, expect, it } from "vitest";
 import {
   AUTH_ERROR_CODES,
+  STEP_UP_METHODS,
+  VERIFIABLE_STEP_UP_METHODS,
   authErrorMessage,
   availableStepUpMethods,
   isAuthErrorCode,
   isNeedsBusinessSelection,
   isStepUpMethod,
+  isVerifiableStepUpMethod,
   parseStepUpRequest,
   stepUpBody,
   type StepUpAvailability,
@@ -29,7 +34,6 @@ const nothing: StepUpAvailability = {
   hasTotp: false,
   hasSms: false,
   hasRecoveryCodes: false,
-  hasWebauthn: false,
 };
 
 describe("parseStepUpRequest", () => {
@@ -74,16 +78,37 @@ describe("parseStepUpRequest", () => {
     });
   });
 
-  it("carries recovery and challengeToken through without inventing them", () => {
+  it("carries recovery through without inventing it", () => {
     expect(parseStepUpRequest({ method: "recovery", credential: "abc", recovery: false })).toEqual({
       ok: true,
       request: { method: "recovery", credential: "abc" },
     });
-    expect(
-      parseStepUpRequest({ method: "webauthn", credential: "{}", challengeToken: "t" }),
-    ).toEqual({
+    expect(parseStepUpRequest({ method: "recovery", credential: "abc", recovery: true })).toEqual({
       ok: true,
-      request: { method: "webauthn", credential: "{}", challengeToken: "t" },
+      request: { method: "recovery", credential: "abc", recovery: true },
+    });
+  });
+
+  it("#854 F03 — refuses WebAuthn as unsupported, whatever text rides along", () => {
+    /**
+     * There is no WebAuthn step-up ceremony (server challenge + verified
+     * assertion). A body naming the method must never be accepted on the
+     * strength of a typed string — not even a well-formed-looking one.
+     */
+    for (const body of [
+      { method: "webauthn", credential: "{}" },
+      { method: "webauthn", credential: "123456" },
+      { method: "webauthn", credential: '{"id":"x","response":{}}', challengeToken: "t" },
+      { method: "webauthn", code: "123456" },
+    ]) {
+      expect(parseStepUpRequest(body)).toEqual({ ok: false, error: "unsupported_method" });
+    }
+  });
+
+  it("drops an unknown challengeToken instead of carrying it to a verifier", () => {
+    expect(parseStepUpRequest({ method: "pin", credential: "4821", challengeToken: "t" })).toEqual({
+      ok: true,
+      request: { method: "pin", credential: "4821" },
     });
   });
 });
@@ -114,9 +139,38 @@ describe("availableStepUpMethods", () => {
       hasTotp: true,
       hasSms: true,
       hasRecoveryCodes: true,
-      hasWebauthn: false,
     });
     expect(methods).toEqual(["password", "totp", "sms_otp", "recovery"]);
+  });
+
+  it("#854 F03 — never advertises a method no ceremony can verify", () => {
+    const everything = availableStepUpMethods({
+      hasPassword: true,
+      hasPin: true,
+      hasTotp: true,
+      hasSms: true,
+      hasRecoveryCodes: true,
+    });
+    expect(everything).not.toContain("webauthn");
+    for (const method of everything) expect(isVerifiableStepUpMethod(method)).toBe(true);
+  });
+});
+
+describe("VERIFIABLE_STEP_UP_METHODS (#854 F03)", () => {
+  it("is the vocabulary minus WebAuthn, and nothing else", () => {
+    expect([...VERIFIABLE_STEP_UP_METHODS].sort()).toEqual(
+      STEP_UP_METHODS.filter((m) => m !== "webauthn").sort(),
+    );
+    expect(isVerifiableStepUpMethod("webauthn")).toBe(false);
+    expect(isVerifiableStepUpMethod("pin")).toBe(true);
+    expect(isVerifiableStepUpMethod(undefined)).toBe(false);
+  });
+
+  it("has Persian copy for the unsupported-method and rolled-back-change refusals", () => {
+    expect(authErrorMessage(AUTH_ERROR_CODES.unsupportedMethod)).toMatch(/پشتیبانی نمی‌شود/);
+    expect(authErrorMessage(AUTH_ERROR_CODES.credentialChangeFailed)).toMatch(
+      /هیچ تغییری اعمال نشد/,
+    );
   });
 });
 

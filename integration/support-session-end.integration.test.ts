@@ -33,6 +33,7 @@ let dbLib: typeof import("../src/lib/db");
 let authEdge: typeof import("../src/lib/auth-edge");
 let auth: typeof import("../src/lib/auth");
 let platformService: typeof import("../src/lib/platform-service");
+let employeeService: typeof import("../src/lib/employee-service");
 let route: typeof import("../src/app/api/support-access/route");
 
 const bizA = { id: "", ownerId: "" };
@@ -61,6 +62,7 @@ beforeAll(async () => {
   authEdge = await import("../src/lib/auth-edge");
   auth = await import("../src/lib/auth");
   platformService = await import("../src/lib/platform-service");
+  employeeService = await import("../src/lib/employee-service");
   route = await import("../src/app/api/support-access/route");
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -134,8 +136,19 @@ async function startSupport(business: { id: string }, adminId = operator.id, mod
   return { grant, token: await authEdge.signSession(payload) };
 }
 
+/** The business owner's own session — like every tenant session, it names a revocable row (#854 follow-up). */
 async function ownerToken(business: { id: string; ownerId: string }) {
-  return authEdge.signSession({ sub: business.ownerId, role: "owner", businessId: business.id, locationId: null, fullName: "Owner" });
+  const { session } = await dbLib.withTenant(business.id, () =>
+    employeeService.createSession(business.ownerId, business.id, { loginMethod: "password" }),
+  );
+  return authEdge.signSession({
+    sub: business.ownerId,
+    role: "owner",
+    businessId: business.id,
+    locationId: null,
+    fullName: "Owner",
+    employeeSessionId: session.id,
+  });
 }
 
 function useCookie(token: string | null) {

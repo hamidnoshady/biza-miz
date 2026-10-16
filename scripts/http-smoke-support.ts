@@ -9,8 +9,9 @@
  *   JWT_SECRET=... PORT=3100 npx tsx scripts/http-smoke-support.ts
  */
 import { randomUUID } from "node:crypto";
-import { query, withoutTenantScope } from "../src/lib/db";
+import { query, withTenant, withoutTenantScope } from "../src/lib/db";
 import { signSession } from "../src/lib/auth-edge";
+import { createSession } from "../src/lib/employee-service";
 import { signPlatformSession } from "../src/lib/platform-auth-edge";
 
 const BASE = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:3100";
@@ -42,6 +43,11 @@ async function main() {
     )
   ).rows;
 
+  // A tenant token must name a revocable session row; the server refuses one
+  // that does not (#854 follow-up, third pass).
+  const { session: ownerSession } = await withTenant(biz.id, () =>
+    createSession(owner.id, biz.id, { locationId: loc.id, loginMethod: "password", deviceLabel: "http smoke" }),
+  );
   const tenantToken = await signSession({
     sub: owner.id,
     role: "owner",
@@ -49,6 +55,7 @@ async function main() {
     businessSlug: `http-smoke-${suffix}`,
     locationId: loc.id,
     fullName: "Http Owner",
+    employeeSessionId: ownerSession.id,
   });
   const platformToken = await signPlatformSession({
     padmin: admin.id,

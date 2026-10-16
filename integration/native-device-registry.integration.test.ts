@@ -22,6 +22,7 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let nativeDevices: typeof import("../src/lib/native-device-service");
 let authLib: typeof import("../src/lib/auth");
+let employeeService: typeof import("../src/lib/employee-service");
 
 const alpha = { businessId: "", ownerId: "", managerId: "" };
 const beta = { businessId: "", ownerId: "" };
@@ -72,19 +73,29 @@ function registration(overrides: Partial<Parameters<typeof nativeDevices.registe
   };
 }
 
-/** A tenant session bound to a device, signed the way `POST /api/native-devices` signs one. */
+/**
+ * A tenant session bound to a device, signed the way `POST /api/native-devices`
+ * signs one: a re-mint of a sign-in's token, so it names that sign-in's
+ * revocable session row (#854 follow-up, third pass). With the row present, a
+ * denial below can only come from the device check under test — never from a
+ * token the server would refuse anyway.
+ */
 async function signDeviceSession(
   businessId: string,
   userId: string,
   deviceId: string,
   nativeDeviceGeneration: number,
 ): Promise<string> {
+  const { session } = await dbLib.withTenant(businessId, () =>
+    employeeService.createSession(userId, businessId, { loginMethod: "password" }),
+  );
   return authLib.signSession({
     sub: userId,
     role: "owner",
     businessId,
     locationId: null,
     fullName: "test",
+    employeeSessionId: session.id,
     nativeDeviceId: deviceId,
     nativeDeviceGeneration,
   });
@@ -105,6 +116,7 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   nativeDevices = await import("../src/lib/native-device-service");
   authLib = await import("../src/lib/auth");
+  employeeService = await import("../src/lib/employee-service");
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
 }, 120_000);

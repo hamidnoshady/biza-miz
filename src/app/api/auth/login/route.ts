@@ -282,6 +282,8 @@ export async function POST(request: NextRequest) {
       createSession(chosen.userId, chosen.businessId, {
         locationId: chosen.locationId,
         deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? "Web (Password)",
+        // The door, for the device list and the security center (P2.27).
+        loginMethod: "password",
       }),
     );
 

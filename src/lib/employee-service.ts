@@ -18,7 +18,9 @@ import bcrypt from "bcryptjs";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
 import type { AuthenticationResponseJSON, AuthenticatorTransportFuture, RegistrationResponseJSON } from "@simplewebauthn/server";
-import { getPool, query, withoutTenantScope } from "./db";
+import { getPool, isPinnedToTransaction, query, withTenantTransaction, withoutTenantScope } from "./db";
+import { isUuid } from "./uuid";
+import { isSessionLoginMethod, type SessionLoginMethod } from "./session-contract";
 import { hostRoutingEnabled, leadingHostLabel, parseHost, rootDomain } from "./host";
 import { postgresDateToIso } from "./jalali";
 import { resolveBusinessByLabel } from "./host-resolution";
@@ -62,8 +64,13 @@ interface Executor {
   query: PoolClient["query"];
 }
 
+/** Where an audit row can go: a pooled client, the pool, or the ambient transaction. */
+interface AuditWriter {
+  query(text: string, params?: unknown[]): Promise<unknown>;
+}
+
 async function auditEmployee(
-  client: Executor,
+  client: AuditWriter,
   params: {
     businessId: string;
     actorId: string | null;
@@ -553,18 +560,46 @@ export interface CreateSessionInput {
   /**
    * Issue #854 (P2.27): which door minted this session. Recorded so the
    * Profile device card can say how a session was established instead of
-   * showing a raw user-agent next to a timestamp.
+   * showing a raw user-agent next to a timestamp. Typed by the shared list
+   * the database constraint mirrors (`SESSION_LOGIN_METHODS`).
    */
-  loginMethod?: string | null;
+  loginMethod?: SessionLoginMethod | null;
   /** The raw user-agent, kept for the expandable detail on that card. */
   userAgent?: string | null;
 }
 
-/** Issues a new, server-side-revocable session and returns the one-time plaintext token alongside it. */
+/**
+ * Issues a new, server-side-revocable session and returns the one-time
+ * plaintext token alongside it.
+ *
+ * The employee profile, the `employee_sessions` row and its
+ * `employee.session_created` audit row are written in ONE transaction (#854
+ * follow-up). They used to be three autocommits on two connections — the audit
+ * went to the pool directly — so a failed audit write left a live row behind
+ * that no token named: harmless for authentication, but listed as an active
+ * session in Profile and the security center, with no record of who opened it.
+ * Now either all of it commits or none of it does, and the caller (every sign-in
+ * door) sees the throw before it signs a token or sets a cookie.
+ *
+ * Inside a caller's `withTenantTransaction` it joins that transaction instead
+ * of opening a second one (`isPinnedToTransaction`), so a caller that writes
+ * more alongside the session — the company hand-off's platform audit — commits
+ * or rolls back the session with it.
+ */
 export async function createSession(
   employeeId: string,
   businessId: string,
   input: CreateSessionInput = {},
+): Promise<{ token: string; session: EmployeeSession }> {
+  if (isPinnedToTransaction()) return openSession(employeeId, businessId, input);
+  return withTenantTransaction(businessId, () => openSession(employeeId, businessId, input));
+}
+
+/** The body of `createSession`; every statement runs on the ambient (pinned) transaction. */
+async function openSession(
+  employeeId: string,
+  businessId: string,
+  input: CreateSessionInput,
 ): Promise<{ token: string; session: EmployeeSession }> {
   await ensureEmployeeProfile(employeeId, businessId);
   const { token, tokenHash } = generateSessionToken();
@@ -593,14 +628,18 @@ export async function createSession(
   // carried in the payload rather than resolved to a label here so
   // audit-service.ts's read side can join employee_credentials/pos_devices
   // live, the same "read back on demand, don't duplicate" choice
-  // shift-service.ts made for a shift's cash summary.
-  await auditEmployee(getPool(), {
-    businessId,
-    actorId: employeeId,
-    action: "employee.session_created",
-    employeeId,
-    payload: { sessionId: session.id, credentialId: input.credentialId ?? null, deviceId: input.deviceId ?? null },
-  });
+  // shift-service.ts made for a shift's cash summary. Written through the
+  // ambient query — the same transaction as the row above — never the pool.
+  await auditEmployee(
+    { query: (text, params) => query(text, params) },
+    {
+      businessId,
+      actorId: employeeId,
+      action: "employee.session_created",
+      employeeId,
+      payload: { sessionId: session.id, credentialId: input.credentialId ?? null, deviceId: input.deviceId ?? null },
+    },
+  );
   return { token, session };
 }
 
@@ -628,6 +667,13 @@ export interface ActiveSessionSummary {
   deviceLabel: string | null;
   /** Presence alone says how this session was opened — see audit.ts's `credentialKindFromId` (null means PIN). */
   credentialId: string | null;
+  /**
+   * The door that opened this session (P2.27), when it was recorded — the
+   * security center labels the row with it before falling back to
+   * `credentialId`. Null for rows that predate migration 0211 and for the
+   * sign-in doors that do not record one.
+   */
+  loginMethod: SessionLoginMethod | null;
   issuedAt: string;
   lastSeenAt: string | null;
   expiresAt: string;
@@ -641,6 +687,7 @@ interface ActiveSessionRow extends Record<string, unknown> {
   location_id: string | null;
   device_label: string | null;
   credential_id: string | null;
+  login_method: string | null;
   issued_at: Date;
   last_seen_at: Date | null;
   expires_at: Date;
@@ -657,7 +704,7 @@ export async function listActiveSessionsForBusiness(businessId: string): Promise
   const { rows } = await query<ActiveSessionRow>(
     `SELECT s.id, s.employee_id, u.full_name AS employee_name, u.role::text AS role,
             s.location_id, coalesce(s.device_label, d.label) AS device_label,
-            s.credential_id, s.issued_at, s.last_seen_at, s.expires_at
+            s.credential_id, s.login_method, s.issued_at, s.last_seen_at, s.expires_at
        FROM employee_sessions s
        JOIN users u ON u.id = s.employee_id
        LEFT JOIN pos_devices d ON d.id = s.device_id
@@ -673,6 +720,7 @@ export async function listActiveSessionsForBusiness(businessId: string): Promise
     locationId: row.location_id,
     deviceLabel: row.device_label,
     credentialId: row.credential_id,
+    loginMethod: isSessionLoginMethod(row.login_method) ? row.login_method : null,
     issuedAt: row.issued_at.toISOString(),
     lastSeenAt: row.last_seen_at ? row.last_seen_at.toISOString() : null,
     expiresAt: row.expires_at.toISOString(),
@@ -813,28 +861,60 @@ export async function touchSession(sessionId: string, businessId: string): Promi
   );
 }
 
+/**
+ * Why a member's own session was ended, recorded on its audit row: a sign-out,
+ * the retry of one the server could not confirm, or the session moving to
+ * another business (`POST /api/auth/switch-business`).
+ */
+export type SessionEndVia = "sign_out" | "sign_out_retry" | "business_switch";
+
+/**
+ * End one `employee_sessions` row, with its audit row, atomically.
+ *
+ * Issue #854 follow-up (logout): the UPDATE and the `employee.session_revoked`
+ * row used to be two separate writes on two connections — the revocation
+ * autocommitted, then the audit went through the pool, so an audit failure
+ * left an ended session with no record, and the sign-out route swallowed the
+ * resulting error and answered success either way. Both now share one tenant
+ * transaction: either the session is ended *and* recorded, or neither happened
+ * and the caller is told.
+ *
+ * `ownedBy` restricts the row to one member's own session — what a sign-out
+ * (which names the session from its own signed token) asks for; the security
+ * center's administrative revocation omits it. A malformed id, or a row that is
+ * already revoked or missing, is `employee_session_not_found`.
+ */
 export async function revokeSession(
   sessionId: string,
   businessId: string,
   actorId: string | null,
+  options: { ownedBy?: string; via?: SessionEndVia } = {},
 ): Promise<void> {
-  const { rows } = await query<{ employee_id: string }>(
-    `UPDATE employee_sessions
-        SET revoked_at = now()
-      WHERE id = $1 AND business_id = $2 AND revoked_at IS NULL
-      RETURNING employee_id`,
-    [sessionId, businessId],
-  );
   // Its own code: `session_not_found` belongs to table (میز) sessions, whose
   // mapped Persian message reads «نشست میز پیدا نشد.» — nonsense when what the
   // owner was ending was an employee's login from the security center.
-  if (!rows[0]) throw new EmployeeError("employee_session_not_found", 404);
-  await auditEmployee(getPool(), {
-    businessId,
-    actorId,
-    action: "employee.session_revoked",
-    employeeId: rows[0].employee_id,
-    payload: { sessionId },
+  if (!isUuid(sessionId)) throw new EmployeeError("employee_session_not_found", 404);
+  const ownedBy = options.ownedBy ?? null;
+  await withTenantTransaction(businessId, async () => {
+    const { rows } = await query<{ employee_id: string }>(
+      `UPDATE employee_sessions
+          SET revoked_at = now()
+        WHERE id = $1 AND business_id = $2 AND revoked_at IS NULL
+          AND ($3::uuid IS NULL OR employee_id = $3::uuid)
+        RETURNING employee_id`,
+      [sessionId, businessId, ownedBy],
+    );
+    if (!rows[0]) throw new EmployeeError("employee_session_not_found", 404);
+    await auditEmployee(
+      { query: (text, params) => query(text, params) },
+      {
+        businessId,
+        actorId,
+        action: "employee.session_revoked",
+        employeeId: rows[0].employee_id,
+        payload: options.via ? { sessionId, via: options.via } : { sessionId },
+      },
+    );
   });
 }
 
