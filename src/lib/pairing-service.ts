@@ -1056,6 +1056,14 @@ const PAIRING_DATA_CLASSIFICATION = {
     "inventory item catalogue (not stock balances or lots)",
     "named payment methods",
     "site-device identity and one-time sync credential",
+    // Issue #839 §19 (Wave 6) — the one part of the trade a paired dealership
+    // desktop holds locally, disclosed in the bucket the replication catalogue
+    // also puts it in (`automotive_vehicle_board`, bootstrap «snapshot»): the
+    // branch *board* only, read-only and refreshed on every sync tick, with no
+    // acquisition cost, no capitalized cost and no minimum price in it. The two
+    // operations it may queue — hold a car, release a hold — are requests the
+    // cloud decides, and a sale is not offline-finalizable at all.
+    "the branch's vehicle board mirror (read-only; filled from the cloud on the first sync after pairing and refreshed continuously) and that branch's queued hold requests",
   ],
   // Derived from the machine-readable replication contract. Bootstrap-only
   // master data is intentionally absent: pairing must not imply that later

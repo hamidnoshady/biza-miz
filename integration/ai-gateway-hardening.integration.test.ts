@@ -189,16 +189,99 @@ describe("provisioning + revoke/rotate lifecycle safety (issue #748 P0-1)", () =
     expect((await gateway.getBusinessGateway(alpha.businessId))?.virtualKey).toBe("sk-tenant-4");
   });
 
-  it("clears the row on a confirmed 404 (the gateway already forgot the key)", async () => {
+  it("clears the row on a confirmed 404 (LiteLLM's own 'No keys found' wording)", async () => {
     stubFetch([{ status: 200, body: { key: "sk-tenant-5" } }]);
     const config = testConfig();
     await gateway.provisionVirtualKey(config, { businessId: alpha.businessId });
 
-    stubFetch([{ status: 404, body: { error: "not found" } }]);
+    // The exact wording LiteLLM's /key/delete uses when the key is not in its
+    // table — see delete_verification_tokens in key_management_endpoints.py.
+    stubFetch([{ status: 404, body: { error: "No keys found" } }]);
     const result = await gateway.revokeVirtualKey(config, alpha.businessId);
     expect(result.ok).toBe(true);
     expect(result.alreadyGone).toBe(true);
     expect(await gateway.getBusinessGateway(alpha.businessId)).toBeNull();
+  });
+
+  it("treats a generic/ambiguous 404 (a missing route, not a documented key-absent answer) as unconfirmed", async () => {
+    stubFetch([{ status: 200, body: { key: "sk-tenant-5b" } }]);
+    const config = testConfig();
+    await gateway.provisionVirtualKey(config, { businessId: alpha.businessId });
+
+    // A 404 that says nothing about the key itself (e.g. a reverse proxy
+    // swallowing the route) must NOT be read as "the key is gone" — issue
+    // #757 §A requires unambiguous, documented evidence only. The /key/info
+    // second opinion is stubbed to answer the same ambiguous shape.
+    stubFetch([
+      { status: 404, body: { detail: "Not Found" } },
+      { status: 404, body: { detail: "Not Found" } },
+    ]);
+    const result = await gateway.revokeVirtualKey(config, alpha.businessId);
+    expect(result.ok).toBe(false);
+    expect((await gateway.getBusinessGateway(alpha.businessId))?.virtualKey).toBe("sk-tenant-5b");
+  });
+
+  it("confirms an unconfirmed delete via a documented /key/info 'not found' second opinion", async () => {
+    stubFetch([{ status: 200, body: { key: "sk-tenant-5c" } }]);
+    const config = testConfig();
+    await gateway.provisionVirtualKey(config, { businessId: alpha.businessId });
+
+    // The delete response itself proves nothing (empty deleted_keys), but the
+    // documented /key/info 404 confirms the key is genuinely gone.
+    stubFetch([
+      { status: 200, body: { deleted_keys: [] } },
+      { status: 404, body: { error: { message: "Key not found in database" } } },
+    ]);
+    const result = await gateway.revokeVirtualKey(config, alpha.businessId);
+    expect(result.ok).toBe(true);
+    expect(result.alreadyGone).toBe(true);
+    expect(await gateway.getBusinessGateway(alpha.businessId)).toBeNull();
+  });
+
+  it("rejects a 2xx delete response whose deleted_keys names a different credential", async () => {
+    stubFetch([{ status: 200, body: { key: "sk-tenant-5d" } }]);
+    const config = testConfig();
+    await gateway.provisionVirtualKey(config, { businessId: alpha.businessId });
+
+    // An unrelated key in deleted_keys must never be read as "our key was
+    // deleted" — the response has to name the exact credential we asked for.
+    stubFetch([
+      { status: 200, body: { deleted_keys: ["sk-someone-elses-key"] } },
+      { status: 200, body: { info: { spend: 0 } } }, // /key/info: still live
+    ]);
+    const result = await gateway.revokeVirtualKey(config, alpha.businessId);
+    expect(result.ok).toBe(false);
+    expect((await gateway.getBusinessGateway(alpha.businessId))?.virtualKey).toBe("sk-tenant-5d");
+  });
+
+  it("rejects an error-status response that happens to carry deleted_keys: []", async () => {
+    stubFetch([{ status: 200, body: { key: "sk-tenant-5e" } }]);
+    const config = testConfig();
+    await gateway.provisionVirtualKey(config, { businessId: alpha.businessId });
+
+    // The exact vulnerability named in issue #757 §A: an error-status
+    // response with an empty deleted_keys list must never read as success.
+    stubFetch([
+      { status: 500, body: { error: "internal", deleted_keys: [] } },
+      { status: 200, body: { info: { spend: 0 } } }, // /key/info: still live
+    ]);
+    const result = await gateway.revokeVirtualKey(config, alpha.businessId);
+    expect(result.ok).toBe(false);
+    expect((await gateway.getBusinessGateway(alpha.businessId))?.virtualKey).toBe("sk-tenant-5e");
+  });
+
+  it("rejects a malformed HTTP 200/204 delete response (no parseable deleted_keys at all)", async () => {
+    stubFetch([{ status: 200, body: { key: "sk-tenant-5f" } }]);
+    const config = testConfig();
+    await gateway.provisionVirtualKey(config, { businessId: alpha.businessId });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("", { status: 204 })),
+    );
+    const result = await gateway.revokeVirtualKey(config, alpha.businessId);
+    expect(result.ok).toBe(false);
+    expect((await gateway.getBusinessGateway(alpha.businessId))?.virtualKey).toBe("sk-tenant-5f");
   });
 
   it("clears the row on a normal successful delete", async () => {
@@ -636,5 +719,137 @@ describe("secrets at rest (issue #748 P0-2)", () => {
     expect(await gateway.getBusinessGateway(alpha.businessId).then((r) => r?.virtualKey)).toBe(
       "sk-encrypted-check",
     );
+  });
+});
+
+describe("undecryptable stored credentials (issue #757 §B)", () => {
+  /** Ciphertext this test environment's resolved key (JWT_SECRET fallback) cannot read. */
+  const WRONG_KEY = Buffer.from("99".repeat(32), "hex");
+
+  async function plantUndecryptableVirtualKey(alias: string): Promise<void> {
+    const ciphertext = encryptSecret("sk-orphan-risk", WRONG_KEY);
+    await db.query(
+      `INSERT INTO ai_business_gateway (business_id, location_id, virtual_key_ciphertext, key_alias, updated_at)
+       VALUES ($1, NULL, $2, $3, now())`,
+      [alpha.businessId, ciphertext, alias],
+    );
+  }
+
+  it("reports a stored-but-undecryptable key as undecryptable, never as absent", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-1");
+    const row = await gateway.getBusinessGateway(alpha.businessId);
+    expect(row).not.toBeNull();
+    expect(row?.credentialState).toBe("undecryptable");
+    expect(row?.virtualKey).toBeNull();
+  });
+
+  it("never deletes the ciphertext merely because decryption failed", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-2");
+    // No delete call can succeed without being confirmed, and this deployment
+    // cannot even present the right key value — the proxy answers generically.
+    stubFetch([{ status: 404, body: { detail: "Not Found" } }, { status: 404, body: { detail: "Not Found" } }]);
+    const result = await gateway.revokeVirtualKey(testConfig(), alpha.businessId);
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("ai_gateway_credential_undecryptable");
+
+    const raw = await rawGatewayRow(alpha.businessId, null);
+    expect(raw?.virtual_key_ciphertext).toBeTruthy();
+    const after = await gateway.getBusinessGateway(alpha.businessId);
+    expect(after?.credentialState).toBe("undecryptable");
+  });
+
+  it("revokes an undecryptable credential by its recorded alias once LiteLLM confirms deletion", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-3");
+    stubFetch([{ status: 200, body: { deleted_keys: ["pos-undecryptable-3"] } }]);
+    const result = await gateway.revokeVirtualKey(testConfig(), alpha.businessId);
+    expect(result.ok).toBe(true);
+    expect(await gateway.getBusinessGateway(alpha.businessId)).toBeNull();
+
+    // The delete request named the alias, not a key value this deployment
+    // never had.
+    const fetchMock = globalThis.fetch as unknown as { mock: { calls: unknown[][] } };
+    const [, init] = fetchMock.mock.calls[0] as [string, { body?: string }];
+    expect(JSON.parse(init.body ?? "{}")).toEqual({ key_aliases: ["pos-undecryptable-3"] });
+  });
+
+  it("clears an undecryptable credential when LiteLLM confirms the alias was already absent, and allows a fresh key afterwards", async () => {
+    // The proxy's documented "No keys found" 404 — the same wording
+    // `delete_key_aliases()`/`delete_verification_tokens()` raise when zero
+    // rows match — is just as confirmed as an explicit deletion: there is
+    // nothing live at LiteLLM under this alias either way, so holding on to
+    // an unreadable ciphertext no longer protects anything.
+    await plantUndecryptableVirtualKey("pos-undecryptable-3b");
+    stubFetch([{ status: 404, body: { error: "No keys found" } }]);
+    const result = await gateway.revokeVirtualKey(testConfig(), alpha.businessId);
+    expect(result.ok).toBe(true);
+    expect(result.alreadyGone).toBe(true);
+    expect(await gateway.getBusinessGateway(alpha.businessId)).toBeNull();
+
+    // With the row cleared, this is no longer an "undecryptable" tenant —
+    // provisioning a fresh key must proceed normally instead of being stuck
+    // behind a permanent recovery error for a credential that is gone.
+    stubFetch([{ status: 200, body: { key: "sk-fresh-after-already-absent" } }]);
+    const provisioned = await gateway.provisionVirtualKey(testConfig(), { businessId: alpha.businessId });
+    expect(provisioned.virtualKey).toBe("sk-fresh-after-already-absent");
+    expect(provisioned.credentialState).toBe("present");
+  });
+
+  it("refuses to provision a replacement while the credential is undecryptable, and never orphans it", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-4");
+    await expect(
+      gateway.provisionVirtualKey(testConfig(), { businessId: alpha.businessId }),
+    ).rejects.toThrow("ai_gateway_credential_undecryptable");
+
+    const raw = await rawGatewayRow(alpha.businessId, null);
+    expect(raw?.virtual_key_ciphertext).toBeTruthy();
+    expect(raw?.sync_error).toBeTruthy();
+  });
+
+  it("rotate refuses to orphan an undecryptable credential unless the alias-revoke is confirmed", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-5");
+    stubFetch([{ status: 500, body: { error: "internal" } }]);
+    await expect(gateway.rotateVirtualKey(testConfig(), alpha.businessId)).rejects.toThrow();
+
+    const raw = await rawGatewayRow(alpha.businessId, null);
+    expect(raw?.virtual_key_ciphertext).toBeTruthy();
+  });
+
+  it("rotates an undecryptable credential once the alias-revoke is confirmed, and persists only the new key", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-6");
+    stubFetch([
+      { status: 200, body: { deleted_keys: ["pos-undecryptable-6"] } }, // alias revoke
+      { status: 200, body: { key: "sk-fresh-after-recovery" } }, // replacement
+    ]);
+    const rotated = await gateway.rotateVirtualKey(testConfig(), alpha.businessId);
+    expect(rotated.virtualKey).toBe("sk-fresh-after-recovery");
+    expect(rotated.credentialState).toBe("present");
+  });
+
+  it("rotates an undecryptable credential once LiteLLM confirms the alias was already absent", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-6b");
+    stubFetch([
+      { status: 404, body: { error: "No keys found" } }, // alias revoke: already gone at LiteLLM
+      { status: 200, body: { key: "sk-fresh-after-already-absent-rotate" } }, // replacement
+    ]);
+    const rotated = await gateway.rotateVirtualKey(testConfig(), alpha.businessId);
+    expect(rotated.virtualKey).toBe("sk-fresh-after-already-absent-rotate");
+    expect(rotated.credentialState).toBe("present");
+  });
+
+  it("verify reports credential-recovery guidance without ever exposing ciphertext or raw secret material", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-7");
+    const { gateway: row, probe } = await gateway.verifyVirtualKey(testConfig(), alpha.businessId);
+    expect(probe.ok).toBe(false);
+    expect(probe.error).toContain("رمزگشایی");
+    expect(JSON.stringify(probe)).not.toContain("sk-orphan-risk");
+    expect(JSON.stringify(row)).not.toContain("sk-orphan-risk");
+  });
+
+  it("preserves tenant/branch isolation: an undecryptable business key never leaks into a sibling business's read", async () => {
+    await plantUndecryptableVirtualKey("pos-undecryptable-8");
+    const betaRow = await gateway.getBusinessGateway(beta.businessId);
+    expect(betaRow).toBeNull();
+    const alphaRow = await gateway.getBusinessGateway(alpha.businessId);
+    expect(alphaRow?.credentialState).toBe("undecryptable");
   });
 });

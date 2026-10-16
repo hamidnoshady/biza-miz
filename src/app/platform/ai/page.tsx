@@ -44,6 +44,8 @@ const CREDENTIAL_SOURCE_FA: Record<string, string> = {
   none: "بدون کلید",
 };
 
+type CredentialState = "absent" | "present" | "undecryptable";
+
 interface GatewayConfig {
   enabled: boolean;
   baseUrl: string;
@@ -51,6 +53,8 @@ interface GatewayConfig {
   embeddingModel: string;
   virtualKeysEnabled: boolean;
   hasMasterKey: boolean;
+  /** Whether the stored master key can actually be decrypted and used. */
+  masterKeyState?: CredentialState;
 }
 
 interface LocationSummary {
@@ -66,6 +70,7 @@ interface BusinessGateway {
   syncedAt: string | null;
   syncError: string | null;
   hasVirtualKey: boolean;
+  credentialState?: CredentialState;
   effectiveModel: string;
 }
 
@@ -113,6 +118,9 @@ interface BranchReadiness extends RuntimeReadiness {
   credentialSource: "branch" | "business" | "master" | "none";
   businessHasKey: boolean;
   branchHasKey: boolean | null;
+  /** A credential is stored but this deployment cannot decrypt it — needs recovery, not re-provisioning. */
+  businessCredentialUndecryptable?: boolean;
+  branchCredentialUndecryptable?: boolean;
   inheritedFromBusiness: boolean;
   effectiveModel: string;
   lastVerifiedAt: string | null;
@@ -165,6 +173,7 @@ const READINESS_REASON_FA: Record<string, string> = {
   invalid_base_url: "نشانی Base URL معتبر نیست",
   missing_runtime_credential: "اعتبارنامهٔ اجرای درخواست موجود نیست",
   tenant_virtual_key_missing: "کلید مجازی این کسب‌وکار صادر نشده است",
+  tenant_credential_undecryptable: "کلید مجازی ذخیره‌شده قابل رمزگشایی نیست؛ نیازمند بازیابی اعتبارنامه",
   missing_model: "مدل گفت‌وگو تنظیم نشده است",
   invalid_max_output_tokens: "سقف توکن خروجی معتبر نیست",
   configuration_load_failed: "خواندن تنظیمات/ساختار پایگاه داده ناموفق بود؛ مهاجرت‌ها و لاگ سرور را بررسی کنید",
@@ -203,6 +212,10 @@ export default function PlatformAiPage() {
   const [search, setSearch] = useState("");
   const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
   const [rotateConfirmOpen, setRotateConfirmOpen] = useState(false);
+  // Issue #757 §B — replacing a master key that is stored but undecryptable
+  // is a deliberate decision (the old one may still be live in LiteLLM), so
+  // it is confirmed explicitly rather than silently overwritten on save.
+  const [masterKeyRecoveryConfirmOpen, setMasterKeyRecoveryConfirmOpen] = useState(false);
 
   // Debounce free-text fleet search so every keystroke doesn't hit the server
   // (issue #748 P1-6 — server-side search over a large fleet).
@@ -392,18 +405,44 @@ export default function PlatformAiPage() {
     return true;
   }
 
-  async function saveConfig(event: FormEvent) {
-    event.preventDefault();
+  async function submitConfig(confirmCredentialReplacement = false) {
     if (!draft) return;
-    await write(
-      {
+    setBusy("config");
+    setError("");
+    setNotice("");
+    const result = await api<{
+      error?: string;
+      detail?: string | null;
+      gateway?: GatewayConfig;
+    }>("/api/platform/ai/gateway", {
+      method: "PUT",
+      body: JSON.stringify({
         action: "config",
         gateway: { ...draft, masterKey: masterKey || undefined },
-      },
-      "config",
-      "PUT",
-    );
+        ...(confirmCredentialReplacement ? { confirmCredentialReplacement: true } : {}),
+      }),
+    });
+    setBusy("");
+    if (!result.ok) {
+      if (result.data.error === "ai_gateway_credential_undecryptable" && !confirmCredentialReplacement) {
+        // The stored master key cannot be decrypted; ask the operator to
+        // explicitly confirm before it is replaced (it may still be a live
+        // credential inside LiteLLM).
+        setMasterKeyRecoveryConfirmOpen(true);
+        return;
+      }
+      const message = result.data.error ? errorMessage(result.data.error) : "انجام عملیات ممکن نشد.";
+      setError(result.data.detail ? `${message} — ${result.data.detail}` : message);
+      return;
+    }
+    setNotice("تغییرات ذخیره شد.");
     setMasterKey("");
+    await load();
+  }
+
+  async function saveConfig(event: FormEvent) {
+    event.preventDefault();
+    await submitConfig(false);
   }
 
   async function probe() {
@@ -453,7 +492,13 @@ export default function PlatformAiPage() {
           </div>
           <div>
             <dt className="text-muted-foreground">کلید مدیر</dt>
-            <dd className="mt-1 font-medium">{draft?.hasMasterKey ? "ثبت شده" : "ثبت نشده"}</dd>
+            <dd className={`mt-1 font-medium ${draft?.masterKeyState === "undecryptable" ? "text-amber-700 dark:text-amber-300" : ""}`}>
+              {draft?.masterKeyState === "undecryptable"
+                ? "نیازمند بازیابی (رمزگشایی نشد)"
+                : draft?.hasMasterKey
+                  ? "ثبت شده"
+                  : "ثبت نشده"}
+            </dd>
           </div>
           <div className="sm:col-span-3">
             <dt className="text-muted-foreground">Base URL</dt>
@@ -494,7 +539,16 @@ export default function PlatformAiPage() {
             <Field label="Base URL">
               <input className={inputClass} dir="ltr" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} />
             </Field>
-            <Field label="Master key" hint={draft.hasMasterKey ? "کلید ذخیره شده است؛ برای حفظ آن خالی بگذارید." : "کلید مدیر LiteLLM را وارد کنید."}>
+            <Field
+              label="Master key"
+              hint={
+                draft.masterKeyState === "undecryptable"
+                  ? "کلید ذخیره‌شده با کلید رمزگشایی این استقرار قابل خواندن نیست. پیش از وارد کردن کلید تازه، در صورت امکان کلید رمزگشایی استقرار را بازیابی کنید؛ در غیر این صورت، ثبت کلید تازه نیاز به تأیید صریح دارد."
+                  : draft.hasMasterKey
+                    ? "کلید ذخیره شده است؛ برای حفظ آن خالی بگذارید."
+                    : "کلید مدیر LiteLLM را وارد کنید."
+              }
+            >
               <input className={inputClass} dir="ltr" type="password" value={masterKey} onChange={(event) => setMasterKey(event.target.value)} autoComplete="off" />
             </Field>
             <Field label="Default chat model alias" hint="باید دقیقاً در /model/info LiteLLM وجود داشته باشد، مانند pos-chat.">
@@ -592,10 +646,28 @@ export default function PlatformAiPage() {
                   «آماده» یعنی پیکربندی فنی کامل است؛ به‌معنای قابل‌پرداخت بودن برای کسب‌وکار نیست.
                 </p>
                 <p>منبع اعتبارنامه: <strong>{branchReadiness ? CREDENTIAL_SOURCE_FA[branchReadiness.credentialSource] : "—"}</strong></p>
-                <p>کلید کسب‌وکار: <strong>{branchReadiness?.businessHasKey ? "صادر شده" : "صادر نشده"}</strong></p>
+                <p>
+                  کلید کسب‌وکار:{" "}
+                  <strong className={branchReadiness?.businessCredentialUndecryptable ? "text-amber-700 dark:text-amber-300" : undefined}>
+                    {branchReadiness?.businessCredentialUndecryptable
+                      ? "نیازمند بازیابی (رمزگشایی نشد)"
+                      : branchReadiness?.businessHasKey
+                        ? "صادر شده"
+                        : "صادر نشده"}
+                  </strong>
+                </p>
                 {selectedLocationId ? (
                   <p>
-                    کلید شعبه: <strong>{branchReadiness?.branchHasKey ? "صادر شده (اختصاصی شعبه)" : branchReadiness?.inheritedFromBusiness ? "به‌ارث‌رسیده از کسب‌وکار" : "صادر نشده"}</strong>
+                    کلید شعبه:{" "}
+                    <strong className={branchReadiness?.branchCredentialUndecryptable ? "text-amber-700 dark:text-amber-300" : undefined}>
+                      {branchReadiness?.branchCredentialUndecryptable
+                        ? "نیازمند بازیابی (رمزگشایی نشد)"
+                        : branchReadiness?.branchHasKey
+                          ? "صادر شده (اختصاصی شعبه)"
+                          : branchReadiness?.inheritedFromBusiness
+                            ? "به‌ارث‌رسیده از کسب‌وکار"
+                            : "صادر نشده"}
+                    </strong>
                   </p>
                 ) : null}
               </div>
@@ -680,7 +752,13 @@ export default function PlatformAiPage() {
                     {readiness?.hasBranchOverride ? <span className="mr-1 text-xs text-muted-foreground">(شعبه‌ای)</span> : null}
                   </td>
                   <td className="py-2">{business.aiEntitled ? "فعال" : "غیرفعال"}</td>
-                  <td className="py-2">{key?.hasVirtualKey ? (key.syncError ? "خطای همگام‌سازی" : "صادر شده") : "صادر نشده"}</td>
+                  <td className="py-2">
+                    {key?.credentialState === "undecryptable"
+                      ? "نیازمند بازیابی"
+                      : key?.hasVirtualKey
+                        ? (key.syncError ? "خطای همگام‌سازی" : "صادر شده")
+                        : "صادر نشده"}
+                  </td>
                   <td className="py-2" dir="ltr">{key?.keyAlias ?? "—"}</td>
                   <td className="py-2">{fmtDate(key?.syncedAt ?? null)}</td>
                   <td className="py-2">{readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</td>
@@ -732,6 +810,20 @@ export default function PlatformAiPage() {
           void write({ action: "revoke_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "revoke");
         }}
         busy={busy === "revoke"}
+      />
+
+      <PlatformConfirmDialog
+        open={masterKeyRecoveryConfirmOpen}
+        onOpenChange={setMasterKeyRecoveryConfirmOpen}
+        title="جایگزینی کلید مدیر رمزگشایی‌نشدنی؟"
+        description="کلید مدیر ذخیره‌شدهٔ فعلی با کلید رمزگشایی این استقرار قابل خواندن نیست؛ ممکن است همچنان در LiteLLM معتبر و فعال باشد. اگر مطمئن نیستید، به‌جای ادامه، کلید رمزگشایی استقرار (INTEGRATIONS_ENCRYPTION_KEY/JWT_SECRET) را بازیابی کنید. ادامه این عملیات کلید ذخیره‌شده را با مقدار واردشده جایگزین می‌کند؛ کلید قبلی در LiteLLM باطل نخواهد شد."
+        confirmLabel="جایگزینی کلید"
+        variant="destructive"
+        onConfirm={() => {
+          setMasterKeyRecoveryConfirmOpen(false);
+          void submitConfig(true);
+        }}
+        busy={busy === "config"}
       />
     </div>
   );

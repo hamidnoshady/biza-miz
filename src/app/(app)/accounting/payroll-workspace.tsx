@@ -13,6 +13,7 @@ import { PayrollEngineProfiles } from "./payroll-engine-profiles";
 import { PayrollEngineReports } from "./payroll-engine-reports";
 import { PayrollEngineRules } from "./payroll-engine-rules";
 import { PayrollEngineRuns } from "./payroll-engine-runs";
+import { PayrollRunSource } from "./payroll-run-source";
 import { PayrollSection } from "./payroll-section";
 
 type PayrollTab = "monthly" | "runs" | "employees" | "rules" | "reports";
@@ -31,18 +32,21 @@ export function PayrollWorkspace({
   refreshKey,
   canManage,
   ownerKey,
+  sourceRunId,
 }: {
   busy: boolean;
   run: Runner;
   refreshKey: number;
   canManage?: boolean;
   ownerKey?: string;
+  sourceRunId?: string | null;
 }) {
   const [tab, setTab] = useState<PayrollTab>("monthly");
   // Unknown permission draws the controls and lets the API decide, as the #835 screen does.
   const manage = canManage !== false;
   return (
     <div className="space-y-4">
+      {sourceRunId ? <PayrollRunSource runId={sourceRunId} /> : null}
       <TabBar idPrefix="payroll" label="بخش‌های حقوق و دستمزد" tabs={TABS} active={tab} onChange={setTab} />
       <TabPanel idPrefix="payroll" active={tab}>
         {tab === "monthly" ? <PayrollSection busy={busy} run={run} refreshKey={refreshKey} canManage={canManage} ownerKey={ownerKey} /> : null}

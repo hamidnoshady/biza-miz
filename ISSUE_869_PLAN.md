@@ -1,11 +1,153 @@
 # Issue #869 — Commission run approval, settlement and payout lifecycle — implementation plan
 
-Working branch: `arena/40246fe8-biza-miz` (from `main` at `7b1b11c`). Committed to this branch; no pull request, not merged.
+Current completion branch: `arena/f54736c8-biza-miz`, audited against `main`
+`916df457eca2fef2123b3cfb6507bd0cfeacfe3e` on 2026-10-15. The original lifecycle
+was merged in PR #930 (`b4b7d22ba9886f589c3af8bff370984ca0f4bdb5`, 2026-10-12).
+The completion audit below supersedes the historical implementation/gate notes.
+Latest `main` `fe486e4e827983efa4062cb83e50272a7eb1a267` was re-audited on the same
+date: automotive/AI/release additions leave commission finances and business-scope
+commission contracts unchanged; PR checks use the current merge ref.
+
+Before merge, `main` advanced again to `ef2c98e0e770a05352603ab384fa184c8648d248`
+(financial accounts/internal transfers #965 and MCP OAuth #960). Integrated that
+target on the same completion branch rather than relying on the older green merge
+ref. The expanded exact-journal writer preserves base-Rial defaults and zero foreign
+legs for commission/payroll callers; existing commission formulas and v1 sync
+contracts are unchanged. Both new Accounting work areas and exact payroll-source
+navigation are preserved. The integrated candidate must earn fresh local/CI gates;
+prior green results below remain explicitly versioned evidence, not a new-head pass.
+Local integrated-tree checks at `891fd5d`: full typecheck and lint PASS; all three new upstream
+migrations apply successfully; financial PostgreSQL **339 tests / 8 files PASS**
+(commission, both payroll suites, and the new financial transfers). Fresh full unit,
+full PostgreSQL and current-head CI are required before merge; live results remain
+in PR #964 to avoid treating an older green target as verification of this merge.
+
+Integration audit found a genuine currency-source gap in the existing shared
+payroll/commission resolver: both explicit foreign-bank selection and the legacy
+bank fallback posted a Rial-only document without FX. Two deterministic PostgreSQL
+regressions failed before the fix (both calls incorrectly succeeded). The shared
+selector now excludes explicitly foreign accounts and the resolver rechecks the
+chosen account's currency under `FOR SHARE` through commit. Legacy/IRR accounts,
+legacy method/heading behavior, approval policy, formulas and v1 sync are unchanged;
+no FX engine was built. Pure eligibility/currency-race tests and commission/payroll
+atomic refusal tests cover the fix. The pre-fix `339/8` result is not a pass for
+this new code; full local/CI gates must be rerun before release.
+After the guard: full typecheck/lint PASS; focused financial PostgreSQL **343 / 8
+files PASS**, including both explicit/fallback foreign-bank refusals and all legacy
+Rial payment regressions. Pure selector/recheck tests PASS (8 / 2 files). Fresh full
+unit/full PostgreSQL and CI are running; their final verdict belongs in PR #964.
 
 Scope from the issue: complete the commission financial lifecycle *after accrual*.
 Commission rules, seller assignment, effective dates, accrual posting and the rules-and-report
 screen (#764) are not rebuilt. Payroll's own commission settlement and the 2300 tie-out (#835,
 migration 0215) are extended, not replaced. #869 owns run → approval → settlement → payout.
+
+
+## Completion audit — 2026-10-15
+
+Evidence read: live issue #869 body and comments (seven unchecked original DoD items;
+no comments), merged PR #930 body/comments, current `main`, settlement/lifecycle/planner/
+payout code, payroll, commission APIs and Growth screens, migrations 0216–0218,
+commission/contention/RLS/sync tests, `docs/commission-settlement.md`, payroll and
+business-scope sync documentation. No replacement financial subsystem or balance table.
+
+| Requirement | Audit status / completion evidence |
+| --- | --- |
+| Immutable runs and rule/employee/source snapshots | Complete in #930; existing line guards retained. Rule terms are the terms at calculation, not a reconstructed historical rules database. |
+| Separate approval/payout and audit trail | Complete in #930; calculator cannot approve, including owner; policy unchanged. Review and approval share `commission.approve`. |
+| Partial/full payouts, retries, reversals | Complete in #930; locked run, allocation bounds, request fingerprint, unique keys, mirror journals; concurrency and rollback tests retained. |
+| No duplicate accrual settlement | Complete in #930; same payroll advisory lock, row locks, mutually exclusive claim CHECK and affected-row checks. |
+| Returns, corrections, close/carry | Complete in #930; signed accruals, append-only reversal, posted-history guards and employee-level carries retained. |
+| Consistent GL reconciliation | Defect fixed here: both commission and payroll tie-outs now read via existing `inSnapshot` / explicit client runner. Includes open standalone runs AND unclaimed carries on that same connection. No RLS bypass, mutation lock, rounding or zero-forcing. |
+| Statements | Previously correct lifetime sums but capped history. Added independent accrual/payout paging, date/run filters, full filtered CSV (20,000 rows per history; explicit refusal above cap), sale/journal/run IDs and navigation. All totals remain lifetime DB sums, even for empty filters. Statement reads also use one snapshot. Payroll provenance now uses a supported exact `?run=<id>` source panel with the existing permission/RLS API, independent of history paging. |
+| Warnings | Fixed sale-day effective windows, item/brand scope, missing/inactive assignments without accrual, and inaccurate claim wording (payroll-held is not necessarily paid). Never accrue money from a warning. Historical lines with existing accruals are not re-diagnosed from subsequently edited rules. |
+| Rule-engine/category scope | Pre-existing #764 dependency, not rebuilt: retail producer does not pass category; a category rule no longer hides the warning. Rule edit history is not available to reconstruct past active flags. Warning sales values remain pre-discount, explicitly documented. |
+| Financial permissions / tenant isolation | Existing five permissions, service transitions, API guards and FORCE RLS retained. Added snapshot reporting probes under a non-superuser/non-BYPASSRLS app role. |
+| Browser acceptance | In-repo real-app multi-user script added (`npm run test:e2e:commission`) and wired into the existing production/RLS browser CI job. Full expanded Rial/Toman real-production acceptance passed at `9fdb199`, including both themes, three widths, WCAG, keyboard/focus, filter races/offline recovery, exact source navigation and refusal/correction lifecycle. See the versioned evidence below. |
+| Synchronization | Existing transactionally appended business-scope recorded/reversed v1 contracts preserved. Existing PostgreSQL tests exercise outbox rollback, duplicate delivery, site refusal, replay and scope. Controlled real central/site HTTP acceptance PASSED at `9fdb199` on separate DBs/processes under the non-BYPASSRLS app role. Customer deployment/physical-device pairing/full IAM scheduler are not claimed. Branch-bound devices intentionally do not receive business-scope events; a business-wide feed does. |
+| Cleanup | Cross-reference audit of settlement helpers/API/UI/tests/sync consumers; no confirmed dead financial path removed. The optional non-snapshot runner default on standalone outstanding was removed: its sole consumer must supply the report runner. |
+| Release / closure | BLOCKED until all mandatory gates, live two-instance verification and merge. Keep issue #869 OPEN. No automatic-closing PR keyword while blocked. |
+
+### Regression evidence added
+
+- PostgreSQL table-lock barriers in `commission-contention.integration.test.ts`: report
+  reads GL, blocks on accrual history, real payout/reversal/payroll transaction commits,
+  report finishes with exactly the pre-commit position; a fresh report sees the new state.
+  Both reports, and statement totals/history, are exercised. A genuine manual GL discrepancy
+  beyond 2^53 remains visible to the last Rial.
+- Whole-history statement fixture: walk 522 signed accruals and 603 payout/reversal
+  allocations without omission/duplication; totals unchanged on every page or empty date
+  filter; CSV mode ignores page offsets and returns the full filtered history.
+- Sale-day rule warning regression, nonmatching item/brand/category scope, missing seller.
+- Signed CSV correction: existing run-line exports threw on negative return amounts because
+  they called a nonnegative input formatter. Shared exact signed export formatting now
+  preserves negative amounts, values beyond 2^53 and the final Rial digit in Toman files.
+- Strict statement query and HTTP view/export permission contracts.
+- Real browser exposed native label activation around multi-control Jalali pickers:
+  Today updated the date then reopened the calendar over Submit. Commission date fields
+  now use `Field as="div"` with explicit picker names; the E2E asserts the picker closes,
+  without force clicks or relaxed timeouts.
+
+### Verification record — verified application head `9fdb199`
+
+Evidence as of 2026-10-15. Later candidate results and the live release checklist
+are maintained in [PR #964](https://github.com/hamidnoshady/biza-miz/pull/964), not
+inferred from this historical gate snapshot. Earlier tables below describe #930 only.
+
+| Gate | Verified result / current continuation |
+| --- | --- |
+| TypeScript / ESLint | Full continuation typecheck and lint PASS locally and Actions at `9fdb199`. No assertion, timeout, visual baseline or security threshold was weakened. |
+| Full unit | 11,429 tests / 867 files PASS locally at `9fdb199`; full unit PASS in Actions. Existing payroll UI and new source/statement/capability/API tests are included, not added again to that total. |
+| Financial PostgreSQL | 247 / 6 files passed locally: payroll 184, accrual 11, settlement 23, contention 10, sync handlers 12, RLS 7. |
+| Full PostgreSQL | Actions PASS at `03f9cb3`, run `38728481214`, 31m18s. The previous local run's final log is unavailable after workspace rehydration; it is not counted as a pass. A fresh full local run is in progress; no final verdict yet. |
+| Actual-app browser | Original multi-user commission lifecycle PASS on the production/non-BYPASSRLS runtime at `03f9cb3`, job `116401557439`. Full expanded Rial and Toman PASS at `9fdb199`, production/RLS job `116451226863`, run `38743483853`: both themes, three widths, WCAG, keyboard/focus, delayed real upstream response, offline/retry, exact payroll source, overpay/reject/recalculate/void and final zero tie-out. An initial error-state test-locator defect was fixed without changing UI financial assertions. |
+| Production build | Actions PASS at `9fdb199` (4m34s in the push workflow). Local cold builds exceeded the 3.8 GiB sandbox; no local pass or threshold change claimed. |
+| Pinned visual / packaging | Actions pinned visuals PASS (5m54s), packaged Windows E2E PASS (16m42s), desktop shell and production container PASS at `03f9cb3`. At `9fdb199`: pinned visuals PASS (5m27s), desktop shell PASS (7m2s), production container PASS (10m22s); fresh Windows packaging still running at this evidence snapshot. No baseline regeneration. |
+| Controlled central/site HTTP | PASS at `9fdb199`, job `116451226863`, transport step 36s. Real scope/authority/failure/backoff/recovery/duplicate checks and unchanged site financial counts; non-secret artifact `11976762680`. This is not customer deployment/physical pairing/IAM-scheduler evidence. |
+| Actions / merge | At `9fdb199`, all completed checks PASS; full PostgreSQL and Windows still running. Full required aggregate must pass on the eventual final documentation head too. PR #964 remains draft; #869 OPEN; no merge or closure at this evidence snapshot. Follow the live PR checklist for later gate/merge results. |
+
+### Continuation delivered after `03f9cb3`
+
+- Added supported `/accounting/payroll?run=<id>` source navigation through existing
+  Accounting gates and the `payroll.view` API. Exact immutable lines open read-only,
+  including outside history paging; foreign/missing/error/retry and stale-owner states
+  are explicit. No alternate payroll settlement engine or mutation surface.
+- Fixed statement filter options disappearing during requests. Only run labels persist;
+  old totals/history remain hidden until the current URL's answer is ready.
+- Closed omitted `/api/commission` → `app.growth` capability mapping. A Hybrid site
+  must not become a second HTTP payout authority. Existing permissions, self-approval
+  policy, rule engine and financial formulas are unchanged; broader #764 audit stays there.
+- Extended real-app acceptance for both business units, both themes, three widths,
+  focused WCAG/contrast, keyboard/focus, delayed actual upstream response and actual
+  offline/retry. Added a real payroll claim fixture, overpay denial and reject/recalculate/void.
+- Added controlled central/site processes and separate DB snapshot bootstrap with RLS
+  application roles. The real production pull client checks v1 recorded/reversed envelopes,
+  credential scope, site refusal, actual transport failure, production backoff, recovery,
+  recovery re-read, durable cloud-owned effects and no duplicate site payments/journals.
+  Branch-bound devices intentionally exclude these business-scope events. This does not
+  claim a physical modern-device pairing ceremony or full IAM-gated automatic scheduling.
+  Successful transport runs retain whitelisted event/payout/reversal/journal/effect IDs,
+  exact Rial amounts, retry/cursor state and before/after financial counts in the
+  `commission-transport-evidence` artifact, never fixture credentials or passwords.
+
+Verified real transport client-event IDs (no tokens):
+`ee6e0092-8ecd-5283-8468-17bf7ff0147b`, `e9e4acb8-d1c7-5e29-9712-eb152f60dd86`,
+`d9498b19-fc2a-5104-bd4c-4934b8178d30`. The
+[retained evidence](https://github.com/hamidnoshady/biza-miz/actions/runs/38743483853/artifacts/11976762680)
+links source payout/reversal/journal IDs to durable site effects and exact cursor/retry state.
+
+Remaining release work at this snapshot: finish full local PostgreSQL and all fresh
+required checks/Windows on the eventual final documentation head, then merge only if
+the mandatory criteria pass. The #764 category-producer and historical-rule limitations
+remain explicit, not silently rebuilt or bypassed. A #764 coordination comment was
+permission-denied (GitHub integration 403); the scope is cross-referenced in PR #964.
+Keep #869 OPEN until mandatory criteria and merge are complete. Physical pairing,
+customer deployment and the full IAM-gated scheduler are not inferred from this
+business-wide production-pull acceptance.
+
+---
+
+## Historical implementation record (PR #930)
 
 ## Baseline, before the first change
 
@@ -88,7 +230,7 @@ migration 0215) are extended, not replaced. #869 owns run → approval → settl
 
 # Status
 
-Delivered on branch `arena/40246fe8-biza-miz` and committed there; not merged. The table maps each requirement of the
+Historical delivery from `arena/40246fe8-biza-miz` was merged through PR #930. The table maps each requirement of the
 issue to the code that meets it and to the test that proves it.
 
 ## What each part of the issue maps to

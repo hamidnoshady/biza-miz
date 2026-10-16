@@ -3,7 +3,10 @@ import {
   UNASSIGNED_COLUMN_KEY,
   buildAccountDimensionMatrix,
   buildDimensionProfitReport,
+  buildDimensionRollup,
+  descendantIds,
   dimensionLinePredicate,
+  dimensionRollupPredicate,
   effectiveNormalBalance,
   type MatrixAccountRow,
   type MatrixAccountTotal,
@@ -237,5 +240,124 @@ describe("buildDimensionProfitReport", () => {
     const unfiltered = [rev(null, 500_000n), rev(V1, 500_000n)];
     const report = buildDimensionProfitReport({ rows: grouped, unfilteredRows: unfiltered, values, industry: "food_service" });
     expect(report.reconciled).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hierarchy rollup (issue #868, Phase 7)
+// ---------------------------------------------------------------------------
+
+describe("buildDimensionRollup", () => {
+  const HQ = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const SALES = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const ONLINE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const STORE = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+  const rollupValues = [
+    { id: HQ, code: "CC-HQ", name: "دفتر مرکزی", parentId: null, isActive: true, own: 0n },
+    { id: SALES, code: "CC-SALES", name: "فروش", parentId: HQ, isActive: true, own: 700n },
+    { id: ONLINE, code: "CC-ONLINE", name: "فروش آنلاین", parentId: SALES, isActive: true, own: 400n },
+    { id: STORE, code: "CC-STORE", name: "فروشگاه", parentId: SALES, isActive: false, own: 300n },
+  ];
+
+  it("a parent's rolledUp includes all descendants, nested and counted once", () => {
+    const report = buildDimensionRollup({ values: rollupValues, unassigned: 50n, journalTotal: 1050n });
+    const byId = new Map(report.rows.map((r) => [r.id, r]));
+    expect(byId.get(ONLINE)!.rolledUp).toBe(400);
+    expect(byId.get(STORE)!.rolledUp).toBe(300);
+    expect(byId.get(SALES)!.rolledUp).toBe(700 + 400 + 300);
+    expect(byId.get(HQ)!.rolledUp).toBe(1400);
+  });
+
+  it("child detail stays independently viewable: own is the value's own posting", () => {
+    const report = buildDimensionRollup({ values: rollupValues, unassigned: 50n, journalTotal: 1050n });
+    const byId = new Map(report.rows.map((r) => [r.id, r]));
+    expect(byId.get(SALES)!.own).toBe(700);
+    expect(byId.get(HQ)!.own).toBe(0); // a parent posts nothing
+  });
+
+  it("grand totals sum own, never rolledUp — no double counting", () => {
+    const report = buildDimensionRollup({ values: rollupValues, unassigned: 50n, journalTotal: 1450n });
+    // own: 0 + 700 + 400 + 300 = 1400; + 50 unassigned = 1450 = journal.
+    expect(report.grandTotal).toBe(1400);
+    expect(report.reconciled).toBe(true);
+  });
+
+  it("reports non-reconciliation rather than presenting wrong totals", () => {
+    const report = buildDimensionRollup({ values: rollupValues, unassigned: 0n, journalTotal: 9999n });
+    expect(report.reconciled).toBe(false);
+  });
+
+  it("archived values stay in the tree for historical reporting", () => {
+    const report = buildDimensionRollup({ values: rollupValues, unassigned: 50n, journalTotal: 1450n });
+    const archived = report.rows.find((r) => r.id === STORE)!;
+    expect(archived.isActive).toBe(false);
+    expect(archived.rolledUp).toBe(300);
+  });
+
+  it("orders a parent immediately before its children, siblings by code", () => {
+    const report = buildDimensionRollup({ values: rollupValues, unassigned: 50n, journalTotal: 1450n });
+    expect(report.rows.map((r) => r.code)).toEqual(["CC-HQ", "CC-SALES", "CC-ONLINE", "CC-STORE"]);
+    expect(report.rows.map((r) => r.depth)).toEqual([0, 1, 2, 2]);
+  });
+
+  it("refuses a parent loop loudly instead of hanging", () => {
+    const cyclic = [
+      { id: HQ, code: "A", name: "A", parentId: SALES, isActive: true, own: 0n },
+      { id: SALES, code: "B", name: "B", parentId: HQ, isActive: true, own: 1n },
+    ];
+    expect(() => buildDimensionRollup({ values: cyclic, unassigned: 0n, journalTotal: 1n })).toThrow("dimension_cycle");
+  });
+
+  it("an orphan (parent not in the set) is treated as a root", () => {
+    const report = buildDimensionRollup({
+      values: [{ id: ONLINE, code: "CC-ONLINE", name: "x", parentId: "99999999-9999-4999-8999-999999999999", isActive: true, own: 5n }],
+      unassigned: 0n,
+      journalTotal: 5n,
+    });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].depth).toBe(0);
+  });
+});
+
+describe("descendantIds / dimensionRollupPredicate", () => {
+  const HQ = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const SALES = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const ONLINE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const tree = [
+    { id: HQ, parentId: null },
+    { id: SALES, parentId: HQ },
+    { id: ONLINE, parentId: SALES },
+    { id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", parentId: null },
+  ];
+
+  it("collects the whole subtree, deepest last, without repeats", () => {
+    expect(descendantIds(tree, HQ)).toEqual([HQ, SALES, ONLINE]);
+    expect(descendantIds(tree, ONLINE)).toEqual([ONLINE]);
+  });
+
+  it("binds the subtree as one uuid array predicate", () => {
+    const bound: Record<string, string[]> = {};
+    const sql = dimensionRollupPredicate(
+      { kind: "cost_center", valueId: HQ },
+      tree,
+      (v) => v,
+      (values) => {
+        bound.ids = values;
+        return "$1";
+      },
+    );
+    expect(sql).toBe("jl.cost_center_id = ANY($1::uuid[])");
+    expect(bound.ids).toEqual([HQ, SALES, ONLINE]);
+  });
+
+  it("the unassigned filter stays a NULL test", () => {
+    const sql = dimensionRollupPredicate(
+      { kind: "cost_center", valueId: "unassigned" },
+      tree,
+      (v) => v,
+      () => "$1",
+    );
+    expect(sql).toBe("jl.cost_center_id IS NULL");
   });
 });

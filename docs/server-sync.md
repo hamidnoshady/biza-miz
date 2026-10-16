@@ -305,6 +305,22 @@ every branch. Its event is recorded with `scope = 'business'`, `business_id` set
 - **Location-scoped sync is unchanged.** The push, pull, health and connection-status
   queries now also name `scope = 'location'`, so the rule is written where it applies.
 
+### Commission verification status (2026-10-15 completion audit)
+
+The #869 follow-up does not change the recorded/reversed v1 wire contracts or
+financial authority. PostgreSQL handler/outbox tests are not evidence of live
+transport between two instances. At the initial audit (`03f9cb3`), real two-instance central/site transport had not
+been completed. The continuation harness below adds that acceptance; its result
+is a mandatory release/issue-closure gate, not inferred from handler tests. Current
+candidate evidence is maintained in [PR #964](https://github.com/hamidnoshady/biza-miz/pull/964).
+To accept it, use separate central and site databases/processes and real credentials:
+commit a central payout and reversal, verify business-wide pull and duplicate retry
+acknowledgements, zero additional site payout/journal effects, tenant denial, and
+location-credential exclusion as specified above. Record request IDs, original /
+reversing payout IDs, effect IDs and persisted cursor/retry results, without tokens.
+Do not claim branch devices should receive these events: business-wide versus
+location-bound delivery is an intentional authority boundary, not lost replication.
+
 ## Supported event scope
 
 `src/lib/data-ownership.ts` is the versioned, machine-readable replication
@@ -437,3 +453,22 @@ verification, pre-migration backup and rollback.
 - **Phone cannot connect:** use the HTTPS URL/QR from Local Devices, trust the
   generated root certificate, confirm the chosen adapter is Private, and
   verify the gateway—not the internal server—is listening on the LAN.
+
+
+### Commission controlled transport acceptance (#869 continuation)
+
+See [commission acceptance](commission-settlement.md#continuation-acceptance-869).
+The new CI harness uses separate central/site application processes and databases,
+the existing non-BYPASSRLS role and the real production pull implementation over HTTP.
+The branch credential excludes business-scope commission envelopes; the business-wide
+feed receives them and the site records durable `cloud_owned` acknowledgments without
+re-posting their journals. The harness checks actual unreachable-endpoint failure,
+backoff/cursor durability, recovery and duplicate re-delivery. It seeds a starting
+snapshot, not a physical-device pairing ceremony, and does not claim the entire
+IAM-gated modern branch scheduler or a customer's live deployment was verified.
+This controlled real-HTTP acceptance PASSED at `9fdb199` (run `38743483853`, job
+`116451226863`, transport step 36s); artifact `11976762680` retains the evidence.
+Later candidates must pass again; this is not customer/physical pairing acceptance.
+On success, `commission-transport-evidence` retains whitelisted source/effect identifiers,
+exact Rial amounts, persisted retry/cursor state and before/after financial counts.
+The credentials fixture is deliberately excluded from every artifact.

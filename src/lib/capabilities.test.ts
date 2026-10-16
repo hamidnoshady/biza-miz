@@ -50,6 +50,13 @@ describe("deployment capability resolver", () => {
     expect(resolveCapability("app.accounting", { deployment: "hybrid", runtimeRole: "site" }).available).toBe(true);
   });
 
+  it.each(["/api/commission/runs", "/api/commission/runs/id/payouts", "/api/commission/payouts/id/reverse", "/api/commission/statement", "/api/commission/liability", "/api/commission/payment-accounts", "/api/commission/rules"])("keeps %s on the single Growth execution authority", (path) => {
+    const key = capabilityForApiPath(path)!;
+    expect(key).toBe("app.growth");
+    expect(resolveCapability(key, { deployment: "hybrid", runtimeRole: "site" })).toMatchObject({ available: false, code: "WRONG_EXECUTION_TARGET" });
+    expect(resolveCapability(key, { deployment: "cloud", runtimeRole: "central" }).available).toBe(true);
+  });
+
   it("maps cloud API families and Local exceptions to the same registry", () => {
     expect(capabilityForApiPath("/api/cms/website/posts")).toBe("app.website");
     expect(capabilityForApiPath("/api/website/posts")).toBe("app.website");

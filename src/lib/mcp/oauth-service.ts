@@ -20,7 +20,8 @@ import {
   hashMcpToken,
   isAllowedRedirectUri,
   isValidCodeChallenge,
-  matchesRegisteredRedirectUri,
+  canonicalRedirectUri,
+  sameRedirectUri,
   verifyCodeChallenge,
 } from "./oauth";
 import { grantableScopes, parseMcpScopes, type McpScope, type McpWriteMode } from "./scopes";
@@ -194,7 +195,7 @@ export async function validateAuthorizationRequest(
   params: URLSearchParams,
 ): Promise<ValidateAuthorizationResult> {
   const clientId = params.get("client_id") ?? "";
-  const redirectUri = params.get("redirect_uri") ?? "";
+  const requestedRedirectUri = params.get("redirect_uri") ?? "";
   const state = params.get("state");
 
   const client = clientId ? await getMcpClient(businessId, clientId) : null;
@@ -206,7 +207,10 @@ export async function validateAuthorizationRequest(
       description: "این برنامه نزد این کسب‌وکار ثبت نشده است.",
     };
   }
-  if (!redirectUri || !matchesRegisteredRedirectUri(redirectUri, client.redirectUris)) {
+  const redirectUri = requestedRedirectUri
+    ? canonicalRedirectUri(requestedRedirectUri, client.redirectUris)
+    : null;
+  if (!redirectUri) {
     return {
       ok: false,
       kind: "display",
@@ -303,9 +307,8 @@ export async function issueAuthorizationCode(input: {
 }): Promise<IssueCodeResult> {
   const client = await getMcpClient(input.businessId, input.clientId);
   if (!client) return { ok: false, error: "invalid_client" };
-  if (!matchesRegisteredRedirectUri(input.redirectUri, client.redirectUris)) {
-    return { ok: false, error: "invalid_redirect" };
-  }
+  const redirectUri = canonicalRedirectUri(input.redirectUri, client.redirectUris);
+  if (!redirectUri) return { ok: false, error: "invalid_redirect" };
   if (!isValidCodeChallenge(input.codeChallenge)) return { ok: false, error: "invalid_request" };
 
   const scopes = grantableScopes(input.requestedScopes, input.approvedScopes);
@@ -337,7 +340,7 @@ export async function issueAuthorizationCode(input: {
       input.clientId,
       hashMcpToken(code),
       input.codeChallenge,
-      input.redirectUri,
+      redirectUri,
       scopes,
       input.writeMode,
       input.locationId,
@@ -348,7 +351,7 @@ export async function issueAuthorizationCode(input: {
     ],
   );
 
-  const url = new URL(input.redirectUri);
+  const url = new URL(redirectUri);
   url.searchParams.set("code", code);
   if (input.state !== null) url.searchParams.set("state", input.state);
   return { ok: true, code, redirectTo: url.toString() };
@@ -444,7 +447,7 @@ export async function exchangeAuthorizationCode(input: {
   if (row.client_id !== input.clientId) {
     return { ok: false, error: "invalid_client", description: "this code was issued to a different client" };
   }
-  if (row.redirect_uri !== input.redirectUri) {
+  if (!sameRedirectUri(input.redirectUri, row.redirect_uri)) {
     return { ok: false, error: "invalid_grant", description: "redirect_uri does not match the authorization request" };
   }
   if (!verifyCodeChallenge(input.codeVerifier, row.code_challenge)) {
