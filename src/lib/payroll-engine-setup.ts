@@ -306,6 +306,15 @@ export interface CostAllocationShare {
   locationId?: string | null;
   projectId?: string | null;
   label?: string | null;
+  /**
+   * Issue #868 — the accounting dimension tuple this share carries. Branch and
+   * project stay the entry-header dimensions they always were; these four are
+   * stamped on the share's expense lines. Absent means unattributed.
+   */
+  costCenterId?: string | null;
+  profitCenterId?: string | null;
+  departmentId?: string | null;
+  detailDimensionId?: string | null;
 }
 
 export interface PayrollProfile {
@@ -420,7 +429,7 @@ function parseCostAllocation(raw: unknown): CostAllocationShare[] {
     if (typeof percent !== "number" || !(percent > 0) || percent > 100 || Math.abs(percent * 100 - Math.round(percent * 100)) > 1e-9) {
       throw new PayrollError("invalid_cost_allocation", 400, "costAllocation");
     }
-    for (const k of ["locationId", "projectId"] as const) {
+    for (const k of ["locationId", "projectId", "costCenterId", "profitCenterId", "departmentId", "detailDimensionId"] as const) {
       if (s[k] !== undefined && s[k] !== null && !isUuid(s[k])) throw new PayrollError("invalid_cost_allocation", 400, `costAllocation.${k}`);
     }
     total += Math.round(percent * 100);
@@ -429,6 +438,10 @@ function parseCostAllocation(raw: unknown): CostAllocationShare[] {
       locationId: (s.locationId as string | undefined) ?? null,
       projectId: (s.projectId as string | undefined) ?? null,
       label: optionalText(s.label, 80, "costAllocation.label"),
+      costCenterId: (s.costCenterId as string | undefined) ?? null,
+      profitCenterId: (s.profitCenterId as string | undefined) ?? null,
+      departmentId: (s.departmentId as string | undefined) ?? null,
+      detailDimensionId: (s.detailDimensionId as string | undefined) ?? null,
     });
   }
   if (out.length > 0 && total !== 10_000) throw new PayrollError("allocation_must_total_100", 400, "costAllocation");
@@ -460,6 +473,25 @@ export async function assertAllocationReferences(run: Runner, businessId: string
     );
     const missing = projectIds.find((id) => !rows.some((r) => r.id === id));
     if (missing) throw new PayrollError("invalid_cost_allocation", 400, { field: "costAllocation.projectId", projectId: missing });
+  }
+  // Issue #868 — the four accounting dimensions, each in its own column of its
+  // own kind. Checked with the explicit business filter (not only RLS), the
+  // same rule the branch and project references above follow.
+  const dimensionFields = [
+    ["costCenterId", "cost_center"],
+    ["profitCenterId", "profit_center"],
+    ["departmentId", "department"],
+    ["detailDimensionId", "detail"],
+  ] as const;
+  for (const [field, kind] of dimensionFields) {
+    const ids = [...new Set(shares.map((s) => s[field]).filter((v): v is string => !!v))];
+    if (ids.length === 0) continue;
+    const { rows } = await run<{ id: string }>(
+      `SELECT id FROM accounting_dimension_values WHERE business_id = $1 AND kind = $2 AND id = ANY($3::uuid[])`,
+      [businessId, kind, ids],
+    );
+    const missing = ids.find((id) => !rows.some((r) => r.id === id));
+    if (missing) throw new PayrollError("invalid_cost_allocation", 400, { field: `costAllocation.${field}`, valueId: missing });
   }
 }
 

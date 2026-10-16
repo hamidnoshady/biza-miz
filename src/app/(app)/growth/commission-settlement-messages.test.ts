@@ -122,6 +122,7 @@ describe("the warnings a run carries", () => {
     );
     expect(unmapped).toContain("نیلوفر");
     expect(unmapped).toContain("900000 ریال");
-    expect(unmapped).toContain("قانون پورسانت فعال ندارند");
+    expect(unmapped).toContain("قانون قابل‌اعمال در تاریخ فروش");
+    expect(unmapped).toContain("محدودهٔ کالا و برند");
   });
 });

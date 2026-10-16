@@ -275,3 +275,44 @@ describe("downloads", () => {
     expect(await (await paymentAccounts(get("/api/commission/payment-accounts"))).json()).toMatchObject({ accounts: [{ code: "1100" }] });
   });
 });
+
+describe("paginated statement HTTP contract", () => {
+  it("passes independent history pages to the service while retaining commission.view", async () => {
+    vi.mocked(service.getCommissionStatement).mockResolvedValue({} as never);
+    const response = await statement(get(`/api/commission/statement?employeeId=${EMPLOYEE_ID}&limit=100&accrualOffset=500&payoutOffset=600&runId=${RUN_ID}`));
+    expect(response.status).toBe(200);
+    expect(requirePermission).toHaveBeenLastCalledWith(PERMISSIONS.commissionView);
+    expect(service.getCommissionStatement).toHaveBeenCalledWith(session.businessId, EMPLOYEE_ID,
+      { limit: 100, accrualOffset: 500, payoutOffset: 600, runId: RUN_ID, dateFrom: null, dateTo: null, format: "json" });
+  });
+  it("refuses invalid pages before reading compensation data", async () => {
+    const response = await statement(get(`/api/commission/statement?employeeId=${EMPLOYEE_ID}&payoutOffset=-1`));
+    expect(response.status).toBe(400);
+    expect(service.getCommissionStatement).not.toHaveBeenCalled();
+  });
+  it("does not allow an export to bypass commission.view", async () => {
+    denied();
+    const response = await statement(get(`/api/commission/statement?employeeId=${EMPLOYEE_ID}&format=csv`));
+    expect(response.status).toBe(403);
+    expect(service.getCommissionStatement).not.toHaveBeenCalled();
+  });
+});
+
+describe("statement CSV HTTP response", () => {
+  it("uses the business display unit, preserves exact lifetime totals and returns a download", async () => {
+    vi.mocked(service.getCommissionStatement).mockResolvedValue({
+      employee: { id: EMPLOYEE_ID, fullName: "فروشنده" },
+      totals: { accrued: "9007199254740993", paidThroughPayroll: "0", paidThroughRuns: "21", unpaid: "9007199254740972" },
+      accruals: [], payouts: [], runs: [],
+    } as never);
+    const result = await statement(get(`/api/commission/statement?employeeId=${EMPLOYEE_ID}&format=csv&dateFrom=2026-01-01`));
+    expect(result.status).toBe(200);
+    expect(result.headers.get("content-type")).toContain("text/csv");
+    expect(result.headers.get("content-disposition")).toContain("attachment;");
+    const csv = await result.text();
+    expect(csv).toContain("تومان");
+    expect(csv).toContain("900719925474099.3");
+    expect(csv).toContain("900719925474097.2");
+    expect(service.getCommissionStatement).toHaveBeenLastCalledWith(session.businessId, EMPLOYEE_ID, expect.objectContaining({ format: "csv", dateFrom: "2026-01-01" }));
+  });
+});

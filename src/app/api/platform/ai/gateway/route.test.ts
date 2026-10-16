@@ -62,6 +62,15 @@ vi.mock("@/lib/ai-gateway-service", () => ({
       this.detail = detail;
     }
   },
+  GatewayCredentialError: class extends Error {
+    code: string;
+    detail: string | null;
+    constructor(code: string, detail: string | null = null) {
+      super(code);
+      this.code = code;
+      this.detail = detail;
+    }
+  },
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -121,6 +130,7 @@ const businessKeyRow = {
   businessId: "biz-1",
   locationId: null,
   virtualKey: "sk-tenant-1",
+  credentialState: "present" as const,
   keyAlias: "pos-biz1",
   spendUsd: 0,
   syncedAt: "2026-09-22T00:00:00Z",
@@ -592,5 +602,156 @@ describe("branch-scoped readiness (issue #757 P1-5)", () => {
     vi.mocked(listBusinessGatewaysForConsole).mockResolvedValueOnce([businessKeyRow]);
     const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1&locationId=loc-other"));
     expect((await res.json()).branchReadiness).toBeNull();
+  });
+
+  it("reports a stored-but-undecryptable business key as having a key that needs recovery, not as unprovisioned", async () => {
+    mockFleetQuery([fleetRow()], []);
+    vi.mocked(listBusinessGatewaysForConsole).mockResolvedValueOnce([
+      { ...businessKeyRow, virtualKey: null, credentialState: "undecryptable" },
+    ] as never);
+    const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1"));
+    const json = await res.json();
+    expect(json.branchReadiness).toMatchObject({
+      businessHasKey: true,
+      businessCredentialUndecryptable: true,
+    });
+  });
+
+  it("reports business inheritance, not branch, when the branch credential is stored but undecryptable and the business key is usable", async () => {
+    mockFleetQuery([fleetRow({ has_branch_override: true })], locations);
+    vi.mocked(listBusinessGatewaysForConsole).mockResolvedValueOnce([
+      businessKeyRow,
+      {
+        ...businessKeyRow,
+        id: "g-branch-1",
+        locationId: "loc-1",
+        virtualKey: null,
+        credentialState: "undecryptable",
+        keyAlias: "pos-biz1-loc1",
+      },
+    ] as never);
+
+    const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1&locationId=loc-1"));
+    const json = await res.json();
+    // The branch's own row is still reported as stored-but-broken (so the
+    // console can offer recovery) — but the EFFECTIVE source for a call is
+    // the business key, exactly as `resolveGatewayAuthKey` would pick it,
+    // because a branch credential this deployment cannot read is no more
+    // usable than one that was never issued.
+    expect(json.branchReadiness).toMatchObject({
+      credentialSource: "business",
+      businessHasKey: true,
+      branchHasKey: true,
+      branchCredentialUndecryptable: true,
+      inheritedFromBusiness: true,
+      lastVerifiedAt: businessKeyRow.syncedAt,
+    });
+  });
+
+  it("reports no effective credential when the branch's stored key is undecryptable and the business has no usable key either", async () => {
+    mockFleetQuery([fleetRow({ has_branch_override: true, business_has_key: false })], locations);
+    vi.mocked(listBusinessGatewaysForConsole).mockResolvedValueOnce([
+      {
+        ...businessKeyRow,
+        locationId: "loc-1",
+        virtualKey: null,
+        credentialState: "undecryptable",
+        keyAlias: "pos-biz1-loc1",
+      },
+    ] as never);
+
+    const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1&locationId=loc-1"));
+    const json = await res.json();
+    // Neither row is usable, so the console must say "none" rather than
+    // naming a branch credential that cannot actually serve a request.
+    expect(json.branchReadiness).toMatchObject({
+      credentialSource: "none",
+      businessHasKey: false,
+      branchHasKey: true,
+      branchCredentialUndecryptable: true,
+      inheritedFromBusiness: false,
+      lastVerifiedAt: null,
+    });
+  });
+});
+
+describe("undecryptable stored credentials (issue #757 §B)", () => {
+  it("PUT config refuses to replace an undecryptable master key without explicit confirmation", async () => {
+    const service = vi.mocked(await import("@/lib/ai-gateway-service"));
+    const { GatewayCredentialError } = await import("@/lib/ai-gateway-service");
+    service.saveAiGatewayConfig.mockRejectedValueOnce(
+      new GatewayCredentialError("ai_gateway_credential_undecryptable", "master key"),
+    );
+    const res = await PUT(new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "PUT",
+      body: JSON.stringify({
+        action: "config",
+        gateway: { baseUrl: "http://litellm:4000/v1", masterKey: "sk-new" },
+      }),
+    }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("ai_gateway_credential_undecryptable");
+  });
+
+  it("PUT config forwards an explicit confirmation to the service", async () => {
+    const res = await PUT(new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "PUT",
+      body: JSON.stringify({
+        action: "config",
+        gateway: { baseUrl: "http://litellm:4000/v1", masterKey: "sk-new" },
+        confirmCredentialReplacement: true,
+      }),
+    }));
+    expect(res.status).toBe(200);
+    const service = vi.mocked(await import("@/lib/ai-gateway-service"));
+    expect(service.saveAiGatewayConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ masterKey: "sk-new" }),
+      { confirmCredentialReplacement: true },
+    );
+  });
+
+  it("POST sync_key returns 409 when the stored credential cannot be decrypted", async () => {
+    const service = vi.mocked(await import("@/lib/ai-gateway-service"));
+    const { GatewayCredentialError } = await import("@/lib/ai-gateway-service");
+    service.provisionVirtualKey.mockRejectedValueOnce(
+      new GatewayCredentialError("ai_gateway_credential_undecryptable", "biz-1"),
+    );
+    const res = await POST(new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "POST",
+      body: JSON.stringify({ action: "sync_key", businessId: "biz-1" }),
+    }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("ai_gateway_credential_undecryptable");
+  });
+
+  it("POST rotate_key returns 409 and audits the attempt when the credential cannot be decrypted or confirmed-revoked", async () => {
+    const service = vi.mocked(await import("@/lib/ai-gateway-service"));
+    const { GatewayCredentialError } = await import("@/lib/ai-gateway-service");
+    service.rotateVirtualKey.mockRejectedValueOnce(
+      new GatewayCredentialError("ai_gateway_credential_undecryptable", "biz-1"),
+    );
+    const res = await POST(new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "POST",
+      body: JSON.stringify({ action: "rotate_key", businessId: "biz-1" }),
+    }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("ai_gateway_credential_undecryptable");
+  });
+
+  it("POST revoke_key surfaces the undecryptable-credential code from a failed revoke without exposing secrets", async () => {
+    vi.mocked(revokeVirtualKey).mockResolvedValueOnce({
+      ok: false,
+      alreadyGone: false,
+      code: "ai_gateway_credential_undecryptable",
+      detail: "alias=pos-biz1",
+    });
+    const res = await POST(new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "POST",
+      body: JSON.stringify({ action: "revoke_key", businessId: "biz-1" }),
+    }));
+    expect(res.status).toBe(502);
+    const json = await res.json();
+    expect(json.error).toBe("ai_gateway_credential_undecryptable");
+    expect(JSON.stringify(json)).not.toMatch(/sk-[A-Za-z0-9]/);
   });
 });

@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGatewayRuntime,
+  classifyKeyDeleteResponse,
   defaultGatewayConfig,
   emptyBusinessGateway,
   gatewayErrorText,
@@ -16,6 +17,7 @@ import {
   gatewayTurnPricing,
   gatewayStatusMessage,
   joinGatewayDetail,
+  keyAbsentSignal,
   keyInfoUrl,
   livelinessUrl,
   modelInfoUrl,
@@ -37,7 +39,13 @@ import {
 import { defaultConfig, isProvider, PROVIDERS, type AiConfig } from "./ai";
 
 function gateway(overrides: Partial<AiGatewayConfig> = {}): AiGatewayConfig {
-  return { ...defaultGatewayConfig(), enabled: true, ...overrides };
+  const merged = { ...defaultGatewayConfig(), enabled: true, ...overrides };
+  // A test fixture names `masterKey`; it never has to separately spell out
+  // `masterKeyState` unless it is deliberately testing the undecryptable case.
+  if (overrides.masterKeyState === undefined) {
+    merged.masterKeyState = merged.masterKey ? "present" : "absent";
+  }
+  return merged;
 }
 
 function business(overrides: Partial<BusinessGateway> = {}): BusinessGateway {
@@ -170,6 +178,90 @@ describe("credential resolution", () => {
   });
 });
 
+describe("resolveEffectiveCredentialSource (issue #757 follow-up: effective-source mismatch)", () => {
+  /**
+   * This must agree with `resolveGatewayAuthKey` on every input: it is the
+   * same decision, just reported with its *name* and originating row
+   * instead of only the raw key. A branch row whose credential is stored
+   * but undecryptable looks identical to "no branch row" here — both have
+   * `virtualKey === null` — which is exactly what makes a usable business
+   * key outrank it, instead of the console claiming an unreadable branch
+   * credential is what a call would actually use.
+   */
+  it("names the branch as the source and returns its row when the branch key is usable", async () => {
+    const { resolveEffectiveCredentialSource } = await import("./ai-gateway");
+    const result = resolveEffectiveCredentialSource({
+      gateway: gateway({ virtualKeysEnabled: true, masterKey: "sk-master" }),
+      business: business({ virtualKey: "sk-biz" }),
+      branch: business({ virtualKey: "sk-branch" }),
+      tenantScoped: true,
+    });
+    expect(result).toMatchObject({ source: "branch", key: "sk-branch" });
+    expect(result.row?.virtualKey).toBe("sk-branch");
+  });
+
+  it("falls back to the business key — reporting source \"business\" — when the branch credential is undecryptable", async () => {
+    const { resolveEffectiveCredentialSource } = await import("./ai-gateway");
+    const undecryptableBranch = {
+      ...business({ virtualKey: "sk-branch" }),
+      virtualKey: null,
+      credentialState: "undecryptable" as const,
+    };
+    const result = resolveEffectiveCredentialSource({
+      gateway: gateway({ virtualKeysEnabled: true, masterKey: "sk-master" }),
+      business: business({ virtualKey: "sk-biz" }),
+      branch: undecryptableBranch,
+      tenantScoped: true,
+    });
+    expect(result).toMatchObject({ source: "business", key: "sk-biz" });
+    expect(result.row?.virtualKey).toBe("sk-biz");
+  });
+
+  it("reports \"none\", not \"branch\", when the branch credential is undecryptable and the business has no usable key either", async () => {
+    const { resolveEffectiveCredentialSource } = await import("./ai-gateway");
+    const undecryptableBranch = {
+      ...business({ virtualKey: "sk-branch" }),
+      virtualKey: null,
+      credentialState: "undecryptable" as const,
+    };
+    const result = resolveEffectiveCredentialSource({
+      gateway: gateway({ virtualKeysEnabled: true, masterKey: "sk-master" }),
+      business: null,
+      branch: undecryptableBranch,
+      tenantScoped: true,
+    });
+    expect(result).toEqual({ source: "none", row: null });
+  });
+
+  it("agrees with resolveGatewayAuthKey's returned key on every one of its own fixtures", async () => {
+    const { resolveEffectiveCredentialSource } = await import("./ai-gateway");
+    const cases = [
+      {
+        gateway: gateway({ virtualKeysEnabled: true, masterKey: "sk-master" }),
+        business: business({ virtualKey: "sk-biz" }),
+        branch: business({ virtualKey: "sk-branch" }),
+      },
+      {
+        gateway: gateway({ virtualKeysEnabled: true, masterKey: "sk-master" }),
+        business: business({ virtualKey: "sk-tenant" }),
+      },
+      { gateway: gateway({ virtualKeysEnabled: true, masterKey: "sk-master" }), business: null },
+      {
+        gateway: gateway({ virtualKeysEnabled: true, masterKey: "sk-master" }),
+        business: null,
+        tenantScoped: true,
+      },
+      {
+        gateway: gateway({ virtualKeysEnabled: false, masterKey: "sk-master" }),
+        business: business({ virtualKey: "sk-tenant" }),
+      },
+    ];
+    for (const input of cases) {
+      expect(resolveEffectiveCredentialSource(input).key).toBe(resolveGatewayAuthKey(input));
+    }
+  });
+});
+
 describe("request body", () => {
   it("never sends request-level fallbacks or other routing policy", () => {
     const runtime = buildGatewayRuntime({
@@ -182,6 +274,7 @@ describe("request body", () => {
       embeddingModel: "pos-chat",
       authKey: "sk-master",
       virtualKeyResolved: false,
+      credentialUndecryptable: false,
       body: {},
     });
   });
@@ -355,7 +448,7 @@ describe("a fresh business/branch row", () => {
     expect(row.virtualKey).toBeNull();
     expect(row.spendUsd).toBe(0);
     expect(Object.keys(row).sort()).toEqual(
-      ["businessId", "keyAlias", "locationId", "spendUsd", "syncedAt", "syncError", "virtualKey"].sort(),
+      ["businessId", "credentialState", "keyAlias", "locationId", "spendUsd", "syncedAt", "syncError", "virtualKey"].sort(),
     );
   });
 });
@@ -465,6 +558,7 @@ describe("the public gateway config is technical-only", () => {
       embeddingModel: "",
       virtualKeysEnabled: false,
       hasMasterKey: true,
+      masterKeyState: "present",
       knowledgeEnabled: false,
       knowledgeBaseUrl: "",
       knowledgeModel: "",
@@ -482,5 +576,89 @@ describe("the public gateway config is technical-only", () => {
     const json = JSON.stringify(pub);
     expect(json).not.toContain("sk-secret");
     expect(json).not.toMatch(/usdRialRate|revenueMarginPercent|maxTurnRial|fallbackModels|publishedModels|allowBusinessModels|mcpServers|mcpEnabled|modelOverride/);
+  });
+});
+
+describe("classifying a /key/delete response (issue #757 §A)", () => {
+  it("confirms deletion only on a 2xx whose deleted_keys names the requested credential", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 200, body: { deleted_keys: ["sk-a"] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "deleted" });
+  });
+
+  it("does not confirm deletion when deleted_keys names a different credential", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 200, body: { deleted_keys: ["sk-other"] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+  });
+
+  it("does not confirm deletion on an empty deleted_keys list", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 200, body: { deleted_keys: [] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+  });
+
+  it("does not confirm deletion on a malformed 2xx body", () => {
+    expect(classifyKeyDeleteResponse({ status: 200, body: null, target: "sk-a" })).toMatchObject({
+      outcome: "unconfirmed",
+    });
+    expect(classifyKeyDeleteResponse({ status: 204, body: undefined, target: "sk-a" })).toMatchObject({
+      outcome: "unconfirmed",
+    });
+  });
+
+  it("confirms absence only on a 404 whose explanation is documented and about the key", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 404, body: { error: "No keys found" }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "already_absent" });
+    expect(
+      classifyKeyDeleteResponse({
+        status: 404,
+        body: { error: { message: "Key not found in database" } },
+        target: "sk-a",
+      }),
+    ).toMatchObject({ outcome: "already_absent" });
+  });
+
+  it("does not confirm absence on a generic 404 that says nothing about the key", () => {
+    expect(
+      classifyKeyDeleteResponse({ status: 404, body: { detail: "Not Found" }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+    expect(classifyKeyDeleteResponse({ status: 404, body: null, target: "sk-a" })).toMatchObject({
+      outcome: "unconfirmed",
+    });
+  });
+
+  it("rejects an error-status response that happens to carry an empty deleted_keys — the vulnerability issue #757 §A describes", () => {
+    expect(
+      classifyKeyDeleteResponse({
+        status: 400,
+        body: { error: "not all keys deleted", deleted_keys: [] },
+        target: "sk-a",
+      }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+    expect(
+      classifyKeyDeleteResponse({ status: 500, body: { deleted_keys: [] }, target: "sk-a" }),
+    ).toMatchObject({ outcome: "unconfirmed" });
+  });
+
+  it("never confirms anything on 401/403/5xx or an unreachable proxy (status 0)", () => {
+    for (const status of [401, 403, 500, 502, 0]) {
+      expect(classifyKeyDeleteResponse({ status, body: { deleted_keys: ["sk-a"] }, target: "sk-a" })).toMatchObject({
+        outcome: "unconfirmed",
+      });
+    }
+  });
+});
+
+describe("keyAbsentSignal", () => {
+  it("recognizes LiteLLM's documented key-absent wordings", () => {
+    expect(keyAbsentSignal({ error: "No keys found" })).toBeTruthy();
+    expect(keyAbsentSignal({ error: { message: "Key not found in database" } })).toBeTruthy();
+  });
+
+  it("returns null for a generic missing-route answer", () => {
+    expect(keyAbsentSignal({ detail: "Not Found" })).toBeNull();
+    expect(keyAbsentSignal(null)).toBeNull();
   });
 });

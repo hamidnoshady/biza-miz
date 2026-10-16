@@ -74,8 +74,11 @@ export function PayrollRunItem({
   paymentAccounts,
   onPay,
   onVoid,
+  initialLines,
 }: {
   run: PayrollRunSummary;
+  /** Already-authorized source lookup; opens immutable lines without fetching them twice. */
+  initialLines?: PayrollRunLine[];
   canManage: boolean;
   busy: boolean;
   working: boolean;
@@ -88,10 +91,10 @@ export function PayrollRunItem({
   const detailsId = useId();
   const dateId = useId();
 
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialLines !== undefined);
   const [details, setDetails] = useState<{ state: "idle" | "loading" | "failed" | "ready"; lines: PayrollRunLine[] }>({
-    state: "idle",
-    lines: [],
+    state: initialLines === undefined ? "idle" : "ready",
+    lines: initialLines ?? [],
   });
   const [accountId, setAccountId] = useState("");
   const [paidDate, setPaidDate] = useState("");

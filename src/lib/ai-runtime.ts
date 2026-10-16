@@ -153,13 +153,19 @@ export function decorateAiConfigWithState(
   const { model, embeddingModel, body, authKey } = runtime;
   const tenantVirtualKeyRequired = Boolean(businessId && gateway?.virtualKeysEnabled);
   const tenantVirtualKeyResolved = Boolean(runtime.virtualKeyResolved);
+  // A stored-but-undecryptable credential (issue #757 §B) is reported with
+  // its own reason, never folded into "missing": the fix is key recovery,
+  // not re-provisioning a replacement that could orphan the live credential.
+  const missingKeyReason = runtime.credentialUndecryptable
+    ? ("tenant_credential_undecryptable" as const)
+    : ("tenant_virtual_key_missing" as const);
   const decorated: AiConfig & Pick<PlatformAiConfig, "tenantVirtualKeyRequired" | "tenantVirtualKeyResolved" | "runtimeUnavailableReason"> = {
     ...config,
     model,
     embeddingModel,
     tenantVirtualKeyRequired,
     tenantVirtualKeyResolved,
-    ...(tenantVirtualKeyRequired && !tenantVirtualKeyResolved ? { runtimeUnavailableReason: "tenant_virtual_key_missing" as const } : {}),
+    ...(tenantVirtualKeyRequired && !tenantVirtualKeyResolved ? { runtimeUnavailableReason: missingKeyReason } : {}),
     gateway: {
       ...(authKey ? { authKey } : {}),
       body,

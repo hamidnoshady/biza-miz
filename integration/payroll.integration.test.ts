@@ -1462,6 +1462,16 @@ describe("payment account (issue #835 §14)", () => {
     return rows[0].account_id;
   }
 
+  it.each(["explicit", "method"] as const)("does not settle a Rial payroll from a foreign-currency bank (%s)", async (choice) => {
+    await db.query("UPDATE accounts SET currency_code='USD' WHERE id=$1", [acct.bank]);
+    const run = await accrue();
+    expect(await message(pay(run.id, choice === "explicit" ? { paymentAccountId: acct.bank } : { method: "bank" }))).toBe("invalid_payment_account");
+    expect((await payrollService.getPayrollRun(biz.id, run.id))!.status).toBe("accrued");
+    expect((await payrollAccounts.listPaymentAccounts(biz.id)).some((account) => account.id === acct.bank)).toBe(false);
+    const entries = await db.query("SELECT id FROM journal_entries WHERE business_id=$1 AND source_type='payroll_payment'", [biz.id]);
+    expect(entries.rows).toHaveLength(0);
+  });
+
   it("credits the business's own bank account (1110) for a bank payment — not card money in transit", async () => {
     const run = await accrue();
     await pay(run.id, { method: "bank" });

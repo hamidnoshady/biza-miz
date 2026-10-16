@@ -27,6 +27,7 @@ import {
   emptyBusinessGateway,
   gatewayManagementUrl,
   gatewayStatusMessage,
+  gatewayErrorText,
   joinGatewayDetail,
   keyDeleteUrl,
   keyGenerateUrl,
@@ -42,10 +43,14 @@ import {
   toPublicGatewayConfig,
   validateGatewayInput,
   virtualKeyAlias,
+  classifyKeyDeleteResponse,
+  keyAbsentSignal,
   type AiGatewayConfig,
   type AiGatewayInput,
   type BusinessGateway,
+  type CredentialState,
   type GatewayProbe,
+  type KeyDeleteOutcome,
   type PublicAiGatewayConfig,
   type PublicBusinessGateway,
   type AiGatewayTurnPricing,
@@ -58,10 +63,20 @@ import {
 } from "./ai-config";
 import { chatCompletionsUrl } from "./ai";
 import { normalizeProviderError, providerErrorReason } from "./ai-provider-errors";
-import { decryptSecret, encryptSecret, resolveEncryptionKey } from "./integrations/secrets";
+import { encryptSecret, readStoredSecret, resolveEncryptionKey } from "./integrations/secrets";
 
 /** Management calls are operator-facing: fail them fast rather than hang a page. */
 const MANAGEMENT_TIMEOUT_MS = 10_000;
+
+/**
+ * The operator-facing text for a credential this deployment cannot decrypt.
+ *
+ * Stored on the row as `sync_error` so the console shows the same sentence
+ * the API and the audit trail use — one vocabulary, one meaning.
+ */
+const CREDENTIAL_UNDECRYPTABLE_ERROR =
+  gatewayErrorText("ai_gateway_credential_undecryptable") ??
+  "کلید ذخیره‌شده قابل رمزگشایی نیست؛ کلید رمزگشایی استقرار را بازیابی کنید.";
 
 // ---------------------------------------------------------------------------
 // Secrets at rest (issue #748 / migrations 0183 and 0209)
@@ -80,25 +95,27 @@ function encryptForStorage(value: string | null | undefined): string | null {
 }
 
 /**
- * Decrypt a stored secret. The optional plaintext argument remains only for
- * the managed-knowledge credential, whose separate migration has not yet
- * retired its legacy column. Master and virtual keys pass no plaintext value.
+ * Decrypt a stored secret, keeping the difference between "there is nothing
+ * here" and "there is something here that this deployment cannot read".
  *
- * A ciphertext that fails to decrypt (rotated `INTEGRATIONS_ENCRYPTION_KEY` /
- * `JWT_SECRET`) is treated as absent rather than thrown: the operator sees a
- * missing-key state and can re-enter the credential instead of every AI
- * request throwing.
+ * The optional plaintext argument remains only for the managed-knowledge
+ * credential, whose separate migration has not yet retired its legacy column.
+ * Master and virtual keys pass no plaintext value.
+ *
+ * Issue #757 §B: a ciphertext that fails to decrypt (a rotated
+ * `INTEGRATIONS_ENCRYPTION_KEY` / `JWT_SECRET`, or a corrupted value) is NOT
+ * an absent credential. The caller must be able to tell the two apart, because
+ * "absent" is a licence to mint a replacement — and a replacement minted
+ * while the original is still live inside LiteLLM orphans it.
  */
-function decryptFromStorage(ciphertext: string | null | undefined, plaintext?: string | null): string {
-  if (ciphertext) {
-    try {
-      return decryptSecret(ciphertext, resolveEncryptionKey(process.env));
-    } catch (err) {
-      console.error("ai gateway secret ciphertext could not be decrypted; treating as absent", err);
-      return "";
-    }
-  }
-  return plaintext?.trim() || "";
+function readStoredCredential(
+  ciphertext: string | null | undefined,
+  plaintext?: string | null,
+): { value: string; state: CredentialState } {
+  const stored = readStoredSecret(ciphertext);
+  if (stored.state !== "absent") return stored;
+  const legacy = plaintext?.trim() || "";
+  return legacy ? { value: legacy, state: "present" } : { value: "", state: "absent" };
 }
 
 function numberValue(value: string | number | null | undefined): number {
@@ -142,10 +159,12 @@ type GatewayRow = PlatformAiGatewayRow & {
 
 function rowToGateway(row: GatewayRow): AiGatewayConfig {
   const fallback = defaultGatewayConfig();
+  const masterKey = readStoredCredential(row.master_key_ciphertext);
   return {
     enabled: row.enabled,
     baseUrl: textOr(row.base_url, fallback.baseUrl),
-    masterKey: decryptFromStorage(row.master_key_ciphertext),
+    masterKey: masterKey.value,
+    masterKeyState: masterKey.state,
     chatModel: row.chat_model ?? "",
     embeddingModel: row.embedding_model ?? "",
     virtualKeysEnabled: row.virtual_keys_enabled,
@@ -157,7 +176,7 @@ function rowToGateway(row: GatewayRow): AiGatewayConfig {
     maxTurnRial: Math.max(0, numberValue(row.max_turn_rial)),
     knowledgeEnabled: row.knowledge_enabled === true,
     knowledgeBaseUrl: textOr(row.knowledge_base_url, ""),
-    knowledgeApiKey: decryptFromStorage(row.knowledge_api_key_ciphertext, row.knowledge_api_key),
+    knowledgeApiKey: readStoredCredential(row.knowledge_api_key_ciphertext, row.knowledge_api_key).value,
     knowledgeModel: textOr(row.knowledge_model, ""),
     knowledgeMaxResults: Math.max(1, Math.min(50, numberValue(row.knowledge_max_results) || 8)),
     researchEnabled: row.research_enabled === true,
@@ -238,6 +257,9 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
     enabled: draft.enabled ?? current.enabled,
     baseUrl: (draft.baseUrl ?? current.baseUrl).trim() || current.baseUrl,
     masterKey: draft.masterKey?.trim() || current.masterKey,
+    // The stored-credential state is never "merged": only the encrypted
+    // write path may change it, and only with an explicit confirmation.
+    masterKeyState: current.masterKeyState,
     chatModel: draft.chatModel ?? current.chatModel,
     embeddingModel: draft.embeddingModel ?? current.embeddingModel,
     virtualKeysEnabled: draft.virtualKeysEnabled ?? current.virtualKeysEnabled,
@@ -270,10 +292,78 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
 }
 
 /**
+ * The one throw this module adds for a *credential* problem (issue #757 §B).
+ *
+ * `GatewayProvisioningError` says "the proxy call did not work";
+ * `GatewayCredentialError` says "this deployment cannot read a credential it
+ * is holding, and replacing it needs an explicit, confirmed decision".
+ */
+export class GatewayCredentialError extends Error {
+  readonly code: string;
+  readonly detail: string | null;
+
+  constructor(code: string, detail: string | null = null) {
+    super(code);
+    this.name = "GatewayCredentialError";
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+/**
+ * Decide what to write for one stored credential.
+ *
+ * Three cases, and the third is the whole point (issue #757 §B):
+ *
+ * 1. A new value was submitted — encrypt and store it. If the credential we
+ *    are replacing could not be decrypted, that replacement is an explicit
+ *    decision (the old credential may still be live in LiteLLM), so it needs
+ *    the operator's confirmation.
+ * 2. Nothing was submitted and the stored credential is readable — re-encrypt
+ *    the same value.
+ * 3. Nothing was submitted and the stored credential is NOT readable — keep
+ *    the existing ciphertext byte for byte. A save of an unrelated setting
+ *    must never destroy (or silently replace) a credential that is still
+ *    live inside LiteLLM.
+ */
+function resolveCredentialStorage(input: {
+  submitted: string;
+  current: { value: string; state: CredentialState };
+  storedCiphertext: string | null;
+  label: string;
+  confirmed: boolean;
+}): { ciphertext: string | null; state: CredentialState } {
+  if (input.submitted) {
+    if (input.current.state === "undecryptable" && !input.confirmed) {
+      throw new GatewayCredentialError(
+        "ai_gateway_credential_undecryptable",
+        `the stored ${input.label} cannot be decrypted with this deployment's key; replacing it has to be confirmed explicitly`,
+      );
+    }
+    return { ciphertext: encryptForStorage(input.submitted), state: "present" };
+  }
+  if (input.current.state === "undecryptable") {
+    return { ciphertext: input.storedCiphertext, state: "undecryptable" };
+  }
+  return {
+    ciphertext: encryptForStorage(input.current.value),
+    state: input.current.value ? "present" : "absent",
+  };
+}
+
+/**
  * Persist the gateway settings.
  */
-export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGatewayConfig> {
-  const current = await getAiGatewayConfig();
+export async function saveAiGatewayConfig(
+  input: AiGatewayInput,
+  options: { confirmCredentialReplacement?: boolean } = {},
+): Promise<AiGatewayConfig> {
+  // The raw row is read here (not through getAiGatewayConfig) because the
+  // write path needs the *stored ciphertext* to preserve a credential this
+  // deployment cannot decrypt.
+  const { rows } = await query<GatewayRow>(GATEWAY_ROW_SELECT);
+  const row = rows[0] ?? null;
+  const current = row ? rowToGateway(row) : gatewayDefaultsFromEnvironment();
   // Validate the complete state that will be persisted, not a partial patch.
   // This lets later edits omit unchanged fields while still preventing an
   // enabled configuration that runtime would immediately reject.
@@ -282,10 +372,29 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
   // An empty submission means "unchanged" (the console always renders the
   // master key masked); a new value is encrypted before it ever reaches a
   // parameter binding. Migration 0209 removes the plaintext storage column.
-  const masterKey = input.masterKey?.trim() || current.masterKey || "";
-  const masterKeyCiphertext = encryptForStorage(masterKey);
-  const knowledgeApiKey = input.knowledgeApiKey?.trim() || current.knowledgeApiKey || "";
-  const knowledgeApiKeyCiphertext = encryptForStorage(knowledgeApiKey);
+  const confirmed = options.confirmCredentialReplacement === true;
+  const masterKey = resolveCredentialStorage({
+    submitted: input.masterKey?.trim() || "",
+    current: { value: current.masterKey, state: current.masterKeyState },
+    storedCiphertext: row?.master_key_ciphertext ?? null,
+    label: "LiteLLM master key",
+    confirmed,
+  });
+  const knowledge = resolveCredentialStorage({
+    submitted: input.knowledgeApiKey?.trim() || "",
+    current: {
+      value: current.knowledgeApiKey,
+      state: row ? readStoredCredential(row.knowledge_api_key_ciphertext, row.knowledge_api_key).state : "absent",
+    },
+    storedCiphertext: row?.knowledge_api_key_ciphertext ?? null,
+    label: "managed-knowledge API key",
+    confirmed,
+  });
+  // The managed-knowledge credential still has a legacy plaintext column
+  // (its own migration, not 0209's). It is cleared only when the ciphertext
+  // is readable — otherwise the plaintext is the last readable copy.
+  const knowledgeLegacyPlaintext =
+    knowledge.state === "undecryptable" ? (row?.knowledge_api_key ?? null) : null;
   await query(
     `INSERT INTO platform_ai_gateway
        (id, enabled, base_url, master_key_ciphertext, chat_model, embedding_model,
@@ -300,8 +409,8 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
      VALUES
        (true, $1, $2, $3, $4, $5, $6,
         $7, $8, $9, $10, $11, $12, now(),
-        $13, $14, NULL, $15, $16, $17,
-        $18, $19, $20, $21, $22, $23, $24, $25)
+        $13, $14, $15, $16, $17, $18,
+        $19, $20, $21, $22, $23, $24, $25, $26)
      ON CONFLICT (id)
      DO UPDATE SET enabled = EXCLUDED.enabled,
                    base_url = EXCLUDED.base_url,
@@ -317,7 +426,7 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
                    max_turn_rial = EXCLUDED.max_turn_rial,
                    knowledge_enabled = EXCLUDED.knowledge_enabled,
                    knowledge_base_url = EXCLUDED.knowledge_base_url,
-                   knowledge_api_key = NULL,
+                   knowledge_api_key = EXCLUDED.knowledge_api_key,
                    knowledge_api_key_ciphertext = EXCLUDED.knowledge_api_key_ciphertext,
                    knowledge_model = EXCLUDED.knowledge_model,
                    knowledge_max_results = EXCLUDED.knowledge_max_results,
@@ -333,7 +442,7 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
     [
       input.enabled ?? current.enabled,
       (input.baseUrl ?? current.baseUrl).trim(),
-      masterKeyCiphertext,
+      masterKey.ciphertext,
       (input.chatModel ?? current.chatModel).trim(),
       (input.embeddingModel ?? current.embeddingModel).trim(),
       input.virtualKeysEnabled ?? current.virtualKeysEnabled,
@@ -345,7 +454,8 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
       Math.round(current.maxTurnRial),
       input.knowledgeEnabled ?? current.knowledgeEnabled,
       (input.knowledgeBaseUrl ?? current.knowledgeBaseUrl).trim(),
-      knowledgeApiKeyCiphertext,
+      knowledgeLegacyPlaintext,
+      knowledge.ciphertext,
       (input.knowledgeModel ?? current.knowledgeModel).trim(),
       input.knowledgeMaxResults ?? current.knowledgeMaxResults,
       input.researchEnabled ?? current.researchEnabled,
@@ -478,12 +588,16 @@ const BUSINESS_GATEWAY_COLUMNS =
   "id, business_id, location_id, virtual_key_ciphertext, key_alias, spend_usd, synced_at, sync_error";
 
 function rowToBusinessGateway(row: BusinessGatewayRow): BusinessGateway {
-  const virtualKey = decryptFromStorage(row.virtual_key_ciphertext);
+  const virtualKey = readStoredCredential(row.virtual_key_ciphertext);
   return {
     id: row.id,
     businessId: row.business_id,
     locationId: row.location_id ?? null,
-    virtualKey: virtualKey || null,
+    virtualKey: virtualKey.value || null,
+    // A stored-but-undecryptable credential is reported as such: the row is
+    // the platform's only memory of a possibly live LiteLLM key, so it must
+    // never look like "no key was ever issued".
+    credentialState: virtualKey.state,
     keyAlias: row.key_alias ?? null,
     spendUsd: numberValue(row.spend_usd),
     syncedAt: row.synced_at,
@@ -631,7 +745,15 @@ export async function saveBusinessGateway(
   return (await getBusinessGateway(businessId, loc)) ?? emptyBusinessGateway(businessId, loc);
 }
 
-/** Record a virtual key against a business or branch. Platform scope. */
+/**
+ * Record a virtual key against a business or branch. Platform scope.
+ *
+ * The key is always written as ciphertext, and a *stored* credential is never
+ * replaced by an empty one: callers that only want to report a problem use
+ * {@link recordCredentialSyncError} instead, which never touches the key
+ * column. That separation is what keeps "the ciphertext could not be
+ * decrypted" from turning into "the credential was silently dropped".
+ */
 async function storeVirtualKey(input: {
   businessId: string;
   locationId?: string | null;
@@ -641,6 +763,9 @@ async function storeVirtualKey(input: {
 }): Promise<BusinessGateway> {
   const loc = input.locationId?.trim() || null;
   const virtualKeyCiphertext = encryptForStorage(input.virtualKey);
+  if (!virtualKeyCiphertext) {
+    throw new Error("ai_gateway_missing_virtual_key: refusing to store an empty credential");
+  }
   return withoutTenantScope("platform", async () => {
     await query(
       `INSERT INTO ai_business_gateway
@@ -659,6 +784,37 @@ async function storeVirtualKey(input: {
         input.keyAlias,
         input.syncError ?? null,
       ],
+    );
+    return (await getBusinessGateway(input.businessId, loc)) ?? emptyBusinessGateway(input.businessId, loc);
+  });
+}
+
+/**
+ * Record a technical problem on a business/branch row *without* touching the
+ * stored credential.
+ *
+ * This is the only way to report "the credential is there but unreadable" or
+ * "the last sync failed": the ciphertext column is left exactly as it was, so
+ * a failure can never be the reason a live credential disappears from the
+ * platform's memory.
+ */
+async function recordCredentialSyncError(input: {
+  businessId: string;
+  locationId?: string | null;
+  syncError: string;
+  keyAlias?: string | null;
+}): Promise<BusinessGateway> {
+  const loc = input.locationId?.trim() || null;
+  return withoutTenantScope("platform", async () => {
+    await query(
+      `INSERT INTO ai_business_gateway
+         (business_id, location_id, key_alias, sync_error, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (business_id, location_id)
+       DO UPDATE SET key_alias = COALESCE(EXCLUDED.key_alias, ai_business_gateway.key_alias),
+                     sync_error = EXCLUDED.sync_error,
+                     updated_at = now()`,
+      [input.businessId, loc, input.keyAlias ?? null, input.syncError],
     );
     return (await getBusinessGateway(input.businessId, loc)) ?? emptyBusinessGateway(input.businessId, loc);
   });
@@ -1061,6 +1217,23 @@ export async function provisionVirtualKey(
   const alias = virtualKeyAlias(input.businessId, loc);
   const existing = await getBusinessGatewayOrEmpty(input.businessId, loc);
 
+  // A credential we cannot decrypt is still a credential (issue #757 §B).
+  // Minting a second one here would leave the first one alive inside
+  // LiteLLM, untracked and unrevokable — so the request is refused and the
+  // operator is told how to recover instead.
+  if (existing?.credentialState === "undecryptable") {
+    await recordCredentialSyncError({
+      businessId: input.businessId,
+      locationId: loc,
+      keyAlias: existing.keyAlias ?? alias,
+      syncError: CREDENTIAL_UNDECRYPTABLE_ERROR,
+    });
+    throw new GatewayCredentialError(
+      "ai_gateway_credential_undecryptable",
+      `stored virtual key for ${alias} cannot be decrypted with this deployment's key`,
+    );
+  }
+
   if (existing?.virtualKey) {
     const res = await gatewayRequest(config, keyUpdateUrl(config.baseUrl), {
       method: "POST",
@@ -1201,23 +1374,6 @@ export async function ensureTenantVirtualKey(
   }
 }
 
-/**
- * Whether LiteLLM's own `/key/delete` response means "this key is gone",
- * either because it just deleted it or because it was already gone. A local
- * key record must never be removed on anything less certain than this.
- */
-function keyConfirmedAbsent(status: number, body: unknown): boolean {
-  // A clean 404 is unambiguous. Some proxy versions instead answer 200/400
-  // with a body naming zero deleted keys — that also means "there was
-  // nothing there to delete", i.e. the key is already gone.
-  if (status === 404) return true;
-  const row = body as { deleted_keys?: unknown } | null;
-  if (row && typeof row === "object" && Array.isArray(row.deleted_keys)) {
-    return row.deleted_keys.length === 0;
-  }
-  return false;
-}
-
 export interface RevokeKeyResult {
   ok: boolean;
   /** True when nothing needed to be revoked, or LiteLLM confirmed the key no longer exists. */
@@ -1227,16 +1383,58 @@ export interface RevokeKeyResult {
 }
 
 /**
+ * Ask LiteLLM whether the credential is still there.
+ *
+ * Used as the *second* opinion after an unconfirmed delete: `/key/info` is a
+ * documented endpoint whose 404 ("Key not found in database") is evidence
+ * about the key itself, unlike a 404 that merely means "this route does not
+ * exist". A 200 means the key is still live, which settles the question in
+ * the other direction.
+ *
+ * Only a documented "the key is not there" answer may be used to clear a
+ * local row. Everything else stays unconfirmed.
+ */
+async function confirmCredentialAbsent(
+  config: AiGatewayConfig,
+  virtualKey: string,
+): Promise<{ absent: boolean; reason: string | null }> {
+  const res = await gatewayRequest(config, keyInfoUrl(config.baseUrl, virtualKey), { method: "GET" });
+  if (res.status === 404) {
+    const absent = keyAbsentSignal(res.body);
+    if (absent) return { absent: true, reason: absent };
+    return { absent: false, reason: null };
+  }
+  if (res.status >= 200 && res.status < 300) {
+    return { absent: false, reason: null };
+  }
+  return { absent: false, reason: null };
+}
+
+/**
  * Revoke a business or branch's virtual key.
  *
  * The local `ai_business_gateway` row is the platform's only memory of which
- * credential is live; it must never be cleared on anything weaker than LiteLLM
- * *confirming* the key is gone. `gatewayRequest()` turns network failures and
- * HTTP errors into a response object rather than throwing (by design — a
- * gateway outage must never become an assistant-facing exception), which is
- * exactly why this function, and not the caller, has to inspect the status
- * before touching the row: every non-2xx/non-404 outcome — unreachable,
- * 401/403, 5xx, or a malformed body — preserves the row and reports failure.
+ * credential is live; it must never be cleared on anything weaker than
+ * LiteLLM *confirming* the key is gone. `gatewayRequest()` turns network
+ * failures and HTTP errors into a response object rather than throwing (by
+ * design — a gateway outage must never become an assistant-facing
+ * exception), which is exactly why this function, and not the caller, has to
+ * inspect the status AND the body before touching the row.
+ *
+ * The confirmation contract (issue #757 §A):
+ *
+ * - a 2xx whose body is the documented `{ deleted_keys: [...] }` shape and
+ *   names this credential → **deleted**;
+ * - a 404 whose explanation is about the key itself ("No keys found", "Key …
+ *   not found") → **already absent**;
+ * - anything else — a malformed 2xx body, a 2xx whose `deleted_keys` does
+ *   not name this credential (an empty list included), a 404 that is really a
+ *   missing route, 401/403, 5xx, an unreachable proxy — → **unconfirmed**.
+ *
+ * An unconfirmed delete is followed by one documented second opinion
+ * (`/key/info`), which may only *confirm absence*; it can never confirm a
+ * deletion. Only a confirmed outcome clears the local row; every other one
+ * preserves it, writes an actionable `sync_error` and reports failure.
  */
 export async function revokeVirtualKey(
   config: AiGatewayConfig,
@@ -1247,7 +1445,20 @@ export async function revokeVirtualKey(
   await assertLocationBelongsToBusiness(businessId, loc);
   const existing = await getBusinessGatewayOrEmpty(businessId, loc);
 
-  if (!existing?.virtualKey) {
+  if (!existing) {
+    // No row at all: there is no credential this platform knows about.
+    return { ok: true, alreadyGone: true };
+  }
+
+  if (existing.credentialState === "undecryptable") {
+    // The stored credential cannot be read, so it cannot be deleted by
+    // value. Revoking it by its recorded alias is the only safe way to
+    // remove it from the proxy; a failure leaves the row untouched and asks
+    // for a credential recovery (issue #757 §B).
+    return revokeUndecryptableCredential(config, businessId, loc, existing);
+  }
+
+  if (!existing.virtualKey) {
     // Nothing live to revoke at the gateway; any local row is at most a
     // stale sync_error placeholder and is safe to clear.
     await clearVirtualKey(businessId, loc);
@@ -1259,22 +1470,105 @@ export async function revokeVirtualKey(
     body: { keys: [existing.virtualKey] },
   });
 
-  if (ok(res.status) || keyConfirmedAbsent(res.status, res.body)) {
+  const classification = classifyKeyDeleteResponse({
+    status: res.status,
+    body: res.body,
+    target: existing.virtualKey,
+  });
+
+  if (classification.outcome === "unconfirmed") {
+    // One documented second opinion, which may only confirm absence.
+    const second = await confirmCredentialAbsent(config, existing.virtualKey);
+    if (second.absent) {
+      await clearVirtualKey(businessId, loc);
+      return { ok: true, alreadyGone: true };
+    }
+  }
+
+  if (classification.outcome === "deleted" || classification.outcome === "already_absent") {
     await clearVirtualKey(businessId, loc);
-    return { ok: true, alreadyGone: !ok(res.status) };
+    return { ok: true, alreadyGone: classification.outcome === "already_absent" };
   }
 
   // Failure — never delete the local row. Record an actionable sync_error so
   // the console shows the credential still exists and needs a retry.
   const error = asError(res.status, res.body);
-  await storeVirtualKey({
+  await recordCredentialSyncError({
     businessId,
     locationId: loc,
-    virtualKey: existing.virtualKey,
     keyAlias: existing.keyAlias ?? virtualKeyAlias(businessId, loc),
-    syncError: joinGatewayDetail("ابطال کلید مجازی در LiteLLM ناموفق بود؛ کلید محلی حفظ شد.", joinGatewayDetail(error.message, error.detail)),
+    syncError: joinGatewayDetail(
+      "ابطال کلید مجازی در LiteLLM تأیید نشد؛ کلید محلی حفظ شد.",
+      joinGatewayDetail(classification.reason, joinGatewayDetail(error.message, error.detail)),
+    ),
   });
   return { ok: false, alreadyGone: false, code: error.code, detail: error.detail };
+}
+
+/**
+ * The recovery path for a credential this deployment cannot decrypt.
+ *
+ * The key *value* is unreadable, but the row still knows the alias LiteLLM
+ * was given, and LiteLLM can delete a key by alias. That is the only
+ * operation that can remove a credential whose value is unknown — and it is
+ * safe because it is confirmed exactly like any other delete.
+ *
+ * If it cannot be confirmed, the row is kept and the operator gets the
+ * recovery steps: restore the deployment key, or revoke the credential in
+ * LiteLLM under the recorded alias. Nothing is ever replaced automatically:
+ * a replacement would leave the original credential alive and untracked.
+ */
+async function revokeUndecryptableCredential(
+  config: AiGatewayConfig,
+  businessId: string,
+  locationId: string | null,
+  existing: BusinessGateway,
+): Promise<RevokeKeyResult> {
+  const alias = existing.keyAlias ?? virtualKeyAlias(businessId, locationId);
+  const res = await gatewayRequest(config, keyDeleteUrl(config.baseUrl), {
+    method: "POST",
+    body: { key_aliases: [alias] },
+  });
+  const classification = classifyKeyDeleteResponse({
+    status: res.status,
+    body: res.body,
+    target: alias,
+  });
+
+  if (classification.outcome === "deleted" || classification.outcome === "already_absent") {
+    // The proxy confirmed either outcome: it just removed the credential
+    // behind this alias, or it already had nothing under that alias. Both
+    // are documented, unambiguous evidence that nothing live is left behind
+    // at LiteLLM under this alias — exactly the same confirmation contract
+    // `revokeVirtualKey` applies to a readable key (issue #757 §A/§B). The
+    // row is the platform's only memory of the credential, so once LiteLLM
+    // confirms there is nothing to protect, holding on to an undecryptable
+    // ciphertext serves no purpose and would only block recovery: clearing
+    // it here is what lets a subsequent provision/rotate mint a fresh,
+    // readable key instead of being stuck behind a permanent "needs
+    // recovery" state for a credential that no longer exists anywhere.
+    await clearVirtualKey(businessId, locationId);
+    return { ok: true, alreadyGone: classification.outcome === "already_absent" };
+  }
+
+  const recovery =
+    gatewayErrorText("ai_gateway_credential_recovery_required") ??
+    "بازیابی اعتبارنامه لازم است.";
+  await recordCredentialSyncError({
+    businessId,
+    locationId,
+    keyAlias: alias,
+    syncError: joinGatewayDetail(
+      recovery,
+      `alias=${alias}؛ ${classification.reason}`,
+    ),
+  });
+  return {
+    ok: false,
+    alreadyGone: false,
+    code: "ai_gateway_credential_undecryptable",
+    detail: `stored credential for alias ${alias} could not be decrypted and could not be revoked by alias either`,
+  };
 }
 
 /**
@@ -1297,6 +1591,20 @@ export async function rotateVirtualKey(
   const loc = locationId?.trim() || null;
   await assertLocationBelongsToBusiness(businessId, loc);
   const existing = await getBusinessGatewayOrEmpty(businessId, loc);
+
+  if (existing?.credentialState === "undecryptable") {
+    // The stored credential is unreadable. It is revoked by alias first —
+    // and only a *confirmed* revocation may be followed by a replacement, so
+    // the live credential can never end up orphaned next to a new one.
+    const revoked = await revokeVirtualKey(config, businessId, loc);
+    if (!revoked.ok) {
+      throw new GatewayCredentialError(
+        revoked.code ?? "ai_gateway_credential_undecryptable",
+        revoked.detail ?? null,
+      );
+    }
+    return provisionVirtualKey(config, { businessId, locationId: loc });
+  }
 
   if (!existing?.virtualKey) {
     // No live key to protect — rotation degrades to plain provisioning.
@@ -1343,6 +1651,34 @@ export async function verifyVirtualKey(
     business: loc ? null : existing,
     branch: loc ? existing : null,
   });
+  if (existing?.credentialState === "undecryptable") {
+    // The credential is stored but unreadable. Say exactly that: reporting
+    // "no key exists" would invite a replacement that orphans the live one.
+    await recordCredentialSyncError({
+      businessId,
+      locationId: loc,
+      keyAlias: existing.keyAlias ?? virtualKeyAlias(businessId, loc),
+      syncError: CREDENTIAL_UNDECRYPTABLE_ERROR,
+    });
+    return {
+      gateway: existing,
+      probe: {
+        ok: false,
+        latencyMs: null,
+        models: [],
+        error: CREDENTIAL_UNDECRYPTABLE_ERROR,
+        stages: [
+          stage({
+            key: "virtual_key_completion",
+            label: "Business virtual-key completion",
+            ok: false,
+            model,
+            message: CREDENTIAL_UNDECRYPTABLE_ERROR,
+          }),
+        ],
+      },
+    };
+  }
   if (!existing?.virtualKey) {
     return {
       gateway: existing,
@@ -1486,7 +1822,10 @@ export function toPublicBusinessGateway(
     keyAlias: business.keyAlias,
     syncedAt: business.syncedAt,
     syncError: business.syncError,
-    hasVirtualKey: Boolean(business.virtualKey),
+    // A credential is "stored" (hasVirtualKey) independently of whether this
+    // deployment can currently read it — see `credentialState`.
+    hasVirtualKey: business.credentialState !== "absent",
+    credentialState: business.credentialState,
     effectiveModel: resolveChatModel({
       platformModel,
       gateway: config,

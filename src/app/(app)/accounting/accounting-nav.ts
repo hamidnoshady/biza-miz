@@ -71,6 +71,14 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "receivables", label: "حساب‌های دریافتنی" },
   { key: "payables", label: "حساب‌های پرداختنی" },
   { key: "receipts", label: "دریافت و پرداخت" },
+  // The money containers themselves, and the transfer document between two of
+  // them. Opening either section needs the app's door only (`ledger.view`) —
+  // «how much is in each account» is a ledger question — while every write
+  // behind them asks for `finance.accounts_manage` / `finance.transfers_manage`
+  // and the screens follow the same capabilities, so a read-only accountant sees
+  // the register without being offered a form the API would refuse.
+  { key: "financial-accounts", label: "حساب‌های مالی" },
+  { key: "transfers", label: "انتقال وجه" },
   { key: "installments", label: "اقساط" },
   { key: "cheques", label: "چک‌ها" },
   { key: "reconciliation", label: "تطبیق بانکی" },

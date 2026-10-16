@@ -2,15 +2,15 @@
  * CSV exports of the settlement screens (issue #869).
  *
  * Dates are Shamsi, as on the screen (the file is read by the people who read
- * the screen). Amounts are integer text in the business's display unit, via
- * `moneyToInputText`, so the file agrees with the screen and never divides by
+ * the screen). Amounts are exact signed text in the business's display unit, via
+ * `moneyToExportText`, so the file agrees with the screen and never divides by
  * ten here. The unit's name comes from the business setting, never a fixed
  * label. The bytes come from the shared `toCsv` codec (BOM, CRLF and the
  * formula-injection guard for every cell).
  */
 import { toCsv } from "./data-transfer/codecs";
 import { formatJalali } from "./jalali";
-import { moneyToInputText, type MoneyUnit } from "./money";
+import { moneyToExportText, type MoneyUnit } from "./money";
 import { COMMISSION_RUN_STATUS_LABELS, type CommissionRunStatus } from "./commission-settlement-lifecycle";
 
 export interface LineExportRow {
@@ -56,7 +56,7 @@ function shamsi(value: string | null): string {
 }
 
 function displayAmount(rialText: string, unit: MoneyUnit): string {
-  return moneyToInputText(rialText, unit);
+  return moneyToExportText(rialText, unit);
 }
 
 export function runLinesToCsv(rows: readonly LineExportRow[], unit: MoneyUnit): string {
@@ -123,4 +123,23 @@ export function runsToCsv(rows: readonly RunExportRow[], unit: MoneyUnit): strin
     formatJalali(row.createdAt, { withTime: true }),
   ]);
   return toCsv(headers, body);
+}
+
+/** A complete filtered history, with lifetime totals repeated explicitly as such. */
+export function statementToCsv(statement: import("./commission-settlement-service").CommissionStatement, unit: MoneyUnit): string {
+  const amount = (value: string) => displayAmount(value, unit);
+  const totals = statement.totals;
+  const common = [statement.employee.fullName, amount(totals.accrued), amount(totals.paidThroughPayroll),
+    amount(totals.paidThroughRuns), amount(totals.unpaid)];
+  return toCsv([
+    "فروشنده", `کل پورسانت ثبت‌شده (${unitWord(unit)})`, "کل پرداخت از حقوق", "کل پرداخت از تسویه", "کل مانده",
+    "نوع ردیف", "شناسه", "تاریخ", "منبع", `مبلغ (${unitWord(unit)})`, "دوره تسویه", "دوره حقوق", "سند", "فروش",
+  ], [
+    // Even an empty detail selection must export the lifetime position.
+    [...common, "جمع کل", "", "", "", "", "", "", "", ""],
+    ...statement.accruals.map((row) => [...common, "ثبت پورسانت", row.id, shamsi(row.saleDate), row.sourceLabel,
+      amount(row.amount), row.settlementRunId ?? "", row.payrollRunId ?? "", row.entryId ?? "", row.orderId ?? ""]),
+    ...statement.payouts.map((row) => [...common, row.kind === "reversal" ? "برگشت پرداخت" : "پرداخت", row.payoutId,
+      shamsi(row.paidDate), "", amount(row.amount), row.runId, "", row.entryId ?? "", ""]),
+  ]);
 }

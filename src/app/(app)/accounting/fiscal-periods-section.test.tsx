@@ -211,19 +211,8 @@ describe("FiscalPeriodsSection capability-aware controls", () => {
 
     await waitFor(() => expect(screen.getByText("سال انتخاب‌شده")).toBeTruthy());
     expect(network.yearAttempts.count).toBe(2);
-    /*
-     * The heading above renders as soon as the year *list* lands, while the periods
-     * request is issued by the effect that runs after that commit — so asserting the
-     * call synchronously here reads a request that has not been made yet on a slow
-     * runner (it failed exactly there on windows-latest twice in a row on PR #958,
-     * and passed on the same commit's push run). Waiting for the call keeps the
-     * assertion intact — a section that never asks for the selected year's periods
-     * still fails, after the timeout — and removes the race.
-     */
-    await waitFor(() =>
-      expect(
-        network.calls.some((url) => url === `/api/ledger/fiscal-years/${fiscalYear.id}/periods`),
-      ).toBe(true),
-    );
+    // The year label renders before its effect requests the periods. Assert
+    // the request after that effect, not in the render/effect timing gap.
+    await waitFor(() => expect(network.calls.some((url) => url === `/api/ledger/fiscal-years/${fiscalYear.id}/periods`)).toBe(true));
   });
 });
