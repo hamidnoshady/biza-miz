@@ -49,6 +49,7 @@
       "local-storage.js",
       "logger.js",
       "update-engine.js",
+      "update-policy.js",
       "cloud-pane.js",
       "desktop-release-public-key.pem",
       "package.json"
