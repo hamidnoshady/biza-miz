@@ -86,13 +86,23 @@ describe("CloudPane", () => {
     // cloud's own login. That must read as «cloud sign-in required» with an
     // explicit action — never an uncontrolled login-loop in the pane, and
     // never an "internet is down" claim.
-    guest.dispatchEvent(
-      Object.assign(new Event("did-navigate"), {
-        url: "https://cafe.example.com/login?next=%2Fcrm%2Foverview",
-        isMainFrame: true,
-      }),
-    );
-    expect(await screen.findByText(/باید وارد حساب ابری شوید/)).toBeTruthy();
+    //
+    // The listener that decides this is attached by an effect that runs after
+    // the commit which first renders the webview, so one dispatch here can land
+    // while the pane is still not listening: this test failed on the loaded
+    // `windows-latest` runner of push run 38927639816 (and was reproduced under
+    // CPU load) while passing on the same commit's PR run. Fire the navigation
+    // until the pane answers, exactly as the theme case above fires `dom-ready`
+    // — the assertion is unchanged, it waits instead of racing the effect.
+    await waitFor(() => {
+      guest.dispatchEvent(
+        Object.assign(new Event("did-navigate"), {
+          url: "https://cafe.example.com/login?next=%2Fcrm%2Foverview",
+          isMainFrame: true,
+        }),
+      );
+      expect(screen.getByText(/باید وارد حساب ابری شوید/)).toBeTruthy();
+    });
     expect(container.querySelector("webview")).toBeNull();
     expect(screen.getByText("ورود با حساب ابری")).toBeTruthy();
     expect(screen.queryByText("این بخش به اینترنت نیاز دارد")).toBeNull();
