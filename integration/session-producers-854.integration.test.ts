@@ -125,6 +125,17 @@ beforeAll(async () => {
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
 
+  // Fault injector: raises for exactly one audit action (TG_ARGV[0]).
+  await db.query(`
+    CREATE OR REPLACE FUNCTION fail_audit_854() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.action = TG_ARGV[0] THEN
+        RAISE EXCEPTION 'injected audit failure for %', NEW.action USING ERRCODE = 'P0001';
+      END IF;
+      RETURN NEW;
+    END
+    $$ LANGUAGE plpgsql`);
+
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   authLib = await import("../src/lib/auth");
@@ -179,9 +190,29 @@ beforeEach(async () => {
   await db.query("DELETE FROM platform_admins");
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
+  await db.query("DROP TRIGGER IF EXISTS trg_fail_audit_854 ON audit_log");
 });
+
+/** Makes every `audit_log` insert of `action` fail, until the test ends. */
+async function failAuditFor(action: string): Promise<void> {
+  if (!/^[a-z_.]+$/.test(action)) throw new Error(`unexpected audit action ${action}`);
+  await db.query("DROP TRIGGER IF EXISTS trg_fail_audit_854 ON audit_log");
+  await db.query(
+    `CREATE TRIGGER trg_fail_audit_854 BEFORE INSERT ON audit_log
+       FOR EACH ROW EXECUTE FUNCTION fail_audit_854('${action}')`,
+  );
+}
+
+/** No session row of this member exists at all — nothing a failed door could have left listed as active. */
+async function sessionRowsOf(memberId: string): Promise<number> {
+  const { rows } = await db.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM employee_sessions WHERE employee_id = $1`,
+    [memberId],
+  );
+  return rows[0].n;
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -600,6 +631,56 @@ describe("sign-in doors — each opens its own row, and «خروج» ends it", (
     );
 
     await expectSignOutEndsEvery(token, [token]);
+  });
+});
+
+describe("sign-in doors — a session whose audit cannot be written is never opened", () => {
+  it("password: an audit failure leaves no row and sets no cookie", async () => {
+    const business = await seedBusiness("PasswordFault");
+    const identity = await createIdentity();
+    const manager = await addMember(business, "manager", { identity });
+    await failAuditFor("employee.session_created");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const login = await call(() =>
+      loginRoute.POST(jsonRequest("/api/auth/login", { email: identity.email, password: PASSWORD })),
+    );
+    expect(login.status).toBe(500);
+    expect(sessionCookieOf(login)).toBeUndefined();
+    expect(await sessionRowsOf(manager.id)).toBe(0);
+
+    // With the audit writable again the same credentials open exactly one row.
+    await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
+    const retried = await call(() =>
+      loginRoute.POST(jsonRequest("/api/auth/login", { email: identity.email, password: PASSWORD })),
+    );
+    expect(retried.status).toBe(200);
+    await expectOwnRow(sessionCookieOf(retried), manager, "password");
+    expect(await sessionRowsOf(manager.id)).toBe(1);
+  });
+
+  it("password + second factor: an audit failure at MFA completion leaves no row and sets no cookie", async () => {
+    const business = await seedBusiness("MfaFault");
+    const identity = await createIdentity();
+    const owner = await addMember(business, "owner", { identity });
+    const secret = await confirmTotp(identity);
+
+    const login = await call(() =>
+      loginRoute.POST(jsonRequest("/api/auth/login", { email: identity.email, password: PASSWORD })),
+    );
+    expect(login.body).toMatchObject({ mfaRequired: true });
+    await failAuditFor("employee.session_created");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const code = await generateTotp({ secret });
+    const verified = await call(() =>
+      mfaVerifyRoute.POST(
+        jsonRequest("/api/auth/mfa/verify", { code, method: "totp" }, { authorization: `Bearer ${login.body!.mfaToken as string}` }),
+      ),
+    );
+    expect(verified.status).toBe(500);
+    expect(sessionCookieOf(verified)).toBeUndefined();
+    expect(await sessionRowsOf(owner.id)).toBe(0);
   });
 });
 

@@ -18,7 +18,7 @@ import bcrypt from "bcryptjs";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
 import type { AuthenticationResponseJSON, AuthenticatorTransportFuture, RegistrationResponseJSON } from "@simplewebauthn/server";
-import { getPool, query, withTenantTransaction, withoutTenantScope } from "./db";
+import { getPool, isPinnedToTransaction, query, withTenantTransaction, withoutTenantScope } from "./db";
 import { isUuid } from "./uuid";
 import { isSessionLoginMethod, type SessionLoginMethod } from "./session-contract";
 import { hostRoutingEnabled, leadingHostLabel, parseHost, rootDomain } from "./host";
@@ -568,11 +568,38 @@ export interface CreateSessionInput {
   userAgent?: string | null;
 }
 
-/** Issues a new, server-side-revocable session and returns the one-time plaintext token alongside it. */
+/**
+ * Issues a new, server-side-revocable session and returns the one-time
+ * plaintext token alongside it.
+ *
+ * The employee profile, the `employee_sessions` row and its
+ * `employee.session_created` audit row are written in ONE transaction (#854
+ * follow-up). They used to be three autocommits on two connections — the audit
+ * went to the pool directly — so a failed audit write left a live row behind
+ * that no token named: harmless for authentication, but listed as an active
+ * session in Profile and the security center, with no record of who opened it.
+ * Now either all of it commits or none of it does, and the caller (every sign-in
+ * door) sees the throw before it signs a token or sets a cookie.
+ *
+ * Inside a caller's `withTenantTransaction` it joins that transaction instead
+ * of opening a second one (`isPinnedToTransaction`), so a caller that writes
+ * more alongside the session — the company hand-off's platform audit — commits
+ * or rolls back the session with it.
+ */
 export async function createSession(
   employeeId: string,
   businessId: string,
   input: CreateSessionInput = {},
+): Promise<{ token: string; session: EmployeeSession }> {
+  if (isPinnedToTransaction()) return openSession(employeeId, businessId, input);
+  return withTenantTransaction(businessId, () => openSession(employeeId, businessId, input));
+}
+
+/** The body of `createSession`; every statement runs on the ambient (pinned) transaction. */
+async function openSession(
+  employeeId: string,
+  businessId: string,
+  input: CreateSessionInput,
 ): Promise<{ token: string; session: EmployeeSession }> {
   await ensureEmployeeProfile(employeeId, businessId);
   const { token, tokenHash } = generateSessionToken();
@@ -601,14 +628,18 @@ export async function createSession(
   // carried in the payload rather than resolved to a label here so
   // audit-service.ts's read side can join employee_credentials/pos_devices
   // live, the same "read back on demand, don't duplicate" choice
-  // shift-service.ts made for a shift's cash summary.
-  await auditEmployee(getPool(), {
-    businessId,
-    actorId: employeeId,
-    action: "employee.session_created",
-    employeeId,
-    payload: { sessionId: session.id, credentialId: input.credentialId ?? null, deviceId: input.deviceId ?? null },
-  });
+  // shift-service.ts made for a shift's cash summary. Written through the
+  // ambient query — the same transaction as the row above — never the pool.
+  await auditEmployee(
+    { query: (text, params) => query(text, params) },
+    {
+      businessId,
+      actorId: employeeId,
+      action: "employee.session_created",
+      employeeId,
+      payload: { sessionId: session.id, credentialId: input.credentialId ?? null, deviceId: input.deviceId ?? null },
+    },
+  );
   return { token, session };
 }
 

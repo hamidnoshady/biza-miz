@@ -262,6 +262,26 @@ async function auditRows(businessId: string, action: string) {
   return rows;
 }
 
+/**
+ * A failed `createSession` committed nothing in `businessId`: no session row —
+ * so nothing for Profile or the security center to list as active — and no
+ * `employee.session_created` audit row. The row and its audit are one
+ * transaction (#854 follow-up); they used to be two connections, and an audit
+ * failure left a live row behind.
+ */
+async function expectNoSessionCommitted(businessId: string): Promise<void> {
+  const sessions = await db.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM employee_sessions WHERE business_id = $1`,
+    [businessId],
+  );
+  expect(sessions.rows[0].n).toBe(0);
+  const audits = await db.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM audit_log WHERE business_id = $1 AND action = 'employee.session_created'`,
+    [businessId],
+  );
+  expect(audits.rows[0].n).toBe(0);
+}
+
 async function failAuditFor(action: string, sessionId?: string): Promise<void> {
   if (!/^[a-z_.]+$/.test(action)) throw new Error(`unexpected audit action ${action}`);
   if (sessionId !== undefined && !/^[0-9a-f-]{36}$/.test(sessionId)) throw new Error("unexpected session id");
@@ -422,6 +442,8 @@ describe("business switch — the session moves; it is not copied", () => {
     // The old session is untouched and still works: nothing was half-switched.
     expect((await rowOf(token))?.revoked_at).toBeNull();
     expect(await works(token)).toBe(true);
+    // And nothing was left behind in the target business.
+    await expectNoSessionCommitted(beta.id);
   });
 
   it("is all-or-nothing when the session it leaves cannot be ended: 503, the old cookie kept, the new row ended again", async () => {
@@ -543,6 +565,7 @@ describe("desktop hand-off — the cloud pane's session is an ordinary revocable
     expect(failed.status).toBe(303);
     expect(failed.response?.headers.get("location")).toBe("/login?next=%2Forders");
     expect(sessionCookieOf(failed)).toBeUndefined();
+    await expectNoSessionCommitted(business.id);
   });
 });
 
@@ -593,8 +616,9 @@ describe("first-run bootstrap — the Owner's first session is revocable", () =>
     expect(mfa?.totpSecret).toBeTruthy();
     expect(mfa?.recoveryCodes?.length).toBeGreaterThan(0);
     expect(sessionCookieOf(created)).toBeUndefined();
-    const { rows } = await db.query(`SELECT 1 FROM businesses`);
+    const { rows } = await db.query<{ id: string }>(`SELECT id FROM businesses`);
     expect(rows).toHaveLength(1);
+    await expectNoSessionCommitted(rows[0].id);
   });
 });
 
@@ -630,8 +654,9 @@ describe("public signup — the new Owner's session is revocable", () => {
     expect(created.status).toBe(200);
     expect(created.body).toMatchObject({ ok: true, signedIn: false });
     expect(sessionCookieOf(created)).toBeUndefined();
-    const { rows } = await db.query(`SELECT 1 FROM businesses`);
+    const { rows } = await db.query<{ id: string }>(`SELECT id FROM businesses`);
     expect(rows).toHaveLength(1);
+    await expectNoSessionCommitted(rows[0].id);
   });
 });
 
@@ -929,6 +954,15 @@ describe("company hand-off — a staff member's own revocable session in the com
       revoked_at: null,
     });
     expect(await works(token)).toBe(true);
+    // The platform's record of the redemption names the session it opened, and
+    // was committed with it.
+    const platformRows = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM platform_audit_log WHERE action = 'platform_company.handoff.redeemed' AND business_id = $1`,
+      [handoff.businessId],
+    );
+    expect(platformRows.rows).toHaveLength(1);
+    expect(platformRows.rows[0].payload).toMatchObject({ returnPath: "/accounting", sessionId: (await rowOf(token))!.id });
+    expect(JSON.stringify(platformRows.rows[0].payload)).not.toContain(handoff.token);
 
     await expectSignOutEnds(token!, handoff.businessId);
   });
@@ -942,8 +976,91 @@ describe("company hand-off — a staff member's own revocable session in the com
     expect(failed.status).toBe(503);
     expect(failed.body).toEqual({ error: "session_unavailable" });
     expect(sessionCookieOf(failed)).toBeUndefined();
+    await expectNoSessionCommitted(handoff.businessId);
 
     await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
     expect((await redeem(handoff.host, handoff.token)).status).toBe(400);
+  });
+
+  it("answers 503 with no cookie when the platform's audit cannot be written, and leaves no active session behind", async () => {
+    // This used to commit the session first and audit it afterwards: a failed
+    // platform audit answered 500 and left a live row in the company that no
+    // cookie named and no platform record explained.
+    const handoff = await companyHandoff();
+    await failPlatformAuditFor("platform_company.handoff.redeemed");
+    quietErrors();
+
+    const failed = await redeem(handoff.host, handoff.token);
+    expect(failed.status).toBe(503);
+    expect(failed.body).toEqual({ error: "session_unavailable" });
+    expect(sessionCookieOf(failed)).toBeUndefined();
+    await expectNoSessionCommitted(handoff.businessId);
+    const platformRows = await db.query(
+      `SELECT 1 FROM platform_audit_log WHERE action = 'platform_company.handoff.redeemed' AND business_id = $1`,
+      [handoff.businessId],
+    );
+    expect(platformRows.rows).toHaveLength(0);
+
+    // The token was spent by the redemption itself; a fresh hand-off is the retry.
+    await db.query("DROP TRIGGER trg_fail_platform_audit_854 ON platform_audit_log");
+    expect((await redeem(handoff.host, handoff.token)).status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createSession itself
+// ---------------------------------------------------------------------------
+
+describe("createSession — the row and its audit are one transaction", () => {
+  async function sessionsOf(memberId: string): Promise<number> {
+    const { rows } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM employee_sessions WHERE employee_id = $1`,
+      [memberId],
+    );
+    return rows[0].n;
+  }
+
+  it("rolls the row back when its audit row cannot be written, and throws to the door", async () => {
+    const business = await seedBusiness("Atomic");
+    const member = await addMember(business, "manager", await createIdentity());
+    await failAuditFor("employee.session_created");
+
+    await expect(
+      dbLib.withTenant(business.id, () => employeeService.createSession(member.id, business.id, { loginMethod: "password" })),
+    ).rejects.toThrow(/injected audit failure/);
+    expect(await sessionsOf(member.id)).toBe(0);
+    await expectNoSessionCommitted(business.id);
+
+    // With the audit writable again, the same call opens exactly one row and one audit row.
+    await db.query("DROP TRIGGER trg_fail_audit_854 ON audit_log");
+    const { session } = await dbLib.withTenant(business.id, () =>
+      employeeService.createSession(member.id, business.id, { loginMethod: "password" }),
+    );
+    expect(await sessionsOf(member.id)).toBe(1);
+    const audit = await auditRows(business.id, "employee.session_created");
+    expect(audit).toHaveLength(1);
+    expect(audit[0].payload).toMatchObject({ sessionId: session.id });
+  });
+
+  it("joins a caller's transaction: nothing is visible before the caller commits, and the caller's rollback takes it", async () => {
+    const business = await seedBusiness("Joined");
+    const member = await addMember(business, "manager", await createIdentity());
+
+    await expect(
+      dbLib.withTenantTransaction(business.id, async () => {
+        await employeeService.createSession(member.id, business.id, { loginMethod: "password" });
+        // Still uncommitted: the same transaction as the caller, not a second one.
+        expect(await sessionsOf(member.id)).toBe(0);
+        throw new Error("the caller aborts");
+      }),
+    ).rejects.toThrow("the caller aborts");
+    expect(await sessionsOf(member.id)).toBe(0);
+    await expectNoSessionCommitted(business.id);
+
+    const { session } = await dbLib.withTenantTransaction(business.id, () =>
+      employeeService.createSession(member.id, business.id, { loginMethod: "password" }),
+    );
+    expect(await sessionsOf(member.id)).toBe(1);
+    expect((await auditRows(business.id, "employee.session_created"))[0].payload).toMatchObject({ sessionId: session.id });
   });
 });
