@@ -41,6 +41,7 @@ const SESSIONS = [
   session("5", "رضا", "password"),
   session("6", "نیلوفر", null, "credential-1"),
   session("7", "علی", null, null),
+  session("8", "مهدی", "cloud_account"),
 ];
 
 beforeEach(() => {
@@ -78,6 +79,13 @@ describe("security center — the door each active session came through", () => 
     expect(await originOf("صندوق دسکتاپ")).toMatch(/^ورود از برنامهٔ دسکتاپ · /);
     expect(await originOf("کارمند شرکت")).toMatch(/^ورود از کنسول مدیریت · /);
     expect(await originOf("رضا")).toMatch(/^ورود با رمز عبور · /);
+  });
+
+  it("names a desktop cloud-account session as such — no credential id no longer reads as a PIN login", async () => {
+    render(<SecurityCenterSettings />);
+    const origin = await originOf("مهدی");
+    expect(origin).toMatch(/^ورود با حساب ابری · /);
+    expect(origin).not.toMatch(/^پین/);
   });
 
   it("keeps the credential-based label for rows that recorded no door", async () => {

@@ -588,13 +588,20 @@ describe("hybrid login credential convergence", () => {
 
     // #854 follow-up (third pass): the hand-back opens a revocable row of its
     // own member, in its own business; «خروج» ends it, and a retained copy of
-    // the cookie is refused afterwards, like every other door's.
+    // the cookie is refused afterwards, like every other door's. The row says
+    // the person signed in with the cloud account (migration 0227) — never a
+    // local password or PIN, which this install did not check.
     expect(session?.employeeSessionId).toBeTruthy();
-    const opened = await withTenant(paired.siteBusinessId, () => query<{ employee_id: string; business_id: string; revoked_at: Date | null }>(
-      `SELECT employee_id, business_id, revoked_at FROM employee_sessions WHERE id = $1`,
+    const opened = await withTenant(paired.siteBusinessId, () => query<{ employee_id: string; business_id: string; login_method: string | null; revoked_at: Date | null }>(
+      `SELECT employee_id, business_id, login_method, revoked_at FROM employee_sessions WHERE id = $1`,
       [session!.employeeSessionId],
     ));
-    expect(opened.rows[0]).toMatchObject({ employee_id: paired.ownerUserId, business_id: paired.siteBusinessId, revoked_at: null });
+    expect(opened.rows[0]).toMatchObject({
+      employee_id: paired.ownerUserId,
+      business_id: paired.siteBusinessId,
+      login_method: "cloud_account",
+      revoked_at: null,
+    });
     const signedOut = await logoutRoute(new NextRequest("http://localhost/api/auth/logout", {
       method: "POST",
       headers: { cookie: `${SESSION_COOKIE}=${cookie}` },

@@ -289,6 +289,31 @@ describe("#854 F10 + logout — sign-out only leaves once the server confirmed i
   });
 });
 
+describe("#854 P2.27 — the device list names the door each session came through", () => {
+  it("names a desktop cloud-account session as such, never as a local password or PIN sign-in", async () => {
+    routes["GET /api/sessions/self"] = () =>
+      json(200, {
+        sessions: [
+          {
+            id: "s-cloud",
+            deviceLabel: "برنامهٔ دسکتاپ",
+            isCurrent: true,
+            issuedAt: minutesAgo(10),
+            lastSeenAt: minutesAgo(1),
+            loginMethod: "cloud_account",
+            businessName: "کافه",
+            locationName: "شعبهٔ مرکزی",
+          },
+        ],
+      });
+    mount();
+    const row = (await screen.findByText("برنامهٔ دسکتاپ")).closest("div.flex") as HTMLElement;
+    expect(row.textContent).toContain("ورود با حساب ابری");
+    expect(row.textContent).not.toContain("ورود با رمز عبور");
+    expect(row.textContent).not.toContain("ورود با رمز عددی");
+  });
+});
+
 describe("#854 F13 — active and home branch, from the server", () => {
   const north = { id: "l-n", name: "شعبهٔ شمال" };
   const main = { id: "l-m", name: "شعبهٔ مرکزی" };

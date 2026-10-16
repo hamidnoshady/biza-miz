@@ -101,6 +101,13 @@ describe("login method labels", () => {
     expect(sessionLoginMethodLabel("company_handoff")).toBe("ورود از کنسول مدیریت");
   });
 
+  it("names the desktop's cloud-account sign-in for what it is — not a local password or PIN", () => {
+    expect(sessionLoginMethodLabel("cloud_account")).toBe("ورود با حساب ابری");
+    expect(sessionLoginMethodLabel("cloud_account")).not.toBe(sessionLoginMethodLabel("password"));
+    expect(sessionLoginMethodLabel("cloud_account")).not.toBe(sessionLoginMethodLabel("pin"));
+    expect(isSessionLoginMethod("cloud_account")).toBe(true);
+  });
+
   it("is exactly the list the database constraint accepts, as of the latest migration that defines it", () => {
     // A door added here but not to the CHECK would make createSession throw at
     // sign-in; one added to the CHECK but not here would render unlabelled.
