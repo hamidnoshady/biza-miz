@@ -316,9 +316,11 @@ export function TableOrderPanel({
     clientRequestIdRef.current = null;
     // The ticket is the server's document: it loads the order the items were
     // just written to (the same rows this panel is showing) and prints what is
-    // on it. `table.order_id` is the pair of this table, created on demand.
-    const ticketOrderId = table.order_id;
-    if (ticketOrderId) {
+    // on it. `table.order_id` is the pair of this table, or the newly created
+    // order id when this was the table's first send.
+    const createdOrderId = (res.data as { order?: { id?: string } } | null)?.order?.id ?? null;
+    const ticketOrderId = table.order_id ?? createdOrderId;
+    if (ticketOrderId && !res.queued) {
       const kitchenRequestId = `kitchen:${ticketOrderId}:${crypto.randomUUID()}`;
       const issue = (requestId: string) => printKitchenTicket(null, ticketOrderId, { requestId });
       void issue(kitchenRequestId).then((result) => {

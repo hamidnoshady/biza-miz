@@ -98,7 +98,6 @@ export type ResolveReason =
   | "explicit"
   | "rule"
   | "default"
-  | "last_used"
   | "only"
   | "fallback"
   /** The rule names a printer (or fallback) but neither can take the document right now. */
@@ -231,14 +230,33 @@ export function resolvePrinter(input: {
   printers: RoutingPrinter[];
   rules?: PrintRuleRef[];
   requestedPrinterId?: string | null;
-  lastUsedPrinterId?: string | null;
+  /** Printers that definitively failed local delivery on an earlier attempt for this job. */
+  failedPrinterIds?: readonly string[];
 }): ResolveResult {
-  const compatible = input.printers.filter((printer) => printerAcceptsDocument(printer, input.documentType));
+  const excluded = new Set(input.failedPrinterIds ?? []);
+  const compatible = input.printers.filter(
+    (printer) => !excluded.has(printer.id) && printerAcceptsDocument(printer, input.documentType),
+  );
   const rule = input.rules?.find((item) => item.documentType === input.documentType) ?? null;
   const templateKey = rule?.templateKey ?? null;
   const templateId = rule?.templateId ?? null;
 
   const byId = (id: string | null | undefined) => compatible.find((printer) => printer.id === id) ?? null;
+
+  // When a primary printer definitively failed delivery at runtime, only the
+  // rule's configured compatible fallback printer may take over — never an
+  // arbitrary unconfigured printer in the branch.
+  if (excluded.size > 0) {
+    if (input.requestedPrinterId) {
+      return { printer: null, fallbackFrom: null, templateKey, templateId, reason: "unavailable" };
+    }
+    const fallback = rule?.printerId ? byId(rule.fallbackPrinterId) : null;
+    if (fallback && rule?.printerId && excluded.has(rule.printerId)) {
+      const named = input.printers.find((printer) => printer.id === rule.printerId) ?? null;
+      return { printer: fallback, fallbackFrom: named, templateKey, templateId, reason: "fallback" };
+    }
+    return { printer: null, fallbackFrom: null, templateKey, templateId, reason: "unavailable" };
+  }
 
   if (input.requestedPrinterId) {
     const explicit = byId(input.requestedPrinterId);
@@ -248,27 +266,26 @@ export function resolvePrinter(input: {
   const primary = byId(rule?.printerId);
   if (primary) return { printer: primary, fallbackFrom: null, templateKey, templateId, reason: "rule" };
 
-  // The rule's printer exists but cannot take this document right now
-  // (offline, inactive, re-paired, wrong paper): the fallback is exactly for
-  // this, and the caller records `fallbackFrom` so history says why.
-  const fallback = byId(rule?.fallbackPrinterId);
-  if (rule?.printerId && fallback) {
-    const named = input.printers.find((printer) => printer.id === rule.printerId) ?? null;
-    return { printer: fallback, fallbackFrom: named, templateKey, templateId, reason: "fallback" };
-  }
+  // The rule's configured primary printer cannot take this document right now
+  // (offline, inactive, re-paired, wrong paper, or removed): the fallback is
+  // for this, and the caller records `fallbackFrom` so history says why.
+  // When `rule.printerId` is null («انتخاب خودکار»), any leftover
+  // `fallbackPrinterId` on a stale rule is ignored so automatic routing wins.
+  if (rule?.printerId) {
+    const fallback = byId(rule.fallbackPrinterId);
+    if (fallback) {
+      const named = input.printers.find((printer) => printer.id === rule.printerId) ?? null;
+      return { printer: fallback, fallbackFrom: named, templateKey, templateId, reason: "fallback" };
+    }
 
-  // A rule that names a printer at all is authoritative: if neither it nor its
-  // fallback is usable we do NOT quietly pick another printer behind the
-  // operator's back — the till must say "this printer is unavailable".
-  if (rule?.printerId || rule?.fallbackPrinterId) {
+    // A rule that names a primary printer is authoritative: if neither it nor
+    // its fallback is usable we do NOT quietly pick another printer behind the
+    // operator's back — the till must say "this printer is unavailable".
     return { printer: null, fallbackFrom: null, templateKey, templateId, reason: "unavailable" };
   }
 
   const defaults = compatible.filter((printer) => printer.isDefault);
   if (defaults.length === 1) return { printer: defaults[0], fallbackFrom: null, templateKey, templateId, reason: "default" };
-
-  const last = byId(input.lastUsedPrinterId);
-  if (last) return { printer: last, fallbackFrom: null, templateKey, templateId, reason: "last_used" };
 
   if (compatible.length === 1) return { printer: compatible[0], fallbackFrom: null, templateKey, templateId, reason: "only" };
 
@@ -293,14 +310,6 @@ export function isSheetPaper(paper: string | null | undefined): boolean {
 
 export function isLabelPaper(paper: string | null | undefined): boolean {
   return paper === "label57x40";
-}
-
-/** The paper a printer will feed, given the relational columns. Kept for callers holding plain data. */
-export function paperOfPrinter(raw: { paper?: unknown; paper_width_mm?: unknown; paperWidthMm?: unknown }): PaperKey {
-  if (typeof raw.paper === "string" && raw.paper in PAPERS) return raw.paper as PaperKey;
-  const width = Number(raw.paper_width_mm ?? raw.paperWidthMm);
-  if (width === 58) return "thermal58";
-  return "thermal80";
 }
 
 export function isPrinterPurposeValue(value: unknown): value is PrinterPurpose {

@@ -73,6 +73,12 @@ const native = require("../../electron/native-printing.js") as {
     bytes: Uint8Array,
     opts?: Record<string, unknown>,
   ) => Promise<{ ok: boolean; error?: string }>;
+  sendPageScript: (tempFilePath: string, printerName: string) => string;
+  sendPageToWindowsPrinter: (
+    name: string,
+    bytes: Uint8Array,
+    opts?: { run?: (script: string) => Promise<string>; tmpdir?: string },
+  ) => Promise<{ ok: boolean; error?: string; detail?: string }>;
 };
 
 /** A fake `net.createConnection` that emits exactly one of connect/timeout/error. */
@@ -285,6 +291,32 @@ describe("sendRawBytesToNetworkPrinter (injected socket)", () => {
     await native.sendRawBytesToNetworkPrinter("10.0.0.5", 0, new Uint8Array([1]), { connect });
     expect(seenPort).toBe(9100);
   });
+  it("distinguishes pre-connect timeout (network_unreachable) from post-write timeout (job_timeout / write_ambiguous)", async () => {
+    const preConnect = vi.fn(() => fakeSocket("timeout"));
+    const preResult = await native.sendRawBytesToNetworkPrinter("10.0.0.5", 9100, new Uint8Array([1, 2]), { connect: preConnect });
+    expect(preResult).toEqual({
+      ok: false,
+      error: "network_unreachable",
+      detail: "The connection timed out.",
+    });
+
+    // Socket connects and begins writing, then times out before closing:
+    const postWrite = vi.fn(() => {
+      const EventEmitter = require("node:events");
+      const sock = new EventEmitter();
+      sock.write = (_bytes: Uint8Array, _cb: (err?: Error) => void) => {
+        setImmediate(() => sock.emit("timeout"));
+      };
+      sock.end = () => {};
+      sock.destroy = () => {};
+      setImmediate(() => sock.emit("connect"));
+      return sock;
+    });
+    const postResult = await native.sendRawBytesToNetworkPrinter("10.0.0.5", 9100, new Uint8Array([1, 2]), { connect: postWrite });
+    expect(postResult.ok).toBe(false);
+    expect(postResult.error).toBe("job_timeout");
+    expect(postResult.detail).toContain("write_ambiguous");
+  });
 });
 
 describe("localSubnets", () => {
@@ -356,5 +388,42 @@ describe("probeTarget / sendRawToTarget — the one dispatch surface", () => {
       { connect },
     );
     expect(networkResult).toEqual({ ok: true });
+  });
+
+  it("aborts the spooler document on incomplete raw writes and classifies PrintDocument.Print exceptions as print_failed (ambiguous)", async () => {
+    const rawScript = native.sendRawScript("C:\\Temp\\job.bin", "EPSON TM-T20III");
+    expect(rawScript).toContain("AbortPrinter");
+    expect(native.classifyWindowsSendError("WritePrinter failed")).toBe("print_failed");
+    expect(native.classifyWindowsSendError("WritePrinterPartial failed")).toBe("job_timeout");
+    expect(native.classifyWindowsSendError("StartDocPrinter failed")).toBe("spooler_rejected");
+
+    const pageScript = native.sendPageScript("C:\\Temp\\page.png", "HP LaserJet");
+    expect(pageScript).toContain("print_document_ambiguous:");
+
+    const runPrintDocError = vi
+      .fn()
+      .mockRejectedValue(new Error("print_document_ambiguous: ExternalException in GDI+"));
+    const pageFailure = await native.sendPageToWindowsPrinter(
+      "HP LaserJet",
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      { run: runPrintDocError },
+    );
+    expect(pageFailure).toEqual({
+      ok: false,
+      error: "print_failed",
+      detail: "print_document_ambiguous: ExternalException in GDI+",
+    });
+
+    const runOffline = vi.fn().mockRejectedValue(new Error("printer_offline"));
+    const offlineFailure = await native.sendPageToWindowsPrinter(
+      "HP LaserJet",
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      { run: runOffline },
+    );
+    expect(offlineFailure).toEqual({
+      ok: false,
+      error: "printer_offline",
+      detail: "printer_offline",
+    });
   });
 });

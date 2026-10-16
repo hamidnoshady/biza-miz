@@ -3,9 +3,10 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { builtInTemplate, type DocType } from "@/lib/print-template";
-import { getPrintTemplate, loadRoutablePrinters, resolvePrintPlan } from "@/lib/printing/plan";
-import { isDocType, printerAcceptsDocument } from "@/lib/printing/routing";
+import { builtInTemplate, type DocType, type PaperKey } from "@/lib/print-template";
+import { getPrintTemplate } from "@/lib/print-templates-service";
+import { loadRoutablePrinters, resolvePrintPlan } from "@/lib/printing/plan";
+import { isDocType, printerAcceptsDocument, printerAcceptsPaper } from "@/lib/printing/routing";
 
 /**
  * Branch print rules: which template and printer each document type uses.
@@ -64,7 +65,12 @@ export const GET = withTenantScope(async () => {
         : { ok: false, error: plan.error };
     }
 
-    return NextResponse.json({ rules: rows, resolved });
+    const normalizedRows = rows.map((row) => ({
+      ...row,
+      fallback_printer_id: row.printer_id ? row.fallback_printer_id : null,
+    }));
+
+    return NextResponse.json({ rules: normalizedRows, resolved });
   } catch (err) {
     console.error("listing print rules failed", err);
     return NextResponse.json({ error: "print_rules_failed", rules: [], resolved: {} }, { status: 500 });
@@ -98,6 +104,7 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
   // ── the template ──
   let templateKey: string | null = null;
   let templateId: string | null = null;
+  let templatePaper: PaperKey | null = null;
   const requestedId = typeof body.templateId === "string" && body.templateId.trim() ? body.templateId.trim() : null;
   const requestedKey = typeof body.templateKey === "string" && body.templateKey.trim() ? body.templateKey.trim() : null;
   if (requestedId) {
@@ -105,11 +112,13 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
     if (!saved) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
     if (saved.docType !== documentType) return NextResponse.json({ error: "incompatible_template" }, { status: 400 });
     templateId = saved.id;
+    templatePaper = saved.paper ?? null;
   } else if (requestedKey) {
     const builtIn = builtInTemplate(requestedKey);
     if (builtIn) {
       if (builtIn.docType !== documentType) return NextResponse.json({ error: "incompatible_template" }, { status: 400 });
       templateKey = builtIn.key;
+      templatePaper = builtIn.paper;
     } else {
       // Tolerate the pre-unification spelling where a saved template's id was
       // sent as the key; it is the same choice, stored in the right column.
@@ -117,13 +126,14 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
       if (!saved) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
       if (saved.docType !== documentType) return NextResponse.json({ error: "incompatible_template" }, { status: 400 });
       templateId = saved.id;
+      templatePaper = saved.paper ?? null;
     }
   }
 
   // ── the printers ──
   const { routable } = await loadRoutablePrinters(location.id);
   const printerId = typeof body.printerId === "string" && body.printerId ? body.printerId : null;
-  const fallbackPrinterId =
+  const rawFallbackPrinterId =
     typeof body.fallbackPrinterId === "string" && body.fallbackPrinterId ? body.fallbackPrinterId : null;
 
   const validatePrinter = (id: string | null, role: "primary" | "fallback"): NextResponse | null => {
@@ -133,17 +143,23 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
     if (!printerAcceptsDocument(printer, documentType)) {
       return NextResponse.json({ error: "incompatible_printer", role, printerName: printer.name }, { status: 400 });
     }
+    if (templatePaper && !printerAcceptsPaper(printer.printerClass, templatePaper)) {
+      return NextResponse.json({ error: "incompatible_template", role, printerName: printer.name }, { status: 400 });
+    }
     return null;
   };
   const primaryError = validatePrinter(printerId, "primary");
   if (primaryError) return primaryError;
-  const fallbackError = validatePrinter(fallbackPrinterId, "fallback");
+  const fallbackError = validatePrinter(rawFallbackPrinterId, "fallback");
   if (fallbackError) return fallbackError;
-  if (printerId && fallbackPrinterId && printerId === fallbackPrinterId) {
+  if (printerId && rawFallbackPrinterId && printerId === rawFallbackPrinterId) {
     // A fallback that IS the primary is not a fallback; it would silently
     // double-print to a printer the operator expected to be spared.
     return NextResponse.json({ error: "duplicate_fallback_printer" }, { status: 400 });
   }
+  // Automatic routing (`printerId === null`, «انتخاب خودکار») has no fixed
+  // primary printer to fall back from, so `fallback_printer_id` is cleared.
+  const fallbackPrinterId = printerId ? rawFallbackPrinterId : null;
 
   try {
     await query(

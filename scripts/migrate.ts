@@ -175,6 +175,17 @@ const CHECKSUM_REPAIRS: ReadonlyMap<string, readonly string[]> = new Map([
     // adopting the checksum is schema-neutral, exactly like 0127 and 0140.
     ["5c0d7299b7d79fb9995fdaf713eeb1fad423515981f924459d18704bb5bd448f"],
   ],
+  [
+    "0222_print_jobs_diagnostics_and_fallback.sql",
+    // sha256 of the initial branch revision that inferred fallback linkage from
+    // shared `print_request_id`. 0223_print_jobs_correct_historical_provenance.sql
+    // repairs any database that ran that revision so both fresh and upgraded
+    // databases converge to the same schema and data state.
+    [
+      "4450f27e4262cb3586dc553edc5c273f823c0f15643a9ab3886d66c38886f476",
+      "e2929d11cdb7f307990751e823485e4ebcea05dd27a32a7e688840d18887189a",
+    ],
+  ],
 ]);
 
 export interface MigrationRunOptions {

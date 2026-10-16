@@ -212,4 +212,94 @@ describe("GET — history, and the sweep that ends abandoned jobs", () => {
     expect(await response.json()).toEqual({ jobs: [] });
     expect(db.query).not.toHaveBeenCalled();
   });
+
+  it("returns linked attempt metadata, routing reason, fallback origin, exact template metadata, and delivery outcome", async () => {
+    vi.mocked(db.query).mockImplementation((async (sql: string) =>
+      String(sql).includes("SELECT j.id")
+        ? {
+            rows: [
+              {
+                id: "job-attempt-2",
+                document_type: "receipt",
+                entity_id: "order-9",
+                status: "handed_off",
+                error_code: null,
+                delivery_outcome: "handed_off",
+                route_reason: "runtime_fallback",
+                attempt_number: 2,
+                previous_job_id: "job-attempt-1",
+                printer_id: "p-backup",
+                printer_name: "چاپگر پشتیبان",
+                fallback_from_printer_id: "p-primary",
+                fallback_from_printer_name: "چاپگر اصلی",
+                template_id: "tpl-1",
+                template_key: "tpl-1",
+                template_name: "قالب سفارشی صندوق",
+                template_version: 4,
+                template_paper: "thermal80",
+                template_source: "rule",
+                print_request_id: "receipt:order-9",
+                created_at: new Date("2026-01-15T10:00:05Z"),
+              },
+              {
+                id: "job-attempt-1",
+                document_type: "receipt",
+                entity_id: "order-9",
+                status: "failed",
+                error_code: "printer_offline",
+                delivery_outcome: "not_delivered",
+                route_reason: "rule",
+                attempt_number: 1,
+                previous_job_id: null,
+                printer_id: "p-primary",
+                printer_name: "چاپگر اصلی",
+                fallback_from_printer_id: null,
+                fallback_from_printer_name: null,
+                template_id: "tpl-1",
+                template_key: "tpl-1",
+                template_name: "قالب سفارشی صندوق",
+                template_version: 4,
+                template_paper: "thermal80",
+                template_source: "rule",
+                print_request_id: "receipt:order-9",
+                created_at: new Date("2026-01-15T10:00:00Z"),
+              },
+            ],
+            rowCount: 2,
+          }
+        : { rows: [], rowCount: 0 }) as never);
+
+    const response = await GET();
+    const body = (await response.json()) as { jobs: Record<string, unknown>[] };
+    expect(body.jobs).toHaveLength(2);
+    expect(body.jobs[0]).toMatchObject({
+      id: "job-attempt-2",
+      attemptNumber: 2,
+      previousJobId: "job-attempt-1",
+      routeReason: "runtime_fallback",
+      deliveryOutcome: "handed_off",
+      printerId: "p-backup",
+      printerName: "چاپگر پشتیبان",
+      fallbackFromPrinterId: "p-primary",
+      fallbackFromPrinterName: "چاپگر اصلی",
+      templateId: "tpl-1",
+      templateName: "قالب سفارشی صندوق",
+      templateVersion: 4,
+      templatePaper: "thermal80",
+      templateSource: "rule",
+      printRequestId: "receipt:order-9",
+    });
+    expect(body.jobs[1]).toMatchObject({
+      id: "job-attempt-1",
+      attemptNumber: 1,
+      previousJobId: null,
+      routeReason: "rule",
+      deliveryOutcome: "not_delivered",
+      printerId: "p-primary",
+      printerName: "چاپگر اصلی",
+      templateName: "قالب سفارشی صندوق",
+      templateVersion: 4,
+      printRequestId: "receipt:order-9",
+    });
+  });
 });

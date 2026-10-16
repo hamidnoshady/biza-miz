@@ -149,7 +149,7 @@ async function openRules() {
   render(<PrintingManager />);
   await waitFor(() => expect(screen.getByRole("tab", { name: "قوانین چاپ" })).toBeTruthy());
   fireEvent.click(screen.getByRole("tab", { name: "قوانین چاپ" }));
-  await screen.findByText("رسید فروش");
+  await screen.findAllByText("رسید فروش");
 }
 
 /**
@@ -274,6 +274,84 @@ describe("Rules screen — printers", () => {
     expect(receiptFallback.some((label) => label.includes("صندوق"))).toBe(false);
   });
 
+  it("clears fallback_printer_id when switching primary printer to automatic («انتخاب خودکار») and handles stale automatic rules", async () => {
+    const backupReceiptPrinter: PrinterRow = {
+      ...RECEIPT_PRINTER,
+      id: "p-receipt-backup",
+      name: "صندوق پشتیبان",
+      is_default: false,
+    };
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
+      if (url === "/api/settings/print-rules") {
+        return {
+          ok: true,
+          data: {
+            rules: [
+              {
+                document_type: "receipt",
+                template_key: null,
+                template_id: "tpl-1",
+                printer_id: "p-receipt",
+                fallback_printer_id: "p-receipt-backup",
+              },
+              {
+                document_type: "kitchen",
+                template_key: "thermal80-kitchen",
+                template_id: null,
+                printer_id: null,
+                fallback_printer_id: "p-kitchen",
+              },
+            ],
+            resolved: RESOLVED,
+          },
+        };
+      }
+      if (url === "/api/settings/printers") {
+        return {
+          ok: true,
+          data: { printers: [RECEIPT_PRINTER, backupReceiptPrinter, KITCHEN_PRINTER, A4_PRINTER] },
+        };
+      }
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/printing/jobs") return { ok: true, data: { jobs: [] } };
+      if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
+      if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
+      return { ok: true, data: {} };
+    });
+
+    await openRules();
+    const primaries = printerSelects();
+    const fallbacks = fallbackSelects();
+
+    // Initially receipt has fixed primary and fallback configured:
+    expect(primaries[0].value).toBe("p-receipt");
+    expect(fallbacks[0].value).toBe("p-receipt-backup");
+    expect(fallbacks[0].disabled).toBe(false);
+
+    // Stale kitchen rule with printer_id: null and fallback_printer_id: "p-kitchen"
+    // is normalized in the UI so fallback is cleared and disabled:
+    expect(primaries[1].value).toBe("");
+    expect(fallbacks[1].value).toBe("");
+    expect(fallbacks[1].disabled).toBe(true);
+
+    // Switching receipt primary to «انتخاب خودکار» clears and disables fallback:
+    fireEvent.change(primaries[0], { target: { value: "" } });
+    expect(primaries[0].value).toBe("");
+    expect(fallbacks[0].value).toBe("");
+    expect(fallbacks[0].disabled).toBe(true);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "ذخیره" })[0]);
+    await waitFor(() =>
+      expect(putBodyOf("receipt")).toMatchObject({
+        documentType: "receipt",
+        templateId: "tpl-1",
+        printerId: null,
+        fallbackPrinterId: null,
+      }),
+    );
+  });
+
   it("prints a sample on the operational path, pinned to the rule's own template", async () => {
     await openRules();
     fireEvent.click(screen.getAllByRole("button", { name: "چاپ نمونه روی همین مسیر" })[0]);
@@ -286,6 +364,134 @@ describe("Rules screen — printers", () => {
     await openRules();
     fireEvent.click(screen.getAllByRole("button", { name: "چاپ نمونه روی همین مسیر" })[0]);
     expect(await screen.findByText(/سرویس چاپ را از تب «چاپگرها» نصب کنید/)).toBeTruthy();
+  });
+
+  it("shows linked attempts, routing reason, fallback origin, template revision, and spooler-handoff vs physical-output semantics in recent activity", async () => {
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
+      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED } };
+      if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/printing/jobs") {
+        return {
+          ok: true,
+          data: {
+            jobs: [
+              {
+                id: "job-2",
+                documentType: "receipt",
+                status: "handed_off",
+                errorCode: null,
+                deliveryOutcome: "handed_off",
+                routeReason: "runtime_fallback",
+                attemptNumber: 2,
+                previousJobId: "job-1",
+                printerName: "صندوق پشتیبان",
+                fallbackFromPrinterName: "صندوق",
+                templateName: "قالب سفارشی من",
+                templateKey: "tpl-1",
+                templateVersion: 3,
+                printRequestId: "receipt:order-1",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۰",
+              },
+              {
+                id: "job-1",
+                documentType: "receipt",
+                status: "failed",
+                errorCode: "printer_offline",
+                deliveryOutcome: "not_delivered",
+                routeReason: "rule",
+                attemptNumber: 1,
+                previousJobId: null,
+                printerName: "صندوق",
+                fallbackFromPrinterName: null,
+                templateName: "قالب سفارشی من",
+                templateKey: "tpl-1",
+                templateVersion: 3,
+                printRequestId: "receipt:order-1",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۰",
+              },
+            ],
+          },
+        };
+      }
+      if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
+      if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
+      return { ok: true, data: {} };
+    });
+
+    await openRules();
+    const text = bodyText();
+    expect(text).toContain("تحویل به صف سیستم‌عامل یا درگاه شبکه انجام شده است و به‌تنهایی خروج فیزیکی کاغذ را تضمین نمی‌کند");
+    expect(text).toContain("تلاش ۲ (مرتبط با تلاش ۱)");
+    expect(text).toContain("تلاش ۱");
+    expect(text).toContain("(جانشین «صندوق»)");
+    expect(text).toContain("مسیر: چاپگر جانشین (تلاش مجدد خودکار)");
+    expect(text).toContain("قالب سفارشی من · نسخهٔ ۳ (v۳)");
+    expect(text).toContain("تحویل به صف سیستم‌عامل (خروجی کاغذ بررسی شود)");
+    expect(text).toContain("عدم تحویل پیش از ارسال");
+  });
+
+  it("does not display intentional reprints sharing printRequestId as linked fallback attempts, and shows ambiguous/historical labels", async () => {
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
+      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED } };
+      if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/printing/jobs") {
+        return {
+          ok: true,
+          data: {
+            jobs: [
+              {
+                id: "reprint-2",
+                documentType: "receipt",
+                status: "handed_off",
+                errorCode: null,
+                deliveryOutcome: "handed_off",
+                routeReason: "unknown",
+                attemptNumber: 1,
+                previousJobId: null,
+                printerName: "صندوق",
+                fallbackFromPrinterName: null,
+                templateName: "رسید",
+                templateKey: "receipt-standard",
+                templateVersion: 1,
+                printRequestId: "receipt:order-99",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۵",
+              },
+              {
+                id: "reprint-1",
+                documentType: "receipt",
+                status: "failed",
+                errorCode: "job_timeout",
+                deliveryOutcome: "ambiguous",
+                routeReason: "rule",
+                attemptNumber: 1,
+                previousJobId: null,
+                printerName: "صندوق",
+                fallbackFromPrinterName: null,
+                templateName: "رسید",
+                templateKey: "receipt-standard",
+                templateVersion: 1,
+                printRequestId: "receipt:order-99",
+                when: "۱۴۰۴/۱۰/۲۵ ۱۰:۰۰",
+              },
+            ],
+          },
+        };
+      }
+      if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
+      if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
+      return { ok: true, data: {} };
+    });
+
+    await openRules();
+    const text = bodyText();
+    expect(text).not.toContain("تلاش ۲");
+    expect(text).not.toContain("مرتبط با تلاش ۱");
+    expect(text).toContain("مسیر: نامشخص (تاریخی)");
+    expect(text).toContain("وضعیت تحویل نامشخص — بدون ارسال مجدد خودکار (بررسی چاپگر و چاپ مجدد دستی لازم است)");
   });
 });
 

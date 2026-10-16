@@ -193,6 +193,24 @@ describe("PUT /api/settings/print-rules — the printers", () => {
     expect(String(sql)).toContain("ON CONFLICT (location_id, document_type) DO UPDATE");
     expect(params).toEqual(["loc-1", "receipt", null, "tpl-1", "p-thermal", "p-thermal-2"]);
   });
+
+  it("clears fallback_printer_id when switching to automatic printer selection (printerId: null)", async () => {
+    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "tpl-1", docType: "receipt", name: "قالب" } as never);
+    const response = await PUT(
+      request({ documentType: "receipt", templateId: "tpl-1", printerId: null, fallbackPrinterId: "p-thermal-2" }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok: boolean; rule: Record<string, unknown> };
+    expect(body.rule).toEqual({
+      documentType: "receipt",
+      templateKey: null,
+      templateId: "tpl-1",
+      printerId: null,
+      fallbackPrinterId: null,
+    });
+    const [, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(params).toEqual(["loc-1", "receipt", null, "tpl-1", null, null]);
+  });
 });
 
 describe("PUT guards", () => {
@@ -265,6 +283,54 @@ describe("GET /api/settings/print-rules — rules plus what would actually print
       locationId: "loc-1",
       documentType: "receipt",
       includeBranding: false,
+    });
+  });
+
+  it("normalizes existing stale rules with null primary and leftover fallback_printer_id on GET", async () => {
+    vi.mocked(db.query).mockResolvedValue({
+      rows: [
+        {
+          document_type: "receipt",
+          template_key: "thermal80-receipt",
+          template_id: null,
+          printer_id: null,
+          fallback_printer_id: "p-thermal-2",
+        },
+      ],
+      rowCount: 1,
+    } as never);
+    vi.mocked(planModule.resolvePrintPlan).mockImplementation((async ({ documentType }: { documentType: string }) =>
+      documentType === "receipt"
+        ? {
+            ok: true,
+            plan: {
+              printer: { id: "p-thermal", name: "صندوق پیش‌فرض" },
+              reason: "default",
+              fallbackPrinter: null,
+              templateKey: "thermal80-receipt",
+              templateId: null,
+              template: { name: "فیش فروش ۸۰ میلی‌متری" },
+              templateVersion: 1,
+              templateSource: "rule",
+            },
+          }
+        : { ok: false, error: "printer_not_configured" }) as never);
+
+    const response = await GET();
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      rules: Array<Record<string, unknown>>;
+      resolved: Record<string, Record<string, unknown>>;
+    };
+    expect(body.rules[0]).toMatchObject({
+      document_type: "receipt",
+      printer_id: null,
+      fallback_printer_id: null,
+    });
+    expect(body.resolved.receipt).toMatchObject({
+      ok: true,
+      printerName: "صندوق پیش‌فرض",
+      route: "default",
     });
   });
 });
