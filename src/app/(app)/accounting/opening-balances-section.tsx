@@ -52,6 +52,19 @@ import {
 import type { AccountRow } from "./accounting-manager";
 import { createPortal } from "react-dom";
 import printStyles from "./opening-balances-print.module.css";
+import {
+  DIMENSION_ERROR_MESSAGES,
+  DIMENSION_KINDS,
+  type DimensionKind,
+  type LineDimensions,
+} from "@/lib/accounting-dimensions";
+import { DimensionFields, useDimensionCatalog } from "./dimension-fields";
+import {
+  dimensionValueLabel,
+  enabledKindLabel,
+  type DimensionCatalog,
+  type DimensionDraft,
+} from "./dimension-catalog";
 
 type SetStatus = "draft" | "review" | "approved" | "posted" | "reversed";
 
@@ -90,6 +103,8 @@ interface OpeningLine {
   partyName: string | null;
   reference: string | null;
   sourceNote: string | null;
+  /** Issue #868 — the line's attribution; carried through every edit. */
+  dimensions: LineDimensions | null;
 }
 
 interface FiscalYear {
@@ -142,6 +157,8 @@ interface ImportPreview {
     partyId: string | null;
     reference: string | null;
     sourceNote: string | null;
+    /** Issue #868 — rides the round-trip untouched (the JSON import can carry it). */
+    dimensions?: LineDimensions | null;
   }[];
 }
 
@@ -156,6 +173,12 @@ interface DraftLine {
   partyId: string;
   /** Display name for the picked party (or the fallback reference text). */
   partyName: string;
+  /**
+   * Issue #868 — the line's attribution as raw value ids. Round-tripped whole:
+   * an edit must never silently un-attribute a line, including ids of values
+   * that are archived or belong to a kind the business has since switched off.
+   */
+  dimensions: LineDimensions;
 }
 
 const STATUS_LABELS: Record<SetStatus, string> = {
@@ -248,11 +271,66 @@ function errorMessage(code: string | undefined): string {
     bad_request: "درخواست نامعتبر بود.",
     request_failed: "ارتباط با سرور برقرار نشد. اتصال را بررسی و دوباره تلاش کنید.",
   };
-  return map[code ?? ""] ?? "خطای غیرمنتظره رخ داد. دوباره تلاش کنید.";
+  return (
+    map[code ?? ""] ??
+    DIMENSION_ERROR_MESSAGES[code ?? ""] ??
+    "خطای غیرمنتظره رخ داد. دوباره تلاش کنید."
+  );
 }
 
 function emptyDraftLine(): DraftLine {
-  return { accountId: "", debit: "", credit: "", reference: "", sourceNote: "", partyType: "", partyId: "", partyName: "" };
+  return { accountId: "", debit: "", credit: "", reference: "", sourceNote: "", partyType: "", partyId: "", partyName: "", dimensions: {} };
+}
+
+/**
+ * Issue #868 — one line's attribution, read-only, as a sub-line of its account
+ * (the journal shows it the same way). The split is annotated on the line that
+ * carries it, never summed into extra rows, so account totals are not
+ * duplicated. Archived values stay readable, labelled «(بایگانی)».
+ */
+function DimensionAttribution({
+  dims,
+  catalog,
+}: {
+  dims: LineDimensions | null | undefined;
+  catalog: DimensionCatalog | null;
+}) {
+  const parts: string[] = [];
+  for (const kind of DIMENSION_KINDS) {
+    const id = dims?.[kind];
+    if (!id) continue;
+    parts.push(`${enabledKindLabel(catalog?.settings, kind)}: ${dimensionValueLabel(catalog?.allValues, id)}`);
+  }
+  if (parts.length === 0) return null;
+  return (
+    <span className="mt-0.5 block text-xs text-muted-foreground">
+      {parts.map((part, index) => (
+        <span key={index} className="block">
+          {part}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** The picker's view of a line's raw ids (every kind, including hidden ones). */
+function draftDimensionView(dimensions: LineDimensions): DimensionDraft {
+  const view: DimensionDraft = {};
+  for (const kind of DIMENSION_KINDS) {
+    const id = dimensions[kind];
+    if (id) view[kind] = id;
+  }
+  return view;
+}
+
+/** The picker's answer back to raw ids. Only set kinds are kept; a cleared picker drops its key. */
+function viewToDimensions(view: DimensionDraft): LineDimensions {
+  const dimensions: LineDimensions = {};
+  for (const kind of DIMENSION_KINDS) {
+    const id = view[kind];
+    if (id) dimensions[kind] = id;
+  }
+  return dimensions;
 }
 
 export function OpeningBalancesSection({
@@ -272,6 +350,9 @@ export function OpeningBalancesSection({
   // The business's selected money unit: every read-out and every typed amount
   // is denominated in it, storage stays integer Rial.
   const money = useMoney();
+  // Issue #868 — the dimension catalogue, read once for the attribution
+  // labels (every screen) and the pickers (the line editor).
+  const { catalog: dimCatalog, loaded: dimCatalogLoaded, error: dimCatalogError, retry: retryDimCatalog } = useDimensionCatalog();
   const [sets, setSets] = useState<OpeningSet[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -551,6 +632,9 @@ export function OpeningBalancesSection({
             partyType: l.partyType ?? "",
             partyId: l.partyId ?? "",
             partyName: l.partyName ?? "",
+            // Issue #868 — likewise the dimension attribution: the raw ids
+            // ride the whole edit round-trip, including archived values.
+            dimensions: l.dimensions ?? {},
           }))
         : [emptyDraftLine()],
     );
@@ -607,6 +691,9 @@ export function OpeningBalancesSection({
         partyId: p.l.partyId || null,
         reference: p.l.reference.trim() || null,
         sourceNote: p.l.sourceNote.trim() || null,
+        // Issue #868 — attribution is part of the line, sent every save (an
+        // omitted `dimensions` would silently un-attribute the line).
+        dimensions: viewToDimensions(draftDimensionView(p.l.dimensions)),
       }));
     setMutation("save-lines");
     setError("");
@@ -984,6 +1071,7 @@ export function OpeningBalancesSection({
                       <Td>
                         <span className="font-medium">{line.accountCode}</span>{" "}
                         <span className="text-muted-foreground">{line.accountName}</span>
+                        <DimensionAttribution dims={line.dimensions} catalog={dimCatalog} />
                       </Td>
                       <Td>{line.debit === "0" ? "—" : money.formatText(line.debit, { withUnit: false })}</Td>
                       <Td>{line.credit === "0" ? "—" : money.formatText(line.credit, { withUnit: false })}</Td>
@@ -1016,6 +1104,7 @@ export function OpeningBalancesSection({
                         {line.sourceNote ? ` — ${line.sourceNote}` : ""}
                       </p>
                     ) : null}
+                    <DimensionAttribution dims={line.dimensions} catalog={dimCatalog} />
                   </article>
                 ))}
               </div>
@@ -1187,6 +1276,49 @@ export function OpeningBalancesSection({
                     }
                   />
                 </label>
+                {/* Issue #868 — the line's dimension attribution, edited with the
+                    shared searchable pickers. Ids of archived values (and of
+                    kinds the business has since switched off) ride the save
+                    untouched; they are shown read-only below the pickers. */}
+                <div className="sm:col-span-3">
+                  {dimCatalogError ? (
+                    <p role="alert" className="mb-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                      ابعاد تحلیلی بارگذاری نشد؛ بدون نمایش آن‌ها ویرایش نکنید.{" "}
+                      <button type="button" className="font-medium underline" onClick={retryDimCatalog}>
+                        تلاش دوباره
+                      </button>
+                    </p>
+                  ) : null}
+                  <DimensionFields
+                    idPrefix={`opening-line-${index}`}
+                    catalog={dimCatalog}
+                    locationId={null}
+                    value={draftDimensionView(line.dimensions)}
+                    onChange={(next) => setDraftLine(index, { dimensions: viewToDimensions(next) })}
+                    rowLabel={`ردیف ${toPersianDigits(String(index + 1))}`}
+                    disabled={isMutating}
+                  />
+                  {(() => {
+                    if (!dimCatalog) return null;
+                    const on = new Set(dimCatalog.settings.filter((s) => s.isEnabled).map((s) => s.kind));
+                    const hidden: Partial<Record<DimensionKind, string>> = {};
+                    for (const kind of DIMENSION_KINDS) {
+                      const id = line.dimensions[kind];
+                      if (id && !on.has(kind)) hidden[kind] = id;
+                    }
+                    return Object.keys(hidden).length > 0 ? (
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        انتساب نگه‌داشته‌شده (این بُعد اکنون غیرفعال است و در ذخیره حفظ می‌شود):{" "}
+                        {(Object.keys(hidden) as DimensionKind[])
+                          .map((kind) => `${enabledKindLabel(dimCatalog.settings, kind)}: ${dimensionValueLabel(dimCatalog.allValues, hidden[kind] ?? null)}`)
+                          .join("، ")}
+                      </p>
+                    ) : null;
+                  })()}
+                  {!dimCatalogLoaded && !dimCatalogError ? (
+                    <LoadingSkeleton rows={1} compact label="در حال بارگذاری ابعاد تحلیلی" />
+                  ) : null}
+                </div>
                 <div className="sm:col-span-3 rounded-lg border border-dashed border-border/80 p-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <label className="flex items-center gap-2 text-xs font-medium text-foreground">
@@ -1391,7 +1523,7 @@ export function OpeningBalancesSection({
           ) : (
             <Field
               label="خطوط (JSON)"
-              hint='مثلاً [{"accountId":"…","debit":1000000},{"accountId":"…","credit":1000000}] — partyType/partyId/reference/sourceNote اختیاری‌اند.'
+              hint='مثلاً [{"accountId":"…","debit":1000000},{"accountId":"…","credit":1000000}] — partyType/partyId/reference/sourceNote و dimensions (مثل {"cost_center":"…"}) اختیاری‌اند.'
             >
               <textarea
                 className={`${inputClass} h-28 resize-none py-2 font-mono text-xs`}
@@ -1488,6 +1620,7 @@ export function OpeningBalancesSection({
                   <tr key={line.id}>
                     <td>
                       <span dir="ltr">{line.accountCode}</span> — {line.accountName}
+                      <DimensionAttribution dims={line.dimensions} catalog={dimCatalog} />
                     </td>
                     <td>{line.partyName ? `${line.partyType ?? ""} ${line.partyName}`.trim() : line.reference ?? "—"}</td>
                     <td>{line.sourceNote ?? "—"}</td>
