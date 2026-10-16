@@ -292,6 +292,8 @@ describe("every tenant table is protected", () => {
       "platform_push_config",
       // Migration 0187: global release catalogue; device telemetry is tenant-scoped.
       "platform_releases",
+      // Migration 0226: singleton platform default; per-business layers are RLS-protected.
+      "platform_desktop_update_policy",
       "platform_restore_runs",
       // Phase 24 — the deployment-wide SMS gateway credentials (Kavenegar) the
       // MFA challenge sends through. A singleton with no business_id, the same

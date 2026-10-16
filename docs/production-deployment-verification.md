@@ -94,3 +94,11 @@ excludes a workstation's `.next` from the context. A properly rebuilt image
 therefore cannot accidentally inherit this checkout's old build output. A stale
 **image reference**, however, can continue to serve an old, internally-consistent
 `.next` indefinitely.
+
+
+## Desktop releases are a separate pipeline
+
+Verifying a Cloud deploy (the image SHA on `/api/health`) says nothing about Desktop releases,
+and promoting a Desktop release never redeploys Central. See
+[desktop-updates-coolify.md](desktop-updates-coolify.md) for the Desktop release setup and its own
+verification.

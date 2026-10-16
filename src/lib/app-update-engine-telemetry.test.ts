@@ -29,6 +29,7 @@ describe("Desktop engine telemetry state file", () => {
       updateTargetVersion: "2.1.0",
       lastErrorCode: "authenticode_invalid",
       lastErrorMessage: "signature check failed",
+      appliedPolicyVersion: null,
     });
   });
 
