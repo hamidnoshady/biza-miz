@@ -272,6 +272,8 @@ describe("every tenant table is protected", () => {
       "platform_cms_config",
       "platform_cms_sites",
       "platform_cms_sync_runs",
+      // Migration 0226: singleton platform default; per-business layers are RLS-protected.
+      "platform_desktop_update_policy",
       // Issue #883 wave 3 (migration 0219) — the console's `pospmcp_` MCP
       // credential store: hashed tokens and capability lists keyed on
       // platform_admins, with authority over the whole deployment rather than
@@ -292,8 +294,6 @@ describe("every tenant table is protected", () => {
       "platform_push_config",
       // Migration 0187: global release catalogue; device telemetry is tenant-scoped.
       "platform_releases",
-      // Migration 0226: singleton platform default; per-business layers are RLS-protected.
-      "platform_desktop_update_policy",
       "platform_restore_runs",
       // Phase 24 — the deployment-wide SMS gateway credentials (Kavenegar) the
       // MFA challenge sends through. A singleton with no business_id, the same
