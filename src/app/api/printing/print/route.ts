@@ -113,11 +113,6 @@ interface PriorAttemptRecord extends Record<string, unknown> {
   has_fallback_attempt: boolean;
 }
 
-/** Kept as a no-op export for test compatibility; fallback never uses process-local cache state. */
-export function clearPrintSnapshotCacheForTests(): void {
-  // No-op: fallback validation and snapshots are backed exclusively by PostgreSQL.
-}
-
 function isValidPrintOperationSnapshot(value: unknown): value is PrintOperationSnapshot {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<PrintOperationSnapshot>;
