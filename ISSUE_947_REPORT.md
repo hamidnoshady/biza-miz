@@ -1,10 +1,13 @@
 # Issue #947 — Team section consolidation: report
 
-**Branch** `arena/ce58f373-biza-miz` · **code head** `10e0740f` · **baseline** `0c4a77c` ·
-**main integrated** `cf2b39dd` (`merge 66f7535a`) — `main`'s head at the time of the
-integration; the branch's earlier head (`03846456`) had merged `916df457`, and the issue's
-audit baseline `35cb0cd` is not in this clone's history, so every finding was re-verified
-against the working tree rather than the issue's line links.
+**Branch** `arena/ce58f373-biza-miz` · **head** `2f77a56f` (**code head** `10e0740f`) ·
+**baseline** `0c4a77c` · **main integrated** `cf2b39dd` (`merge 66f7535a`) — `main`'s head at
+the time of the integration; the branch's earlier head (`03846456`) had merged `916df457`,
+and the issue's audit baseline `35cb0cd` is not in this clone's history, so every finding was
+re-verified against the working tree rather than the issue's line links. `main` has advanced
+since (`fff5016e` at the time of writing: a document and one new integration test file, no
+`src/**` or migration change); the branch does not contain those commits, and §8.4 states
+that exactly rather than implying otherwise.
 
 The report is committed as a child of the code head; the commit that carries it changes
 documentation only, and the code head's own last change fixed the three findings from the
@@ -505,6 +508,8 @@ path filter matched here.
 | `build-desktop-installer` | 38887049006 (push) · 38887053682 (PR) | ✅ success — `packaged Windows end-to-end` ✅ (10m25s) |
 | `verify-shippables` | 38887049330 (push) · 38887053930 (PR) | ✅ success — `which shippables changed` ✅, `desktop shell` ✅ (6m39s), `production container` ✅ (14m35s), `Windows print connector` ✅; `WordPress plugin` and `commit and tag the desktop version` **skipped** by their own conditions |
 | `android-build` | — | **did not trigger**: its path filter watches `android/**` and `src/lib/native/**`, and this head touches neither |
+| `test.yml` (push) | **38894957543** (report head `2f77a56f`) | **✅ completed success — all 11 jobs green**, over a tree identical to `10e0740f` except for this report |
+| `test.yml` (pull_request), `build-desktop-installer`, `verify-shippables` | **38894963539**, **38894963364**, **38894963351** (`2f77a56f`) | **✅ all three success**. Only the PR-triggered packaging runs appeared at this head: the push event's path filter does not match a documentation-only commit, which is the path filter doing its job |
 
 Every head of this branch that matters has its own completed run:
 
@@ -513,6 +518,7 @@ Every head of this branch that matters has its own completed run:
 | `03846456` | the previous code head (pre-integration) | `test.yml` **✅ 11/11** (`38718493517`); PR checks **15 passed, 3 skipped, none red** |
 | `66f7535a` | the merge commit (not pushed on its own — it is the parent of `10e0740f`) | — |
 | `10e0740f` | the code head of this revision: the merge + the three review fixes + migration 0226 | `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events |
+| `2f77a56f` | the head this report is committed at: `10e0740f` plus `ISSUE_947_REPORT.md` only | `test.yml` **38894957543** (push) and **38894963539** (PR) **11/11 each**; `build-desktop-installer` **38894963364** ✅ and `verify-shippables` **38894963351** ✅ on the PR event |
 
 The run that failed on this branch is the one at the **pre-integration** head `0723b53`
 (`38452006386`), and its failure is the item-5 finding:
@@ -535,7 +541,8 @@ The run that failed on this branch is the one at the **pre-integration** head `0
   build's server). Those are exactly the gates CI owns in this repository, and all three are
   green there (8.2). The *scoped* typecheck above is what this box can do about `tsc`, and it
   covers every file this revision changed.
-- **CI, finished**: the runs listed in 8.2 — nothing is pending at this head.
+- **CI, finished**: the runs listed in 8.2, for the code head `10e0740f` **and** for the report
+  head `2f77a56f` — nothing is pending at either.
 - Nothing is running when the report commit was made; the sweep, the unit suite and the
   focused runs had all finished. (`node_modules` was re-installed from the lockfile with
   `npm ci` after the integration; `node_modules` is committed on `main` as a symlink blob,
@@ -545,10 +552,10 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 | Dimension | State |
 |---|---|
-| Source | `10e0740f` on `arena/ce58f373-biza-miz`, pushed, in **PR #958**; `origin/main` (`cf2b39dd`) is an ancestor through the merge `66f7535a`; the report is the commit after it and changes no source |
+| Source | `2f77a56f` on `arena/ce58f373-biza-miz`, pushed, in **PR #958** — the code head `10e0740f` (the merge of `cf2b39dd` plus the three review fixes) and then this report, which changes no source |
 | Tests | **11 749** unit/component + **38** design green locally at the code head; the **full database sweep** green at it (236 files, 3 622 passed, 2 skipped, exit 0 — no timeout); **33** new database tests across the three fixes (7 phone-arm, 5 boundary injections, 1 replica chain, plus the earlier ones), each falsified in the failing direction |
 | Checks | `test.yml` at **`10e0740f`**: `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events — the packaging workflows also ran at this head, because a source change matches their path filters (see 8.2) |
-| Mergeability | No conflicts: `git merge-base --is-ancestor origin/main HEAD` holds, and `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries; PR #958 is the only PR for this branch |
+| Mergeability | No conflicts. `cf2b39dd` — `main` at the integration — is an ancestor of this branch through the merge `66f7535a`, which is what `git merge-base --is-ancestor` verified when the merge was made. **`main` has since advanced** to `fff5016e` (PR #978: one operator-checklist document plus `integration/automotive-reports.integration.test.ts`; **no `src/**`, migration or script change**), so it is 19 commits ahead of the integration point — and against *that* head `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries (tree `b5eca689`); GitHub reports PR #958 **MERGEABLE / CLEAN**. Integration with the newer `main` is therefore a merge away and conflict-free, but this revision does **not** claim to contain it, and no gate here was run against it. PR #958 is the only PR for this branch |
 | Deployment | **Nothing deployed, published, tagged or merged**, and nothing was authorised to be. The migrations (0221, 0222, 0223, 0226) are forward-only and unapplied anywhere except this sandbox's local database |
 | Runtime acceptance | Not claimed. The gates that exercise a running server (production build, visual regression, subledger keyboard/WCAG, media E2E) passed **in CI on GitHub's runners** at the head named above; no runtime acceptance was performed against a deployed environment |
 
@@ -556,12 +563,14 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 **[PR #958](https://github.com/hamidnoshady/biza-miz/pull/958)** (`arena/ce58f373-biza-miz` →
 `main`) carries the repository's full required suite, including the `pull_request`-triggered
-desktop/container/workflow paths a branch push skips by path filter. At `10e0740f`:
-**16 checks passed, 2 skipped, none pending and none red** — the eleven `test.yml` jobs plus
-`desktop shell`, `production container`, `packaged Windows end-to-end`, `Windows print
-connector`, `which shippables changed` and the aggregate `all checks passed`; the two skips
-are `WordPress plugin` and `commit and tag the desktop version`, each by its own path
-condition. The visual job's own step list is in 8.2: it built, served, compared and ran the
+desktop/container/workflow paths a branch push skips by path filter. At the code head
+`10e0740f`: **16 checks passed, 2 skipped, none pending and none red** — the eleven `test.yml`
+jobs plus `desktop shell`, `production container`, `packaged Windows end-to-end`, `Windows
+print connector`, `which shippables changed` and the aggregate `all checks passed`. At the
+head this report is committed at (`2f77a56f`, the same tree plus this document):
+**15 passed, 3 skipped, none pending and none red**, the three skips being `Windows print
+connector`, `WordPress plugin` and `commit and tag the desktop version`, each by its own path
+condition — and the PR itself is **MERGEABLE / CLEAN**. The visual job's own step list is in 8.2: it built, served, compared and ran the
 subledger keyboard/WCAG script, and the baseline-recording step stayed **skipped** at every
 head of this branch — no baseline was re-recorded, edited or approved.
 
