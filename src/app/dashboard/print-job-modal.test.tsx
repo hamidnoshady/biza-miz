@@ -63,11 +63,31 @@ describe("PrintJobModal — progress announcements", () => {
     expect(screen.getByRole("status").contains(alert)).toBe(true);
   });
 
-  it("announces success through the same live region", () => {
+  it("announces success through the same live region and preserves the spooler-handoff vs physical-output distinction", () => {
     render(<PrintJobModal />);
     push({ phase: "handed_off", title: "چاپ رسید", printerName: "EPSON TM-T88" });
 
     const status = screen.getByRole("status");
     expect(status.textContent).toContain("به چاپگر ارسال شد");
+    expect(status.textContent).toContain(
+      "تحویل به صف سیستم‌عامل انجام شد (خروجی فیزیکی کاغذ را بررسی کنید).",
+    );
+  });
+
+  it("displays fallback attempt provenance when a primary printer fails before handoff and switches to backup", () => {
+    render(<PrintJobModal />);
+    push({
+      phase: "handed_off",
+      title: "چاپ رسید",
+      printerName: "چاپگر پشتیبان صندوق",
+      usedFallback: true,
+      fallbackFromPrinterName: "چاپگر اصلی صندوق",
+    });
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("چاپگر پشتیبان صندوق");
+    expect(status.textContent).toContain(
+      "چاپ از طریق چاپگر جایگزین (به‌جای «چاپگر اصلی صندوق») انجام شد.",
+    );
   });
 });

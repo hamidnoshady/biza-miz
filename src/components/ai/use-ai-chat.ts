@@ -28,6 +28,26 @@ import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 export type AssistantMode = "wizard" | "dashboard" | "floor";
 export type AiAppFocus = "all" | "accounting" | "growth" | "crm" | "website" | "workspace";
 
+export const AI_APP_FOCUSES: readonly AiAppFocus[] = [
+  "all",
+  "workspace",
+  "accounting",
+  "crm",
+  "growth",
+  "website",
+] as const;
+
+export function normalizeAiAppFocus(
+  raw: unknown,
+  allowed?: readonly AiAppFocus[],
+): AiAppFocus {
+  if (typeof raw !== "string") return "all";
+  const trimmed = raw.trim().toLowerCase() as AiAppFocus;
+  if (!(AI_APP_FOCUSES as readonly string[]).includes(trimmed)) return "all";
+  if (allowed && allowed.length > 0 && !allowed.includes(trimmed)) return "all";
+  return trimmed;
+}
+
 /** Phase E — a typed input request attached to an assistant turn. */
 interface AiInputRequestState {
   /** The persisted request id; null when the turn was not persisted. */
@@ -142,11 +162,19 @@ function parseInputRequestPayload(raw: unknown): AiInputRequestState | null {
   };
 }
 
+export interface LoadedConversationMeta {
+  id: string;
+  title: string | null;
+  projectId: string | null;
+}
+
 export interface UseAiChatOptions {
   mode: AssistantMode;
   currentStep?: string | null;
   /** Called whenever the active conversation id changes (new turn, load, reset). */
   onConversationIdChange?: (id: string | null) => void;
+  /** Called when a historical conversation finishes loading its metadata. */
+  onConversationLoaded?: (meta: LoadedConversationMeta) => void;
   /**
    * Phase F — when set, a NEW conversation started from this hook is linked to
    * this project, so its turns are shaped by the project's instruction, notes
@@ -162,6 +190,7 @@ export function useAiChat({
   mode,
   currentStep,
   onConversationIdChange,
+  onConversationLoaded,
   projectId = null,
   appFocus = "all",
   runtimeMode: initialRuntimeMode = AI_RUNTIME_MODES[0],
@@ -173,6 +202,7 @@ export function useAiChat({
   const [busy, setBusy] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationTitle, setConversationTitle] = useState<string | null>(null);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [actionsAllowed, setActionsAllowed] = useState(true);
@@ -281,10 +311,12 @@ export function useAiChat({
   }
 
   function startNewConversation() {
+    generationRef.current += 1;
     if (abortControllerRef.current) {
       cancelGeneration();
-      generationRef.current += 1;
     }
+    setLoadingConversation(false);
+    setConversationTitle(null);
     setConversation(null);
     setInput("");
     clearAttachment();
@@ -292,14 +324,13 @@ export function useAiChat({
   }
 
   /**
-   * Issue #812 §17 — a conversation load is generation-guarded. Rapid
-   * A → B → C clicks used to let a slow A response land last and overwrite the
-   * conversation the member is actually looking at, because nothing checked
-   * which load was still the current one. The load now claims the generation
-   * up front and abandons its result if a newer load (or a fresh stream) has
-   * since claimed it.
+   * Issue #812 §17 & Issue #905 — a conversation load is generation-guarded.
+   * Rapid A → B → C clicks or clicking New Chat while a load is in flight will
+   * abandon the stale response rather than overwriting the current view.
+   * Also reads `conversation.title` and `conversation.projectId` so active
+   * project context and header title match the loaded thread.
    */
-  async function loadConversation(id: string) {
+  async function loadConversation(id: string): Promise<LoadedConversationMeta | null> {
     if (abortControllerRef.current) {
       cancelGeneration();
     }
@@ -309,13 +340,26 @@ export function useAiChat({
     try {
       const response = await fetch(`/api/ai/conversations/${id}?mode=${encodeURIComponent(mode)}`);
       const data = (await response.json().catch(() => ({}))) as {
+        conversation?: {
+          id?: string;
+          title?: string | null;
+          projectId?: string | null;
+        } | null;
         messages?: ConversationMessagePayload[];
         error?: string;
       };
       if (!response.ok || !data.messages) throw new Error(data.error ?? "not_found");
       // A newer load or a new turn claimed the thread while this one was in
       // flight: drop the stale result entirely rather than overwriting it.
-      if (generationRef.current !== generation) return;
+      if (generationRef.current !== generation) return null;
+      const loadedTitle =
+        typeof data.conversation?.title === "string" && data.conversation.title.trim()
+          ? data.conversation.title.trim()
+          : null;
+      const loadedProjectId =
+        typeof data.conversation?.projectId === "string" && data.conversation.projectId.trim()
+          ? data.conversation.projectId.trim()
+          : null;
       setMessages(
         data.messages.map((message) => ({
           id: message.id,
@@ -331,10 +375,19 @@ export function useAiChat({
           inputRequest: parseInputRequestPayload(message.inputRequest),
         })),
       );
+      setConversationTitle(loadedTitle);
       setConversation(id);
+      const meta: LoadedConversationMeta = {
+        id,
+        title: loadedTitle,
+        projectId: loadedProjectId,
+      };
+      onConversationLoaded?.(meta);
+      return meta;
     } catch {
       // Only the load the member is still waiting on may report a failure.
       if (generationRef.current === generation) toast.error("بازکردن این مکالمه ممکن نشد.");
+      return null;
     } finally {
       if (generationRef.current === generation) setLoadingConversation(false);
     }
@@ -720,6 +773,8 @@ export function useAiChat({
     busy,
     applyingId,
     conversationId,
+    conversationTitle,
+    setConversationTitle,
     loadingConversation,
     attachments,
     attachFiles,

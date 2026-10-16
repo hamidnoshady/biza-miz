@@ -1104,3 +1104,63 @@ describe("P0-3: no duplicate or stale executions", () => {
     expect(audit[0].result.cancelled).toBe("connection_revoked");
   });
 });
+
+describe("P1/P2/P5: module filtering, cursor pagination, and single-token rotation/revocation", () => {
+  it("excludes non-food_service trade tools on a cafe tenant and paginates tools/list via nextCursor", async () => {
+    const token = await mintToken({ scopes: ["pos.read", "pos.write"] });
+    const allNames: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = resultOf(
+        await call(token, "tools/list", cursor ? { cursor } : {}),
+      ) as { tools: Array<{ name: string; description: string }>; nextCursor?: string };
+      expect(page.tools.length).toBeLessThanOrEqual(100);
+      for (const tool of page.tools) {
+        expect(tool.description.includes("\n")).toBe(false);
+        allNames.push(tool.name);
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    expect(new Set(allNames).size).toBe(allNames.length);
+    expect(allNames.some((n) => n.includes("jewelry") || n.includes("aec") || n.includes("cosmetic"))).toBe(
+      false,
+    );
+
+    const refused = await call(token, "tools/call", {
+      name: "write_jewelry_item_create",
+      arguments: { name: "Ring" },
+    });
+    expect((refused as { error?: { message: string } }).error?.message).toContain("مجاز نیست");
+
+    const badCursor = await call(token, "tools/list", { cursor: "invalid-cursor" });
+    expect((badCursor as { error?: { code: number } }).error?.code).toBe(-32602);
+  });
+
+  it("rotates or revokes one static token without affecting sibling tokens", async () => {
+    const tokenA = await mintToken({ scopes: ["pos.read"] });
+    const tokenB = await mintToken({ scopes: ["pos.read"] });
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM mcp_connections ORDER BY created_at ASC",
+    );
+    const connAId = rows[0].id;
+
+    const rotated = await dbLib.withTenant(shop.businessId, () =>
+      connections.rotateMcpConnectionToken(shop.businessId, connAId, shop.userId, 90),
+    );
+    expect(rotated.ok).toBe(true);
+    if (!rotated.ok) return;
+
+    // Old token A is immediately invalid; rotated token A and sibling token B work
+    expect(await mcpAuth.authenticateMcp(bearer(tokenA))).toBeNull();
+    expect(await mcpAuth.authenticateMcp(bearer(rotated.token))).not.toBeNull();
+    expect(await mcpAuth.authenticateMcp(bearer(tokenB))).not.toBeNull();
+
+    // Revoking connection A leaves connection B active
+    await dbLib.withTenant(shop.businessId, () =>
+      connections.revokeMcpConnection(shop.businessId, connAId, shop.userId),
+    );
+    expect(await mcpAuth.authenticateMcp(bearer(rotated.token))).toBeNull();
+    expect(await mcpAuth.authenticateMcp(bearer(tokenB))).not.toBeNull();
+  });
+});

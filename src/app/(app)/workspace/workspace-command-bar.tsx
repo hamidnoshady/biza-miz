@@ -22,6 +22,7 @@ import {
   CheckSquareIcon,
   FileTextIcon,
   FileSignatureIcon,
+  LayoutGridIcon,
   PlusIcon,
   SearchIcon,
   type LucideIcon,
@@ -161,6 +162,13 @@ export function WorkspaceCommandBar({
         <Link href={workspaceAssistantHref(section, projectId)}>
           <BotIcon className="size-4" aria-hidden />
           پرسش از دستیار
+        </Link>
+      </Button>
+
+      <Button variant="outline" asChild>
+        <Link href="/dashboard?widgets=1">
+          <LayoutGridIcon className="size-4" aria-hidden />
+          ویجت‌های دستیار
         </Link>
       </Button>
 

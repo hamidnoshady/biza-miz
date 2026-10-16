@@ -185,6 +185,9 @@ public static class CafePosNativePrinter
     private static extern bool EndDocPrinter(IntPtr printer);
 
     [DllImport("winspool.drv", SetLastError = true)]
+    private static extern bool AbortPrinter(IntPtr printer);
+
+    [DllImport("winspool.drv", SetLastError = true)]
     private static extern bool StartPagePrinter(IntPtr printer);
 
     [DllImport("winspool.drv", SetLastError = true)]
@@ -207,6 +210,7 @@ public static class CafePosNativePrinter
         IntPtr unmanaged = IntPtr.Zero;
         bool documentStarted = false;
         bool pageStarted = false;
+        bool completed = false;
 
         try
         {
@@ -223,16 +227,21 @@ public static class CafePosNativePrinter
             {
                 int written;
                 IntPtr cursor = new IntPtr(unmanaged.ToInt64() + offset);
-                if (!WritePrinter(printer, cursor, data.Length - offset, out written)) ThrowLastError("WritePrinter");
+                if (!WritePrinter(printer, cursor, data.Length - offset, out written)) ThrowLastError(offset > 0 ? "WritePrinterPartial" : "WritePrinter");
                 if (written <= 0) throw new Win32Exception("WritePrinter wrote zero bytes.");
                 offset += written;
             }
+            completed = true;
         }
         finally
         {
             if (unmanaged != IntPtr.Zero) Marshal.FreeCoTaskMem(unmanaged);
-            if (pageStarted) EndPagePrinter(printer);
-            if (documentStarted) EndDocPrinter(printer);
+            if (pageStarted && completed) EndPagePrinter(printer);
+            if (documentStarted)
+            {
+                if (completed) EndDocPrinter(printer);
+                else AbortPrinter(printer);
+            }
             if (printer != IntPtr.Zero) ClosePrinter(printer);
         }
     }
@@ -242,6 +251,8 @@ public static class CafePosNativePrinter
 function sendRawScript(tempFilePath, printerName) {
   return [
     "$ErrorActionPreference = 'Stop'",
+    `$queue = @(Get-CimInstance -ClassName Win32_Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq ${psQuote(printerName)} }) | Select-Object -First 1`,
+    "if ($null -ne $queue -and ($queue.WorkOffline -eq $true -or [int]$queue.PrinterStatus -eq 7)) { throw 'printer_offline' }",
     `Add-Type -TypeDefinition @'\n${RAW_PRINT_CSHARP}\n'@ -Language CSharp`,
     `$bytes = [IO.File]::ReadAllBytes(${psQuote(tempFilePath)})`,
     `[CafePosNativePrinter]::Send(${psQuote(printerName)}, $bytes)`,
@@ -250,8 +261,20 @@ function sendRawScript(tempFilePath, printerName) {
 
 function classifyWindowsSendError(message) {
   const text = String(message || "").toLowerCase();
-  if (text.includes("openprinter") || text.includes("invalid printer") || text.includes("printer name")) {
+  if (text.includes("openprinter") || text.includes("invalid printer") || text.includes("printer name") || text.includes("printer_not_found")) {
     return "printer_not_found";
+  }
+  if (text.includes("printer_offline") || text.includes("workoffline") || text.includes("offline")) {
+    return "printer_offline";
+  }
+  if (text.includes("powershell timed out") || text.includes("writeprinterpartial") || text.includes("write_ambiguous")) {
+    return "job_timeout";
+  }
+  if (text.includes("writeprinter") || text.includes("print_document_ambiguous") || text.includes("printdocument.print")) {
+    return "print_failed";
+  }
+  if (text.includes("startdocprinter") || text.includes("startpageprinter") || text.includes("spooler")) {
+    return "spooler_rejected";
   }
   return "print_failed";
 }
@@ -318,6 +341,7 @@ function sendRawBytesToNetworkPrinter(ip, port, bytes, { timeoutMs = 15_000, con
       return;
     }
     let settled = false;
+    let writeStarted = false;
     let socket;
     const finish = (result) => {
       if (settled) return;
@@ -332,17 +356,34 @@ function sendRawBytesToNetworkPrinter(ip, port, bytes, { timeoutMs = 15_000, con
       return;
     }
     socket.once("connect", () => {
+      writeStarted = true;
       socket.write(bytes, (writeError) => {
         if (writeError) {
-          finish({ ok: false, error: classifyNetworkError(writeError), detail: writeError.message });
+          finish({ ok: false, error: "job_timeout", detail: `write_ambiguous: ${writeError.message}` });
           return;
         }
         socket.end();
       });
     });
     socket.once("close", () => finish({ ok: true }));
-    socket.once("timeout", () => finish({ ok: false, error: "network_unreachable", detail: "The connection timed out." }));
-    socket.once("error", (error) => finish({ ok: false, error: classifyNetworkError(error), detail: error.message }));
+    socket.once("timeout", () => {
+      if (writeStarted) {
+        finish({
+          ok: false,
+          error: "job_timeout",
+          detail: "write_ambiguous: The connection timed out after sending print data.",
+        });
+        return;
+      }
+      finish({ ok: false, error: "network_unreachable", detail: "The connection timed out." });
+    });
+    socket.once("error", (error) => {
+      if (writeStarted) {
+        finish({ ok: false, error: "job_timeout", detail: `write_ambiguous: ${error.message}` });
+        return;
+      }
+      finish({ ok: false, error: classifyNetworkError(error), detail: error.message });
+    });
   });
 }
 
@@ -412,6 +453,8 @@ function sendPageScript(tempFilePath, printerName) {
   return [
     "$ProgressPreference = 'SilentlyContinue'",
     "$ErrorActionPreference = 'Stop'",
+    `$queue = @(Get-CimInstance -ClassName Win32_Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq ${psQuote(printerName)} }) | Select-Object -First 1`,
+    "if ($null -ne $queue -and ($queue.WorkOffline -eq $true -or [int]$queue.PrinterStatus -eq 7)) { throw 'printer_offline' }",
     "Add-Type -AssemblyName System.Drawing",
     `Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
@@ -438,7 +481,11 @@ public static class CafePosPagePrinter {
         offset += take;
         e.HasMorePages = offset < image.Height;
       };
-      doc.Print();
+      try {
+        doc.Print();
+      } catch (Exception ex) {
+        throw new InvalidOperationException("print_document_ambiguous: " + ex.Message, ex);
+      }
     }
   }
 }
@@ -457,7 +504,17 @@ async function sendPageToWindowsPrinter(printerName, bytes, { run = runPowerShel
     return { ok: true };
   } catch (error) {
     const message = error.message || "";
-    const errorCode = /printer_not_found|Invalid printer/i.test(message) ? "printer_not_found" : "spooler_rejected";
+    const errorCode = /printer_not_found|Invalid printer/i.test(message)
+      ? "printer_not_found"
+      : /printer_offline|workoffline/i.test(message)
+        ? "printer_offline"
+        : /powershell timed out/i.test(message)
+          ? "job_timeout"
+          : /print_document_ambiguous|PrintDocument\.Print/i.test(message)
+            ? "print_failed"
+            : /pre_handoff_spooler_rejected|StartDocPrinter|StartPagePrinter/i.test(message)
+              ? "spooler_rejected"
+              : "print_failed";
     return { ok: false, error: errorCode, detail: message };
   } finally {
     fs.promises.unlink(tempPath).catch(() => {});

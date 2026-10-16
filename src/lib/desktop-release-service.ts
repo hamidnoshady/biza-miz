@@ -21,6 +21,12 @@ import {
   type DeviceComplianceStatus,
   type DeviceConnectivity,
 } from "./desktop-release";
+import {
+  effectivePolicyChannel,
+  resolveDesktopUpdatePolicy,
+  validateDesktopUpdatePolicyPatch,
+  type PolicyLayer,
+} from "./desktop-update-policy";
 
 export type ReleaseLifecycleStatus = "draft" | "published" | "paused" | "withdrawn";
 export type ReleaseRolloutState = "internal" | "pilot" | "percentage" | "full" | "paused";
@@ -148,6 +154,33 @@ export function selectTargetRelease(
   return candidates[0] ?? null;
 }
 
+export interface PolicyReleaseSelection {
+  release: PlatformDesktopRelease | null;
+  withheldReason: "hold" | "pinned_release_unavailable" | "no_eligible_release" | null;
+}
+
+/**
+ * Target selection under an effective update policy. The platform rollout rules
+ * stay the default; a policy can only narrow (hold) or explicitly approve one
+ * published release for its scope (a pin, i.e. a canary). A pin bypasses the
+ * percentage bucket, never publication: a draft, paused or withdrawn release,
+ * or one on another channel, is withheld rather than substituted.
+ */
+export function selectTargetReleaseForPolicy(
+  releases: PlatformDesktopRelease[],
+  input: { channel: DesktopReleaseChannel; targetReleaseId: string | null; hold: boolean; publicDeviceId: string },
+): PolicyReleaseSelection {
+  if (input.hold) return { release: null, withheldReason: "hold" };
+  if (input.targetReleaseId) {
+    const pinned = releases.find((release) => release.id === input.targetReleaseId);
+    const usable = pinned && pinned.status === "published" && pinned.rolloutState !== "paused" &&
+      pinned.channel === input.channel && parseSemVer(pinned.version);
+    return usable ? { release: pinned, withheldReason: null } : { release: null, withheldReason: "pinned_release_unavailable" };
+  }
+  const release = selectTargetRelease(releases, input.channel, input.publicDeviceId);
+  return { release, withheldReason: release ? null : "no_eligible_release" };
+}
+
 export interface RuntimeStatusReport {
   appVersion: string | null;
   commitSha: string | null;
@@ -161,6 +194,8 @@ export interface RuntimeStatusReport {
   updateTargetVersion: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
+  /** The policy version the device says it has applied; null from older clients. */
+  appliedPolicyVersion: number | null;
 }
 
 function optionalText(value: unknown, maximum = 240): string | null {
@@ -198,9 +233,16 @@ export function validateRuntimeStatusReport(value: unknown):
   if (updateTargetVersion && !parseSemVer(updateTargetVersion)) {
     return { ok: false, error: "invalid_target_version" };
   }
+  const appliedPolicyVersion = input.appliedPolicyVersion === null || input.appliedPolicyVersion === undefined
+    ? null
+    : Number(input.appliedPolicyVersion);
+  if (appliedPolicyVersion !== null && (!Number.isSafeInteger(appliedPolicyVersion) || appliedPolicyVersion < 0)) {
+    return { ok: false, error: "invalid_policy_version" };
+  }
   return {
     ok: true,
     report: {
+      appliedPolicyVersion,
       appVersion,
       commitSha: optionalText(input.commitSha, 80),
       buildId: optionalText(input.buildId, 200),
@@ -328,6 +370,9 @@ type FleetRow = Record<string, unknown> & {
   last_error_message: string | null;
   last_push_at: Date | string | null;
   last_pull_at: Date | string | null;
+  delivered_policy_version: string | number | null;
+  acknowledged_policy_version: string | number | null;
+  acknowledged_policy_at: Date | string | null;
   update_events: Array<{
     state: string;
     installedVersion: string | null;
@@ -374,6 +419,18 @@ export interface FleetDeviceStatus {
     clientOccurredAt: string | null;
     reportedAt: string;
   }>;
+  /** Policy delivery, kept apart so an offline device is never shown as "applied". */
+  policy: {
+    effectiveVersion: number;
+    deliveredVersion: number | null;
+    acknowledgedVersion: number | null;
+    acknowledgedAt: string | null;
+    /** requested = written, delivered = Central sent it, acknowledged = device applied it. */
+    delivery: "acknowledged" | "delivered" | "requested" | "default";
+    automaticInstall: "off" | "safe_window";
+    hold: boolean;
+    pinnedReleaseId: string | null;
+  };
 }
 
 function maybeIso(value: Date | string | null): string | null {
@@ -388,12 +445,63 @@ export interface FleetUpdateSummary {
   problems: number;
 }
 
+type FleetPolicyLayer = PolicyLayer & { businessId: string | null; locationId: string | null; siteDeviceId: string | null };
+
+async function readFleetPolicyLayers(businessId?: string): Promise<FleetPolicyLayer[]> {
+  const [platform, business] = await Promise.all([
+    query<{ policy: unknown; version: string | number; reason: string | null; updated_at: Date | string }>(
+      `SELECT policy,version,reason,updated_at FROM platform_desktop_update_policy WHERE id`,
+    ),
+    query<{
+      business_id: string; scope: "business" | "location" | "device"; location_id: string | null;
+      site_device_id: string | null; policy: unknown; version: string | number; reason: string | null;
+      updated_at: Date | string;
+    }>(
+      `SELECT business_id,scope,location_id,site_device_id,policy,version,reason,updated_at
+         FROM business_desktop_update_policies ${businessId ? "WHERE business_id=$1" : ""}`,
+      businessId ? [businessId] : [],
+    ),
+  ]);
+  // Stored patches are re-validated on read so a hand-edited row cannot widen authority.
+  const patchOf = (value: unknown) => {
+    const checked = validateDesktopUpdatePolicyPatch(value);
+    return checked.ok ? checked.patch : {};
+  };
+  const layers: FleetPolicyLayer[] = platform.rows.map((row) => ({
+    scope: "platform", patch: patchOf(row.policy), version: Number(row.version), reason: row.reason,
+    updatedAt: iso(row.updated_at), businessId: null, locationId: null, siteDeviceId: null,
+  }));
+  for (const row of business.rows) {
+    layers.push({
+      scope: row.scope, patch: patchOf(row.policy), version: Number(row.version), reason: row.reason,
+      updatedAt: iso(row.updated_at), businessId: row.business_id, locationId: row.location_id,
+      siteDeviceId: row.site_device_id,
+    });
+  }
+  return layers;
+}
+
+function policyLayersForDevice(
+  layers: FleetPolicyLayer[],
+  businessId: string,
+  locationId: string,
+  siteDeviceId: string,
+): PolicyLayer[] {
+  return layers.filter((layer) =>
+    layer.scope === "platform" ||
+    (layer.businessId === businessId && (
+      layer.scope === "business" ||
+      (layer.scope === "location" && layer.locationId === locationId) ||
+      (layer.scope === "device" && layer.siteDeviceId === siteDeviceId)
+    )));
+}
+
 async function readDesktopFleetCompliance(now: Date, businessId?: string): Promise<{
   devices: FleetDeviceStatus[];
   releases: PlatformDesktopRelease[];
   summary: FleetUpdateSummary;
 }> {
-  const [runtime, releases] = await Promise.all([
+  const [runtime, releases, policyLayers] = await Promise.all([
     query<FleetRow>(
       `SELECT d.id AS site_device_id,d.public_id,d.business_id,b.name AS business_name,
               d.location_id,l.name AS location_name,d.display_name,d.status AS device_status,
@@ -401,6 +509,7 @@ async function readDesktopFleetCompliance(now: Date, businessId?: string): Promi
               rs.schema_version,rs.electron_version,rs.platform,rs.release_channel,
               rs.client_checked_at,rs.reported_at,rs.update_state,rs.update_target_version,
               rs.last_error_code,rs.last_error_message,
+              rs.delivered_policy_version,rs.acknowledged_policy_version,rs.acknowledged_policy_at,
               runs.last_push_at,runs.last_pull_at,COALESCE(events.update_events,'[]'::jsonb) AS update_events
          FROM site_devices d
          JOIN businesses b ON b.id=d.business_id
@@ -434,10 +543,21 @@ async function readDesktopFleetCompliance(now: Date, businessId?: string): Promi
       businessId ? [businessId] : [],
     ),
     releaseRows().then((rows) => rows.map(rowToRelease)),
+    readFleetPolicyLayers(businessId),
   ]);
   const devices = runtime.rows.map((row): FleetDeviceStatus => {
-    const channel = row.release_channel ?? "stable";
-    const targetRelease = selectTargetRelease(releases, channel, row.public_id);
+    const resolved = resolveDesktopUpdatePolicy(
+      policyLayersForDevice(policyLayers, row.business_id, row.location_id, row.site_device_id),
+    );
+    const pinned = resolved.policy.targetReleaseId
+      ? releases.find((release) => release.id === resolved.policy.targetReleaseId) ?? null
+      : null;
+    const channel = effectivePolicyChannel(resolved.policy, pinned?.channel ?? null, row.release_channel ?? "stable");
+    const targetRelease = selectTargetReleaseForPolicy(releases, {
+      channel, targetReleaseId: resolved.policy.targetReleaseId, hold: resolved.policy.hold, publicDeviceId: row.public_id,
+    }).release;
+    const deliveredVersion = row.delivered_policy_version === null ? null : Number(row.delivered_policy_version);
+    const acknowledgedVersion = row.acknowledged_policy_version === null ? null : Number(row.acknowledged_policy_version);
     const connectivity = classifyDeviceConnectivity(row.reported_at, now);
     let compliance = classifyDesktopVersion(
       row.app_version,
@@ -485,6 +605,18 @@ async function readDesktopFleetCompliance(now: Date, businessId?: string): Promi
         clientOccurredAt: event.clientOccurredAt ? iso(event.clientOccurredAt) : null,
         reportedAt: iso(event.reportedAt),
       })),
+      policy: {
+        effectiveVersion: resolved.policyVersion,
+        deliveredVersion,
+        acknowledgedVersion,
+        acknowledgedAt: maybeIso(row.acknowledged_policy_at),
+        delivery: resolved.policyVersion === 0 ? "default"
+          : acknowledgedVersion !== null && acknowledgedVersion >= resolved.policyVersion ? "acknowledged"
+            : deliveredVersion !== null && deliveredVersion >= resolved.policyVersion ? "delivered" : "requested",
+        automaticInstall: resolved.policy.automaticInstall,
+        hold: resolved.policy.hold,
+        pinnedReleaseId: resolved.policy.targetReleaseId,
+      },
     };
   });
   return {

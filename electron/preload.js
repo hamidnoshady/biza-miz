@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld("businessSuiteDesktop", Object.freeze({
     selectOfflinePackage: () => ipcRenderer.invoke("desktop:update-offline"),
     installNow: () => ipcRenderer.invoke("desktop:update-install-now"),
     installOnNextRestart: () => ipcRenderer.invoke("desktop:update-install-next-restart"),
+    postponeAutoInstall: (hours) => ipcRenderer.invoke("desktop:update-postpone", { hours }),
     showBackup: () => ipcRenderer.invoke("desktop:update-show-backup"),
     onState: (callback) => {
       if (typeof callback !== "function") return () => {};

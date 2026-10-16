@@ -131,7 +131,18 @@ export default function UsersStep() {
               </Field>
             </>
           ) : (
-            <Field label="پین (۴ تا ۱۲ رقم) *" hint="برای ورود سریع در صفحهٔ ورود؛ رمز شخصی همین عضو است.">
+            /*
+             * Issue #947 (TEAM-F03) corrected this hint once (it claimed the PIN was
+             * unique per *branch*, while the door then matched a PIN across the whole
+             * business). Main now answers the same question differently and finally:
+             * migration 0221 dropped the business-wide blind index (#953), so a PIN is
+             * a personal secret that two members may happen to share — never an
+             * identifier, and never something a hint may describe as unique.
+             */
+            <Field
+              label="پین (۴ تا ۱۲ رقم) *"
+              hint="برای ورود سریع در صفحهٔ ورود؛ رمز شخصی همین عضو است."
+            >
               <input
                 className={`${inputClass} w-48 text-center tracking-[0.25em]`}
                 dir="ltr"

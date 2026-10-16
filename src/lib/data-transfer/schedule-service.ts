@@ -32,6 +32,8 @@ import { SmtpMessageProvider } from "../messaging/providers/smtp";
 import { toPersianDigits } from "../digits";
 import { formatJalali } from "../jalali";
 import { findEntity } from "./registry";
+import { memberAccessForUser } from "../member-access";
+import { partyReadAudienceForPermissions } from "../personnel-access";
 import { createExportJob } from "./export-service";
 import { recordDataTransferAudit } from "./audit";
 import type { ExportFormat, ScheduleFrequency } from "./types";
@@ -412,14 +414,26 @@ export async function runScheduledExport(
   businessId: string,
   scheduleId: string,
 ): Promise<{ exportJobId: string; emailed: boolean; rowCount: number }> {
-  const { rows } = await query<ScheduleRow & { location_id: string | null }>(
-    `SELECT ${COLUMNS}, location_id FROM data_scheduled_exports
+  const { rows } = await query<ScheduleRow & { location_id: string | null; created_by: string | null }>(
+    `SELECT ${COLUMNS}, location_id, created_by FROM data_scheduled_exports
       WHERE business_id = $1 AND id = $2`,
     [businessId, scheduleId],
   );
   if (!rows[0]) throw new ScheduleError("schedule_not_found");
   const schedule = toSchedule(rows[0]);
   const locationId = rows[0].location_id;
+
+  /*
+   * Issue #947 (TEAM-F01) — a schedule runs with no member behind it, so the audience
+   * comes from the member who created it: a manager's nightly customer file must not
+   * quietly accumulate the personnel columns the manager cannot see on screen, while an
+   * owner's keeps all of them. An unresolvable creator (the member was deleted, the
+   * membership revoked) narrows rather than widens — «we no longer know who this runs
+   * for» must not read as «it may read everything».
+   */
+  const creator = rows[0].created_by
+    ? await memberAccessForUser(businessId, rows[0].created_by)
+    : null;
 
   const { job, body } = await createExportJob({
     businessId,
@@ -431,6 +445,7 @@ export async function runScheduledExport(
     actorUserId: null,
     actorName: `زمان‌بندی «${schedule.name}»`,
     scheduleId: schedule.id,
+    partyAudience: partyReadAudienceForPermissions(creator?.isActive ? creator.permissions : null),
   });
 
   // `deliver_store: false` means "email it and do not keep a copy" — a

@@ -88,7 +88,7 @@ import {
   hasDimensions,
 } from "./accounting-dimensions-service";
 import type { LineDimensions } from "./accounting-dimensions";
-import { DIMENSION_KINDS } from "./accounting-dimensions";
+import { DIMENSION_KINDS, parseLineDimensions } from "./accounting-dimensions";
 import { resolvePayoutAccount } from "./payroll-accounts";
 import { outstandingAdvances } from "./payroll-advances-service";
 import { standaloneCommissionOutstanding } from "./commission-settlement-service";
@@ -114,6 +114,7 @@ import type {
   PayrollCommissionPreview,
   PayrollLiability,
   PayrollRun,
+  PayrollRunAllocation,
   PayrollRunLine,
   PayrollRunStatus,
   PayrollRunSummary,
@@ -129,6 +130,7 @@ export type {
   PayrollCommissionPreview,
   PayrollLiability,
   PayrollRun,
+  PayrollRunAllocation,
   PayrollRunLine,
   PayrollRunStatus,
   PayrollRunSummary,
@@ -187,12 +189,19 @@ export async function listStaffWages(businessId: string): Promise<StaffWage[]> {
     monthly_taxable_allowance: string;
     monthly_non_taxable_allowance: string;
     monthly_fixed_deduction: string;
+    cost_center_id: string | null;
+    profit_center_id: string | null;
+    department_id: string | null;
+    detail_dimension_id: string | null;
   }>(
-    `SELECT id, full_name, role, monthly_wage::text AS monthly_wage,
-            monthly_taxable_allowance::text AS monthly_taxable_allowance,
-            monthly_non_taxable_allowance::text AS monthly_non_taxable_allowance,
-            monthly_fixed_deduction::text AS monthly_fixed_deduction
-       FROM users WHERE business_id = $1 AND is_active ORDER BY full_name, id`,
+    `SELECT u.id, u.full_name, u.role, u.monthly_wage::text AS monthly_wage,
+            u.monthly_taxable_allowance::text AS monthly_taxable_allowance,
+            u.monthly_non_taxable_allowance::text AS monthly_non_taxable_allowance,
+            u.monthly_fixed_deduction::text AS monthly_fixed_deduction,
+            e.cost_center_id, e.profit_center_id, e.department_id, e.detail_dimension_id
+       FROM users u
+       LEFT JOIN employees e ON e.id = u.id
+      WHERE u.business_id = $1 AND u.is_active ORDER BY u.full_name, u.id`,
     [businessId],
   );
   const advances = await outstandingAdvances(poolRunner, businessId);
@@ -205,6 +214,7 @@ export async function listStaffWages(businessId: string): Promise<StaffWage[]> {
     nonTaxableAllowance: r.monthly_non_taxable_allowance,
     fixedDeduction: r.monthly_fixed_deduction,
     advanceOutstanding: (advances.get(r.id) ?? 0n).toString(),
+    defaultDimensions: dimensionsFromColumns(r),
   }));
 }
 
@@ -339,6 +349,68 @@ export async function setStaffPayTerms(params: {
       );
     }
     return { changed: true, changes };
+  });
+}
+
+/**
+ * Issue #868 — one member's default dimension tuple: the standing attribution
+ * a run falls back to when its accrual carries no per-run allocation for them.
+ *
+ * A default is standing configuration, not a posting, but it is held to the
+ * same policy a posting would face (`assertDimensionsPostable`): the values
+ * must be this business's own active leaves of their kinds, usable today. The
+ * columns live on `employees` (migration 0222); `payroll_run_allocations`
+ * snapshots what a run actually charged, so changing a default never rewrites
+ * history. Explicit `null`/`{}` clears the tuple.
+ */
+export async function setEmployeeDefaultDimensions(params: {
+  businessId: string;
+  userId: string;
+  dimensions: unknown;
+  actorId: string | null;
+}): Promise<{ defaultDimensions: LineDimensions }> {
+  if (!isUuid(params.userId)) throw new PayrollError("user_not_found", 404);
+  const parsed = parseLineDimensions(params.dimensions ?? {});
+  if (!parsed.ok) throw new PayrollError("invalid_dimensions", 400);
+  const dimensions = parsed.value;
+
+  return inTransaction(async (client) => {
+    await lockPayroll(client, params.businessId);
+    const { rows } = await client.query<{ full_name: string }>(
+      `SELECT full_name FROM users WHERE id = $1 AND business_id = $2 AND is_active FOR UPDATE`,
+      [params.userId, params.businessId],
+    );
+    const member = rows[0];
+    if (!member) throw new PayrollError("user_not_found", 404);
+
+    // The policy names its own refusals (dimension_inactive, wrong tenant, …);
+    // the payroll boundary re-labels only the shape error above.
+    await assertDimensionsPostable(client, {
+      businessId: params.businessId,
+      locationId: null,
+      entryDate: null,
+      lines: [{ dimensions }],
+    });
+
+    const dims = dimensionColumnValues(dimensions);
+    await client.query(
+      `INSERT INTO employees (id, business_id, cost_center_id, profit_center_id, department_id, detail_dimension_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET
+         cost_center_id = EXCLUDED.cost_center_id,
+         profit_center_id = EXCLUDED.profit_center_id,
+         department_id = EXCLUDED.department_id,
+         detail_dimension_id = EXCLUDED.detail_dimension_id`,
+      [
+        params.userId,
+        params.businessId,
+        dims.cost_center_id,
+        dims.profit_center_id,
+        dims.department_id,
+        dims.detail_dimension_id,
+      ],
+    );
+    return { defaultDimensions: dimensionsFromColumns(dims) };
   });
 }
 
@@ -552,6 +624,56 @@ async function loadLines(businessId: string, runIds: string[]): Promise<Map<stri
 }
 
 /**
+ * Issue #868 — the applied allocation snapshot per run (`payroll_run_allocations`):
+ * what each member's expense was actually split into at accrual time, written
+ * once and never recomputed. Grouped per member in share order.
+ */
+async function loadAllocations(
+  businessId: string,
+  runIds: string[],
+): Promise<Map<string, PayrollRunAllocation[]>> {
+  const byRun = new Map<string, PayrollRunAllocation[]>();
+  if (runIds.length === 0) return byRun;
+  const { rows } = await query<{
+    run_id: string;
+    user_id: string;
+    full_name: string | null;
+    share_bp: number;
+    amount: string;
+    cost_center_id: string | null;
+    profit_center_id: string | null;
+    department_id: string | null;
+    detail_dimension_id: string | null;
+    label: string | null;
+  }>(
+    `SELECT a.run_id, a.user_id, u.full_name, a.share_bp, a.amount::text AS amount,
+            a.cost_center_id, a.profit_center_id, a.department_id, a.detail_dimension_id, a.label
+       FROM payroll_run_allocations a
+       JOIN payroll_runs r ON r.id = a.run_id
+       LEFT JOIN users u ON u.id = a.user_id
+      WHERE r.business_id = $1 AND a.run_id = ANY($2::uuid[])
+      ORDER BY a.user_id, a.created_at, a.id`,
+    [businessId, runIds],
+  );
+  for (const row of rows) {
+    const list = byRun.get(row.run_id) ?? [];
+    let member = list.find((m) => m.userId === row.user_id);
+    if (!member) {
+      member = { userId: row.user_id, fullName: row.full_name, shares: [] };
+      list.push(member);
+    }
+    member.shares.push({
+      shareBp: row.share_bp,
+      amount: row.amount,
+      dimensions: dimensionsFromColumns(row),
+      label: row.label,
+    });
+    byRun.set(row.run_id, list);
+  }
+  return byRun;
+}
+
+/**
  * The payroll history: newest first, filtered, bounded and cursor-paginated —
  * see `payroll-history-query.ts` for the contract. A page carries summaries; a
  * run's lines are fetched with `getPayrollRun` when its details are opened
@@ -617,7 +739,8 @@ export async function getPayrollRun(businessId: string, runId: string): Promise<
   );
   if (!rows[0]) return null;
   const lines = await loadLines(businessId, [rows[0].id]);
-  return { ...toSummary(rows[0]), lines: lines.get(rows[0].id) ?? [] };
+  const allocations = await loadAllocations(businessId, [rows[0].id]);
+  return { ...toSummary(rows[0]), lines: lines.get(rows[0].id) ?? [], allocations: allocations.get(rows[0].id) ?? [] };
 }
 
 async function mustGetRun(businessId: string, runId: string): Promise<PayrollRun> {

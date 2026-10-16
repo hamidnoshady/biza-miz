@@ -27,6 +27,12 @@ import { getSetting, SETTING_KEYS } from "../settings";
 import { renderReportTableHtml, type ReportPdfBusinessInfo } from "../report-pdf-template";
 import { defaultExportFields, findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
+import type { PartyReadAudience } from "../personnel-access";
+import {
+  decideExportDownload,
+  recordedAudienceFor,
+  type CurrentExportAccess,
+} from "./export-audience";
 import { requireAdapter, type AdapterContext } from "./adapters";
 import { displayCell, sheetsToXlsxBuffer, toCsv, toJsonDocument } from "./codecs";
 import { recordDataTransferAudit } from "./audit";
@@ -40,7 +46,13 @@ export const MAX_STORED_EXPORT_BYTES = 25 * 1024 * 1024;
 export const EXPORT_RETENTION_DAYS = 30;
 
 export class ExportError extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    /** The permission keys whose absence caused a refusal, when it is that kind. */
+    readonly requires?: readonly string[],
+    /** Why, in one word, so a screen can explain «legacy file» vs «revoked». */
+    readonly reason?: string,
+  ) {
     super(code);
     this.name = "ExportError";
   }
@@ -66,6 +78,15 @@ export interface ExportJob {
   finishedAt: string | null;
   /** False once the bytes have been pruned; the history row survives. */
   downloadable: boolean;
+  /**
+   * Issue #947 — the audience this file was produced under (`null` = not recorded:
+   * produced before migration 0222, or by a schedule with no requesting member). The
+   * history screen shows it, so «why can I not download this» has an answer on the row
+   * rather than only in the response of the download that failed.
+   */
+  partyAudience: PartyReadAudience | null;
+  /** The permission keys the production was authorized against. `null` = not recorded. */
+  domainKeys: string[] | null;
 }
 
 interface JobRow extends Record<string, unknown> {
@@ -79,6 +100,8 @@ interface JobRow extends Record<string, unknown> {
   row_count: number;
   file_name: string;
   content_type: string;
+  party_audience: unknown;
+  domain_keys: unknown;
   size_bytes: string | number;
   error: string | null;
   schedule_id: string | null;
@@ -90,7 +113,7 @@ interface JobRow extends Record<string, unknown> {
 
 const JOB_COLUMNS = `id, entity_key, format, status, fields, filters, provider_metadata, row_count, file_name,
   content_type, size_bytes, error, schedule_id, created_by_name, created_at, finished_at,
-  (content IS NOT NULL) AS has_content`;
+  party_audience, domain_keys, (content IS NOT NULL) AS has_content`;
 
 function exportProviderMetadata(value: unknown): ProviderJobMetadata | null {
   let candidate = value;
@@ -131,7 +154,35 @@ function toJob(row: JobRow): ExportJob {
     createdAt: row.created_at.toISOString(),
     finishedAt: row.finished_at?.toISOString() ?? null,
     downloadable: row.has_content && row.status === "completed",
+    partyAudience: partyAudienceFrom(row.party_audience),
+    domainKeys: Array.isArray(row.domain_keys) ? (row.domain_keys as string[]) : null,
   };
+}
+
+/**
+ * The stored audience, validated rather than trusted.
+ *
+ * A `jsonb` column can hold anything a previous writer or a hand-edit put there; a
+ * malformed value is read as «not recorded» (the conservative answer) instead of being
+ * coerced into a shape that might widen a read.
+ */
+/**
+ * The parameter for the `party_audience` column: a JSON object, or SQL NULL.
+ *
+ * `JSON.stringify(null)` is the *string* `"null"`, which is a perfectly valid `jsonb`
+ * value and not at all what «this row has no recorded provenance» means — the shape check
+ * on the column refuses it, which is how this was caught.
+ */
+export function recordedAudienceJson(audience: PartyReadAudience | undefined): string | null {
+  const recorded = recordedAudienceFor(audience);
+  return recorded ? JSON.stringify(recorded) : null;
+}
+
+function partyAudienceFrom(value: unknown): PartyReadAudience | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.personnel !== "boolean" || typeof candidate.financial !== "boolean") return null;
+  return { personnel: candidate.personnel, financial: candidate.financial };
 }
 
 export const CONTENT_TYPES: Record<ExportFormat, string> = {
@@ -159,6 +210,14 @@ export interface BuildExportInput {
   limit?: number;
   actorUserId: string | null;
   actorName: string;
+  /**
+   * What the requesting member may read of an Employee file (issue #947, TEAM-F01).
+   *
+   * Omitted means the internal full read, which is what a scheduled run with no
+   * member behind it gets; the routes pass the audience they resolved from the
+   * session, and the schedule runner passes the creator's.
+   */
+  partyAudience?: PartyReadAudience;
   /** Set when a schedule produced this export rather than a person. */
   scheduleId?: string | null;
 }
@@ -188,6 +247,7 @@ export async function buildExport(input: BuildExportInput): Promise<BuiltExport>
     locationId: input.locationId,
     actorUserId: input.actorUserId,
     actorName: input.actorName,
+    partyAudience: input.partyAudience,
   };
   const rows = await adapter.read(context, {
     fields: fieldKeys,
@@ -404,9 +464,10 @@ export async function createExportJob(input: BuildExportInput): Promise<{
   const { rows } = await query<JobRow>(
     `INSERT INTO data_export_jobs
        (business_id, location_id, entity_key, format, status, fields, filters,
-        schedule_id, created_by, created_by_name, started_at, expires_at)
+        schedule_id, created_by, created_by_name, started_at, expires_at, party_audience,
+        domain_keys)
      VALUES ($1, $2::uuid, $3, $4, 'running', $5::jsonb, $6::jsonb, $7::uuid, $8::uuid, $9,
-             now(), now() + interval '${EXPORT_RETENTION_DAYS} days')
+             now(), now() + interval '${EXPORT_RETENTION_DAYS} days', $10::jsonb, $11::text[])
      RETURNING ${JOB_COLUMNS}`,
     [
       input.businessId,
@@ -418,6 +479,25 @@ export async function createExportJob(input: BuildExportInput): Promise<{
       input.scheduleId ?? null,
       input.actorUserId,
       input.actorName,
+      /*
+       * Issue #947 — provenance, written with the row rather than patched in later: the
+       * file and the audience it was produced under must be one transaction, or a crash
+       * between them leaves bytes nobody can attribute.
+       *
+       * SQL NULL, not the JSON literal `null`: the column's shape check accepts «no
+       * provenance recorded» as absent, and a `'null'::jsonb` is a value the row could
+       * come to mean something else than the reader expects.
+       */
+      recordedAudienceJson(input.partyAudience),
+      /*
+       * The domain keys this production was authorized under, from the entity's own
+       * contract rather than from the caller (issue #947). `entityAccess` re-checks it at
+       * download time too, but the row carrying it means a *later* registry edit — a key
+       * renamed, an entity re-gated — cannot quietly turn an old file into an
+       * entitled-looking one, and it lets the history screen answer «why» without a
+       * second reading of the catalogue.
+       */
+      entity.exportPermission ? [entity.exportPermission] : null,
     ],
   );
   const jobId = rows[0].id;
@@ -499,22 +579,66 @@ export async function getExportJob(businessId: string, jobId: string): Promise<E
   return rows[0] ? toJob(rows[0]) : null;
 }
 
-/** A previously produced export's bytes, for re-download. */
+/**
+ * A previously produced export's bytes, for re-download — and the *enforcement* of the
+ * audience those bytes were produced under (issue #947).
+ *
+ * ## Why the check lives here as well as in the route
+ *
+ * The route already re-checks the entity/provider permissions, which answers «may this
+ * member export this entity at all». It cannot answer «was this *file* produced under a
+ * sensitivity this member may read», because that lives on the row and the answer has to
+ * be the same for every caller — including the ones that do not go through the HTTP
+ * route (a test, a future download-from-a-link, a support tool). So the row's recorded
+ * provenance is enforced where the bytes are read, and the refusal is a thrown
+ * `ExportError` with the same `{ error, requires }` vocabulary the rest of the guards
+ * speak.
+ *
+ * `access` is optional: a caller with no member behind it (the retention sweep's own
+ * bookkeeping, a migration) may read bytes for an internal purpose, and the two
+ * integration cases that assert «the bytes are retained» do exactly that. Every
+ * *user-facing* caller passes it — the route does — and its absence is visible in the
+ * signature rather than implied.
+ */
 export async function getExportContent(
   businessId: string,
   jobId: string,
+  access?: CurrentExportAccess,
 ): Promise<{ fileName: string; contentType: string; body: Buffer } | null> {
   const { rows } = await query<{
     file_name: string;
     content_type: string;
     content: Buffer | null;
+    party_audience: unknown;
+    domain_keys: unknown;
   }>(
-    `SELECT file_name, content_type, content FROM data_export_jobs
+    `SELECT file_name, content_type, content, party_audience, domain_keys FROM data_export_jobs
       WHERE business_id = $1 AND id = $2 AND status = 'completed'`,
     [businessId, jobId],
   );
   const row = rows[0];
   if (!row || !row.content) return null;
+
+  if (access) {
+    const decision = decideExportDownload(
+      {
+        partyAudience: partyAudienceFrom(row.party_audience),
+        domainKeys: Array.isArray(row.domain_keys) ? (row.domain_keys as string[]) : null,
+      },
+      access,
+    );
+    if (!decision.allowed) {
+      /*
+       * Refused, not redacted. The stored file is a rendered document — a PDF's columns
+       * are positional and a workbook's headers are labels — so there is no narrowing
+       * pass that could be trusted. The member who is allowed to see this data produces
+       * a fresh file (`POST /api/data/exports`), which is projected with *current*
+       * fields under *current* permissions; the bytes that were produced under wider
+       * ones stay where they are.
+       */
+      throw new ExportError("export_requires_regeneration", decision.requires, decision.reason);
+    }
+  }
   return { fileName: row.file_name, contentType: row.content_type, body: row.content };
 }
 

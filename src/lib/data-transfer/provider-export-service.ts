@@ -1,6 +1,7 @@
 import { query } from "../db";
 import { recordDataTransferAudit } from "./audit";
-import { CONTENT_TYPES, MAX_STORED_EXPORT_BYTES } from "./export-service";
+import type { PartyReadAudience } from "../personnel-access";
+import { CONTENT_TYPES, MAX_STORED_EXPORT_BYTES, recordedAudienceJson } from "./export-service";
 import type { ProviderJobMetadata } from "./types";
 
 const EXPORT_RETENTION_DAYS = 30;
@@ -79,6 +80,17 @@ export async function createProviderExportJob(input: {
   actorUserId: string | null;
   actorName: string;
   providerMetadata: ProviderJobMetadata;
+  /**
+   * Issue #947 — what this file was produced *under*: the party halves the producer could
+   * read, and the permission keys the provider scopes were checked against.
+   *
+   * Recorded with the row so a later download can ask «does the caller asking now still
+   * hold this?» instead of trusting that nothing changed. A provider workbook is a
+   * rendered document: it cannot be re-projected, so this provenance is the only thing
+   * standing between «produced by an owner last week» and «handed to a manager today».
+   */
+  partyAudience?: PartyReadAudience;
+  domainKeys?: readonly string[];
 }): Promise<{ jobId: string; downloadable: boolean }> {
   const providerKey = input.providerMetadata.provider.toLowerCase().replace(/[^a-z0-9_]/g, "");
   if (!providerKey) throw new Error("invalid_provider_key");
@@ -89,10 +101,10 @@ export async function createProviderExportJob(input: {
     `INSERT INTO data_export_jobs
        (business_id, entity_key, format, status, fields, filters, provider_metadata,
         row_count, file_name, content_type, size_bytes, content, created_by,
-        created_by_name, started_at, finished_at, expires_at)
+        created_by_name, started_at, finished_at, expires_at, party_audience, domain_keys)
      VALUES ($1, $2, 'xlsx', 'completed', $3::jsonb, '{}'::jsonb, $4::jsonb,
              $5, $6, $7, $8, $9, $10::uuid, $11, now(), now(),
-             now() + interval '${EXPORT_RETENTION_DAYS} days')
+             now() + interval '${EXPORT_RETENTION_DAYS} days', $12::jsonb, $13::text[])
      RETURNING id`,
     [
       input.businessId,
@@ -106,6 +118,8 @@ export async function createProviderExportJob(input: {
       stored ? input.body : null,
       input.actorUserId,
       input.actorName,
+      recordedAudienceJson(input.partyAudience),
+      input.domainKeys ? [...input.domainKeys] : null,
     ],
   );
   const jobId = rows[0].id;

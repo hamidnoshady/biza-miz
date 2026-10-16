@@ -192,4 +192,73 @@ describe("MCP read authorization", () => {
     });
     expect(mocks.runSystemReadTool).not.toHaveBeenCalled();
   });
+
+  it("emits a real serverInfo.version on initialize and serves prompts/list and resources/templates/list", async () => {
+    const init = await dispatchMcpMessage(
+      AUTH,
+      parseMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    );
+    const initResult = (init as { result: { serverInfo: { version: string }; instructions: string } }).result;
+    expect(initResult.serverInfo.version).not.toBe("unknown");
+    expect(initResult.serverInfo.version).toMatch(/^\d+\.\d+\.\d+/);
+
+    const prompts = await dispatchMcpMessage(
+      AUTH,
+      parseMessage({ jsonrpc: "2.0", id: 2, method: "prompts/list", params: {} }),
+    );
+    const promptList = (prompts as { result: { prompts: Array<{ name: string }> } }).result.prompts;
+    expect(promptList.length).toBeGreaterThan(0);
+    expect(promptList.map((p) => p.name)).toContain("daily_briefing");
+
+    const promptGet = await dispatchMcpMessage(
+      AUTH,
+      parseMessage({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "prompts/get",
+        params: { name: "daily_briefing", arguments: { date: "2026-10-16" } },
+      }),
+    );
+    expect(promptGet).toMatchObject({
+      jsonrpc: "2.0",
+      id: 3,
+      result: { messages: expect.any(Array) },
+    });
+
+    const templates = await dispatchMcpMessage(
+      AUTH,
+      parseMessage({ jsonrpc: "2.0", id: 4, method: "resources/templates/list", params: {} }),
+    );
+    const templateList = (
+      templates as { result: { resourceTemplates: Array<{ uriTemplate: string }> } }
+    ).result.resourceTemplates;
+    expect(templateList.map((t) => t.uriTemplate)).toContain("pos://reports/{key}");
+  });
+
+  it("requires pos.read scope before listing or reading report template resources", async () => {
+    const writeOnlyAuth: McpAuthentication = {
+      ...AUTH,
+      scopes: ["pos.write"],
+    };
+
+    const templates = await dispatchMcpMessage(
+      writeOnlyAuth,
+      parseMessage({ jsonrpc: "2.0", id: 1, method: "resources/templates/list", params: {} }),
+    );
+    const templateList = (
+      templates as { result: { resourceTemplates: Array<{ uriTemplate: string }> } }
+    ).result.resourceTemplates;
+    expect(templateList).toEqual([]);
+
+    const readRes = await dispatchMcpMessage(
+      writeOnlyAuth,
+      resourceRead("pos://reports/daily_sales_summary"),
+    );
+    expect(readRes).toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32602 },
+    });
+    expect(mocks.runSystemReadTool).not.toHaveBeenCalled();
+  });
 });

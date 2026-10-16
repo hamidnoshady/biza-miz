@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { PartyValidationError, createParty, listParties, searchParties } from "@/lib/parties-service";
+import {
+  PartyValidationError,
+  createParty,
+  listParties,
+  partyForAudience,
+  searchParties,
+} from "@/lib/parties-service";
+import { partyReadAudienceForPermissions } from "@/lib/personnel-access";
 import { PARTY_ROLES, parsePartyRequestBody, type PartyRole } from "@/lib/parties";
 import { arBalancesForCustomers } from "@/lib/ar-service";
 import { storeCreditBalancesFor } from "@/lib/loyalty-service";
@@ -28,8 +35,17 @@ import { storeCreditBalancesFor } from "@/lib/loyalty-service";
  * use, which can also include archived parties.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.partiesView);
+  const { session, membership, error } = await requirePermission(PERMISSIONS.partiesView);
   if (error) return error;
+
+  /**
+   * Issue #947 (TEAM-F01) — `parties.view` opens the directory; it does not open
+   * every field of every row. The audience is built from the *effective* set
+   * `authorize()` just resolved, never from the role in the token: a revoked
+   * `team.manage` or `payroll.view` must narrow this response on the very next
+   * request. See `personnel-access.ts` for the whole policy.
+   */
+  const audience = partyReadAudienceForPermissions([...membership.permissions]);
 
   const params = request.nextUrl.searchParams;
   const q = params.get("q") ?? "";
@@ -41,6 +57,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const parties = await searchParties(session.businessId, q, {
       roles,
       limit: params.get("limit") ? Number(params.get("limit")) : undefined,
+      audience,
     });
     // The till's customer picker asks for the balance beside the name (a
     // subtle «بدهی/اعتبار» line) so the cashier knows before ringing up a
@@ -68,6 +85,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     categoryId: params.get("categoryId") || undefined,
     page: params.has("page") ? Number(params.get("page")) : undefined,
     pageSize: params.has("pageSize") ? Number(params.get("pageSize")) : undefined,
+    audience,
   });
   // `customers` is kept beside `parties` for the screens that predate the rename
   // and read only the customer slice: a list endpoint that returns the same array
@@ -124,7 +142,7 @@ function touchesAccountingFields(body: Record<string, unknown>): boolean {
  * path, so the form can put the message under the input that caused it.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.partiesView);
+  const { session, membership, error } = await requirePermission(PERMISSIONS.partiesView);
   if (error) return error;
 
   let body: Record<string, unknown>;
@@ -149,8 +167,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   try {
     const party = await createParty(session.businessId, input, {
       locationId: session.locationId ?? null,
+      // Issue #947 (TEAM-F02) — a created link is an audited relationship change.
+      actorId: session.sub,
     });
-    return NextResponse.json({ party, customer: party }, { status: 201 });
+    // Issue #947 (TEAM-F01) — the echo of a write is the same read: a route that
+    // projected its GETs and returned the raw record here would hand the caller the
+    // very fields the list withholds, one «ذخیره» later.
+    const audience = partyReadAudienceForPermissions([...membership.permissions]);
+    const projected = partyForAudience(party, audience);
+    return NextResponse.json({ party: projected, customer: projected }, { status: 201 });
   } catch (err) {
     if (err instanceof PartyValidationError) {
       return NextResponse.json(

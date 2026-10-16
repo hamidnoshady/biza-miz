@@ -157,9 +157,11 @@ describe("strict shapes", () => {
   it("requires uuid printer and template ids (they are resolved against a branch, not parsed)", () => {
     const base = { document: { kind: "order-receipt", orderId: ORDER_ID } };
     expect(failure({ ...base, printerId: "printer-1" }).error).toBe("bad_request");
+    expect(failure({ ...base, failedPrinterId: "printer-1" }).error).toBe("bad_request");
     expect(failure({ ...base, templateId: "saved-1" }).error).toBe("bad_request");
     expect(failure({ ...base, printerId: "" }).error).toBe("bad_request");
     expect(ok({ ...base, printerId: null, templateId: null }).printerId).toBeNull();
+    expect(ok({ ...base, failedPrinterId: PRINTER_ID }).failedPrinterId).toBe(PRINTER_ID);
   });
 
   it("requires a known document type", () => {

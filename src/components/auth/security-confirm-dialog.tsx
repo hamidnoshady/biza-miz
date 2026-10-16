@@ -11,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { ErrorBox } from "@/app/dashboard/ui";
+import { ErrorBox, Field, inputClass } from "@/app/dashboard/ui";
 
 /**
  * The product confirmation every destructive personal-security action goes
@@ -34,6 +34,17 @@ import { ErrorBox } from "@/app/dashboard/ui";
  * `variant="destructive"` gives irreversible actions (factor removal, recovery
  * regeneration, credential removal) the red framing; reversible confirmations
  * use the default variant.
+ *
+ * ## The optional reason (issue #947, TEAM-F08)
+ *
+ * Some confirmations are also *access changes* whose justification the server
+ * insists on: archiving a custom role, retiring a permission template. Those
+ * screens used `window.prompt` to ask — a native dialog the product cannot style,
+ * localize or validate, and one that a screen reader announces as an unlabelled
+ * text box. Passing `reason` turns the same confirmation into the application's own
+ * field: labelled, hinted, length-checked before the button enables, and part of the
+ * one dialog the member already confirmed. The caller keeps the value in its own
+ * state, so cancelling sends nothing and the reason never leaves the form.
  */
 export function SecurityConfirmDialog({
   open,
@@ -46,6 +57,7 @@ export function SecurityConfirmDialog({
   busy = false,
   error,
   variant = "destructive",
+  reason,
   onConfirm,
 }: {
   open: boolean;
@@ -60,6 +72,20 @@ export function SecurityConfirmDialog({
   busy?: boolean;
   error?: React.ReactNode;
   variant?: "default" | "destructive";
+  /**
+   * The justification field, rendered inside the dialog when the action is an
+   * access change the server will ask for a reason about. Omitted entirely for the
+   * confirmations that need none.
+   */
+  reason?: {
+    label: string;
+    hint?: string;
+    value: string;
+    onChange: (value: string) => void;
+    /** Minimum characters the server accepts; the confirm button waits for it. */
+    minLength: number;
+    maxLength?: number;
+  };
   onConfirm: () => void;
 }) {
   return (
@@ -84,13 +110,30 @@ export function SecurityConfirmDialog({
           ))}
         </ul>
 
+        {reason ? (
+          <Field label={reason.label} hint={reason.hint}>
+            <textarea
+              className={inputClass}
+              value={reason.value}
+              onChange={(event) => reason.onChange(event.target.value)}
+              rows={3}
+              maxLength={reason.maxLength ?? 500}
+              aria-required="true"
+            />
+          </Field>
+        ) : null}
+
         {error ? <ErrorBox>{error}</ErrorBox> : null}
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             {cancelLabel}
           </Button>
-          <Button variant={variant === "destructive" ? "destructive" : "default"} onClick={onConfirm} disabled={busy}>
+          <Button
+            variant={variant === "destructive" ? "destructive" : "default"}
+            onClick={onConfirm}
+            disabled={busy || (reason ? reason.value.trim().length < reason.minLength : false)}
+          >
             {confirmLabel}
           </Button>
         </DialogFooter>
