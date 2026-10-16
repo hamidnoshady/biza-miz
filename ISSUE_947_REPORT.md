@@ -82,8 +82,13 @@ commission-engine code was touched.
   — the `ELSE 'all'` arm is gone from the writers.
 - `POST /api/team` validates the scope before writing and applies the assignments
   atomically; `/api/setup/users` and the invitation flow go through the same resolver.
-- The screen asks for the policy («دسترسی شعبه») as part of onboarding, and the copy now
-  states PIN uniqueness is **business-wide**, not per branch.
+- The screen asks for the policy («دسترسی شعبه») as part of onboarding, and the PIN hint no
+  longer claims any uniqueness at all: issue #953 (migration `0221_pin_not_unique.sql`, merged
+  before this work) removed the business-wide blind index and its unique constraint — the PIN
+  door names the member, so two members may share digits. Both onboarding surfaces say that
+  («رمز شخصی همین عضو است؛ در فهرست ورود با نام او پیدا می‌شود.»), and each carries the
+  reasoning in a comment; `team-manager.test.ts` asserts the absence of both the old
+  «per branch» and the «business-wide» wording, so the claim cannot come back.
 
 ### TEAM-F04 / TEAM-F05 — one personnel file per membership
 
@@ -330,7 +335,7 @@ inventory, and that drift is bookkeeping rather than evidence.
 | 4 | `employeeUserId` accepted any business's membership id | `assertEmployeeLinkTarget` + composite FK |
 | 5 | Personnel-file creation depended on which door created the membership; failures were swallowed | `personnel-file.ts` + callers + drift table |
 | 6 | PIN onboarding silently granted `all` branches when no assignment was named | `resolveMembershipBranchPolicy` |
-| 7 | The PIN copy claimed per-branch uniqueness (it is business-wide) | onboarding form |
+| 7 | The PIN copy claimed per-branch uniqueness (main's `0221_pin_not_unique.sql`, #953, had already removed uniqueness itself) | onboarding form (Team and setup) |
 | 8 | Read-only `team.view` requested (and surfaced the 403 of) the invitation list | `team-manager.tsx` |
 | 9 | The party form offered edits the service refuses for linked members, with no way to reach the canonical editor | `party-form.tsx` |
 | 10 | Role archiving failures were invisible and `window.confirm`/`prompt` were used | `roles-manager.tsx`, `security-confirm-dialog.tsx` |
