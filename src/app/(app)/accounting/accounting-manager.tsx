@@ -34,6 +34,8 @@ import { ApSection } from "./ap-section";
 import { ReceiptsPaymentsSection } from "./receipts-payments-section";
 import { InstallmentsSection } from "./installments-section";
 import { ChequesSection } from "./cheques-section";
+import { FinancialAccountsSection } from "./financial-accounts-section";
+import { TransfersSection } from "./transfers-section";
 import { ReconciliationSection } from "./reconciliation-section";
 import { ChartOfAccountsSection } from "./chart-of-accounts-section";
 import { DimensionsSection } from "./dimensions-section";
@@ -293,6 +295,18 @@ export function AccountingManager({
    * came back 403 under a generic error.
    */
   const canManageReconciliation = permissions.includes(PERMISSIONS.financeReconciliationManage);
+  /*
+   * «حساب‌های مالی» and «انتقال وجه» (issue #862).
+   *
+   * The sections open on the app's ledger door (`ledger.view`), because "how
+   * much is in each container" is a ledger question — but registering a
+   * container, and moving money between two of them, are the two capabilities
+   * the API enforces. Threading them here keeps a read-only accountant from
+   * being offered a form whose submit the server would refuse, and the API
+   * check stays authoritative either way.
+   */
+  const canManageFinancialAccounts = permissions.includes(PERMISSIONS.financeAccountsManage);
+  const canManageTransfers = permissions.includes(PERMISSIONS.financeTransfersManage);
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -452,6 +466,22 @@ export function AccountingManager({
             canReversePayments={canApproveLedger}
             canReverseReceipts={canApproveLedger}
           /> : null}
+          {section === "financial-accounts" ? (
+            <FinancialAccountsSection
+              busy={busy}
+              refreshKey={refreshKey}
+              canManage={canManageFinancialAccounts}
+            />
+          ) : null}
+          {section === "transfers" ? (
+            <TransfersSection
+              busy={busy}
+              run={run}
+              refreshKey={refreshKey}
+              canManage={canManageTransfers}
+              canBrowseMedia={canBrowseMedia}
+            />
+          ) : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? (
             <ChequesSection
@@ -478,6 +508,7 @@ export function AccountingManager({
               refreshKey={refreshKey}
               canManage={canManagePayroll}
               ownerKey={currentUserId}
+              sourceRunId={searchParams.get("run")}
             />
           ) : null}
           {section === "vat" ? <VatReportSection refreshKey={refreshKey} /> : null}

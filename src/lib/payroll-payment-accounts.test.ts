@@ -23,6 +23,17 @@ const STANDARD: ChartAccountRow[] = [
 ];
 
 describe("usablePaymentAccounts", () => {
+  it("excludes foreign-currency banks from Rial flows while retaining legacy and explicit IRR accounts", () => {
+    const chart = [
+      ...STANDARD.filter((account) => account.id !== "a1110"),
+      { ...row("usd", "1115", "بانک دلار"), currencyCode: "USD" },
+      { ...row("eur", "1116", "بانک یورو"), currencyCode: "EUR" },
+      { ...row("rial", "1117", "بانک ریال"), currencyCode: "IRR" },
+      { ...row("legacy", "1118", "بانک قدیمی"), currencyCode: null },
+    ];
+    expect(usablePaymentAccounts(chart).map((account) => account.id)).toEqual(["a1100", "rial", "legacy", "a1130"]);
+  });
+
   it("offers cash, bank and petty cash — and never card money in transit", () => {
     const offered = usablePaymentAccounts(STANDARD);
     expect(offered.map((a) => a.code)).toEqual(["1100", "1110", "1130"]);

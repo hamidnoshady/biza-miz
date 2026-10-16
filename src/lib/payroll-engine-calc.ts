@@ -658,6 +658,12 @@ export interface PostingSide {
   accountCode: string;
   debit: bigint;
   credit: bigint;
+  /**
+   * Issue #868 — true for the salary/employer-contribution expense legs.
+   * Only these carry the bucket's dimension tuple; liability and settlement
+   * legs (payables, staff advances) stay unattributed.
+   */
+  expense?: boolean;
 }
 
 /** The part of a payslip the accrual posts. */
@@ -686,12 +692,16 @@ const DEFAULT_POSTING_ACCOUNTS: PostingAccounts = Object.freeze({ salariesPayabl
  */
 export function accrualPostingSides(payslips: readonly PostablePayslip[], accounts: PostingAccounts = DEFAULT_POSTING_ACCOUNTS): PostingSide[] {
   const net = new Map<string, bigint>();
-  const add = (code: string, signed: bigint) => net.set(code, (net.get(code) ?? 0n) + signed);
+  const expenseCodes = new Set<string>();
+  const add = (code: string, signed: bigint, expense = false) => {
+    if (expense) expenseCodes.add(code);
+    net.set(code, (net.get(code) ?? 0n) + signed);
+  };
   for (const slip of payslips) {
     for (const line of slip.lines) {
-      if (line.kind === "earning") add(line.debitAccountCode, line.amount);
+      if (line.kind === "earning") add(line.debitAccountCode, line.amount, true);
       else if (line.kind === "employer_contribution") {
-        add(line.debitAccountCode, line.amount);
+        add(line.debitAccountCode, line.amount, true);
         add(line.creditAccountCode, -line.amount);
       } else add(line.creditAccountCode, -line.amount);
     }
@@ -700,8 +710,9 @@ export function accrualPostingSides(payslips: readonly PostablePayslip[], accoun
   }
   const sides: PostingSide[] = [];
   for (const [accountCode, amount] of [...net.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    if (amount > 0n) sides.push({ accountCode, debit: amount, credit: 0n });
-    else if (amount < 0n) sides.push({ accountCode, debit: 0n, credit: -amount });
+    const expense = expenseCodes.has(accountCode) || undefined;
+    if (amount > 0n) sides.push({ accountCode, debit: amount, credit: 0n, expense });
+    else if (amount < 0n) sides.push({ accountCode, debit: 0n, credit: -amount, expense });
   }
   const debit = sides.reduce((s, x) => s + x.debit, 0n);
   const credit = sides.reduce((s, x) => s + x.credit, 0n);

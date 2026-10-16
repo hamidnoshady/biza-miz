@@ -141,7 +141,9 @@ export async function createSupplierReturn(client:PoolClient,params:{
  }
  await postExactSupplierReturnEntry(client,{businessId:params.businessId,locationId:params.locationId,
   supplierReturnId:headers[0].id,createdBy:params.createdBy,inventoryEventId:events[0].id,debitCode,
-  goods:rialText(total.toString()),vat:rialText(vat.toString())});
+  goods:rialText(total.toString()),vat:rialText(vat.toString()),
+  // Issue #868 — the return mirrors the purchase's posted attribution.
+  purchaseId:params.purchaseId});
  await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1",[events[0].id]);
  if(params.sync)await appendSyncOutboxEvent(client,{
   locationId:params.locationId,clientEventId:params.sync.clientEventId??params.idempotencyKey,

@@ -10,7 +10,7 @@
  *
  * ## The decision it records
  *
- * **Nothing automotive-specific replicates, and that is a decision, not an
+ * **No authoritative vehicle record replicates, and that is a decision, not an
  * omission.** The rule is already in the product for serialized stock, and a
  * car is the archetype of a serial: `master-sync-registry.test.ts` asserts
  * `item_serials` is not master-synced, and 0212's uniqueness is *per business*
@@ -28,9 +28,19 @@
  *   * **The cars do not.** The vehicle record, its cost ledger, its price
  *     history, its transfers and the leads attached to it stay cloud-owned with
  *     one authority over every state transition, exactly as `item_serials`,
- *     `serial_reservations` and the retail sale path already are. A paired
- *     automotive desktop opens the till (the trade has the `pos` module) and
- *     sells retail goods; its vehicle screens are the cloud's.
+ *     `serial_reservations` and the retail sale path already are.
+ *   * **Two derived tables do travel, and neither is a car.** §19's Wave 6
+ *     added a *read-only mirror* (`automotive_vehicle_stock_mirror`) and a
+ *     *durable request queue* (`automotive_vehicle_offline_requests`). The
+ *     mirror is the cloud's own answer, replaced whole from a snapshot that
+ *     carries no acquisition cost, no capitalized cost and no minimum price —
+ *     a paired desktop reads the board and cannot leak a margin from it. The
+ *     queue holds *intents*: hold this car, release a hold this branch placed.
+ *     Each carries an idempotency key and the version the operator saw, and the
+ *     cloud re-validates the car inside its own transaction before calling the
+ *     canonical reservation service. Neither table is written by any other
+ *     path, neither carries the master-data capture trigger, and a sale is
+ *     still not offline-finalizable at all.
  *
  * ## Why the buckets are not the same protocol
  *
@@ -62,11 +72,19 @@
  */
 
 /** How each automotive record is classified for a paired desktop. */
-export type AutomotiveSyncClass = "cloud_only" | "cloud_catalogue";
+export type AutomotiveSyncClass =
+  | "cloud_only"
+  | "cloud_catalogue"
+  /** A read-only projection of cloud data: the cloud's row or nothing, never a merge. */
+  | "cloud_mirror"
+  /** An outbound queue of intents that only the cloud can decide. */
+  | "site_request_queue";
 
 export const AUTOMOTIVE_SYNC_CLASS_LABELS: Record<AutomotiveSyncClass, string> = {
   cloud_only: "ابری — موجودی و اسناد خودرو یک نویسنده دارد",
   cloud_catalogue: "کاتالوگ مشترک — برند و مدل، نه خودروی فیزیکی",
+  cloud_mirror: "آینهٔ خواندنی — همان چیزی که سرور مرکزی می‌گوید، بدون هزینه و بدون تصمیم",
+  site_request_queue: "صف درخواست محلی — تا تأیید سرور مرکزی رزرو نیست",
 };
 
 export interface AutomotiveSyncEntry {
@@ -82,7 +100,11 @@ export interface AutomotiveSyncEntry {
     | "void_not_edit"
     | "lead_extension"
     | "vehicle_attachment"
-    | "catalogue_row";
+    | "catalogue_row"
+    /** Replaced whole by a cloud snapshot; never merged field by field. */
+    | "replaced_snapshot"
+    /** Append-an-intent; the cloud decides and the answer is final. */
+    | "request_queue";
   tables: readonly string[];
   reason: string;
   conflictRule: string;
@@ -220,6 +242,34 @@ export const AUTOMOTIVE_SYNC_CLASSIFICATION: readonly AutomotiveSyncEntry[] = [
     requirement:
       "none — this is the shipped path; the table list is empty because the catalogue is not an automotive-owned table, and the guard proves it is not claimed twice",
   },
+  {
+    key: "vehicle_board_mirror",
+    label: "آینهٔ خواندنی موجودی خودرو در شعبه",
+    class: "cloud_mirror",
+    surface: "خودروها / موجودی همگام‌شده (نسخهٔ دسکتاپ)",
+    writeModel: "replaced_snapshot",
+    tables: ["automotive_vehicle_stock_mirror"],
+    reason:
+      "The branch's board as a paired desktop may hold it: one row per car, replaced whole from the cloud's snapshot on every sync tick, and carrying no acquisition cost, no capitalized cost and no minimum price. The payload is validated before it is written (duplicate VIN/chassis/stock number is refused whole) and the table itself repeats those partial unique indexes, so a bad snapshot cannot create the ambiguous stock §19 forbids.",
+    conflictRule:
+      "the cloud's snapshot is the only writer and the whole row is replaced — there is no per-field merge and no clock comparison anywhere on this path",
+    requirement:
+      "already satisfied: the snapshot is a whole-branch projection over the site credential (`GET /api/server-sync/automotive-stock`), the applier is idempotent by content hash, and the table is never written by any other code path",
+  },
+  {
+    key: "vehicle_offline_requests",
+    label: "درخواست‌های آفلاین خودرو (رزرو و آزادسازی)",
+    class: "site_request_queue",
+    surface: "خودروها / رزرو در حالت آفلاین",
+    writeModel: "request_queue",
+    tables: ["automotive_vehicle_offline_requests"],
+    reason:
+      "The durable queue of the only two operations a disconnected branch may take: hold a car for a customer, and release a hold this branch placed. Each row is an intent with an idempotency key (the row id, which is also the sync event's client_event_id), the vehicle version the operator was looking at and the state they saw. Nothing about it is financial until the cloud confirms it: a pending row is never shown as a hold and a deposit on it is not a liability.",
+    conflictRule:
+      "the cloud re-validates the car's live state inside one transaction (row lock plus the one-active-hold-per-serial index) and answers `confirmed` or `conflict` with a named code; the site adopts that answer monotonically and never overwrites it",
+    requirement:
+      "already satisfied: `automotive.vehicle.reservation.requested`, `.released` and `.withdrawn` carry the request site-to-cloud, `applyVehicleOfflineRequest` calls the canonical `reserveVehicle`/`releaseVehicleReservation` behind a savepoint, and `offlineSaleFinalization` is `false` by type — a sale, a purchase and their postings are never invented offline",
+  },
 ];
 
 export function automotiveClassifiedTables(): string[] {
@@ -231,6 +281,17 @@ export function automotiveCloudOnlyTables(): string[] {
   return AUTOMOTIVE_SYNC_CLASSIFICATION.filter((entry) => entry.class === "cloud_only").flatMap((entry) => [
     ...entry.tables,
   ]);
+}
+
+/**
+ * The two tables §19's Wave 6 added — the ones a paired desktop *does* hold.
+ * Exported so the guard, the pairing test and the docs agree on the exception
+ * instead of each keeping its own list.
+ */
+export function automotiveSiteLocalTables(): string[] {
+  return AUTOMOTIVE_SYNC_CLASSIFICATION.filter(
+    (entry) => entry.class === "cloud_mirror" || entry.class === "site_request_queue",
+  ).flatMap((entry) => [...entry.tables]);
 }
 
 /**

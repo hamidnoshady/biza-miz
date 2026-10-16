@@ -167,3 +167,47 @@ export function cardTable(card: CardTableInput): PlainTable {
   rows.push(["", "مانده پایان دوره", "", "", card.closingBalance]);
   return { headers, rows };
 }
+
+/** The part of a hierarchy rollup the table needs. */
+export interface RollupTableInput {
+  rows: {
+    code: string;
+    name: string;
+    depth: number;
+    isActive: boolean;
+    own: number;
+    rolledUp: number;
+    childCount: number;
+  }[];
+  grandTotal: number;
+  unassigned: number;
+  reconciled: boolean;
+}
+
+/**
+ * The hierarchy rollup (issue #868): a parent sits directly above its
+ * children, indented one step per level. «مبلغ این مرکز» is what was posted on
+ * the row alone; «با زیرمجموعه» adds the subtree below it. The grand total is
+ * the sum of the FIRST amount column only — the second is display arithmetic
+ * and would count children twice if totalled.
+ */
+export function rollupTable(report: RollupTableInput): PlainTable {
+  const headers = ["کد", "مرکز", "مبلغ این مرکز", "با زیرمجموعه", "زیرمجموعه‌ها"];
+  const rows: (string | number)[][] = report.rows.map((row) => [
+    row.code,
+    `${"‌".repeat(row.depth)}${row.depth > 0 ? "└ " : ""}${row.name}${row.isActive ? "" : " (بایگانی‌شده)"}`,
+    row.own,
+    row.rolledUp,
+    row.childCount,
+  ]);
+  rows.push(["", "جمع کل (بدون دوباره‌شماری)", report.grandTotal, "", ""]);
+  if (report.unassigned !== 0) rows.push(["", "بدون بُعد", report.unassigned, "", ""]);
+  rows.push([
+    "",
+    "جمع + بدون بُعد در برابر جمع دفتر",
+    report.grandTotal + report.unassigned,
+    report.reconciled ? "مطابقت" : "نامطابقت",
+    "",
+  ]);
+  return { headers, rows };
+}

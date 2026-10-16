@@ -363,6 +363,42 @@ export const DATA_OWNERSHIP_REGISTRY = {
     events: [],
     masterTables: ["item_brands", "items", "watch_item_attributes"],
   }),
+  /*
+   * Accounting-dimension master data (issue #868): cost centres, profit
+   * centres, departments and detail values, their settings and the
+   * item/category/supplier/channel posting mappings (migration 0222). The
+   * dimension workspace is authored in the accounting screens, which are
+   * cloud-owned — so the cloud is the one canonical owner and the master feed
+   * carries rows down with their UUIDs unchanged, exactly the ids a site's
+   * attribution columns and a pulled entry's lines reference. A conflict is
+   * settled by that ownership (`authoritative_scope`): a site never becomes a
+   * second writable authority for a value a posting names.
+   *
+   * What deliberately does not ride this feed: payroll_run_allocations (an
+   * immutable posted-run snapshot, cloud-owned like payroll), the employees
+   * default-dimension columns (users bootstrap, `staff_access`), and the
+   * dimension columns of journal_lines themselves (inside the ledger,
+   * `accounting_journals`).
+   */
+  accounting_dimension_master: replicated({
+    domain: "accounting_dimension_master",
+    authority: "cloud_authoritative",
+    direction: "cloud_to_site",
+    conflictPolicy: "authoritative_scope",
+    tombstonePolicy: "archive",
+    bootstrap: "required",
+    continuousSync: "active",
+    identity: "stable dimension value UUIDs (settings by business_id+kind)",
+    retry:
+      "per-field hybrid-logical-clock capture by trigger; settings apply before values, values before mappings; an archived value keeps its history and blocks nothing posted",
+    transport: "master_feed",
+    events: [],
+    masterTables: [
+      "accounting_dimension_settings",
+      "accounting_dimension_values",
+      "accounting_dimension_mappings",
+    ],
+  }),
   staff_access: cloudOrBootstrapOnly({
     domain: "staff_access",
     authority: "cloud_authoritative",
@@ -504,6 +540,37 @@ export const DATA_OWNERSHIP_REGISTRY = {
       "never transported, by §26's explicit rule: these are status machines whose terminal states move money and feed Accounting, and a field-by-field merge could produce the very states their trigger guards refuse. Any future transport must be an explicit event carrying a decision",
     transport: "none",
     events: [],
+  }),
+  // Issue #839 §19 (Wave 6) — the automotive branch board, and the two requests
+  // a paired dealership desktop may queue while the cloud is unreachable.
+  //
+  // This is the *only* part of the trade that leaves the cloud, and it is
+  // deliberately a projection plus a request queue rather than a second copy of
+  // the car: the mirror is the cloud's own answer (whole rows, no per-field
+  // merge), the queue carries intents the cloud decides, and a sale is not
+  // offline-finalizable at all — which is why no sale event is listed here.
+  // `automotive-sync-classification.ts` records the same split per table, and
+  // `replication-catalogue.ts` publishes it to the pairing screen.
+  automotive_vehicle_board: replicated({
+    domain: "automotive_vehicle_board",
+    authority: "cloud_authoritative",
+    direction: "bidirectional",
+    conflictPolicy: "authoritative_scope",
+    tombstonePolicy: "authoritative_delete",
+    bootstrap: "required",
+    continuousSync: "active",
+    identity:
+      "the physical unit's serial_id for the mirrored board (unique per business in 0212, and again in the mirror), and a client-generated request UUID for a queued hold — the same value as the sync event's client_event_id",
+    retry:
+      "idempotent replay: the mirror is replaced whole from a content-hashed snapshot so a repeated or out-of-order response is harmless, and a queued request is applied once by the cloud — a retry answers `duplicate` with the hold it already created, and a refusal is recorded with a named conflict code for an operator to resolve instead of being merged",
+    transport: "events",
+    events: [
+      event("automotive.vehicle.reservation.requested", 1),
+      event("automotive.vehicle.reservation.released", 1),
+      // The withdrawal of a request the counter cancelled before the cloud
+      // decided it: the same domain, one more way a site hands work up.
+      event("automotive.vehicle.reservation.withdrawn", 1),
+    ],
   }),
 } as const satisfies Record<string, DomainOwnershipDefinition>;
 

@@ -19,6 +19,10 @@ import { FiscalPeriodError, readUncoveredEntries } from "./fiscal-periods-servic
 import { FISCAL_PERIOD_COUNT, fiscalPeriodLockErrorCode } from "./fiscal-periods";
 import type { RialText } from "./inventory-exact";
 import { isUuid } from "./uuid";
+import {
+  calculateDimensionalClosingLines,
+  closingTupleRows,
+} from "./closing-dimensions";
 
 export { MissingLedgerAccountError };
 
@@ -34,6 +38,11 @@ export interface ClosingBalance {
   account_type: "revenue" | "expense";
   debit: string;
   credit: string;
+  /** Issue #868 — the dimension tuple this balance sits in. */
+  cost_center_id?: string | null;
+  profit_center_id?: string | null;
+  department_id?: string | null;
+  detail_dimension_id?: string | null;
 }
 
 export interface CalculatedClosingLines {
@@ -158,30 +167,29 @@ export async function closeFiscalYear(
       throw new FiscalPeriodError("uncovered_entries_before_close", 409, { uncovered });
     }
 
+    // Issue #868 — the closing balances grouped by (account × dimension
+    // tuple): each group closes against retained earnings carrying its own
+    // tuple, so every dimension group balances within itself and a year with
+    // no attribution produces exactly the entry this always produced.
     const { rows: totals } = await client.query<ClosingBalance>(
       `SELECT a.id AS account_id, a.type::text AS account_type,
+              jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id,
               SUM(jl.debit)::text AS debit, SUM(jl.credit)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id
          JOIN accounts a ON a.id = jl.account_id
         WHERE je.business_id = $1 AND a.type IN ('revenue', 'expense')
           AND je.entry_date BETWEEN $2 AND $3
-        GROUP BY a.id, a.type
+        GROUP BY a.id, a.type, jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id
        HAVING SUM(jl.debit) <> SUM(jl.credit)`,
       [businessId, year.starts_on, year.ends_on],
     );
 
-    const calculated = calculateClosingLines(totals);
-    const lines = [...calculated.lines];
-    if (calculated.netIncome !== 0n) {
-      const retainedEarnings = await accountIdsByCode(client, businessId, [WELL_KNOWN_CODES.retainedEarnings]);
-      const retainedEarningsId = retainedEarnings.get(WELL_KNOWN_CODES.retainedEarnings)!;
-      lines.push({
-        accountId: retainedEarningsId,
-        debit: (calculated.netIncome < 0n ? -calculated.netIncome : 0n).toString() as RialText,
-        credit: (calculated.netIncome > 0n ? calculated.netIncome : 0n).toString() as RialText,
-      });
-    }
+    const retainedEarnings = await accountIdsByCode(client, businessId, [WELL_KNOWN_CODES.retainedEarnings]);
+    const retainedEarningsId = retainedEarnings.get(WELL_KNOWN_CODES.retainedEarnings)!;
+    const calculated = calculateDimensionalClosingLines(closingTupleRows(totals), retainedEarningsId);
+    const lines: ExactJournalLine[] = calculated.lines;
+    const netIncome = calculated.netIncome;
 
     let closingEntryId: string | null = null;
     try {
@@ -195,6 +203,10 @@ export async function closeFiscalYear(
         lines,
         createdBy: actorId,
         postingKind: "closing",
+        // The closing entry mirrors the year's own attribution (issue #868):
+        // a dimension value archived after the year's postings must not stop
+        // the year from closing. The database's structural guards still apply.
+        dimensionMirror: true,
       });
     } catch (err) {
       const code = fiscalPeriodLockErrorCode(err);
@@ -237,7 +249,7 @@ export async function closeFiscalYear(
           before: { status: "soft_closed" },
           after: { status: "locked", lockedAt: period.locked_at },
           closingEntryId,
-          netIncome: calculated.netIncome.toString(),
+          netIncome: netIncome.toString(),
           finalClose: true,
         },
       });
@@ -251,7 +263,7 @@ export async function closeFiscalYear(
     );
     if (!closedYears[0]) throw new FiscalPeriodError("fiscal_year_already_closed", 409);
 
-    const exactNetIncome = calculated.netIncome.toString();
+    const exactNetIncome = netIncome.toString();
     await writeClosingAudit(client, {
       businessId,
       actorId,

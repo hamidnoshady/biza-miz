@@ -18,6 +18,7 @@ import {
 import { decorateAiConfigWithState } from "@/lib/ai-runtime";
 import {
   BusinessLocationMismatchError,
+  GatewayCredentialError,
   GatewayProvisioningError,
   getAiGatewayConfig,
   getAiGatewayRuntimeSettings,
@@ -38,6 +39,7 @@ import {
 import {
   isGatewayActive,
   resolveChatModel,
+  resolveEffectiveCredentialSource,
   validateGatewayInput,
   type BusinessGateway,
   type AiGatewayInput,
@@ -221,6 +223,9 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     credentialSource: "branch" | "business" | "master" | "none";
     businessHasKey: boolean;
     branchHasKey: boolean | null;
+    /** A credential is stored but this deployment cannot decrypt it (issue #757 §B). */
+    businessCredentialUndecryptable: boolean;
+    branchCredentialUndecryptable: boolean;
     inheritedFromBusiness: boolean;
     effectiveModel: string;
     lastVerifiedAt: string | null;
@@ -237,26 +242,37 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
       : null;
     const decorated = decorateAiConfigWithState(platform, gateway, businessRow, branchRow, focusBusinessId);
     const readiness = getAiRuntimeReadiness(decorated);
-    const businessHasKey = Boolean(businessRow?.virtualKey);
-    const branchHasKey = focusLocationId ? Boolean(branchRow?.virtualKey) : null;
-    const credentialSource: "branch" | "business" | "master" | "none" = !isGatewayActive(gateway)
-      ? "none"
-      : gateway.virtualKeysEnabled
-        ? branchRow?.virtualKey
-          ? "branch"
-          : businessRow?.virtualKey
-            ? "business"
-            : "none"
-        : gateway.masterKey
-          ? "master"
-          : "none";
-    const credentialRow = !isGatewayActive(gateway) || !gateway.virtualKeysEnabled
-      ? null
-      : branchRow?.virtualKey
-        ? branchRow
-        : businessRow?.virtualKey
-          ? businessRow
-          : null;
+    // "Has a key" means a credential is stored, independent of whether this
+    // deployment can currently decrypt it — a stored-but-undecryptable row
+    // must never read as "never provisioned" (issue #757 §B).
+    // "Has a key" describes what is STORED, independent of whether this
+    // deployment can currently decrypt it — a stored-but-undecryptable row
+    // must never read as "never provisioned" (issue #757 §B). This is
+    // reported separately from which credential is actually EFFECTIVE below:
+    // folding the two together is exactly what used to make an unreadable
+    // branch credential outrank a perfectly usable business key.
+    const businessHasKey = businessRow?.credentialState !== undefined && businessRow?.credentialState !== "absent";
+    const branchHasKey = focusLocationId
+      ? branchRow?.credentialState !== undefined && branchRow?.credentialState !== "absent"
+      : null;
+    const businessCredentialUndecryptable = businessRow?.credentialState === "undecryptable";
+    const branchCredentialUndecryptable = branchRow?.credentialState === "undecryptable";
+    // The credential actually in effect for a call: the SAME decision
+    // `resolveGatewayAuthKey` makes for the live request path, so the
+    // console can never claim a different source than the one a request
+    // would really use. A branch row with an undecryptable credential has
+    // `virtualKey === null`, exactly like a branch with no row at all, so it
+    // is correctly skipped here in favour of a usable business key.
+    const effective = isGatewayActive(gateway)
+      ? resolveEffectiveCredentialSource({
+          gateway,
+          business: businessRow,
+          branch: focusLocationId ? branchRow : null,
+          tenantScoped: true,
+        })
+      : { source: "none" as const, row: null };
+    const credentialSource = effective.source;
+    const credentialRow = effective.row;
     const businessSyncError = businessRow?.syncError ?? null;
     const branchSyncError = branchRow?.syncError ?? null;
     branchReadiness = {
@@ -267,8 +283,9 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
       credentialSource,
       businessHasKey,
       branchHasKey,
-      inheritedFromBusiness:
-        gateway.virtualKeysEnabled && Boolean(focusLocationId) && !branchHasKey && businessHasKey,
+      businessCredentialUndecryptable,
+      branchCredentialUndecryptable,
+      inheritedFromBusiness: credentialSource === "business" && Boolean(focusLocationId),
       effectiveModel: resolveChatModel({ platformModel: platform.model, gateway, business: businessRow, branch: branchRow }),
       lastVerifiedAt: credentialRow?.syncedAt ?? null,
       businessSyncError,
@@ -345,21 +362,39 @@ export const PUT = withPlatformScope(async (request: NextRequest) => {
     const merged = mergeGatewayConfig(input, current);
     const errors = validateGatewayInput(merged);
     if (errors.length > 0) return NextResponse.json({ error: errors[0], errors }, { status: 400 });
-    const saved = await saveAiGatewayConfig(input);
-    await platformAudit({
-      adminId: session.padmin,
-      action: "ai.gateway.save",
-      entity: "platform_ai_gateway",
-      entityId: "true",
-      payload: {
-        enabled: saved.enabled,
-        baseUrl: saved.baseUrl,
-        chatModel: saved.chatModel,
-        embeddingModel: saved.embeddingModel,
-        virtualKeysEnabled: saved.virtualKeysEnabled,
-      },
-    });
-    return NextResponse.json({ gateway: toPublicAiGatewayConfig(saved) });
+    // Issue #757 §B — replacing a credential this deployment cannot decrypt
+    // is an explicit decision (the old one may still be live in LiteLLM), so
+    // it needs the operator's confirmation, not an ordinary settings save.
+    const confirmCredentialReplacement = body.confirmCredentialReplacement === true;
+    try {
+      const saved = await saveAiGatewayConfig(input, { confirmCredentialReplacement });
+      await platformAudit({
+        adminId: session.padmin,
+        action: "ai.gateway.save",
+        entity: "platform_ai_gateway",
+        entityId: "true",
+        payload: {
+          enabled: saved.enabled,
+          baseUrl: saved.baseUrl,
+          chatModel: saved.chatModel,
+          embeddingModel: saved.embeddingModel,
+          virtualKeysEnabled: saved.virtualKeysEnabled,
+        },
+      });
+      return NextResponse.json({ gateway: toPublicAiGatewayConfig(saved) });
+    } catch (err) {
+      if (err instanceof GatewayCredentialError) {
+        await platformAudit({
+          adminId: session.padmin,
+          action: "ai.gateway.save_blocked_undecryptable_credential",
+          entity: "platform_ai_gateway",
+          entityId: "true",
+          payload: { code: err.code },
+        });
+        return NextResponse.json({ error: err.code, detail: err.detail }, { status: 409 });
+      }
+      throw err;
+    }
   }
 
   return NextResponse.json({ error: "bad_request" }, { status: 400 });
@@ -421,6 +456,12 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     } catch (err) {
       if (err instanceof BusinessLocationMismatchError) {
         return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      if (err instanceof GatewayCredentialError) {
+        // A stored credential exists but cannot be decrypted (issue #757
+        // §B). A 409 — this is a state conflict needing operator recovery,
+        // not a transient remote failure a retry would fix on its own.
+        return NextResponse.json({ error: err.code, detail: err.detail }, { status: 409 });
       }
       if (err instanceof GatewayProvisioningError) {
         return NextResponse.json({ error: err.code, detail: err.detail }, { status: 502 });
@@ -498,6 +539,20 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     } catch (err) {
       if (err instanceof BusinessLocationMismatchError) {
         return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      if (err instanceof GatewayCredentialError) {
+        // The stored credential could not be decrypted and could not be
+        // confirmed-revoked by alias either (issue #757 §B) — rotation
+        // refused rather than risk an orphaned credential.
+        await platformAudit({
+          adminId: session.padmin,
+          businessId,
+          action: "ai.gateway.key.rotate_failed",
+          entity: "ai_business_gateway",
+          entityId: locationId ? `${businessId}:${locationId}` : businessId,
+          payload: { locationId, error: err.code, detail: err.detail },
+        });
+        return NextResponse.json({ error: err.code, detail: err.detail }, { status: 409 });
       }
       if (err instanceof GatewayProvisioningError) {
         // Rotation may fail either at the revoke step (old key + row both

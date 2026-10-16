@@ -55,7 +55,7 @@ The rest of the workspace has these responsibilities:
 | خرید و انبار | inventory, products and industry-specific trade entries |
 | عملیات | the industry’s canonical operations screens, such as floor, kitchen, reservations and delivery |
 | اشخاص | the one directory (`/accounting/directory`) and its `?view=` links |
-| **فضای کار حسابداری** | ONE ordinary link to the workspace page `/accounting/ledger`, which lists the permitted ledger tools (trial balance, journal, manual entry, chart of accounts, accounting dimensions, receivables, payables, receipts/payments, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll) under four named divisions |
+| **فضای کار حسابداری** | ONE ordinary link to the workspace page `/accounting/ledger`, which lists the permitted ledger tools (trial balance, journal, voucher numbering, manual entry, chart of accounts, accounting dimensions, receivables, payables, receipts/payments, financial accounts, internal transfers, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll) under four named divisions |
 | گزارش و تحلیل | financial reports (`/accounting/financial-reports`), business reports (`/accounting/reports`), growth/marketing |
 | پیکربندی | business settings, technical connections, credit and billing |
 
@@ -81,10 +81,10 @@ so the sidebar has one spelling of a row instead of one per menu.
 
   | division | sections |
   | --- | --- |
-  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، ارز و تسعیر، سرفصل حساب‌ها، ابعاد حسابداری |
-  | دریافتنی و پرداختنی | دریافتنی، پرداختنی، اقساط، چک‌ها |
-  | وجوه و هزینه | دریافت و پرداخت، هزینه‌ها، تطبیق بانکی، دارایی ثابت |
-  | دوره، مالیات و حقوق | دوره‌های مالی، مالیات، حقوق و دستمزد |
+  | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، اسناد و شماره‌گذاری، ثبت سند دستی، ارز و تسعیر، سرفصل حساب‌ها، ابعاد حسابداری |
+  | دریافتنی و پرداختنی | حساب‌های دریافتنی، حساب‌های پرداختنی، اقساط، چک‌ها |
+  | وجوه و هزینه | دریافت و پرداخت، حساب‌های مالی، انتقال وجه، هزینه‌ها، تطبیق بانکی، دارایی‌های ثابت |
+  | دوره، مالیات و حقوق | دوره‌های مالی، ترازات افتتاحیه، گزارش مالیات، صورتحساب مؤدیان، حقوق و دستمزد |
 
   They are an *arrangement* of `LEDGER_WORKSPACE_SECTION_KEYS`, never a second
   list: `ledgerWorkspaceToolGroups()` builds the page from
@@ -107,6 +107,37 @@ division («دفتر و اسناد»، «وجوه و هزینه»…) after its 
 above it from `sm` up (`accounting-manager.tsx`); the workspace page, the
 overview, the directory and the reports pages render as plain pages. That chip
 row is navigation between sibling tools, not a second copy of the menu.
+
+### The money containers and their transfers
+
+«حساب‌های مالی» and «انتقال وجه» are the ledger's operational register for the
+money the business actually holds: bank accounts, cash boxes, petty cash and
+POS/PSP settlement accounts (`financial_accounts`), and the document that moves
+money between two of them (`financial_transfers`, migration `0224_…`, issue
+#862). They sit in the funds division because they are the containers the
+receipts and expenses beside them pay into and out of.
+
+Three rules keep them inside the one accounting engine rather than beside it:
+
+- **One container, one postable GL account.** `uq_financial_accounts_gl_account`
+  makes the link unique, so two containers can never display the same
+  chart-of-accounts balance; a container may only point at a leaf, active,
+  correctly-typed account.
+- **No balances of their own.** Nothing caches a container's money: the register,
+  the account card, the balance summary and the exports all sum `journal_lines`
+  of the linked account, and the card prints its own closing figure beside that
+  ledger balance rather than instead of it.
+- **Transfers post like any other document.** Amount and fee are one balanced
+  `postExactJournalEntry` inside one transaction, idempotent by key and refused
+  across branches, tenants, currencies or closed periods; a correction is an
+  append-only reversal entry that references the original, and an account with
+  history is archived, never deleted.
+
+What they deliberately do *not* own: bank reconciliation (#830) and the
+receipt/payment, expense and payroll documents (#829, #832, #835). Those keep
+their own flows and consume this model through
+`/api/ledger/financial-accounts/payment-sources` instead of re-deriving which
+container money came from.
 
 ### Where the business entries come from
 
@@ -267,7 +298,9 @@ balance and one file.
   `LEDGER_WORKSPACE_SUBGROUPS`). It then appears on the
   «فضای کار حسابداری» page (`/accounting/ledger`) at its canonical URL; the
   sidebar does not list it. `accounting-workspace.test.ts` must still prove
-  every section has an intended home.
+  every section has an intended home, and `accounting-workspace-ia.test.ts`
+  proves the divisions table on this page still matches them — update the table
+  above when it does not.
 - **Business page adopted by Accounting:** add its **canonical** href to
   `WORKSPACE_GROUP_SLOTS`. Do not duplicate its gating; the composer receives
   the shell’s already-filtered nav.
@@ -284,3 +317,20 @@ balance and one file.
 - Inventory’s distinct underlying data models and their posting safeguards.
 - Dashboard surfaces that are not in the retirement table, such as
   `/dashboard/orders`.
+
+
+## Commission settlement boundary (#869 completion, 2026-10-15)
+
+Commission approval and standalone payouts remain in Growth at `/growth/commission/runs`
+and `/growth/commission/runs/[id]`; they are not another payroll engine or Accounting menu.
+Their journals link to the existing journal workspace, and seller statements link sales,
+standalone runs and the canonical payroll workspace. Legacy payroll sources use
+`/accounting/payroll?run=<id>`: the existing Accounting page/section gates remain intact,
+and the source panel fetches the exact run through the existing `payroll.view` API,
+not from the first history page. It opens immutable lines read-only, aborts/ignores stale
+responses, and shows explicit missing/foreign/error/retry states. It does not select an
+engine run or create a second payroll navigation item. The normal monthly workspace
+and its permitted mutation controls remain unchanged.
+Both payroll and Growth reconcile against account 2300 through the existing tenant-scoped
+read-only snapshot helper. A real difference stays visible. See
+[commission settlement](commission-settlement.md) for exact contracts and outstanding gates.

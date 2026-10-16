@@ -52,6 +52,8 @@ import {
   ruleSetFor,
   type CostAllocationShare,
 } from "./payroll-engine-setup";
+import { allocationTupleKey } from "./payroll-dimensions";
+import type { LineDimensions } from "./accounting-dimensions";
 import {
   accrualPostingSides,
   allocateExact,
@@ -774,7 +776,8 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
       `SELECT u.id AS user_id, u.full_name, COALESCE(p.payroll_code, e.employee_code) AS code, p.base_salary::text AS base_salary,
               p.hire_date::text AS hire_date, p.termination_date::text AS termination_date,
               COALESCE((p.insurance_profile->>'insured')::boolean, true) AS insured,
-              COALESCE((p.tax_profile->>'exempt')::boolean, false) AS tax_exempt, p.cost_allocation
+              COALESCE((p.tax_profile->>'exempt')::boolean, false) AS tax_exempt, p.cost_allocation,
+              e.cost_center_id, e.profit_center_id, e.department_id, e.detail_dimension_id
          FROM payroll_employee_profiles p
          JOIN users u ON u.id = p.user_id AND u.business_id = p.business_id
          LEFT JOIN employees e ON e.id = u.id
@@ -867,7 +870,26 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
         if (err instanceof PayrollCalcError) throw new PayrollError(err.message, 400, { field: err.field ?? emp.user_id, userId: emp.user_id });
         throw err;
       }
-      const shares = emp.cost_allocation ?? [];
+      // Issue #868 — an unallocated payslip goes whole to the employee's
+      // default dimension tuple when one is configured; with none, it stays in
+      // the undimensioned bucket exactly as before. The snapshot records what
+      // was applied, so later default changes never touch a posted run.
+      const defaultDimensions = {
+        cost_center: emp.cost_center_id ?? undefined,
+        profit_center: emp.profit_center_id ?? undefined,
+        department: emp.department_id ?? undefined,
+        detail: emp.detail_dimension_id ?? undefined,
+      };
+      const hasDefault = Boolean(
+        defaultDimensions.cost_center || defaultDimensions.profit_center ||
+        defaultDimensions.department || defaultDimensions.detail,
+      );
+      const shares: CostAllocationShare[] =
+        (emp.cost_allocation ?? []).length > 0
+          ? (emp.cost_allocation ?? [])
+          : hasDefault
+            ? [{ percent: 100, ...defaultDimensions }]
+            : [];
       const parts = shares.length > 0 ? allocateExact(slip.employerCost, shares.map((s) => s.percent)) : [];
       const allocation = shares.map((s, i) => ({ ...s, amount: parts[i].toString() }));
       const sum = (key: PayslipLine["systemKey"]) => slip.lines.filter((l) => l.systemKey === key).reduce((s, l) => s + l.amount, 0n);
@@ -946,36 +968,58 @@ export async function approveEngineRun(params: { businessId: string; runId: stri
 }
 
 /** The accrual, from the frozen payslips. Idempotent: a posted run answers `already_posted`, and the source key is unique. */
-/** One accrual journal entry's slice: a branch × project bucket and the payslip shares charged to it. */
+/** One accrual journal entry's slice: a branch × project × dimension-tuple bucket and the payslip shares charged to it. */
 interface AccrualBucket {
   postingKind: string;
   locationId: string | null;
   projectId: string | null;
+  /** Issue #868 — the accounting dimension tuple the bucket's expense legs carry. */
+  dimensions: LineDimensions;
   parts: PostablePayslip[];
+}
+
+function shareDimensions(share: CostAllocationShare): LineDimensions {
+  const dimensions: LineDimensions = {};
+  if (share.costCenterId) dimensions.cost_center = share.costCenterId;
+  if (share.profitCenterId) dimensions.profit_center = share.profitCenterId;
+  if (share.departmentId) dimensions.department = share.departmentId;
+  if (share.detailDimensionId) dimensions.detail = share.detailDimensionId;
+  return dimensions;
 }
 
 /**
  * Splits payslips into cost-allocation buckets. Each payslip is divided exactly
  * by its own allocation snapshot (`allocatePayslip` — every line and the debt
  * split to the Rial, net derived per share so each share balances); an
- * unallocated payslip goes whole to the undimensioned bucket. Buckets are
- * ordered by key so posting order — and so entry ids order — is deterministic.
+ * unallocated payslip goes whole to the undimensioned bucket. A share's
+ * accounting dimensions (issue #868) are part of its bucket: two shares of one
+ * branch that name different cost centres post two entries, each stamped with
+ * its own tuple. Buckets are ordered by key so posting order — and so entry ids
+ * order — is deterministic.
  */
 function accrualBuckets(
   payslips: ReadonlyArray<PostablePayslip & { costAllocation: readonly CostAllocationShare[] }>,
 ): AccrualBucket[] {
   const buckets = new Map<string, AccrualBucket>();
-  const bucketFor = (locationId: string | null, projectId: string | null) => {
-    const postingKind = `alloc:${locationId ?? "-"}:${projectId ?? "-"}`;
+  const bucketFor = (locationId: string | null, projectId: string | null, dimensions: LineDimensions) => {
+    const tuple = allocationTupleKey(dimensions);
+    // An unattributed bucket keeps its historical key (idempotent replays of
+    // pre-#868 runs find the entry they posted); a dimensioned bucket adds the
+    // tuple, so distinct tuples never share one posting identity.
+    const postingKind = tuple === allocationTupleKey({}) ? `alloc:${locationId ?? "-"}:${projectId ?? "-"}` : `alloc:${locationId ?? "-"}:${projectId ?? "-"}:${tuple}`;
     let bucket = buckets.get(postingKind);
-    if (!bucket) buckets.set(postingKind, (bucket = { postingKind, locationId, projectId, parts: [] }));
+    if (!bucket) buckets.set(postingKind, (bucket = { postingKind, locationId, projectId, dimensions, parts: [] }));
     return bucket;
   };
   for (const slip of payslips) {
     const shares = slip.costAllocation;
     const parts = allocatePayslip(slip, shares.map((s) => s.percent));
-    if (shares.length === 0) bucketFor(null, null).parts.push(parts[0]);
-    else shares.forEach((share, i) => bucketFor(share.locationId ?? null, share.projectId ?? null).parts.push(parts[i]));
+    if (shares.length === 0) bucketFor(null, null, {}).parts.push(parts[0]);
+    else {
+      shares.forEach((share, i) =>
+        bucketFor(share.locationId ?? null, share.projectId ?? null, shareDimensions(share)).parts.push(parts[i]),
+      );
+    }
   }
   return [...buckets.values()].sort((x, y) => x.postingKind.localeCompare(y.postingKind));
 }
@@ -1026,7 +1070,14 @@ export async function postEngineRun(params: { businessId: string; runId: string;
           sourceType: "payroll_engine_accrual",
           sourceId: run.id,
           createdBy: params.actorId,
-          lines: sides.map((s) => ({ accountId: accounts.get(s.accountCode)!, debit: asRial(s.debit), credit: asRial(s.credit) })),
+          lines: sides.map((s) => ({
+            accountId: accounts.get(s.accountCode)!,
+            debit: asRial(s.debit),
+            credit: asRial(s.credit),
+            // Issue #868 — expense legs carry the bucket's tuple; payables and
+            // the staff-debt leg stay unattributed.
+            dimensions: s.expense ? bucket.dimensions : null,
+          })),
         });
       if (entryId) entryIds.push(entryId);
     }

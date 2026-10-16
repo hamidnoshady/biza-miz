@@ -204,10 +204,10 @@ function CreateRunCard({ onCreated }: { onCreated: (runId: string) => void }) {
           </InfoBox>
         ) : null}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="از تاریخ">
+          <Field as="div" label="از تاریخ">
             <JalaliDatePicker value={periodFrom} onChange={setPeriodFrom} ariaLabel="از تاریخ دوره" />
           </Field>
-          <Field label="تا تاریخ">
+          <Field as="div" label="تا تاریخ">
             <JalaliDatePicker value={periodTo} onChange={setPeriodTo} ariaLabel="تا تاریخ دوره" />
           </Field>
           <Field label="شعبه">

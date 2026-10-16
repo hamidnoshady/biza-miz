@@ -626,3 +626,21 @@ describe("who can see and write a business-scope event", () => {
     expect(await countEvents(t, PAYOUT_EVENT)).toBe(0);
   });
 });
+
+describe("snapshot reporting retains the runtime role's RLS scope", () => {
+  it("reads its own position but cannot read another tenant even with that tenant's explicit ids", async () => {
+    const t = await newTenant();
+    const other = await newTenant();
+    await accrue(t, 100_000);
+    await accrue(other, 200_000);
+    await withTenant(t.id, async () => {
+      const role = await dbLib.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+        "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user");
+      expect(role.rows[0]).toEqual({ rolsuper: false, rolbypassrls: false });
+      expect(await settlement.getCommissionLiability(t.id)).toMatchObject({ accruedTotal: "5000", difference: "0" });
+      expect(await settlement.getCommissionLiability(other.id)).toMatchObject({ accruedTotal: "0", ledgerBalance: "0" });
+      expect((await settlement.getCommissionStatement(t.id, t.sellerA, { limit: 1 })).totals.accrued).toBe("5000");
+      await expect(settlement.getCommissionStatement(other.id, other.sellerA)).rejects.toThrow("employee_not_found");
+    });
+  });
+});

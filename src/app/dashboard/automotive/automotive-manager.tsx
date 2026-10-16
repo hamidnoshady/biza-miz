@@ -22,6 +22,7 @@ import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from ".
 import { FilterChip, FilterChipRow, FilterToolbar, FilterToolbarSearch, SearchField } from "../filters";
 import { VEHICLE_STATE_LABELS, VEHICLE_CONDITION_LABELS, VEHICLE_STATES, type VehicleState } from "@/lib/automotive";
 import { VehicleDetailDialog } from "./vehicle-detail-dialog";
+import { AutomotiveOfflineBoard } from "./offline-board";
 import { formatJalali } from "@/lib/jalali";
 import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { JalaliDatePicker } from "../jalali-date-picker";
@@ -30,7 +31,7 @@ import { PaymentWays, usePaymentMethods } from "../payment-ways";
 import { emptyPaymentDraft, paymentDraftBody, type PaymentDraft } from "@/lib/payment-draft";
 import { ledgerSettlementFor } from "@/lib/payment-methods";
 
-type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "leads" | "expenses";
+type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "leads" | "expenses" | "offline";
 
 const TABS: readonly ManagerTab<SectionKey>[] = [
   { key: "overview", label: "نمای کلی" },
@@ -40,6 +41,9 @@ const TABS: readonly ManagerTab<SectionKey>[] = [
   { key: "sales", label: "فروش خودرو" },
   { key: "leads", label: "مشتریان و سرنخ‌ها" },
   { key: "expenses", label: "هزینهٔ خودرو" },
+  // Issue #839 §19 — what this install may do with a car while the cloud is
+  // out of reach: the read-only mirror, the queued requests and their answers.
+  { key: "offline", label: "موجودی همگام‌شده" },
 ];
 
 const STATE_TONE: Partial<Record<VehicleState, "active" | "positive" | "neutral" | "danger">> = {
@@ -649,6 +653,15 @@ export function AutomotiveManager({
       {section === "expenses" ? (
         <div role="tabpanel" id="automotive-panel-expenses" aria-labelledby="automotive-tab-expenses">
           <ExpensesSection vehicles={workflowVehicles} vehiclesLoading={workflowLoading} canRecord={canRecordCost} run={run} />
+        </div>
+      ) : null}
+
+      {section === "offline" ? (
+        <div role="tabpanel" id="automotive-panel-offline" aria-labelledby="automotive-tab-offline">
+          {/* Opening a mirrored car reuses the ordinary detail dialog: on a
+              paired site the vehicle screens read the cloud, which is exactly
+              what the clerk is looking at when the board is stale. */}
+          <AutomotiveOfflineBoard onOpenVehicle={(id) => setSelectedVehicleId(id)} />
         </div>
       ) : null}
       {selectedVehicleId ? (
