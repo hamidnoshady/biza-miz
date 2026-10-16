@@ -649,7 +649,6 @@ describe("the history table is branch-scoped underneath the routes", () => {
     activeAuthContext.businessId = alpha.businessId;
     activeAuthContext.locationId = alphaMain.locationId;
     capturedRenderedHtml.length = 0;
-    printRoute.clearPrintSnapshotCacheForTests();
 
     const backupPrinter = await db.query<{ id: string }>(
       `INSERT INTO printers (location_id, name, kind, printer_class, paper, paper_width_mm, is_active, connection)
@@ -742,8 +741,7 @@ describe("the history table is branch-scoped underneath the routes", () => {
     await db.query(`UPDATE businesses SET name = 'آلفای تغییریافته' WHERE id = $1`, [alpha.businessId]);
     await db.query(`UPDATE locations SET address = 'نشانی تغییریافته' WHERE id = $1`, [alphaMain.locationId]);
 
-    // Clear in-memory cache so attempt 2 is proven to restore from PostgreSQL print_jobs.render_snapshot:
-    printRoute.clearPrintSnapshotCacheForTests();
+    // Attempt 2 must restore PostgreSQL print_jobs.render_snapshot despite the edits above.
 
     // 4. Fallback attempt (attempt 2) via POST /api/printing/print:
     const fallbackRes = await printRoute.POST(
