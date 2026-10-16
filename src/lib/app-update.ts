@@ -56,9 +56,21 @@ export function currentDesktopIdentity(channelOverride?: DesktopReleaseChannel):
   };
 }
 
-/** Kept for health diagnostics; update ordering must use currentDesktopIdentity().version. */
+const PACKAGE_VERSION = "0.1.0";
+
+/** Kept for health diagnostics and MCP serverInfo.version; update ordering must use currentDesktopIdentity().version. */
 export function currentAppVersion(): string {
-  return currentDesktopIdentity().version;
+  const desktop = currentDesktopIdentity();
+  if (desktop.version !== "unknown") return desktop.version;
+  const baseVersion =
+    (parseSemVer(process.env.npm_package_version?.trim() ?? "")
+      ? process.env.npm_package_version!.trim()
+      : null) ?? PACKAGE_VERSION;
+  const sha =
+    shaOrNull(process.env.APP_BUILD_COMMIT) ??
+    shaOrNull(process.env.APP_IMAGE_SHA) ??
+    shaOrNull(process.env.GIT_COMMIT);
+  return sha ? `${baseVersion}+${sha.slice(0, 7)}` : baseVersion;
 }
 
 export interface UpdateCheckResponse {
