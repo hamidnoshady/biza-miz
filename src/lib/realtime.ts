@@ -4,10 +4,24 @@
  * `registerConnection`; API route handlers call `broadcast` after a mutation
  * commits so every connected cashier/waiter/KDS screen updates within ~1s.
  *
- * A connection pinned to a location (`locationId` set) receives that
- * location's events; an all-locations connection (a null `locationId`: an
- * owner or a roaming manager) receives every location *of its own business*.
- * Covered by realtime.test.ts against a stand-in socket.
+ * Every connection carries the set of branches whose events it may receive,
+ * decided by the same authorization every route uses (`authorize` and
+ * `actionableLocationIds` in authorize.ts — membership, business status and
+ * branch scope, including a Hybrid site's local branch restriction):
+ *
+ * - a connection pinned to a branch (`session.locationId` set) receives that
+ *   branch's events, and only while the member may still act in it;
+ * - a connection with no pinned branch (an owner, or a member with no home
+ *   branch) receives the branches of its own business that its scope reaches —
+ *   all of them for an owner or an `all` scope, the selected ones for a
+ *   `selected` scope, none for `none`.
+ *
+ * The set is resolved before the socket is accepted (server.ts refuses the
+ * upgrade otherwise), recomputed on every re-authorization, and emptied the
+ * moment a re-check fails, so a socket never receives events on a stale or
+ * unresolved scope. Covered by realtime.test.ts against a stand-in socket and by
+ * integration/realtime-session-854.integration.test.ts under an unprivileged
+ * database role.
  */
 import type { WebSocket } from "ws";
 import type { SessionPayload } from "./auth";
@@ -30,13 +44,11 @@ interface Connection {
   ws: WebSocket;
   session: SessionPayload;
   /**
-   * For an all-locations connection, the ids of its own business's
-   * locations — what `broadcast` matches it against. Empty until the first
-   * load answers (so it receives nothing rather than everything), and
-   * reloaded on every re-authorization, which is how a branch opened after
-   * the socket starts reaching it. Unused for a pinned connection.
+   * The branches whose events this connection may receive right now — what
+   * `broadcast` matches against. Replaced on every re-authorization and emptied
+   * before a socket is closed for a failed or refused re-check.
    */
-  businessLocationIds: ReadonlySet<string>;
+  allowedLocationIds: ReadonlySet<string>;
 }
 
 // Cached on globalThis so dev-mode hot reload of this module doesn't spawn a
@@ -47,40 +59,60 @@ const connections = globalForRt.rtConnections ?? (globalForRt.rtConnections = ne
 /** How often an open socket is authenticated and authorized again. */
 export const REAUTH_INTERVAL_MS = 30_000;
 
-/** Every location of one business, read inside that business's own tenant scope. */
-async function loadBusinessLocationIds(businessId: string): Promise<Set<string>> {
-  const { query, withTenant } = await import("./db");
-  const { rows } = await withTenant(businessId, () =>
-    query<{ id: string }>("SELECT id FROM locations WHERE business_id = $1", [businessId]),
-  );
-  return new Set(rows.map((row) => row.id));
+const NOTHING: ReadonlySet<string> = new Set();
+
+/** What a session may receive on the live channel, or why it may not open one. */
+export type RealtimeScope =
+  | { ok: true; session: SessionPayload; locationIds: ReadonlySet<string> }
+  | { ok: false; status: 401 | 403 };
+
+/**
+ * Decides which branches' events `session` may receive, from the database, now.
+ *
+ * A pinned session asks `authorize` about its branch (`canActInLocation`): the
+ * branch must be an active branch of the member's own business that the
+ * member's scope reaches, or the socket is refused — an unauthorized pinned
+ * branch never receives anything. A session with no pinned branch receives
+ * `actionableLocationIds`: every branch the member may act in, which never
+ * includes another business's. A throw (a failed read) propagates; callers
+ * fail closed on it.
+ */
+export async function resolveRealtimeScope(session: SessionPayload): Promise<RealtimeScope> {
+  const { authorize, actionableLocationIds } = await import("./authorize");
+  const pinned = session.locationId ?? null;
+  const decision = await authorize(session, pinned ? { locationId: pinned } : {});
+  if (!decision.ok) return { ok: false, status: decision.status === 401 ? 401 : 403 };
+  const locationIds = pinned ? new Set([pinned]) : new Set(await actionableLocationIds(decision.membership));
+  return { ok: true, session: decision.session, locationIds };
 }
 
 /**
  * Registers an upgraded socket. `token` is the session cookie it was opened
- * with: the upgrade authenticated it once, and every re-authorization
- * authenticates it again exactly as an HTTP request is authenticated
- * (`resolveSessionFromToken`: signature and expiry, the support grant, the
- * `employee_sessions` row, the identity's token version, the native device).
- * Until the #854 follow-up the re-check looked only at the membership, so a
- * socket opened before «خروج» — or before the session was ended from the
- * security center, or a support grant ended — kept receiving the business's
- * live events for as long as it stayed open.
+ * with and `locationIds` the scope `resolveRealtimeScope` granted it at the
+ * upgrade.
+ *
+ * Every re-authorization authenticates the token again exactly as an HTTP
+ * request is authenticated (`resolveSessionFromToken`: signature and expiry, the
+ * support grant, the `employee_sessions` row, the identity's token version, the
+ * native device) and then re-decides the scope, so a socket follows «خروج», a
+ * session ended from the security center, a closed support grant, a suspended
+ * membership and a changed branch assignment within one interval.
  */
-export function registerConnection(ws: WebSocket, session: SessionPayload, token: string): void {
-  const conn: Connection = { ws, session, businessLocationIds: new Set() };
+export function registerConnection(
+  ws: WebSocket,
+  session: SessionPayload,
+  token: string,
+  locationIds: ReadonlySet<string>,
+): void {
+  const conn: Connection = { ws, session, allowedLocationIds: new Set(locationIds) };
   connections.add(conn);
   ws.on("close", () => connections.delete(conn));
   ws.on("error", () => connections.delete(conn));
 
-  const allLocations = session.locationId === null;
-  const refreshLocations = async () => {
-    if (allLocations) conn.businessLocationIds = await loadBusinessLocationIds(conn.session.businessId);
+  const end = (code: number, reason: string) => {
+    conn.allowedLocationIds = NOTHING;
+    ws.close(code, reason);
   };
-  refreshLocations().catch((error: unknown) => {
-    console.error("WebSocket location scope failed to load", error);
-    ws.close(1011, "Authorization Check Failed");
-  });
 
   // Long-lived channels re-authenticate the token and re-authorize against
   // current membership and branch state; JWT role claims are never trusted
@@ -90,20 +122,19 @@ export function registerConnection(ws: WebSocket, session: SessionPayload, token
       const { resolveSessionFromToken } = await import("./auth");
       const current = await resolveSessionFromToken(token);
       if (!current) {
-        ws.close(1008, "Session Ended");
+        end(1008, "Session Ended");
         return;
       }
-      const { authorize } = await import("./authorize");
-      const decision = await authorize(current, { locationId: current.locationId });
-      if (!decision.ok) {
-        ws.close(1008, "Authorization Revoked");
+      const scope = await resolveRealtimeScope(current);
+      if (!scope.ok) {
+        end(1008, "Authorization Revoked");
         return;
       }
-      conn.session = decision.session;
-      await refreshLocations();
+      conn.session = scope.session;
+      conn.allowedLocationIds = scope.locationIds;
     } catch (error) {
-      console.error("WebSocket re-authorization failed", error);
-      ws.close(1011, "Authorization Check Failed");
+      console.error("WebSocket re-authorization failed", error instanceof Error ? error.message : "unknown error");
+      end(1011, "Authorization Check Failed");
     }
   }, REAUTH_INTERVAL_MS);
   interval.unref();
@@ -116,6 +147,7 @@ export function disconnectMember(businessId: string, userId: string, reason = "A
   let closed = 0;
   for (const connection of connections) {
     if (connection.session.businessId !== businessId || connection.session.sub !== userId) continue;
+    connection.allowedLocationIds = NOTHING;
     connection.ws.close(1008, reason);
     connections.delete(connection);
     closed += 1;
@@ -124,18 +156,17 @@ export function disconnectMember(businessId: string, userId: string, reason = "A
 }
 
 /**
- * Sends `event` to every connection pinned to `locationId` and to every
- * all-locations connection of the business that owns it. Location ids are
- * unique, so the pinned match was always exact; an all-locations connection
- * used to match every location on the server, which on a central server
- * hosting several businesses handed one owner every other business's order,
- * table and low-stock events.
+ * Sends `event` to every connection whose current scope includes `locationId`.
+ * Location ids are unique across businesses, and a scope only ever holds
+ * branches of the connection's own business, so this is also the tenant
+ * boundary: an all-locations connection used to match every location on the
+ * server (#854 follow-up), and a pinned one used to be served before its branch
+ * access had been checked at all.
  */
 export function broadcast(locationId: string, event: RealtimeEvent): void {
   const payload = JSON.stringify(event);
-  for (const { ws, session, businessLocationIds } of connections) {
-    const reaches = session.locationId === null ? businessLocationIds.has(locationId) : session.locationId === locationId;
-    if (!reaches) continue;
+  for (const { ws, allowedLocationIds } of connections) {
+    if (!allowedLocationIds.has(locationId)) continue;
     if (ws.readyState === ws.OPEN) ws.send(payload);
   }
 }

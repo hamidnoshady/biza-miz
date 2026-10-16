@@ -110,7 +110,7 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.24 "trusted device" wording inaccurate | **resolved (pass 2)** | `otp_login_at` is membership-wide and the wording now says so — the Profile phone card reads «رمز عددی تا ۷ روز برای همهٔ ورودهای این عضویت کار می‌کند (نه فقط یک دستگاه)»; the security-center and login-screen copy already described the window without per-device claims. No per-device trust is claimed anywhere |
 | P2.25 resend UX for phone verification | resolved (pass 2 + pass 3) | server-side cooldown and caps (`checkPhoneOtpRateLimit`: 60 s resend, 5/hour, 20/day; the MFA challenge limiter is the twin) with `retryAfterMs` surfaced by the routes. Pass 3 finished the presentation the issue actually asks for, via one shared hook (`components/auth/use-resend-cooldown.ts`): a **live ticking countdown** seeded from the challenge's real send time (so a reload mid-window shows the honest remainder, not a fresh 60), the limiter's own `retryAfterMs` rewriting the window on a 429, the masked destination, and a live expiry line (`smsChallengeExpiryMessage`) driven by `useNowTick`. Wired into the tenant two-factor card, the platform console card, the Profile login-phone card (whose pending challenge now carries `requestedAt`), and the door's `phone-otp-step` |
 | P2.26 destructive actions confirmed | **resolved (pass 3)** | one shared product confirmation (`components/auth/security-confirm-dialog.tsx`): consequences are a required, rendered list; cancellation sends no mutation; while busy the dialog cannot be closed and both buttons disable, so a retry cannot duplicate the mutation; recent-auth stays a separate gate. It now fronts every destructive personal/membership-security action that used to be a bare `confirm()` or nothing: factor removal and recovery-code regeneration (tenant card + platform console card), the SMS-factor swap, WebAuthn credential removal, team suspension and offboarding, and the IAM card's «ترمیم از نسخهٔ ابری» and detach-to-local. Session revocation keeps its own inline confirmed panel (P1.4). Pinned by `two-factor-settings.test.tsx` and `components/auth/webauthn-manager.test.tsx` |
-| P2.27 weak device/session labels | **partly open** (pass 1; #957 third pass) | device labels are recorded on every door, and `login_method` on every door except the desktop's cloud-login callback. Pass 1 left the password door unlabelled too; #957's third pass closed that (see "The password door records its door"). The callback is listed under "Not changed, stated plainly" |
+| P2.27 weak device/session labels | **resolved** (pass 1; #957 third and fourth passes) | device labels and `login_method` are recorded on every door. Pass 1 left the password door and the desktop's cloud-login callback unlabelled; #957's third pass labelled the password door, and its fourth pass the callback (`cloud_account`, migration 0227). Before that the security center showed a cloud-account session as «پین» |
 | P2.28 personal security split across surfaces | **resolved (pass 3 + pass 4)** | `/settings/profile` is the canonical personal-security screen **including WebAuthn**: pass 3 extracted the sidebar-only biometric overlay into the reusable `components/auth/webauthn-manager.tsx` card, added it to the profile under the `webauthn_credential` credential surface (server authority unchanged — writable on every profile, read-only contract honoured), and reduced the sidebar's `BiometricSettingsButton` to a link to the profile instead of a duplicate panel. Pass 4 removed the last duplicate: the Security Center's personal phone card (its own mutation form against `/api/auth/phone/self`) is gone from the organisation screen; the Security Center now renders the organisation's MFA policy posture and links to the Profile section that owns the personal phone ceremony. One writer per surface remains: Profile for the signed-in person, Security Center for policy, Team for member administration. Pinned by `components/auth/webauthn-manager.test.tsx` and the Security Center's rendered contract |
 
 ### Second-pass gaps (GAP 1–10) mapped to findings
@@ -544,7 +544,9 @@ hosting several businesses, every owner with a screen open received every other
 business's order, table, table-session and low-stock events. Those events carry
 ids, and a low-stock event also carries the item's name and quantity.
 
-An all-locations connection now carries its own business's location ids. They
+An all-locations connection now carries its own business's location ids. (The
+fourth pass, below, narrows this to the branches the member may act in, and
+checks pinned connections too.) They
 are read inside that business's tenant scope when the socket opens, and again
 on every re-check, so a branch opened later reaches it from the next one. Until
 the first read answers, the connection receives nothing; if the read fails, the
@@ -586,19 +588,94 @@ invitation), so MFA completion now records `phone_otp`, `invitation` or
 `password` from it, and the direct password door records `password`. No
 migration: both values were already allowed.
 
-**Not changed, stated plainly.**
+**Not changed in the third pass** (both closed in the fourth pass, below):
+`createSession` wrote its row and its audit row on two connections, and the
+desktop's cloud-login callback recorded no `login_method`.
 
-- `createSession` writes its row and its `employee.session_created` audit row on
-  two connections, so an audit failure leaves an unused row. No token names that
-  row, so it cannot authenticate; it is listed until it expires and can be ended
-  from the security center. This predates the pass; making it atomic touches
-  every sign-in door.
-- The desktop's cloud-login callback records no `login_method`: none of the
-  recorded doors describes it (the person proved who they are to the cloud, not
-  to this install), and a new value would need a migration of its own. The
-  security center falls back to the credential label for those rows. This is
-  what remains of the P2.27 gap; the password door is closed (below).
-- A physical authenticator and a real SMS provider remain unverified, as above.
+### Fourth pass (2026-10-16): atomic sessions, the cloud-account door, branch-scoped live events
+
+**A session and its audit are one transaction.** `createSession`
+(`src/lib/employee-service.ts`) wrote the employee profile, the
+`employee_sessions` row and its `employee.session_created` audit row as three
+autocommits on two connections (the audit went to the pool directly). A failed
+audit write therefore left a live row that no token named: it could not
+authenticate, but Profile and the security center listed it as an active
+session with no record of who opened it. All three now run in one
+`withTenantTransaction`; inside a caller's transaction `createSession` joins it
+(`isPinnedToTransaction`) instead of opening a second one. Every door already
+answered a throw before signing a token or setting a cookie, so no door changed
+except the company hand-off.
+
+**The company hand-off's platform audit is in the same transaction.** The
+route committed the session first and wrote `platform_company.handoff.redeemed`
+afterwards: a failure there answered 500 and left an active session in the
+company that no cookie named and no platform record explained. The session, its
+audit and the platform audit (which now also names the session id) are now one
+transaction. `platform_audit_log` has no tenant column and no row-level security
+(`EXEMPT_TABLES`), so the tenant transaction's own connection can write it. If
+any of the three fails, nothing is committed and the answer is
+`503 session_unavailable` with no cookie; the redeemed token stays spent.
+
+**The desktop's cloud-account sign-in records its door.**
+`/api/auth/cloud-login/callback` recorded no `login_method`, and the security
+center labels a row with no door and no credential id «پین», so every desktop
+cloud-account session was shown as a local PIN sign-in. It now records
+`cloud_account` («ورود با حساب ابری»). Migration
+`0227_employee_session_cloud_account_login.sql` adds exactly that value to
+0226's CHECK; `SESSION_LOGIN_METHODS`, its label and every read model (the
+Profile device list via `/api/sessions/self`, the security center via
+`listActiveSessionsForBusiness`) share one list, and `session-contract.test.ts` pins it
+to the newest migration. Cloud identity readiness, member resolution, credential
+authority, MFA and revocation are untouched — the callback only says which door
+it is.
+
+**Live events follow the member's branch access.** An all-locations connection
+received every branch of its own business whatever the member's scope, so a
+member limited to selected branches with no home branch heard all of them; and
+a pinned connection was served from the moment it opened, before anyone asked
+whether the member could still act in its branch (the first check came 30
+seconds later). Now:
+
+- `resolveRealtimeScope` (`src/lib/realtime.ts`) decides what a session may hear
+  with the canonical evaluator: `authorize(session, { locationId: pinned })` —
+  `canActInLocation`, the branch check every route makes — for a pinned
+  connection, and `actionableLocationIds(membership)` for one with no pinned
+  branch. `actionableLocationIds` (`src/lib/authorize.ts`) is
+  `canActInLocation`'s decision for every branch at once: the same tenant
+  boundary, the same `accessibleLocationIds` policy over the same membership
+  context (including a Hybrid site's local branch restriction). There is no
+  second branch policy.
+- `server.ts` resolves the scope **before** the socket opens: an unauthorized
+  pinned branch or a gone membership is refused (403/401), and a failed read
+  answers 503 — an unresolved scope delivers nothing, and a refused upgrade
+  makes the client back off instead of reconnecting every second.
+- Every connection carries exactly the branches it may hear; `broadcast` matches
+  only that set, which never holds another business's branch.
+- Every 30-second re-check re-authenticates the token and re-decides the scope:
+  an added branch starts, a removed branch stops, a withdrawn pinned branch or a
+  suspended membership closes the socket (`1008 Authorization Revoked`), an ended
+  session or closed support grant closes it (`1008 Session Ended`), and a failed
+  read empties the scope and closes it (`1011`).
+
+| Requirement | Code | Tests |
+|---|---|---|
+| Session row + audit atomic | `employee-service.ts` `createSession` → `withTenantTransaction` / joins a caller's | `session-revocation-854` «createSession — the row and its audit are one transaction» (2): an audit failure rolls the row back; inside a caller's transaction nothing is visible before its commit and its rollback takes the row |
+| No usable cookie or row after a failure, per door | unchanged doors; `company-handoff` route | password and password + TOTP (`session-producers-854`, 2 cases); business switch, desktop hand-off, bootstrap, signup, company hand-off (`session-revocation-854`, each now also asserts no row and no audit row) |
+| Company hand-off platform audit atomic | `company-handoff/route.ts` | `session-revocation-854`: platform-audit failure → 503, no cookie, no session row, no audit rows, token spent; the success path's platform audit names the session |
+| Cloud-account door labelled | `0227_employee_session_cloud_account_login.sql`, `session-contract.ts`, `cloud-login/callback` | `session-contract.test.ts` (list = newest CHECK; label); `security-center-settings.test.tsx` (not «پین»); `profile-section.test.tsx`; `hybrid-credential-sync` (row records `cloud_account`) |
+| Branch scope for every connection | `authorize.ts` `actionableLocationIds`; `realtime.ts` `resolveRealtimeScope`, `registerConnection`, `broadcast`; `server.ts` upgrade | `realtime.test.ts` (18); `realtime-session-854` (9, unprivileged role): two businesses × several branches; `all`, `selected`, `home`, `none`; selected with no home; authorized and refused pinned branches; an added and a removed branch and a narrowed scope on an open socket; a withdrawn pinned branch and a suspended membership; a closed support grant; «خروج» and a security-center revocation; a real failed scope read (the role loses `SELECT` on `user_locations`) |
+
+Mutations, each restored: `createSession` back to separate autocommits fails 7
+cases; the previous company route (audit after commit) fails 2; an unpinned
+socket hearing every branch fails 4 of the 9 realtime cases; skipping the pinned
+check fails 2 (and 3 unit cases); a re-check that keeps the old scope fails 2;
+a failed re-check that stays open fails 1; reading branches across businesses
+fails 2.
+
+**Not verified here, stated plainly.** Live events were exercised on one server
+process: that each instance re-checks the sockets it holds against the shared
+database is the design, not a multi-instance run. A physical authenticator, a
+real SMS provider and a two-machine Electron hand-off remain unverified.
 
 ## Gate results in this workspace
 

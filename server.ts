@@ -102,7 +102,7 @@ app.prepare().then(async () => {
   // server bootstrap has run (inside prepare()) caches a broken internal
   // AsyncLocalStorage stub that then breaks every page render.
   const { SESSION_COOKIE, resolveSessionFromToken } = await import("./src/lib/auth");
-  const { registerConnection } = await import("./src/lib/realtime");
+  const { registerConnection, resolveRealtimeScope } = await import("./src/lib/realtime");
   // Pure, dependency-free host parsing — safe to load here alongside the rest.
   const { websocketOriginAllowed } = await import("./src/lib/host");
   type HostEnv = import("./src/lib/host").HostEnv;
@@ -669,10 +669,33 @@ app.prepare().then(async () => {
       return;
     }
 
+    // Branch scope before the socket opens (#854 follow-up): the same
+    // authorization every route uses decides which branches' events this
+    // session may receive. A session that may not act in its pinned branch —
+    // or whose membership is gone — is refused here rather than accepted and
+    // then closed, so the client backs off instead of reconnecting every
+    // second; a failed read refuses too, because an unresolved scope must
+    // deliver nothing.
+    const scope = await resolveRealtimeScope(session).catch((error: unknown) => {
+      console.error("WebSocket authorization failed", error instanceof Error ? error.message : "unknown error");
+      return null;
+    });
+    if (!scope) {
+      socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    if (!scope.ok) {
+      socket.write(scope.status === 401 ? "HTTP/1.1 401 Unauthorized\r\n\r\n" : "HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
     wss.handleUpgrade(req, socket, head, (ws) => {
       // The token goes along so the socket's periodic re-check authenticates
-      // it again, the way every request does — see registerConnection.
-      registerConnection(ws, session, token);
+      // it again, the way every request does; the scope is what it may hear
+      // until that re-check decides again — see registerConnection.
+      registerConnection(ws, scope.session, token, scope.locationIds);
     });
   });
 
