@@ -141,6 +141,13 @@ const ERROR_STATUS: Record<string, number> = {
   name_taken: 409,
   invalid_email: 400,
   no_delivery: 400,
+  /*
+   * Issue #947 — the stored file was produced under a wider audience than the caller
+   * holds now. 403, not 410: the file is still there, it is the *permission* that
+   * changed, and the body carries `requires` so the screen can name the key instead of
+   * showing «دسترسی ندارید» with no next step.
+   */
+  export_requires_regeneration: 403,
 };
 
 /** Maps a thrown engine error onto a response; rethrows anything else. */
@@ -151,7 +158,20 @@ export function handleDataError(error: unknown): NextResponse {
     error instanceof TemplateError ||
     error instanceof ScheduleError
   ) {
-    return NextResponse.json({ error: error.code }, { status: ERROR_STATUS[error.code] ?? 400 });
+    const status = ERROR_STATUS[error.code] ?? 400;
+    // The refusal names what is missing when the error carries it (issue #947's stored
+    // export, the provider scope checks) — the same `{ error, requires }` shape
+    // `entityAccess` answers with, so one screen reader handles both.
+    const requires = error instanceof ExportError ? error.requires : undefined;
+    const reason = error instanceof ExportError ? error.reason : undefined;
+    return NextResponse.json(
+      {
+        error: error.code,
+        ...(requires && requires.length > 0 ? { requires } : {}),
+        ...(reason ? { reason } : {}),
+      },
+      { status },
+    );
   }
   throw error;
 }

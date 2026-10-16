@@ -131,10 +131,23 @@ describe("read-only roster (P2.1)", () => {
 describe("custom roles screen (P2.4)", () => {
   it("locks its write controls on the permission its routes demand", () => {
     const ROLES = readFileSync(join(ROOT, "components/team/roles-manager.tsx"), "utf8");
-    // Both write routes (`POST /api/team/roles`, `PATCH …/[id]`) guard on
-    // `team.permissions.manage`; the screen's lock has to name the same rule.
-    expect(ROLES).toMatch(/const locked=deploymentProfile==="hybrid"\|\|!canManagePermissions/);
+    /*
+     * Both write routes (`POST /api/team/roles`, `PATCH …/[id]`) guard on
+     * `team.permissions.manage`; the screen's lock has to name the same rule.
+     *
+     * Compared against a whitespace-stripped copy: the assertion is about the
+     * *condition*, and a reflow (issue #947 rewrote this file's compact style into the
+     * repo's usual one, adding the accessible archive dialog) must not be able to make
+     * it pass or fail by accident.
+     */
+    const compact = ROLES.replace(/\s+/g, "");
+    expect(compact).toContain('constlocked=deploymentProfile==="hybrid"||!canManagePermissions');
     expect(ROLES).toContain("canManagePermissions");
+    // …and the archive confirmation the issue asked for is the product's own dialog,
+    // not a native `window.confirm`/`window.prompt` call (matched as a *call*, so the
+    // comments that explain the change are still allowed to name them).
+    expect(ROLES).not.toMatch(/window\.(prompt|confirm)\s*\(/);
+    expect(ROLES).toContain("SecurityConfirmDialog");
   });
 });
 

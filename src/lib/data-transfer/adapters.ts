@@ -12,6 +12,7 @@
  * RLS; it passes it to the service functions that expect one.
  */
 
+import type { PartyReadAudience } from "../personnel-access";
 import type { EntityDefinition, RelationMissingStrategy } from "./types";
 
 /** The tenant and branch an adapter is operating on. */
@@ -22,6 +23,17 @@ export interface AdapterContext {
   /** Who asked, for the services that record an actor. */
   actorUserId: string | null;
   actorName: string;
+  /**
+   * What *this* caller may read of an Employee file (issue #947, TEAM-F01).
+   *
+   * An export is a read like any other, and one with a wider blast radius than a screen:
+   * the file leaves the server and gets emailed around. The party entity therefore
+   * narrows Employee rows the same way `/api/parties` does, using the audience the route
+   * resolved from the actor's effective permissions. Left undefined by callers with no
+   * requesting member (a test, a migration script), where the internal full read is
+   * correct.
+   */
+  partyAudience?: PartyReadAudience;
 }
 
 export interface ReadOptions {

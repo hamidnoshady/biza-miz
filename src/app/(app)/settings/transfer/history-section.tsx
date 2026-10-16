@@ -275,7 +275,22 @@ export function HistorySection({
                   </Td>
                   <Td>{job.createdByName || "—"}</Td>
                   <Td>
-                    {job.downloadable ? (
+                    {/*
+                      Issue #947 — three answers, not two. «No file» and «you may not
+                      download this file any more» are different facts, and the second
+                      one needs a sentence that says what to do instead of a dead row.
+                    */}
+                    {!job.downloadable ? (
+                      <span className="text-xs text-muted-foreground">
+                        {job.providerMetadata?.sourceFormat === "connected_outbox" ? "بدون فایل؛ وضعیت ارسال ثبت است" : "فایل نگه‌داری نمی‌شود"}
+                      </span>
+                    ) : job.download && !job.download.allowed ? (
+                      <span className="block text-xs text-muted-foreground">
+                        {job.download.reason === "legacy_provenance"
+                          ? "با دسترسی گسترده‌تر از دسترسی فعلی شما ساخته شده؛ برای دریافت تازه «خروجی جدید» بگیرید."
+                          : "دسترسی لازم برای این فایل دیگر نزد شما نیست؛ «خروجی جدید» فایلی مطابق دسترسی فعلی می‌سازد."}
+                      </span>
+                    ) : (
                       <SecondaryButton
                         onClick={() => {
                           window.location.href = `/api/data/exports/${job.id}`;
@@ -283,10 +298,6 @@ export function HistorySection({
                       >
                         دانلود دوباره
                       </SecondaryButton>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">
-                        {job.providerMetadata?.sourceFormat === "connected_outbox" ? "بدون فایل؛ وضعیت ارسال ثبت است" : "فایل نگه‌داری نمی‌شود"}
-                      </span>
                     )}
                   </Td>
                 </DataTableRow>

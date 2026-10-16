@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { PartyValidationError, getParty, removeParty, updateParty } from "@/lib/parties-service";
+import {
+  PartyValidationError,
+  getParty,
+  partyForAudience,
+  removeParty,
+  updateParty,
+} from "@/lib/parties-service";
 import { parsePartyRequestBody } from "@/lib/parties";
+import { ensurePersonnelFileForMembership } from "@/lib/personnel-file";
+import { partyReadAudienceForPermissions } from "@/lib/personnel-access";
 
 /**
  * One party: the file a directory row opens, and the record a picker's
@@ -16,11 +24,18 @@ import { parsePartyRequestBody } from "@/lib/parties";
  */
 export const GET = withTenantScope(
   async (_request: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-    const { session, error } = await requirePermission(PERMISSIONS.partiesView);
+    const { session, membership, error } = await requirePermission(PERMISSIONS.partiesView);
     if (error) return error;
 
+    /**
+     * Issue #947 (TEAM-F01) — the item read carries the same field projection as
+     * the collection: opening one row by id must not be the way around a list that
+     * withholds the personnel half of an Employee file.
+     */
+    const audience = partyReadAudienceForPermissions([...membership.permissions]);
+
     const { id } = await params;
-    const party = await getParty(session.businessId, id);
+    const party = await getParty(session.businessId, id, audience);
     if (!party) return NextResponse.json({ error: "party_not_found" }, { status: 404 });
     return NextResponse.json({ party, customer: party });
   },
@@ -55,7 +70,7 @@ function accountingFieldsIn(body: Record<string, unknown>): { field: string } | 
 
 export const PUT = withTenantScope(
   async (request: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-    const { session, error } = await requirePermission(PERMISSIONS.partiesManage);
+    const { session, membership, error } = await requirePermission(PERMISSIONS.partiesManage);
     if (error) return error;
 
     let body: Record<string, unknown>;
@@ -83,9 +98,32 @@ export const PUT = withTenantScope(
 
     const { id } = await params;
     try {
-      const party = await updateParty(session.businessId, id, input);
+      /*
+       * Issue #947 (TEAM-F01) — the audience is passed to the *write* as well as the
+       * read. A form sends the record back whole, so a member whose audience withheld
+       * the personnel half would otherwise blank it on their next save: the blank they
+       * send is not a cleared field, it is a field they were never shown
+       * (`restrictPartyWriteToAudience`).
+       */
+      const audience = partyReadAudienceForPermissions([...membership.permissions]);
+      const party = await updateParty(session.businessId, id, input, { actorId: session.sub, audience });
       if (!party) return NextResponse.json({ error: "party_not_found" }, { status: 404 });
-      return NextResponse.json({ party, customer: party });
+
+      /*
+       * Issue #947 (TEAM-F04/F07) — a write that *attaches* a file to a membership is
+       * completed by the same guarantee every other door uses: the file's three shared
+       * fields follow the account from that moment on. Linking a standalone personnel
+       * record to somebody's login is exactly the case where the two records start to
+       * disagree — the file was kept by hand until now — so the sync runs here rather
+       * than waiting for the member's next edit. It never throws: a failure is recorded
+       * as a durable debt the Team screen shows and the reconciliation script repays.
+       */
+      if (typeof body.employeeUserId === "string" && body.employeeUserId) {
+        await ensurePersonnelFileForMembership(session.businessId, body.employeeUserId);
+      }
+
+      const projected = partyForAudience(party, audience);
+      return NextResponse.json({ party: projected, customer: projected });
     } catch (err) {
       if (err instanceof PartyValidationError) {
         return NextResponse.json(

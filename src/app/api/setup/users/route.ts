@@ -125,6 +125,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       phoneE164: phone,
       defaultLocationId: locationId,
       locationIds: locationId ? [locationId] : [],
+      /**
+       * Issue #947 (TEAM-F03) — the setup wizard's own branch is named explicitly.
+       *
+       * This route already sent the branch id, so it never fell into the unnamed
+       * case; but it named the *assignment* without naming the *policy*, and the
+       * policy was then inferred by whichever column happened to be set. The first
+       * member of a new business is created here, and «home» is what this route
+       * means: the branch the wizard just created.
+       */
+      locationScope: locationId ? "home" : "none",
       actorId: session.sub,
     });
   } catch (err) {

@@ -103,15 +103,19 @@ async function checkScopePermissions(
   owner: DataOwner,
   scopes: readonly string[],
   requirements: (industry: Industry) => Record<string, string[]>,
-): Promise<{ ok: true } | { ok: false; missing: string[] }> {
+): Promise<{ ok: true; required: string[] } | { ok: false; missing: string[] }> {
   const businessIndustry = await getBusinessIndustry(owner.businessId);
   const access = await memberAccessFor(owner.session);
   const granted = access?.permissions ?? new Set<string>();
   const requiredByScope = requirements(industryFor(businessIndustry));
-  const missing = scopes.flatMap((scope) =>
-    (requiredByScope[scope] ?? ["data_transfer.unsupported_scope"]).filter((permission) => !granted.has(permission)),
-  );
-  return missing.length ? { ok: false, missing: [...new Set(missing)] } : { ok: true };
+  // Issue #947 — the *required* set is returned alongside the verdict, not just a
+  // pass/fail. The export records it on the job row (how do we prove, a month later,
+  // what this file was authorized against?), and the download compares it to what the
+  // caller holds then. Deriving it twice — once to check, once to record — is how the
+  // two drift.
+  const required = [...new Set(scopes.flatMap((scope) => requiredByScope[scope] ?? ["data_transfer.unsupported_scope"]))];
+  const missing = required.filter((permission) => !granted.has(permission));
+  return missing.length ? { ok: false, missing } : { ok: true, required };
 }
 
 export function checkHolooScopePermissions(owner: DataOwner, scopes: readonly string[]) {

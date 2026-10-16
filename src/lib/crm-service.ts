@@ -36,6 +36,7 @@ import { businessToday } from "./business-day-service";
 import { getBusinessDek } from "./business-keys";
 import { encryptOptional, phoneBlindIndex, phoneKind, phoneLast4 } from "./field-crypto";
 import { mobileReachableSql, phonePairKeySql } from "./parties-service";
+import { FULL_PARTY_AUDIENCE, type PartyReadAudience } from "./personnel-access";
 import { normalizePhone } from "./phone";
 import {
   duplicateConfidence,
@@ -138,6 +139,12 @@ export interface CustomerFile {
    * which one is lying. So the CRM asks accounting and shows its answer.
    * Positive means the customer owes the business.
    */
+  /**
+   * Issue #947 (TEAM-F01) — the paths this read withheld, when the row is also a
+   * member of staff's. Named for the same reason `Party.restrictedFields` is: a blank
+   * field must not read as «no data».
+   */
+  restrictedFields?: string[];
   accounting: {
     receivableRial: number;
     /** False when the chart of accounts has no A/R account yet. */
@@ -160,9 +167,23 @@ export interface CustomerFile {
 export async function getCustomerFile(
   businessId: string,
   customerId: string,
+  /**
+   * Issue #947 (TEAM-F01) — the same rule `/api/parties` applies, applied here too.
+   *
+   * This file is reachable with `parties.view` alone (`/api/crm/customers/[id]/file`),
+   * and its row is a `parties` row: a person who is *both* a customer and a member of
+   * staff is one record, so a reader without a personnel key could read the address and
+   * the notes the directory withholds for exactly that row. Two fields, one rule, one
+   * door — a second copy of the policy would be the thing that drifts.
+   *
+   * The financial half is not projected here: this file carries no bank block and no
+   * identity numbers, and its receivables come from the ledger's own contract.
+   */
+  audience: PartyReadAudience = FULL_PARTY_AUDIENCE,
 ): Promise<CustomerFile | null> {
   const { rows } = await query<Record<string, unknown>>(
     `SELECT c.id, c.name, c.phone, c.phone_e164 AS "phoneE164", c.email, c.address,
+            c.roles,
             c.birthday::text AS birthday, c.tags, c.notes,
             c.sms_consent AS "smsConsent", c.marketing_consent AS "marketingConsent",
             c.is_active AS "isActive", c.merged_into_id AS "mergedIntoId",
@@ -242,21 +263,31 @@ export async function getCustomerFile(
   });
   const daysSinceLastPurchase = lastPurchaseDate ? dayDiff(lastPurchaseDate, today) : null;
 
+  /*
+   * Withheld for a reader without a personnel key, on a row that is also an Employee's:
+   * the same two paths `/api/parties` blanks, so the screen that shows them cannot be
+   * reached around the one that does not. The storage role is lowercase (`roles &&
+   * ARRAY['customer']` above is how the row was found in the first place).
+   */
+  const staffRecord = ((row.roles as string[] | null) ?? []).includes("employee");
+  const withholdsPersonnel = staffRecord && !audience.personnel;
+
   return {
     id: row.id as string,
     name: row.name as string,
     phone: (row.phone as string | null) ?? null,
     phoneE164: (row.phoneE164 as string | null) ?? null,
     email: (row.email as string | null) ?? null,
-    address: (row.address as string | null) ?? null,
+    address: withholdsPersonnel ? null : ((row.address as string | null) ?? null),
     birthday: (row.birthday as string | null) ?? null,
     tags: (row.tags as string[] | null) ?? [],
-    notes: (row.notes as string | null) ?? null,
+    notes: withholdsPersonnel ? null : ((row.notes as string | null) ?? null),
     smsConsent: Boolean(row.smsConsent),
     marketingConsent: Boolean(row.marketingConsent),
     isActive: Boolean(row.isActive),
     mergedIntoId: (row.mergedIntoId as string | null) ?? null,
     createdAt: String(row.createdAt),
+    ...(withholdsPersonnel ? { restrictedFields: ["address", "notes"] } : {}),
     stats: {
       orderCount,
       totalSpentRial,
