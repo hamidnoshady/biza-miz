@@ -1,7 +1,7 @@
 # Issue #947 — Team section consolidation: report
 
-**Branch** `arena/ce58f373-biza-miz` · **head** `2f77a56f` (**code head** `10e0740f`) ·
-**baseline** `0c4a77c` · **main integrated** `cf2b39dd` (`merge 66f7535a`) — `main`'s head at
+**Branch** `arena/ce58f373-biza-miz` · **code head** `10e0740f` · **baseline** `0c4a77c` ·
+**main integrated** `cf2b39dd` (`merge 66f7535a`) — `main`'s head at
 the time of the integration; the branch's earlier head (`03846456`) had merged `916df457`,
 and the issue's audit baseline `35cb0cd` is not in this clone's history, so every finding was
 re-verified against the working tree rather than the issue's line links. `main` has advanced
@@ -9,10 +9,12 @@ since (`fff5016e` at the time of writing: a document and one new integration tes
 `src/**` or migration change); the branch does not contain those commits, and §8.4 states
 that exactly rather than implying otherwise.
 
-The report is committed as a child of the code head; the commit that carries it changes
-documentation only, and the code head's own last change fixed the three findings from the
-PR review at `4c3a72053a` (see §1, «The three review findings»). The evidence below therefore
-names the head each gate ran on.
+The report is committed as a child of the code head and changes documentation only; the code
+head's own last change fixed the three findings from the PR review at `4c3a72053a` (see §1,
+«The three review findings»). The evidence below therefore names the head each gate ran on —
+and where a head is named, it is named because a gate ran on *it*: the branch's current head
+is whatever PR #958 shows, and the documentation-only heads on top of the code head are
+covered by the same suite over an identical code tree (§8.2).
 
 Scope delivered: TEAM-F01 … TEAM-F08, the consumer seam, migrations 0221–0223 and 0226 with
 the reconciliation work, and the follow-up work the second directive named — stored-export
@@ -561,7 +563,7 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 |---|---|
 | Source | The head that carries this document on `arena/ce58f373-biza-miz` (PR #958 names it), whose **code head is `10e0740f`** — the merge of `cf2b39dd` plus the three review fixes — followed only by report edits that change no source |
 | Tests | **11 749** unit/component + **38** design green locally at the code head; the **full database sweep** green at it (236 files, 3 622 passed, 2 skipped, exit 0 — no timeout); **33** new database tests across the three fixes (7 phone-arm, 5 boundary injections, 1 replica chain, plus the earlier ones), each falsified in the failing direction |
-| Checks | `test.yml` at **`10e0740f`**: `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events — the packaging workflows also ran at this head, because a source change matches their path filters (see 8.2) |
+| Checks | At the code head **`10e0740f`**: `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events — the packaging workflows ran there too, because a source change matches their path filters. Every documentation-only head after it is green by the same suite over the same tree (see 8.2) |
 | Mergeability | No conflicts. `cf2b39dd` — `main` at the integration — is an ancestor of this branch through the merge `66f7535a`, which is what `git merge-base --is-ancestor` verified when the merge was made. **`main` has since advanced** to `fff5016e` (PR #978: one operator-checklist document plus `integration/automotive-reports.integration.test.ts`; **no `src/**`, migration or script change**), so it is 19 commits ahead of the integration point — and against *that* head `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries (tree `b5eca689`); GitHub reports PR #958 **MERGEABLE / CLEAN**. Integration with the newer `main` is therefore a merge away and conflict-free, but this revision does **not** claim to contain it, and no gate here was run against it. PR #958 is the only PR for this branch |
 | Deployment | **Nothing deployed, published, tagged or merged**, and nothing was authorised to be. The migrations (0221, 0222, 0223, 0226) are forward-only and unapplied anywhere except this sandbox's local database |
 | Runtime acceptance | Not claimed. The gates that exercise a running server (production build, visual regression, subledger keyboard/WCAG, media E2E) passed **in CI on GitHub's runners** at the head named above; no runtime acceptance was performed against a deployed environment |
