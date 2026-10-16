@@ -35,12 +35,31 @@ const SESSION = {
 };
 
 const requirePermission = vi.fn();
+const requireAnyPermission = vi.fn();
+const requireFloorAssistant = vi.fn();
 const getSession = vi.fn();
 
 vi.mock("@/lib/auth", () => ({
   withTenantScope: (handler: (...args: unknown[]) => Promise<Response>) => handler,
   requirePermission: (...args: unknown[]) => requirePermission(...args),
+  requireAnyPermission: (...args: unknown[]) => requireAnyPermission(...args),
+  requireFloorAssistant: (...args: unknown[]) => requireFloorAssistant(...args),
   getSession: (...args: unknown[]) => getSession(...args),
+}));
+
+const listConversations = vi.fn();
+const listConversationsByProject = vi.fn();
+const getConversationMode = vi.fn();
+const getConversationMessages = vi.fn();
+const renameConversation = vi.fn();
+const deleteConversation = vi.fn();
+vi.mock("@/lib/ai-conversations", () => ({
+  listConversations: (...args: unknown[]) => listConversations(...args),
+  listConversationsByProject: (...args: unknown[]) => listConversationsByProject(...args),
+  getConversationMode: (...args: unknown[]) => getConversationMode(...args),
+  getConversationMessages: (...args: unknown[]) => getConversationMessages(...args),
+  renameConversation: (...args: unknown[]) => renameConversation(...args),
+  deleteConversation: (...args: unknown[]) => deleteConversation(...args),
 }));
 
 // The widget run route's project guard is a local helper that dynamically
@@ -173,22 +192,55 @@ function jsonRequest(url: string, method: string, body?: unknown) {
  * asked-for capability is absent, so a boundary is asserted by status instead
  * of inferred from the fact that the route asked.
  */
-function asCaller(permissions: string[]) {
+function asCaller(permissions: string[], role = SESSION.role) {
+  const sessionWithRole = { ...SESSION, role };
   requirePermission.mockImplementation(async (capability: string) => {
     if (!permissions.includes(capability)) {
       return {
-        session: SESSION,
-        membership: { permissions: new Set(permissions) },
+        session: sessionWithRole,
+        membership: { permissions: new Set(permissions), role },
         error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
       };
     }
     return {
-      session: SESSION,
-      membership: { permissions: new Set(permissions) },
+      session: sessionWithRole,
+      membership: { permissions: new Set(permissions), role },
       error: null,
     };
   });
-  getSession.mockImplementation(async () => SESSION);
+  requireAnyPermission.mockImplementation(async (...capabilities: string[]) => {
+    const allowed = capabilities.some((c) => permissions.includes(c));
+    if (!allowed) {
+      return {
+        session: sessionWithRole,
+        membership: { permissions: new Set(permissions), role },
+        error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+      };
+    }
+    return {
+      session: sessionWithRole,
+      membership: { permissions: new Set(permissions), role },
+      error: null,
+    };
+  });
+  requireFloorAssistant.mockImplementation(async () => {
+    if (
+      !permissions.includes(PERMISSIONS.menuView) ||
+      (role !== "cashier" && role !== "waiter")
+    ) {
+      return {
+        session: null,
+        membership: { permissions: new Set(permissions), role },
+        error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+      };
+    }
+    return {
+      session: sessionWithRole,
+      membership: { permissions: new Set(permissions), role },
+      error: null,
+    };
+  });
+  getSession.mockImplementation(async () => sessionWithRole);
 }
 
 /** The widget every widget test runs, overridable per case. */
@@ -474,5 +526,231 @@ describe("§12 — /api/ai/research/[id]/approve is a capability, not a membersh
     // a free one, and the same rule applies to its reporting.
     expect(attribution.researchRunId).toBe("run-1");
     expect(attribution.runtimeMode).toBe("deep_research");
+  });
+});
+
+describe("Issue #905 §10 — /api/ai/conversations transcript access and pagination", () => {
+  const convId = "11111111-1111-4111-8111-111111111111";
+
+  it("revokes list, detail, rename, and delete access when ai.use (and floor.assistant) is revoked", async () => {
+    asCaller([]);
+    const listRoute = await import("./conversations/route");
+    const detailRoute = await import("./conversations/[id]/route");
+
+    const listRes = await listRoute.GET(
+      jsonRequest("http://localhost/api/ai/conversations", "GET"),
+    );
+    expect(listRes.status).toBe(403);
+
+    const detailRes = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(detailRes.status).toBe(403);
+
+    const renameRes = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "عنوان تازه",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(renameRes.status).toBe(403);
+
+    const deleteRes = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(deleteRes.status).toBe(403);
+  });
+
+  it("blocks detail, rename, and delete on a dashboard conversation when ai.use is revoked even if menu.view remains", async () => {
+    asCaller([PERMISSIONS.menuView], "cashier");
+    getConversationMode.mockResolvedValue("dashboard");
+    const detailRoute = await import("./conversations/[id]/route");
+
+    const detailRes = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(detailRes.status).toBe(403);
+    expect(getConversationMessages).not.toHaveBeenCalled();
+
+    const renameRes = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "عنوان تازه",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(renameRes.status).toBe(403);
+    expect(renameConversation).not.toHaveBeenCalled();
+
+    const deleteRes = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(deleteRes.status).toBe(403);
+    expect(deleteConversation).not.toHaveBeenCalled();
+  });
+
+  it("enforces canonical requireFloorAssistant on floor conversations across GET, PATCH, and DELETE", async () => {
+    getConversationMode.mockResolvedValue("floor");
+    const detailRoute = await import("./conversations/[id]/route");
+
+    // A manager holding ai.use + menu.view is NOT a floor role (cashier/waiter)
+    asCaller([PERMISSIONS.aiUse, PERMISSIONS.menuView], "manager");
+    const managerGet = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(managerGet.status).toBe(403);
+
+    const managerPatch = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "میز ۳",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(managerPatch.status).toBe(403);
+    expect(renameConversation).not.toHaveBeenCalled();
+
+    const managerDelete = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(managerDelete.status).toBe(403);
+    expect(deleteConversation).not.toHaveBeenCalled();
+
+    // An active waiter with menu.view passes requireFloorAssistant across GET, PATCH, DELETE
+    asCaller([PERMISSIONS.menuView], "waiter");
+    getConversationMessages.mockResolvedValueOnce({
+      conversation: {
+        id: convId,
+        mode: "floor",
+        title: "میز ۳",
+        lastMessageAt: "2026-03-01T12:00:00.000Z",
+        createdAt: "2026-03-01T11:00:00.000Z",
+        projectId: null,
+      },
+      messages: [],
+    });
+    renameConversation.mockResolvedValueOnce({
+      id: convId,
+      mode: "floor",
+      title: "میز ۴",
+      lastMessageAt: "2026-03-01T12:00:00.000Z",
+      createdAt: "2026-03-01T11:00:00.000Z",
+      projectId: null,
+    });
+    deleteConversation.mockResolvedValueOnce(true);
+
+    const waiterGet = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}?mode=floor`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterGet.status).toBe(200);
+
+    // Calling GET with a mismatched `?mode=dashboard` on a `floor` conversation returns 404
+    const waiterMismatchModeGet = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}?mode=dashboard`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterMismatchModeGet.status).toBe(404);
+
+    const waiterPatch = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "میز ۴",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterPatch.status).toBe(200);
+
+    const waiterDelete = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(waiterDelete.status).toBe(200);
+  });
+
+  it("returns 404 without leaking existence when conversation belongs to another member or business", async () => {
+    asCaller([PERMISSIONS.aiUse]);
+    getConversationMode.mockResolvedValue(null);
+    const detailRoute = await import("./conversations/[id]/route");
+
+    const getRes = await detailRoute.GET(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "GET"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(getRes.status).toBe(404);
+
+    const patchRes = await detailRoute.PATCH(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "PATCH", {
+        title: "عنوان",
+      }),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(patchRes.status).toBe(404);
+
+    const deleteRes = await detailRoute.DELETE(
+      jsonRequest(`http://localhost/api/ai/conversations/${convId}`, "DELETE"),
+      { params: Promise.resolve({ id: convId }) },
+    );
+    expect(deleteRes.status).toBe(404);
+  });
+
+  it("forwards server-side q and compound cursor params and returns hasMore + nextCursor", async () => {
+    asCaller([PERMISSIONS.aiUse]);
+    const listRoute = await import("./conversations/route");
+    listConversations.mockResolvedValueOnce([
+      {
+        id: "22222222-2222-4222-8222-222222222222",
+        mode: "dashboard",
+        title: "گفتگوی اول",
+        lastMessageAt: "2026-03-01T12:00:00.000Z",
+        createdAt: "2026-03-01T11:00:00.000Z",
+        projectId: null,
+      },
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        mode: "dashboard",
+        title: "گفتگوی دوم",
+        lastMessageAt: "2026-03-01T12:00:00.000Z",
+        createdAt: "2026-03-01T10:00:00.000Z",
+        projectId: null,
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000000",
+        mode: "dashboard",
+        title: "گفتگوی سوم",
+        lastMessageAt: "2026-03-01T11:00:00.000Z",
+        createdAt: "2026-03-01T09:00:00.000Z",
+        projectId: null,
+      },
+    ]);
+
+    const res = await listRoute.GET(
+      jsonRequest(
+        `http://localhost/api/ai/conversations?limit=2&q=%D9%81%D8%B1%D9%88%D8%B4&before=2026-03-02T00:00:00.000Z&beforeId=${convId}`,
+        "GET",
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(listConversations).toHaveBeenCalledWith(
+      { businessId: SESSION.businessId, actorUserId: SESSION.sub },
+      {
+        mode: "dashboard",
+        before: "2026-03-02T00:00:00.000Z",
+        beforeId: convId,
+        query: "فروش",
+        limit: 3,
+      },
+    );
+
+    const payload = await res.json();
+    expect(payload.conversations).toHaveLength(2);
+    expect(payload.hasMore).toBe(true);
+    expect(payload.nextCursor).toEqual({
+      before: "2026-03-01T12:00:00.000Z",
+      beforeId: "11111111-1111-4111-8111-111111111111",
+    });
   });
 });

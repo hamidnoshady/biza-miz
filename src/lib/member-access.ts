@@ -6,6 +6,7 @@
  */
 import type { SessionPayload } from "./auth-edge";
 import { authorize, loadMembership } from "./authorize";
+import { partyReadAudienceForPermissions, type PartyReadAudience } from "./personnel-access";
 import type { Permission } from "./permissions";
 import type { Role } from "./auth-edge";
 
@@ -44,6 +45,28 @@ export async function memberAccessFor(session: SessionPayload): Promise<MemberAc
  * `isActive: false` → reads nothing). Folding suspended into null would grant
  * the system read consent to suspended members.
  */
+/**
+ * The party-write audience of an actor who has no session — a queue worker, a scheduled
+ * job, an automation (issue #947, item 2).
+ *
+ * Async writers name the member every write belongs to, and that member's *current*
+ * membership is what the write is authorized against: resolving it at enqueue time would
+ * let a revocation be outlived by a queued job. `null` (no membership any more) answers
+ * the narrow audience, which is the same answer `authorize()` would give them today.
+ *
+ * `undefined` is returned for «there is no actor at all» — a migration, a script, a test
+ * — because that is the caller the engine's own default (the full internal audience)
+ * belongs to, and inventing a member for it would be worse than saying so.
+ */
+export async function partyWriteAudienceForActor(
+  businessId: string,
+  actorUserId: string | null | undefined,
+): Promise<PartyReadAudience | undefined> {
+  if (!actorUserId) return undefined;
+  const access = await memberAccessForUser(businessId, actorUserId);
+  return partyReadAudienceForPermissions(access?.isActive ? access.permissions : null);
+}
+
 export async function memberAccessForUser(
   businessId: string,
   userId: string,

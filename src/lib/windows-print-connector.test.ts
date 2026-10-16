@@ -258,4 +258,10 @@ describe("the dependency-free Windows print connector", () => {
     expect(connectorSource).toContain("Connector v3 (release");
     expect(connectorSource).toContain('Write-ConnectorLog ("Printed " + $bytes.Length + " bytes to "');
   });
+
+  it("classifies WritePrinter, PrintDocument.Print, and unknown failures as ambiguous and aborts incomplete raw documents", () => {
+    expect(connectorSource).toContain("AbortPrinter");
+    expect(connectorSource).toContain("print_document_ambiguous:");
+    expect(connectorSource).toContain("ambiguous = $ambiguous");
+  });
 });

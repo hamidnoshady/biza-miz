@@ -8,6 +8,7 @@ import { rialToHolooAmount, type HolooCurrencyUnit } from "@/lib/integrations/ho
 import { sheetsToXlsxBuffer, type SheetData } from "../../codecs";
 import type { FieldType } from "../../types";
 import { HOLOO_DATA_TRANSFER_PROFILE, holooTransferSheet } from "./profile";
+import type { PartyReadAudience } from "@/lib/personnel-access";
 
 export const HOLOO_EXPORT_SCOPES = ["goods", "persons", "accounts"] as const;
 export type HolooExportScope = (typeof HOLOO_EXPORT_SCOPES)[number];
@@ -152,6 +153,13 @@ async function exportPersons(input: {
   businessId: string;
   connectionId: string;
   locationId: string | null;
+  /**
+   * Issue #947 (TEAM-F01): this workbook carries an `Address` column, and an Employee
+   * who is also a customer is a real person in this list. Narrowed to the caller's
+   * audience, the personnel columns of those rows go out empty instead of leaving the
+   * building; a plain customer's address is untouched.
+   */
+  audience?: PartyReadAudience;
 }): Promise<{ rows: Record<string, string>[]; skippedMultiRole: number }> {
   if (!input.locationId) throw new Error("location_required");
   const parties: Awaited<ReturnType<typeof listParties>>["parties"] = [];
@@ -163,6 +171,7 @@ async function exportPersons(input: {
       locationId: input.locationId,
       page,
       pageSize: 100,
+      audience: input.audience,
     });
     parties.push(...result.parties);
     total = result.total;
@@ -248,6 +257,8 @@ export async function buildHolooWorkbookExport(input: {
   locationId: string | null;
   currencyUnit: HolooCurrencyUnit;
   scopes: readonly string[];
+  /** Issue #947 (TEAM-F01): what the requesting member may read of an Employee file. */
+  audience?: PartyReadAudience;
 }): Promise<{ body: Buffer; rowCount: number; skippedMultiRolePersons: number }> {
   if (input.scopes.length === 0 || input.scopes.some((scope) => !HOLOO_EXPORT_SCOPES.includes(scope as HolooExportScope))) {
     throw new Error("unsupported_scope");

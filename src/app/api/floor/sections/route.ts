@@ -28,7 +28,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   ]);
   if (dup.length > 0) return NextResponse.json({ error: "section_exists" }, { status: 409 });
 
-  const waiterId = await validWaiterId(location.id, body.assignedWaiterId);
+  const waiterId = await validWaiterId(session.businessId, location.id, body.assignedWaiterId);
   if (waiterId === false) return NextResponse.json({ error: "waiter_not_found" }, { status: 400 });
 
   const { rows } = await query<{ id: string }>(

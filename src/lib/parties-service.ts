@@ -32,6 +32,7 @@ import { getBusinessDek } from "./business-keys";
 import { query } from "./db";
 import { hasMatchingMediaSignature } from "./media";
 import { getMediaAsset } from "./media-service";
+import { FULL_PARTY_AUDIENCE, type PartyReadAudience } from "./personnel-access";
 import {
   blindIndex,
   decryptOptional,
@@ -116,6 +117,15 @@ export interface Party extends Record<string, unknown> {
   financialInfo: Partial<PartyFinancialInfo> & Record<string, unknown>;
   /** The membership this personnel file belongs to, when `role` is Employee. */
   employeeUserId: string | null;
+  /**
+   * Issue #947 (TEAM-F01) — the fields this read withheld, when the caller's
+   * grants did not cover them. Empty/absent means «the caller saw the record as
+   * stored». The projection empties a withheld field rather than inventing a
+   * placeholder, and names it here so a screen can explain the gap (a person
+   * whose national ID reads as «—» should be told why, not left to conclude the
+   * record is empty).
+   */
+  restrictedFields?: string[];
   createdAt?: string;
   updatedAt?: string;
 }
@@ -138,7 +148,8 @@ export interface Party extends Record<string, unknown> {
  * from the membership is refused with a named error whose sentence sends the
  * editor to the team screen that owns those fields. Writes that bring the
  * party *in line* with the membership are allowed — that is the repair
- * direction, and `ensureEmployeeParty` is how the fields travel
+ * direction, and the membership sync (`ensurePersonnelFileForMembership`,
+ * `src/lib/personnel-file.ts`) is how the fields travel
  * (membership → party, never the other way round). Fields the write does not
  * change are never the reason for a refusal, so pre-existing drift on one
  * column cannot lock an unrelated edit on another.
@@ -184,6 +195,92 @@ async function assertLinkedPartyFollowsCanonicalIdentity(
   if (args.next.phoneE164 !== previous.phoneE164 && args.next.phoneE164 !== memberPhone) {
     throw new PartyValidationError("identity_phone_managed_by_membership", "phone");
   }
+}
+
+/**
+ * Issue #947 (TEAM-F02) — the membership a personnel file may point at.
+ *
+ * ## What was wrong
+ *
+ * `parties.employee_user_id` was a plain `uuid REFERENCES users(id)` (migration
+ * 0137), and the parser accepted the field from any request body. Migration 0148's
+ * unique index keeps it to one file per membership, and
+ * `assertLinkedPartyFollowsCanonicalIdentity` keeps such a file's *identity* in
+ * step — but nothing asked whether the membership was **in this business**. A
+ * create could link a file to another tenant's membership, and an edit could
+ * *relink* to one: `assertLinkedPartyFollowsCanonicalIdentity` returns early when
+ * its same-business lookup finds nothing ("a dangling link owns nothing"), which is
+ * the right answer for a link that no longer resolves and the wrong one for a link
+ * being proposed.
+ *
+ * ## The rule, in one place
+ *
+ * Every writer that can set the column — `createParty`, `updateParty`, the
+ * membership → file sync — validates the proposed target here first:
+ *
+ *   - the membership must exist **in this business** (`employee_link_unknown`
+ *     otherwise — one code, whether the id is foreign, deleted or a typo, so the
+ *     refusal never confirms that somebody else's tenant holds that id);
+ *   - another personnel file of this business must not already hold it
+ *     (`employee_link_taken`), which is 0137's unique index with a sentence instead
+ *     of a raw `23505`.
+ *
+ * Migration 0221 adds the same invariant to the database as a composite foreign key
+ * `(business_id, employee_user_id) → users(business_id, id)`, so a bulk import, a
+ * script or a future writer that forgot this call still cannot cross tenants.
+ */
+export async function assertEmployeeLinkTarget(
+  businessId: string,
+  employeeUserId: string,
+  options: { exceptPartyId?: string | null } = {},
+): Promise<void> {
+  const { rows } = await query<{ id: string }>(
+    "SELECT id FROM users WHERE id = $1 AND business_id = $2",
+    [employeeUserId, businessId],
+  );
+  if (!rows[0]) throw new PartyValidationError("employee_link_unknown", "employeeUserId");
+
+  const { rows: taken } = await query<{ id: string }>(
+    `SELECT id FROM parties
+      WHERE business_id = $1 AND employee_user_id = $2
+        AND ($3::uuid IS NULL OR id <> $3::uuid)
+      LIMIT 1`,
+    [businessId, employeeUserId, options.exceptPartyId ?? null],
+  );
+  if (taken[0]) throw new PartyValidationError("employee_link_taken", "employeeUserId");
+}
+
+/**
+ * Issue #947 (TEAM-F02) — the audited half of the link.
+ *
+ * The link decides which membership a personnel file belongs to, and therefore
+ * which account's payroll, advances and status the file answers for. «Who moved this
+ * person's file onto that account, and when» is the question an audit trail exists
+ * to answer, so every change — including the sync's repair of a missing file — is
+ * written to the same `audit_log` the membership's own changes use.
+ *
+ * `actorId` is nullable on purpose: an import, a migration or a system sync has no
+ * person behind it, and recording a null actor is honest where inventing one would
+ * not be. The action name is the same one the Team screen filters on.
+ */
+async function auditPersonnelLink(params: {
+  businessId: string;
+  actorId: string | null;
+  partyId: string;
+  from: string | null;
+  to: string | null;
+}): Promise<void> {
+  if (params.from === params.to) return;
+  await query(
+    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, 'team.personnel_link_changed', 'party', $3, $4)`,
+    [
+      params.businessId,
+      params.actorId,
+      params.partyId,
+      JSON.stringify({ before: params.from, after: params.to }),
+    ],
+  );
 }
 
 /** A rejected write, named. The route turns the code into a 400 and a Persian message. */
@@ -309,6 +406,139 @@ function toParty(row: PartyRow, dek: Buffer | null): Party {
     employeeUserId: (row.employeeUserId as string | null) ?? null,
   };
   return party;
+}
+
+/**
+ * Issue #947 (TEAM-F01) — the fields a read withholds from a caller who does not
+ * hold the capability that opens them.
+ *
+ * Named as paths, because that is what the party form already uses for its field
+ * errors (`generalInfo.nationalId`, `contactInfo.email`): one vocabulary for «which
+ * field of the record are we talking about», whether the server is refusing a write
+ * or withholding a read.
+ *
+ * The lists are the *whole* policy; `personnel-access.ts` decides who is subject to
+ * it. Splitting them this way is deliberate — the trust decision is one reviewable
+ * sentence per audience, and the serialization it drives is one list next to the
+ * serializer that applies it.
+ */
+export const PERSONNEL_RESTRICTED_FIELDS: readonly string[] = [
+  "generalInfo.nationalId",
+  "generalInfo.economicCode",
+  "address",
+  "addressInfo",
+  "contactInfo",
+  "notes",
+];
+
+/** The bank block — withheld without `ledger.view`, the key its own write needs. */
+export const FINANCIAL_RESTRICTED_FIELDS: readonly string[] = ["financialInfo"];
+
+/**
+ * Reads one party through the caller's audience.
+ *
+ * ## What this is not
+ *
+ * It is not a row filter: a member who may read the directory may read that the
+ * person exists, their name and the phone number the shift lead calls. It is a
+ * *field* filter, and it only ever withholds — a projection that added fields, or
+ * rewrote one, would be a second record rather than a view of the one that exists.
+ *
+ * The three identity fields the membership owns (name, email, phone) are deliberately
+ * *not* in the withheld set: they are the operational contact pair every screen
+ * needs, and the accounts they belong to are protected by their own gate. What is
+ * withheld is the identity *numbers*, the home address, the HR notes, the extra
+ * contact documents and the bank block — data a customer list never needed.
+ *
+ * `taxPercentage` also stays: it is the rate this party is invoiced at, which the
+ * CRM and the invoice screens draw beside the accounting code, not a personal fact.
+ */
+export function partyForAudience(party: Party, audience: PartyReadAudience): Party {
+  const withholdsPersonnel = party.roles.includes("Employee") && !audience.personnel;
+  const withholdsFinancial = !audience.financial;
+  if (!withholdsPersonnel && !withholdsFinancial) return party;
+
+  const restricted: string[] = [];
+  const projected: Party = { ...party };
+  if (withholdsPersonnel) {
+    restricted.push(...PERSONNEL_RESTRICTED_FIELDS);
+    projected.generalInfo = { ...party.generalInfo, nationalId: "", economicCode: "" };
+    projected.address = null;
+    projected.addressInfo = {};
+    projected.contactInfo = {};
+    projected.notes = null;
+  }
+  if (withholdsFinancial) {
+    restricted.push(...FINANCIAL_RESTRICTED_FIELDS);
+    projected.financialInfo = {};
+  }
+  projected.restrictedFields = restricted;
+  return projected;
+}
+
+/**
+ * The *write* side of the same projection (issue #947, TEAM-F01).
+ *
+ * ## Why a field projection needs a write half
+ *
+ * A save is a round trip: the screen reads the record, the person edits one field and
+ * every field goes back. That is safe while the reader saw everything the writer is
+ * about to send — and it stops being safe the moment a projection withholds a field.
+ * The withheld value comes back *blank*, the blank is indistinguishable from a cleared
+ * field, and the save erases it. The party form is exactly this shape: it always emits
+ * `general_info.nationalId`, `notes` and the three tabs (see `buildPartyPayload`), so a
+ * manager — `parties.manage` without `team.view` — opening a colleague's personnel file
+ * and changing the category would have written `national_id = NULL`, `address = NULL`,
+ * `notes = NULL` and `address_info = '{}'` over data they simply could not see.
+ *
+ * The rule is therefore the one the projection already implies: **a caller cannot
+ * express an opinion about a field they are not allowed to read.** Every withheld path
+ * keeps its stored value; everything else in the write lands normally. The comparison is
+ * by *path*, not by value, so it holds whether the value arrived blank, unchanged or
+ * invented.
+ *
+ * `updateParty` applies this whenever its caller passes an audience, which the party
+ * routes do; a service-to-service write (an import, the assistant's tools, the membership
+ * sync) keeps the default full audience and is unaffected. It is deliberately *not* a
+ * refusal: the projection is a data-minimisation boundary, and failing the whole save
+ * because a form sent a field it should not have shown would turn «بخشی از این پرونده
+ * برای شما پنهان است» into «ذخیره نشد».
+ */
+export function restrictPartyWriteToAudience(
+  write: NormalizedWrite,
+  existing: Party,
+  audience: PartyReadAudience,
+): NormalizedWrite {
+  // The personnel half is withheld only for an Employee file — the same condition
+  // `partyForAudience` applies when it serializes one. A customer's identity numbers
+  // are ordinary CRM data and stay writable for the same caller, which is why this
+  // cannot be a property of the audience alone.
+  const withholdsPersonnel = existing.roles.includes("Employee") && !audience.personnel;
+  const withholdsFinancial = !audience.financial;
+  if (!withholdsPersonnel && !withholdsFinancial) return write;
+
+  const guarded: NormalizedWrite = { ...write };
+  if (withholdsPersonnel) {
+    const storedGeneral = existing.generalInfo ?? {};
+    guarded.nationalId = storedGeneral.nationalId ? String(storedGeneral.nationalId) : null;
+    guarded.economicCode = storedGeneral.economicCode ? String(storedGeneral.economicCode) : null;
+    guarded.generalInfo = {
+      ...guarded.generalInfo,
+      nationalId: guarded.nationalId ?? "",
+      economicCode: guarded.economicCode ?? "",
+    };
+    guarded.address = existing.address ?? null;
+    guarded.addressInfo = (existing.addressInfo as Record<string, unknown> | null) ?? null;
+    // The contact tab is what the root phone/email columns are derived from
+    // (`normalizePartyWrite`), so restoring one without the other would leave the row
+    // internally inconsistent — the tab blank and the columns holding the old value.
+    guarded.contactInfo = (existing.contactInfo as Record<string, unknown> | null) ?? null;
+    guarded.phone = existing.phone ?? null;
+    guarded.email = existing.email ?? null;
+    guarded.notes = existing.notes ?? null;
+  }
+  if (withholdsFinancial) guarded.financialInfo = (existing.financialInfo as Record<string, unknown> | null) ?? null;
+  return guarded;
 }
 
 /**
@@ -980,7 +1210,7 @@ export async function partySearchClause(
 export async function searchParties(
   businessId: string,
   q: string,
-  options: { roles?: PartyRole[]; limit?: number } = {},
+  options: { roles?: PartyRole[]; limit?: number; audience?: PartyReadAudience } = {},
 ): Promise<Party[]> {
   const term = q.trim();
   const dek = await getBusinessDek(businessId);
@@ -1010,7 +1240,8 @@ export async function searchParties(
       LIMIT ${limitParam}`,
     params,
   );
-  return rows.map((row) => toParty(row, dek));
+  const audience = options.audience ?? FULL_PARTY_AUDIENCE;
+  return rows.map((row) => partyForAudience(toParty(row, dek), audience));
 }
 
 /** The legacy name of the picker search — POS, checkout and the invoice screen still call this. */
@@ -1027,6 +1258,13 @@ export interface PartyListOptions {
   locationId?: string | null;
   page?: number;
   pageSize?: number;
+  /**
+   * Issue #947 (TEAM-F01) — what this caller may read of each row. Omitted means
+   * the internal/full audience: the service's own callers (the membership → file
+   * sync, an export an admin already holds a bulk key for) read the record as
+   * stored, and only a *request* narrows it.
+   */
+  audience?: PartyReadAudience;
 }
 
 export interface PartyListResult {
@@ -1078,7 +1316,8 @@ export async function listParties(businessId: string, options: PartyListOptions 
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, pageSize, offset],
   );
-  return { parties: rows.map((row) => toParty(row, dek)), total };
+  const audience = options.audience ?? FULL_PARTY_AUDIENCE;
+  return { parties: rows.map((row) => partyForAudience(toParty(row, dek), audience)), total };
 }
 
 /** The listing, under the name the pages that predate 0137 already import. */
@@ -1090,8 +1329,20 @@ export async function listCustomers(
   return { customers: result.parties, total: result.total };
 }
 
-/** One party by id, in this business only — the read every mutation re-uses. */
-export async function getParty(businessId: string, id: string): Promise<Party | null> {
+/**
+ * One party by id, in this business only — the read every mutation re-uses.
+ *
+ * Issue #947 (TEAM-F01) — an optional audience narrows what the row returns for a
+ * *request*; the default is the full record, because every mutation and every
+ * service-to-service caller needs the values it is about to write back. A caller
+ * that can read the record to edit it must not be handed a projection of it, or the
+ * next save would write the blanks over the real data.
+ */
+export async function getParty(
+  businessId: string,
+  id: string,
+  audience: PartyReadAudience = FULL_PARTY_AUDIENCE,
+): Promise<Party | null> {
   const dek = await getBusinessDek(businessId);
   const { rows } = await query<PartyRow>(
     `SELECT ${PARTY_COLUMNS}
@@ -1099,7 +1350,7 @@ export async function getParty(businessId: string, id: string): Promise<Party | 
       WHERE p.business_id = $1 AND p.id = $2`,
     [businessId, id],
   );
-  return rows[0] ? toParty(rows[0], dek) : null;
+  return rows[0] ? partyForAudience(toParty(rows[0], dek), audience) : null;
 }
 
 /**
@@ -1108,8 +1359,12 @@ export async function getParty(businessId: string, id: string): Promise<Party | 
  * receive customer points or a customer-credit liability just because its UUID
  * was supplied to an endpoint.
  */
-export async function getCustomer(businessId: string, id: string): Promise<Party | null> {
-  const party = await getParty(businessId, id);
+export async function getCustomer(
+  businessId: string,
+  id: string,
+  audience: PartyReadAudience = FULL_PARTY_AUDIENCE,
+): Promise<Party | null> {
+  const party = await getParty(businessId, id, audience);
   return party?.roles.includes("Customer") ? party : null;
 }
 
@@ -1123,7 +1378,7 @@ export async function getCustomer(businessId: string, id: string): Promise<Party
 export async function createParty(
   businessId: string,
   input: PartyInput,
-  options: { locationId?: string | null } = {},
+  options: { locationId?: string | null; actorId?: string | null } = {},
 ): Promise<Party> {
   const dek = await getBusinessDek(businessId);
   const write = normalizePartyWrite(input);
@@ -1139,6 +1394,10 @@ export async function createParty(
     ? (write.employeeUserId ?? null)
     : null;
   if (linkedMembershipId) {
+    // Issue #947 (TEAM-F02) — the proposed target is same-business *before* the
+    // identity comparison: a link that does not resolve in this tenant has no
+    // canonical identity to agree with, and must be refused rather than skipped.
+    await assertEmployeeLinkTarget(businessId, linkedMembershipId);
     await assertLinkedPartyFollowsCanonicalIdentity(businessId, {
       employeeUserId: linkedMembershipId,
       next: { displayName: write.displayName, email: write.email, phoneE164: phoneCols.e164 },
@@ -1211,7 +1470,18 @@ export async function createParty(
         ],
       );
       const created = rows[0] ? await getParty(businessId, String(rows[0].id)) : null;
-      if (created) return created;
+      if (created) {
+        if (linkedMembershipId) {
+          await auditPersonnelLink({
+            businessId,
+            actorId: options.actorId ?? null,
+            partyId: created.id,
+            from: null,
+            to: linkedMembershipId,
+          });
+        }
+        return created;
+      }
     } catch (error) {
       lastError = error;
       if (!isUniqueViolation(error)) throw error;
@@ -1277,11 +1547,22 @@ export async function updateParty(
   businessId: string,
   id: string,
   input: PartyInput,
+  options: { actorId?: string | null; audience?: PartyReadAudience } = {},
 ): Promise<Party | null> {
   const existing = await getParty(businessId, id);
   if (!existing) return null;
   const dek = await getBusinessDek(businessId);
-  const write = normalizePartyWrite(input, existing);
+  /*
+   * Issue #947 (TEAM-F01) — the write half of the read projection. A browser form
+   * round-trips every field it read, and it cannot round-trip a field the projection
+   * withheld: the blank it sends back would erase the stored value. Everything the
+   * audience denies is restored from the row here, before any validation reads it.
+   */
+  const write = restrictPartyWriteToAudience(
+    normalizePartyWrite(input, existing),
+    existing,
+    options.audience ?? FULL_PARTY_AUDIENCE,
+  );
   await assertNationalIdFree(businessId, write.nationalId, dek, id);
   // Only re-checked when this write actually touches the field: an edit that
   // never mentions the avatar carries the existing (already-owned) value
@@ -1292,6 +1573,29 @@ export async function updateParty(
   }
 
   const phoneCols = phoneColumns(write.phone, dek);
+
+  /*
+   * Issue #947 (TEAM-F02) — which membership this file points at, before and
+   * after this write.
+   *
+   * `linkBefore`/`linkAfter` are computed from the *normalized* write, not from
+   * the body: a partial save that never mentions the link leaves it alone (that is
+   * what `undefined` means here), an explicit null clears it, and dropping the
+   * Employee role clears it the way it always has. The difference between the two
+   * is what gets audited.
+   */
+  const linkBefore = existing.employeeUserId ?? null;
+  const linkAfter = write.roles.includes("Employee")
+    ? write.employeeUserId === undefined
+      ? linkBefore
+      : (write.employeeUserId ?? null)
+    : null;
+  // A proposed target is validated before it is written — the same-business rule,
+  // the one-file-per-membership rule, and (below) the canonical-identity rule.
+  if (linkAfter && linkAfter !== linkBefore) {
+    await assertEmployeeLinkTarget(businessId, linkAfter, { exceptPartyId: id });
+  }
+
   // Issue #854 (pass 4, gap 5) — a linked personnel file may not grow an
   // identity that disagrees with its membership's login fields.
   if (existing.employeeUserId) {
@@ -1373,7 +1677,17 @@ export async function updateParty(
         RETURNING id`,
       params,
     );
-    return rows[0] ? await getParty(businessId, id) : null;
+    if (!rows[0]) return null;
+    if (linkAfter !== linkBefore) {
+      await auditPersonnelLink({
+        businessId,
+        actorId: options.actorId ?? null,
+        partyId: id,
+        from: linkBefore,
+        to: linkAfter,
+      });
+    }
+    return await getParty(businessId, id);
   } catch (error) {
     if (isUniqueViolation(error) && write.accountingCodeMode === "Manual") {
       throw new PartyValidationError("accounting_code_taken", "accountingCode");
@@ -1387,43 +1701,42 @@ export async function updateCustomer(
   businessId: string,
   id: string,
   input: { name?: string; phone?: string | null; address?: string | null; notes?: string | null } & PartyInput,
+  /**
+   * Issue #947 (item 2) — the audience of the actor this write belongs to, for the
+   * callers that are not a browser request: a queue worker, an automation, a scheduled
+   * job. `notes` and `address` are two of the fields `team.view` withholds on a staff
+   * file, so an async writer that names its actor must be held to that actor's audience
+   * exactly as the route is. Omitted means the service's own default (the internal full
+   * audience), which is what a caller with no member behind it gets.
+   */
+  options: { actorId?: string | null; audience?: PartyReadAudience } = {},
 ): Promise<Party | null> {
-  return updateParty(businessId, id, {
-    ...input,
-    displayName: input.name,
-    address: input.address,
-  });
+  return updateParty(
+    businessId,
+    id,
+    {
+      ...input,
+      displayName: input.name,
+      address: input.address,
+    },
+    options,
+  );
 }
 
 /**
- * The personnel party of one membership, created on demand and kept named.
- *
- * A cashier added from «مدیریت تیم» is a counterparty from the moment their first
- * مساعده is recorded, and the payroll screen should not have to care whether the
- * owner opened the party form. So the team routes call this rather than writing an
- * `INSERT` of their own: one place decides that a membership has exactly one party
- * row (0137's unique index is what makes "exactly" true), and the link means the
- * Team view and the ledger agree about who the money belongs to.
- *
- * The row is also *repaired*, not just created: when the party already exists and
- * the caller names a display name, the party is renamed with it. The team screen
- * is where a member's name is managed, and the promise its layout makes — the
- * membership above and the personnel file below are two views of one person —
- * is only true if a rename travels to both. A caller that names no name (the
- * suspend button, a status flip) changes nothing but the party's existence.
- *
- * Issue #854 (pass 4, gap 5) — the same one-directional repair carries the
- * login phone and email: the membership is the canonical owner of the login
- * identity fields, and when it changes them (`setMemberPhone`, creation) this
- * is the path that brings the personnel file back in line. The reverse
- * direction — a party edit rewriting the identity — is refused by
- * `assertLinkedPartyFollowsCanonicalIdentity`, so these three fields have
- * exactly one writer: the membership.
- */
-/**
  * The personnel file of one membership, or null while it does not exist yet.
- * Issue #854 (pass 4, gap 5) — readers that need the file behind a member
- * (the phone/identity sync, the team tab) all go through this one lookup.
+ *
+ * Issue #854 (pass 4, gap 5) — readers that need the file behind a member (the
+ * phone/identity sync, the team tab) all go through this one lookup.
+ *
+ * Issue #947 (TEAM-F04) — the *writer* that used to live beside this reader
+ * (`ensureEmployeeParty`) is gone. It took the display name, the phone and the email
+ * from its caller, so each door that created a membership had its own idea of what
+ * the file should say, and two of those doors (setup, a replica applying a cloud
+ * event) had no idea at all. The one writer is now
+ * `ensurePersonnelFileForMembership` in `src/lib/personnel-file.ts`, which derives
+ * the identity from the membership row and records a durable retry when it fails.
+ * This lookup stays because it is what that sync and the Team tab read.
  */
 export async function getPartyByEmployee(
   businessId: string,
@@ -1434,38 +1747,6 @@ export async function getPartyByEmployee(
     [businessId, userId],
   );
   return rows[0] ? getParty(businessId, rows[0].id) : null;
-}
-
-export async function ensureEmployeeParty(
-  businessId: string,
-  userId: string,
-  details: { displayName?: string | null; phone?: string | null; email?: string | null } = {},
-): Promise<Party | null> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM parties WHERE business_id = $1 AND employee_user_id = $2`,
-    [businessId, userId],
-  );
-  const name = details.displayName?.trim() || null;
-  if (rows[0]) {
-    const patch: PartyInput = {};
-    if (name) patch.displayName = name;
-    if (details.phone !== undefined) patch.phone = details.phone;
-    if (details.email !== undefined) patch.email = details.email;
-    if (!name && details.phone === undefined && details.email === undefined) {
-      return getParty(businessId, rows[0].id);
-    }
-    return updateParty(businessId, rows[0].id, patch);
-  }
-  const created = await createParty(businessId, {
-    role: "Employee",
-    personType: "Real",
-    displayName: name ?? "",
-    firstName: name ?? "",
-    phone: details.phone ?? null,
-    email: details.email ?? null,
-    employeeUserId: userId,
-  });
-  return created.id ? created : null;
 }
 
 export type RemovePartyResult = "deleted" | "archived" | "not_found";

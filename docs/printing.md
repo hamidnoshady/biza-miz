@@ -131,15 +131,87 @@ Two more consequences of the split worth stating plainly, because they are
 what an operator sees:
 
 - **Provenance is recorded.** Every job writes a `print_jobs` row with the
-  printer, the `template_id`/`template_key` and the **template version** that
-  produced it, plus the route (`rule`, `fallback`, `only`, …) and the printer a
-  fallback replaced. The rules screen's «فعالیت اخیر» is that table.
-- **A job always ends.** The server stamps `sending`; the browser (the only
-  side that can talk to the spooler) closes the row as `handed_off` or
-  `failed` with a canonical error code — on refusal, on connector failure, on
-  abort, on timeout. Any row still `sending` after
-  `SENDING_STALE_AFTER_SECONDS` (120 s) is swept to `failed`/`job_timeout` when
-  history is read, so «در حال ارسال» can never be a permanent state.
+  printer (`printer_id`, `printer_name`), the template (`template_id`,
+  `template_key`, `template_name`, `template_version`, `template_paper`,
+  `template_source`), the attempt linkage (`attempt_number`,
+  `previous_job_id`, `print_request_id`), the routing reason (`route_reason`:
+  `explicit`, `rule`, `fallback`, `runtime_fallback`, `default`, `only`, `none`,
+  `unknown`), the fallback origin (`fallback_from_printer_id`,
+  `fallback_from_printer_name`), and the canonical delivery outcome
+  (`delivery_outcome`: `pending`, `handed_off`, `not_delivered`, `ambiguous`,
+  `connector_unavailable`). Historical rows created before `route_reason`
+  existed keep `route_reason = 'unknown'` and `attempt_number = 1` rather than
+  inferring fallback linkage from shared `print_request_id` values (which are
+  reused across intentional reprints). The rules screen's «فعالیت اخیر» renders
+  that table directly, preserving the distinction between OS spooler/socket
+  handoff (`handed_off`) and confirmed physical paper output.
+- **Runtime fallback, atomic reservation, strict parent/snapshot validation, and duplicate-print protection.**
+  When a rule specifies a fixed primary printer (`printer_id IS NOT NULL`,
+  `route: "rule"`) and a compatible `fallback_printer_id` is configured on the
+  rule (`resolvePrintPlan` only advertises `backupPrinter` when the fallback
+  printer physically accepts the document type AND the primary attempt's
+  resolved snapshot template paper, and never resolves a paper mismatch by
+  silently switching templates), the client attempts delivery to the primary
+  printer first. When a rule is set to automatic printer selection
+  (`printer_id = null`, «انتخاب خودکار»), `fallback_printer_id` is cleared across
+  the UI, API write boundary (`PUT /api/settings/print-rules`), rule loader, and
+  `resolvePrinter` so automatic routing (`default` → `only` → `choose`) is never
+  overridden by a leftover fallback, while failover (`reason: "fallback"`) is
+  preserved whenever a configured primary (`printer_id != null`) becomes
+  unavailable. Delivery outcomes are classified by
+  `classifyDeliveryOutcome` (`src/lib/printing/errors.ts`), which defaults any
+  unknown or unverified failure to `ambiguous`:
+  - **Confirmed handoff (`handed_off`)**: the OS spooler or TCP socket accepted
+    the bytes; the attempt row closes as `handed_off` (`delivery_outcome =
+    'handed_off'`) and no retry occurs.
+  - **Confirmed pre-handoff non-delivery (`not_delivered`)**: the transport
+    positively established that no handoff occurred (`printer_not_found`,
+    `printer_offline`, pre-connect `network_unreachable`, pre-write
+    `spooler_rejected` on `StartDocPrinter`/`StartPagePrinter`,
+    `printer_inactive`, `reconnect_required`, `invalid_printer`,
+    `incompatible_printer`). The client closes attempt 1 as `failed`
+    (`delivery_outcome = 'not_delivered'`) and requests a single fallback
+    attempt from `POST /api/printing/print` with `failedPrinterId` and
+    `previousJobId`. On the server, fallback authorization requires all of:
+    (1) an existing durable parent attempt (`attempt_number = 1`) in the
+    authenticated tenant/branch (`409 fallback_parent_not_found` if missing,
+    `503 printer_unavailable` if parent lookup fails),
+    (2) parent identity matching the requested document type, entity id, and
+    `failedPrinterId`,
+    (3) positively confirmed non-delivery (`status = 'failed'`,
+    `delivery_outcome = 'not_delivered'`, pre-handoff `error_code` — pending
+    parents return `409 fallback_parent_pending`; handed-off or ambiguous
+    parents return `409 job_timeout`),
+    (4) a valid persisted `render_snapshot` on the parent row (`409
+    fallback_snapshot_missing` if missing or invalid — the server never falls
+    back to process-local caches or reloads mutable order/template/branding
+    data for attempt 2),
+    (5) a currently configured, active, compatible backup printer on the rule,
+    and
+    (6) **atomic durable reservation before rendering** (`reserveFallbackJobRow`),
+    which locks the verified parent row (`FOR UPDATE`), checks for any child row
+    and inserts the `attempt_number = 2` row under `ON CONFLICT (previous_job_id)
+    WHERE previous_job_id IS NOT NULL DO NOTHING RETURNING id` in a short SQL
+    statement *before* calling `preparePrint()` (so no DB lock is held during
+    Chromium rendering). Only the request that wins the reservation renders and
+    returns printable bytes; any concurrent, retried, or conflicting fallback
+    request receives `409 fallback_already_reserved` (or `503` on database
+    errors) without rendering or returning `dataBase64`. Unconfigured printers
+    are never chosen automatically.
+  - **Unknown / ambiguous (`ambiguous`)**: any timeout, generic `print_failed`,
+    `WritePrinter` failure (partial or initial after `StartDocPrinter`),
+    exception during or after `PrintDocument.Print`, or lost acknowledgment.
+    Automatic retry and fallback are **strictly suppressed** on both client and
+    server so the customer or kitchen never receives a silent duplicate print;
+    the UI warns the operator to check physical output before manually
+    reprinting.
+- **A job always ends.** The server stamps `sending` (`delivery_outcome =
+  'pending'`); the browser (the only side that can talk to the spooler) closes
+  the row as `handed_off` or `failed` with a canonical error code and
+  `delivery_outcome`. Any row still `sending` after
+  `SENDING_STALE_AFTER_SECONDS` (120 s) is swept to `failed`/`job_timeout` with
+  `delivery_outcome = 'ambiguous'` when history is read, so «در حال ارسال» can
+  never be a permanent state.
 
 ### The Windows connector (browser / cloud)
 
@@ -418,10 +490,10 @@ branch) and resolves in this order — the leftmost thing that exists wins:
 | --- | --- |
 | 1. the template explicitly requested (a gallery test print) | 1. the printer explicitly requested |
 | 2. the rule's saved template (`template_id`) | 2. the rule's printer |
-| 3. the rule's built-in template (`template_key`) | 3. the rule's fallback printer (the primary is gone/incompatible) |
-| 4. a saved template marked default for the document type | 4. the branch's only compatible printer for that document |
-| 5. the `templateKey` a pre-0212 printer row still carries (transition read — see `legacyBehaviorOf`) | 5. the last printer that printed this document type |
-| 6. the built-in for the document type that fits the printer's paper | 6. the default printer for that purpose — otherwise `printer_not_configured` |
+| 3. the rule's built-in template (`template_key`) | 3. the rule's fallback printer (the primary is gone/incompatible or failed pre-handoff delivery) |
+| 4. a saved template marked default for the document type | 4. the default printer for that purpose (`is_default = true`) |
+| 5. the `templateKey` a pre-0212 printer row still carries (transition read — see `legacyBehaviorOf`) | 5. the branch's only compatible printer for that document — otherwise `printer_not_configured` |
+| 6. the built-in for the document type that fits the printer's paper | |
 | 7. the built-in for the document type | |
 
 A rule that names a printer which is inactive, disconnected or incompatible
@@ -519,9 +591,10 @@ the path (print_jobs, print_rules, print_templates, printers) carries FORCE
 ROW LEVEL SECURITY, with the cross-tenant read exercised through the
 deployment's unprivileged runtime role.
 `integration/printer-connection-migration.integration.test.ts` covers 0155 and
-0212 on a pre-0155 database, and migration 0213's move from document-keyed rows
+0212 on a pre-0155 database, migration 0213's move from document-keyed rows
 to one row per attempt (a repeated correlation id, and a print with none at
-all).
+all), and migrations 0222 + 0223's diagnostic backfills and safe historical
+provenance correction.
 
 ## Adding to the model
 

@@ -13,6 +13,7 @@
  */
 import { EncryptJWT, jwtDecrypt } from "jose";
 import { query, withTenantTransaction, withoutTenantScope } from "./db";
+import { ensurePersonnelFileForMembership } from "./personnel-file";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
 import {
   consumeAllChallenges,
@@ -470,6 +471,16 @@ export async function stampPhoneVerified(options: {
   // Anything that must observe the *committed* stamp (a projection, a sync)
   // belongs here, after the transaction — never inside it, where its own
   // failure would roll the verification back.
+  /*
+   * Issue #947 (TEAM-F05) — this door moves the same field the Team screen's phone
+   * editor does, so it owes the same propagation. Before this, proving a number at
+   * the door stamped `users.phone_e164` and left the personnel file holding the old
+   * one (or none at all) — two views of one person disagreeing about the number the
+   * shift lead calls. The sync derives the whole canonical identity from the row that
+   * just changed and records a durable retry if the file cannot be written; the
+   * verification above has already succeeded, so nothing here can fail the login.
+   */
+  await ensurePersonnelFileForMembership(options.businessId, options.userId);
 }
 
 /** Validate + canonicalise a typed number, or null when it is not a mobile. */

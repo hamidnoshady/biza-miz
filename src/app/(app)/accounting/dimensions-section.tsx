@@ -39,13 +39,17 @@ import {
 } from "@/lib/accounting-dimensions";
 import { toPersianDigits } from "@/lib/digits";
 import { DimensionReportsPanel } from "./dimension-reports-panel";
+import { DimensionMappingsTab } from "./dimension-mappings-tab";
 import { filterDimensionValues, historicalKinds, isoToJalaliText } from "./dimension-catalog";
 
-type SectionTab = "manage" | "reports";
+type SectionTab = "manage" | "reports" | "mappings";
 
 const TABS: readonly Tab<SectionTab>[] = [
   { key: "manage", label: "مدیریت ابعاد" },
   { key: "reports", label: "گزارش‌های ابعاد" },
+  /** Issue #868 — the trading attribution rules table (`accounting_dimension_mappings`),
+   *  which PR #898 shipped service-only. */
+  { key: "mappings", label: "انتساب تحلیلی" },
 ];
 
 interface LocationOption {
@@ -561,8 +565,10 @@ export function DimensionsSection({ canManage }: { canManage: boolean }) {
               )}
             </SectionCard>
           </div>
-        ) : (
+        ) : tab === "reports" ? (
           <DimensionReportsPanel reportableKinds={reportable} kindLabel={kindLabel} values={values} />
+        ) : (
+          <DimensionMappingsTab values={values} canManage={canManage} />
         )}
       </TabPanel>
     </div>

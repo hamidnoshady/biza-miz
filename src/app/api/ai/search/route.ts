@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { searchConversations } from "@/lib/ai-conversations";
+import { isFeatureEnabled } from "@/lib/features";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { standardReportsFor } from "@/lib/reports";
 import { requirePermission, withTenantScope } from "@/lib/auth";
@@ -23,12 +24,22 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (!q) return NextResponse.json({ conversations: [], reports: [] });
 
   const needle = q.toLowerCase();
-  const industry = await getBusinessIndustry(session.businessId);
-  const reports = standardReportsFor(industry).filter(
-    (report) => report.label.toLowerCase().includes(needle) || report.key.toLowerCase().includes(needle),
-  )
-    .slice(0, MAX_RESULTS)
-    .map((report) => ({ key: report.key, label: report.label }));
+  const canViewReports =
+    (!guard.membership || guard.membership.permissions.has(PERMISSIONS.reportsView)) &&
+    (await isFeatureEnabled(session.businessId, "reporting").catch(() => true));
+
+  let reports: { key: string; label: string }[] = [];
+  if (canViewReports) {
+    const industry = await getBusinessIndustry(session.businessId);
+    reports = standardReportsFor(industry)
+      .filter(
+        (report) =>
+          report.label.toLowerCase().includes(needle) ||
+          report.key.toLowerCase().includes(needle),
+      )
+      .slice(0, MAX_RESULTS)
+      .map((report) => ({ key: report.key, label: report.label }));
+  }
 
   const conversations = await searchConversations(
     { businessId: session.businessId, actorUserId: session.sub },

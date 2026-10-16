@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 import { ACTION_CATALOG, type ActionType } from "../ai";
 import { AI_TOOL_PERMISSION_MAP, aiActionPermission } from "../ai-capabilities";
 import { PERMISSIONS } from "../permissions";
+import { LEGACY_GRANTS, parseMcpGrants } from "./grants";
+import { mcpModuleForReadTool, mcpModuleForWriteAction } from "./registry";
 import {
   MCP_READ_TOOL_SUMMARIES,
+  MCP_TOOLS_PAGE_SIZE,
   assertWriteToolsMatchCatalogue,
   findMcpTool,
   isKnownMcpTool,
+  mcpAvailableModules,
   mcpReadTools,
   mcpToolCatalogue,
   mcpWriteTools,
+  paginateMcpTools,
 } from "./tools";
 
 describe("read tools", () => {
@@ -252,5 +257,188 @@ describe("permission-filtered catalogue (issue #883 P0-1)", () => {
       .not.toBeNull();
     // …but isKnownMcpTool stays scope-level, so 'no access' ≠ 'no such tool'.
     expect(isKnownMcpTool("run_report")).toBe(true);
+  });
+});
+
+describe("P1: tenant module filtering & advertised module parity", () => {
+  it("excludes non-food_service trade modules from food_service tools/list and findMcpTool", () => {
+    const tools = mcpToolCatalogue(
+      ["pos.read", "pos.write"],
+      undefined,
+      LEGACY_GRANTS,
+      { industry: "food_service", writeMode: "approve" },
+    );
+    const names = tools.map((t) => t.descriptor.name);
+    for (const forbidden of [
+      "jewelry",
+      "aec",
+      "cosmetics",
+      "cosmetic",
+      "wholesale",
+      "haberdashery",
+      "tools_fittings",
+      "accessories",
+      "accessory",
+      "pricelist",
+      "product_attribute",
+      "barcode_template",
+      "sales_invoice",
+      "boq",
+      "rfi",
+    ]) {
+      expect(
+        names.filter((n) => n.includes(forbidden)),
+        `unexpected ${forbidden} tools on food_service`,
+      ).toEqual([]);
+    }
+    expect(
+      findMcpTool("write_jewelry_item_create", ["pos.read", "pos.write"], undefined, LEGACY_GRANTS, {
+        industry: "food_service",
+      }),
+    ).toBeNull();
+    expect(
+      findMcpTool("get_boq_variance", ["pos.read", "pos.write"], undefined, LEGACY_GRANTS, {
+        industry: "food_service",
+      }),
+    ).toBeNull();
+  });
+
+  it("advertised modules match the exact module predicate used by mcpToolCatalogue", () => {
+    const options = { industry: "food_service" as const, writeMode: "approve" as const };
+    const modules = new Set(
+      mcpAvailableModules(["pos.read", "pos.write"], undefined, LEGACY_GRANTS, options),
+    );
+    const tools = mcpToolCatalogue(["pos.read", "pos.write"], undefined, LEGACY_GRANTS, options);
+    for (const tool of tools) {
+      if (tool.binding.kind === "read") {
+        expect(modules.has(mcpModuleForReadTool(tool.binding.readToolName))).toBe(true);
+      } else if (tool.binding.kind === "write") {
+        expect(modules.has(mcpModuleForWriteAction(tool.binding.actionType))).toBe(true);
+      }
+    }
+    // Narrowing to CRM read-only narrows both advertised modules and tools
+    const crmOnly = parseMcpGrants({
+      apps: { crm: { read: true, write: false } },
+      branches: "all",
+    });
+    const crmModules = mcpAvailableModules(["pos.read", "pos.write"], undefined, crmOnly, options);
+    expect(crmModules).toEqual(["customers", "crm", "loyalty"]);
+  });
+
+  it("retains shared settings tools on non-POS industries (service_saas and architecture_construction)", () => {
+    for (const industry of ["service_saas", "architecture_construction"] as const) {
+      const names = new Set(
+        mcpToolCatalogue(["pos.read", "pos.write"], undefined, LEGACY_GRANTS, { industry }).map(
+          (t) => t.descriptor.name,
+        ),
+      );
+      expect(names.has("write_payment_method_create")).toBe(true);
+      expect(names.has("write_printer_create")).toBe(true);
+      expect(names.has("write_print_template_save")).toBe(true);
+      expect(names.has("write_settings_print_rules_save")).toBe(true);
+    }
+  });
+});
+
+describe("P3: JSON Schema portability (no array-typed nullable fields)", () => {
+  it("uses anyOf rather than array type across every tool inputSchema", () => {
+    const tools = mcpToolCatalogue(["pos.read", "pos.write"]);
+    const offending: string[] = [];
+    function check(node: unknown, path: string) {
+      if (!node || typeof node !== "object") return;
+      const rec = node as Record<string, unknown>;
+      if (Array.isArray(rec.type)) {
+        offending.push(`${path}: type=${JSON.stringify(rec.type)}`);
+      }
+      if (rec.properties && typeof rec.properties === "object") {
+        for (const [k, v] of Object.entries(rec.properties as Record<string, unknown>)) {
+          check(v, `${path}.${k}`);
+        }
+      }
+      if (rec.items) check(rec.items, `${path}[]`);
+      if (Array.isArray(rec.anyOf)) {
+        rec.anyOf.forEach((b, i) => check(b, `${path}.anyOf[${i}]`));
+      }
+    }
+    for (const tool of tools) {
+      check(tool.descriptor.inputSchema, tool.descriptor.name);
+    }
+    expect(offending).toEqual([]);
+  });
+});
+
+describe("P2: cursor pagination and concise single-line descriptions", () => {
+  it("keeps every tool description to a single line and reduces total food_service payload well below 341 KB", () => {
+    const tools = mcpToolCatalogue(
+      ["pos.read", "pos.write"],
+      undefined,
+      LEGACY_GRANTS,
+      { industry: "food_service", writeMode: "approve" },
+    ).map((t) => t.descriptor);
+    for (const tool of tools) {
+      expect(tool.description.includes("\n"), `${tool.name} has multi-line description`).toBe(
+        false,
+      );
+    }
+    const totalBytes = JSON.stringify({ tools }).length;
+    expect(totalBytes).toBeLessThan(260_000);
+
+    // Follow nextCursor across all pages: every tool seen exactly once
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = paginateMcpTools(tools, cursor);
+      expect(page.ok).toBe(true);
+      if (!page.ok) break;
+      expect(page.tools.length).toBeLessThanOrEqual(MCP_TOOLS_PAGE_SIZE);
+      seen.push(...page.tools.map((t) => t.name));
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor);
+    expect(pages).toBeGreaterThan(1);
+    expect(seen).toEqual(tools.map((t) => t.name));
+    expect(new Set(seen).size).toBe(tools.length);
+  });
+
+  it("rejects malformed cursors", () => {
+    const tools = mcpReadTools().map((t) => t.descriptor);
+    expect(paginateMcpTools(tools, "not-a-valid-cursor")).toEqual({ ok: false });
+  });
+});
+
+describe("P4: write tool descriptions and annotations match approval semantics", () => {
+  it("states approval queue semantics on approve-mode connections and marks queued writes non-destructive", () => {
+    const approveTools = mcpToolCatalogue(
+      ["pos.write"],
+      undefined,
+      LEGACY_GRANTS,
+      { writeMode: "approve" },
+    ).filter((t) => t.binding.kind === "write");
+    expect(approveTools.length).toBe(mcpWriteTools().length);
+    for (const tool of approveTools) {
+      expect(tool.descriptor.description).toMatch(/approval|تأیید/);
+      expect(tool.descriptor.description).not.toMatch(/in one transaction|در یک تراکنش/);
+      expect(tool.descriptor.annotations.destructiveHint).toBe(false);
+      expect(tool.descriptor.annotations.readOnlyHint).toBe(false);
+    }
+  });
+
+  it("distinguishes immediate apply writes from always_approve step-up writes on apply-mode connections", () => {
+    const applyTools = mcpToolCatalogue(
+      ["pos.write"],
+      undefined,
+      LEGACY_GRANTS,
+      { writeMode: "apply" },
+    );
+    const expense = applyTools.find((t) => t.descriptor.name === "write_expense")!;
+    // expense.create is always_approve -> still awaits human approval even in apply mode
+    expect(expense.descriptor.description).toContain("Always awaits human approval");
+    expect(expense.descriptor.annotations.destructiveHint).toBe(false);
+
+    const accountDelete = applyTools.find((t) => t.descriptor.name === "write_account_delete")!;
+    // account.delete is mode-governed and destructive -> applies immediately in apply mode
+    expect(accountDelete.descriptor.description).toContain("Applies immediately");
+    expect(accountDelete.descriptor.annotations.destructiveHint).toBe(true);
   });
 });

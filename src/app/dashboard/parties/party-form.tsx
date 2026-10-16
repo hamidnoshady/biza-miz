@@ -21,7 +21,9 @@
  * — autosaved on a timer so a closed tab costs nothing, and never autosaved into
  * the record itself, which is the other thing a screen like this gets wrong.
  */
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ExternalLinkIcon } from "lucide-react";
 import {
   ACCOUNTING_CODE_MODES,
   ACCOUNTING_CODE_MODE_LABELS,
@@ -35,6 +37,8 @@ import {
   asciiDigits,
   buildNonAccountingPayload,
   buildPartyPayload,
+  restrictedFieldsLabel,
+  restrictPartyPayload,
   formStateFromParty,
   partyFieldErrorMessage,
   hasPartyRole,
@@ -159,6 +163,32 @@ export function PartyFormDialog({
    * lost save.
    */
   const [loadingRecord, setLoadingRecord] = useState(Boolean(partyId && !initial));
+  /**
+   * Issue #947 (TEAM-F07) — the membership this personnel file belongs to.
+   *
+   * When it is set, the three canonical identity fields (name, mobile, email) are
+   * owned by that account: the server refuses a write that would make them differ
+   * (`identity_*_managed_by_membership`, #854) and the membership sync is what brings
+   * them across. The form used to offer those inputs as ordinary text boxes anyway,
+   * so the *only* way to discover the rule was to fill a field in and be refused —
+   * with a message that fell through to «این فیلد الزامی است». The field is now
+   * stated read-only with the screen that owns it named, while everything the file
+   * does own (address, national ID, notes, category, accounting code, bank) stays
+   * editable exactly as before.
+   */
+  const [linkedMemberId, setLinkedMemberId] = useState<string | null>(
+    initial?.employeeUserId ?? null,
+  );
+  /**
+   * Issue #947 (TEAM-F01) — the paths this read withheld.
+   *
+   * The server blanks them and names them; the form has to do two things with that
+   * answer: say *why* the field is empty (a blank national ID reads as «no data», not
+   * «no permission»), and not post it back (`restrictPartyPayload`), because the blank
+   * it would send is indistinguishable from a deliberate clear.
+   */
+  const [restrictedFields, setRestrictedFields] = useState<string[]>(initial?.restrictedFields ?? []);
+  const withholds = (path: string) => restrictedFields.includes(path);
   const [formError, setFormError] = useState("");
   const [info, setInfo] = useState("");
   const [draftId, setDraftId] = useState<string | null>(null);
@@ -205,6 +235,8 @@ export function PartyFormDialog({
         return;
       }
       const hydrated = formStateFromParty(data.party);
+      setLinkedMemberId(data.party.employeeUserId ?? null);
+      setRestrictedFields(data.party.restrictedFields ?? []);
       setState(hydrated);
       setBaseline(hydrated);
       setTaxInput(taxPercentageText(hydrated));
@@ -389,9 +421,10 @@ export function PartyFormDialog({
     setErrors({});
     setBusy(true);
     setFormError("");
-    const payload = accountingEditable
-      ? buildPartyPayload(submitted)
-      : buildNonAccountingPayload(submitted);
+    const payload = restrictPartyPayload(
+      accountingEditable ? buildPartyPayload(submitted) : buildNonAccountingPayload(submitted),
+      restrictedFields,
+    );
     const { ok, data } = partyId
       ? await api<{ party?: PartyApiRecord; error?: string; fieldErrors?: Record<string, string> }>(
           `/api/parties/${encodeURIComponent(partyId)}`,
@@ -526,6 +559,62 @@ export function PartyFormDialog({
         <div ref={bodyRef} className="min-w-0 space-y-4">
 
         {/* ---------------- root fields ---------------- */}
+        {/* Issue #947 (TEAM-F01) — what this reader may not see, said out loud. */}
+        {restrictedFields.length > 0 ? (
+          <InfoBox>
+            بخشی از اطلاعات این پرونده با دسترسی شما نمایش داده نمی‌شود
+            {restrictedFieldsLabel(restrictedFields) ? ` (${restrictedFieldsLabel(restrictedFields)})` : ""}؛ همان
+            بخش‌ها در این فرم خالی و فقط‌خواندنی هستند و ذخیره‌کردن آن‌ها را تغییر نمی‌دهد.
+          </InfoBox>
+        ) : null}
+        {/*
+          Issue #947 (TEAM-F07) — the linked identity, stated before anybody types.
+
+          A personnel file with a membership owns three fields *through* that account:
+          its name, its mobile and its email. The canonical editor is the Team screen,
+          and the membership sync carries the values across — so offering ordinary
+          inputs here meant the owner edited a field this form cannot save, and found
+          out from a 409 after «ذخیره».
+
+          An Employee file with *no* membership is the other half of the same story and
+          gets its own sentence: it is a standalone personnel record (accounting,
+          address, notes), and giving the person a login is the Team screen's
+          onboarding flow, which creates the account and its file together.
+        */}
+        {hasPartyRole(state, "Employee") ? (
+          linkedMemberId ? (
+            <InfoBox>
+              <span className="block">
+                نام، موبایل و ایمیل این پرونده از حساب کاربری عضو می‌آید و این‌جا فقط‌خواندنی است؛
+                برای تغییرشان از صفحهٔ کارکنان استفاده کنید.
+              </span>
+              <span className="mt-1 block">
+                نشانی، کد ملی، یادداشت‌ها، دسته‌بندی و اطلاعات حسابداری/بانکی همچنان از همین فرم
+                ویرایش می‌شوند.
+              </span>
+              <Link
+                href="/settings/team"
+                className="mt-2 inline-flex items-center gap-1 font-medium text-primary hover:underline"
+              >
+                ویرایش شناسه در «کاربران و دسترسی‌ها»
+                <ExternalLinkIcon className="size-3.5 shrink-0" aria-hidden="true" />
+              </Link>
+            </InfoBox>
+          ) : (
+            <InfoBox>
+              این پرونده به هیچ حساب کاربری متصل نیست: یک پروندهٔ پرسنلی مستقل برای حسابداری و
+              تماس است، بدون ورود به سامانه.
+              <Link
+                href="/settings/team"
+                className="ms-1 inline-flex items-center gap-1 font-medium text-primary hover:underline"
+              >
+                ساخت حساب و اتصال در «کاربران و دسترسی‌ها»
+                <ExternalLinkIcon className="size-3.5 shrink-0" aria-hidden="true" />
+              </Link>
+            </InfoBox>
+          )
+        ) : null}
+
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2 flex flex-wrap items-center gap-4">
             <label className="flex items-center gap-2 text-sm">
@@ -655,11 +744,25 @@ export function PartyFormDialog({
             </div>
           </Field>
 
-          <Field label="نام نمایشی (الزامی)">
+          <Field
+            label="نام نمایشی (الزامی)"
+            hint={
+              linkedMemberId
+                ? "از حساب کاربری عضو می‌آید؛ برای تغییر، از «کاربران و دسترسی‌ها» استفاده کنید."
+                : undefined
+            }
+          >
             <input
               data-field="displayName"
-              autoFocus
-              className={inputClass}
+              autoFocus={!linkedMemberId}
+              /*
+               * Read-only, not `disabled`: a disabled input leaves the tab order and is
+               * announced as unavailable, while this value is a fact the reader may need
+               * to copy — and the only way to hear why it cannot be typed here.
+               */
+              readOnly={Boolean(linkedMemberId)}
+              aria-readonly={linkedMemberId ? true : undefined}
+              className={`${inputClass}${linkedMemberId ? " opacity-70" : ""}`}
               maxLength={MAX_PARTY_DISPLAY_NAME}
               value={state.displayName}
               onChange={(event) => {
@@ -826,7 +929,10 @@ export function PartyFormDialog({
         <TabPanel idPrefix="party-form" active={tab}>
           {tab === "general" ? (
             <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-              <Field label="کد ملی">
+              <Field
+                label="کد ملی"
+                hint={withholds("generalInfo.nationalId") ? "با دسترسی شما نمایش داده نمی‌شود." : undefined}
+              >
                 {/*
                   Persian digits in the box, ASCII in the state — the rule the
                   rest of the app follows. It also drops `maxLength`: the
@@ -842,6 +948,8 @@ export function PartyFormDialog({
                   inputMode="numeric"
                   autoComplete="off"
                   disabled={state.personType === "Legal"}
+                  readOnly={withholds("generalInfo.nationalId")}
+                  aria-readonly={withholds("generalInfo.nationalId") ? true : undefined}
                   value={toPersianDigits(state.generalInfo.nationalId)}
                   onChange={(event) => {
                     patchTab("generalInfo", { nationalId: asciiDigits(event.target.value).slice(0, 10) });
@@ -859,9 +967,14 @@ export function PartyFormDialog({
                   </span>
                 ) : null}
               </Field>
-              <Field label="کد اقتصادی">
+              <Field
+                label="کد اقتصادی"
+                hint={withholds("generalInfo.economicCode") ? "با دسترسی شما نمایش داده نمی‌شود." : undefined}
+              >
                 <input
                   data-field="generalInfo.economicCode"
+                  readOnly={withholds("generalInfo.economicCode")}
+                  aria-readonly={withholds("generalInfo.economicCode") ? true : undefined}
                   className={inputClass}
                   dir="ltr"
                   inputMode="numeric"
@@ -929,11 +1042,16 @@ export function PartyFormDialog({
                 )}
               </Field>
               <div className="hidden sm:block" />
-              <Field label="یادداشت">
+              <Field
+                label="یادداشت"
+                hint={withholds("notes") ? "با دسترسی شما نمایش داده نمی‌شود." : undefined}
+              >
                 <textarea
                   className={inputClass}
                   rows={3}
                   maxLength={MAX_PARTY_NOTES}
+                  readOnly={withholds("notes")}
+                  aria-readonly={withholds("notes") ? true : undefined}
                   value={state.notes}
                   onChange={(event) => patch({ notes: event.target.value })}
                 />
@@ -942,7 +1060,21 @@ export function PartyFormDialog({
           ) : null}
 
           {tab === "address" ? (
-            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+            /*
+              A withheld address is a *tab*, not a field: `<fieldset disabled>` makes
+              every control inside inert and announces the group as unavailable, while
+              five `readOnly` props would leave the group looking ordinary. Disabled
+              inside a withheld tab is also the honest state — there is nothing here to
+              edit and nothing the save would change.
+            */
+            <fieldset
+              disabled={withholds("addressInfo") || withholds("address")}
+              className="m-0 min-w-0 border-0 p-0"
+            >
+              {withholds("addressInfo") || withholds("address") ? (
+                <InfoBox>نشانی این پرونده با دسترسی شما نمایش داده نمی‌شود.</InfoBox>
+              ) : null}
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
               <Field label="استان">
                 <input
                   className={inputClass}
@@ -996,14 +1128,24 @@ export function PartyFormDialog({
                   onChange={(event) => patchTab("addressInfo", { postalBox: event.target.value })}
                 />
               </Field>
-            </div>
+              </div>
+            </fieldset>
           ) : null}
 
           {tab === "contact" ? (
-            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-              <Field label="تلفن همراه">
+            <fieldset disabled={withholds("contactInfo")} className="m-0 min-w-0 border-0 p-0">
+              {withholds("contactInfo") ? (
+                <InfoBox>اطلاعات تماس تکمیلی این پرونده با دسترسی شما نمایش داده نمی‌شود.</InfoBox>
+              ) : null}
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+              <Field
+                label="تلفن همراه"
+                hint={linkedMemberId ? "موبایل ورود عضو از حساب کاربری می‌آید." : undefined}
+              >
                 <input
-                  className={inputClass}
+                  readOnly={Boolean(linkedMemberId)}
+                  aria-readonly={linkedMemberId ? true : undefined}
+                  className={`${inputClass}${linkedMemberId ? " opacity-70" : ""}`}
                   dir="ltr"
                   inputMode="tel"
                   maxLength={32}
@@ -1022,10 +1164,15 @@ export function PartyFormDialog({
                   onChange={(event) => patchTab("contactInfo", { phone: event.target.value })}
                 />
               </Field>
-              <Field label="پست الکترونیکی">
+              <Field
+                label="پست الکترونیکی"
+                hint={linkedMemberId ? "ایمیل ورود عضو از حساب کاربری می‌آید." : undefined}
+              >
                 <input
                   data-field="contactInfo.email"
-                  className={inputClass}
+                  readOnly={Boolean(linkedMemberId)}
+                  aria-readonly={linkedMemberId ? true : undefined}
+                  className={`${inputClass}${linkedMemberId ? " opacity-70" : ""}`}
                   dir="ltr"
                   type="email"
                   maxLength={200}
@@ -1060,7 +1207,8 @@ export function PartyFormDialog({
                   </span>
                 ) : null}
               </Field>
-            </div>
+              </div>
+            </fieldset>
           ) : null}
 
           {tab === "financial" ? (

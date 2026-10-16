@@ -26,7 +26,7 @@ const backendManager = require("../../electron/backend-manager.js") as {
     runtimeUrl: string,
     superuserUrl: string,
     appVersion?: string,
-    options?: { pgToolsDir?: string; emergencyBackupDir?: string; updateStatePath?: string; updateTargetPath?: string },
+    options?: { pgToolsDir?: string; emergencyBackupDir?: string; updateStatePath?: string; updateTargetPath?: string; updatePolicyPath?: string },
   ) => Record<string, string>;
 };
 
@@ -44,12 +44,14 @@ describe("desktopServerEnvironment", () => {
         emergencyBackupDir: "/userData/emergency-backups",
         updateStatePath: "/userData/Configuration/update-state.json",
         updateTargetPath: "/userData/Configuration/update-target.json",
+        updatePolicyPath: "/userData/Configuration/update-policy.json",
       },
     );
     expect(env.PG_TOOLS_DIR).toBe("/resources/postgresql-tools");
     expect(env.RESTORE_EMERGENCY_DIR).toBe("/userData/emergency-backups");
     expect(env.DESKTOP_UPDATE_STATE_PATH).toBe("/userData/Configuration/update-state.json");
     expect(env.DESKTOP_UPDATE_TARGET_PATH).toBe("/userData/Configuration/update-target.json");
+    expect(env.DESKTOP_UPDATE_POLICY_PATH).toBe("/userData/Configuration/update-policy.json");
   });
 
   it("still sets the core env (unchanged by the fix) and forces production/loopback posture", () => {

@@ -10,7 +10,9 @@
 import gsap from "gsap";
 
 export function reducedMotion(): boolean {
-  if (typeof window === "undefined") return true;
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return true;
+  }
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
@@ -52,19 +54,6 @@ export function animateTypingDots(parent: HTMLElement): gsap.core.Tween | null {
     duration: 0.32,
     ease: "sine.inOut",
     stagger: { each: 0.16, repeat: -1, yoyo: true },
-  });
-}
-
-/** A soft, endless float for the hero's gradient orbs. */
-export function animateFloat(el: HTMLElement, drift: { x: number; y: number }, duration: number): void {
-  if (reducedMotion()) return;
-  gsap.to(el, {
-    x: drift.x,
-    y: drift.y,
-    duration,
-    ease: "sine.inOut",
-    repeat: -1,
-    yoyo: true,
   });
 }
 

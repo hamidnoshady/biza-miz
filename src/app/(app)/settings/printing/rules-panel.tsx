@@ -64,12 +64,27 @@ interface ResolvedPlan {
 interface HistoryRow {
   id: string;
   documentType: string;
+  entityId?: string | null;
   status: string;
   errorCode: string | null;
+  errorMessage?: string | null;
+  deliveryOutcome?: "pending" | "handed_off" | "not_delivered" | "ambiguous" | "connector_unavailable";
+  routeReason?: string | null;
+  attemptNumber?: number;
+  previousJobId?: string | null;
+  fallbackFromPrinterId?: string | null;
+  fallbackFromPrinterName?: string | null;
+  printRequestId?: string | null;
   printerName: string | null;
+  templateId?: string | null;
+  templateName?: string | null;
   templateKey: string | null;
   templateVersion: number | null;
-  when: string;
+  templatePaper?: string | null;
+  templateSource?: string | null;
+  createdAt?: string;
+  handedOffAt?: string | null;
+  when?: string;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -79,13 +94,25 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const ROUTE_LABEL: Record<string, string> = {
+  explicit: "چاپگر انتخاب‌شده",
   requested: "چاپگر انتخاب‌شده",
   rule: "قانون این سند",
   fallback: "چاپگر جانشین",
+  runtime_fallback: "چاپگر جانشین (تلاش مجدد خودکار)",
   only: "تنها چاپگر سازگار",
-  last_used: "آخرین چاپگر استفاده‌شده",
   default: "چاپگر پیش‌فرض",
+  choose: "انتخاب نشده",
+  unavailable: "خارج از دسترس",
   none: "انتخاب نشده",
+  unknown: "نامشخص (تاریخی)",
+};
+
+const OUTCOME_LABEL: Record<string, string> = {
+  handed_off: "تحویل به صف سیستم‌عامل (خروجی کاغذ بررسی شود)",
+  not_delivered: "عدم تحویل پیش از ارسال",
+  ambiguous: "وضعیت تحویل نامشخص — بدون ارسال مجدد خودکار (بررسی چاپگر و چاپ مجدد دستی لازم است)",
+  connector_unavailable: "سرویس چاپ در دسترس نیست",
+  pending: "در حال ارسال",
 };
 
 const RULE_ERROR: Record<string, string> = {
@@ -139,7 +166,12 @@ export function RulesPanel() {
     ]);
     if (!ruleRes.ok) setError("قوانین چاپ خوانده نشد.");
     const next: Record<string, RuleRow> = {};
-    for (const row of ruleRes.data.rules ?? []) next[row.document_type] = row;
+    for (const row of ruleRes.data.rules ?? []) {
+      next[row.document_type] = {
+        ...row,
+        fallback_printer_id: row.printer_id ? row.fallback_printer_id : null,
+      };
+    }
     setRules(next);
     setResolved(ruleRes.data.resolved ?? {});
     if (jobRes.ok) setJobs(jobRes.data.jobs ?? []);
@@ -159,6 +191,8 @@ export function RulesPanel() {
 
   async function save(documentType: DocType) {
     const row = rules[documentType];
+    const primaryPrinterId = row?.printer_id ?? null;
+    const fallbackPrinterId = primaryPrinterId ? (row?.fallback_printer_id ?? null) : null;
     setSaving(documentType);
     setError("");
     setNotice("");
@@ -168,8 +202,8 @@ export function RulesPanel() {
         documentType,
         templateKey: row?.template_key ?? null,
         templateId: row?.template_id ?? null,
-        printerId: row?.printer_id ?? null,
-        fallbackPrinterId: row?.fallback_printer_id ?? null,
+        printerId: primaryPrinterId,
+        fallbackPrinterId,
       }),
     });
     setSaving(null);
@@ -203,17 +237,23 @@ export function RulesPanel() {
   }
 
   function patch(documentType: DocType, patchRow: Partial<RuleRow>) {
-    setRules((current) => ({
-      ...current,
-      [documentType]: {
+    setRules((current) => {
+      const merged: RuleRow = {
         document_type: documentType,
         template_key: current[documentType]?.template_key ?? null,
         template_id: current[documentType]?.template_id ?? null,
         printer_id: current[documentType]?.printer_id ?? null,
         fallback_printer_id: current[documentType]?.fallback_printer_id ?? null,
         ...patchRow,
-      },
-    }));
+      };
+      if (!merged.printer_id || merged.fallback_printer_id === merged.printer_id) {
+        merged.fallback_printer_id = null;
+      }
+      return {
+        ...current,
+        [documentType]: merged,
+      };
+    });
   }
 
   if (loading) return <LoadingSkeleton rows={4} />;
@@ -304,8 +344,13 @@ export function RulesPanel() {
                 <span className="mb-1 block text-muted-foreground">چاپگر جانشین (وقتی چاپگر اصلی در دسترس نیست)</span>
                 <select
                   className={inputClass}
-                  value={row?.fallback_printer_id ?? ""}
-                  onChange={(event) => patch(documentType, { fallback_printer_id: event.target.value || null })}
+                  disabled={!row?.printer_id}
+                  value={row?.printer_id ? (row?.fallback_printer_id ?? "") : ""}
+                  onChange={(event) =>
+                    patch(documentType, {
+                      fallback_printer_id: row?.printer_id ? (event.target.value || null) : null,
+                    })
+                  }
                 >
                   <option value="">بدون جانشین</option>
                   {fallbackCandidates.map((printer) => (
@@ -344,24 +389,69 @@ export function RulesPanel() {
         );
       })}
 
-      <SectionCard title="فعالیت اخیر" description="آخرین ارسال‌ها. «ارسال شد» یعنی ویندوز کار را پذیرفته است.">
+      <SectionCard
+        title="فعالیت اخیر"
+        description="آخرین تلاش‌های چاپ. «ارسال شد» یعنی تحویل به صف سیستم‌عامل یا درگاه شبکه انجام شده است و به‌تنهایی خروج فیزیکی کاغذ را تضمین نمی‌کند."
+      >
         {jobs.length === 0 ? (
           <p className="text-sm text-muted-foreground">هنوز چاپی ثبت نشده است.</p>
         ) : (
-          <ul className="space-y-2 text-sm">
-            {jobs.map((job) => (
-              <li key={job.id} className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-muted-foreground">{job.when}</span>
-                <span>{DOC_TYPE_LABELS[job.documentType as DocType] ?? job.documentType}</span>
-                <span dir="auto">{job.printerName ?? "—"}</span>
-                <span className="text-xs text-muted-foreground">
-                  {job.templateKey ? `${job.templateKey}${job.templateVersion ? ` · v${toPersianDigits(job.templateVersion)}` : ""}` : "—"}
-                </span>
-                <StatusBadge tone={job.status === "handed_off" ? "active" : job.status === "failed" ? "danger" : "neutral"}>
-                  {STATUS_LABEL[job.status] ?? job.status}
-                </StatusBadge>
-              </li>
-            ))}
+          <ul className="divide-y divide-border/60 text-sm">
+            {jobs.map((job) => {
+              const attemptNum = job.attemptNumber ?? 1;
+              const isLinked =
+                Boolean(job.previousJobId) ||
+                jobs.some((other) => other.id !== job.id && other.previousJobId === job.id);
+              const templateDisplay = job.templateName ?? job.templateKey;
+              return (
+                <li key={job.id} className="space-y-1 py-2.5 first:pt-0 last:pb-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {job.when ? <span className="text-muted-foreground">{job.when}</span> : null}
+                      <span className="font-medium">{DOC_TYPE_LABELS[job.documentType as DocType] ?? job.documentType}</span>
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                        تلاش {toPersianDigits(attemptNum)}
+                        {isLinked && attemptNum > 1 ? " (مرتبط با تلاش ۱)" : ""}
+                      </span>
+                      <span dir="auto">{job.printerName ?? "—"}</span>
+                      {job.fallbackFromPrinterName ? (
+                        <span className="text-xs text-amber-700 dark:text-amber-300" dir="auto">
+                          (جانشین «{job.fallbackFromPrinterName}»)
+                        </span>
+                      ) : null}
+                    </div>
+                    <StatusBadge tone={job.status === "handed_off" ? "active" : job.status === "failed" ? "danger" : "neutral"}>
+                      {STATUS_LABEL[job.status] ?? job.status}
+                    </StatusBadge>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span>
+                        قالب:{" "}
+                        {templateDisplay
+                          ? `${templateDisplay}${job.templateVersion ? ` · نسخهٔ ${toPersianDigits(job.templateVersion)} (v${toPersianDigits(job.templateVersion)})` : ""}`
+                          : "—"}
+                      </span>
+                      {job.routeReason ? (
+                        <span>مسیر: {ROUTE_LABEL[job.routeReason] ?? job.routeReason}</span>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {job.deliveryOutcome ? (
+                        <span className={job.deliveryOutcome === "ambiguous" ? "text-amber-700 dark:text-amber-300" : ""}>
+                          {OUTCOME_LABEL[job.deliveryOutcome] ?? job.deliveryOutcome}
+                        </span>
+                      ) : null}
+                      {job.status === "failed" && (job.errorMessage || job.errorCode) ? (
+                        <span className="text-red-700 dark:text-red-300">
+                          {job.errorMessage ?? printerErrorMessage(job.errorCode)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </SectionCard>

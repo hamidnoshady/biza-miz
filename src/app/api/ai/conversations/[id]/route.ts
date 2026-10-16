@@ -1,42 +1,112 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, withTenantScope } from "@/lib/auth";
+import {
+  requireAnyPermission,
+  requireFloorAssistant,
+  requirePermission,
+  withTenantScope,
+} from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
+import type { AgentMode } from "@/lib/ai";
 import {
   deleteConversation,
   getConversationMessages,
+  getConversationMode,
   renameConversation,
 } from "@/lib/ai-conversations";
 
-/** One conversation's messages. Ownership (not role) is the access control — see ai-conversations.ts. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MODES: readonly AgentMode[] = ["wizard", "dashboard", "floor"];
+
+/**
+ * Canonical conversation-mode authorization policy (Issue #905 §10):
+ * - `floor` conversations require `requireFloorAssistant()` (active
+ *   cashier/waiter membership with `PERMISSIONS.menuView`).
+ * - `dashboard` and `wizard` conversations require `requirePermission(PERMISSIONS.aiUse)`.
+ * - Every lookup is scoped by `(id, business_id = session.businessId,
+ *   actor_user_id = session.sub)` inside `withTenantScope`, so foreign-member
+ *   and foreign-business ids return 404 without leaking existence, while
+ *   revoking the mode's permission immediately blocks detail, rename, and
+ *   delete with 403 Forbidden.
+ */
+async function requireConversationModeAccess(mode: AgentMode) {
+  return mode === "floor"
+    ? requireFloorAssistant()
+    : requirePermission(PERMISSIONS.aiUse);
+}
+
+async function authorizeConversationById(id: string) {
+  const baseGuard = await requireAnyPermission(
+    PERMISSIONS.aiUse,
+    PERMISSIONS.menuView,
+  );
+  if (baseGuard.error) {
+    return { error: baseGuard.error, session: null, mode: null };
+  }
+  const session = baseGuard.session;
+
+  if (!UUID_RE.test(id)) {
+    return {
+      error: NextResponse.json({ error: "not_found" }, { status: 404 }),
+      session: null,
+      mode: null,
+    };
+  }
+
+  const savedMode = await getConversationMode({
+    businessId: session.businessId,
+    actorUserId: session.sub,
+    conversationId: id,
+  });
+  if (!savedMode) {
+    return {
+      error: NextResponse.json({ error: "not_found" }, { status: 404 }),
+      session: null,
+      mode: null,
+    };
+  }
+
+  const modeGuard = await requireConversationModeAccess(savedMode);
+  if (modeGuard.error) {
+    return { error: modeGuard.error, session: null, mode: null };
+  }
+
+  return { error: null, session: modeGuard.session, mode: savedMode };
+}
+
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
     const { id } = await context.params;
-    const requestedMode = _request.nextUrl.searchParams.get("mode");
+    const auth = await authorizeConversationById(id);
+    if (auth.error) return auth.error;
+    const session = auth.session;
+
+    const rawMode = new URL(request.url).searchParams.get("mode");
+    const requestedMode =
+      rawMode && (MODES as readonly string[]).includes(rawMode)
+        ? (rawMode as AgentMode)
+        : null;
+    if (requestedMode && requestedMode !== auth.mode) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
 
     const result = await getConversationMessages({
       businessId: session.businessId,
       actorUserId: session.sub,
       conversationId: id,
     });
-    if (!result) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    if (requestedMode && requestedMode !== result.conversation.mode) {
-      return NextResponse.json({ error: "conversation_mode_mismatch" }, { status: 409 });
+    if (!result) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
     return NextResponse.json(result);
   },
 );
 
-/**
- * Rename one conversation (the history sidebar's inline editor). Ownership is
- * enforced the same way as GET/DELETE: an unknown or foreign id is a 404, and
- * a title that is empty after normalisation is a 400 — never a silent no-op.
- */
 export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     const { id } = await context.params;
+    const auth = await authorizeConversationById(id);
+    if (auth.error) return auth.error;
+    const session = auth.session;
 
     let body: { title?: unknown };
     try {
@@ -44,37 +114,38 @@ export const PATCH = withTenantScope(
     } catch {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
-    const title = typeof body.title === "string" ? body.title : "";
-    if (!title.replace(/\s+/g, " ").trim()) {
-      return NextResponse.json(
-        { error: "missing_title", message: "عنوان گفتگو نمی‌تواند خالی باشد." },
-        { status: 400 },
-      );
+    if (typeof body.title !== "string" || !body.title.trim()) {
+      return NextResponse.json({ error: "empty_title" }, { status: 400 });
     }
 
-    const renamed = await renameConversation({
+    const updated = await renameConversation({
       businessId: session.businessId,
       actorUserId: session.sub,
       conversationId: id,
-      title,
+      title: body.title,
     });
-    if (!renamed) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    return NextResponse.json({ conversation: renamed });
+    if (!updated) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    return NextResponse.json({ conversation: updated });
   },
 );
 
 export const DELETE = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     const { id } = await context.params;
+    const auth = await authorizeConversationById(id);
+    if (auth.error) return auth.error;
+    const session = auth.session;
 
-    const deleted = await deleteConversation({
+    const ok = await deleteConversation({
       businessId: session.businessId,
       actorUserId: session.sub,
       conversationId: id,
     });
-    if (!deleted) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    if (!ok) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
     return NextResponse.json({ ok: true });
   },
 );

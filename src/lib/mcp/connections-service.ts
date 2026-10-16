@@ -381,6 +381,60 @@ export async function updateMcpConnectionAccess(
 }
 
 /**
+ * Rotate a single static-token connection's bearer token in place without
+ * touching other connections or losing this connection's audit trail.
+ * Immediately invalidates the previous token hash and optionally updates the
+ * expiry window (defaults to 180 days when omitted).
+ */
+export async function rotateMcpConnectionToken(
+  businessId: string,
+  id: string,
+  actorUserId: string,
+  expiresInDays?: number | null,
+): Promise<CreateMcpConnectionResult | { ok: false; error: "connection_not_found" }> {
+  const days = expiresInDays === undefined ? 180 : expiresInDays;
+  if (days !== null && (!Number.isFinite(days) || days <= 0 || days > MAX_EXPIRY_DAYS)) {
+    return { ok: false, error: "invalid_expiry" };
+  }
+
+  const token = createMcpStaticToken();
+  const { rows } = await query<{ scopes: unknown; write_mode: string; grants: unknown }>(
+    `UPDATE mcp_connections
+        SET token_prefix = $3,
+            token_hash = $4,
+            authorized_by = $5,
+            expires_at = CASE WHEN $6::numeric IS NULL THEN NULL ELSE now() + ($6 || ' days')::interval END
+      WHERE id = $1 AND business_id = $2 AND status = 'active' AND origin = 'token'
+      RETURNING scopes, write_mode, grants`,
+    [
+      id,
+      businessId,
+      mcpTokenDisplayPrefix(token),
+      hashMcpToken(token),
+      actorUserId,
+      days,
+    ],
+  );
+  if (!rows[0]) return { ok: false, error: "connection_not_found" };
+
+  const connection = await getMcpConnection(businessId, id);
+  if (!connection) return { ok: false, error: "connection_not_found" };
+
+  await recordMcpGrantEvent({
+    businessId,
+    connectionId: id,
+    kind: "access_changed",
+    scopes: Array.isArray(rows[0].scopes) ? (rows[0].scopes as string[]) : [],
+    writeMode: rows[0].write_mode,
+    grants: rows[0].grants ?? null,
+    actorUserId,
+    via: "api",
+  });
+
+  return { ok: true, connection, token };
+}
+
+/**
  * Did the replacement grant document narrow the old one? Broadenings are
  * harmless (queued proposals stay valid); narrowings dismiss them.
  * `same-or-narrower` per app and per branch set.

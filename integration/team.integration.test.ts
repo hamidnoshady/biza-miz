@@ -897,6 +897,298 @@ describe("branch assignment", () => {
 });
 
 /**
+ * Issue #947 (TEAM-F03) — the branch policy of a membership is *decided*, not
+ * inferred from whichever column happened to be NULL.
+ *
+ * `createMembership`'s `INSERT` ended in `ELSE 'all'`, so a caller that named no
+ * branch policy at all — the shape the PIN-staff form sent — wrote
+ * `location_scope = 'all'` with zero `user_locations` rows: the widest possible
+ * answer, chosen by nobody, and invisible on the member's own card because there was
+ * no assignment row to show it. The pure rule is unit-tested
+ * (`location-access.test.ts`); what only a database can show is what lands in the row
+ * and in the replica event.
+ */
+describe("branch policy of a new membership (issue #947, TEAM-F03)", () => {
+  async function policyOf(userId: string): Promise<{ scope: string; defaultId: string | null; ids: string[] }> {
+    const { rows } = await db.query<{ location_scope: string; location_id: string | null; ids: string[] | null }>(
+      `SELECT u.location_scope, u.location_id,
+              (SELECT array_agg(ul.location_id) FROM user_locations ul WHERE ul.user_id = u.id) AS ids
+         FROM users u WHERE u.id = $1`,
+      [userId],
+    );
+    return { scope: rows[0].location_scope, defaultId: rows[0].location_id, ids: rows[0].ids ?? [] };
+  }
+
+  it("binds a creation that names no branch policy to the business's default branch", async () => {
+    /*
+     * The whole finding in one case: role, name and PIN — nothing else — and the member
+     * must not end up holding every branch of the business. The default is the oldest
+     * active branch, the same «when nobody said otherwise» rule the branch service uses.
+     */
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Unnamed Policy Cashier",
+        pin: "4455",
+        actorId: alpha.ownerId,
+      }),
+    );
+
+    expect(await policyOf(userId)).toEqual({
+      scope: "home",
+      defaultId: alpha.locationId,
+      ids: [],
+    });
+  });
+
+  it("honours each explicit policy, and never widens one that cannot be honoured", async () => {
+    const second = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Policy Second') RETURNING id",
+      [alpha.businessId],
+    );
+    const secondId = second.rows[0].id;
+
+    // all / selected / home / none, named directly.
+    const all = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "All Branch Cashier",
+        pin: "5566",
+        locationScope: "all",
+        actorId: alpha.ownerId,
+      }),
+    );
+    expect(await policyOf(all.userId)).toMatchObject({ scope: "all", ids: [] });
+
+    const selected = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Selected Branch Cashier",
+        pin: "6677",
+        locationScope: "selected",
+        locationIds: [secondId],
+        actorId: alpha.ownerId,
+      }),
+    );
+    expect(await policyOf(selected.userId)).toMatchObject({ scope: "selected", ids: [secondId] });
+
+    const none = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "No Branch Cashier",
+        pin: "7788",
+        locationScope: "none",
+        actorId: alpha.ownerId,
+      }),
+    );
+    expect(await policyOf(none.userId)).toMatchObject({ scope: "none" });
+
+    // «selected» with nothing selected was an `ELSE 'all'` case; it is now a refusal,
+    // and nothing was written.
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.createMembership({
+          businessId: alpha.businessId,
+          role: "cashier",
+          fullName: "Impossible Selected",
+          pin: "8899",
+          locationScope: "selected",
+          actorId: alpha.ownerId,
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "selected_locations_required" });
+    const rows = await db.query("SELECT 1 FROM users WHERE full_name = 'Impossible Selected'");
+    expect(rows.rowCount).toBe(0);
+  });
+
+  it("reads a cleared assignment as «none», not as «every branch»", async () => {
+    // The update path's own `ELSE 'all'`: unticking every branch used to grant the
+    // whole business, including branches opened later.
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Cleared Branches Waiter",
+        pin: "9911",
+        locationIds: [alpha.locationId],
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+      }),
+    );
+    /*
+     * A creation that names a branch set and no policy reads as «selected» — the same
+     * inference every pre-0170 row reads as, and what the old `CASE` produced too. The
+     * point of the case is the *second* half: clearing the set must land on «none».
+     */
+    expect(await policyOf(userId)).toMatchObject({ scope: "selected" });
+
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId,
+        actorId: alpha.ownerId,
+        locationIds: [],
+        defaultLocationId: null,
+      }),
+    );
+    expect(await policyOf(userId)).toEqual({ scope: "none", defaultId: null, ids: [] });
+  });
+
+  it("records which arm of the rule decided it", async () => {
+    /*
+     * «Who gave this cashier every branch?» has to have an answer, and the answer is
+     * the audit entry: the policy plus the arm that produced it. A member created by a
+     * legacy client that named nothing is recorded as `business_default` rather than as
+     * an unremarked `all`.
+     */
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Audited Policy Cashier",
+        pin: "1212",
+        actorId: alpha.ownerId,
+      }),
+    );
+    const { rows } = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM audit_log
+        WHERE business_id = $1 AND entity_id = $2 AND action = 'team.member_created'
+        ORDER BY created_at DESC LIMIT 1`,
+      [alpha.businessId, userId],
+    );
+    expect(rows[0]?.payload).toMatchObject({
+      after: { locationScope: "home", locationScopeBasis: "business_default" },
+    });
+  });
+
+  it("replicates the fallback branch the row actually stored, all the way to access", async () => {
+    /*
+     * The same unnamed-policy creation, followed through the replication seam — the
+     * half a cloud-only assertion cannot see.
+     *
+     * `membership.created` carried `locations.defaultLocationId`, which is **null** in
+     * exactly this case (the caller named no branch, so nothing was assigned), while the
+     * row the cloud wrote holds the business's default branch. `applyIamEvents` writes
+     * the payload value straight into `users.location_id`, so the site ended up with
+     * `location_scope = 'home'` and `location_id = NULL` — and `branchScopeSql`'s home
+     * arm is `location_id = $branch`, which no branch satisfies. The member the cloud had
+     * hired could not be put on floor work anywhere on the replica, although the two
+     * installs agreed about the role, the name and the policy.
+     *
+     * So this case asserts all three links of the chain: the event says the branch the
+     * membership holds, the replica stores it, and the shared eligibility contract then
+     * *admits* the replicated member at that branch.
+     */
+    const { userId } = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Replicated Fallback Waiter",
+        pin: "7788",
+        actorId: alpha.ownerId,
+      }),
+    );
+
+    // The cloud row: home, bound to the default branch, no explicit assignment.
+    const cloud = await db.query<{ location_scope: string; location_id: string | null }>(
+      "SELECT location_scope, location_id FROM users WHERE id = $1",
+      [userId],
+    );
+    expect(cloud.rows[0]).toEqual({ location_scope: "home", location_id: alpha.locationId });
+
+    const events = await db.query<{ payload: string }>(
+      `SELECT payload::text AS payload FROM iam_events
+        WHERE business_id = $1 AND event_type = 'membership.created' AND entity_id = $2`,
+      [alpha.businessId, userId],
+    );
+    const payload = JSON.parse(events.rows[0].payload) as {
+      membership: { defaultLocationId: string | null; locationScope: string; locationIds: string[] };
+    };
+    // The event describes the row — the fix this case exists for.
+    expect(payload.membership.locationScope).toBe("home");
+    expect(payload.membership.defaultLocationId).toBe(alpha.locationId);
+    expect(payload.membership.locationIds).toEqual([]);
+
+    /*
+     * Apply it the way a Hybrid/Local site does: `applyIamEvents` in the tenant the
+     * event belongs to, with the membership id the site materialised for it (a site
+     * is another install, so its row ids are its own; the branch ids the payload
+     * carries are the tenant's, which is how they resolve at all).
+     */
+    const iamSync = await import("../src/lib/iam/sync");
+    const staff = await import("../src/lib/staff-eligibility");
+    const applyCreated = (membershipId: string, defaultLocationId: string | null) =>
+      asBusiness(alpha.businessId, () =>
+        iamSync.applyIamEvents(alpha.businessId, randomUUID(), 0, [
+          {
+            id: randomUUID(),
+            businessId: alpha.businessId,
+            sequence: 1,
+            eventType: "membership.created",
+            entityType: "membership",
+            entityId: membershipId,
+            schemaVersion: 1,
+            payload: {
+              ...(JSON.parse(events.rows[0].payload) as Record<string, unknown>),
+              membership: {
+                ...payload.membership,
+                id: membershipId,
+                defaultLocationId,
+              },
+            },
+            actorUserId: null,
+            origin: "cloud",
+            createdAt: new Date().toISOString(),
+          },
+        ]),
+      );
+
+    const replicatedId = randomUUID();
+    await applyCreated(replicatedId, payload.membership.defaultLocationId);
+
+    const replica = await db.query<{ location_scope: string; location_id: string | null }>(
+      "SELECT location_scope, location_id FROM users WHERE id = $1",
+      [replicatedId],
+    );
+    expect(replica.rows[0]).toEqual({ location_scope: "home", location_id: alpha.locationId });
+
+    // …and the point of storing it: the replicated member may actually work there.
+    expect(
+      await asBusiness(alpha.businessId, () =>
+        staff.isEligibleStaffAtLocation(alpha.businessId, alpha.locationId, replicatedId),
+      ),
+    ).toBe(true);
+    const roster = await asBusiness(alpha.businessId, () =>
+      staff.listEligibleStaffAtLocation(alpha.businessId, alpha.locationId),
+    );
+    expect(roster.map((row) => row.id)).toContain(replicatedId);
+
+    /*
+     * The control: the same event with the value the payload used to carry. A «home»
+     * member with no home is not eligible *anywhere*, which is the failure this fix
+     * removes — stated here so the reason the field matters cannot be mistaken for a
+     * cosmetic difference between two equal values.
+     */
+    const strandedId = randomUUID();
+    await applyCreated(strandedId, null);
+    const stranded = await db.query<{ location_scope: string; location_id: string | null }>(
+      "SELECT location_scope, location_id FROM users WHERE id = $1",
+      [strandedId],
+    );
+    expect(stranded.rows[0]).toEqual({ location_scope: "home", location_id: null });
+    expect(
+      await asBusiness(alpha.businessId, () =>
+        staff.isEligibleStaffAtLocation(alpha.businessId, alpha.locationId, strandedId),
+      ),
+    ).toBe(false);
+  });
+});
+
+/**
  * Issue #854 (P1.12) — a role transition may not strand the membership.
  *
  * The two models are not interchangeable: a password role signs in at the
@@ -911,6 +1203,202 @@ describe("branch assignment", () => {
  * with a suspended membership, so the door is not needed until reactivation —
  * which is checked, and is the third case below.
  */
+/**
+ * Issue #947 (consumer seam) — the floor's staff eligibility, driven by real policies.
+ *
+ * `GET /api/staff` (the picker) and `floor.validWaiterId` (the write-side check) both
+ * asked `users.location_id IS NULL OR location_id = $2`, which since migration 0170 is
+ * the member's *default* branch: a waiter with two branches was missing at one of them,
+ * and a waiter with no branch at all stayed assignable at the old one. These cases take
+ * the four policies `createMembership` can persist and ask the shared contract what it
+ * answers at each branch — the two doors now answer with the same function.
+ */
+describe("floor staff eligibility (issue #947, consumer seam)", () => {
+  let staff: typeof import("../src/lib/staff-eligibility");
+
+  beforeAll(async () => {
+    staff = await import("../src/lib/staff-eligibility");
+  });
+
+  async function secondLocation(): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Eligibility Second') RETURNING id",
+      [alpha.businessId],
+    );
+    return rows[0].id;
+  }
+
+  it("follows the policy, not the default branch column", async () => {
+    const second = await secondLocation();
+    const selected = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Selected Waiter",
+        pin: "1010",
+        locationScope: "selected",
+        locationIds: [second],
+        actorId: alpha.ownerId,
+      }),
+    );
+
+    // Eligible exactly where the policy says, through both halves of the contract.
+    expect(await asBusiness(alpha.businessId, () => staff.isEligibleStaffAtLocation(alpha.businessId, second, selected.userId))).toBe(true);
+    expect(await asBusiness(alpha.businessId, () => staff.isEligibleStaffAtLocation(alpha.businessId, alpha.locationId, selected.userId))).toBe(false);
+
+    const atSecond = await asBusiness(alpha.businessId, () => staff.listEligibleStaffAtLocation(alpha.businessId, second));
+    expect(atSecond.map((row) => row.id)).toEqual([selected.userId]);
+    const atHome = await asBusiness(alpha.businessId, () => staff.listEligibleStaffAtLocation(alpha.businessId, alpha.locationId));
+    expect(atHome.map((row) => row.id)).not.toContain(selected.userId);
+  });
+
+  it("keeps the other three policies honest — home, none and all", async () => {
+    const second = await secondLocation();
+    const home = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Home Waiter",
+        pin: "1212",
+        locationScope: "home",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+      }),
+    );
+    const none = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "No Branch Waiter",
+        pin: "1313",
+        locationScope: "none",
+        actorId: alpha.ownerId,
+      }),
+    );
+    const all = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Every Branch Waiter",
+        pin: "1414",
+        locationScope: "all",
+        actorId: alpha.ownerId,
+      }),
+    );
+
+    // Sorted, because the list is ordered by the member's name and these are Persian
+    // and English names side by side — the *set* is what the contract promises.
+    const eligibleAt = async (locationId: string) =>
+      (await asBusiness(alpha.businessId, () => staff.listEligibleStaffAtLocation(alpha.businessId, locationId)))
+        .map((row) => row.id)
+        .sort();
+
+    expect(await eligibleAt(alpha.locationId)).toEqual([home.userId, all.userId].sort());
+    expect(await eligibleAt(second)).toEqual([all.userId]);
+    // «no branch» means no branch: not the old default, not the new one.
+    expect(await eligibleAt(alpha.locationId)).not.toContain(none.userId);
+    expect(await eligibleAt(second)).not.toContain(none.userId);
+  });
+
+  it("drops a suspended member and keeps roles and tenants apart", async () => {
+    const second = await secondLocation();
+    const waiter = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "waiter",
+        fullName: "Suspended Waiter",
+        pin: "1515",
+        locationScope: "all",
+        actorId: alpha.ownerId,
+      }),
+    );
+    const cashier = await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "All Branch Cashier",
+        pin: "1616",
+        locationScope: "all",
+        actorId: alpha.ownerId,
+      }),
+    );
+    // A rival business's branch never appears in this business's eligibility, even for a
+    // member id from the wrong tenant.
+    const rival = await seedBusiness("Eligibility Rival", `rival-elig-${randomUUID().slice(0, 8)}`, `rival-elig-${randomUUID().slice(0, 8)}@example.ir`);
+
+    const eligible = await asBusiness(alpha.businessId, () => staff.listEligibleStaffAtLocation(alpha.businessId, alpha.locationId));
+    expect(eligible.map((row) => row.id)).toContain(waiter.userId);
+    // A cashier is not floor staff: the role filter is the contract's, not the caller's.
+    expect(eligible.map((row) => row.id)).not.toContain(cashier.userId);
+    expect(
+      await asBusiness(alpha.businessId, () =>
+        staff.isEligibleStaffAtLocation(alpha.businessId, rival.locationId, waiter.userId),
+      ),
+    ).toBe(false);
+
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: waiter.userId,
+        actorId: alpha.ownerId,
+        isActive: false,
+      }),
+    );
+    expect(
+      await asBusiness(alpha.businessId, () =>
+        staff.isEligibleStaffAtLocation(alpha.businessId, alpha.locationId, waiter.userId),
+      ),
+    ).toBe(false);
+    // The second branch is forbidden to everyone in this business except the roaming
+    // member below — the suspended waiter is gone from it too.
+    expect(
+      await asBusiness(alpha.businessId, () =>
+        staff.isEligibleStaffAtLocation(alpha.businessId, second, waiter.userId),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps the pre-0170 roaming member reachable, and has no widening fallback", async () => {
+    /*
+     * The two shapes migration 0170's backfill produced, from the other side:
+     *
+     *  - the old «roaming manager» (no assignment, no default branch) became
+     *    `location_scope = 'all'` and must stay reachable everywhere — the floor may not
+     *    lose a waiter it used to show;
+     *  - a row with no branch *and* a «home» policy reached nowhere before this change
+     *    and reaches nowhere now. `home` means «the member's default branch»; when there
+     *    is none, the honest answer is «no branch», never «every branch» — the widening
+     *    fallback is exactly what TEAM-F03 removed from the membership writers.
+     */
+    const second = await secondLocation();
+    const insert = async (name: string, locationScope?: string) => {
+      // The column is `NOT NULL DEFAULT 'home'` since 0170, so «no policy stated» is
+      // written by *omitting* it, exactly the way a raw insert of that era would.
+      const { rows } = await db.query<{ id: string }>(
+        locationScope
+          ? `INSERT INTO users (business_id, full_name, role, pin_hash, is_active, location_scope)
+             VALUES ($1, $2, 'waiter', '$2b$10$notarealhashnotarealhashnotarealhashno', true, $3::location_scope)
+             RETURNING id`
+          : `INSERT INTO users (business_id, full_name, role, pin_hash, is_active)
+             VALUES ($1, $2, 'waiter', '$2b$10$notarealhashnotarealhashnotarealhashno', true)
+             RETURNING id`,
+        locationScope ? [alpha.businessId, name, locationScope] : [alpha.businessId, name],
+      );
+      return rows[0].id;
+    };
+    const roaming = await insert("Legacy Roaming Waiter", "all");
+    const homed = await insert("Branchless Home Waiter");
+
+    const eligible = async (locationId: string, userId: string) =>
+      asBusiness(alpha.businessId, () => staff.isEligibleStaffAtLocation(alpha.businessId, locationId, userId));
+
+    expect(await eligible(alpha.locationId, roaming)).toBe(true);
+    expect(await eligible(second, roaming)).toBe(true);
+    expect(await eligible(alpha.locationId, homed)).toBe(false);
+    expect(await eligible(second, homed)).toBe(false);
+  });
+});
+
 describe("credential-aware role transitions (P1.12)", () => {
   it("refuses to move a PIN member into a password role without a global identity", async () => {
     await asBusiness(alpha.businessId, () =>
@@ -1750,6 +2238,7 @@ describe("the rehire ceremony (issue #854 pass 4)", () => {
 describe("the membership owns the login phone, and the personnel file follows (issue #854 pass 4)", () => {
   it("setMemberPhone travels to the linked party; a party edit cannot travel back", async () => {
     const partiesMod = await import("../src/lib/parties-service");
+    const personnelMod = await import("../src/lib/personnel-file");
 
     const { userId } = await asBusiness(alpha.businessId, () =>
       team.createMembership({
@@ -1762,8 +2251,10 @@ describe("the membership owns the login phone, and the personnel file follows (i
         reason: "تست: صندوق‌دار برای آزمون همگام‌سازی شماره",
       }),
     );
+    // Issue #947 — `createMembership` already guaranteed the file; the sync is
+    // idempotent, so calling it again is the retry path rather than a second writer.
     await asBusiness(alpha.businessId, () =>
-      partiesMod.ensureEmployeeParty(alpha.businessId, userId, { displayName: "Phone Sync Cashier" }),
+      personnelMod.ensurePersonnelFileForMembership(alpha.businessId, userId),
     );
 
     // The canonical direction: membership → personnel file.

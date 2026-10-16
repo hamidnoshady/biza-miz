@@ -10,6 +10,7 @@
 import { NextResponse } from "next/server";
 import { fiscalPeriodLockErrorCode } from "./fiscal-periods";
 import { MissingLedgerAccountError } from "./ledger-service";
+import { AccountingDimensionError } from "./accounting-dimensions-service";
 import { PayrollError } from "./payroll-errors";
 
 export type JsonObject = Record<string, unknown>;
@@ -53,6 +54,11 @@ export function badRequest(code = "bad_request"): NextResponse {
  * which the caller must rethrow (an unexpected failure is not a 4xx).
  */
 export function payrollErrorResponse(err: unknown): NextResponse | null {
+  // Issue #868 — the posting policy's refusals travel through payroll actions
+  // (a default tuple, an allocation); they keep their code and 400.
+  if (err instanceof AccountingDimensionError) {
+    return NextResponse.json({ error: err.message, ...(err.details ?? {}) }, { status: err.status });
+  }
   if (err instanceof PayrollError) {
     return NextResponse.json({ error: err.message, ...(err.details ?? {}) }, { status: err.status });
   }

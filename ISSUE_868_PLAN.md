@@ -200,6 +200,25 @@ Runs: the packaged job `37979722293` (push) and `37979728260` (pull request) pas
 
 **The base on Windows is not measured.** Dispatching `verify-shippables` and `build-desktop-installer` with `source_ref=7b1b11c54f9ccb19a82fba69b590d10b10da31ba` from this session returned HTTP 403 (the session token cannot start workflow runs), so the base's staged figure on Windows is missing. If the Linux delta carries over, the base would be about 197.7 MiB. Those two dispatches, run manually on this branch with that `source_ref`, would record it exactly.
 
+**Packaged baseline/current comparison — EXTERNALLY BLOCKED, NOT COMPLETE (re-verified 2026-10-16).** The repository verification half is done: `master-sync-registry` orders the dimension tables `settings → values → mappings` (dependency order), migration `0223` attaches `trg_sync_capture` to all three, and the sync suites pass (`master-sync-registry` 6, `master-sync-merge` 11, `data-ownership` 8, `replication-catalogue` 3 — 28/28). The Windows packaged half cannot run from this session. Re-attempted this cycle against the current base:
+
+```
+gh workflow run verify-shippables.yml --ref arena/dd42d5c5-biza-miz -f source_ref=cf2b39dd046aec1ed71be26d4f41f5618f0ab7a9
+# could not create workflow dispatch event: HTTP 403: Resource not accessible by integration
+# (https://api.github.com/repos/hamidnoshady/biza-miz/actions/workflows/359684878/dispatches)
+```
+
+The integration token cannot create `workflow_dispatch` events. What is needed, run manually (Actions UI or a token with `actions: write`) on this branch, is BOTH workflows dispatched twice — once with `-f source_ref=<base sha>` and once with `-f source_ref=<PR head sha>`:
+
+```
+gh workflow run verify-shippables.yml        --ref <pr-branch> -f source_ref=<base>
+gh workflow run build-desktop-installer.yml  --ref <pr-branch> -f source_ref=<base>
+gh workflow run verify-shippables.yml        --ref <pr-branch> -f source_ref=<head>
+gh workflow run build-desktop-installer.yml  --ref <pr-branch> -f source_ref=<head>
+```
+
+Then compare, on the same runner label, the `desktop-staged-runtime-size` / `business-suite-desktop-size-report` artifacts (staged runtime, packaged payload, installer bytes, category breakdown) between the base and head runs: byte totals must stay inside the existing budgets and any delta must be attributed. Until those four runs exist and are compared, the packaged Windows baseline/current comparison is recorded as **externally blocked**, and no claim is made that it passed. Real packaged cloud/site behavior (ID preservation, archive state, dependency ordering, ownership preservation, replay/conflict/attributed-reversal on an installed system) likewise remains unverified here: the database/feed tests above are not a substitute.
+
 **Diagnostics, so a budget failure keeps its numbers.** `src/lib/desktop-size-diagnostics.ts` (pure, with 37 tests) and `scripts/desktop-size-diagnostics.ts` (a `tsx` CLI) write the totals, the categories, the traced packages, the largest files and a manifest. They run `if: always()` after each budget step, and the reports upload even when a budget fails (`desktop-staged-runtime-size` and `business-suite-desktop-size-report`). Both manual workflows take a `source_ref`; a `source_ref` run is never a release: `RELEASE_BUILD` evaluates to false for it, the value the branch's pushes get, and on run `37979722293` the release job was skipped. A `source_ref` dispatch itself has not run yet, because of the 403 above. Provenance now records the checked-out commit rather than `GITHUB_SHA`.
 
 **Follow-ups, not in this PR, each with its measured size.**
@@ -235,7 +254,7 @@ Still open (each is a real piece of work, with the required decision or contract
 6. **Safe bulk assignment** of dimensions on unposted drafts only (with an audit row per changed line).
 7. **Generated opening / carry-forward entries** carrying dimension attribution; aggregates have no natural attribution until the prior year's closing is split by dimension (report-by-dimension already exists, but the carry-forward generator doesn't read it).
 8. **Site/cloud sync contract extension**: `MASTER_SYNC_TABLES` for dimension master data; site events need attribution propagated; requires cloud-side schema.
-9. **Windows packaged base comparison** using `source_ref=7b1b11c54f9ccb19a82fba69b590d10b10da31ba` — session cannot dispatch `workflow_dispatch` (HTTP 403 on the earlier attempt); needs a token with workflow-dispatch permission.
+9. **Windows packaged base comparison** using `source_ref` — EXTERNALLY BLOCKED. Session cannot dispatch `workflow_dispatch` (HTTP 403, re-verified 2026-10-16; exact command and error above, in "Packaged baseline/current comparison"). Needs a token with `actions: write` to run the four listed dispatches and compare the size artifacts.
 10. **Visual regression**: drifts on cheques + chart-of-accounts screens; baselines NOT re-recorded (standing instruction). Requires human review.
 11. **Restricted-role RLS tests** DONE for the two dimension master tables (new suite `integration/accounting-dimensions-rls.integration.test.ts`, 4 tests under a purpose-created NOSUPERUSER/NOBYPASSRLS role).
 12. **Repository ownership & decision matrix** recorded in `docs/engineering/issue-868-ownership.md`, enumerating deferred bulk-assign / carry-forward / sync contracts and the three-option decision menus for payroll / trading / settlements.

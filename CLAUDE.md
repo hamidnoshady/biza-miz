@@ -207,9 +207,10 @@ Three details are load-bearing:
   `NODE_OPTIONS=--max-old-space-size=3072` so both the runner jobs and the Dockerfile's
   Next.js build share one ceiling.
 - **GHCR is the production registry.** `docker-compose.local.yml` pulls
-  `ghcr.io/hamidnoshady/cafe-restaurant-pos`, and `src/lib/app-update.ts` defaults
-  `GHCR_IMAGE` to it. Hosts that cannot reach `ghcr.io` directly can pull that same image
-  through the `ghcr-mirror.liara.ir` cache as documented in `docker-compose.srv1.yml`.
+  `ghcr.io/hamidnoshady/biza-miz` — the name the workflow derives from
+  `${{ github.repository }}`, so a repository rename changes it. Hosts that cannot reach
+  `ghcr.io` directly can pull that same image through the `ghcr-mirror.liara.ir` cache as
+  documented in `docker-compose.srv1.yml`.
 
 Coolify's restart request uses `latest=true` so it pulls the newly published image rather
 than recreating the previous local image. When `PRODUCTION_HEALTH_URL` is set, the workflow
