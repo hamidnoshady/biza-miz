@@ -49,7 +49,7 @@ services:
     # Deliberately not published to the host: only the app reaches it.
 
   app:
-    image: ghcr-mirror.liara.ir/hamidnoshady/cafe-restaurant-pos:latest
+    image: ghcr-mirror.liara.ir/hamidnoshady/biza-miz:latest
     # Without this a redeploy would happily reuse the cached :latest and the
     # new build would never actually go live.
     pull_policy: always

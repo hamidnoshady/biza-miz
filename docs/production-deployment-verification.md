@@ -78,9 +78,13 @@ current route tree needs to be rewritten.
    SHA. Do this before changing application code.
 2. In the platform service configuration, select the immutable image that
    matches that SHA — for example
-   `ghcr.io/hamidnoshady/cafe-restaurant-pos:sha-<short-sha>` — and redeploy it.
-   Confirm the service is configured for this repository, has registry access,
-   and pulls rather than reusing a local cached image.
+   `ghcr.io/hamidnoshady/biza-miz:sha-<short-sha>` — and redeploy it. Use the
+   repository's **current** name: the publish workflow tags
+   `ghcr.io/${{ github.repository }}`, so a `sha-<short>` tag only exists under
+   the current package name, and a pre-rename reference keeps resolving to the
+   frozen image built before the rename. Confirm the service is configured for
+   this repository, has registry access, and pulls rather than reusing a local
+   cached image.
 3. Repeat `npm run deploy:verify`. Do not call the rollout complete until both
    the reported SHA and all redirects pass.
 4. If the SHA is current but routes still fail, query
