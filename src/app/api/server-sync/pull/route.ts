@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
-import { recordLegacyTokenUsage, resolveSyncCredential, tokensMatch, legacySyncToken, recordSyncRun } from "@/lib/server-sync";
+import {
+  recordLegacyTokenUsage,
+  resolveSyncCredential,
+  tokensMatch,
+  legacySyncToken,
+  recordSyncRun,
+} from "@/lib/server-sync";
 
 /**
  * Server-to-server pull endpoint (Phase 11).
@@ -40,8 +46,11 @@ type SyncEventRow = {
 
 export async function GET(request: NextRequest) {
   const auth = request.headers.get("authorization");
-  const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
-  if (!bearer) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const bearer = auth?.startsWith("Bearer ")
+    ? auth.slice("Bearer ".length).trim()
+    : "";
+  if (!bearer)
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const { searchParams } = new URL(request.url);
 
@@ -58,18 +67,30 @@ export async function GET(request: NextRequest) {
     // caller must say which business it's pulling for; a per-business token
     // (the non-legacy path above) doesn't need this.
     const requested = searchParams.get("businessId");
-    if (!requested) return NextResponse.json({ error: "business_id_required" }, { status: 400 });
+    if (!requested)
+      return NextResponse.json(
+        { error: "business_id_required" },
+        { status: 400 },
+      );
     const known = await withoutTenantScope("server-sync-auth", () =>
       query(`SELECT 1 FROM businesses WHERE id = $1`, [requested]),
     );
-    if (known.rows.length === 0) return NextResponse.json({ error: "unknown_business" }, { status: 422 });
+    if (known.rows.length === 0)
+      return NextResponse.json({ error: "unknown_business" }, { status: 422 });
     businessId = requested;
 
-    const { rows: tokenRows } = await withoutTenantScope("server-sync-auth", () =>
-      query(`SELECT 1 FROM server_sync_tokens WHERE business_id = $1`, [businessId])
+    const { rows: tokenRows } = await withoutTenantScope(
+      "server-sync-auth",
+      () =>
+        query(`SELECT 1 FROM server_sync_tokens WHERE business_id = $1`, [
+          businessId,
+        ]),
     );
     if (tokenRows.length > 0) {
-      return NextResponse.json({ error: "legacy_token_superseded" }, { status: 403 });
+      return NextResponse.json(
+        { error: "legacy_token_superseded" },
+        { status: 403 },
+      );
     }
   }
 
@@ -79,13 +100,21 @@ export async function GET(request: NextRequest) {
   // only rows whose transaction has finished (below the snapshot's xmin), so a
   // row that commits after a higher id was handed out can never be skipped.
   const afterTxRaw = searchParams.get("afterTx");
-  const afterTx = afterTxRaw !== null && /^[0-9]{1,20}$/.test(afterTxRaw) ? afterTxRaw : null;
+  const afterTx =
+    afterTxRaw !== null && /^[0-9]{1,20}$/.test(afterTxRaw) ? afterTxRaw : null;
   // Long-poll: with nothing to return, hold the request up to `wait` seconds
   // and answer as soon as something commits, so a desktop hears about a cloud
   // edit in about a second instead of on its next 30-second tick.
-  const waitSeconds = Math.min(Math.max(Number(searchParams.get("wait") ?? "0") || 0, 0), 25);
+  const waitSeconds = Math.min(
+    Math.max(Number(searchParams.get("wait") ?? "0") || 0, 0),
+    25,
+  );
 
-  if (!Number.isFinite(after) || !Number.isFinite(limit) || (afterTxRaw !== null && afterTx === null)) {
+  if (
+    !Number.isFinite(after) ||
+    !Number.isFinite(limit) ||
+    (afterTxRaw !== null && afterTx === null)
+  ) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
@@ -102,6 +131,9 @@ export async function GET(request: NextRequest) {
                 AND se.applied_at IS NOT NULL
                 AND se.error IS NULL
                 AND se.origin = 'local'
+                -- A retracted event (0225) was queued and withdrawn before it
+                -- ever left the site: there is nothing to deliver down.
+                AND se.retracted_at IS NULL
                 AND ($3::uuid IS NULL OR (se.scope = 'location' AND se.location_id = $3::uuid))
               ORDER BY se.txid, se.id
               LIMIT $2`,
@@ -116,6 +148,7 @@ export async function GET(request: NextRequest) {
                 AND se.applied_at IS NOT NULL
                 AND se.error IS NULL
                 AND (se.origin IS NULL OR se.origin = 'local')
+                AND se.retracted_at IS NULL
                 AND ($3::uuid IS NULL OR (se.scope = 'location' AND se.location_id = $3::uuid))
               ORDER BY se.id
               LIMIT $2`,
@@ -124,10 +157,15 @@ export async function GET(request: NextRequest) {
       return result.rows;
     });
 
-  if (usedLegacyToken) await withTenant(businessId, () => recordLegacyTokenUsage(businessId!));
+  if (usedLegacyToken)
+    await withTenant(businessId, () => recordLegacyTokenUsage(businessId!));
   let rows = await readPage();
   const deadline = Date.now() + waitSeconds * 1000;
-  while (rows.length === 0 && Date.now() < deadline && !request.signal.aborted) {
+  while (
+    rows.length === 0 &&
+    Date.now() < deadline &&
+    !request.signal.aborted
+  ) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     rows = await readPage();
   }
@@ -149,7 +187,10 @@ export async function GET(request: NextRequest) {
     clientEventId: r.client_event_id,
     type: r.event_type,
     payload: r.payload,
-    occurredAt: r.occurred_at instanceof Date ? r.occurred_at.toISOString() : r.occurred_at,
+    occurredAt:
+      r.occurred_at instanceof Date
+        ? r.occurred_at.toISOString()
+        : r.occurred_at,
     actorUserId: r.actor_user_id ?? "",
     actorRole: r.actor_role ?? "cashier",
     businessId,
@@ -160,17 +201,19 @@ export async function GET(request: NextRequest) {
 
   // An empty (often long-polled) read is the idle state and is not recorded.
   if (credential?.siteDeviceId && events.length > 0) {
-    await withTenant(businessId, () => recordSyncRun({
-      businessId,
-      siteDeviceId: credential.siteDeviceId,
-      locationId: credential.locationId,
-      direction: "pull",
-      status: "ok",
-      startCursor: after,
-      endCursor: events.at(-1)?.id ?? after,
-      eventsAttempted: events.length,
-      eventsApplied: events.length,
-    }));
+    await withTenant(businessId, () =>
+      recordSyncRun({
+        businessId,
+        siteDeviceId: credential.siteDeviceId,
+        locationId: credential.locationId,
+        direction: "pull",
+        status: "ok",
+        startCursor: after,
+        endCursor: events.at(-1)?.id ?? after,
+        eventsAttempted: events.length,
+        eventsApplied: events.length,
+      }),
+    );
   }
   return NextResponse.json({ events });
 }

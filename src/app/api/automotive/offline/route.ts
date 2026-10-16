@@ -5,7 +5,11 @@ import { requireIndustryForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { deploymentRole } from "@/lib/deployment-role";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
-import { resolveAutomotiveOfflineCapability } from "@/lib/automotive-offline";
+import {
+  AUTOMOTIVE_OFFLINE_REQUEST_STATUSES,
+  resolveAutomotiveOfflineCapability,
+  type AutomotiveOfflineRequestStatus,
+} from "@/lib/automotive-offline";
 import {
   automotiveMirrorStatus,
   listMirrorVehicles,
@@ -42,30 +46,65 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (industryError) return industryError;
 
   const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
+  if (!location)
+    return NextResponse.json({ error: "no_location" }, { status: 409 });
 
   try {
     const profile = await readDeploymentProfile(session.businessId);
-    const capability = resolveAutomotiveOfflineCapability({ profile: profile.profile, runtimeRole: deploymentRole() });
+    const capability = resolveAutomotiveOfflineCapability({
+      profile: profile.profile,
+      runtimeRole: deploymentRole(),
+    });
     const url = new URL(request.url);
-    const [status, vehicles, requests] = await Promise.all([
+    const requestStatusParam = url.searchParams.get("requestStatus");
+    const requestStatus = (
+      AUTOMOTIVE_OFFLINE_REQUEST_STATUSES as readonly string[]
+    ).includes(requestStatusParam ?? "")
+      ? (requestStatusParam as AutomotiveOfflineRequestStatus)
+      : null;
+    const [status, vehicles, requestPage] = await Promise.all([
       automotiveMirrorStatus(session.businessId, location.id),
       listMirrorVehicles(session.businessId, location.id, {
         condition:
-          url.searchParams.get("condition") === "new" || url.searchParams.get("condition") === "used"
+          url.searchParams.get("condition") === "new" ||
+          url.searchParams.get("condition") === "used"
             ? (url.searchParams.get("condition") as "new" | "used")
             : null,
         state: url.searchParams.get("state"),
         search: url.searchParams.get("search"),
       }),
-      listVehicleOfflineRequests(session.businessId, location.id),
+      // The requests arrive as a page, never as a silently truncated window: the
+      // open ones always (that is the work the counter must act on) and the settled
+      // history newest-first behind a keyset cursor the panel follows with
+      // `cursor`/`nextCursor`. `total` and `openTotal` are counted under the same
+      // filter the rows are read with, so a header can never promise more rows than
+      // the list can reach.
+      listVehicleOfflineRequests(
+        session.businessId,
+        location.id,
+        requestStatus ?? undefined,
+        {
+          unacknowledgedOnly: url.searchParams.get("unacknowledged") === "1",
+          cursor: url.searchParams.get("cursor"),
+          limit: Number(url.searchParams.get("limit")) || undefined,
+        },
+      ),
     ]);
     return NextResponse.json({
       capability,
-      deployment: { profile: profile.profile, pairedAt: profile.pairedAt, source: profile.source },
+      deployment: {
+        profile: profile.profile,
+        pairedAt: profile.pairedAt,
+        source: profile.source,
+      },
       status,
       vehicles,
-      requests,
+      requests: requestPage.rows,
+      requestsPage: {
+        total: requestPage.total,
+        openTotal: requestPage.openTotal,
+        nextCursor: requestPage.nextCursor,
+      },
     });
   } catch (err) {
     return handleAutomotiveError(err);

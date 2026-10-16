@@ -10,16 +10,22 @@ import type { PoolClient } from "pg";
 import type { Role } from "./auth";
 import type { SyncEventType } from "./sync-event-registry";
 import { deploymentRole } from "./deployment-role";
+import { query } from "./db";
 
 /** Postgres NOTIFY channel a site raises when it queues an event for the central server. */
 export const SYNC_OUTBOX_CHANNEL = "sync_outbox";
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** sync_events uses uuid keys; derive a stable UUID when the domain identity is textual. */
 export function syncClientEventId(identity: string): string {
   if (UUID.test(identity)) return identity.toLowerCase();
-  const hex = createHash("sha256").update(`eshobe-sync-event:${identity}`).digest("hex").slice(0, 32).split("");
+  const hex = createHash("sha256")
+    .update(`eshobe-sync-event:${identity}`)
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
   hex[12] = "5"; // name-derived UUID semantics
   hex[16] = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
   return `${hex.slice(0, 8).join("")}-${hex.slice(8, 12).join("")}-${hex.slice(12, 16).join("")}-${hex.slice(16, 20).join("")}-${hex.slice(20).join("")}`;
@@ -80,6 +86,101 @@ export async function appendSyncOutboxEvent(
 }
 
 /**
+ * Record that delivery of these events is about to be attempted (0225).
+ *
+ * Offline cancellation has to answer one question honestly — *can the cloud still
+ * apply this command?* — and only the machine that queues the event can answer
+ * it. `dispatch_attempted_at` is the fact that settles it: one monotonic stamp
+ * written before the HTTP request leaves, never cleared. After it is set nothing
+ * local can prove the cloud has not seen the row, so a cancellation stops being a
+ * local withdrawal and becomes a command the cloud answers (see
+ * `automotive-offline.ts`, `planOfflineRequestCancel`).
+ *
+ * The push path claims its batch with the CTE in `server-sync.ts`, so the stamp
+ * and the read are one statement and a cancellation racing the push resolves one
+ * way or the other: either the row is retracted first and never selected, or it is
+ * claimed and the cancellation knows it must ask the cloud. This function is the
+ * same stamp for anything else that delivers an event directly.
+ */
+export async function markSyncOutboxDispatchAttempts(
+  ids: readonly string[],
+): Promise<number> {
+  if (ids.length === 0) return 0;
+  const { rowCount } = await query(
+    `UPDATE sync_events
+        SET dispatch_attempted_at = coalesce(dispatch_attempted_at, now())
+      WHERE id = ANY($1::bigint[]) AND pushed_at IS NULL AND retracted_at IS NULL`,
+    [ids],
+  );
+  return rowCount ?? 0;
+}
+
+/**
+ * Withdraw an event this machine has never attempted to deliver (0225).
+ *
+ * This is the other half of the honesty rule: a cancellation may be reported as
+ * done without a round trip *exactly* when delivery was never attempted. The
+ * `dispatch_attempted_at IS NULL` predicate is the proof, enforced again by the
+ * `sync_events_retraction_shape` CHECK — an in-flight or delivered event cannot
+ * be retracted here, and the caller falls back to a cloud-confirmed withdrawal.
+ *
+ * The row is kept, not deleted: what a branch queued and then withdrew is part of
+ * the record, and the push selector skips it by predicate rather than by absence.
+ * Returns `false` when retraction is not provable (no attempt is the caller's
+ * business — this only reports whether the row was in a retractable state).
+ */
+export async function retractSyncOutboxEvent(
+  client: PoolClient,
+  input: { locationId: string; clientEventId: string; reason: string },
+): Promise<boolean> {
+  const { rowCount } = await client.query(
+    `UPDATE sync_events
+        SET retracted_at = now(), retracted_reason = $3::text
+      WHERE location_id = $1::uuid AND client_event_id = $2::uuid AND origin = 'local'
+        AND pushed_at IS NULL
+        AND dispatch_attempted_at IS NULL
+        AND retracted_at IS NULL`,
+    [input.locationId, input.clientEventId, input.reason],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/**
+ * What this machine knows about its own delivery of one event — the facts
+ * `planOfflineRequestCancel` decides on. Returned for a *pending* request so the
+ * server can tell the difference between "withdraw it, the cloud never saw it"
+ * and "ask the cloud, it may hold the car".
+ */
+export async function syncOutboxDispatchFacts(
+  client: PoolClient,
+  input: { locationId: string; clientEventId: string },
+): Promise<{
+  exists: boolean;
+  dispatchAttempted: boolean;
+  pushed: boolean;
+  retracted: boolean;
+}> {
+  const { rows } = await client.query<{
+    dispatch_attempted_at: Date | null;
+    pushed_at: Date | null;
+    retracted_at: Date | null;
+  }>(
+    `SELECT dispatch_attempted_at, pushed_at, retracted_at
+       FROM sync_events
+      WHERE location_id = $1::uuid AND client_event_id = $2::uuid
+        AND origin = 'local'`,
+    [input.locationId, input.clientEventId],
+  );
+  const row = rows[0];
+  return {
+    exists: Boolean(row),
+    dispatchAttempted: Boolean(row?.dispatch_attempted_at),
+    pushed: Boolean(row?.pushed_at),
+    retracted: Boolean(row?.retracted_at),
+  };
+}
+
+/**
  * Record a business-wide event (#869): one that belongs to no location, such as a
  * commission payout, which covers every branch at once. It is written with
  * `scope = 'business'`, `business_id` set and `location_id` NULL. Nothing is
@@ -108,7 +209,8 @@ export async function appendBusinessSyncOutboxEvent(
     schemaVersion?: number;
   },
 ): Promise<void> {
-  if (deploymentRole() === "site") throw new Error("business_sync_event_cloud_only");
+  if (deploymentRole() === "site")
+    throw new Error("business_sync_event_cloud_only");
   await client.query(
     `INSERT INTO sync_events
        (scope,business_id,location_id,client_event_id,event_type,payload,occurred_at,applied_at,

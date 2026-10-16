@@ -338,12 +338,13 @@ describe("§22's classification against the schema", () => {
     const classification = redeemed.snapshot.dataClassification;
     // §19 (Wave 6) changed what this half of the audit may say, and the desktop
     // is told the truth about the change: the trade's *only* ongoing events are
-    // the two hold requests the cloud decides, the authoritative records are
-    // still disclosed as cloud-only, and the branch board is disclosed as a
-    // read-only mirror rather than as a synchronised vehicle record.
+    // the hold requests and their withdrawal the cloud decides, the authoritative
+    // records are still disclosed as cloud-only, and the branch board is disclosed
+    // as a read-only mirror rather than as a synchronised vehicle record.
     expect(classification.ongoingDomainEvents.filter((event) => event.includes("automotive")).sort()).toEqual([
       "automotive.vehicle.reservation.released@1",
       "automotive.vehicle.reservation.requested@1",
+      "automotive.vehicle.reservation.withdrawn@1",
     ]);
     expect(classification.centralOnlyData.join(" ")).toContain("Automotive vehicle records");
     // …and the exception is disclosed in the bucket it belongs to, with the

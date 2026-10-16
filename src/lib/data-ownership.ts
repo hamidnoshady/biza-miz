@@ -594,6 +594,9 @@ export const DATA_OWNERSHIP_REGISTRY = {
     events: [
       event("automotive.vehicle.reservation.requested", 1),
       event("automotive.vehicle.reservation.released", 1),
+      // The withdrawal of a request the counter cancelled before the cloud
+      // decided it: the same domain, one more way a site hands work up.
+      event("automotive.vehicle.reservation.withdrawn", 1),
     ],
   }),
 } as const satisfies Record<string, DomainOwnershipDefinition>;

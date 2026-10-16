@@ -268,7 +268,7 @@ export const AUTOMOTIVE_SYNC_CLASSIFICATION: readonly AutomotiveSyncEntry[] = [
     conflictRule:
       "the cloud re-validates the car's live state inside one transaction (row lock plus the one-active-hold-per-serial index) and answers `confirmed` or `conflict` with a named code; the site adopts that answer monotonically and never overwrites it",
     requirement:
-      "already satisfied: `automotive.vehicle.reservation.requested` and `.released` carry the request site-to-cloud, `applyVehicleOfflineRequest` calls the canonical `reserveVehicle`/`releaseVehicleReservation` behind a savepoint, and `offlineSaleFinalization` is `false` by type — a sale, a purchase and their postings are never invented offline",
+      "already satisfied: `automotive.vehicle.reservation.requested`, `.released` and `.withdrawn` carry the request site-to-cloud, `applyVehicleOfflineRequest` calls the canonical `reserveVehicle`/`releaseVehicleReservation` behind a savepoint, and `offlineSaleFinalization` is `false` by type — a sale, a purchase and their postings are never invented offline",
   },
 ];
 
