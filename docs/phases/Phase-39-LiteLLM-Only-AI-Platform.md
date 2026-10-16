@@ -74,6 +74,14 @@ workspace is inside `/dashboard`, not a provider-settings page.
 
 ## Secret cutover and required rollout
 
+For a copy-paste, Coolify-oriented version of the procedure below — exact
+commands, stop conditions, and the redacted evidence to keep for each step —
+see
+[`docs/ai-gateway-secret-cutover-operator-checklist.md`](../ai-gateway-secret-cutover-operator-checklist.md).
+This section remains the authoritative summary of *what* the procedure is and
+*why* each guard exists; that file is the same procedure expanded for an
+operator running it against a real deployment.
+
 Migration 0183 added `master_key_ciphertext` and `virtual_key_ciphertext` while retaining
 plaintext for the transition. The current gateway readers and writers use ciphertext only.
 Migration 0209 drops `platform_ai_gateway.master_key` and `ai_business_gateway.virtual_key` in a
