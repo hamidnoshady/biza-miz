@@ -41,7 +41,7 @@ services:
       retries: 10
 
   app:
-    image: ${POS_IMAGE:-ghcr.io/hamidnoshady/cafe-restaurant-pos}:${POS_IMAGE_TAG:-latest}
+    image: ${POS_IMAGE:-ghcr.io/hamidnoshady/biza-miz}:${POS_IMAGE_TAG:-latest}
     restart: unless-stopped
     # Allow server.ts to drain active sales, WebSockets and background jobs.
     stop_grace_period: 30s
