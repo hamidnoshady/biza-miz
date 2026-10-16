@@ -10,17 +10,33 @@
  *    event. Mismatched tenants are authorized via `POST /api/auth/switch-business`
  *    (wiping the previous tenant's local native caches first) or rejected when
  *    unauthorized; missing or revoked sessions fail closed.
- * 3. Reconciles native background sync (`sync.completed`) with the web IndexedDB
- *    offline mutation queue (`flushQueue`) and enforces device revocation.
+ * 3. Coordinates native background sync with the canonical web IndexedDB
+ *    offline mutation queue (`flushQueue` -> `POST /api/sync/events`):
+ *    - Android `BizaSyncWorker` probes `/api/health` and emits `sync.reconcileRequested`
+ *      (or persists `state = "waiting_for_app"` when the browser is closed).
+ *    - `reconcileNativeSyncRequest` verifies `businessId`, `installationId`,
+ *      `sessionGeneration`, and `syncRequestId` deduplication before calling
+ *      `flushQueue()` and acknowledging exact `flushedCount` / `remainingCount`
+ *      via `sync.acknowledge`.
+ *    - `lastSyncedAt` and `pendingCount = 0` are NEVER stamped from `/api/health`;
+ *      they are updated only when `flushQueue()` actually flushes queued writes.
  */
 import { useEffect, useRef } from "react";
-import type { NativeDeepLinkEvent } from "@/lib/native/bridge-contract";
+import type {
+  NativeAppInfo,
+  NativeDeepLinkEvent,
+  NativeSyncAcknowledgeReason,
+  NativeSyncAcknowledgeResult,
+  NativeSyncReconcileRequestedEvent,
+} from "@/lib/native/bridge-contract";
 import {
+  acknowledgeNativeBackgroundSync,
+  getNativeSyncStatus,
   triggerNativeBackgroundSync,
   validateTenantDeepLink,
 } from "@/lib/native/capabilities-client";
-import { flushQueue } from "@/app/dashboard/offline-queue";
-import { useNative } from "./native-provider";
+import { flushQueue, type FlushQueueResult } from "@/app/dashboard/offline-queue";
+import { useNative, type NativeRequest } from "./native-provider";
 
 const REGISTER_URL = "/api/native-devices";
 
@@ -192,6 +208,147 @@ export async function resolveAndRouteNativeDeepLink(
   };
 }
 
+export interface ReconcileNativeSyncOptions {
+  request: NativeRequest;
+  activeBusinessId: string | null;
+  activeInstallationId?: string | null;
+  activeSessionGeneration?: number | null;
+  acknowledgedRequestIds?: Set<string>;
+  flushImpl?: () => Promise<FlushQueueResult>;
+  fetchImpl?: typeof fetch;
+  app?: NativeAppInfo | null;
+}
+
+export interface ReconcileNativeSyncOutcome {
+  accepted: boolean;
+  reason: NativeSyncAcknowledgeReason;
+  flushedCount: number;
+  remainingCount: number;
+  lastSyncedAt: string | null;
+  acknowledgeResult: NativeSyncAcknowledgeResult | null;
+}
+
+/**
+ * Handles a `sync.reconcileRequested` event (or a durable `waiting_for_app`
+ * request discovered on reconnect) by validating tenant, installation,
+ * session generation, and request deduplication before flushing IndexedDB
+ * `pendingActions` to `/api/sync/events` and acknowledging the real outcome
+ * back to Android `TenantSyncStateStore`.
+ */
+export async function reconcileNativeSyncRequest(
+  event: NativeSyncReconcileRequestedEvent,
+  options: ReconcileNativeSyncOptions,
+): Promise<ReconcileNativeSyncOutcome> {
+  const activeBiz = options.activeBusinessId?.trim() || null;
+  const eventBiz = event.businessId?.trim() || "";
+  if (!activeBiz || !eventBiz || activeBiz !== eventBiz) {
+    return {
+      accepted: false,
+      reason: "tenant_mismatch",
+      flushedCount: 0,
+      remainingCount: event.pendingCount,
+      lastSyncedAt: null,
+      acknowledgeResult: null,
+    };
+  }
+
+  const activeInst = options.activeInstallationId?.trim() || null;
+  const eventInst = event.installationId?.trim() || null;
+  if (activeInst && eventInst && activeInst !== eventInst) {
+    return {
+      accepted: false,
+      reason: "installation_mismatch",
+      flushedCount: 0,
+      remainingCount: event.pendingCount,
+      lastSyncedAt: null,
+      acknowledgeResult: null,
+    };
+  }
+
+  const activeGen = options.activeSessionGeneration ?? null;
+  const eventGen = event.sessionGeneration ?? null;
+  if (activeGen !== null && eventGen !== null && activeGen !== eventGen) {
+    return {
+      accepted: false,
+      reason: "session_generation_mismatch",
+      flushedCount: 0,
+      remainingCount: event.pendingCount,
+      lastSyncedAt: null,
+      acknowledgeResult: null,
+    };
+  }
+
+  if (options.acknowledgedRequestIds?.has(event.syncRequestId)) {
+    return {
+      accepted: false,
+      reason: "duplicate_or_stale",
+      flushedCount: 0,
+      remainingCount: event.pendingCount,
+      lastSyncedAt: null,
+      acknowledgeResult: null,
+    };
+  }
+
+  const flushFn = options.flushImpl ?? flushQueue;
+  const flushOutcome = await flushFn();
+
+  const ack = await acknowledgeNativeBackgroundSync(options.request, {
+    businessId: activeBiz,
+    syncRequestId: event.syncRequestId,
+    flushedCount: flushOutcome.flushedCount,
+    remainingCount: flushOutcome.remainingCount,
+    failedCount: flushOutcome.failedCount,
+    conflictCount: flushOutcome.conflictCount,
+    transientFailure: flushOutcome.transientFailure,
+    installationId: activeInst ?? eventInst,
+    sessionGeneration: activeGen ?? eventGen,
+    completedAt: flushOutcome.completedAt,
+  });
+
+  if (ack.accepted && !flushOutcome.transientFailure) {
+    options.acknowledgedRequestIds?.add(event.syncRequestId);
+  }
+
+  // Stamp server-side native_app_devices.last_synced_at ONLY when real business
+  // events were flushed and acknowledged by Android.
+  const fetchFn = options.fetchImpl ?? (typeof fetch !== "undefined" ? fetch : undefined);
+  if (
+    ack.accepted &&
+    !flushOutcome.transientFailure &&
+    ack.flushedCount > 0 &&
+    ack.lastSyncedAt &&
+    activeInst &&
+    options.app &&
+    fetchFn
+  ) {
+    try {
+      await fetchFn(REGISTER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          installationId: activeInst,
+          environment: options.app.environment,
+          appVersionName: options.app.appVersionName,
+          appVersionCode: options.app.appVersionCode,
+          bridgeVersion: options.app.bridgeVersion,
+          lastSyncedAt: ack.lastSyncedAt,
+        }),
+      });
+    } catch {
+      // Best-effort metadata update; local acknowledgement already succeeded.
+    }
+  }
+
+  return {
+    accepted: ack.accepted,
+    reason: ack.reason,
+    flushedCount: ack.flushedCount,
+    remainingCount: ack.remainingCount,
+    lastSyncedAt: ack.lastSyncedAt,
+    acknowledgeResult: ack,
+  };
+}
+
 export interface NativeDeviceRegistrarProps {
   /** Authoritative active business ID from `WorkspaceShell`'s server session. */
   businessId?: string | null;
@@ -200,6 +357,9 @@ export interface NativeDeviceRegistrarProps {
 export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistrarProps = {}) {
   const { connection, app, request, onEvent } = useNative();
   const previousBusinessIdRef = useRef<string | null>(businessId?.trim() || null);
+  const installationIdRef = useRef<string | null>(null);
+  const sessionGenerationRef = useRef<number | null>(null);
+  const acknowledgedRequestIdsRef = useRef<Set<string>>(new Set());
 
   // If the server-rendered businessId prop changes across navigations (tenant switch),
   // clear the previous tenant's native operational state and caller ID cache immediately.
@@ -207,6 +367,7 @@ export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistr
     const currentBiz = businessId?.trim() || null;
     const prevBiz = previousBusinessIdRef.current;
     if (prevBiz && currentBiz && prevBiz !== currentBiz && connection === "connected") {
+      acknowledgedRequestIdsRef.current.clear();
       void triggerNativeBackgroundSync(request, {
         action: "clear_tenant",
         businessId: prevBiz,
@@ -223,12 +384,14 @@ export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistr
         fallbackBusinessId: businessId,
         previousBusinessId: previousBusinessIdRef.current,
         onClearTenant: async (oldBizId) => {
+          acknowledgedRequestIdsRef.current.clear();
           await triggerNativeBackgroundSync(request, {
             action: "clear_tenant",
             businessId: oldBizId,
           });
         },
         onClearAll: async () => {
+          acknowledgedRequestIdsRef.current.clear();
           await triggerNativeBackgroundSync(request, {
             action: "clear_all",
             businessId: null,
@@ -241,8 +404,20 @@ export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistr
       });
     });
 
-    const offSync = onEvent("sync.completed", (event) => {
+    const offReconcile = onEvent("sync.reconcileRequested", (event) => {
+      void reconcileNativeSyncRequest(event, {
+        request,
+        activeBusinessId: businessId,
+        activeInstallationId: installationIdRef.current,
+        activeSessionGeneration: sessionGenerationRef.current,
+        acknowledgedRequestIds: acknowledgedRequestIdsRef.current,
+        app,
+      });
+    });
+
+    const offSyncCompleted = onEvent("sync.completed", (event) => {
       if (event.revoked && typeof window !== "undefined") {
+        acknowledgedRequestIdsRef.current.clear();
         void triggerNativeBackgroundSync(request, {
           action: "clear_all",
           businessId: null,
@@ -254,17 +429,60 @@ export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistr
             }
           })
           .catch(() => {});
-        return;
       }
-      // Reconcile the web IndexedDB offline mutation queue when Android background sync completes.
-      void flushQueue();
     });
 
     return () => {
       offDeepLink();
-      offSync();
+      offReconcile();
+      offSyncCompleted();
     };
-  }, [businessId, onEvent, request]);
+  }, [app, businessId, onEvent, request]);
+
+  // Reconcile native sync status when the web queue flushes directly (e.g., user-initiated
+  // or auto-online flush while a native syncRequestId is scheduled).
+  useEffect(() => {
+    if (typeof window === "undefined" || connection !== "connected" || !app) return;
+    if (app.bridgeVersion < 3 || !app.capabilities.includes("background.sync")) return;
+    const activeBiz = businessId?.trim() || null;
+    if (!activeBiz) return;
+
+    function handleQueueFlushed(e: Event) {
+      const detail = (e as CustomEvent<FlushQueueResult>).detail;
+      if (!detail || !activeBiz) return;
+      void (async () => {
+        const status = await getNativeSyncStatus(request, activeBiz);
+        const syncRequestId = status.pendingSyncRequestId ?? null;
+        if (
+          !syncRequestId ||
+          acknowledgedRequestIdsRef.current.has(syncRequestId) ||
+          (status.pendingCount === 0 && !status.scheduled && !status.waitingForApp)
+        ) {
+          return;
+        }
+        const ack = await acknowledgeNativeBackgroundSync(request, {
+          businessId: activeBiz,
+          syncRequestId,
+          flushedCount: detail.flushedCount,
+          remainingCount: detail.remainingCount,
+          failedCount: detail.failedCount,
+          conflictCount: detail.conflictCount,
+          transientFailure: detail.transientFailure,
+          installationId: installationIdRef.current,
+          sessionGeneration: sessionGenerationRef.current,
+          completedAt: detail.completedAt,
+        });
+        if (ack.accepted && !detail.transientFailure) {
+          acknowledgedRequestIdsRef.current.add(syncRequestId);
+        }
+      })();
+    }
+
+    window.addEventListener("biza:offline-queue-flushed", handleQueueFlushed);
+    return () => {
+      window.removeEventListener("biza:offline-queue-flushed", handleQueueFlushed);
+    };
+  }, [app, businessId, connection, request]);
 
   useEffect(() => {
     if (connection !== "connected" || !app) return;
@@ -274,6 +492,7 @@ export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistr
       try {
         const identity = await request("device.identity");
         if (cancelled) return;
+        installationIdRef.current = identity.installationId;
         const res = await fetch(REGISTER_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -292,6 +511,56 @@ export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistr
               businessId: null,
             });
           }
+          return;
+        }
+        if (!cancelled && res.ok) {
+          try {
+            const payload = (await res.json()) as {
+              device?: { sessionGeneration?: number | null };
+            };
+            if (typeof payload.device?.sessionGeneration === "number") {
+              sessionGenerationRef.current = payload.device.sessionGeneration;
+            }
+          } catch {
+            // Ignore non-JSON body in minimal test stubs.
+          }
+        }
+
+        // If Android WorkManager probed /api/health while the browser was closed,
+        // TenantSyncStateStore persisted state = "waiting_for_app" with a durable
+        // pendingSyncRequestId. Reconcile it now that the web runtime is active.
+        const activeBiz = businessId?.trim() || null;
+        if (
+          !cancelled &&
+          activeBiz &&
+          app.bridgeVersion >= 3 &&
+          app.capabilities.includes("background.sync")
+        ) {
+          const status = await getNativeSyncStatus(request, activeBiz);
+          if (
+            !cancelled &&
+            (status.waitingForApp || status.state === "waiting_for_app") &&
+            status.pendingSyncRequestId
+          ) {
+            await reconcileNativeSyncRequest(
+              {
+                businessId: activeBiz,
+                syncRequestId: status.pendingSyncRequestId,
+                pendingCount: status.pendingCount,
+                requestedAt: new Date().toISOString(),
+                installationId: status.installationId ?? identity.installationId,
+                sessionGeneration: status.sessionGeneration ?? sessionGenerationRef.current,
+              },
+              {
+                request,
+                activeBusinessId: activeBiz,
+                activeInstallationId: identity.installationId,
+                activeSessionGeneration: sessionGenerationRef.current,
+                acknowledgedRequestIds: acknowledgedRequestIdsRef.current,
+                app,
+              },
+            );
+          }
         }
       } catch {
         // Offline, an app below bridge version 2 (no device.identity yet), a
@@ -302,7 +571,7 @@ export function NativeDeviceRegistrar({ businessId = null }: NativeDeviceRegistr
     return () => {
       cancelled = true;
     };
-  }, [connection, app, request]);
+  }, [businessId, connection, app, request]);
 
   return null;
 }

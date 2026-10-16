@@ -68,6 +68,7 @@ export const NATIVE_COMMANDS = [
   "crm.callerId.sync",
   "sync.status",
   "sync.trigger",
+  "sync.acknowledge",
 ] as const;
 export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
 
@@ -87,12 +88,14 @@ export const NATIVE_COMMAND_MIN_BRIDGE: Readonly<Record<NativeCommand, number>> 
   "crm.callerId.sync": 3,
   "sync.status": 3,
   "sync.trigger": 3,
+  "sync.acknowledge": 3,
 });
 
 export const NATIVE_EVENTS = [
   "bridge.ready",
   "navigation.deepLink",
   "crm.callEnded",
+  "sync.reconcileRequested",
   "sync.completed",
 ] as const;
 export type NativeEventName = (typeof NATIVE_EVENTS)[number];
@@ -253,6 +256,28 @@ export interface NativeCallerIdSyncResult {
   } | null;
 }
 
+export const NATIVE_SYNC_LIFECYCLE_STATES = [
+  "idle",
+  "scheduled",
+  "waiting_for_app",
+  "retrying",
+  "failed",
+  "revoked",
+] as const;
+export type NativeSyncLifecycleState = (typeof NATIVE_SYNC_LIFECYCLE_STATES)[number];
+
+export const NATIVE_SYNC_ACKNOWLEDGE_REASONS = [
+  "acknowledged",
+  "partial_remaining",
+  "revoked",
+  "duplicate_or_stale",
+  "tenant_mismatch",
+  "installation_mismatch",
+  "session_generation_mismatch",
+  "invalid_request",
+] as const;
+export type NativeSyncAcknowledgeReason = (typeof NATIVE_SYNC_ACKNOWLEDGE_REASONS)[number];
+
 export interface NativeSyncStatus {
   scheduled: boolean;
   networkAvailable: boolean;
@@ -260,6 +285,11 @@ export interface NativeSyncStatus {
   pendingCount: number;
   lastSyncedAt: string | null;
   revoked: boolean;
+  state?: NativeSyncLifecycleState;
+  waitingForApp?: boolean;
+  pendingSyncRequestId?: string | null;
+  installationId?: string | null;
+  sessionGeneration?: number | null;
 }
 
 export interface NativeSyncTriggerResult {
@@ -267,6 +297,19 @@ export interface NativeSyncTriggerResult {
   action: "enqueue" | "immediate" | "clear_tenant" | "clear_all";
   businessId: string | null;
   clearedEntries: number;
+  syncRequestId?: string | null;
+  state?: NativeSyncLifecycleState;
+}
+
+export interface NativeSyncAcknowledgeResult {
+  accepted: boolean;
+  reason: NativeSyncAcknowledgeReason;
+  businessId: string | null;
+  syncRequestId: string | null;
+  flushedCount: number;
+  remainingCount: number;
+  lastSyncedAt: string | null;
+  state: NativeSyncLifecycleState;
 }
 
 export interface NativeDeepLinkEvent {
@@ -284,11 +327,22 @@ export interface NativeCrmCallEndedEvent {
   endedAt: string;
 }
 
+export interface NativeSyncReconcileRequestedEvent {
+  businessId: string;
+  syncRequestId: string;
+  pendingCount: number;
+  requestedAt: string;
+  installationId: string | null;
+  sessionGeneration: number | null;
+}
+
 export interface NativeSyncCompletedEvent {
   businessId: string | null;
   syncedAt: string;
   revoked: boolean;
   flushedCount: number;
+  remainingCount?: number;
+  syncRequestId?: string | null;
 }
 
 export interface NativeCommandResults {
@@ -307,12 +361,14 @@ export interface NativeCommandResults {
   "crm.callerId.sync": NativeCallerIdSyncResult;
   "sync.status": NativeSyncStatus;
   "sync.trigger": NativeSyncTriggerResult;
+  "sync.acknowledge": NativeSyncAcknowledgeResult;
 }
 
 export interface NativeEventPayloads {
   "bridge.ready": NativeAppInfo;
   "navigation.deepLink": NativeDeepLinkEvent;
   "crm.callEnded": NativeCrmCallEndedEvent;
+  "sync.reconcileRequested": NativeSyncReconcileRequestedEvent;
   "sync.completed": NativeSyncCompletedEvent;
 }
 
@@ -669,6 +725,14 @@ export function parseCallerIdSyncResult(raw: unknown): NativeCallerIdSyncResult 
   };
 }
 
+function isSyncLifecycleState(value: unknown): value is NativeSyncLifecycleState {
+  return typeof value === "string" && (NATIVE_SYNC_LIFECYCLE_STATES as readonly string[]).includes(value);
+}
+
+function isSyncAcknowledgeReason(value: unknown): value is NativeSyncAcknowledgeReason {
+  return typeof value === "string" && (NATIVE_SYNC_ACKNOWLEDGE_REASONS as readonly string[]).includes(value);
+}
+
 export function parseSyncStatus(raw: unknown): NativeSyncStatus | null {
   if (!isRecord(raw)) return null;
   if (
@@ -686,6 +750,27 @@ export function parseSyncStatus(raw: unknown): NativeSyncStatus | null {
   if (!isNullableBoundedString(businessId, 64) || !isNullableBoundedString(lastSyncedAt, 64)) {
     return null;
   }
+  if (raw.state !== undefined && !isSyncLifecycleState(raw.state)) {
+    return null;
+  }
+  if (raw.waitingForApp !== undefined && typeof raw.waitingForApp !== "boolean") {
+    return null;
+  }
+  const pendingSyncRequestId = raw.pendingSyncRequestId ?? null;
+  const installationId = raw.installationId ?? null;
+  if (
+    !isNullableBoundedString(pendingSyncRequestId, 64) ||
+    !isNullableBoundedString(installationId, 128)
+  ) {
+    return null;
+  }
+  const sessionGeneration = raw.sessionGeneration ?? null;
+  if (
+    sessionGeneration !== null &&
+    (typeof sessionGeneration !== "number" || !Number.isInteger(sessionGeneration) || sessionGeneration < 0)
+  ) {
+    return null;
+  }
   return {
     scheduled: raw.scheduled,
     networkAvailable: raw.networkAvailable,
@@ -693,6 +778,11 @@ export function parseSyncStatus(raw: unknown): NativeSyncStatus | null {
     pendingCount: raw.pendingCount,
     lastSyncedAt: lastSyncedAt ?? null,
     revoked: raw.revoked,
+    ...(raw.state !== undefined ? { state: raw.state } : {}),
+    ...(raw.waitingForApp !== undefined ? { waitingForApp: raw.waitingForApp } : {}),
+    ...(raw.pendingSyncRequestId !== undefined ? { pendingSyncRequestId: pendingSyncRequestId ?? null } : {}),
+    ...(raw.installationId !== undefined ? { installationId: installationId ?? null } : {}),
+    ...(raw.sessionGeneration !== undefined ? { sessionGeneration } : {}),
   };
 }
 
@@ -716,11 +806,57 @@ export function parseSyncTriggerResult(raw: unknown): NativeSyncTriggerResult | 
   ) {
     return null;
   }
+  const syncRequestId = raw.syncRequestId ?? null;
+  if (!isNullableBoundedString(syncRequestId, 64)) {
+    return null;
+  }
+  if (raw.state !== undefined && !isSyncLifecycleState(raw.state)) {
+    return null;
+  }
   return {
     scheduled: raw.scheduled,
     action: raw.action,
     businessId: businessId ?? null,
     clearedEntries: raw.clearedEntries,
+    ...(raw.syncRequestId !== undefined ? { syncRequestId: syncRequestId ?? null } : {}),
+    ...(raw.state !== undefined ? { state: raw.state } : {}),
+  };
+}
+
+export function parseSyncAcknowledgeResult(raw: unknown): NativeSyncAcknowledgeResult | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.accepted !== "boolean") return null;
+  if (!isSyncAcknowledgeReason(raw.reason)) return null;
+  const businessId = raw.businessId ?? null;
+  const syncRequestId = raw.syncRequestId ?? null;
+  const lastSyncedAt = raw.lastSyncedAt ?? null;
+  if (
+    !isNullableBoundedString(businessId, 64) ||
+    !isNullableBoundedString(syncRequestId, 64) ||
+    !isNullableBoundedString(lastSyncedAt, 64)
+  ) {
+    return null;
+  }
+  if (
+    typeof raw.flushedCount !== "number" ||
+    !Number.isInteger(raw.flushedCount) ||
+    raw.flushedCount < 0 ||
+    typeof raw.remainingCount !== "number" ||
+    !Number.isInteger(raw.remainingCount) ||
+    raw.remainingCount < 0
+  ) {
+    return null;
+  }
+  if (!isSyncLifecycleState(raw.state)) return null;
+  return {
+    accepted: raw.accepted,
+    reason: raw.reason,
+    businessId: businessId ?? null,
+    syncRequestId: syncRequestId ?? null,
+    flushedCount: raw.flushedCount,
+    remainingCount: raw.remainingCount,
+    lastSyncedAt: lastSyncedAt ?? null,
+    state: raw.state,
   };
 }
 
@@ -773,6 +909,37 @@ export function parseCrmCallEndedEvent(raw: unknown): NativeCrmCallEndedEvent | 
   };
 }
 
+export function parseSyncReconcileRequestedEvent(raw: unknown): NativeSyncReconcileRequestedEvent | null {
+  if (!isRecord(raw)) return null;
+  if (!isBoundedString(raw.businessId, 1, 64)) return null;
+  if (!isValidRequestId(raw.syncRequestId)) return null;
+  if (
+    typeof raw.pendingCount !== "number" ||
+    !Number.isInteger(raw.pendingCount) ||
+    raw.pendingCount < 0
+  ) {
+    return null;
+  }
+  if (!isBoundedString(raw.requestedAt, 10, 64)) return null;
+  const installationId = raw.installationId ?? null;
+  if (!isNullableBoundedString(installationId, 128)) return null;
+  const sessionGeneration = raw.sessionGeneration ?? null;
+  if (
+    sessionGeneration !== null &&
+    (typeof sessionGeneration !== "number" || !Number.isInteger(sessionGeneration) || sessionGeneration < 0)
+  ) {
+    return null;
+  }
+  return {
+    businessId: raw.businessId,
+    syncRequestId: raw.syncRequestId,
+    pendingCount: raw.pendingCount,
+    requestedAt: raw.requestedAt,
+    installationId: installationId ?? null,
+    sessionGeneration: sessionGeneration ?? null,
+  };
+}
+
 export function parseSyncCompletedEvent(raw: unknown): NativeSyncCompletedEvent | null {
   if (!isRecord(raw)) return null;
   const businessId = raw.businessId ?? null;
@@ -782,11 +949,23 @@ export function parseSyncCompletedEvent(raw: unknown): NativeSyncCompletedEvent 
   if (typeof raw.flushedCount !== "number" || !Number.isInteger(raw.flushedCount) || raw.flushedCount < 0) {
     return null;
   }
+  if (
+    raw.remainingCount !== undefined &&
+    (typeof raw.remainingCount !== "number" || !Number.isInteger(raw.remainingCount) || raw.remainingCount < 0)
+  ) {
+    return null;
+  }
+  const syncRequestId = raw.syncRequestId ?? null;
+  if (!isNullableBoundedString(syncRequestId, 64)) {
+    return null;
+  }
   return {
     businessId: businessId ?? null,
     syncedAt: raw.syncedAt,
     revoked: raw.revoked,
     flushedCount: raw.flushedCount,
+    ...(raw.remainingCount !== undefined ? { remainingCount: raw.remainingCount } : {}),
+    ...(raw.syncRequestId !== undefined ? { syncRequestId: syncRequestId ?? null } : {}),
   };
 }
 
@@ -825,6 +1004,8 @@ export function parseCommandResult<C extends NativeCommand>(
       return parseSyncStatus(raw) as NativeCommandResults[C] | null;
     case "sync.trigger":
       return parseSyncTriggerResult(raw) as NativeCommandResults[C] | null;
+    case "sync.acknowledge":
+      return parseSyncAcknowledgeResult(raw) as NativeCommandResults[C] | null;
     default:
       return null;
   }
@@ -841,6 +1022,8 @@ export function parseEventPayload<E extends NativeEventName>(
       return parseDeepLinkEvent(raw) as NativeEventPayloads[E] | null;
     case "crm.callEnded":
       return parseCrmCallEndedEvent(raw) as NativeEventPayloads[E] | null;
+    case "sync.reconcileRequested":
+      return parseSyncReconcileRequestedEvent(raw) as NativeEventPayloads[E] | null;
     case "sync.completed":
       return parseSyncCompletedEvent(raw) as NativeEventPayloads[E] | null;
     default:

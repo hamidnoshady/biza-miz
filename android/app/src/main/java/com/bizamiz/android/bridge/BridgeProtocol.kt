@@ -32,6 +32,7 @@ object BridgeProtocol {
     const val CMD_CRM_CALLER_ID_SYNC: String = "crm.callerId.sync"
     const val CMD_SYNC_STATUS: String = "sync.status"
     const val CMD_SYNC_TRIGGER: String = "sync.trigger"
+    const val CMD_SYNC_ACKNOWLEDGE: String = "sync.acknowledge"
 
     val ALLOWLISTED_COMMANDS: Set<String> = setOf(
         CMD_APP_INFO,
@@ -49,6 +50,7 @@ object BridgeProtocol {
         CMD_CRM_CALLER_ID_SYNC,
         CMD_SYNC_STATUS,
         CMD_SYNC_TRIGGER,
+        CMD_SYNC_ACKNOWLEDGE,
     )
 
     val COMMANDS: Set<String> = ALLOWLISTED_COMMANDS
@@ -69,22 +71,26 @@ object BridgeProtocol {
         CMD_CRM_CALLER_ID_SYNC to 3,
         CMD_SYNC_STATUS to 3,
         CMD_SYNC_TRIGGER to 3,
+        CMD_SYNC_ACKNOWLEDGE to 3,
     )
 
     const val EVENT_BRIDGE_READY: String = "bridge.ready"
     const val EVENT_NAVIGATION_DEEP_LINK: String = "navigation.deepLink"
     const val EVENT_CRM_CALL_ENDED: String = "crm.callEnded"
+    const val EVENT_SYNC_RECONCILE_REQUESTED: String = "sync.reconcileRequested"
     const val EVENT_SYNC_COMPLETED: String = "sync.completed"
 
     const val EVT_BRIDGE_READY: String = EVENT_BRIDGE_READY
     const val EVT_NAVIGATION_DEEP_LINK: String = EVENT_NAVIGATION_DEEP_LINK
     const val EVT_CRM_CALL_ENDED: String = EVENT_CRM_CALL_ENDED
+    const val EVT_SYNC_RECONCILE_REQUESTED: String = EVENT_SYNC_RECONCILE_REQUESTED
     const val EVT_SYNC_COMPLETED: String = EVENT_SYNC_COMPLETED
 
     val ALLOWLISTED_EVENTS: Set<String> = setOf(
         EVENT_BRIDGE_READY,
         EVENT_NAVIGATION_DEEP_LINK,
         EVENT_CRM_CALL_ENDED,
+        EVENT_SYNC_RECONCILE_REQUESTED,
         EVENT_SYNC_COMPLETED,
     )
 
@@ -308,15 +314,42 @@ object BridgeProtocol {
     }
 
     /**
+     * Canonical builder for `sync.reconcileRequested` event payloads matching
+     * `parseSyncReconcileRequestedEvent` in `src/lib/native/bridge-contract.ts`:
+     * `{ businessId, syncRequestId, pendingCount, requestedAt, installationId, sessionGeneration }`.
+     */
+    fun buildSyncReconcileRequestedEventPayload(
+        businessId: String,
+        syncRequestId: String,
+        pendingCount: Int,
+        requestedAt: String,
+        installationId: String? = null,
+        sessionGeneration: Int? = null,
+    ): JSONObject {
+        require(businessId.isNotBlank()) { "businessId is required" }
+        require(syncRequestId.isNotBlank()) { "syncRequestId is required" }
+        require(requestedAt.isNotBlank()) { "requestedAt is required" }
+        return JSONObject()
+            .put("businessId", businessId)
+            .put("syncRequestId", syncRequestId)
+            .put("pendingCount", pendingCount.coerceAtLeast(0))
+            .put("requestedAt", requestedAt)
+            .put("installationId", installationId?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            .put("sessionGeneration", sessionGeneration ?: JSONObject.NULL)
+    }
+
+    /**
      * Canonical builder for `sync.completed` event payloads matching
      * `parseSyncCompletedEvent` in `src/lib/native/bridge-contract.ts`:
-     * `{ businessId, syncedAt, revoked, flushedCount }`.
+     * `{ businessId, syncedAt, revoked, flushedCount, remainingCount, syncRequestId }`.
      */
     fun buildSyncCompletedEventPayload(
         businessId: String?,
         syncedAt: String,
         revoked: Boolean,
         flushedCount: Int,
+        remainingCount: Int = 0,
+        syncRequestId: String? = null,
     ): JSONObject {
         require(syncedAt.isNotBlank()) { "syncedAt is required" }
         return JSONObject()
@@ -324,5 +357,7 @@ object BridgeProtocol {
             .put("syncedAt", syncedAt)
             .put("revoked", revoked)
             .put("flushedCount", flushedCount.coerceAtLeast(0))
+            .put("remainingCount", remainingCount.coerceAtLeast(0))
+            .put("syncRequestId", syncRequestId?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
     }
 }

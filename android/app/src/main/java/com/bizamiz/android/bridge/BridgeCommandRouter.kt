@@ -124,22 +124,47 @@ class BridgeCommandRouter(
         CommandOutcome.Success(
             JSONObject()
                 .put("scheduled", false)
+                .put("state", "idle")
+                .put("waitingForApp", false)
                 .put("networkAvailable", true)
                 .put("businessId", businessId ?: JSONObject.NULL)
                 .put("pendingCount", 0)
                 .put("lastSyncedAt", JSONObject.NULL)
+                .put("pendingSyncRequestId", JSONObject.NULL)
+                .put("installationId", JSONObject.NULL)
+                .put("sessionGeneration", JSONObject.NULL)
                 .put("revoked", false),
         )
     },
     private val syncTriggerHandler: (JSONObject) -> CommandOutcome = { payload ->
         val action = payload.optString("action", "enqueue")
         val businessId = payload.optString("businessId", "").takeIf { it.isNotBlank() }
+        val scheduled = action == "enqueue" || action == "immediate"
         CommandOutcome.Success(
             JSONObject()
-                .put("scheduled", action == "enqueue" || action == "immediate")
+                .put("scheduled", scheduled)
                 .put("action", action)
                 .put("businessId", businessId ?: JSONObject.NULL)
-                .put("clearedEntries", 0),
+                .put("clearedEntries", 0)
+                .put("syncRequestId", if (scheduled && businessId != null) "syncreq_${businessId}_default" else JSONObject.NULL)
+                .put("state", if (scheduled) "scheduled" else "idle"),
+        )
+    },
+    private val syncAcknowledgeHandler: (JSONObject) -> CommandOutcome = { payload ->
+        val businessId = payload.optString("businessId", "").takeIf { it.isNotBlank() }
+        val syncRequestId = payload.optString("syncRequestId", "").takeIf { it.isNotBlank() }
+        val flushedCount = payload.optInt("flushedCount", 0)
+        val remainingCount = payload.optInt("remainingCount", 0)
+        CommandOutcome.Success(
+            JSONObject()
+                .put("accepted", true)
+                .put("reason", if (remainingCount > 0) "partial_remaining" else "acknowledged")
+                .put("businessId", businessId ?: JSONObject.NULL)
+                .put("syncRequestId", syncRequestId ?: JSONObject.NULL)
+                .put("flushedCount", flushedCount)
+                .put("remainingCount", remainingCount)
+                .put("lastSyncedAt", if (flushedCount > 0) "2026-10-16T00:00:00.000Z" else JSONObject.NULL)
+                .put("state", if (remainingCount > 0) "scheduled" else "idle"),
         )
     },
 ) {
@@ -257,6 +282,14 @@ class BridgeCommandRouter(
                 }
                 syncTriggerHandler(payload)
             }
+            BridgeProtocol.CMD_SYNC_ACKNOWLEDGE -> {
+                val businessId = payload.optString("businessId", "")
+                val syncRequestId = payload.optString("syncRequestId", "")
+                if (businessId.isBlank() || businessId.length > 64 || !BridgeProtocol.isValidRequestId(syncRequestId)) {
+                    return CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Invalid sync.acknowledge payload.")
+                }
+                syncAcknowledgeHandler(payload)
+            }
             else -> CommandOutcome.Failure(BridgeProtocol.ERR_UNKNOWN_COMMAND)
         }
     }
@@ -304,6 +337,7 @@ class BridgeCommandRouter(
             BridgeProtocol.CMD_PRINTER_PRINT to BridgeProtocol.CAP_PRINTER,
             BridgeProtocol.CMD_CRM_CALLER_ID_SYNC to BridgeProtocol.CAP_CRM_CALLER_ID,
             BridgeProtocol.CMD_SYNC_TRIGGER to BridgeProtocol.CAP_BACKGROUND_SYNC,
+            BridgeProtocol.CMD_SYNC_ACKNOWLEDGE to BridgeProtocol.CAP_BACKGROUND_SYNC,
         )
 
         private val VALID_PRINTER_TRANSPORTS: Set<String> = setOf(

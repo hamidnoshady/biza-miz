@@ -35,6 +35,7 @@ import type {
   NativePickedMediaFile,
   NativeScannerResult,
   NativeShareResult,
+  NativeSyncAcknowledgeResult,
   NativeSyncStatus,
   NativeSyncTriggerResult,
 } from "./bridge-contract";
@@ -519,6 +520,9 @@ export async function triggerNativeBackgroundSync(
     action: "enqueue" | "immediate" | "clear_tenant" | "clear_all";
     businessId: string | null;
     pendingCount?: number;
+    installationId?: string | null;
+    sessionGeneration?: number | null;
+    syncRequestId?: string | null;
   },
 ): Promise<NativeSyncTriggerResult> {
   try {
@@ -526,6 +530,9 @@ export async function triggerNativeBackgroundSync(
       action: options.action,
       businessId: options.businessId,
       pendingCount: options.pendingCount ?? 0,
+      ...(options.installationId !== undefined ? { installationId: options.installationId } : {}),
+      ...(options.sessionGeneration !== undefined ? { sessionGeneration: options.sessionGeneration } : {}),
+      ...(options.syncRequestId !== undefined ? { syncRequestId: options.syncRequestId } : {}),
     });
   } catch {
     return {
@@ -533,6 +540,50 @@ export async function triggerNativeBackgroundSync(
       action: options.action,
       businessId: options.businessId,
       clearedEntries: 0,
+    };
+  }
+}
+
+export async function acknowledgeNativeBackgroundSync(
+  request: NativeRequest,
+  options: {
+    businessId: string;
+    syncRequestId: string;
+    flushedCount: number;
+    remainingCount: number;
+    installationId?: string | null;
+    sessionGeneration?: number | null;
+    failedCount?: number;
+    conflictCount?: number;
+    transientFailure?: boolean;
+    revoked?: boolean;
+    completedAt?: string;
+  },
+): Promise<NativeSyncAcknowledgeResult> {
+  try {
+    return await request("sync.acknowledge", {
+      businessId: options.businessId,
+      syncRequestId: options.syncRequestId,
+      flushedCount: Math.max(0, Math.trunc(options.flushedCount)),
+      remainingCount: Math.max(0, Math.trunc(options.remainingCount)),
+      ...(options.installationId !== undefined ? { installationId: options.installationId } : {}),
+      ...(options.sessionGeneration !== undefined ? { sessionGeneration: options.sessionGeneration } : {}),
+      ...(options.failedCount !== undefined ? { failedCount: Math.max(0, Math.trunc(options.failedCount)) } : {}),
+      ...(options.conflictCount !== undefined ? { conflictCount: Math.max(0, Math.trunc(options.conflictCount)) } : {}),
+      ...(options.transientFailure !== undefined ? { transientFailure: options.transientFailure } : {}),
+      ...(options.revoked !== undefined ? { revoked: options.revoked } : {}),
+      ...(options.completedAt !== undefined ? { completedAt: options.completedAt } : {}),
+    });
+  } catch {
+    return {
+      accepted: false,
+      reason: "invalid_request",
+      businessId: options.businessId,
+      syncRequestId: options.syncRequestId,
+      flushedCount: 0,
+      remainingCount: Math.max(0, Math.trunc(options.remainingCount)),
+      lastSyncedAt: null,
+      state: options.remainingCount > 0 ? "scheduled" : "idle",
     };
   }
 }

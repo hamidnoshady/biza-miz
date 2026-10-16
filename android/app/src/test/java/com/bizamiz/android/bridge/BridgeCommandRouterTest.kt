@@ -170,6 +170,16 @@ class BridgeCommandRouterTest {
         )
         assertTrue(syncTrigRes.getBoolean("ok"))
         assertTrue(syncTrigRes.getJSONObject("result").getBoolean("scheduled"))
+
+        val syncAckRes = JSONObject(
+            r.handleMessage(
+                "https://pos.bizamiz.com",
+                """{"v":3,"kind":"request","id":"r-sync-ack","command":"sync.acknowledge","payload":{"businessId":"biz-1","syncRequestId":"syncreq_biz1_1","flushedCount":2,"remainingCount":0}}""",
+            )!!,
+        )
+        assertTrue(syncAckRes.getBoolean("ok"))
+        assertTrue(syncAckRes.getJSONObject("result").getBoolean("accepted"))
+        assertEquals(2, syncAckRes.getJSONObject("result").getInt("flushedCount"))
     }
 
     @Test

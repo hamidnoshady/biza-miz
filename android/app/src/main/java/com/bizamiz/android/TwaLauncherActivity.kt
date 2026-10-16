@@ -237,6 +237,9 @@ class TwaLauncherActivity : Activity() {
                 CallLifecycleTracker.shared.clear()
             },
         )
+        TwaSessionHolder.setPendingReconcileProvider {
+            syncStore.drainDurablePendingReconcileEvents()
+        }
 
         return BridgeCommandRouter(
             trustedOrigin = trustedOrigin,
@@ -306,13 +309,87 @@ class TwaLauncherActivity : Activity() {
                 val action = payload.optString("action", "enqueue")
                 val businessId = payload.optString("businessId", "").takeIf { it.isNotBlank() }
                 val pendingCount = payload.optInt("pendingCount", 0)
+                val installationId = payload.optString("installationId", "").takeIf { it.isNotBlank() }
+                    ?: InstallationId.read(applicationContext)
+                val sessionGeneration = if (payload.isNull("sessionGeneration")) {
+                    null
+                } else {
+                    payload.optInt("sessionGeneration", -1).takeIf { it >= 0 }
+                }
+                val syncRequestId = payload.optString("syncRequestId", "").takeIf { it.isNotBlank() }
                 CommandOutcome.Success(
                     syncStore.recordSyncRequest(
                         businessId = businessId,
                         action = action,
                         pendingCount = pendingCount,
+                        installationId = installationId,
+                        sessionGeneration = sessionGeneration,
+                        syncRequestId = syncRequestId,
                     ),
                 )
+            },
+            syncAcknowledgeHandler = { payload ->
+                val businessId = payload.optString("businessId", "").takeIf { it.isNotBlank() }
+                val syncRequestId = payload.optString("syncRequestId", "").takeIf { it.isNotBlank() }
+                val flushedCount = payload.optInt("flushedCount", 0)
+                val remainingCount = payload.optInt("remainingCount", 0)
+                val failedCount = payload.optInt("failedCount", 0)
+                val conflictCount = payload.optInt("conflictCount", 0)
+                val transientFailure = payload.optBoolean("transientFailure", false)
+                val revoked = payload.optBoolean("revoked", false)
+                val installationId = payload.optString("installationId", "").takeIf { it.isNotBlank() }
+                val sessionGeneration = if (payload.isNull("sessionGeneration")) {
+                    null
+                } else {
+                    payload.optInt("sessionGeneration", -1).takeIf { it >= 0 }
+                }
+                val completedAt = payload.optString("completedAt", "").takeIf { it.isNotBlank() }
+                val ackResult = if (completedAt != null) {
+                    syncStore.acknowledgeSyncCompletion(
+                        businessId = businessId,
+                        syncRequestId = syncRequestId,
+                        flushedCount = flushedCount,
+                        remainingCount = remainingCount,
+                        installationId = installationId,
+                        sessionGeneration = sessionGeneration,
+                        failedCount = failedCount,
+                        conflictCount = conflictCount,
+                        transientFailure = transientFailure,
+                        revoked = revoked,
+                        completedAtIso = completedAt,
+                    )
+                } else {
+                    syncStore.acknowledgeSyncCompletion(
+                        businessId = businessId,
+                        syncRequestId = syncRequestId,
+                        flushedCount = flushedCount,
+                        remainingCount = remainingCount,
+                        installationId = installationId,
+                        sessionGeneration = sessionGeneration,
+                        failedCount = failedCount,
+                        conflictCount = conflictCount,
+                        transientFailure = transientFailure,
+                        revoked = revoked,
+                    )
+                }
+
+                if (ackResult.optBoolean("accepted", false) && !transientFailure && ackResult.optInt("flushedCount", 0) > 0) {
+                    val syncedAt = ackResult.optString("lastSyncedAt", "").takeIf { it.isNotBlank() }
+                    if (syncedAt != null) {
+                        TwaSessionHolder.postEvent(
+                            BridgeProtocol.EVENT_SYNC_COMPLETED,
+                            BridgeProtocol.buildSyncCompletedEventPayload(
+                                businessId = businessId,
+                                syncedAt = syncedAt,
+                                revoked = false,
+                                flushedCount = ackResult.optInt("flushedCount", 0),
+                                remainingCount = ackResult.optInt("remainingCount", 0),
+                                syncRequestId = syncRequestId,
+                            ),
+                        )
+                    }
+                }
+                CommandOutcome.Success(ackResult)
             },
         )
     }

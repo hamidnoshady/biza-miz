@@ -63,6 +63,10 @@
     "sync.trigger": {
       "minBridgeVersion": 3,
       "description": "Schedule or run an immediate tenant-scoped background sync or clear tenant native cache on sign-out/switch."
+    },
+    "sync.acknowledge": {
+      "minBridgeVersion": 3,
+      "description": "Acknowledge the actual outcome of flushing the web IndexedDB offline mutation queue for a pending native sync request."
     }
   },
   "events": {
@@ -78,9 +82,13 @@
       "minBridgeVersion": 3,
       "description": "Emitted when an incoming or outgoing business call completes so the user can log a CRM post-call activity."
     },
+    "sync.reconcileRequested": {
+      "minBridgeVersion": 3,
+      "description": "Emitted when Android WorkManager verifies origin reachability and requests the web runtime to flush and acknowledge its IndexedDB mutation queue."
+    },
     "sync.completed": {
       "minBridgeVersion": 3,
-      "description": "Emitted when a scheduled Android WorkManager sync pass completes or detects device revocation."
+      "description": "Emitted only after the web sync pipeline acknowledges completed writes or when device revocation aborts sync."
     }
   },
   "errorCodes": [

@@ -142,14 +142,16 @@ A frame with a different `v` is ignored, so the request that is waiting for it t
 | `share.open` | command | 3 | `shared`, `target` |
 | `printer.discover` | command | 3 | `printers`: array of `{ id, name, transport, address, paired }` |
 | `printer.print` | command | 3 | `printed`, `transport`, `bytesWritten`, `jobId` |
-| `crm.callerId.status` | command | 3 | `roleHeld`, `permission`, `cachedEntries`, `lastSyncedAt` |
+| `crm.callerId.status` | command | 3 | `roleHeld`, `supported`, `cachedCustomerCount`, `businessId`, `lastSyncedAt` |
 | `crm.callerId.sync` | command | 3 | `roleHeld`, `syncedCount`, `businessId`, optional `matchedCaller` |
-| `sync.status` | command | 3 | `pendingCount`, `lastSyncedAt`, `networkAvailable`, `scheduled` |
-| `sync.trigger` | command | 3 | `pendingCount`, `lastSyncedAt`, `networkAvailable`, `scheduled` |
+| `sync.status` | command | 3 | `scheduled`, `state` (`"idle"` \| `"scheduled"` \| `"waiting_for_app"` \| `"retrying"` \| `"failed"` \| `"revoked"`), `waitingForApp`, `networkAvailable`, `businessId`, `pendingCount`, `lastSyncedAt`, `pendingSyncRequestId`, `installationId`, `sessionGeneration`, `revoked` |
+| `sync.trigger` | command | 3 | `scheduled`, `action`, `businessId`, `clearedEntries`, `syncRequestId`, `state` |
+| `sync.acknowledge` | command | 3 | `accepted`, `reason` (`"acknowledged"` \| `"partial_remaining"` \| `"revoked"` \| `"duplicate_or_stale"` \| `"tenant_mismatch"` \| `"installation_mismatch"` \| `"session_generation_mismatch"` \| `"invalid_request"`), `businessId`, `syncRequestId`, `flushedCount`, `remainingCount`, `lastSyncedAt`, `state` |
 | `bridge.ready` | event | 1 | same shape as `app.info` |
 | `navigation.deepLink` | event | 3 | `path`, `notificationCategory`, `businessId` |
 | `crm.callEnded` | event | 3 | `phoneNormalized`, `direction` (`"incoming"` \| `"outgoing"`), `durationSeconds`, `customerId`, `customerName`, `endedAt` |
-| `sync.completed` | event | 3 | `businessId`, `syncedAt`, `revoked`, `flushedCount` |
+| `sync.reconcileRequested` | event | 3 | `businessId`, `syncRequestId`, `pendingCount`, `requestedAt`, `installationId`, `sessionGeneration` |
+| `sync.completed` | event | 3 | `businessId`, `syncedAt`, `revoked`, `flushedCount`, `remainingCount`, `syncRequestId` |
 
 There is no generic executor. A command that is not in the allowlist gets `unknown_command`,
 and nothing runs. The allowlists are the `commands` and `events` keys in the contract file.
@@ -191,11 +193,12 @@ the allowlisted commands, events, and capabilities shared between `src/lib/nativ
 and `android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt` (guarded against drift
 by `src/lib/native/native-config.test.ts` and `BridgeContractTest.kt`):
 
-- **Commands (15)**: `app.info`, `notifications.status`, `device.identity`, `notifications.register`,
+- **Commands (16)**: `app.info`, `notifications.status`, `device.identity`, `notifications.register`,
   `biometric.status`, `biometric.authenticate`, `scanner.scan`, `media.pick`, `share.open`,
   `printer.discover`, `printer.print`, `crm.callerId.status`, `crm.callerId.sync`, `sync.status`,
-  `sync.trigger`.
-- **Events (4)**: `bridge.ready`, `navigation.deepLink`, `crm.callEnded`, `sync.completed`.
+  `sync.trigger`, `sync.acknowledge`.
+- **Events (5)**: `bridge.ready`, `navigation.deepLink`, `crm.callEnded`,
+  `sync.reconcileRequested`, `sync.completed`.
 - **Capabilities (8)**: `notifications` (v1), `barcode.scan` (v3), `printer` (v3),
   `crm.caller-id` (v3), `biometric` (v3), `share` (v3), `media.capture` (v3),
   `background.sync` (v3).
@@ -229,9 +232,25 @@ by `src/lib/native/native-config.test.ts` and `BridgeContractTest.kt`):
 3. **Background Sync (`NativeSyncScheduler.kt` + `BizaSyncWorker.kt` + `TenantSyncStateStore.kt`)**:
    - Uses `androidx.work:work-runtime-ktx` (`WorkManagerSyncScheduler` + `BizaSyncWorker`) with
      `NetworkType.CONNECTED` constraints and exponential backoff (`MAX_RETRY_ATTEMPTS = 5`).
-   - Android does not maintain a second business database; when `BizaSyncWorker` verifies origin
-     connectivity, it stamps `lastSyncedAt` and emits `sync.completed` to trigger `flushQueue()` on
-     the web app's IndexedDB `pendingActions` queue (`POST /api/sync/events`).
+   - Android does not maintain a second business database; the canonical offline mutation queue is
+     IndexedDB `pendingActions` (`src/app/dashboard/offline-queue.tsx`), flushed via `POST /api/sync/events`.
+   - **Connectivity probe vs. actual business sync completion**: When `BizaSyncWorker` receives
+     HTTP `200..299` from `GET /api/health`, it records `SyncPassOutcome.OriginReachable` and moves
+     the tenant state to `"waiting_for_app"` (`waitingForApp: true`). It **never** stamps
+     `lastSyncedAt`, **never** zeroes `pendingCount`, and **never** emits `sync.completed` from
+     `/api/health` alone:
+     - If the Custom Tabs / TWA bridge channel is connected, `BizaSyncWorker` emits
+       `sync.reconcileRequested` (`{ businessId, syncRequestId, pendingCount, requestedAt, installationId, sessionGeneration }`).
+     - If the browser/web runtime is closed when `BizaSyncWorker` runs, `TenantSyncStateStore`
+       persists `"waiting_for_app"` and `pendingSyncRequestId` in encrypted storage across process
+       death; when the browser reopens and connects (`TwaSessionHolder.onChannelReady` and
+       `NativeDeviceRegistrar`), the durable reconciliation request is replayed automatically.
+     - `NativeDeviceRegistrar` (`reconcileNativeSyncRequest`) verifies `businessId`, `installationId`,
+       `sessionGeneration`, and `syncRequestId` deduplication, runs `flushQueue()` against
+       `POST /api/sync/events`, and sends `sync.acknowledge` with exact `flushedCount` and
+       `remainingCount`. `TenantSyncStateStore.acknowledgeSyncCompletion` stamps `lastSyncedAt` and
+       emits `sync.completed` only when `flushedCount > 0`, and preserves `pendingCount = remainingCount`
+       when partial failures remain.
 4. **Firebase Cloud Messaging (`BizaFirebaseMessagingService.kt` + `NotificationChannelManager.kt`)**:
    - Integrates `com.google.firebase:firebase-messaging` directly (no reflection) with auto-init
      disabled until explicit user opt-in and credential verification (`BuildConfig.FIREBASE_*`).

@@ -200,6 +200,66 @@ describe("parseCommandResult and parseEventPayload", () => {
       lastSyncedAt: "2026-10-15T10:00:00Z",
       revoked: false,
     });
+    expect(
+      parseCommandResult("sync.status", {
+        scheduled: true,
+        state: "waiting_for_app",
+        waitingForApp: true,
+        networkAvailable: true,
+        businessId: "biz-1",
+        pendingCount: 3,
+        lastSyncedAt: null,
+        pendingSyncRequestId: "syncreq_biz1_123",
+        installationId: "inst-1234567890",
+        sessionGeneration: 2,
+        revoked: false,
+      }),
+    ).toEqual({
+      scheduled: true,
+      state: "waiting_for_app",
+      waitingForApp: true,
+      networkAvailable: true,
+      businessId: "biz-1",
+      pendingCount: 3,
+      lastSyncedAt: null,
+      pendingSyncRequestId: "syncreq_biz1_123",
+      installationId: "inst-1234567890",
+      sessionGeneration: 2,
+      revoked: false,
+    });
+    expect(
+      parseCommandResult("sync.acknowledge", {
+        accepted: true,
+        reason: "acknowledged",
+        businessId: "biz-1",
+        syncRequestId: "syncreq_biz1_123",
+        flushedCount: 3,
+        remainingCount: 0,
+        lastSyncedAt: "2026-10-16T08:00:00.000Z",
+        state: "idle",
+      }),
+    ).toEqual({
+      accepted: true,
+      reason: "acknowledged",
+      businessId: "biz-1",
+      syncRequestId: "syncreq_biz1_123",
+      flushedCount: 3,
+      remainingCount: 0,
+      lastSyncedAt: "2026-10-16T08:00:00.000Z",
+      state: "idle",
+    });
+    expect(
+      parseCommandResult("sync.acknowledge", {
+        accepted: true,
+        reason: "unknown_reason",
+        businessId: "biz-1",
+        syncRequestId: "syncreq_biz1_123",
+        flushedCount: 1,
+        remainingCount: 0,
+        lastSyncedAt: null,
+        state: "idle",
+      }),
+    ).toBeNull();
   });
 
   it("checks an event payload against its declared shape", () => {
@@ -234,6 +294,31 @@ describe("parseCommandResult and parseEventPayload", () => {
       customerName: "رضا محمدی",
       endedAt: "2026-10-15T10:05:00Z",
     });
+    expect(
+      parseEventPayload("sync.reconcileRequested", {
+        businessId: "biz-1",
+        syncRequestId: "syncreq_biz1_123",
+        pendingCount: 3,
+        requestedAt: "2026-10-16T08:01:00.000Z",
+        installationId: "inst-1234567890",
+        sessionGeneration: 2,
+      }),
+    ).toEqual({
+      businessId: "biz-1",
+      syncRequestId: "syncreq_biz1_123",
+      pendingCount: 3,
+      requestedAt: "2026-10-16T08:01:00.000Z",
+      installationId: "inst-1234567890",
+      sessionGeneration: 2,
+    });
+    expect(
+      parseEventPayload("sync.reconcileRequested", {
+        businessId: "",
+        syncRequestId: "bad id with spaces",
+        pendingCount: 1,
+        requestedAt: "2026-10-16T08:01:00.000Z",
+      }),
+    ).toBeNull();
   });
 });
 

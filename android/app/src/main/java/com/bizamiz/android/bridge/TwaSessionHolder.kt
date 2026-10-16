@@ -23,6 +23,7 @@ internal object TwaSessionHolder {
     private var channelReady: Boolean = false
 
     private val pendingEvents = ArrayDeque<Pair<String, JSONObject>>()
+    private var pendingReconcileProvider: (() -> List<Pair<String, JSONObject>>)? = null
 
     @Synchronized
     fun hold(context: Context, callback: CustomTabsCallback, session: CustomTabsSession) {
@@ -31,6 +32,14 @@ internal object TwaSessionHolder {
         sessionRef = WeakReference(session)
         channelReady = false
     }
+
+    @Synchronized
+    fun setPendingReconcileProvider(provider: (() -> List<Pair<String, JSONObject>>)?) {
+        pendingReconcileProvider = provider
+    }
+
+    @Synchronized
+    fun isChannelReady(): Boolean = channelReady && sessionRef?.get() != null
 
     @Synchronized
     fun onChannelReady(session: CustomTabsSession?) {
@@ -43,6 +52,19 @@ internal object TwaSessionHolder {
                 activeSession.postMessage(frame, null)
             } catch (_: Exception) {
                 // Drop malformed or unsendable frame rather than blocking subsequent events.
+            }
+        }
+        val durableReconcileEvents = try {
+            pendingReconcileProvider?.invoke().orEmpty()
+        } catch (_: Exception) {
+            emptyList()
+        }
+        for ((name, payload) in durableReconcileEvents) {
+            try {
+                val frame = BridgeProtocol.encodeEvent(name, payload)
+                activeSession.postMessage(frame, null)
+            } catch (_: Exception) {
+                // Keep durable state in TenantSyncStateStore for next channel ready or status pull.
             }
         }
     }

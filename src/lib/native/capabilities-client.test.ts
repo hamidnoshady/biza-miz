@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { NativeBridgeError } from "./bridge";
 import {
+  acknowledgeNativeBackgroundSync,
   authenticateWithNativeBiometric,
   buildPostCallActivityPayload,
   buildQuickCrmActivityPayload,
@@ -400,6 +401,23 @@ describe("CRM caller ID sync and post-call activity payload", () => {
       businessId: "biz-1",
     });
     expect(triggerRes.scheduled).toBe(false);
+
+    const ackFallback = await acknowledgeNativeBackgroundSync(failingRequest, {
+      businessId: "biz-1",
+      syncRequestId: "syncreq_biz1_1",
+      flushedCount: 2,
+      remainingCount: 1,
+    });
+    expect(ackFallback).toEqual({
+      accepted: false,
+      reason: "invalid_request",
+      businessId: "biz-1",
+      syncRequestId: "syncreq_biz1_1",
+      flushedCount: 0,
+      remainingCount: 1,
+      lastSyncedAt: null,
+      state: "scheduled",
+    });
 
     const shareRes = await shareViaNativeOrWeb(failingRequest, { title: "فاکتور" });
     expect(shareRes.shared).toBe(false);

@@ -28,21 +28,27 @@ In scope and delivered on this branch (`arena/980efbf2-biza-miz`, PR #966):
   (`data-mobile-cards="true"` and `data-label` injection on `<Td>` cells with `< 640px` stacked
   card styling in `src/app/globals.css`).
 - **Phase 8 (Bridge v3, Native Capabilities, Mobile Shell Consolidation, and Root-Cause Resolutions)**:
-  - Bridge v3 (`15` allowlisted commands, `4` events, `8` capabilities) and migration
-    `0222_native_app_capabilities.sql` (extending `native_app_devices` with `push_token`,
-    `push_provider`, `push_channels`, `capabilities`, `biometric_enabled`, `biometric_verified_at`,
-    `caller_id_role_held`, `last_sync_at`, and seeding the 5 `android_*` feature flags).
+  - Bridge v3 (`16` allowlisted commands including `sync.acknowledge`, `5` events including
+    `sync.reconcileRequested`, `8` capabilities) and migration `0222_native_app_capabilities.sql`
+    (extending `native_app_devices` with `push_token`, `push_provider`, `push_channels`,
+    `capabilities`, `biometric_enabled`, `biometric_verified_at`, `caller_id_role_held`,
+    `last_sync_at`, and seeding the 5 `android_*` feature flags).
   - Canonical mobile shell consolidation (`MobileBottomNavigation` & `MobileDashboardHeader` in
     `src/app/dashboard/dashboard-sidebar.tsx`, `resolveAdaptiveBottomNavHrefs` in
     `src/lib/bottom-nav.ts`, `AppSheet`, `QuickCreateSheet`, and `PostCallActivitySheet` in
     `src/components/mobile/*`, removing duplicate unreferenced shell components).
-  - Resolution of all 6 confirmed root-cause gaps:
+  - Resolution of all 6 confirmed root-cause gaps + background-sync producer/consumer boundary:
     1. Canonical CRM activity (`subject`/`body`) and customer (`POST /api/parties`) request payloads.
     2. Separation of incoming-call identification (`BizaCallScreeningService.onScreenCall`) from
        post-call disconnection detection (`CallLifecycleTracker.kt`).
     3. Constrained background sync via `androidx.work:work-runtime-ktx` (`WorkManagerSyncScheduler` +
-       `BizaSyncWorker` + `TenantSyncStateStore`) reconciled with the web app's IndexedDB
-       `pendingActions` queue (`flushQueue()`).
+       `BizaSyncWorker` + `TenantSyncStateStore`) with a strict producer/consumer boundary between
+       `/api/health` reachability probes (`SyncPassOutcome.OriginReachable` -> `state = "waiting_for_app"`,
+       emitting `sync.reconcileRequested` when connected or persisting durable `pendingSyncRequestId`
+       when the browser is closed) and actual business synchronization (`flushQueue()` ->
+       `POST /api/sync/events` -> `sync.acknowledge`, enforcing `businessId`, `installationId`,
+       `sessionGeneration`, and `syncRequestId` deduplication before updating `lastSyncedAt` and
+       `pendingCount`).
     4. Direct `com.google.firebase:firebase-messaging` integration (`BizaFirebaseMessagingService.kt` +
        `NotificationChannelManager.kt`) and server-side FCM fan-out in `src/lib/notifications-service.ts`
        (`deliverNativeFcmForRecipient`), failing closed (`fcmToken: null`, `pushProvider: "none"`)
@@ -276,7 +282,7 @@ The 28 items in the issue's "Acceptance criteria" section, classified by honest 
 | 3 | Verified TWA works without browser chrome | Blocked by External Prerequisite | `TwaLauncherActivity.kt` launches fullscreen `TrustedWebActivityIntentBuilder` with `ImmersiveMode`. Removing the Chrome address bar on a physical device requires Google Play App Signing SHA-256 fingerprint in `public/.well-known/assetlinks.json`. |
 | 4 | Digital Asset Links validated | Blocked by External Prerequisite | `public/.well-known/assetlinks.json` serves statements for `com.bizamiz.app`, `com.bizamiz.app.staging`, and `com.bizamiz.app.dev` (`handle_all_urls` + `use_as_origin`). `sha256_cert_fingerprints` remain intentionally empty (fail-closed) until the owner enrolls Play App Signing. |
 | 5 | App Links deep-link to the correct platform routes | Verified in CI | `AndroidManifest.xml` (`android:autoVerify="true"`), `AppLinkRouter.kt`, `TwaLauncherActivity.kt`, `validateTenantDeepLink` (`src/lib/native/capabilities-client.ts`), and `resolveAndRouteNativeDeepLink` (`src/components/native/native-device-registrar.tsx`); covered by `AppLinkRouterTest.kt`, `capabilities-client.test.ts`, and `native-device-registrar.test.tsx`. |
-| 6 | Native/web bridge is typed, versioned, allowlisted, and tested | Verified in CI | `config/native-bridge-contract.json` (`v3`, 15 commands, 4 events, 8 capabilities); `bridge-contract.test.ts`, `bridge.test.ts`, `native-config.test.ts`, `capabilities-client.test.ts`; `BridgeProtocolTest.kt`, `BridgeCommandRouterTest.kt`, `BridgeContractTest.kt`. |
+| 6 | Native/web bridge is typed, versioned, allowlisted, and tested | Verified in CI | `config/native-bridge-contract.json` (`v3`, 16 commands including `sync.acknowledge`, 5 events including `sync.reconcileRequested`, 8 capabilities); `bridge-contract.test.ts`, `bridge.test.ts`, `native-config.test.ts`, `capabilities-client.test.ts`; `BridgeProtocolTest.kt`, `BridgeCommandRouterTest.kt`, `BridgeContractTest.kt`. |
 | 7 | Android can detect supported native capabilities | Verified in CI | `resolveCapability` (`src/lib/native/capability.ts`), `NativeProvider`, and `NativeCapabilityGate` negotiate all 8 capabilities (`notifications`, `barcode.scan`, `printer`, `crm.caller-id`, `biometric`, `share`, `media.capture`, `background.sync`) with browser fallbacks (`barcodeDetector`, `webAuthn`, `pushManager`, `webShare`). |
 | 8 | Mobile/TWA UI uses a real app shell | Verified in CI | Canonical `MobileBottomNavigation` & `MobileDashboardHeader` (`src/app/dashboard/dashboard-sidebar.tsx`), adaptive bottom nav (`resolveAdaptiveBottomNavHrefs` in `src/lib/bottom-nav.ts`), and consolidated `src/components/mobile/*` (`AppSheet`, `QuickCreateSheet`, `PostCallActivitySheet`); tested in `src/components/mobile/mobile-components.test.tsx`. |
 | 9 | All major platform modules remain accessible on Android | Verified in CI | Full web route tree accessible inside TWA, with adaptive bottom navigation, slide-over `بیشتر` (`More`) `AppSheet` exposing every authorized module, and permission-filtered `QuickCreateSheet` (`POST /api/crm/activities` and `POST /api/parties`). |
@@ -284,7 +290,7 @@ The 28 items in the issue's "Acceptance criteria" section, classified by honest 
 | 11 | Device registration and revocation work | Verified in CI | `migrations/0216_native_app_devices.sql`, `0217_native_app_devices_generation.sql`, `0222_native_app_capabilities.sql`, `src/lib/native-device-service.ts`, `/api/native-devices*`, live `checkNativeDevice` in `src/lib/auth.ts`, `NativeDeviceManagementSettings`, and `SelfNativeDevicesCard`. Verified against PostgreSQL in `integration/native-device-registry.integration.test.ts`. |
 | 12 | Biometric re-authentication works | Verified in CI | `AndroidBiometricGateway.kt`, `biometric.status` / `biometric.authenticate` commands, `src/app/dashboard/lock-screen.tsx` (enforces server `/api/native-devices/self` revocation & session validity before unlocking), and `src/app/dashboard/biometric-settings.tsx`. |
 | 13 | Push notifications deep-link correctly | Verified in CI (Live Push Blocked on External Firebase Credentials) | `NotificationChannelManager.kt` (7 channels: `orders`, `payments`, `crm`, `inventory`, `approvals`, `operations`, `security`), `BizaFirebaseMessagingService.kt`, `com.google.firebase:firebase-messaging:24.1.0`, `deliverNativeFcmForRecipient` in `src/lib/notifications-service.ts`, and `resolveAndRouteNativeDeepLink` in `NativeDeviceRegistrar`. Returns `fcmToken: null` (`pushProvider: "none"`) when external `BuildConfig.FIREBASE_*` / `FIREBASE_SERVER_KEY` credentials are absent. |
-| 14 | Background native sync without a second business datastore | Verified in CI | `NativeSyncScheduler.kt` (`WorkManagerSyncScheduler`), `BizaSyncWorker.kt`, and `TenantSyncStateStore.kt` (schedules constrained background work with `MAX_RETRY_ATTEMPTS = 5`, stamps `lastSyncedAt` only on real completion, emits `sync.completed` to trigger `flushQueue()` on the web app's IndexedDB `pendingActions` queue, and cancels on revocation/sign-out). Tested in `TenantSyncStateStoreTest.kt`. |
+| 14 | Background native sync without a second business datastore | Verified in CI (Closed-Browser Execution Reports `waiting_for_app`) | `NativeSyncScheduler.kt` (`WorkManagerSyncScheduler`), `BizaSyncWorker.kt`, and `TenantSyncStateStore.kt` schedule constrained background work (`NetworkType.CONNECTED`, `MAX_RETRY_ATTEMPTS = 5`) and separate `/api/health` reachability (`SyncPassOutcome.OriginReachable` -> `state = "waiting_for_app"`, never marking sync complete) from actual business queue execution (`flushQueue()` -> `POST /api/sync/events` -> `sync.acknowledge` enforcing `businessId`, `installationId`, `sessionGeneration`, and `syncRequestId` deduplication). When the browser is closed, Android reports `"waiting_for_app"` and replays `sync.reconcileRequested` on reconnect. Tested in `TenantSyncStateStoreTest.kt` and `native-device-registrar.test.tsx`. |
 | 15 | Barcode/QR scanner integrates with web routes | Verified in CI | `AndroidBarcodeScanner.kt`, `scanner.scan` command, and `CameraBarcodeScanner` (`src/components/scanner/camera-barcode-scanner.tsx`) which prefers the native Android scanner inside the TWA and falls back to `BarcodeDetector`/ZXing in browsers. |
 | 16 | Android share/file/camera flows integrate with the media flows | Verified in CI | `AndroidMediaPickerAndShare.kt` (`media.pick`, `share.open`), MIME/size validation (`validatePickedMediaFile`, `pickedMediaFileToBrowserFile`), and `MediaManager` camera/document picker + native share buttons (`src/app/dashboard/media/media-manager.tsx`). |
 | 17 | Native printer support is capability-gated | Implemented (Hardware Unverified) | `AndroidPrintingGateway.kt` (`printer.discover`, `printer.print` for `system_print`, `network_tcp`, `bluetooth`, `pdf_share`) + `src/lib/native/android-printing-bridge.ts` wired into `desktopPrintingBridge()` (`src/lib/printing/client.ts`). Tested in `android-printing-bridge.test.ts` and `AndroidNativeCapabilitiesTest.kt`; physical printer hardware not claimed verified. |

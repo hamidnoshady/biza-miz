@@ -476,7 +476,7 @@ export async function WorkspaceShell({
           neither (see the component's own header comment).
         */}
         <NativeDeviceRegistrar businessId={session.businessId} />
-        <OfflineQueueProvider>
+        <OfflineQueueProvider businessId={session.businessId}>
         <BugReportProvider>
         {/*
           A *definite* height, not `min-h-screen` — this is the fix for "the app

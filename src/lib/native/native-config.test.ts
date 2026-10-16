@@ -99,6 +99,7 @@ describe("bridge contract matches its TypeScript mirror", () => {
       "crm.callerId.sync",
       "sync.status",
       "sync.trigger",
+      "sync.acknowledge",
     ]);
   });
 });
@@ -194,6 +195,9 @@ describe("Android build reads the shared contract", () => {
     const syncStore = repoFile(
       "android/app/src/main/java/com/bizamiz/android/sync/TenantSyncStateStore.kt",
     );
+    const syncWorker = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/sync/BizaSyncWorker.kt",
+    );
     const notifManager = repoFile(
       "android/app/src/main/java/com/bizamiz/android/notifications/NotificationChannelManager.kt",
     );
@@ -234,8 +238,14 @@ describe("Android build reads the shared contract", () => {
     });
 
     // Root Cause 3: TenantSyncStateStore delegates scheduling to WorkManagerSyncScheduler and never stamps lastSyncedAt on enqueue.
+    // BizaSyncWorker probes /api/health as SyncPassOutcome.OriginReachable and NEVER marks business sync complete on its own.
     expect(syncStore).toContain("WorkManagerSyncScheduler");
+    expect(syncStore).toContain("fun acknowledgeSyncCompletion");
+    expect(syncStore).toContain("STATE_WAITING_FOR_APP");
     expect(syncStore).not.toContain('.put("lastSyncedAt", nowIso)');
+    expect(syncWorker).toContain("SyncPassOutcome.OriginReachable");
+    expect(syncWorker).toContain("EVENT_SYNC_RECONCILE_REQUESTED");
+    expect(syncWorker).not.toContain("flushedCount = pendingBefore");
     expect(
       parseSyncCompletedEvent({
         businessId: "biz-1",
