@@ -3,7 +3,7 @@
 // tablets use the separate HTTPS gateway in gateway-manager.js.
 "use strict";
 
-const { app, BrowserWindow, dialog, ipcMain, powerMonitor, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, session, shell } = require("electron");
 const path = require("node:path");
 const { BackendManager } = require("./backend-manager");
 const { createCertificateManager } = require("./certificate-manager");
@@ -636,7 +636,7 @@ if (!gotSingleInstanceLock) {
           readSafety: () => backend.preUpdateSafety(),
           readSystem: async () => {
             const stats = require("node:fs").statfsSync(app.getPath("userData"));
-            return { freeDiskBytes: Number(stats.bavail) * Number(stats.bsize), onBatteryPower: powerMonitor.isOnBatteryPower() };
+            return { freeDiskBytes: Number(stats.bavail) * Number(stats.bsize), onBatteryPower: require("electron").powerMonitor.isOnBatteryPower() };
           },
         });
         if (outcome.action === "install") {
