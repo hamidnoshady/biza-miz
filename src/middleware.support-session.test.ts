@@ -66,6 +66,21 @@ describe("middleware — support-session mode enforcement", () => {
     expect((await call("DELETE", "/api/support-access", await token("read_only"))).passed).toBe(true);
   });
 
+  it("a support session may sign itself out — «خروج» reaches the route that closes its grant", async () => {
+    for (const mode of ["read_only", "controlled"] as const) {
+      expect((await call("POST", "/api/auth/logout", await token(mode))).passed, mode).toBe(true);
+    }
+    // Exactly that request: not another method on it, and not a look-alike path.
+    expect(await call("DELETE", "/api/auth/logout", await token("read_only"))).toMatchObject({
+      status: 403,
+      body: { error: "impersonation_read_only" },
+    });
+    expect(await call("POST", "/api/auth/logoutx", await token("read_only"))).toMatchObject({
+      status: 403,
+      body: { error: "impersonation_read_only" },
+    });
+  });
+
   it("a controlled session gets only its granted technical writes, plus its own exit", async () => {
     const t = await token("controlled");
     expect((await call("POST", "/api/printing/test", t)).passed).toBe(true);

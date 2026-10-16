@@ -45,6 +45,12 @@ export const AUTH_ERROR_CODES = {
   missingToken: "missing_token",
   invalidAction: "invalid_action",
   invalidMethod: "invalid_method",
+  /**
+   * A method the vocabulary names but no server ceremony can verify yet
+   * (#854 F03: WebAuthn step-up). Distinct from `invalid_method` so a stale
+   * client is told "not available", not "you sent garbage".
+   */
+  unsupportedMethod: "unsupported_method",
 
   // Password
   missingCurrentPassword: "missing_current_password",
@@ -80,6 +86,13 @@ export const AUTH_ERROR_CODES = {
   attemptsExhausted: "attempts_exhausted",
   rateLimited: "rate_limited",
   smsDispatchFailed: "sms_dispatch_failed",
+  /**
+   * #854 F04/F05 — the credential change and its audit/session refresh could
+   * not be committed together, so *nothing* was committed. Never sent after a
+   * partial write: the routes that emit it run the whole change in one
+   * transaction.
+   */
+  credentialChangeFailed: "credential_change_failed",
 
   // Authorization / escalation
   forbidden: "forbidden",
@@ -125,6 +138,8 @@ const AUTH_ERROR_MESSAGES: Record<AuthErrorCode, string> = {
   missing_token: "نشانی بازیابی نامعتبر است.",
   invalid_action: "درخواست نامعتبر است.",
   invalid_method: "روش انتخاب‌شده معتبر نیست.",
+  unsupported_method:
+    "این روش تأیید هویت فعلاً پشتیبانی نمی‌شود؛ از رمز عبور، رمز عددی یا کد دومرحله‌ای استفاده کنید.",
 
   missing_current_password: "رمز عبور فعلی را وارد کنید.",
   invalid_current_password: "رمز عبور فعلی نادرست است.",
@@ -160,6 +175,8 @@ const AUTH_ERROR_MESSAGES: Record<AuthErrorCode, string> = {
   attempts_exhausted: "تعداد تلاش‌های ناموفق بیش از حد مجاز است؛ کد تازه‌ای درخواست کنید.",
   rate_limited: "تعداد درخواست‌ها بیش از حد مجاز است؛ کمی صبر کنید.",
   sms_dispatch_failed: "ارسال پیامک ممکن نشد. کمی بعد دوباره تلاش کنید.",
+  credential_change_failed:
+    "ثبت این تغییر امنیتی ممکن نشد و هیچ تغییری اعمال نشد. کمی بعد دوباره تلاش کنید.",
 
   forbidden: "شما اجازهٔ این کار را ندارید.",
   owner_only: "فقط مالک کسب‌وکار می‌تواند این کار را انجام دهد.",
@@ -256,7 +273,11 @@ export const STEP_UP_METHODS = [
   "recovery",
   /** The member's current staff PIN — the only door a PIN-only role has. */
   "pin",
-  /** A fresh WebAuthn assertion. */
+  /**
+   * A WebAuthn assertion. Named so a stale client gets `unsupported_method`
+   * rather than `invalid_method`, but **not verifiable**: see
+   * `VERIFIABLE_STEP_UP_METHODS`.
+   */
   "webauthn",
 ] as const;
 
@@ -266,19 +287,42 @@ export function isStepUpMethod(value: unknown): value is StepUpMethod {
   return typeof value === "string" && (STEP_UP_METHODS as readonly string[]).includes(value);
 }
 
+/**
+ * The step-up methods a server ceremony can actually verify today (#854 F03).
+ *
+ * WebAuthn is deliberately absent. A recent-authentication proof needs a
+ * server-issued challenge and a verified signed assertion over it; there is no
+ * such step-up ceremony yet, and the old picker filled the gap with a text box —
+ * which is not WebAuthn, and must never be accepted as if it were. Until a real
+ * challenge/response ceremony exists, the method is neither advertised (`GET
+ * /api/auth/step-up`) nor accepted (`parseStepUpRequest` → `unsupported_method`).
+ */
+export const VERIFIABLE_STEP_UP_METHODS = [
+  "password",
+  "totp",
+  "sms_otp",
+  "recovery",
+  "pin",
+] as const satisfies readonly StepUpMethod[];
+
+export type VerifiableStepUpMethod = (typeof VERIFIABLE_STEP_UP_METHODS)[number];
+
+export function isVerifiableStepUpMethod(value: unknown): value is VerifiableStepUpMethod {
+  return (
+    typeof value === "string" && (VERIFIABLE_STEP_UP_METHODS as readonly string[]).includes(value)
+  );
+}
+
 export interface StepUpRequest {
-  method: StepUpMethod;
+  method: VerifiableStepUpMethod;
   /**
    * The secret being offered: a password, a 6-digit code, a recovery code or a
-   * PIN. For `webauthn` this is the assertion payload's JSON, which is why the
-   * field is not called `code` — the old name is exactly what broke the
-   * contract (#854 P1.9).
+   * PIN. Not called `code` — the old name is exactly what broke the contract
+   * (#854 P1.9).
    */
   credential: string;
   /** Explicit pool selection; the server refuses a method the account lacks. */
   recovery?: boolean;
-  /** Set for `webauthn` — the challenge token issued by the step-up options route. */
-  challengeToken?: string;
 }
 
 export type StepUpParseError =
@@ -304,6 +348,9 @@ export function parseStepUpRequest(body: unknown): StepUpParseResult {
   const raw = body as Record<string, unknown>;
 
   if (!isStepUpMethod(raw.method)) return { ok: false, error: "invalid_method" };
+  // Known but not verifiable (#854 F03): refused before any credential is read,
+  // so no text field can stand in for a ceremony that does not exist.
+  if (!isVerifiableStepUpMethod(raw.method)) return { ok: false, error: "unsupported_method" };
 
   const credential =
     typeof raw.credential === "string"
@@ -319,23 +366,20 @@ export function parseStepUpRequest(body: unknown): StepUpParseResult {
       method: raw.method,
       credential: credential.trim(),
       ...(raw.recovery === true ? { recovery: true } : {}),
-      ...(typeof raw.challengeToken === "string" ? { challengeToken: raw.challengeToken } : {}),
     },
   };
 }
 
 /** The client-side body builder, so a form cannot invent a field name. */
 export function stepUpBody(input: {
-  method: StepUpMethod;
+  method: VerifiableStepUpMethod;
   credential: string;
   recovery?: boolean;
-  challengeToken?: string;
 }): string {
   return JSON.stringify({
     method: input.method,
     credential: input.credential,
     ...(input.recovery ? { recovery: true } : {}),
-    ...(input.challengeToken ? { challengeToken: input.challengeToken } : {}),
   });
 }
 
@@ -353,16 +397,19 @@ export interface StepUpAvailability {
   hasTotp: boolean;
   hasSms: boolean;
   hasRecoveryCodes: boolean;
-  hasWebauthn: boolean;
 }
 
-export function availableStepUpMethods(availability: StepUpAvailability): StepUpMethod[] {
-  const methods: StepUpMethod[] = [];
+/**
+ * Only verifiable methods, ever (#854 F03). A registered passkey is *not* a
+ * step-up door until a WebAuthn step-up ceremony exists — so holding one adds
+ * nothing here, and the input no longer has a field for it.
+ */
+export function availableStepUpMethods(availability: StepUpAvailability): VerifiableStepUpMethod[] {
+  const methods: VerifiableStepUpMethod[] = [];
   if (availability.hasPassword) methods.push("password");
   if (availability.hasTotp) methods.push("totp");
   if (availability.hasSms) methods.push("sms_otp");
   if (availability.hasPin) methods.push("pin");
-  if (availability.hasWebauthn) methods.push("webauthn");
   if (availability.hasRecoveryCodes) methods.push("recovery");
   return methods;
 }

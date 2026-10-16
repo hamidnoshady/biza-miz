@@ -248,12 +248,20 @@ export async function POST(request: NextRequest) {
             locationId: chosen.locationId,
             deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? "Web (MFA)",
             /**
-             * Issue #854 (GAP 8) — the session keeps the true provenance of a
-             * phone-OTP door finished through MFA. The label above is the only
-             * client-supplied metadata it carries, observed on *this* request
-             * by the server; nothing is replayed from the earlier call.
+             * Issue #854 (GAP 8, P2.27) — the session keeps the true door it
+             * came through, read from the *signed* pending token: a phone-OTP
+             * door, an invitation acceptance (the token names the invitation),
+             * or the password door, which is what `primaryAuth` defaults to.
+             * The label above is the only client-supplied metadata it carries,
+             * observed on *this* request by the server; nothing is replayed
+             * from the earlier call.
              */
-            loginMethod: payload.primaryAuth === "phone_otp" ? "phone_otp" : null,
+            loginMethod:
+              payload.primaryAuth === "phone_otp"
+                ? "phone_otp"
+                : payload.invitationId
+                  ? "invitation"
+                  : "password",
           }),
         )
       ).session.id;

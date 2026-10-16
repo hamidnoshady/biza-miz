@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
+import { withTenant } from "@/lib/db";
+import { createSession } from "@/lib/employee-service";
 import {
   EmailPasswordMismatchError,
   provisionBusiness,
@@ -16,6 +18,13 @@ import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
  * — that is the cross-business identity case — but must supply its existing
  * password, since adding a business to an account is an action on that
  * account. `provisionBusiness` enforces it.
+ *
+ * The new Owner's session is revocable like every other (#854 follow-up,
+ * third pass): an `employee_sessions` row with `login_method = 'setup'`, named
+ * by the cookie. If that row cannot be opened the business still exists, so
+ * the answer is still `ok` — with `signedIn: false` and no cookie — rather than
+ * a 500 that would invite a second signup (and, with the same password, a
+ * second business). The Owner signs in at /login.
  */
 export async function POST(request: NextRequest) {
   if (!publicSignupEnabled()) {
@@ -48,21 +57,41 @@ export async function POST(request: NextRequest) {
     throw err;
   }
 
-  const token = await signSession({
-    sub: created.userId,
-    role: "owner",
-    businessId: created.businessId,
-    businessSlug: created.businessSlug,
-    businessSubdomain: created.businessSubdomain,
-    locationId: null,
-    fullName: input.ownerName,
-    platformUserId: created.platformUserId,
+  const userAgent = request.headers.get("user-agent");
+  const opened = await withTenant(created.businessId, () =>
+    createSession(created.userId, created.businessId, {
+      locationId: null,
+      loginMethod: "setup",
+      deviceLabel: userAgent?.slice(0, 120) ?? null,
+      userAgent,
+    }),
+  ).catch((err: unknown) => {
+    console.error(
+      "signup could not open the Owner's session:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+    return null;
   });
+  const token = opened
+    ? await signSession({
+        sub: created.userId,
+        role: "owner",
+        businessId: created.businessId,
+        businessSlug: created.businessSlug,
+        businessSubdomain: created.businessSubdomain,
+        locationId: null,
+        fullName: input.ownerName,
+        platformUserId: created.platformUserId,
+        employeeSessionId: opened.session.id,
+      })
+    : null;
 
   const res = NextResponse.json({
     ok: true,
+    /** False only when the business exists but its Owner could not be signed in: go to /login. */
+    signedIn: token !== null,
     business: { id: created.businessId, slug: created.businessSlug },
   });
-  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+  if (token) res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return res;
 }

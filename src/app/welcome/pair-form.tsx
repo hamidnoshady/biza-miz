@@ -77,6 +77,13 @@ export function PairForm({ onBack }: { onBack: () => void }) {
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<ProbeState>({ kind: "idle" });
   const [pairedOwnerId, setPairedOwnerId] = useState("");
+  /**
+   * Paired, but the server could not open the Owner's session (#854
+   * follow-up: no cookie without a revocable record). Said on screen rather
+   * than a silent jump to the sign-in page, so the Owner knows the device is
+   * connected and only the automatic sign-in is missing.
+   */
+  const [signInNeeded, setSignInNeeded] = useState(false);
   /** Pairing snapshot committed, but the login-credential plane not fully converged yet. */
   const [identitySyncPending, setIdentitySyncPending] = useState(false);
   const [offlinePin, setOfflinePin] = useState("");
@@ -134,8 +141,17 @@ export function PairForm({ onBack }: { onBack: () => void }) {
       ownerUserId?: string;
       requiresOfflineCredential?: boolean;
       identitySyncPending?: boolean;
+      signedIn?: boolean;
     };
     if (res.ok) {
+      // Paired, but the server could not open the Owner's session (#854
+      // follow-up: no cookie without a revocable record). The offline-PIN step
+      // needs that session, so the Owner signs in first.
+      if (data.signedIn === false) {
+        setSignInNeeded(true);
+        setBusy(false);
+        return;
+      }
       if (data.requiresOfflineCredential && data.ownerUserId) {
         setPairedOwnerId(data.ownerUserId);
         // The pairing request now reconciles the credential/PIN plane itself;
@@ -157,6 +173,26 @@ export function PairForm({ onBack }: { onBack: () => void }) {
       ERROR_MESSAGES[data.error ?? ""] ?? "اتصال انجام نشد. دوباره تلاش کنید.",
     );
   }
+
+  if (signInNeeded) return (
+    <div className={`w-full max-w-md ${cardClass} p-8`}>
+      <h1 className="text-2xl font-bold">دستگاه متصل شد</h1>
+      <p
+        role="status"
+        className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground"
+      >
+        این دستگاه به حساب ابری متصل شد، اما ورود خودکار انجام نشد. با ایمیل و
+        گذرواژهٔ مالک وارد شوید تا راه‌اندازی ادامه پیدا کند.
+      </p>
+      <button
+        type="button"
+        onClick={() => router.replace("/login")}
+        className="mt-5 inline-flex h-10 w-full items-center justify-center rounded-lg border border-transparent bg-primary px-5 text-sm font-medium text-primary-foreground transition-all hover:bg-primary/80 active:translate-y-px outline-none focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50"
+      >
+        رفتن به صفحهٔ ورود
+      </button>
+    </div>
+  );
 
   if (pairedOwnerId) return (
     <div className={`w-full max-w-md ${cardClass} p-8`}>

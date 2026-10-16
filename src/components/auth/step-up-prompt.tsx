@@ -23,6 +23,14 @@
  * drift from the route's parser again. Nothing here decides policy: the server
  * still refuses a method the account lacks, and the caller still retries its
  * own action after `onVerified`.
+ *
+ * #854 follow-up:
+ *  - **F03** — only methods a server ceremony can verify are ever rendered
+ *    (`isVerifiableStepUpMethod`). WebAuthn used to arrive here and render as a
+ *    *text box*; a typed string is not a WebAuthn assertion, so even a stale
+ *    server that still advertised it gets no field from this component.
+ *  - **F08** — the PIN is a secret like the password: a masked field that still
+ *    opens the numeric keyboard and normalises Persian/Arabic digits.
  */
 import { useCallback, useEffect, useState } from "react";
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
@@ -37,10 +45,12 @@ import {
 } from "@/app/dashboard/ui";
 import {
   authErrorMessage,
+  isVerifiableStepUpMethod,
   stepUpBody,
   type StepUpMethod,
+  type VerifiableStepUpMethod,
 } from "@/lib/auth-contracts";
-import { toLatinDigits } from "@/lib/digits";
+import { normalizeSecurityDigits, toLatinDigits } from "@/lib/digits";
 
 interface StepUpStatus {
   availableMethods?: StepUpMethod[];
@@ -52,7 +62,28 @@ interface StepUpStatus {
 }
 
 /** Methods whose credential is a code typed from somewhere else. */
-const CODE_METHODS: readonly StepUpMethod[] = ["totp", "sms_otp", "recovery", "pin"];
+const CODE_METHODS: readonly VerifiableStepUpMethod[] = ["totp", "sms_otp", "recovery", "pin"];
+
+/** Longest PIN the policy allows (`pin-policy.ts`: 4–12 digits). */
+const PIN_MAX_DIGITS = 12;
+
+/**
+ * What a keystroke becomes, per method. Digit-only secrets are normalised as
+ * they are typed (Persian/Arabic digits → ASCII, everything else dropped), so
+ * the masked PIN field never holds a character the server would refuse.
+ * Recovery codes may carry letters and dashes, so only their digits are
+ * transliterated, at submit time.
+ */
+function normalizeStepUpInput(method: VerifiableStepUpMethod, value: string): string {
+  if (method === "pin") return normalizeSecurityDigits(value, PIN_MAX_DIGITS);
+  if (method === "totp" || method === "sms_otp") return normalizeSecurityDigits(value, 8);
+  return value;
+}
+
+/** The server's list, minus anything no ceremony can verify (#854 F03). */
+function verifiableMethods(status: StepUpStatus | null): VerifiableStepUpMethod[] {
+  return (status?.availableMethods ?? []).filter(isVerifiableStepUpMethod);
+}
 
 export function StepUpPrompt({
   open,
@@ -69,7 +100,7 @@ export function StepUpPrompt({
   onVerified: () => void;
 }) {
   const [status, setStatus] = useState<StepUpStatus | null>(null);
-  const [method, setMethod] = useState<StepUpMethod | null>(null);
+  const [method, setMethod] = useState<VerifiableStepUpMethod | null>(null);
   const [credential, setCredential] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,7 +113,7 @@ export function StepUpPrompt({
       return;
     }
     setStatus(data);
-    const methods = data.availableMethods ?? [];
+    const methods = verifiableMethods(data);
     setMethod((current) => (current && methods.includes(current) ? current : (methods[0] ?? null)));
   }, []);
 
@@ -139,8 +170,8 @@ export function StepUpPrompt({
 
   if (!open) return null;
 
-  const methods = status?.availableMethods ?? [];
-  const label = (m: StepUpMethod) => status?.methodLabels?.[m] ?? m;
+  const methods = verifiableMethods(status);
+  const label = (m: VerifiableStepUpMethod) => status?.methodLabels?.[m] ?? m;
 
   return (
     <form
@@ -203,12 +234,33 @@ export function StepUpPrompt({
               >
                 <input
                   dir="ltr"
-                  type={method === "password" ? "password" : "text"}
-                  inputMode={method === "password" ? undefined : "numeric"}
-                  autoComplete={method === "password" ? "current-password" : "one-time-code"}
-                  maxLength={method === "password" ? undefined : method === "recovery" ? 32 : 8}
+                  /*
+                   * #854 F08 — the PIN and the password are secrets and are
+                   * masked; one-time codes (TOTP/SMS/recovery) are read off
+                   * another device and stay visible while being typed.
+                   */
+                  type={method === "password" || method === "pin" ? "password" : "text"}
+                  inputMode={
+                    method === "password" ? undefined : method === "recovery" ? "text" : "numeric"
+                  }
+                  autoComplete={
+                    method === "password"
+                      ? "current-password"
+                      : method === "pin"
+                        ? "off"
+                        : "one-time-code"
+                  }
+                  maxLength={
+                    method === "password"
+                      ? undefined
+                      : method === "recovery"
+                        ? 32
+                        : method === "pin"
+                          ? PIN_MAX_DIGITS
+                          : 8
+                  }
                   value={credential}
-                  onChange={(e) => setCredential(e.target.value)}
+                  onChange={(e) => setCredential(normalizeStepUpInput(method, e.target.value))}
                   className={inputClass}
                 />
               </Field>

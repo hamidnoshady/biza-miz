@@ -123,6 +123,10 @@ export async function GET(request: NextRequest) {
     const { session } = await createSession(user.id, businessId, {
       locationId: user.location_id,
       deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? null,
+      // The person proved who they are to the cloud account, not to this
+      // install: not a local password or PIN sign-in (P2.27, migration 0227).
+      loginMethod: "cloud_account",
+      userAgent: request.headers.get("user-agent"),
     });
     return signSession({
       sub: user.id,

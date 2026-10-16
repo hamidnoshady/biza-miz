@@ -48,10 +48,12 @@ async function checkImpersonation(session: SessionPayload | null): Promise<Sessi
 
 /**
  * Phase 20 Wave 2 — the counterpart of checkImpersonation for
- * `employeeSessionId`: a JWT alone is not enough to keep using a PIN login
- * once its `employee_sessions` row has been revoked or has expired, so that
- * row is re-checked live on every request rather than trusted for the
- * token's full 12-hour lifetime. Runs with `withoutTenantScope` for the same
+ * `employeeSessionId`: a JWT alone is not enough to keep using a session once
+ * its `employee_sessions` row has been revoked or has expired, so that row is
+ * re-checked live on every request rather than trusted for the token's full
+ * 12-hour lifetime. (Written for PIN logins; since the #854 follow-up every
+ * tenant session other than a support session has such a row.) Runs with
+ * `withoutTenantScope` for the same
  * structural reason `checkImpersonation`'s `activeGrant` call does: this is
  * called from `getSession()` before `enterTenantScope` has run for the
  * request, so there is no ambient tenant scope yet to run an ordinary query
@@ -59,13 +61,31 @@ async function checkImpersonation(session: SessionPayload | null): Promise<Sessi
  * doc comment.
  */
 async function checkEmployeeSession(session: SessionPayload | null): Promise<SessionPayload | null> {
-  if (!session?.employeeSessionId) return session;
+  if (!session) return null;
+  // A support session is bound to its grant, which checkImpersonation (run
+  // before this) has just re-checked live; it never has a row of its own.
+  if (session.imp) return session;
+  // Issue #854 follow-up (third pass): no row, no session. Six doors used to
+  // mint tenant tokens without one — the business switch, bootstrap, signup,
+  // pairing, and the desktop and company hand-offs — and nothing on the
+  // server could end those: «خروج» could only clear the cookie, every
+  // revocation path (security center, deactivation, sign-out everywhere,
+  // password reset) works on rows, and the re-mint routes re-signed such a
+  // token with a fresh expiry. Every door now opens a row, so a token without
+  // one was minted before that change. It is refused rather than trusted for
+  // the rest of its life: the member signs in once more, into a session that
+  // can be ended.
+  if (!session.employeeSessionId) return null;
   const sessionId = session.employeeSessionId;
 
+  // Bound to its own business *and* its own member: every door signs the id
+  // of the row it just opened for that member, so a token naming anyone
+  // else's row — in another business or the same one — names no session.
   const status = await withoutTenantScope("employee-session-auth", async () => {
     const { rows } = await query<{ expires_at: Date; revoked_at: Date | null }>(
-      `SELECT expires_at, revoked_at FROM employee_sessions WHERE id = $1 AND business_id = $2`,
-      [sessionId, session.businessId],
+      `SELECT expires_at, revoked_at FROM employee_sessions
+        WHERE id = $1 AND business_id = $2 AND employee_id = $3`,
+      [sessionId, session.businessId, session.sub],
     );
     if (!rows[0]) return null;
     return sessionStatus({ expiresAt: rows[0].expires_at, revokedAt: rows[0].revoked_at });

@@ -110,14 +110,19 @@ export interface SessionPayload {
     allowedCapabilities?: string[];
   };
   /**
-   * Phase 20 Wave 2 — employee_sessions.id, set only when this token was
-   * minted by pin-login. The JWT stays the bearer credential in the cookie
-   * (this is *not* a session lookup key); the row it names is what makes the
-   * session individually revocable and listable, re-checked live on the
-   * server by checkEmployeeSession in auth.ts the same way impersonation
-   * grants are — never trusted alone, same as `imp.grantId` above. Absent on
-   * password-role logins (owner/manager/accountant never go through
-   * pin-login) and on any token minted before this field existed.
+   * Phase 20 Wave 2 — employee_sessions.id. The JWT stays the bearer
+   * credential in the cookie (this is *not* a session lookup key); the row it
+   * names is what makes the session individually revocable and listable,
+   * re-checked live on the server by checkEmployeeSession in auth.ts the same
+   * way impersonation grants are — never trusted alone, same as `imp.grantId`
+   * above.
+   *
+   * Since the #854 follow-up (third pass) every door that mints a tenant
+   * session opens such a row — the sign-in doors, the business switch, the
+   * first-run doors and the desktop/company hand-offs — and a re-mint carries
+   * it forward. Only a support session goes without one (it is bound to
+   * `imp.grantId` instead); any other token without it predates the change and
+   * is refused by checkEmployeeSession.
    */
   employeeSessionId?: string | null;
   /**
@@ -154,6 +159,8 @@ export interface SessionPayload {
   recentAuthAt?: number;
   /** Registered JWT issued-at claim (epoch seconds). */
   iat?: number;
+  /** Registered JWT expiry claim (epoch seconds) — set by `signSession`, read back after verification. */
+  exp?: number;
 }
 
 

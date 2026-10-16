@@ -112,25 +112,9 @@ export async function readSelfCredentialState(
     mfaPendingMethods: pending,
     unusedRecoveryCodes: Number(row.unused_recovery_codes ?? 0),
     hasRecoveryCodes: Number(row.unused_recovery_codes ?? 0) > 0,
-    hasWebauthn: false,
     hasVerifiedPhone: row.phone_verified_at !== null,
     loginManagedByCloud: deployment.profile === "hybrid",
   };
-}
-
-/** Whether the membership has at least one registered biometric credential. */
-export async function hasWebauthnCredential(
-  businessId: string,
-  membershipId: string,
-): Promise<boolean> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM employee_credentials
-      WHERE employee_id = $1 AND business_id = $2
-        AND credential_type = 'webauthn' AND status = 'active'
-      LIMIT 1`,
-    [membershipId, businessId],
-  );
-  return rows.length > 0;
 }
 
 /**

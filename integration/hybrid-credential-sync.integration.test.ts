@@ -45,6 +45,7 @@ import { GET as cloudLoginCallback } from "../src/app/api/auth/cloud-login/callb
 import { GET as rosterRoute } from "../src/app/api/auth/pin-login/roster/route";
 import { POST as rosterSyncRoute } from "../src/app/api/auth/pin-login/roster/sync/route";
 import { POST as pairRoute } from "../src/app/api/setup/pair/route";
+import { POST as logoutRoute } from "../src/app/api/auth/logout/route";
 import { POST as iamStatusRoute } from "../src/app/api/team/iam-status/route";
 import { createSession } from "../src/lib/employee-service";
 import { signSession } from "../src/lib/auth";
@@ -584,6 +585,29 @@ describe("hybrid login credential convergence", () => {
     const session = await resolveSessionFromToken(cookie);
     expect(session?.platformUserId).toBe(cloudLoginHandoff.platformUserId);
     expect(session?.tokenVersion).toBe(cloudLoginHandoff.tokenVersion);
+
+    // #854 follow-up (third pass): the hand-back opens a revocable row of its
+    // own member, in its own business; «خروج» ends it, and a retained copy of
+    // the cookie is refused afterwards, like every other door's. The row says
+    // the person signed in with the cloud account (migration 0227) — never a
+    // local password or PIN, which this install did not check.
+    expect(session?.employeeSessionId).toBeTruthy();
+    const opened = await withTenant(paired.siteBusinessId, () => query<{ employee_id: string; business_id: string; login_method: string | null; revoked_at: Date | null }>(
+      `SELECT employee_id, business_id, login_method, revoked_at FROM employee_sessions WHERE id = $1`,
+      [session!.employeeSessionId],
+    ));
+    expect(opened.rows[0]).toMatchObject({
+      employee_id: paired.ownerUserId,
+      business_id: paired.siteBusinessId,
+      login_method: "cloud_account",
+      revoked_at: null,
+    });
+    const signedOut = await logoutRoute(new NextRequest("http://localhost/api/auth/logout", {
+      method: "POST",
+      headers: { cookie: `${SESSION_COOKIE}=${cookie}` },
+    }));
+    expect(await signedOut.json()).toMatchObject({ ok: true, outcome: "revoked", pendingRevocations: 0 });
+    expect(await resolveSessionFromToken(cookie)).toBeNull();
   }, 240_000);
 
   it("persists a failed PIN apply as degraded and repairs it on the next pass", async () => {
@@ -714,12 +738,14 @@ describe("hybrid login credential convergence", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as {
         ok: boolean;
+        signedIn: boolean;
         ownerUserId: string;
         requiresOfflineCredential: boolean;
         identitySyncPending: boolean;
         credentialSync: { status: string; pinMembersExpected: number; pinMembersUsable: number; pinMembersMissing: number };
       };
       expect(body.ok).toBe(true);
+      expect(body.signedIn).toBe(true);
       expect(body.requiresOfflineCredential).toBe(true);
       // Pairing does not finish while PIN staff remain credentialless: it ran
       // the credential plane itself and reports the outcome.
@@ -739,6 +765,26 @@ describe("hybrid login credential convergence", () => {
         [body.ownerUserId],
       ));
       const businessId = device.rows[0].business_id;
+
+      // #854 follow-up (third pass): the Owner's first session on the install
+      // is a revocable row like every other — opened by pairing, named by the
+      // cookie, ended by «خروج», and a retained copy is refused afterwards.
+      const ownerToken = response.cookies.get(SESSION_COOKIE)?.value;
+      const ownerSession = await resolveSessionFromToken(ownerToken);
+      expect(ownerSession?.sub).toBe(body.ownerUserId);
+      expect(ownerSession?.employeeSessionId).toBeTruthy();
+      const opened = await withTenant(businessId, () => query<{ login_method: string; employee_id: string; revoked_at: Date | null }>(
+        `SELECT login_method, employee_id, revoked_at FROM employee_sessions WHERE id = $1`,
+        [ownerSession!.employeeSessionId],
+      ));
+      expect(opened.rows[0]).toMatchObject({ login_method: "setup", employee_id: body.ownerUserId, revoked_at: null });
+      const signedOut = await logoutRoute(new NextRequest("http://localhost/api/auth/logout", {
+        method: "POST",
+        headers: { cookie: `${SESSION_COOKIE}=${ownerToken}` },
+      }));
+      expect(await signedOut.json()).toMatchObject({ ok: true, outcome: "revoked", pendingRevocations: 0 });
+      expect(await resolveSessionFromToken(ownerToken)).toBeNull();
+
       const config = await withTenant(businessId, () => query<{ value: { siteDeviceId: string } }>(
         `SELECT value FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = 'server_sync.config'`,
         [businessId],
