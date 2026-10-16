@@ -7,6 +7,7 @@ import {
   aiPanelSection,
   canManageAi,
   isAiPanelSectionKey,
+  resolveAllowedAiPanelSections,
 } from "./ai-panel";
 
 describe("AI panel section registry", () => {
@@ -37,6 +38,8 @@ describe("AI panel section registry", () => {
     }
     expect(isAiPanelSectionKey("chat")).toBe(false);
     expect(isAiPanelSectionKey("overview")).toBe(false);
+    expect(isAiPanelSectionKey("agents")).toBe(false);
+    expect(isAiPanelSectionKey("knowledge")).toBe(false);
     expect(isAiPanelSectionKey("")).toBe(false);
     expect(isAiPanelSectionKey(null)).toBe(false);
     expect(isAiPanelSectionKey(undefined)).toBe(false);
@@ -65,5 +68,28 @@ describe("AI panel role gate", () => {
         expect(canManageAi(role, key)).toBe(false);
       }
     }
+  });
+
+  it("evaluates per-section capabilities from effective permission sets", () => {
+    const usageOnly = new Set(["ai.use", "ai.usage.view"]);
+    expect(canManageAi(usageOnly)).toBe(true);
+    expect(canManageAi(usageOnly, "usage")).toBe(true);
+    expect(canManageAi(usageOnly, "memory")).toBe(false);
+    expect(canManageAi(usageOnly, "automations")).toBe(false);
+    expect(resolveAllowedAiPanelSections(usageOnly, { deepResearchEnabled: false })).toEqual([
+      "usage",
+    ]);
+    expect(resolveAllowedAiPanelSections(usageOnly, { deepResearchEnabled: true })).toEqual([
+      "research",
+      "usage",
+    ]);
+
+    const automationsOnly = new Set(["ai.use", "ai.automations.manage"]);
+    expect(
+      resolveAllowedAiPanelSections(automationsOnly, { deepResearchEnabled: false }),
+    ).toEqual(["automations"]);
+
+    const fullManage = new Set(["ai.use", "ai.manage"]);
+    expect(resolveAllowedAiPanelSections(fullManage)).toEqual([...AI_PANEL_SECTION_KEYS]);
   });
 });
