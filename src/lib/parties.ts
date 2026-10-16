@@ -583,6 +583,24 @@ export const PARTY_FIELD_ERROR_MESSAGES: Record<string, string> = {
   invalid_url: "نشانی وب‌سایت معتبر نیست.",
   invalid_image: "تصویر پروفایل باید یک فایل تصویر یا نشانی آن باشد.",
   invalid_uuid: "شناسه انتخابی معتبر نیست.",
+  /*
+   * Issue #947 (TEAM-F02/F07) — what a *linked* personnel file answers when one of
+   * the three canonical identity fields is edited here.
+   *
+   * These codes existed and no message table carried them, so the form rendered the
+   * fallback («این فیلد الزامی است») under a field the person had just filled in —
+   * the least helpful sentence available for the one refusal whose whole point is
+   * «this field belongs to another screen». Each names that screen, because that is
+   * the action the reader has to take.
+   */
+  identity_name_managed_by_membership:
+    "نام این پرونده از حساب کاربری عضو می‌آید؛ آن را در «کاربران و دسترسی‌ها» تغییر دهید.",
+  identity_email_managed_by_membership:
+    "ایمیل این پرونده از حساب کاربری عضو می‌آید؛ آن را در «کاربران و دسترسی‌ها» تغییر دهید.",
+  identity_phone_managed_by_membership:
+    "موبایل این پرونده از حساب کاربری عضو می‌آید؛ آن را در «کاربران و دسترسی‌ها» تغییر دهید.",
+  employee_link_unknown: "حساب کاربری انتخاب‌شده در این کسب‌وکار نیست.",
+  employee_link_taken: "این حساب کاربری همین حالا به پروندهٔ پرسنلی دیگری متصل است.",
 };
 
 /** Field path → error code. The form renders it under the input; the API echoes it back. */
@@ -852,6 +870,63 @@ export function buildNonAccountingPayload(state: PartyFormState): NonAccountingP
 }
 
 /**
+ * The client half of the write-side projection (issue #947, TEAM-F01).
+ *
+ * A form that was shown a withheld field shows it *blank*, and posting the blank back
+ * is indistinguishable from clearing it — the server refuses to let that erase anything
+ * (`restrictPartyWriteToAudience`), but a save that silently does nothing is its own
+ * bug. So the payload drops exactly the paths this read withheld and lets the server's
+ * «leave it» normalisation keep the stored value, which is what an untouched key means.
+ *
+ * `restrictedFields` is the list the read named (`PartyApiRecord.restrictedFields`), so
+ * the two sides of the round trip share one vocabulary and the form never has to know
+ * which permissions produced it.
+ */
+export function restrictPartyPayload<T extends object>(
+  payload: T,
+  restrictedFields: readonly string[],
+): T {
+  if (restrictedFields.length === 0) return payload;
+  const out: Record<string, unknown> = { ...(payload as Record<string, unknown>) };
+  if (out.general_info !== undefined && out.general_info !== null) {
+    const general = { ...(out.general_info as Record<string, unknown>) };
+    if (restrictedFields.includes("generalInfo.nationalId")) delete general.nationalId;
+    if (restrictedFields.includes("generalInfo.economicCode")) delete general.economicCode;
+    out.general_info = general;
+  }
+  if (restrictedFields.includes("address") || restrictedFields.includes("addressInfo")) delete out.address_info;
+  if (restrictedFields.includes("contactInfo")) delete out.contact_info;
+  if (restrictedFields.includes("notes")) delete out.notes;
+  if (restrictedFields.includes("financialInfo")) delete out.financial_info;
+  return out as T;
+}
+
+/**
+ * The withheld paths, named for the person who is looking at the blank field.
+ *
+ * One label per path the projection can withhold, in the order the form shows them.
+ * A path with no label is skipped rather than printed raw — the list is the server's
+ * vocabulary, and a sentence for a person should not contain `generalInfo.economicCode`.
+ */
+export const PARTY_RESTRICTED_FIELD_LABELS: Record<string, string> = {
+  "generalInfo.nationalId": "کد ملی",
+  "generalInfo.economicCode": "کد اقتصادی",
+  address: "نشانی",
+  addressInfo: "نشانی",
+  contactInfo: "اطلاعات تماس تکمیلی",
+  notes: "یادداشت",
+  financialInfo: "اطلاعات بانکی",
+};
+
+/** «کد ملی، نشانی و یادداشت» — the withheld paths as one Persian phrase. */
+export function restrictedFieldsLabel(restrictedFields: readonly string[]): string {
+  const names = restrictedFields
+    .map((path) => PARTY_RESTRICTED_FIELD_LABELS[path])
+    .filter((label): label is string => Boolean(label));
+  return [...new Set(names)].join("، ");
+}
+
+/**
  * Coerced so a half-typed form can never post `NaN` into a jsonb column.
  *
  * Takes the loose shape rather than `PartyGeneralInfo` because both callers are
@@ -937,6 +1012,24 @@ export interface PartyApiRecord {
   addressInfo?: Partial<PartyAddressInfo> | null;
   contactInfo?: Partial<PartyContactInfo> | null;
   financialInfo?: Partial<PartyFinancialInfo> | null;
+  /**
+   * Issue #947 (TEAM-F02/F07) — the membership this personnel file belongs to, when
+   * the record is an Employee file. Absent or `null` means «no login account»: the
+   * file is a standalone personnel record, not a second copy of a member.
+   *
+   * The screens read it to decide what they may offer (the linked identity is
+   * read-only; an unlinked file offers the route to create an account) — and it is
+   * the field the service validates on every write, so a client that does not carry
+   * it simply cannot relink anybody (`assertEmployeeLinkTarget`).
+   */
+  employeeUserId?: string | null;
+  /**
+   * Issue #947 (TEAM-F01) — the fields this read withheld from the caller. Named
+   * (dot-paths, the same vocabulary the form's field errors use) so a screen can say
+   * «این بخش با دسترسی شما نمایش داده نمیشود» instead of rendering an empty field
+   * the reader assumes is simply unfilled.
+   */
+  restrictedFields?: string[];
 }
 
 export function formStateFromParty(party: PartyApiRecord | null | undefined): PartyFormState {

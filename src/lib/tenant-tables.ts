@@ -63,7 +63,7 @@ export const EXEMPT_TABLES = new Set([
   // storage credentials are deliberately absent; per-device runtime/update
   // telemetry lives in RLS-protected site_device_* tables.
   "platform_releases",
-  // Migration 0226 — deployment-wide Desktop update policy defaults (singleton,
+  // Migration 0227 — deployment-wide Desktop update policy defaults (singleton,
   // no business_id). Per-business/location/device layers are RLS-protected in
   // business_desktop_update_policies.
   "platform_desktop_update_policy",

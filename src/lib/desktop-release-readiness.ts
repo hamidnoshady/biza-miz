@@ -72,7 +72,7 @@ export function evaluateReleaseReadiness(
   }
 
   add(facts.policyTablesReady
-    ? { id: "policy_tables", layer: "central_database", status: "ok", message: "Update policy tables are present (migration 0226 applied)." }
+    ? { id: "policy_tables", layer: "central_database", status: "ok", message: "Update policy tables are present (migration 0227 applied)." }
     : { id: "policy_tables", layer: "central_database", status: "fail", message: "Update policy tables are missing: migrations have not completed on this Central instance." });
 
   add(facts.lastRegistration

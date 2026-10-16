@@ -3,7 +3,13 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { normalizeNumericText } from "@/lib/digits";
-import { taxPercentageOf } from "@/lib/parties";
+import {
+  buildPartyPayload,
+  formStateFromParty,
+  restrictedFieldsLabel,
+  restrictPartyPayload,
+  taxPercentageOf,
+} from "@/lib/parties";
 
 /**
  * The «اشخاص» directory's fixed defects, pinned so they stay fixed.
@@ -358,5 +364,77 @@ describe("api() after both fixes for it landed", () => {
     // Every superseded search would otherwise raise «ارتباط با سرور برقرار
     // نشد» — the normal path, reported as an outage.
     expect(UI_SOURCE).toMatch(/aborted \? \{\} : \{ error: "network_error" \}/);
+  });
+});
+
+describe("the withheld half of a personnel file (issue #947, TEAM-F01/F07)", () => {
+  /*
+   * The pair the projection turns into a round trip. `GET /api/parties` blanks the
+   * sensitive fields and *names* them (`restrictedFields`); the form then holds blanks
+   * it must not send back, because a blank is indistinguishable from a deliberate
+   * clear. The server refuses to let that erase anything
+   * (`restrictPartyWriteToAudience`, pinned by the database suite); this is the client
+   * half, and the reason it is worth having on its own: a form whose save silently
+   * does nothing is a bug even when the data is safe.
+   */
+  const projected = formStateFromParty({
+    role: "Employee",
+    roles: ["Employee"],
+    displayName: "کارمند پنهان",
+    personType: "Real",
+    generalInfo: { nationalId: "", economicCode: "", taxPercentage: null },
+    addressInfo: {},
+    contactInfo: {},
+    financialInfo: {},
+    notes: null,
+  });
+
+  it("strips exactly the withheld paths and leaves the rest of the payload alone", () => {
+    const payload = buildPartyPayload(projected);
+    const withheld = ["generalInfo.nationalId", "address", "addressInfo", "contactInfo", "notes", "financialInfo"];
+    const stripped = restrictPartyPayload(payload, withheld);
+
+    // An absent key means «leave it» to `normalizePartyWrite` — the opposite of the
+    // empty object and the empty string the form would otherwise send.
+    expect(stripped.general_info.nationalId).toBeUndefined();
+    expect("address_info" in stripped).toBe(false);
+    expect("contact_info" in stripped).toBe(false);
+    expect("financial_info" in stripped).toBe(false);
+    expect("notes" in stripped).toBe(false);
+    // Nothing else is touched.
+    expect(stripped.general_info.taxPercentage).toBe(payload.general_info.taxPercentage);
+    expect(stripped.displayName).toBe("کارمند پنهان");
+    expect(stripped.roles).toEqual(["Employee"]);
+  });
+
+  it("returns the very same payload to a reader who saw everything", () => {
+    // Conservative by construction: a wide read costs nothing, and a partial write
+    // would otherwise drop the fields the caller is allowed to change.
+    const payload = buildPartyPayload(projected);
+    expect(restrictPartyPayload(payload, [])).toBe(payload);
+  });
+
+  it("names the withheld paths in Persian for the reader, not as field paths", () => {
+    expect(
+      restrictedFieldsLabel(["generalInfo.nationalId", "address", "addressInfo", "contactInfo"]),
+    ).toBe("کد ملی، نشانی، اطلاعات تماس تکمیلی");
+    expect(restrictedFieldsLabel(["somethingUnknown"])).toBe("");
+  });
+
+  it("draws the withheld fields read-only, with the reason, and out of the payload", () => {
+    /*
+     * Structural, like the rest of this file: vitest runs without a DOM here, so the
+     * client component cannot be mounted. These are the exact lines that make the
+     * screen honest — a blank input a person can type into and then watch refuse to
+     * save is worse than one that says «با دسترسی شما نمایش داده نمیشود».
+     */
+    expect(FORM_SOURCE).toMatch(/const \[restrictedFields, setRestrictedFields\] = useState<string\[\]>/);
+    expect(FORM_SOURCE).toMatch(/setRestrictedFields\(data\.party\.restrictedFields \?\? \[\]\)/);
+    expect(FORM_SOURCE).toMatch(/restrictPartyPayload\(/);
+    expect(FORM_SOURCE).toMatch(/readOnly=\{withholds\("generalInfo\.nationalId"\)\}/);
+    expect(FORM_SOURCE).toMatch(/readOnly=\{withholds\("notes"\)\}/);
+    expect(FORM_SOURCE).toMatch(/<fieldset\s+disabled=\{withholds\("addressInfo"\) \|\| withholds\("address"\)\}/);
+    expect(FORM_SOURCE).toMatch(/<fieldset disabled=\{withholds\("contactInfo"\)\}/);
+    expect(FORM_SOURCE).toMatch(/aria-readonly=\{withholds\("notes"\) \? true : undefined\}/);
   });
 });

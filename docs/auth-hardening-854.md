@@ -88,14 +88,14 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.2 Team UI permission controls gated | resolved (pass 1) | mutating controls require `team.permissions_manage`; request shape omits the permission half without it |
 | P2.3 permission registry duplicated | resolved (pass 1) | member editor + roles dialog render the canonical `PermissionEditor` |
 | P2.4 "reason required" was only UI metadata | **resolved (pass 2, GAP 4)** | server-validated meaningful reasons (8–500 chars, whitespace-normalised) in `validateAccessChangeReason`; enforced inside the write — `updateMembership`, `createMembership`, `createInvitation` (stored on the invitation, inherited by the acceptance audit), `createTenantRole` (always) and `updateTenantRole` (permission/archive/scope changes, not description-only edits). The validated reason, the actor and the change ride the IAM event and the audit row. The member editor, roles dialog and invite dialog show the reason field exactly when the server will demand it; role archiving asks for its reason. Blank/missing/short refusals and successful persistence are pinned in `integration/auth-hardening-854-gaps.integration.test.ts` (GAP 4) |
-| P2.5 personnel/membership identity drift | **resolved (pass 4)** | canonical ownership defined exactly as the issue prescribes: the membership row (`users`: `full_name`, `email`, `phone_e164`) and the global identity own the login-identity fields; the personnel record keeps HR-only fields. A personnel write that would *change* a shared field away from the membership's value is refused with `identity_{name,email,phone}_managed_by_membership` (HTTP 409 + fieldErrors from `/api/parties/[id]`), so `/api/parties` can never silently fork a conflicting identity copy; repair writes that align the party with the membership stay allowed, and unlinked parties are untouched. The membership→party direction remains the repair path (`ensureEmployeeParty` after a committed rename, plus `setMemberPhone` post-commit sync). Nothing reads a stale personnel copy for authorization. Pinned by the canonical-ownership cases in `parties.integration.test.ts` and the sync cases in `team.integration.test.ts` |
+| P2.5 personnel/membership identity drift | **resolved (pass 4)** | canonical ownership defined exactly as the issue prescribes: the membership row (`users`: `full_name`, `email`, `phone_e164`) and the global identity own the login-identity fields; the personnel record keeps HR-only fields. A personnel write that would *change* a shared field away from the membership's value is refused with `identity_{name,email,phone}_managed_by_membership` (HTTP 409 + fieldErrors from `/api/parties/[id]`), so `/api/parties` can never silently fork a conflicting identity copy; repair writes that align the party with the membership stay allowed, and unlinked parties are untouched. The membership→party direction remains the repair path — since issue #947 it is one guaranteed operation, `ensurePersonnelFileForMembership` in `src/lib/personnel-file.ts`, called by every door that creates or changes a membership (create, update, rehire, `setMemberPhone`, invitation acceptance, setup, IAM replica) and retried from `GET /api/team` and `scripts/reconcile-personnel-files.ts` when it fails; the old route-local `ensureEmployeeParty` writer is gone. Nothing reads a stale personnel copy for authorization. Pinned by the canonical-ownership cases in `parties.integration.test.ts` and the sync cases in `team.integration.test.ts` |
 | P2.6 membership-linked party hard-deleted | **resolved (pass 2)** | `removeParty`'s history check now counts the `employee_user_id` link itself, so a member's personnel file is archived, never hard-deleted; pinned by the new case in `parties.integration.test.ts` |
 | P2.7 personnel subsection without `parties.view` | **resolved (pass 4)** | the issue offers two fixes; the Team page now implements the first — the personnel subsection mounts only when the signed-in member can actually read it: `canViewParties(role, permissions)` from the shared `parties-scopes` module gates the single `<PartiesSection>` mount (no unconditional fallback mount), so a team manager with team access but no `parties.view` sees a clean team screen instead of a 403-ing subsection. The dedicated membership-scoped personnel read path stays recorded as possible future work; the `parties.view` permission itself was *not* widened to make the error disappear |
-| P2.8 offboarded member looks "reactivatable" | **resolved (pass 4)** | actions now derive from the lifecycle state: suspended members get «فعال‌سازی» (reactivate), offboarded members get «بازگشت به کار» (rehire) and nothing else — the generic activate button no longer renders for an offboarded row, and the service refuses `not_offboarded` in the other direction. Rehire is an explicit ceremony, `POST /api/team/[id]/rehire`, holding the membership row lock, gated on `team.manage` **and** `team.permissions.manage` (a rehire re-grants the stored role/permissions), with the whole grant re-checked against the actor (`grants_beyond_actor`) and owner-only/self checks preserved. It restores the identity linkage (relinks or mints the platform identity, preserving the historical membership row — no history deletion), re-establishes PIN credentials under the blind index, and applies the stored role, permission overrides and branch scope in one transaction, with an explicit `reason`. No migration was required: offboarding already retained everything a rehire needs. Pinned by the rehire cases in `team.integration.test.ts` (success + every refusal code + MFA factor survival + same-email rehire with history kept) |
+| P2.8 offboarded member looks "reactivatable" | **resolved (pass 4)** | actions now derive from the lifecycle state: suspended members get «فعال‌سازی» (reactivate), offboarded members get «بازگشت به کار» (rehire) and nothing else — the generic activate button no longer renders for an offboarded row, and the service refuses `not_offboarded` in the other direction. Rehire is an explicit ceremony, `POST /api/team/[id]/rehire`, holding the membership row lock, gated on `team.manage` **and** `team.permissions.manage` (a rehire re-grants the stored role/permissions), with the whole grant re-checked against the actor (`grants_beyond_actor`) and owner-only/self checks preserved. It restores the identity linkage (relinks or mints the platform identity, preserving the historical membership row — no history deletion), re-establishes PIN credentials (`employee_credentials.secret_hash` — the only stored form of a PIN since migration `0221` dropped the blind index, issue #953), and applies the stored role, permission overrides and branch scope in one transaction, with an explicit `reason`. No migration was required: offboarding already retained everything a rehire needs. Pinned by the rehire cases in `team.integration.test.ts` (success + every refusal code + MFA factor survival + same-email rehire with history kept) |
 | P2.9 re-invite collides with retained rows | **resolved (pass 4)** | the same-email case no longer dead-ends: a new membership for an offboarded identity's email is refused `email_taken` by design, and the retained row is recovered through the rehire ceremony instead of colliding with it — invitations still supersede pending ones per address and acceptance stays idempotent per identity. Cross-tenant rehire attempts answer `not_found`, and historical membership/personnel/audit references survive the relink untouched |
 | P2.10 branch-scope validation incomplete | resolved (pass 1) | explicit scope validated at creation and acceptance |
 | P2.11 invitation UI lacks branch scope | resolved (pass 1) | the invite form asks for scope + branches |
-| P2.12 PIN uniqueness copy and implementation disagree | resolved (pass 1) | the PIN surface copy and the blind-index constraint now describe the same per-business rule |
+| P2.12 PIN uniqueness copy and implementation disagree | **superseded (migration `0221`)** | pass 1 aligned the copy with the per-business constraint; #953 then removed uniqueness itself (P2.13), so the hint now says what is true — the PIN is *this member's* personal secret, the door finds the member by name, and two members may happen to choose the same digits |
 | P2.13 PIN uniqueness race-prone check | **superseded (migration `0221`)** | uniqueness itself is gone: refusing a duplicate PIN told the person choosing it what a colleague's PIN was. The door now always names the member (`employeeId` is required by `/api/auth/pin-login`), the blind index and its unique index are dropped, and `secret_hash` is the only stored form of a PIN |
 | P2.14 custom-role `default_location_scope` dead | **resolved (pass 2, GAP 10)** | the scope is now applied: `createTenantRole`/`updateTenantRole` store and serve it (update is an access change and needs a reason), the roles dialog edits it, and both membership-creation paths inherit it when no explicit branch policy is given — refusing `selected`/`home` defaults that cannot be honoured instead of silently widening to "all". Pinned by the GAP 4 invitation/creation cases in `auth-hardening-854-gaps.integration.test.ts` |
 | P2.15 confirmPassword ignored | resolved (pass 1) | one server-side validator |
@@ -139,23 +139,26 @@ passes 1–3; it closed what the review still found reachable:
 | OTP/PIN digit handling | P2.23 | one `normalizeSecurityDigits` helper in front of every remaining security-code input (see the P2.23 row); the duplicated form whose `/\D/g` strip motivated the audit was removed with the phone card above |
 | Personnel section authorisation | P2.7 | the Team screen's personnel subsection mounts only behind `canViewParties`; `parties.view` not widened |
 | Membership lifecycle & rehire | P2.8, P2.9 | lifecycle-derived actions + the explicit rehire ceremony `POST /api/team/[id]/rehire` (`rehireMembership`: membership row lock, dual permission gate, grant re-check against the actor, identity relink, PIN re-establishment, stored role/permissions/branch scope restored in one transaction, reason required; refuses `not_offboarded`, keeps history rows; `email_taken` steers same-email cases to rehire instead of colliding). No MFA bypass: factors live on the global identity and survive the relink — pinned by an integration test that reads `mfa_enrolments` through the relinked `platform_user_id` |
-| Canonical identity ownership | P2.5 | the membership/global identity owns `full_name`/`email`/`phone_e164` for login purposes; conflicting personnel writes are refused (`identity_*_managed_by_membership`, 409 + fieldErrors), alignment writes allowed; membership→party sync on rename/create/setMemberPhone. Consumers inspected: party create/update API, `ensureEmployeeParty`, team rename/create/setMemberPhone, data-transfer CRM import (`entities/crm.ts` now refuses conflicting employee-party identity writes), ai-autopilot customer updates (unaffected — customers are not employee-linked) |
+| Canonical identity ownership | P2.5 | the membership/global identity owns `full_name`/`email`/`phone_e164` for login purposes; conflicting personnel writes are refused (`identity_*_managed_by_membership`, 409 + fieldErrors), alignment writes allowed; membership→party sync on rename/create/setMemberPhone, now the single `ensurePersonnelFileForMembership` guarantee (issue #947) called from every membership door. Consumers inspected: party create/update API, the personnel-file sync, team rename/create/setMemberPhone, data-transfer CRM import (`entities/crm.ts` now refuses conflicting employee-party identity writes), ai-autopilot customer updates (unaffected — customers are not employee-linked) |
 | Deterministic MFA contention | P0.9/GAP 3 + P2.21 concurrency | the existing `Promise.all` races stay (they prove the invariant under a real race), and pass 4 adds held-lock ordering tests: a client holds `pg_advisory_xact_lock(hashtext('platform_user'), hashtext(subject))` — the same lock both `removeMfaFactorChecked` and `confirmMfaEnrolment` take — the queued operation is *proven* waiting by a 700 ms race probe, then released. Pinned orderings: replacement-commits-first then removal refuses; removal-decides-first (refused, required account) then replacement commits — identical final state, never factorless; two-factor removals serialise with the survivor covering the account; a stale replacement code cannot authorise a swap to a different number (`expectedPhoneE164` binding) and cannot be replayed; a wrong code rolls back leaving the confirmed factor intact |
 
 ## Known limitations, stated plainly
 
 - **Legacy `users.pin_hash` rows.** Every PIN read goes through
   `coalesce(ec.secret_hash, u.pin_hash)`, so a pre-migration bcrypt hash still
-  signs its owner in, but such a row sits *outside* the keyed blind index —
-  uniqueness for it is not enforced by the constraint, and it cannot be looked
-  up by index. No code path writes that column any more (creations and
-  rotations write `employee_credentials` + the index; suspension/offboarding
-  and cloud replication only ever NULL it). The safe migration policy is
-  rotation on next contact: an affected member sets a new PIN through the
-  normal self-service or admin-reset flow, which writes the indexed credential,
-  and the legacy column is then cleared. Until that happens the legacy hash
-  remains the only door for that member — which is why it is kept readable
-  rather than dropped.
+  signs its owner in, but such a row predates `employee_credentials` entirely:
+  it has no credential row, no `last_used_at`, and no device binding, and it is
+  outside every credential-lifecycle rule this page describes. (Uniqueness is
+  not one of those rules and has not been since migration `0221` — issue #953
+  removed the blind index and its unique constraint, because refusing a
+  duplicate PIN told the person choosing it what a colleague's PIN was.) No
+  code path writes that column any more (creations and rotations write
+  `employee_credentials`; suspension/offboarding and cloud replication only
+  ever NULL it). The safe migration policy is rotation on next contact: an
+  affected member sets a new PIN through the normal self-service or admin-reset
+  flow, which writes the credential row, and the legacy column is then cleared.
+  Until that happens the legacy hash remains the only door for that member —
+  which is why it is kept readable rather than dropped.
 - **`issueCredential` / `verifyCredential` were dead code and are removed.**
   The audit found no route, job, script, dynamic import or test calling them;
   they were a parallel bcrypt PIN path that bypassed the blind index, so they
@@ -276,3 +279,36 @@ document.
 | `npm run test:db` | 199 files / 2743 tests passed, 1 skipped (pass-3 head `4e1dd30`, local Postgres 5432, 2026-10-09) — including the extended `auth-hardening-854-gaps` suite (23 cases) and every tenant-isolation/team/phone-otp file |
 | `npm run build` | production build completed with `NODE_OPTIONS=--max-old-space-size=3072` (same as CI) once the sandbox gained swap; every earlier attempt on the swap-less 4 GB box was OOM-killed |
 | `npm run test:visual` | run locally against the CI-mirrored recipe in `docs/design/visual-regression.md` (Chromium `141.0.7390.0` from `@sparticuz/chromium@141.0.0`, seeded DB, production server, `TZ=Asia/Tehran`). Before this pass it failed exactly as CI did, and **only** on `accounting-expenses` (3.67% of pixels, bounds 54,18 1342×831; CI measured 4.06% at 54,18 1370×830 on the same stale baseline) with the other 13 screens byte-comparable. The diff is the #832 expenses redesign — the screen gained the VAT checkbox, the receipt-upload file input, the status/receipt/number/actions columns and the «پرداختی از حساب‌ها» totals line, all on the existing primitives (teal primary, amber eyebrow, the same table skin) — for which no baseline was ever re-recorded, on main as well as here. Reviewed per policy and re-recorded once, committed with this explanation; the suite is now 14/14 |
+
+## Follow-up: team consolidation (issue #947)
+
+The pass-4 work above shipped the *rules*; #947 consolidated the doors they are applied
+at, and its own record is the Team section of the manual plus
+`src/lib/personnel-file.ts`, `src/lib/personnel-access.ts` and migration
+`0221_personnel_links.sql`. Three of that issue's findings revise notes on this page:
+
+- **P2.5 (canonical identity)** — the propagation door is no longer a per-route call. One
+  idempotent operation owns it and records a durable debt (`personnel_file_drift`) when it
+  cannot complete; a failure is never swallowed. Migration `0223_personnel_file_obligation`
+  moved the *obligation* into the membership's own transaction (a trigger on `users`), so a
+  committed membership can no longer be file-less without a recorded reason, and
+  `listPersonnelFileDebts` (`users` × `parties`) is the inventory the sweep reads — the
+  drift table is bookkeeping about a debt, not the evidence of one. Migration
+  `0226_personnel_file_obligation_phone_cleared` corrects that trigger's phone arm
+  (forward-only, 0223 is applied and unedited): a membership phone that is *cleared* is
+  canonical and must clear the file's, so it records the debt like every other mismatch. The
+  operation is also the single failure boundary for the propagation — `canonicalIdentity`
+  included — because every caller invokes it after committing, and therefore gets an
+  explicit `{ ok, reason, error, recorded }` instead of an exception. The seams this shares
+  with the floor audit (#916) are written down in `docs/issue-947-integration-contracts.md`.
+- **P2.7 (personnel subsection)** — unchanged: the subsection still mounts only behind
+  `canViewParties`. What #947 added is the *field* projection behind it: `parties.view`
+  opens the directory, and the sensitive half of an Employee file (identity numbers,
+  address, HR notes, bank block) additionally needs `team.view`/`team.manage` or
+  `payroll.view` (`personnel-access.ts`), so a cashier's customer lookup can no longer
+  read a colleague's national ID through the same endpoint.
+- **Branch policy** — the §8/X notes about `location_scope` reflected a `CASE … ELSE
+  'all'` in the membership writers. That last arm is gone: a creation or rehire that
+  names no branch policy takes the business's default branch, and an edit that clears a
+  member's branches takes `none` (`resolveMembershipBranchPolicy`,
+  `location-access.ts`).

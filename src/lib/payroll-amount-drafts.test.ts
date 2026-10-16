@@ -118,6 +118,7 @@ const member = (overrides: Partial<StaffWage> = {}): StaffWage => ({
   nonTaxableAllowance: "0",
   fixedDeduction: "0",
   advanceOutstanding: "0",
+  defaultDimensions: {},
   ...overrides,
 });
 

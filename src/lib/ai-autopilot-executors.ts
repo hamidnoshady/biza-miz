@@ -384,6 +384,7 @@ import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
 import { createDraft, deleteDraft, ManualJournalError, reverseEntry, MANUAL_MEMO_MAX } from "./manual-journal-service";
 
 import { updateCustomer } from "./parties-service";
+import { partyWriteAudienceForActor } from "./member-access";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
 import { isWasteReason, recordWaste } from "./waste-service";
 import {
@@ -907,13 +908,34 @@ const customerNote: AutopilotExecutor = async (ctx) => {
   const notes = str(ctx.payload.notes);
   if (!customerId || !notes) return fail("invalid_payload");
 
-  const { rows: before } = await query<{ notes: string | null; name: string }>(
-    `SELECT notes, name FROM parties WHERE id = $1 AND business_id = $2`,
+  const { rows: before } = await query<{ notes: string | null; name: string; roles: string[] }>(
+    `SELECT notes, name, roles FROM parties WHERE id = $1 AND business_id = $2`,
     [customerId, ctx.businessId],
   );
   if (!before[0]) return fail("not_found");
 
-  const updated = await updateCustomer(ctx.businessId, customerId, { notes });
+  /*
+   * Issue #947 (item 2) — an automation writes as the member who switched it on
+   * (`authorizedByUserId`, «every write is theirs»), so it is held to that member's
+   * audience exactly as their browser session is. `notes` is one of the fields
+   * `team.view` withholds on a *staff* file, and the failing mode here is silent: the
+   * service would keep the stored note and report success, leaving an automation that
+   * believes it wrote something and a person who never sees it. So the refusal is
+   * explicit, with a code the run's history shows.
+   */
+  const audience = await partyWriteAudienceForActor(ctx.businessId, ctx.authorizedByUserId);
+  if (
+    before[0].roles?.includes("employee") &&
+    audience &&
+    !audience.personnel
+  ) {
+    return fail("staff_file_requires_team_access");
+  }
+
+  const updated = await updateCustomer(ctx.businessId, customerId, { notes }, {
+    actorId: ctx.authorizedByUserId,
+    ...(audience ? { audience } : {}),
+  });
   if (!updated) return fail("not_found");
   return {
     ok: true,
@@ -4010,7 +4032,11 @@ const floorSectionCreate: AutopilotExecutor = async (ctx) => {
     branch.locationId, name,
   ]);
   if (dup.length > 0) return fail("section_exists");
-  const waiterId = await validWaiterId(branch.locationId, ctx.payload.assignedWaiterId === undefined ? undefined : str(ctx.payload.assignedWaiterId));
+  // Issue #947 (consumer seam): `validWaiterId` now asks the shared eligibility
+  // resolver, which is business-scoped — the same contract the floor routes and the
+  // picker use, so an MCP-created section cannot be assigned to a member the floor
+  // screen would refuse (or vice versa).
+  const waiterId = await validWaiterId(ctx.businessId, branch.locationId, ctx.payload.assignedWaiterId === undefined ? undefined : str(ctx.payload.assignedWaiterId));
   if (waiterId === false) return fail("waiter_not_found");
   const { rows } = await query<{ id: string }>(
     `INSERT INTO floor_sections (location_id, name, color, assigned_waiter_id, sort_order)
@@ -4046,7 +4072,7 @@ const floorSectionUpdate: AutopilotExecutor = async (ctx) => {
   }
   if (ctx.payload.color !== undefined) set("color", str(ctx.payload.color)?.trim() || null);
   if (ctx.payload.assignedWaiterId !== undefined) {
-    const waiterId = await validWaiterId(branch.locationId, str(ctx.payload.assignedWaiterId));
+    const waiterId = await validWaiterId(ctx.businessId, branch.locationId, str(ctx.payload.assignedWaiterId));
     if (waiterId === false) return fail("waiter_not_found");
     set("assigned_waiter_id", waiterId);
   }
@@ -8600,9 +8626,15 @@ const revertCustomerNote: AutopilotReverter = async (ctx) => {
   const customerId = str(ctx.priorState?.customerId) ?? str(ctx.payload.customerId);
   if (!customerId || !ctx.priorState) return fail("no_prior_state");
   const prior = ctx.priorState.notes;
-  const restored = await updateCustomer(ctx.businessId, customerId, {
-    notes: typeof prior === "string" ? prior : "",
-  });
+  // Same audience as the forward write (issue #947, item 2): a revert is a write, and a
+  // narrower member must not be able to undo somebody else's protected edit either.
+  const audience = await partyWriteAudienceForActor(ctx.businessId, ctx.authorizedByUserId);
+  const restored = await updateCustomer(
+    ctx.businessId,
+    customerId,
+    { notes: typeof prior === "string" ? prior : "" },
+    { actorId: ctx.authorizedByUserId, ...(audience ? { audience } : {}) },
+  );
   return restored ? { ok: true, result: { customerId, restored: true } } : fail("not_found");
 };
 

@@ -272,7 +272,7 @@ describe("every tenant table is protected", () => {
       "platform_cms_config",
       "platform_cms_sites",
       "platform_cms_sync_runs",
-      // Migration 0226: singleton platform default; per-business layers are RLS-protected.
+      // Migration 0227: singleton platform default; per-business layers are RLS-protected.
       "platform_desktop_update_policy",
       // Issue #883 wave 3 (migration 0219) — the console's `pospmcp_` MCP
       // credential store: hashed tokens and capability lists keyed on

@@ -8,6 +8,7 @@ import { iamStateHash, sequenceDecision } from "./reconciliation";
 import { validateIamEvent } from "./events";
 import { buildIamSnapshot } from "./service";
 import { syncHybridLoginCredentials } from "./login-credential-sync";
+import { ensurePersonnelFileForMembership } from "../personnel-file";
 
 function baseUrl(value:string){return value.trim().replace(/\/+$/,"");}
 
@@ -52,6 +53,18 @@ async function applySnapshot(businessId:string,siteDeviceId:string,snapshot:IamS
     await client.query("COMMIT");
     const { disconnectMember } = await import("../realtime");
     for (const member of snapshot.memberships) if (!member.isActive || member.status !== "active") disconnectMember(businessId, member.id, "Cloud access revoked");
+    /*
+     * Issue #947 (TEAM-F04) — a replica that applies the cloud's roster is one of
+     * the membership writers, so it owes the personnel file too. It used to write
+     * neither the file nor any record that one was owed: a site could show a
+     * roster whose members had no accounting file at all, and the cloud had no way
+     * to know. Each call is idempotent and its failure lands in
+     * `personnel_file_drift`, where the site's own reconciliation picks it up.
+     */
+    for (const member of snapshot.memberships) {
+      if (!member.isActive || member.status !== "active") continue;
+      await ensurePersonnelFileForMembership(businessId, member.id);
+    }
   }catch(error){await client.query("ROLLBACK").catch(()=>{});throw error;}finally{client.release();}
 }
 
@@ -171,6 +184,18 @@ export async function applyIamEvents(businessId:string,siteDeviceId:string,lastS
     await client.query("COMMIT");
     const { disconnectMember } = await import("../realtime");
     for (const event of events) if (event.eventType === "membership.suspended" || event.eventType === "membership.offboarded") disconnectMember(businessId, event.entityId, "Cloud access revoked");
+    /*
+     * Issue #947 (TEAM-F04) — the two membership events that create an account
+     * (a fresh membership, and a rehire coming back to life) owe the personnel
+     * file on this site exactly as they do on the cloud. Suspension, offboarding
+     * and role changes do not: the file stays, which is the point of offboarding
+     * being a lifecycle state rather than a deletion.
+     */
+    for (const event of events) {
+      if (event.entityType !== "membership") continue;
+      if (event.eventType !== "membership.created" && event.eventType !== "membership.rehired") continue;
+      await ensurePersonnelFileForMembership(businessId, event.entityId);
+    }
     return cursor;
   }catch(error){await client.query("ROLLBACK").catch(()=>{});throw error;}finally{client.release();}
 }

@@ -34,6 +34,7 @@
  */
 
 import { query, withoutTenantScope, withTenant } from "../db";
+import { partyWriteAudienceForActor } from "../member-access";
 import { findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
 import { RowRejection, requireAdapter, type AdapterContext } from "./adapters";
@@ -679,11 +680,35 @@ export async function runImportJob(
     [businessId, jobId],
   );
 
+  /*
+   * Issue #947 (item 2) — the *authority* these rows are written under.
+   *
+   * An import is a write batch, and a browser form is not the only door into `parties`: a
+   * CSV can carry `nationalId`, `address` and `notes`, and this adapter maps them onto
+   * whatever row its duplicate rule matched. When that row is a member of staff's
+   * personnel file, those are exactly the fields `team.view` protects on read — and the
+   * write seam must not be a way around the read seam.
+   *
+   * The authority is resolved *here*, from the membership of the member who created the
+   * job, and deliberately not carried on the job row: a queued job may run minutes or
+   * hours later, and the honest question at that moment is «may this member write this
+   * now», not «what could they do when they clicked». A creator whose membership has been
+   * revoked or suspended resolves to a narrow audience — the same answer the route would
+   * give them today.
+   *
+   * A job created by nobody (a script, a migration, a test) resolves to no audience at
+   * all, which is what «absent» means everywhere else in the engine: the internal full
+   * read, with no member behind it to narrow.
+   *
+   * `partyWriteAudienceForActor` is the same resolver `POST /api/parties` uses, so a CSV
+   * and a form cannot come to different conclusions about the same member (issue #947).
+   */
   const adapterContext: AdapterContext = {
     businessId,
     locationId: context.locationId,
     actorUserId: context.actorUserId,
     actorName: context.actorName,
+    partyAudience: await partyWriteAudienceForActor(businessId, context.actorUserId),
   };
   const writeOptions = {
     duplicateStrategy: job.options.duplicateStrategy ?? "skip",

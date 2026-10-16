@@ -1,5 +1,5 @@
 /**
- * Database half of the Desktop update policy (migration 0226). Reads resolve
+ * Database half of the Desktop update policy (migration 0227). Reads resolve
  * the layers that apply to ONE authenticated device; writes are Superadmin
  * only and are always scope-checked against the business that owns the target,
  * so a location or device id from another business can never be named.

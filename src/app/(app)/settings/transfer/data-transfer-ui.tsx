@@ -103,6 +103,19 @@ export interface ExportJobView {
   createdByName: string;
   createdAt: string;
   downloadable: boolean;
+  /**
+   * Issue #947 — the sensitivity this file was produced under, `null` when the row
+   * predates the provenance column. Shown on the row so «چرا این فایل دانلود نمی‌شود»
+   * is answerable without attempting the download and reading an error.
+   */
+  partyAudience?: { personnel: boolean; financial: boolean } | null;
+  /**
+   * Whether the member *reading this list* may still download the file, decided by the
+   * server with the same function the download uses (issue #947). Absent on jobs that
+   * were produced before provenance was recorded — `partyAudience: null` — which the
+   * server refuses to anyone who cannot read everything.
+   */
+  download?: { allowed: true } | { allowed: false; requires: string[]; reason: string };
 }
 
 export interface ScheduleView {
@@ -156,6 +169,14 @@ const ERRORS: Record<string, string> = {
   invalid_email: "نشانی ایمیل معتبر نیست.",
   no_delivery: "دست‌کم یکی از «ذخیره در تاریخچه» یا «ارسال ایمیل» باید فعال باشد.",
   content_expired: "فایل این خروجی دیگر نگه‌داری نمی‌شود.",
+  /*
+   * Issue #947 — the stored file was produced under wider permissions than this member
+   * holds now (a revoked key, a narrower role, or a file from before provenance was
+   * recorded). The sentence says what to *do*: regenerate, which produces a file
+   * projected with today's fields under today's permissions.
+   */
+  export_requires_regeneration:
+    "این فایل با دسترسی گسترده‌تری ساخته شده و دیگر قابل دانلود نیست. با «خروجی جدید» فایلی مطابق دسترسی فعلی شما ساخته می‌شود.",
   forbidden: "برای این کار روی این نوع داده دسترسی ندارید.",
   unauthorized: "وارد نشده‌اید.",
   network_error: "ارتباط با سرور برقرار نشد.",

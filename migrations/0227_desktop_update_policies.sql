@@ -1,4 +1,4 @@
--- 0226_desktop_update_policies.sql
+-- 0227_desktop_update_policies.sql
 --
 -- Central, versioned Desktop update policy (issue #981). Layers resolve
 -- platform → business → location → device; each layer stores only the keys it

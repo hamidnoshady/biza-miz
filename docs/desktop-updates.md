@@ -38,7 +38,7 @@ Operators publishing a release: [desktop-updates-coolify.md](desktop-updates-coo
 
 ## Central update policy
 
-Migration 0226 adds a versioned policy that Central resolves **per device** before it returns
+Migration 0227 adds a versioned policy that Central resolves **per device** before it returns
 anything. Precedence is **platform defaults → business → location → device**; a layer stores only
 the keys it explicitly overrides, so the console can show inherited versus overridden values. The
 resolved policy is previewed in `/platform/updates` (device → «سیاست به‌روزرسانی») and every change

@@ -30,6 +30,8 @@ const here = (relative: string) =>
 
 const TEAM_MANAGER = here("./team-manager.tsx");
 const TEAM_API = here("../../api/team/route.ts");
+const TEAM_SERVICE = here("../../../lib/team-service.ts");
+const PERSONNEL_FILE = here("../../../lib/personnel-file.ts");
 const MEMBER_API = here("../../api/team/[id]/route.ts");
 const CREDENTIALS_API = here("../../api/team/[id]/credentials/route.ts");
 const SETUP_USERS_API = here("../../api/setup/users/route.ts");
@@ -82,14 +84,93 @@ describe("the team screen sends what the API accepts", () => {
   });
 });
 
-describe("the personnel file follows the membership, but only when named", () => {
-  it("renames the party on a rename, and not on a suspend", () => {
-    // The guard is the fix: before it, every PATCH (suspend, permission
-    // change) called ensureEmployeeParty with whatever name the body happened
-    // to omit, stamping the party with a stale or blank label.
-    expect(MEMBER_API).toContain("const renameTo = body.fullName?.trim()");
-    expect(MEMBER_API).toContain("if (renameTo)");
-    expect(MEMBER_API).toContain("ensureEmployeeParty");
+describe("the personnel file follows the membership, and every door writes it", () => {
+  it("propagates a rename from the membership row, never from the body", () => {
+    /*
+     * The rename guard used to live in the route (`const renameTo = body.fullName?.trim()`)
+     * and was the fix for a PATCH that omitted a name stamping the party blank. The
+     * guard's *job* moved into the guarantee: the route forwards whatever the body
+     * said (or nothing), the service writes the row first, and the file is derived
+     * from the row that was written — so an omitted name is simply not a value the
+     * propagation can ever see, whatever door the edit came through.
+     */
+    expect(MEMBER_API).toContain("fullName: body.fullName");
+    expect(TEAM_SERVICE).toContain("full_name   = coalesce($4, full_name)");
+    expect(PERSONNEL_FILE).toContain("displayName: (member.full_name ?? \"\").trim()");
+  });
+
+  it("has one writer for the file, called by the membership service", () => {
+    /*
+     * Issue #947 (TEAM-F04). The file used to be created by whichever door
+     * remembered to: `POST /api/team` called `ensureEmployeeParty`, the setup
+     * wizard and the invitation finaliser each had their own writer, and the IAM
+     * replica had a third. Two of those doors had no writer at all, so a member
+     * created through them owned no personnel file — no payroll row could hang off
+     * them. The single guarantee now lives in `personnel-file.ts` and the routes do
+     * not write parties themselves; this asserts the two halves of that: the
+     * service calls it, and the member route no longer reaches for the old
+     * per-route writer.
+     */
+    expect(TEAM_SERVICE).toContain("ensurePersonnelFileForMembership");
+    expect(MEMBER_API).not.toContain("ensureEmployeeParty");
+    expect(TEAM_API).not.toContain("ensureEmployeeParty");
+  });
+
+  it("tells the member card whether the file exists or is still owed", () => {
+    // F04/F05 surface: the guarantee is either true or visibly owed, and the
+    // roster is where an owner sees which.
+    expect(TEAM_API).toContain("listPersonnelFileDrift");
+    expect(TEAM_API).toContain("retryPersonnelFileDrift");
+    expect(TEAM_MANAGER).toContain("personnelFileId");
+    expect(TEAM_MANAGER).toContain("personnelFileDrift");
+  });
+});
+
+describe("the branch policy is chosen, not inferred (issue #947, TEAM-F03)", () => {
+  it("sends an explicit branch policy from the PIN-staff form", () => {
+    /*
+     * The form used to send role/name/PIN/phone and nothing else, and
+     * `createMembership`'s INSERT ended in `ELSE 'all'` — so every PIN member
+     * created here silently received every branch of the business, with no
+     * `user_locations` row to show for it.
+     */
+    expect(TEAM_MANAGER).toContain("locationScope,");
+    expect(TEAM_MANAGER).toContain('locationIds: locationScope === "selected" ? branchIds : []');
+    expect(TEAM_MANAGER).toContain('defaultLocationId: locationScope === "home" ? defaultLocationId : null');
+    expect(TEAM_API).toContain("locationScope: isLocationScope(body.locationScope)");
+  });
+
+  it("leaves no SQL arm that can widen a policy by omission", () => {
+    // The decision itself lives in location-access.ts and is unit-tested; what
+    // this holds is that the service no longer carries a second, wider one.
+    expect(TEAM_SERVICE).not.toContain("ELSE 'all'::location_scope");
+    expect(TEAM_SERVICE).toContain("resolveMembershipBranchPolicy");
+  });
+
+  it("does not claim a PIN is unique, in either direction", () => {
+    /*
+     * The old hint said «per branch» while the door matched business-wide; main then
+     * removed uniqueness entirely (migration 0221, #953 — the uniqueness index leaked
+     * one member's PIN to whoever tried to reuse it). So neither claim is true now, and
+     * a hint that promises uniqueness would make a shared digit look like an error.
+     */
+    expect(TEAM_MANAGER).not.toContain("در هر شعبه باید یکتا باشد");
+    expect(TEAM_MANAGER).not.toContain("در کل کسب‌وکار یکتاست");
+    expect(TEAM_MANAGER).toContain("رمز شخصی همین عضو است");
+  });
+});
+
+describe("a read-only visit does not request what it may not read (TEAM-F06)", () => {
+  it("gates the invitations read on team.manage", () => {
+    // GET /api/team accepts team.view OR team.manage; /api/team/invitations needs
+    // team.manage. Asking for both unconditionally put a 403 about invitations —
+    // which the reader never requested — above a roster that had loaded fine.
+    expect(TEAM_MANAGER).toContain('"/api/team/invitations"');
+    expect(TEAM_MANAGER).toContain("canManage");
+    // The refusal is read as a *partial* failure, not as a broken page: the
+    // roster loaded, and the sentence says so.
+    expect(TEAM_MANAGER).toContain("if (!invitesRes) {");
+    expect(TEAM_MANAGER).toContain("بقیهٔ این صفحه کامل بارگذاری شده است");
   });
 });
 
@@ -255,7 +336,6 @@ describe("lifecycle-derived member actions (issue #854 pass 4, gap 4)", () => {
     // It delegates to the service ceremony — not an unlocked state flip.
     expect(REHIRE_API).toContain("rehireMembership");
     // The ceremony itself holds the membership row lock and takes a reason.
-    const TEAM_SERVICE = here("../../../lib/team-service.ts");
     expect(TEAM_SERVICE).toContain("FOR UPDATE");
     expect(TEAM_SERVICE).toContain("validateAccessChangeReason");
     const AUTHORITY = here("../../../lib/membership-authority.ts");
@@ -264,5 +344,125 @@ describe("lifecycle-derived member actions (issue #854 pass 4, gap 4)", () => {
 
   it("the offboard confirmation names rehire as the way back", () => {
     expect(TEAM_MANAGER).toContain("بازگشت دوبارهٔ همین شخص با «بازگشت به کار»");
+  });
+});
+
+describe("the team tab is companion views with one member detail surface (issue #947, TEAM-F08)", () => {
+  const DETAIL = here("./member-detail-dialog.tsx");
+
+  it("declares the views once and renders every one of them", () => {
+    /*
+     * The failure this forbids: a tab in the strip whose panel was never written, or a
+     * panel left behind by a rename. The list is data (`TEAM_VIEWS`), the strip renders it,
+     * and each key has a panel in the same file — so a fifth view added must be added in
+     * both places, which is the point of grepping the source here.
+     */
+    const views = TEAM_MANAGER.match(/const TEAM_VIEWS = \[([\s\S]*?)\] as const;/);
+    expect(views, "TEAM_VIEWS is declared").not.toBeNull();
+    const keys = [...views![1].matchAll(/key: "([a-z]+)"/g)].map((match) => match[1]);
+    expect(keys).toEqual(["members", "onboarding", "files", "roles"]);
+    expect(TEAM_MANAGER).toContain("tabs={TEAM_VIEWS}");
+    for (const key of keys) {
+      expect(TEAM_MANAGER, `view ${key} renders a panel`).toContain(`view === "${key}" ?`);
+    }
+  });
+
+  it("offers the three onboarding modes from one entry point", () => {
+    /*
+     * The modes are the outcomes the issue names: invite a login user, create PIN staff
+     * with an explicit branch policy, or create only a personnel file. The third must say
+     * what it does *not* create — no login, and no payroll row (wages live on the
+     * membership, see `listStaffWages`).
+     */
+    const modes = TEAM_MANAGER.match(/const ONBOARDING_MODES = \[([\s\S]*?)\] as const;/);
+    expect(modes).not.toBeNull();
+    const keys = [...modes![1].matchAll(/key: "([a-z]+)"/g)].map((match) => match[1]);
+    expect(keys).toEqual(["invite", "pin", "file"]);
+    expect(TEAM_MANAGER).toContain("tabs={onboardingModes}");
+    // The file-only mode states the absence out loud, and does not pretend to create
+    // something it cannot: it hands the reader to the directory that owns that record.
+    expect(TEAM_MANAGER).toContain("بدون حساب کاربری و بدون");
+    expect(TEAM_MANAGER).toContain("setView(\"files\")");
+    // Only a member who may create memberships is offered the PIN mode.
+    expect(TEAM_MANAGER).toContain('mode.key !== "pin" || canManage');
+  });
+
+  it("reads the member in one place: access, login, file, finance and history", () => {
+    // The six sections the issue names, in the surface (the overview carries the
+    // membership state and the personnel link state).
+    for (const heading of ["نمای کلی", "دسترسی", "ورود و اعتبارنامه", "پروندهٔ پرسنلی", "مالی", "تاریخچه"]) {
+      expect(DETAIL, `the detail surface has «${heading}»`).toContain(heading);
+    }
+    // The finance door is the accounting payroll screen and only appears with the key
+    // that screen enforces.
+    expect(DETAIL).toContain('accountingSectionHref("payroll")');
+    expect(DETAIL).toContain("PERMISSIONS.payrollView");
+    // Self-service is linked, not duplicated: profile owns the member's own number and
+    // sessions.
+    expect(DETAIL).toContain("پروفایل من");
+    // History points at the audit log the routes write.
+    expect(DETAIL).toContain("/settings/audit-log");
+    expect(TEAM_MANAGER).toContain("<MemberDetailDialog");
+  });
+
+  it("opens the existing writers instead of writing from the detail surface", () => {
+    /*
+     * A reading surface that grew its own PATCH would be a second validator. Every action
+     * here hands off to the dialog that already owns the write — pinned by the callbacks
+     * the Team screen passes in.
+     */
+    expect(DETAIL).not.toContain("fetch(");
+    expect(DETAIL).not.toContain("api<");
+    for (const handoff of ["onEdit(", "onEditPhone(", "onEditCredentials(", "onLinkFile(", "onRehire("]) {
+      expect(DETAIL).toContain(handoff);
+    }
+    expect(TEAM_MANAGER).toContain("onEdit={() => setEditing(detail)}");
+    expect(TEAM_MANAGER).toContain("onLinkFile={() => void openFileLink(detail)}");
+    expect(TEAM_MANAGER).toContain("onRehire={() => setRehiring(detail)}");
+  });
+
+  it("pages the roster, and filters across all of it", () => {
+    // Filter-then-page: the search must match every member, not the visible page, or a
+    // match on page 3 reads as «پیدا نشد».
+    expect(TEAM_MANAGER).toMatch(/const visibleMembers = useMemo/);
+    expect(TEAM_MANAGER).toMatch(/pagedMembers[\s\S]{0,200}visibleMembers\.slice/);
+    expect(TEAM_MANAGER).toContain("{pagedMembers.map((member) => (");
+    expect(TEAM_MANAGER).not.toContain("{visibleMembers.map((member) => (");
+    // A filter change returns to the first page, and the clamp keeps an out-of-range
+    // page from rendering an empty list.
+    expect(TEAM_MANAGER).toContain("setMemberPage(1)");
+    expect(TEAM_MANAGER).toMatch(/Math\.min\(memberPage, memberPages\)/);
+    // Both paging buttons exist and are disabled at the ends.
+    expect(TEAM_MANAGER).toContain("صفحهٔ قبل");
+    expect(TEAM_MANAGER).toContain("صفحهٔ بعد");
+  });
+
+  it("searches the personnel directory on the server, not the first 200 rows", () => {
+    /*
+     * The picker used to fetch `pageSize=200` and filter in the browser: for a business
+     * with more files, a record that existed in the directory could not be found here.
+     * The query now travels to the route that owns the search, and the count is stated.
+     */
+    expect(TEAM_MANAGER).not.toContain("pageSize=200");
+    expect(TEAM_MANAGER).toContain("params.set(\"q\", term.trim())");
+    expect(TEAM_MANAGER).toContain("setFileLinkTotal(res.data.total");
+    expect(TEAM_MANAGER).toContain("پروندهٔ یافت‌شده نمایش داده می‌شود");
+    // The candidate set is still the *unlinked* files: the ones the link route accepts.
+    expect(TEAM_MANAGER).toContain(".filter((party) => !party.employeeUserId)");
+    // And the search itself is the directory's own (`searchParties` reaches `listParties`).
+    const PARTIES_API = here("../../api/parties/route.ts");
+    expect(PARTIES_API).toContain("listParties");
+    expect(PARTIES_API).toContain("q,");
+  });
+
+  it("keeps contact fields LTR inside the RTL surface, and reduces motion by default", () => {
+    // Email, phone and the invitation link are latin: each input carries `dir="ltr"`, so a
+    // Persian sentence typed beside them cannot flip the field's direction.
+    for (const anchor of ["ایمیل", "شمارهٔ موبایل"]) {
+      expect(TEAM_MANAGER, `the ${anchor} field stays LTR`).toMatch(
+        new RegExp(`dir="ltr"[\\s\\S]{0,600}${anchor}`),
+      );
+    }
+    expect(DETAIL).toContain('dir="ltr"');
   });
 });
