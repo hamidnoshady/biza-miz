@@ -206,13 +206,16 @@ async function sellThroughInvoice(input: {
   tenderAmount: number;
   customerId?: string | null;
   createdBy?: string | null;
+  /** Defaults to the primary business — the scoping tests sell at another branch/tenant. */
+  businessId?: string;
+  locationId?: string;
 }) {
   const client = await dbLib.getPool().connect();
   try {
     await client.query("BEGIN");
     const invoice = await invoiceService.createRetailInvoice(client, {
-      businessId: biz.id,
-      locationId: biz.locationId,
+      businessId: input.businessId ?? biz.id,
+      locationId: input.locationId ?? biz.locationId,
       industry: "automotive",
       customerId: input.customerId ?? null,
       createdBy: input.createdBy ?? null,
@@ -743,6 +746,77 @@ describe("sales and profitability report", () => {
     expect(rows[0].status).toBe("reversed");
     expect(rows[0].reversal_entry_ids.length).toBeGreaterThan(0);
   });
+
+  it("scopes the period to one branch and to one tenant", async () => {
+    const soldOn = await businessDay();
+    // A car at the second branch, sold by an invoice in that branch...
+    const siteCar = await carReadyToSell("SB-2", 200_000_000, 0, { locationId: biz.secondLocationId });
+    await sellThroughInvoice({
+      serialId: siteCar.serialId,
+      price: 300_000_000,
+      vatPercent: 9,
+      tenderAmount: 327_000_000,
+      locationId: biz.secondLocationId,
+    });
+    // ...and one at the primary branch.
+    const mainCar = await carReadyToSell("SB-1", 300_000_000, 0);
+    await sellThroughInvoice({ serialId: mainCar.serialId, price: 400_000_000, vatPercent: 9, tenderAmount: 436_000_000 });
+
+    // The other dealership's own car and sale, on the same day.
+    await db.query(
+      `INSERT INTO settings (business_id, key, value) VALUES ($1, 'tax.config', '{"defaultRate":9}'::jsonb)`,
+      [other.id],
+    );
+    const theirCar = await carReadyToSell("SB-3", 100_000_000, 0, { businessId: other.id, locationId: other.locationId });
+    await sellThroughInvoice({
+      serialId: theirCar.serialId,
+      price: 150_000_000,
+      vatPercent: 9,
+      tenderAmount: 163_500_000,
+      businessId: other.id,
+      locationId: other.locationId,
+    });
+
+    // Both of ours, each with the branch that sold it — and neither of theirs.
+    const allBranches = await reports.vehicleSalesReport(biz.id, { dateFrom: soldOn, dateTo: soldOn });
+    expect(allBranches.rows.map((row) => [row.stockNumber, row.locationName])).toEqual([
+      ["SB-1", "Main"],
+      ["SB-2", "Branch 2"],
+    ]);
+    expect(allBranches.summary).toMatchObject({
+      unitsSold: 2,
+      revenueGrossRial: 763_000_000,
+      revenueRial: 700_000_000,
+      cogsRial: 500_000_000,
+      grossProfitRial: 200_000_000,
+    });
+    expect(allBranches.summary.revenueGrossRial - allBranches.summary.revenueRial).toBe(-(await accountBalance("2200")));
+    expect(allBranches.rows.some((row) => row.stockNumber === "SB-3")).toBe(false);
+
+    // One branch is one branch: `locationId` narrows both the rows and the money.
+    const mainOnly = await reports.vehicleSalesReport(biz.id, { dateFrom: soldOn, dateTo: soldOn, locationId: biz.locationId });
+    expect(mainOnly.rows.map((row) => row.stockNumber)).toEqual(["SB-1"]);
+    expect(mainOnly.summary).toMatchObject({
+      unitsSold: 1,
+      revenueRial: 400_000_000,
+      cogsRial: 300_000_000,
+      grossProfitRial: 100_000_000,
+    });
+
+    const siteOnly = await reports.vehicleSalesReport(biz.id, {
+      dateFrom: soldOn,
+      dateTo: soldOn,
+      locationId: biz.secondLocationId,
+    });
+    expect(siteOnly.rows.map((row) => row.stockNumber)).toEqual(["SB-2"]);
+    expect(siteOnly.summary).toMatchObject({ unitsSold: 1, revenueRial: 300_000_000, cogsRial: 200_000_000 });
+
+    // The other dealership's report is theirs alone — and ties to their books.
+    const theirs = await reports.vehicleSalesReport(other.id, { dateFrom: soldOn, dateTo: soldOn });
+    expect(theirs.rows.map((row) => row.stockNumber)).toEqual(["SB-3"]);
+    expect(theirs.summary).toMatchObject({ unitsSold: 1, revenueRial: 150_000_000, cogsRial: 100_000_000, grossProfitRial: 50_000_000 });
+    expect(theirs.summary.revenueRial).toBe(-(await accountBalance("4590", other.id)));
+  });
 });
 
 describe("reservations and deposits report", () => {
@@ -805,6 +879,17 @@ describe("reservations and deposits report", () => {
       createdBy: biz.ownerId,
     });
 
+    // The hold's age is the age of the *hold* — not of the car it holds, and not
+    // of its expiry. Backdate this row's own creation and the register has to
+    // follow it: a report that aged holds from `expires_at`, or from the
+    // vehicle's acquisition date, would answer something else entirely (0, or
+    // several hundred days) instead of the 30 written here.
+    const takenOn = addDays(today, -30);
+    await db.query(`UPDATE serial_reservations SET created_at = ($2::date + time '12:00') WHERE id = $1`, [
+      hold1.id,
+      takenOn,
+    ]);
+
     const report = await reports.vehicleReservationReport(biz.id, { today });
     expect(report.today).toBe(today);
     // Live holds first — the register is a worklist before it is a history.
@@ -823,13 +908,9 @@ describe("reservations and deposits report", () => {
       expiresAtTime: "18:00:00",
       locationName: "Main",
       releaseReason: null,
+      ageDays: 30,
     });
-    // The hold's age is counted from the row's own creation, which is today.
-    const { rows: holdRows } = await db.query<{ created_at: string }>(
-      "SELECT created_at::text AS created_at FROM serial_reservations WHERE id = $1",
-      [hold1.id],
-    );
-    expect(byStock.get("H-1")!.ageDays).toBe(daysBetween(holdRows[0].created_at.slice(0, 10), today));
+    expect(byStock.get("H-1")!.createdAt).toContain(takenOn);
     // The refund is the amount that actually went back, with its entry.
     expect(byStock.get("H-3")).toMatchObject({ status: "released", depositRefundedRial: 30_000_000, releaseReason: "انصراف مشتری" });
     // The converted hold was closed by the sale, not refunded.
