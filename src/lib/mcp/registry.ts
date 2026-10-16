@@ -944,11 +944,7 @@ export function mcpModuleForWriteAction(actionType: string): McpModuleKey {
     actionType === "inventory.adjustment.propose" ||
     actionType.startsWith("shift.") ||
     actionType.startsWith("barcode.") ||
-    actionType.startsWith("businessDay.") ||
-    actionType.startsWith("paymentMethod.") ||
-    actionType.startsWith("printer.") ||
-    actionType.startsWith("printTemplate.") ||
-    actionType === "settings.printRules.save"
+    actionType.startsWith("businessDay.")
   ) {
     return "pos";
   }
@@ -983,6 +979,10 @@ export function mcpModuleForWriteAction(actionType: string): McpModuleKey {
     actionType.startsWith("branch.") ||
     actionType.startsWith("device.") ||
     actionType.startsWith("rollup.") ||
+    actionType.startsWith("paymentMethod.") ||
+    actionType.startsWith("printer.") ||
+    actionType.startsWith("printTemplate.") ||
+    actionType === "settings.printRules.save" ||
     actionType === "settings.business.save" ||
     actionType === "settings.tax.save" ||
     actionType === "settings.mfaPolicy.save"

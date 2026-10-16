@@ -200,32 +200,19 @@ export function McpPanel() {
   async function create() {
     setBusy(true);
     setMessage(null);
-    const hasWriteScope = selected.includes(MCP_SCOPES.write);
-    const normalizedApps = grantDraft
-      ? (Object.fromEntries(
-          MCP_APPS.map((app) => [
-            app,
-            {
-              read: grantDraft.apps[app].read,
-              write: hasWriteScope ? grantDraft.apps[app].write : false,
-            },
-          ]),
-        ) as Record<McpApp, { read: boolean; write: boolean }>)
-      : undefined;
     const { ok, data } = await api<{ token?: string; error?: string }>("/api/connections/mcp", {
       method: "POST",
       body: JSON.stringify({
         name,
         scopes: selected,
         writeMode,
-        expiresInDays: expiresInDays.trim() ? Number(expiresInDays) : 180,
-        grants:
-          grantDraft && normalizedApps
-            ? grantsToStorage({
-                apps: normalizedApps,
-                branches: grantDraft.branches,
-              })
-            : undefined,
+        expiresInDays: expiresInDays.trim() ? Number(expiresInDays) : null,
+        grants: grantDraft
+          ? grantsToStorage({
+              apps: grantDraft.apps,
+              branches: grantDraft.branches,
+            })
+          : undefined,
       }),
     });
     setBusy(false);
@@ -246,33 +233,6 @@ export function McpPanel() {
     setToken(data.token);
     setName("");
     setExpiresInDays("");
-    await load();
-  }
-
-  async function rotateToken(connection: McpConnection) {
-    if (
-      !confirm(
-        `توکن اتصال «${connection.name}» تعویض شود؟ توکن قبلی فوراً از کار می‌افتد و سایر اتصال‌ها دست‌نخورده می‌مانند.`,
-      )
-    ) {
-      return;
-    }
-    setBusy(true);
-    setMessage(null);
-    const { ok, data } = await api<{ token?: string; error?: string }>(
-      `/api/connections/mcp/${connection.id}`,
-      {
-        method: "POST",
-        body: JSON.stringify({ expiresInDays: 180 }),
-      },
-    );
-    setBusy(false);
-    if (!ok || !data.token) {
-      setMessage({ kind: "error", text: "تعویض توکن ممکن نشد." });
-      return;
-    }
-    setToken(data.token);
-    setMessage({ kind: "ok", text: "توکن جدید ساخته شد و توکن قبلی باطل گردید." });
     await load();
   }
 
@@ -425,11 +385,11 @@ export function McpPanel() {
         </SectionCard>
       ) : null}
 
-      <SectionCard title="اتصال Claude یا ChatGPT — روش پیشنهادی (OAuth)">
+      <SectionCard title="اتصال Claude یا ChatGPT">
         <p className="mb-3 text-xs leading-6 text-muted-foreground">
-          روش پیشنهادی و امن‌تر: در برنامهٔ Claude (موبایل یا دسکتاپ) یا در ChatGPT، بخش افزودن «Connector»
-          را باز کنید و همین آدرس را وارد کنید. احراز هویت از طریق OAuth 2.1 (با PKCE و چرخش خودکار توکن)
-          انجام می‌شود و هیچ کلید یا رمزی جایی کپی نمی‌شود.
+          در برنامهٔ Claude (موبایل یا دسکتاپ) یا در ChatGPT، بخش افزودن «Connector» را باز کنید و همین آدرس
+          را وارد کنید. سپس همین‌جا وارد می‌شوید و انتخاب می‌کنید چه دسترسی‌ای بدهید. هیچ کلید یا رمزی جایی
+          کپی نمی‌شود.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <code
@@ -667,17 +627,6 @@ export function McpPanel() {
                   <StatusBadge tone={connection.status === "active" ? "positive" : "neutral"}>
                     {connection.status === "active" ? "فعال" : "باطل‌شده"}
                   </StatusBadge>
-                  {connection.status === "active" && connection.origin === "token" && canManage ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="xs"
-                      onClick={() => rotateToken(connection)}
-                      disabled={busy}
-                    >
-                      تعویض توکن
-                    </Button>
-                  ) : null}
                   {connection.status === "active" && canManage ? (
                     <Button
                       type="button"

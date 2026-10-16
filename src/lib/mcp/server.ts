@@ -470,8 +470,16 @@ export async function dispatchMcpMessage(
       return jsonRpcResult(id, { resources: mcpResourcesFor(auth.permissions, auth.grants) });
 
     case "resources/templates/list": {
+      const industry = await resolveTenantIndustry(auth.businessId);
       const allowedResources = mcpResourcesFor(auth.permissions, auth.grants);
-      const canReadReports = allowedResources.some((r) => r.uri === "pos://reports/catalog");
+      const canReadReports =
+        allowedResources.some((r) => r.uri === "pos://reports/catalog") &&
+        Boolean(
+          findMcpTool("run_report", auth.scopes, auth.permissions, auth.grants, {
+            industry,
+            writeMode: auth.writeMode,
+          }),
+        );
       return jsonRpcResult(id, {
         resourceTemplates: canReadReports
           ? [
@@ -490,6 +498,8 @@ export async function dispatchMcpMessage(
 
     case "resources/read": {
       const uri = typeof params.uri === "string" ? params.uri : "";
+      const industry = await resolveTenantIndustry(auth.businessId);
+      const catalogueOptions = { industry, writeMode: auth.writeMode };
       const allowedResources = mcpResourcesFor(auth.permissions, auth.grants);
       const reportTemplateMatch = uri.match(/^pos:\/\/reports\/([a-z0-9_]+)$/);
       const isReportTemplateUri =
@@ -497,7 +507,8 @@ export async function dispatchMcpMessage(
       const isAllowedDirectUri = allowedResources.some((resource) => resource.uri === uri);
       const isAllowedTemplateUri =
         isReportTemplateUri &&
-        allowedResources.some((resource) => resource.uri === "pos://reports/catalog");
+        allowedResources.some((resource) => resource.uri === "pos://reports/catalog") &&
+        Boolean(findMcpTool("run_report", auth.scopes, auth.permissions, auth.grants, catalogueOptions));
       if (!isAllowedDirectUri && !isAllowedTemplateUri) {
         return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
       }
@@ -507,6 +518,9 @@ export async function dispatchMcpMessage(
       }
       let content: { uri: string; mimeType: string; text: string } | null = null;
       if (isAllowedTemplateUri && reportTemplateMatch) {
+        if (!findMcpTool("run_report", auth.scopes, authority.permissions, auth.grants, catalogueOptions)) {
+          return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
+        }
         const outcome = await runSystemReadTool(
           "run_report",
           { key: reportTemplateMatch[1] },

@@ -324,6 +324,20 @@ describe("P1: tenant module filtering & advertised module parity", () => {
     const crmModules = mcpAvailableModules(["pos.read", "pos.write"], undefined, crmOnly, options);
     expect(crmModules).toEqual(["customers", "crm", "loyalty"]);
   });
+
+  it("retains shared settings tools on non-POS industries (service_saas and architecture_construction)", () => {
+    for (const industry of ["service_saas", "architecture_construction"] as const) {
+      const names = new Set(
+        mcpToolCatalogue(["pos.read", "pos.write"], undefined, LEGACY_GRANTS, { industry }).map(
+          (t) => t.descriptor.name,
+        ),
+      );
+      expect(names.has("write_payment_method_create")).toBe(true);
+      expect(names.has("write_printer_create")).toBe(true);
+      expect(names.has("write_print_template_save")).toBe(true);
+      expect(names.has("write_settings_print_rules_save")).toBe(true);
+    }
+  });
 });
 
 describe("P3: JSON Schema portability (no array-typed nullable fields)", () => {

@@ -234,4 +234,31 @@ describe("MCP read authorization", () => {
     ).result.resourceTemplates;
     expect(templateList.map((t) => t.uriTemplate)).toContain("pos://reports/{key}");
   });
+
+  it("requires pos.read scope before listing or reading report template resources", async () => {
+    const writeOnlyAuth: McpAuthentication = {
+      ...AUTH,
+      scopes: ["pos.write"],
+    };
+
+    const templates = await dispatchMcpMessage(
+      writeOnlyAuth,
+      parseMessage({ jsonrpc: "2.0", id: 1, method: "resources/templates/list", params: {} }),
+    );
+    const templateList = (
+      templates as { result: { resourceTemplates: Array<{ uriTemplate: string }> } }
+    ).result.resourceTemplates;
+    expect(templateList).toEqual([]);
+
+    const readRes = await dispatchMcpMessage(
+      writeOnlyAuth,
+      resourceRead("pos://reports/daily_sales_summary"),
+    );
+    expect(readRes).toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32602 },
+    });
+    expect(mocks.runSystemReadTool).not.toHaveBeenCalled();
+  });
 });

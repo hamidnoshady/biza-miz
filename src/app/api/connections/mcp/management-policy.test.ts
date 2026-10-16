@@ -20,11 +20,7 @@ import * as connections from "@/lib/mcp/connections-service";
 import * as writeService from "@/lib/mcp/write-service";
 import * as oauthService from "@/lib/mcp/oauth-service";
 import { POST as createConnection } from "./route";
-import {
-  POST as rotateConnection,
-  PATCH as patchConnection,
-  DELETE as deleteConnection,
-} from "./[id]/route";
+import { PATCH as patchConnection, DELETE as deleteConnection } from "./[id]/route";
 import { POST as consent } from "./consent/route";
 import { POST as decide } from "./pending/[id]/route";
 
@@ -48,7 +44,6 @@ vi.mock("@/lib/mcp/connections-service", async (importOriginal) => {
     ...actual,
     createStaticMcpConnection: vi.fn(),
     revokeMcpConnection: vi.fn(),
-    rotateMcpConnectionToken: vi.fn(),
     updateMcpConnectionAccess: vi.fn(),
     listMcpConnections: vi.fn(),
   };
@@ -104,11 +99,6 @@ beforeEach(() => {
     token: "posmcp_x",
   } as never);
   vi.mocked(connections.revokeMcpConnection).mockResolvedValue(true as never);
-  vi.mocked(connections.rotateMcpConnectionToken).mockResolvedValue({
-    ok: true,
-    connection: { id: "conn-1" },
-    token: "posmcp_rotated",
-  } as never);
   vi.mocked(connections.updateMcpConnectionAccess).mockResolvedValue({
     ok: true,
     connection: { id: "conn-1" },
@@ -184,12 +174,6 @@ describe("PATCH/DELETE /api/connections/mcp/[id] (narrow, revoke)", () => {
       { params: Promise.resolve({ id: "c1" }) } as never,
     );
     expect(deleted.status).toBe(200);
-    const rotated = await rotateConnection(
-      post({ expiresInDays: 90 }, "http://x/api/connections/mcp/c1"),
-      { params: Promise.resolve({ id: "c1" }) } as never,
-    );
-    expect(rotated.status).toBe(200);
-    expect(await rotated.json()).toMatchObject({ token: "posmcp_rotated" });
   });
 });
 

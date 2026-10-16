@@ -31,7 +31,6 @@ import {
   type OpenAiTool,
 } from "../ai";
 import { aiActionPermission, canUseAiTool } from "../ai-capabilities";
-import type { Industry } from "../industries";
 import type { Permission } from "../permissions";
 import {
   LEGACY_GRANTS,
@@ -42,15 +41,10 @@ import {
 } from "./grants";
 import {
   mcpBusinessWideToolAllowed,
-  mcpIsToolModuleEnabled,
-  mcpModuleForReadTool,
-  mcpModuleForWriteAction,
   mcpReadRegistryEntry,
-  mcpTenantEnabledModules,
   mcpWriteRegistryEntry,
-  type McpModuleKey,
 } from "./registry";
-import { MCP_SCOPES, type McpScope, type McpWriteMode } from "./scopes";
+import { MCP_SCOPES, type McpScope } from "./scopes";
 
 /** MCP's own tool descriptor. `annotations` are hints a client may show or ignore. */
 export interface McpToolDescriptor {
@@ -278,24 +272,12 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_pending_submittals: "Submittals waiting on a reviewer: submitted or under review, overdue first, with number, title, submission type, revision number, reviewer, due date and days late. Optionally one project, or a window in days. Architecture/engineering/construction businesses with document control enabled only.",
 };
 
-function toConciseOneLine(text: string): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  const match = flat.match(/^(.+?[.۔؟!])(?:\s|$)/);
-  const sentence = match ? match[1] : flat;
-  const dashSplit = sentence.split(/\s+[—–]\s+/);
-  return dashSplit[0].trim();
-}
-
 function readDescriptor(tool: OpenAiTool): McpToolDescriptor {
   const english = MCP_READ_TOOL_SUMMARIES[tool.function.name];
-  const conciseFa = toConciseOneLine(tool.function.description);
-  const description = english
-    ? `${toConciseOneLine(english)} — ${conciseFa}`
-    : conciseFa;
   return {
     name: tool.function.name,
     title: tool.function.name,
-    description,
+    description: english ? `${english}\n\n${tool.function.description}` : tool.function.description,
     inputSchema: tool.function.parameters,
     annotations: {
       title: tool.function.name,
@@ -1516,9 +1498,9 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         taskId: id("شناسهٔ تَسک — از list_workspace_tasks"),
         title: { type: "string" },
         description: { type: "string" },
-        assigneeUserId: { anyOf: [{ type: "string" }, { type: "null" }], description: "شناسهٔ مسئول؛ null یعنی بی‌مسئول کردن" },
-        dueDate: { anyOf: [{ type: "string" }, { type: "null" }], description: "ISO date؛ null یعنی برداشتن سررسید" },
-        phaseId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        assigneeUserId: { type: ["string", "null"], description: "شناسهٔ مسئول؛ null یعنی بی‌مسئول کردن" },
+        dueDate: { type: ["string", "null"], description: "ISO date؛ null یعنی برداشتن سررسید" },
+        phaseId: { type: ["string", "null"] },
         priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
       },
       required: ["taskId"],
@@ -1570,7 +1552,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         name: { type: "string" },
         outputQuantity: { type: "string" },
         conversionCostRial: { type: "string" },
-        notes: { anyOf: [{ type: "string" }, { type: "null" }] },
+        notes: { type: ["string", "null"] },
         isActive: { type: "boolean" },
       },
       required: ["formulaId"],
@@ -1631,14 +1613,14 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         title: { type: "string" },
         description: { type: "string" },
         status: { type: "string", enum: ["draft", "in_review", "approved", "rejected", "archived"] },
-        projectId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        taskId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        contractId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        partyId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        journalEntryId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        mediaAssetId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        projectId: { type: ["string", "null"] },
+        taskId: { type: ["string", "null"] },
+        contractId: { type: ["string", "null"] },
+        partyId: { type: ["string", "null"] },
+        journalEntryId: { type: ["string", "null"] },
+        mediaAssetId: { type: ["string", "null"] },
         tags: { type: "array", items: { type: "string" } },
-        supersedesId: { anyOf: [{ type: "string" }, { type: "null" }], description: "نسخهٔ قبلی — از list_workspace_documents" },
+        supersedesId: { type: ["string", "null"], description: "نسخهٔ قبلی — از list_workspace_documents" },
       },
       required: ["title"],
       additionalProperties: false,
@@ -1656,12 +1638,12 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         title: { type: "string" },
         description: { type: "string" },
         status: { type: "string", enum: ["draft", "in_review", "approved", "rejected", "archived"] },
-        projectId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        taskId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        contractId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        partyId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        journalEntryId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        mediaAssetId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        projectId: { type: ["string", "null"] },
+        taskId: { type: ["string", "null"] },
+        contractId: { type: ["string", "null"] },
+        partyId: { type: ["string", "null"] },
+        journalEntryId: { type: ["string", "null"] },
+        mediaAssetId: { type: ["string", "null"] },
         tags: { type: "array", items: { type: "string" } },
       },
       required: ["documentId"],
@@ -1691,7 +1673,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         name: { type: "string" },
         key: { type: "string", description: "برای بازنویسی قالب موجود؛ وگرنه از نام ساخته می‌شود" },
         description: { type: "string" },
-        projectType: { anyOf: [{ type: "string" }, { type: "null" }] },
+        projectType: { type: ["string", "null"] },
         phases: { type: "array", items: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false } },
         defaultTasks: { type: "array", items: { type: "object", additionalProperties: true } },
       },
@@ -1722,12 +1704,12 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         title: { type: "string" },
         kind: { type: "string", enum: ["meeting", "milestone", "reminder", "site_visit", "other"] },
         eventDate: { type: "string", description: "ISO date — لازم" },
-        startTime: { anyOf: [{ type: "string" }, { type: "null" }] },
-        endTime: { anyOf: [{ type: "string" }, { type: "null" }] },
+        startTime: { type: ["string", "null"] },
+        endTime: { type: ["string", "null"] },
         location: { type: "string" },
         description: { type: "string" },
-        projectId: { anyOf: [{ type: "string" }, { type: "null" }], description: "از list_workspace_projects" },
-        taskId: { anyOf: [{ type: "string" }, { type: "null" }], description: "از list_workspace_tasks" },
+        projectId: { type: ["string", "null"], description: "از list_workspace_projects" },
+        taskId: { type: ["string", "null"], description: "از list_workspace_tasks" },
       },
       required: ["title", "eventDate"],
       additionalProperties: false,
@@ -1745,11 +1727,11 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         title: { type: "string" },
         kind: { type: "string", enum: ["meeting", "milestone", "reminder", "site_visit", "other"] },
         eventDate: { type: "string" },
-        startTime: { anyOf: [{ type: "string" }, { type: "null" }] },
-        endTime: { anyOf: [{ type: "string" }, { type: "null" }] },
+        startTime: { type: ["string", "null"] },
+        endTime: { type: ["string", "null"] },
         location: { type: "string" },
         description: { type: "string" },
-        projectId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        projectId: { type: ["string", "null"] },
       },
       required: ["eventId"],
       additionalProperties: false,
@@ -1844,7 +1826,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
             properties: {
               priceListId: id("از list_price_lists"),
               itemId: id("از list_menu_items"),
-              price: { anyOf: [{ type: "number" }, { type: "null" }], description: "ریال — null یعنی حذف قیمت این سلول" },
+              price: { type: ["number", "null"], description: "ریال — null یعنی حذف قیمت این سلول" },
               expectedVersion: { type: "string", description: "version از list_price_list_entries" },
             },
             required: ["priceListId", "itemId", "price"],
@@ -2809,8 +2791,8 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     inputSchema: {
       type: "object",
       properties: {
-        defaultMarginPercent: { anyOf: [{ type: "number" }, { type: "null" }] },
-        fallbackOverheadPercent: { anyOf: [{ type: "number" }, { type: "null" }] },
+        defaultMarginPercent: { type: ["number", "null"] },
+        fallbackOverheadPercent: { type: ["number", "null"] },
         overheadMode: { type: "string", enum: ["automatic", "manual"] },
         costDriftThresholdPercent: { type: "number" },
       },
@@ -2839,7 +2821,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     destructive: false,
     inputSchema: {
       type: "object",
-      properties: { snappfoodCommissionPercent: { anyOf: [{ type: "number" }, { type: "null" }], description: "۰ تا ۱۰۰؛ null=پاک‌شده" } },
+      properties: { snappfoodCommissionPercent: { type: ["number", "null"], description: "۰ تا ۱۰۰؛ null=پاک‌شده" } },
       required: ["snappfoodCommissionPercent"],
       additionalProperties: false,
     },
@@ -3125,10 +3107,10 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         domainYears: { type: "number" },
         cdnProvider: { type: "string" },
         cdnStatus: { type: "string" },
-        cdnNote: { anyOf: [{ type: "string" }, { type: "null" }] },
+        cdnNote: { type: ["string", "null"] },
         siteType: { type: "string" },
         siteName: { type: "string" },
-        planKey: { anyOf: [{ type: "string" }, { type: "null" }] },
+        planKey: { type: ["string", "null"] },
       },
       additionalProperties: false,
     },
@@ -3313,8 +3295,8 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         itemIds: { type: "array", items: { type: "string" } },
         brandIds: { type: "array", items: { type: "string" } },
         categoryIds: { type: "array", items: { type: "string" } },
-        activeFrom: { anyOf: [{ type: "string" }, { type: "null" }] },
-        activeTo: { anyOf: [{ type: "string" }, { type: "null" }] },
+        activeFrom: { type: ["string", "null"] },
+        activeTo: { type: ["string", "null"] },
         priority: { type: "number" },
         isActive: { type: "boolean" },
       },
@@ -3341,7 +3323,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     destructive: false,
     inputSchema: {
       type: "object",
-      properties: { name: { type: "string" }, phone: { anyOf: [{ type: "string" }, { type: "null" }] } },
+      properties: { name: { type: "string" }, phone: { type: ["string", "null"] } },
       required: ["name"],
       additionalProperties: false,
     },
@@ -3408,8 +3390,8 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     inputSchema: {
       type: "object",
       properties: {
-        startTime: { anyOf: [{ type: "string" }, { type: "null" }], description: "«HH:MM» یا null/رشتهٔ خالی = خاموش" },
-        startMinutes: { anyOf: [{ type: "number" }, { type: "null" }] },
+        startTime: { type: ["string", "null"], description: "«HH:MM» یا null/رشتهٔ خالی = خاموش" },
+        startMinutes: { type: ["number", "null"] },
       },
       additionalProperties: false,
     },
@@ -3444,9 +3426,9 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         id: id("قلم — خالی = ساخت"),
         name: { type: "string" },
         unit: { type: "string" },
-        sku: { anyOf: [{ type: "string" }, { type: "null" }] },
-        reorderLevel: { anyOf: [{ type: "number" }, { type: "null" }] },
-        purchaseUnit: { anyOf: [{ type: "string" }, { type: "null" }] },
+        sku: { type: ["string", "null"] },
+        reorderLevel: { type: ["number", "null"] },
+        purchaseUnit: { type: ["string", "null"] },
         purchaseUnitFactor: { type: "number" },
         isActive: { type: "boolean" },
         imageMediaId: id("تصویر مرجع از کتابخانهٔ رسانه — null = پاک"),
@@ -3791,7 +3773,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         grams: { type: "string" },
         pricePerGram: { type: "number" },
         depositRial: { type: "number" },
-        promisedDate: { anyOf: [{ type: "string" }, { type: "null" }] },
+        promisedDate: { type: ["string", "null"] },
         itemId: { type: "string" },
         locationId: id("شعبه — پیش‌فرض پین"),
       },
@@ -3868,7 +3850,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         purity: { type: "string", description: "عیار مثل 18 یا 750" },
         grossWeight: { type: "string" },
         netWeight: { type: "string" },
-        unitCostPerGram: { anyOf: [{ type: "number" }, { type: "null" }] },
+        unitCostPerGram: { type: ["number", "null"] },
         locationId: id("شعبه — پیش‌فرض پین"),
       },
       required: ["name", "purity", "grossWeight", "netWeight"],
@@ -3887,7 +3869,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         purity: { type: "string" },
         grossWeight: { type: "string" },
         netWeight: { type: "string" },
-        unitCostPerGram: { anyOf: [{ type: "number" }, { type: "null" }] },
+        unitCostPerGram: { type: ["number", "null"] },
       },
       required: ["id"],
       additionalProperties: false,
@@ -3953,9 +3935,9 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
       properties: {
         subjectType: { type: "string" },
         subjectId: { type: "string" },
-        projectId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        projectId: { type: ["string", "null"] },
         title: { type: "string" },
-        approverUserId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        approverUserId: { type: ["string", "null"] },
         dueDate: { type: "string" },
         note: { type: "string" },
       },
@@ -4186,7 +4168,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         name: { type: "string" },
         earnPointsPer100000: { type: "number" },
         pointValueRial: { type: "number" },
-        pointsExpiryDays: { anyOf: [{ type: "number" }, { type: "null" }] },
+        pointsExpiryDays: { type: ["number", "null"] },
         isActive: { type: "boolean" },
         isDefault: { type: "boolean" },
       },
@@ -4814,12 +4796,12 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         id: id("شناسهٔ پرونده برای ویرایش — از list_crm_cases"),
         subject: { type: "string" },
         body: { type: "string" },
-        customerId: { anyOf: [{ type: "string" }, { type: "null" }], description: "از find_customers" },
+        customerId: { type: ["string", "null"], description: "از find_customers" },
         status: { type: "string", enum: ["open", "in_progress", "waiting", "resolved", "closed"] },
         priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
         category: { type: "string" },
-        orderId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        assigneeUserId: { anyOf: [{ type: "string" }, { type: "null" }], description: "از list_crm_members — رشتهٔ خالی برداریِ مسئول است" },
+        orderId: { type: ["string", "null"] },
+        assigneeUserId: { type: ["string", "null"], description: "از list_crm_members — رشتهٔ خالی برداریِ مسئول است" },
         assignedTo: { type: "string", description: "نام مسئول — فقط وقتی شناسه نداری" },
         resolution: { type: "string" },
       },
@@ -4854,11 +4836,11 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         kind: { type: "string", enum: ["call", "meeting", "message", "note", "task", "visit"] },
         subject: { type: "string" },
         body: { type: "string" },
-        dueAt: { anyOf: [{ type: "string" }, { type: "null" }] },
-        customerId: { anyOf: [{ type: "string" }, { type: "null" }] },
-        dealId: { anyOf: [{ type: "string" }, { type: "null" }], description: "از list_crm_deals" },
-        caseId: { anyOf: [{ type: "string" }, { type: "null" }], description: "از list_crm_cases" },
-        assigneeUserId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        dueAt: { type: ["string", "null"] },
+        customerId: { type: ["string", "null"] },
+        dealId: { type: ["string", "null"], description: "از list_crm_deals" },
+        caseId: { type: ["string", "null"], description: "از list_crm_cases" },
+        assigneeUserId: { type: ["string", "null"] },
         assignedTo: { type: "string" },
         completed: { type: "boolean" },
       },
@@ -4878,10 +4860,10 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         kind: { type: "string", enum: ["call", "meeting", "message", "note", "task", "visit"] },
         subject: { type: "string" },
         body: { type: "string" },
-        dueAt: { anyOf: [{ type: "string" }, { type: "null" }] },
-        assigneeUserId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        dueAt: { type: ["string", "null"] },
+        assigneeUserId: { type: ["string", "null"] },
         assignedTo: { type: "string" },
-        customerId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        customerId: { type: ["string", "null"] },
         completed: { type: "boolean" },
       },
       required: ["activityId"],
@@ -4930,12 +4912,12 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         customerId: id("مشتری مرتبط"),
         stageId: id("مرحلهٔ قیف — از list_crm_pipelines"),
         valueRial: { type: "number" },
-        probability: { anyOf: [{ type: "number" }, { type: "null" }] },
-        expectedCloseDate: { anyOf: [{ type: "string" }, { type: "null" }] },
+        probability: { type: ["number", "null"] },
+        expectedCloseDate: { type: ["string", "null"] },
         ownerUserId: id("مالک به‌صورت شناسهٔ عضو"),
         ownerUser: { type: "string", description: "نام مالک — فقط وقتی شناسه نداری" },
         source: { type: "string" },
-        lostReason: { anyOf: [{ type: "string" }, { type: "null" }] },
+        lostReason: { type: ["string", "null"] },
         orderId: id("سفارش مرتبط"),
         description: { type: "string" },
       },
@@ -5301,65 +5283,32 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
   },
 ];
 
-function cleanWriteEnglish(english: string): string {
-  return toConciseOneLine(
-    english
-      .replace(/\s+in one transaction\b/gi, "")
-      .replace(/\s+immediately\b/gi, ""),
-  );
-}
-
-function writeApprovalPrefix(
-  alwaysApprove: boolean,
-  writeMode?: McpWriteMode,
-): string {
-  if (alwaysApprove) {
-    return "[Always awaits human approval / همواره در صف تأیید] ";
-  }
-  if (writeMode === "approve") {
-    return "[Awaits human approval / نیازمند تأیید در صف] ";
-  }
-  if (writeMode === "apply") {
-    return "[Applies immediately / اجرای فوری] ";
-  }
-  return "[Awaits approval in approve mode; applies immediately in apply mode / نیازمند تأیید یا اجرای فوری] ";
-}
-
-function writeDescriptor(
-  spec: WriteToolSpec,
-  writeMode?: McpWriteMode,
-): McpToolDescriptor {
+function writeDescriptor(spec: WriteToolSpec): McpToolDescriptor {
   const meta = ACTION_CATALOG[spec.actionType];
-  const entry = mcpWriteRegistryEntry(spec.actionType);
-  const alwaysApprove = entry?.approval === "always_approve";
-  const effectiveImmediate =
-    writeMode === undefined ? true : !alwaysApprove && writeMode === "apply";
-  const prefix = writeApprovalPrefix(alwaysApprove, writeMode);
-  const cleanLabel = meta.label.replace(/\s*در یک تراکنش\s*/g, " ").trim();
   return {
     name: spec.name,
     title: meta.label,
-    description: `${prefix}${cleanWriteEnglish(spec.english)} — ${cleanLabel}`,
+    description: `${spec.english}\n\n${meta.label} — ${meta.payloadHint}`,
     inputSchema: spec.inputSchema,
     annotations: {
       title: meta.label,
       readOnlyHint: false,
-      // A write that only enqueues a proposal for human approval does not
-      // immediately mutate or destroy domain records; destructiveHint is true
-      // only when the tool can apply an irreversible change immediately.
-      destructiveHint: effectiveImmediate ? spec.destructive : false,
-      // None of these are idempotent without an explicit idempotencyKey.
+      // "Destructive" in MCP's sense is "cannot simply be undone", which is
+      // exactly what ACTION_CATALOG's `revertible: false` records.
+      destructiveHint: spec.destructive,
+      // None of these are idempotent: calling write_expense twice books the
+      // expense twice, and a client that retries on a timeout must be told so.
       idempotentHint: false,
       openWorldHint: false,
     },
   };
 }
 
-export function mcpWriteTools(writeMode?: McpWriteMode): McpTool[] {
+export function mcpWriteTools(): McpTool[] {
   return WRITE_TOOL_SPECS.map((spec) => {
     const meta = ACTION_CATALOG[spec.actionType];
     return {
-      descriptor: writeDescriptor(spec, writeMode),
+      descriptor: writeDescriptor(spec),
       scope: MCP_SCOPES.write,
       // Non-null by construction; assertWriteToolsMatchCatalogue proves it.
       binding: { kind: "write", actionType: spec.actionType, executor: meta.executor! } as const,
@@ -5404,7 +5353,8 @@ const MCP_NATIVE_TOOLS: McpTool[] = [
       name: "get_write_status",
       title: "وضعیت یک عملیات نوشتنی",
       description:
-        "Ask what happened to one write this connection submitted: status (pending_approval / applied / failed / dismissed / in_flight) and message. — بررسی وضعیت یک درخواست نوشتنی ثبت‌شده توسط همین اتصال (در انتظار تأیید، انجام‌شده، ناموفق یا ردشده).",
+        "Ask what happened to one write this connection submitted: the audit id it returned, its status (pending_approval / applied / failed / dismissed / in_flight), and its message.\n" +
+        "وضعیت یک درخواست نوشتنی که همین اتصال ثبت کرده است را برمی‌گرداند: انتظار تأیید، انجام‌شده، ناموفق یا ردشده، همراه با پیام آن.",
       inputSchema: {
         type: "object",
         properties: {
@@ -5462,60 +5412,54 @@ export function findMcpStatusTool(name: string): McpTool | null {
 // Catalogue
 // ---------------------------------------------------------------------------
 
-export interface McpCatalogueOptions {
-  /** Tenant's industry; when provided, tools for disabled modules are excluded. */
-  industry?: Industry | null;
-  /** Explicit enabled module set (overrides `industry` if given). */
-  enabledModules?: ReadonlySet<McpModuleKey>;
-  /** Connection's write mode (`approve` vs `apply`) for accurate write descriptions/annotations. */
-  writeMode?: McpWriteMode;
-}
-
-function resolveEnabledModules(
-  options?: McpCatalogueOptions,
-): ReadonlySet<McpModuleKey> | null {
-  if (options?.enabledModules) return options.enabledModules;
-  if (options?.industry !== undefined) {
-    return new Set(mcpTenantEnabledModules(options.industry));
-  }
-  return null;
-}
-
 /**
  * The tools this connection may call.
  *
- * Filtered on five axes, and every one fails closed:
+ * Filtered twice, and both filters fail closed:
+ *
+ *   * **by scope** — a read-only connection must not be able to *see* that a
+ *     write tool exists, or a model will keep proposing one and telling the
+ *     owner the app refused;
+ *   * **by the authorizer's current permissions**, when the caller passes
+ *     them (the dispatcher always does) — a connector authorized by a member
+ *     without `payroll.view` neither sees nor calls `get_payroll_summary`,
+ *     and a write whose action maps to no recognisable domain permission is
+ *     withheld entirely (issue #883 P0-1).
+ *
+ * The catalogue is a courtesy to the client; `server.ts` re-checks the same
+ * two axes on every call. Omitting `permissions` yields the scope-only list
+ * (`isKnownMcpTool`'s "exists at all" answer) — it must never be passed to a
+ * client as what they may use.
+ */
+/**
+ * The tools this connection may call.
+ *
+ * Filtered on four axes now, and every one fails closed:
  *
  *   * **by scope** — a read-only connection must not be able to *see* that a
  *     write tool exists;
  *   * **by grants** (issue #883 §1) — the connection's app grants and its
- *     branch consent;
- *   * **by the registry** — a tool with no registry entry is not offered;
- *   * **by the tenant's enabled modules** (P1) — trade/industry modules not
- *     enabled on this tenant are excluded from both `tools/list` and `tools/call`;
+ *     branch consent. A "CRM read" connection sees the CRM rows only; a
+ *     connection consented to ONE branch sees no tool whose answer aggregates
+ *     across branches, because answering it would leak the branches it was
+ *     NOT consented to;
+ *   * **by the registry** — a tool with no registry entry is not offered. The
+ *     registry names the app, branch behaviour and risk; a missing row is a
+ *     CI failure (registry.test.ts), and defensively treated as denied here;
  *   * **by the authorizer's current permissions**, when the caller passes
  *     them (the dispatcher always does).
+ *
+ * The catalogue is a courtesy to the client; `server.ts` re-checks the same
+ * axes on every call. Omitting `permissions` yields the scope-only list
+ * (`isKnownMcpTool`'s "exists at all" answer) — it must never be passed to a
+ * client as what they may use.
  */
 export function mcpToolCatalogue(
   scopes: readonly McpScope[],
   permissions?: ReadonlySet<Permission>,
   grants: McpGrants = LEGACY_GRANTS,
-  options?: McpCatalogueOptions,
 ): McpTool[] {
-  const enabledModules = resolveEnabledModules(options);
-  const reads = mcpReadTools();
-  const writes = mcpWriteTools(options?.writeMode);
-  const natives = mcpNativeTools(scopes, grants);
-  // Place core read tools, native status tool, and core write tools in the
-  // front slice so the bounded first page of `tools/list` always carries the
-  // primary operational reads, writes, and `get_write_status`.
-  const all = [
-    ...reads.slice(0, 50),
-    ...natives,
-    ...writes.slice(0, 25),
-    ...reads.slice(50),
-    ...writes.slice(25),
-  ];
+  const all = [...mcpReadTools(), ...mcpWriteTools(), ...mcpNativeTools(scopes, grants)];
   return all.filter((tool) => {
     if (!scopes.includes(tool.scope)) return false;
     if (tool.binding.kind === "status") return true; // gated by mcpNativeTools itself
@@ -5528,21 +5472,9 @@ export function mcpToolCatalogue(
       ) {
         return false;
       }
-      if (enabledModules) {
-        const mod = mcpModuleForReadTool(tool.binding.readToolName);
-        if (!mcpIsToolModuleEnabled(mod, tool.binding.readToolName, enabledModules)) {
-          return false;
-        }
-      }
     } else {
       const entry = mcpWriteRegistryEntry(tool.binding.actionType);
       if (!entry || !mcpCanWriteApp(grants, entry.app)) return false;
-      if (enabledModules) {
-        const mod = mcpModuleForWriteAction(tool.binding.actionType);
-        if (!mcpIsToolModuleEnabled(mod, tool.descriptor.name, enabledModules)) {
-          return false;
-        }
-      }
     }
     if (!permissions) return true;
     return tool.binding.kind === "read"
@@ -5552,87 +5484,13 @@ export function mcpToolCatalogue(
   });
 }
 
-/**
- * Compute the ordered list of MCP modules actually available to this
- * connection, using the exact same predicate as `mcpToolCatalogue` (P1).
- * Every tool returned by `mcpToolCatalogue` belongs to a module in this list,
- * and no module without permitted/consented tools is advertised.
- */
-export function mcpAvailableModules(
-  scopes: readonly McpScope[],
-  permissions?: ReadonlySet<Permission>,
-  grants: McpGrants = LEGACY_GRANTS,
-  options?: McpCatalogueOptions,
-): McpModuleKey[] {
-  const orderedCandidateModules = mcpTenantEnabledModules(options?.industry ?? null);
-  const tools = mcpToolCatalogue(scopes, permissions, grants, options);
-  const activeModules = new Set<McpModuleKey>();
-  for (const tool of tools) {
-    if (tool.binding.kind === "read") {
-      activeModules.add(mcpModuleForReadTool(tool.binding.readToolName));
-    } else if (tool.binding.kind === "write") {
-      activeModules.add(mcpModuleForWriteAction(tool.binding.actionType));
-    }
-  }
-  return orderedCandidateModules.filter((mod) => activeModules.has(mod));
-}
-
-export const MCP_TOOLS_PAGE_SIZE = 100;
-
-export function encodeMcpCursor(offset: number): string {
-  return Buffer.from(JSON.stringify({ offset }), "utf8").toString("base64url");
-}
-
-export function decodeMcpCursor(cursor: unknown, total: number): number | null {
-  if (cursor === undefined || cursor === null || cursor === "") return 0;
-  if (typeof cursor !== "string") return null;
-  try {
-    const raw = Buffer.from(cursor, "base64url").toString("utf8");
-    const parsed = JSON.parse(raw) as { offset?: unknown };
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      typeof parsed.offset !== "number" ||
-      !Number.isInteger(parsed.offset) ||
-      parsed.offset < 0 ||
-      parsed.offset > total
-    ) {
-      return null;
-    }
-    return parsed.offset;
-  } catch {
-    return null;
-  }
-}
-
-export function paginateMcpTools(
-  tools: readonly McpToolDescriptor[],
-  cursor?: unknown,
-  pageSize: number = MCP_TOOLS_PAGE_SIZE,
-): { ok: true; tools: McpToolDescriptor[]; nextCursor?: string } | { ok: false } {
-  const offset = decodeMcpCursor(cursor, tools.length);
-  if (offset === null) return { ok: false };
-  const slice = tools.slice(offset, offset + pageSize);
-  const nextOffset = offset + slice.length;
-  return {
-    ok: true,
-    tools: slice,
-    ...(nextOffset < tools.length ? { nextCursor: encodeMcpCursor(nextOffset) } : {}),
-  };
-}
-
 export function findMcpTool(
   name: string,
   scopes: readonly McpScope[],
   permissions?: ReadonlySet<Permission>,
   grants?: McpGrants,
-  options?: McpCatalogueOptions,
 ): McpTool | null {
-  return (
-    mcpToolCatalogue(scopes, permissions, grants, options).find(
-      (tool) => tool.descriptor.name === name,
-    ) ?? null
-  );
+  return mcpToolCatalogue(scopes, permissions, grants).find((tool) => tool.descriptor.name === name) ?? null;
 }
 
 /** True for a name this server knows at all — so "no access" and "no such tool" can be told apart. */
