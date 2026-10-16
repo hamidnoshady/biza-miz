@@ -33,7 +33,7 @@ import * as setupState from "@/lib/setup-state";
 import * as planModule from "@/lib/printing/plan";
 import * as renderService from "@/lib/printing/render-service";
 import * as loader from "@/lib/printing/document-loader";
-import { clearPrintSnapshotCacheForTests, POST } from "./route";
+import { POST } from "./route";
 import type { PrintPlan } from "@/lib/printing/plan";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -149,7 +149,6 @@ afterAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  clearPrintSnapshotCacheForTests();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "loc-1" } as never);
   vi.mocked(planModule.resolvePrintPlan).mockResolvedValue({ ok: true, plan: plan() } as never);
