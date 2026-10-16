@@ -1,13 +1,11 @@
 # Issue #947 — Team section consolidation: report
 
-**Branch** `arena/ce58f373-biza-miz` · **code head** `10e0740f` · **baseline** `0c4a77c` ·
-**main integrated** `cf2b39dd` (`merge 66f7535a`) — `main`'s head at
-the time of the integration; the branch's earlier head (`03846456`) had merged `916df457`,
-and the issue's audit baseline `35cb0cd` is not in this clone's history, so every finding was
-re-verified against the working tree rather than the issue's line links. `main` has advanced
-since (`fff5016e` at the time of writing: a document and one new integration test file, no
-`src/**` or migration change); the branch does not contain those commits, and §8.4 states
-that exactly rather than implying otherwise.
+**Branch** `arena/ce58f373-biza-miz` · **code head** `0f890f0f` · **baseline** `0c4a77c` ·
+**main integrated** `fff5016e` (`merge d08406ac`) — `main`'s head at the time of this
+integration, and an ancestor of this branch; the earlier integration points were `916df457`
+(`merge 8c511bdf`) and `cf2b39dd` (`merge 66f7535a`). The issue's audit baseline `35cb0cd` is
+not in this clone's history, so every finding was re-verified against the working tree rather
+than the issue's line links.
 
 The report is committed as a child of the code head and changes documentation only; the code
 head's own last change fixed the three findings from the PR review at `4c3a72053a` (see §1,
@@ -89,6 +87,50 @@ commission-engine code was touched.
   («رمز شخصی همین عضو است؛ در فهرست ورود با نام او پیدا می‌شود.»), and each carries the
   reasoning in a comment; `team-manager.test.ts` asserts the absence of both the old
   «per branch» and the «business-wide» wording, so the claim cannot come back.
+
+### Current `main` integrated, and the last stale PIN-uniqueness claims corrected
+
+- **The integration is conflict-free and current.** `main` advanced four commits past the
+  previous integration point (`cf2b39dd` → `fff5016e`: the dealership's three reports proved
+  against a real database, the merge of PR #973, and the production secret-cutover checklist
+  of PR #978). The merge `d08406ac` resolved nothing because nothing conflicted — the delta
+  is one new document, one phase-document edit and one new integration test file
+  (`integration/automotive-reports.integration.test.ts`, +1112 lines). No `src/**`,
+  migration, script or existing test is touched, so nothing this branch owns could be
+  dropped; `git merge-base --is-ancestor origin/main HEAD` now **holds**, and main's new test
+  file runs **10/10** on the merged tree here.
+- **Issue #953's decision is preserved and now the only story told.** Main's own
+  `cccfa647` («Stop refusing a staff PIN because a colleague already uses it», #953, migration
+  `0221_pin_not_unique.sql`) removed PIN uniqueness: the business-wide blind index and its
+  unique constraint are gone, the PIN door names the member first
+  (`/api/auth/pin-login` requires `employeeId`), and two members may choose the same digits.
+  The branch keeps that migration untouched (the live schema has **no** `pin_blind_index`
+  column and no uniqueness index on `employee_credentials`), and both onboarding surfaces
+  already carry the corrected hint («رمز شخصی همین عضو است؛ در فهرست ورود با نام او پیدا
+  می‌شود.») with the reasoning in a comment — `team-manager.test.ts` asserts the absence of
+  both the old «per branch» and the intermediate «business-wide» wording, so the claim cannot
+  come back. This revision corrects the three places that still described the intermediate
+  rule as current, and corrects the PIN row in §2: `docs/auth-hardening-854.md`'s P2.8 (rehire
+  «under the blind index» → `employee_credentials.secret_hash`, the only stored form since
+  0221) and P2.12 (marked superseded by 0221, like P2.13 beside it), the «Legacy
+  `users.pin_hash` rows» limitation (it explained the risk as sitting outside a uniqueness
+  constraint that no longer exists; it now states the real reason to rotate — no credential
+  row, no `last_used_at`, no device binding), and `src/lib/auth-hardening.test.ts`'s docblock
+  («`setPin`'s blind index» → the credential write).
+- **One more inherited flaky test, fixed in its own commit.** `unit tests` failed on the push
+  run of `a6725caa` (job 117063165109, `windows-latest`) at
+  `src/components/cloud-pane.test.tsx` — «asks for cloud sign-in explicitly when the guest
+  lands on the cloud login page (issue #948)» — while the same commit's PR run passed that
+  job. Both the test and `cloud-pane.tsx` are byte-identical to `origin/main` (`eb76f07b`,
+  PR #950), so it is main's own test. The pane attaches its `did-navigate` listener in an
+  effect that only runs once `state === "embedded"` (an asynchronous state), while the test
+  dispatched the navigation immediately after the webview appeared: on a slow runner the
+  event arrives before the pane listens and nothing follows. Reproduced here under CPU load
+  (1 failure in 6 runs of the single test, same assertion message), and the file's own theme
+  case already documents the hazard and fires `dom-ready` inside `waitFor` for that reason.
+  The dispatch now repeats inside `waitFor`, as that case does — assertion unchanged in force
+  (with the pane's `isCloudAuthLanding` branch disabled the test still fails), 12 consecutive
+  loaded runs green afterwards. See §8.5 for the run history.
 
 ### TEAM-F04 / TEAM-F05 — one personnel file per membership
 
@@ -349,6 +391,7 @@ inventory, and that drift is bookkeeping rather than evidence.
 | 18 | **Review P1** — the creation event published `locations.defaultLocationId` (null in the fallback case) while the row stored `homeLocationId`, so a replica held `location_scope = 'home'` with `location_id = NULL` and the new member matched no branch | `team-service.ts` (`createMembership` payload) |
 | 19 | **Review P2** — `0223`'s trigger (and its backfill) missed a membership phone that was **cleared** while the file kept the old number, so the number stayed on the file with no debt and nothing to retry | `0226` (forward-only replacement + inventory) |
 | 20 | **Review P2** — `canonicalIdentity` and the nameless case's drift write ran outside the never-throws boundary, so a transient failure became a 500 for an already-committed membership (a retried creation then answered «این ایمیل قبلاً استفاده شده است»); database refusals were also recorded with the useless code `error` | `personnel-file.ts` (one boundary, `synchronizePersonnelFile`, `recorded`, SQLSTATE codes) |
+| 21 | A racy inherited test: `cloud-pane.test.tsx` (issue #948, main's `eb76f07b`) dispatched `did-navigate` before the pane's effect had attached its listener, so it failed on a loaded `windows-latest` runner and passed elsewhere | `src/components/cloud-pane.test.tsx` (dispatch repeated inside `waitFor`, as the file's own theme case already does) |
 
 ---
 
@@ -466,6 +509,14 @@ inventory, and that drift is bookkeeping rather than evidence.
   detail surface, the server-backed search and the hand-offs),
   `src/app/dashboard/parties/parties-directory-regressions.test.ts` (44),
   `src/lib/admin-screen-contracts.test.ts` (17).
+- Test files that came in from `main` and are green on this tree: `integration/automotive-reports.integration.test.ts`
+  (**10 tests**, the dealership's three reports), added by the integration and run here
+  (`10 passed`).
+- One **inherited** test was made deterministic rather than flaky (its own commit, §8.5):
+  `src/components/cloud-pane.test.tsx`'s issue-#948 case now repeats its `did-navigate`
+  dispatch inside `waitFor`, the pattern the same file already uses for `dom-ready`. The
+  assertion is unchanged in force, proven by disabling the pane's `isCloudAuthLanding` branch
+  and watching the test still fail.
 - No test was disabled, skipped or weakened, and no baseline or budget was changed to make
   anything pass.
 
@@ -479,22 +530,24 @@ the box, not a claim about the code.
 
 ### 8.1 Local gates
 
-All at the head named in each row, on the **merged** tree (main `cf2b39dd` integrated by
-`66f7535a`) with the three review fixes on top, local Postgres 16 on 127.0.0.1:5432 and
+All at the head named in each row, on the **merged** tree (main `fff5016e` integrated by
+`d08406ac`), with the three review fixes, migration 0226, the PIN-copy corrections and the
+cloud-pane test repair on top, local Postgres 16 on 127.0.0.1:5432 and
 `DATABASE_URL=postgres://pos:pos@localhost:5432/pos`, unless the row names CI. The code head
-of this revision is **`10e0740f`**.
+of this revision is **`0f890f0f`**.
 
 | Gate | Command | Result |
 |---|---|---|
 | Formatting/lint | `npm run lint` (`eslint . --max-warnings=0`) | **clean, exit 0** (59 s) |
-| Typecheck, scoped to the change | `tsc --noEmit -p tsconfig.scoped-tmp.json` (extends the project's own config; `include` = `src/lib/personnel-file.ts`, `src/lib/team-service.ts`, the two changed integration tests — the compiler still pulls their whole import graph) | **clean, no diagnostics** (10 s). The temp config was deleted after the run and is not in the diff. |
+| Typecheck, scoped to the change | `tsc --noEmit -p tsconfig.scoped-tmp.json` (extends the project's own config; `include` = `src/lib/personnel-file.ts`, `src/lib/team-service.ts`, `src/lib/auth-hardening.test.ts`, the two changed integration tests — the compiler still pulls their whole import graph) | **clean, no diagnostics**. The temp config was deleted after the run and is not in the diff. |
 | Typecheck, whole project | `npx tsc --noEmit` | **cannot complete locally**: V8 `Ineffective mark-compacts near heap limit`, exit 134 at the default heap; killed by the kernel at 3600 MB. Green in CI (`type check`, 8.2). |
-| Unit + component | `npm test` (`vitest run`) | **887 files / 11 749 tests passed, exit 0** (469 s) |
+| Unit + component | `npm test` (`vitest run`) | **887 files / 11 749 tests passed, exit 0** (512 s on the merged tree with the cloud-pane repair) |
 | Design system | `npm run test:design` | **5 files / 38 tests passed** |
-| Database — the suites this issue rewrites | `integration/personnel-file-obligation` **23**, `integration/team` **54**, `integration/parties` **73**, `integration/phone-otp` **8**, `integration/iam-control-plane` **2**, `integration/staff-login-tenant` **7** | **167 passed, 0 failed** (86 s for the first five together) |
-| Database — full sweep | `npm run test:db` (`vitest run --config vitest.db.config.ts`) | **236 files · 3 622 passed · 2 skipped · exit 0** (3 196 s, 53 min) — every file, no failure and **no load-induced timeout this time**: `integration/fixed-assets.integration.test.ts` (the file that timed out in the pre-integration sweep) is **75/75 in 14 s**. Two tests are skipped by their own `it.skip` in `main`, unchanged here. |
-| Migrations | `tsx scripts/migrate.ts` | **`Applying 0226_personnel_file_obligation_phone_cleared.sql … ok`**, `schema_migrations` = **363** with `0226_…` the newest (`0225` and `0224` came from `main`); the DB harness rebuilds a scratch database per file, so the sweep above ran every migration 363 times over, including 0226 |
-| Operator retry, on real leftover rows | `npm run personnel:reconcile` then `--dry-run` | **`1 attempted, 1 repaired, 0 still owed`** per business → **`Personnel files: all repaired (3 of 3)`**, and the dry run afterwards reads **`nothing owed`** (idempotent). The three rows were left by the sweep itself: `integration/pairing.integration.test.ts` and `integration/seed-live-chart.integration.test.ts` create their businesses in the shared local database, so their raw-SQL owners are exactly the «writer nobody updated» case the obligation covers. |
+| Database — the suites this issue rewrites | `integration/personnel-file-obligation` **23**, `integration/team` **54**, `integration/parties` **73** | **150 passed, 0 failed** (72 s) — re-run on the merged tree, so the three fixes' regression tests are green against current `main` |
+| Database — `main`'s new file | `integration/automotive-reports` | **10 passed** |
+| Database — full sweep | `npm run test:db` (`vitest run --config vitest.db.config.ts`) | **237 files · 3 632 passed · 2 skipped · exit 0** — every file including `main`'s new one, no failure and no load-induced timeout (`integration/fixed-assets.integration.test.ts` 75/75). The two skips are `it.skip`s in `main`, unchanged here. |
+| Migrations | `tsx scripts/migrate.ts` | **`Applying 0226_personnel_file_obligation_phone_cleared.sql … ok`**, `schema_migrations` = **363** with `0226_…` the newest (`0224`/`0225` came from `main`, and `0221_pin_not_unique.sql` — the #953 decision — is applied too); the DB harness rebuilds a scratch database per file, so the sweep above ran all 363 migrations 237 times over |
+| Operator retry, on real leftover rows | `npm run personnel:reconcile` then `--dry-run` | **`1 attempted, 1 repaired, 0 still owed`** per business → **`Personnel files: all repaired (3 of 3)`**, and the dry run afterwards reads **`nothing owed`** (idempotent) — re-run after this round's sweep. The three rows were left by the sweep itself: `integration/pairing.integration.test.ts` and `integration/seed-live-chart.integration.test.ts` create their businesses in the shared local database, so their raw-SQL owners are exactly the «writer nobody updated» case the obligation covers. |
 | Seed coherence | `tsx scripts/seed.ts` | **refused on this database** (`Refusing to seed with default credentials into an already-initialized database`), which is the seed's own guard; coherence was verified on a **fresh** database before the integration (`Personnel files synced for 2/2 member(s)`, reconcile → `nothing owed`) and CI's `integration tests (real database)` runs the seed on a fresh database every time. |
 | Production build | `npm run build` | **not possible locally**: exit 137 (`Killed`) with `NODE_OPTIONS=--max-old-space-size=3000`, V8 heap OOM at the default heap. Green in CI (`production build`, 8.2). |
 | Visual regression | `npm run test:visual` | **not run locally**: it needs the production server the build above cannot produce. Green in CI (`visual regression`, 8.2). No baseline was re-recorded, edited or approved. |
@@ -503,9 +556,28 @@ of this revision is **`10e0740f`**.
 
 `test.yml` runs on Arena branch pushes as well as PRs (the workflow says so in its own `on:`
 comment: GitHub suppresses the App-created PR-synchronize event, so the same required suite is
-run on the push). The code head `10e0740f` changed `src/**`, a migration, `scripts/**` and
-tests — so unlike the documentation-only heads of the previous round, **every** workflow's
-path filter matched here.
+run on the push). The code head `0f890f0f` changed `src/**`, a migration, `scripts/**` and
+tests — so unlike the documentation-only heads of earlier rounds, **every** workflow's path
+filter matched here.
+
+The rows below are this branch's whole run history, newest first within each head. **At the
+code head `0f890f0f`, every run is green** — `test.yml` on both events (11/11 jobs each,
+including the `unit tests` job that had failed at `a6725caa`), plus
+`build-desktop-installer` and `verify-shippables`.
+
+| Workflow | Run | Result |
+|---|---|---|
+| `test.yml` (push) | **38937550040** (`0f890f0f`) | **✅ completed success — all 11 jobs**: `type check` ✅, **`unit tests` ✅** (the job that failed at `a6725caa`, 6m), `ESLint (noninteractive)` ✅, `API guard and permission tests` ✅, `visual regression` ✅, `design checks` ✅, `integration tests (real database)` ✅, `production build` ✅, `data transfer engine (real database)` ✅, `media E2E tests` ✅, `all checks passed` ✅ |
+| `test.yml` (pull_request) | **38937558128** (`0f890f0f`) | **✅ completed success — the same 11 jobs, all green** |
+| `build-desktop-installer` (PR) | **38937557862** (`0f890f0f`) | ✅ success |
+| `verify-shippables` (PR) | **38937557995** (`0f890f0f`) | ✅ success |
+| `test.yml` (push) | **38927639816** (`a6725caa`, the same code plus the PIN-doc corrections) | ❌ **`unit tests` failed; every other job green** (10/11) — main's racy `cloud-pane.test.tsx` #948 case on `windows-latest` (job 117063165109), while the *same commit's* PR run passed that job (**38927648596** ✅). Fixed in `0f890f0f` (its own commit); see §8.5 |
+| `test.yml` (pull_request) | **38927648596** (`a6725caa`) | ✅ completed success — 11/11 |
+| `build-desktop-installer` (PR) | 38927648776 (`a6725caa`) | ✅ success |
+| `verify-shippables` (PR) | 38927648740 (`a6725caa`) | ✅ success |
+
+Earlier heads, for the record — the previous integration and the three review fixes
+(`10e0740f`), and the documentation-only heads after it:
 
 | Workflow | Run | Result |
 |---|---|---|
@@ -528,11 +600,13 @@ Every head of this branch that matters has its own completed run:
 | `10e0740f` | the code head of this revision: the merge + the three review fixes + migration 0226 | `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events |
 | `2f77a56f` | documentation-only head: `10e0740f` plus `ISSUE_947_REPORT.md` | `test.yml` **38894957543** (push) and **38894963539** (PR) **11/11 each**; `build-desktop-installer` **38894963364** ✅ and `verify-shippables` **38894963351** ✅ on the PR event |
 | `011dd1cf` | documentation-only head: the report's mergeability correction | `test.yml` **38903870011** (push) and **38903876501** (PR) **11/11 each**; `build-desktop-installer` **38903876592** ✅ and `verify-shippables` **38903876462** ✅ on the PR event |
+| `a6725caa` | the merge of `fff5016e` + the PIN-copy corrections | `test.yml` **38927648596** (PR) **11/11**; the push run **38927639816** had the one flaky inherited job (above) |
+| `0f890f0f` | **the code head of this revision**: `a6725caa` + the `cloud-pane.test.tsx` repair | `test.yml` **38937550040** (push) and **38937558128** (PR), **11/11 each**; `build-desktop-installer` **38937557862** ✅ and `verify-shippables` **38937557995** ✅ on the PR event |
 
 Documentation-only heads are verified by the same suite over the same code tree — the table
 lists them through `011dd1cf`, and the runs of any later documentation-only head (including
 the one that carries this paragraph) appear on the PR itself and cover an identical code tree.
-No commit after `10e0740f` touches `src/**`, a migration, a script or a test.
+No commit after `0f890f0f` touches `src/**`, a migration, a script or a test.
 
 The run that failed on this branch is the one at the **pre-integration** head `0723b53`
 (`38452006386`), and its failure is the item-5 finding:
@@ -546,17 +620,18 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 ### 8.3 Running, finished and impossible
 
-- **Local, finished** (all at `10e0740f`, on the merged tree unless noted): lint (exit 0),
-  scoped typecheck (clean), unit (887 files / 11 749 tests), design (38), the changed database
-  suites (167), the **full 236-file database sweep** (3 622 passed, 2 skipped, exit 0, no
-  timeout), migration application (363), the operator reconcile and its idempotent re-run.
+- **Local, finished** (all at `0f890f0f`, on the merged tree unless noted): lint (exit 0),
+  scoped typecheck (clean), unit (887 files / 11 749 tests), design (38), the regression suites
+  of the three fixes (150) plus `main`'s new `automotive-reports` file (10), the **full 237-file
+  database sweep** (3 632 passed, 2 skipped, exit 0, no timeout), migration application (363),
+  the operator reconcile and its idempotent re-run.
 - **Local, impossible**: `npm run build` (kernel OOM at 3000 MB), whole-project `tsc --noEmit`
   (V8 OOM at 3072 MB, kernel OOM at 3600 MB), and therefore `npm run test:visual` (needs the
   build's server). Those are exactly the gates CI owns in this repository, and all three are
   green there (8.2). The *scoped* typecheck above is what this box can do about `tsc`, and it
   covers every file this revision changed.
-- **CI, finished**: the runs listed in 8.2, for the code head `10e0740f` **and** for the report
-  head `2f77a56f` — nothing is pending at either.
+- **CI, finished**: the runs listed in 8.2, for the code head `0f890f0f` (both events, 11/11
+  each) and for the earlier heads — nothing is pending anywhere on this branch.
 - Nothing is running when the report commit was made; the sweep, the unit suite and the
   focused runs had all finished. (`node_modules` was re-installed from the lockfile with
   `npm ci` after the integration; `node_modules` is committed on `main` as a symlink blob,
@@ -566,10 +641,10 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 | Dimension | State |
 |---|---|
-| Source | The head that carries this document on `arena/ce58f373-biza-miz` (PR #958 names it), whose **code head is `10e0740f`** — the merge of `cf2b39dd` plus the three review fixes — followed only by report edits that change no source |
+| Source | The head that carries this document on `arena/ce58f373-biza-miz` (PR #958 names it), whose **code head is `0f890f0f`** — the merge of `fff5016e` plus the three review fixes, migration 0226, the PIN-copy corrections and the cloud-pane test repair — followed only by report edits that change no source |
 | Tests | **11 749** unit/component + **38** design green locally at the code head; the **full database sweep** green at it (236 files, 3 622 passed, 2 skipped, exit 0 — no timeout); **33** new database tests across the three fixes (7 phone-arm, 5 boundary injections, 1 replica chain, plus the earlier ones), each falsified in the failing direction |
-| Checks | At the code head **`10e0740f`**: `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events — the packaging workflows ran there too, because a source change matches their path filters. Every documentation-only head after it is green by the same suite over the same tree (see 8.2) |
-| Mergeability | No conflicts. `cf2b39dd` — `main` at the integration — is an ancestor of this branch through the merge `66f7535a`, which is what `git merge-base --is-ancestor` verified when the merge was made. **`main` has since advanced** to `fff5016e` (PR #978: one operator-checklist document plus `integration/automotive-reports.integration.test.ts`; **no `src/**`, migration or script change**), so it is 19 commits ahead of the integration point — and against *that* head `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries (tree `b5eca689`); GitHub reports PR #958 **MERGEABLE / CLEAN**. Integration with the newer `main` is therefore a merge away and conflict-free, but this revision does **not** claim to contain it, and no gate here was run against it. PR #958 is the only PR for this branch |
+| Checks | At the code head **`0f890f0f`**: `test.yml` **38937550040** (push) and **38937558128** (PR), each **11/11 jobs green** including `integration tests (real database)`, `visual regression` and the `unit tests` job that had failed at `a6725caa`; `build-desktop-installer` and `verify-shippables` green on the PR event. The one red job in this branch's history and how it was fixed are in §8.5 |
+| Mergeability | No conflicts, and **current `main` is contained**: `git merge-base --is-ancestor origin/main HEAD` holds for `fff5016e`, through the merge `d08406ac`, which resolved nothing because main's four-commit delta (one new document, one phase-document edit, one new integration test file; no `src/**`, migration, script or existing test) did not overlap anything this branch touches. The merge is a plain merge commit and both sides' functionality is present — verified by running main's new test file on the merged tree (10/10) and the full database sweep (237 files, 3 632 passed). GitHub reports PR #958 **MERGEABLE**. PR #958 is the only PR for this branch |
 | Deployment | **Nothing deployed, published, tagged or merged**, and nothing was authorised to be. The migrations (0221, 0222, 0223, 0226) are forward-only and unapplied anywhere except this sandbox's local database |
 | Runtime acceptance | Not claimed. The gates that exercise a running server (production build, visual regression, subledger keyboard/WCAG, media E2E) passed **in CI on GitHub's runners** at the head named above; no runtime acceptance was performed against a deployed environment |
 
@@ -578,15 +653,32 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 **[PR #958](https://github.com/hamidnoshady/biza-miz/pull/958)** (`arena/ce58f373-biza-miz` →
 `main`) carries the repository's full required suite, including the `pull_request`-triggered
 desktop/container/workflow paths a branch push skips by path filter. At the code head
-`10e0740f`: **16 checks passed, 2 skipped, none pending and none red** — the eleven `test.yml`
-jobs plus `desktop shell`, `production container`, `packaged Windows end-to-end`, `Windows
-print connector`, `which shippables changed` and the aggregate `all checks passed`. At the
-documentation-only heads (`2f77a56f`, `011dd1cf` — the same tree plus this document):
-**15 passed, 3 skipped, none pending and none red**, the three skips being `Windows print
+`0f890f0f`: **15 checks passed, 3 skipped, none pending and none red** — the eleven `test.yml`
+jobs plus `desktop shell`, `production container`, `packaged Windows end-to-end`, `which
+shippables changed` and the aggregate `all checks passed`; the three skips are `Windows print
 connector`, `WordPress plugin` and `commit and tag the desktop version`, each by its own path
-condition — and the PR itself is **MERGEABLE / CLEAN**. The visual job's own step list is in 8.2: it built, served, compared and ran the
+condition. (At `10e0740f`, whose packaging path filter matched on the push event too, the same
+suite read 16 passed / 2 skipped.) The PR itself is **MERGEABLE**. The visual job's own step list is in 8.2: it built, served, compared and ran the
 subledger keyboard/WCAG script, and the baseline-recording step stayed **skipped** at every
 head of this branch — no baseline was re-recorded, edited or approved.
+
+**A second inherited race — `cloud-pane.test.tsx` (issue #948) — was found and fixed here.**
+The push run of `a6725caa` (`38927639816`) failed its `unit tests` job on `windows-latest`
+(job `117063165109`) at `src/components/cloud-pane.test.tsx` — «asks for cloud sign-in
+explicitly when the guest lands on the cloud login page» — while the same commit's PR run
+passed that job (`38927648596`). The file and its component are byte-identical to `origin/main`
+(`eb76f07b`, PR #950), so this is main's own test. The pane attaches the `did-navigate`
+listener in an effect guarded by `state === "embedded"` (a state that arrives asynchronously
+after the handoff lookup), while the test waited only for the webview element and dispatched
+the navigation immediately, so a loaded runner delivers the event before the pane is
+listening — and the assertion then times out looking for the «cloud sign-in required» card.
+Reproduced here under CPU load (1 failure in 6 runs of the single test, same message). The
+file's own theme case already documents this exact hazard («the pane becomes `embedded`
+asynchronously … Fire `dom-ready` until that listener answers, instead of racing it»), so the
+fix follows it: the dispatch repeats inside `waitFor`. The assertion keeps its force — with
+`isCloudAuthLanding`'s branch disabled the test still fails — and 12 consecutive loaded runs
+are green afterwards. It is a separate commit (`0f890f0f`), like the fiscal-periods repair
+before it, and the `unit tests` job is green on both events at the code head.
 
 **The fiscal-periods race is `main`'s, and `main` fixed it while this PR was open.** The PR's
 first runs failed at `src/app/(app)/accounting/fiscal-periods-section.test.tsx:214` on
@@ -638,6 +730,13 @@ this branch; no duplicate was opened, and nothing was merged, tagged or deployed
   swap): `npm run build` is killed at 3000 MB, `tsc --noEmit` aborts at 3072 MB, and
   `npm run test:visual` needs the build's server. CI is where those gates are meaningful,
   and their results are reported above — nothing here claims a local pass.
+- **Two inherited flaky tests were repaired here, each in its own commit and each kept at full
+  strength** (both are `main`'s files, byte-identical to `origin/main` before the fix — see
+  8.5). `fiscal-periods-section.test.tsx` (issue #834) was fixed by this branch *and*
+  independently by `main` (`03f9cb36`), and the merge kept main's version;
+  `cloud-pane.test.tsx` (issue #948) was fixed here (`0f890f0f`) and **is** part of this PR's
+  diff — it is a test-only change to a file this issue does not otherwise touch, kept in its
+  own commit so a reviewer can drop it or lift it into a PR of its own.
 - **The fiscal-periods race was `main`'s, and `main` has fixed it — this branch no longer
   carries a fix of its own.** `unit tests` failed twice in a row at
   `fiscal-periods-section.test.tsx:214` on the PR while passing on a push run of the same
@@ -648,12 +747,13 @@ this branch; no duplicate was opened, and nothing was merged, tagged or deployed
   this branch or as something for a reviewer to extract: both fixes wait inside `waitFor` for
   the same call, and the file now belongs to main. Nothing was disabled, skipped or weakened
   by either change (see 8.5).
-- **One inherited database test times out under the full serial sweep.** In a 230-file run,
-  `integration/fixed-assets.integration.test.ts` (issue #833, `main`'s code, byte-identical
-  to `origin/main`) had one test hit its 30 s budget after the file had already taken 194 s;
-  alone, the file is 75/75 green in 13 s and that single test passes. It is load, not logic
-  — and it is left alone rather than given a longer timeout, because raising a budget to get
-  green is exactly what the brief forbids.
+- **One inherited database test once timed out under the full serial sweep, and has not since.**
+  In the pre-integration 230-file run, `integration/fixed-assets.integration.test.ts` (issue
+  #833, `main`'s code, byte-identical to `origin/main`) had one test hit its 30 s budget after
+  the file had already taken 194 s; alone it is 75/75 in 13 s. The two sweeps this revision
+  ran (236 and **237** files, `0f890f0f`) both passed it — 75/75 in ~14 s — so it reads as the
+  load-induced outlier it looked like, and it is left alone rather than given a longer timeout,
+  because raising a budget to get green is exactly what the brief forbids.
 - **Dependencies**: local runs use `node_modules` from the lockfile (`npm ci` at the code
   head, after the sandbox was re-created and the committed symlink had to be replaced).
   `node_modules` is committed on `main` as a symlink blob pointing outside the repository —
@@ -673,10 +773,13 @@ Forward-only, none applied outside this sandbox:
 | 0223 | `0223_personnel_file_obligation.sql` | The membership → file obligation as a property of the membership row: `AFTER INSERT` and `AFTER UPDATE OF full_name, email, phone_e164` on `users` write the debt in the membership's own transaction, without creating the file or overwriting an existing diagnosis. |
 | 0226 | `0226_personnel_file_obligation_phone_cleared.sql` | **Corrects 0223's phone arm, forward-only** (a review finding; 0223 is applied and unedited): a membership phone that is **cleared** is canonical and must clear the file's, so the predicate now records the debt for `NULL`-or-blank membership phone over a non-blank `file_phone` as well as for the reverse, and the inventory is re-run with the corrected predicate. Name and email arms, the `attempts >= 0` contract, the partial unique index and the trigger's binding are unchanged; an existing open episode keeps its diagnosis and attempt count. |
 
-Applied locally with `scripts/migrate.ts` (**363 migrations** total — `0224` and `0225` came
-from `main` — `schema_migrations` records each one); `npm run personnel:reconcile` is the
-operator's retry (it repaired 3 of 3 owed files on this database and then read
-`nothing owed`).
+Applied locally with `scripts/migrate.ts` (**363 migrations** total; `schema_migrations`
+records each one). `0224` (`_financial_accounts_and_transfers`) and `0225`
+(`_automotive_offline_cancel_and_delivery`) came from `main`, and so did
+`0221_pin_not_unique.sql` (issue #953, `cccfa647`) — the migration that removed PIN
+uniqueness; it is present, applied and untouched, which is how the shared-PIN decision is
+preserved. `npm run personnel:reconcile` is the operator's retry (it repaired 3 of 3 owed
+files on this database and then read `nothing owed`).
 
 ## 11. Consumer coverage on the changed contracts
 
@@ -702,7 +805,7 @@ and no route, API or writer was deleted without a `grep` over `src/`, `scripts/`
 |---|---|---|
 | F01 — no sensitive Employee field under plain `parties.view`, in collection/item/search/export/AI | `personnel-access.ts`, `parties-service.ts`, `entities/crm.ts`, `party-form.tsx` | `parties.integration.test.ts` (audience cases, route round trip, export projection), `personnel-access.test.ts` (14), `parties-directory-regressions.test.ts` (44) |
 | F02 — tenant-safe identity link | `assertEmployeeLinkTarget`, `0221` | `parties.integration.test.ts` (service refusals, raw-insert `23503`, null-link delete) |
-| F03 — explicit PIN branch policy, honest copy | `resolveMembershipBranchPolicy`, onboarding form | `team.integration.test.ts` (four policies, refusals, cleared assignment), `location-access.test.ts` (16) |
+| F03 — explicit PIN branch policy, honest copy | `resolveMembershipBranchPolicy`, onboarding form | `team.integration.test.ts` (four policies, refusals, cleared assignment), `location-access.test.ts` (16); the PIN hint's honesty is pinned by `team-manager.test.ts` («does not claim a PIN is unique, in either direction», which names #953 and migration 0221) |
 | F04/F05 — one file per membership on every path; MFA-before-acceptance and replica authority preserved | `personnel-file.ts`, `0221`, `0223`, `0226`, `seed.ts` | `personnel-file-obligation.integration.test.ts` (23), `team.integration.test.ts` (invitation/rehire cases), `docs/issue-947-integration-contracts.md` |
 | Review P1 — the creation event replicates the branch the row stored | `team-service.ts` (`defaultLocationId: homeLocationId`) | `team.integration.test.ts` «replicates the fallback branch the row actually stored, all the way to access» (payload → replica row → eligibility, with a pre-fix control event) |
 | Review P2 — the obligation covers a **cleared** membership phone | `0226` (function + backfill), `personnel-file.ts` unchanged as the decider | `personnel-file-obligation.integration.test.ts` «the obligation follows a cleared membership phone» (7 cases; 2 fail without 0226) |
@@ -715,4 +818,6 @@ and no route, API or writer was deleted without a `grep` over `src/`, `scripts/`
 | Import field-write authorization | `partyWriteAudienceForActor`, `import-service.ts`, `ai-autopilot-executors.ts` | `data-transfer.integration.test.ts` (65) |
 | Atomic/durable projection obligation, honest error contract, idempotent retry | `0223`, `0226`, `personnel-file.ts`, `reconcile-personnel-files.ts` | `personnel-file-obligation.integration.test.ts` (23); `npm run personnel:reconcile` on this tree: 3 of 3 repaired, then `nothing owed` |
 | Cross-issue contracts with #854 and #916 | `docs/issue-947-integration-contracts.md`, `docs/auth-hardening-854.md` | the two documents; floor/eligibility tests referenced inside them |
-| No test disabled/weakened; no baseline re-recorded; no budget raised | — | every run in §8; the CI visual job's `Record visual baselines` step is `skipped` at every head |
+| Current `main` integrated without dropping either side | merge `d08406ac` (`main` `fff5016e`) | `git merge-base --is-ancestor origin/main HEAD` holds; main's new `integration/automotive-reports.integration.test.ts` runs **10/10** on the merged tree; the full sweep (237 files) is green |
+| #953's shared-PIN decision preserved; no stale uniqueness claim left | `0221_pin_not_unique.sql` (main's) untouched; corrected copy + docs | `team-manager.test.ts` («does not claim a PIN is unique, in either direction»); the live schema has no `pin_blind_index` column; `docs/auth-hardening-854.md` P2.8/P2.12 and the legacy-hash limitation corrected in this revision |
+| No test disabled/weakened; no baseline re-recorded; no budget raised | — | every run in §8; the CI visual job's `Record visual baselines` step is `skipped` at every head; the one flaky inherited test was repaired at full strength (§8.5) |
