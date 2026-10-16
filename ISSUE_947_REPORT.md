@@ -510,6 +510,7 @@ path filter matched here.
 | `android-build` | — | **did not trigger**: its path filter watches `android/**` and `src/lib/native/**`, and this head touches neither |
 | `test.yml` (push) | **38894957543** (report head `2f77a56f`) | **✅ completed success — all 11 jobs green**, over a tree identical to `10e0740f` except for this report |
 | `test.yml` (pull_request), `build-desktop-installer`, `verify-shippables` | **38894963539**, **38894963364**, **38894963351** (`2f77a56f`) | **✅ all three success**. Only the PR-triggered packaging runs appeared at this head: the push event's path filter does not match a documentation-only commit, which is the path filter doing its job |
+| `test.yml` (push and pull_request), `build-desktop-installer`, `verify-shippables` | **38903870011**, **38903876501**, **38903876592**, **38903876462** (`011dd1cf`) | **✅ all four success** — the second documentation-only head, same code tree as `10e0740f` |
 
 Every head of this branch that matters has its own completed run:
 
@@ -518,7 +519,13 @@ Every head of this branch that matters has its own completed run:
 | `03846456` | the previous code head (pre-integration) | `test.yml` **✅ 11/11** (`38718493517`); PR checks **15 passed, 3 skipped, none red** |
 | `66f7535a` | the merge commit (not pushed on its own — it is the parent of `10e0740f`) | — |
 | `10e0740f` | the code head of this revision: the merge + the three review fixes + migration 0226 | `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events |
-| `2f77a56f` | the head this report is committed at: `10e0740f` plus `ISSUE_947_REPORT.md` only | `test.yml` **38894957543** (push) and **38894963539** (PR) **11/11 each**; `build-desktop-installer` **38894963364** ✅ and `verify-shippables` **38894963351** ✅ on the PR event |
+| `2f77a56f` | documentation-only head: `10e0740f` plus `ISSUE_947_REPORT.md` | `test.yml` **38894957543** (push) and **38894963539** (PR) **11/11 each**; `build-desktop-installer` **38894963364** ✅ and `verify-shippables` **38894963351** ✅ on the PR event |
+| `011dd1cf` | documentation-only head: the report's mergeability correction | `test.yml` **38903870011** (push) and **38903876501** (PR) **11/11 each**; `build-desktop-installer` **38903876592** ✅ and `verify-shippables` **38903876462** ✅ on the PR event |
+
+Documentation-only heads are verified by the same suite over the same code tree — the table
+lists them through `011dd1cf`, and the runs of any later documentation-only head (including
+the one that carries this paragraph) appear on the PR itself and cover an identical code tree.
+No commit after `10e0740f` touches `src/**`, a migration, a script or a test.
 
 The run that failed on this branch is the one at the **pre-integration** head `0723b53`
 (`38452006386`), and its failure is the item-5 finding:
@@ -552,7 +559,7 @@ The run that failed on this branch is the one at the **pre-integration** head `0
 
 | Dimension | State |
 |---|---|
-| Source | `2f77a56f` on `arena/ce58f373-biza-miz`, pushed, in **PR #958** — the code head `10e0740f` (the merge of `cf2b39dd` plus the three review fixes) and then this report, which changes no source |
+| Source | The head that carries this document on `arena/ce58f373-biza-miz` (PR #958 names it), whose **code head is `10e0740f`** — the merge of `cf2b39dd` plus the three review fixes — followed only by report edits that change no source |
 | Tests | **11 749** unit/component + **38** design green locally at the code head; the **full database sweep** green at it (236 files, 3 622 passed, 2 skipped, exit 0 — no timeout); **33** new database tests across the three fixes (7 phone-arm, 5 boundary injections, 1 replica chain, plus the earlier ones), each falsified in the failing direction |
 | Checks | `test.yml` at **`10e0740f`**: `test.yml` **38887048976** (push) and **38887053757** (PR), each **11/11 jobs green** including `integration tests (real database)` and `visual regression`; `build-desktop-installer` and `verify-shippables` green on both events — the packaging workflows also ran at this head, because a source change matches their path filters (see 8.2) |
 | Mergeability | No conflicts. `cf2b39dd` — `main` at the integration — is an ancestor of this branch through the merge `66f7535a`, which is what `git merge-base --is-ancestor` verified when the merge was made. **`main` has since advanced** to `fff5016e` (PR #978: one operator-checklist document plus `integration/automotive-reports.integration.test.ts`; **no `src/**`, migration or script change**), so it is 19 commits ahead of the integration point — and against *that* head `git merge-tree --write-tree HEAD origin/main` exits **0** with no conflict entries (tree `b5eca689`); GitHub reports PR #958 **MERGEABLE / CLEAN**. Integration with the newer `main` is therefore a merge away and conflict-free, but this revision does **not** claim to contain it, and no gate here was run against it. PR #958 is the only PR for this branch |
@@ -567,7 +574,7 @@ desktop/container/workflow paths a branch push skips by path filter. At the code
 `10e0740f`: **16 checks passed, 2 skipped, none pending and none red** — the eleven `test.yml`
 jobs plus `desktop shell`, `production container`, `packaged Windows end-to-end`, `Windows
 print connector`, `which shippables changed` and the aggregate `all checks passed`. At the
-head this report is committed at (`2f77a56f`, the same tree plus this document):
+documentation-only heads (`2f77a56f`, `011dd1cf` — the same tree plus this document):
 **15 passed, 3 skipped, none pending and none red**, the three skips being `Windows print
 connector`, `WordPress plugin` and `commit and tag the desktop version`, each by its own path
 condition — and the PR itself is **MERGEABLE / CLEAN**. The visual job's own step list is in 8.2: it built, served, compared and ran the
