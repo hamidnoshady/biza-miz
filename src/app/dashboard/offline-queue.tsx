@@ -325,6 +325,8 @@ export interface ConnectionState {
   syncFault: string | null;
   /** Entries stuck in `failed` or `conflict` — need a human decision, not just time. */
   attentionNeeded: number;
+  /** Issue #987 — true while the pairing snapshot has not yet been promoted. */
+  pairingPending: boolean;
 }
 
 export interface ConnectionStatusSnapshot {
@@ -385,6 +387,8 @@ export interface ConnectionStatusSnapshot {
   } | null;
   overallIdentity?: string;
   identityError?: string | null;
+  /** Issue #987 — true while the pairing snapshot has not yet been promoted. */
+  pairingPending?: boolean;
 }
 
 export interface OfflineQueueState {
@@ -403,6 +407,7 @@ function useOfflineQueueState(): OfflineQueueState {
   const [cloudSync, setCloudSync] = useState<CloudSyncState>("cloud_sync_not_configured");
   const [syncError, setSyncError] = useState(false);
   const [syncFault, setSyncFault] = useState<string | null>(null);
+  const [pairingPending, setPairingPending] = useState(false);
 
   const refreshEntries = useCallback(() => {
     void getOfflineDb().pendingActions.orderBy("createdAt").toArray().then(setEntries);
@@ -430,6 +435,7 @@ function useOfflineQueueState(): OfflineQueueState {
         const body = (await response.json()) as ConnectionStatusSnapshot;
         setServerStatus(body);
         setSyncFault(body.fault ?? null);
+        setPairingPending(Boolean(body.pairingPending));
         if (body.cloudSync === "connected") {
           setCloudSync("cloud_sync_connected");
           setInternet("internet_available");
@@ -489,6 +495,7 @@ function useOfflineQueueState(): OfflineQueueState {
       syncError,
       syncFault,
       attentionNeeded,
+      pairingPending,
     },
   };
 }

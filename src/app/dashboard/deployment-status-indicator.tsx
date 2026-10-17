@@ -27,11 +27,13 @@ export function DeploymentStatusIndicator({ profile }: { profile: DeploymentProf
   // reading of a green pipe with a broken identity plane.
   const syncLabel =
     profile === "hybrid"
-      ? serverStatus?.sync === "connected"
-        ? "سایت محلی · همگام با ابر"
-        : serverStatus?.sync === "connecting"
-          ? "سایت محلی · در حال اتصال به ابر"
-          : `سایت محلی · همگام‌سازی متوقف${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`
+      ? serverStatus?.pairingPending
+        ? "سایت محلی · در حال تکمیل جفت‌شدن"
+        : serverStatus?.sync === "connected"
+          ? "سایت محلی · همگام با ابر"
+          : serverStatus?.sync === "connecting"
+            ? "سایت محلی · در حال اتصال به ابر"
+            : `سایت محلی · همگام‌سازی متوقف${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`
       : null;
   const label =
     profile === "cloud"
@@ -40,7 +42,7 @@ export function DeploymentStatusIndicator({ profile }: { profile: DeploymentProf
         ? "فقط محلی · اتصال به ابر"
         : `${syncLabel}${identityDegraded ? " · نیازمند بررسی هویت و ورود کارکنان" : ""}`;
   const tone =
-    profile === "hybrid" && (serverStatus?.sync !== "connected" || identityDegraded)
+    profile === "hybrid" && (serverStatus?.pairingPending || serverStatus?.sync !== "connected" || identityDegraded)
       ? "bg-amber-500 dark:bg-amber-400"
       : profile === "local"
         ? "bg-stone-400 dark:bg-stone-500"

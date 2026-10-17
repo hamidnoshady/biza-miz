@@ -27,6 +27,13 @@ export interface ServerSyncConfig {
   pairingSessionId?: string;
   /** Stable Electron backend instance identity, bound to the pairing session. */
   installationId?: string;
+  /**
+   * Transitional flag written by pairing-apply.ts. Cleared by
+   * acknowledgePendingPairing() once the snapshot is activated. Read by
+   * the connection-status endpoint so the UI can distinguish "pairing
+   * still finalising" from a sync error while the flag is in flight.
+   */
+  pairingPending?: boolean;
 }
 
 export interface ServerSyncConfigUpdateInput {
@@ -117,6 +124,9 @@ export function resolveConfigUpdate(
         : {}),
       ...(existing?.installationId
         ? { installationId: existing.installationId }
+        : {}),
+      ...(existing?.pairingPending
+        ? { pairingPending: existing.pairingPending }
         : {}),
     },
   };

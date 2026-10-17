@@ -1276,6 +1276,11 @@ export async function refreshStagedSiteCredential(
  * lost. The durable session fields in the site config let the normal sync tick
  * finish activation later without reusing the one-time code or minting a new
  * credential.
+ *
+ * When the pairing completed without durable session ids (pairingSessionId /
+ * installationId were not supplied), there is nothing to acknowledge on the
+ * cloud — the snapshot is already the truth.  The function tolerates their
+ * absence and simply clears the pending flag.
  */
 export async function acknowledgePendingPairing(
   businessId: string,
@@ -1283,50 +1288,56 @@ export async function acknowledgePendingPairing(
   { status: "skipped" } | { status: "ok" } | { status: "error"; error: string }
 > {
   const config = await getServerSyncConfig(businessId);
-  if (
-    !config?.pairingSessionId ||
-    !config.installationId ||
-    !config.remoteUrl?.trim() ||
-    !config.token?.trim()
-  ) {
+  if (!config?.pairingPending) {
     return { status: "skipped" };
   }
-  try {
-    const response = await fetch(
-      `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/pairing/acknowledge`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${config.token.trim()}`,
+  if (!config.remoteUrl?.trim() || !config.token?.trim()) {
+    return { status: "skipped" };
+  }
+
+  // When the pairing supplied durable session ids, confirm the committed
+  // snapshot with the cloud before promoting.  Without them the snapshot
+  // already committed and there is no session to acknowledge.
+  if (config.pairingSessionId && config.installationId) {
+    try {
+      const response = await fetch(
+        `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/pairing/acknowledge`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${config.token.trim()}`,
+          },
+          body: JSON.stringify({
+            pairingSessionId: config.pairingSessionId,
+            installationId: config.installationId,
+          }),
+          signal: AbortSignal.timeout(30_000),
         },
-        body: JSON.stringify({
-          pairingSessionId: config.pairingSessionId,
-          installationId: config.installationId,
-        }),
-        signal: AbortSignal.timeout(30_000),
-      },
-    );
-    if (!response.ok)
+      );
+      if (!response.ok)
+        return {
+          status: "error",
+          error: `pairing_acknowledgement_failed: HTTP ${response.status}`,
+        };
+    } catch (error) {
       return {
         status: "error",
-        error: `pairing_acknowledgement_failed: HTTP ${response.status}`,
+        error: `pairing_acknowledgement_unreachable: ${error instanceof Error ? error.message : String(error)}`,
       };
-    // Pairing is the owner's explicit consent to connect this install. Keep
-    // traffic disabled until the cloud confirms the committed local snapshot,
-    // then atomically promote this recovered configuration to an active Hybrid
-    // sync target; a lost acknowledgement response retries this same step.
-    const activated = { ...config, enabled: true };
-    delete activated.pairingSessionId;
-    delete activated.installationId;
-    await setServerSyncConfig(businessId, activated);
-    return { status: "ok" };
-  } catch (error) {
-    return {
-      status: "error",
-      error: `pairing_acknowledgement_unreachable: ${error instanceof Error ? error.message : String(error)}`,
-    };
+    }
   }
+
+  // Pairing is the owner's explicit consent to connect this install.
+  // Atomically promote this configuration to an active Hybrid sync target
+  // by clearing the transient pairing fields; a lost acknowledgement
+  // response retries this same step on the next tick.
+  const activated = { ...config, enabled: true };
+  delete activated.pairingPending;
+  delete activated.pairingSessionId;
+  delete activated.installationId;
+  await setServerSyncConfig(businessId, activated);
+  return { status: "ok" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,9 +1359,18 @@ export async function runServerSyncTick(): Promise<void> {
 
   for (const row of rows) {
     try {
-      await withTenant(row.business_id, () =>
+      const ack = await withTenant(row.business_id, () =>
         acknowledgePendingPairing(row.business_id),
       );
+      // While pairing is still pending (acknowledgement failed or in-flight),
+      // the cloud does not yet recognise this device.  Operational sync would
+      // hit 401s, so skip it until the next tick retries the acknowledgement.
+      if (ack.status === "error") {
+        console.error(
+          `pairing acknowledgement error for business ${row.business_id}: ${ack.error}`,
+        );
+        continue;
+      }
       const credentialReady = await withTenant(row.business_id, () =>
         refreshStagedSiteCredential(row.business_id),
       );
