@@ -43,10 +43,12 @@ So on the one event every clean quit fires, the hook is called with no arguments
 Commit `68840333` (issue #869) added `electron/embedded-postgres-exit.js`
 (`releaseEmbeddedPostgresExitHook`) and calls it from `backend-manager.js` right after the
 library is imported. That commit is an ancestor of **desktop-v1.0.60**, the build named in
-this issue — so a shipped build that removes the hook still logged the failure. The release
-call depends on resolving the *same* `async-exit-hook` module instance the library registered
-with; if resolution differs in a packaged/asar layout, the call silently returns `false` and
-the broken hook stays registered.
+this issue, so the rejection was observed from a build that already contained the release
+call. The release depends on resolving the *same* `async-exit-hook` module instance the
+library registered with; where that identity does not hold — a packaged/asar resolution
+difference is one possibility — it returns `false` with no trace and the hook stays
+registered. The packaged layout could not be reproduced in this sandbox, so the fix does not
+rely on which explanation is right.
 
 That makes the runtime release necessary but not sufficient, and it is what the issue means
 by "the app's error channel is permanently red". The fix below therefore removes the crash
@@ -149,10 +151,27 @@ New regression coverage:
   instance, throws `BackendStoppedError`), quit before PostgreSQL starts (no instance, no
   server), and idempotent concurrent `stop()`.
 
+## CI evidence
+
+`build-desktop-installer` (the "packaged Windows end-to-end" job) ran on this branch at
+`21602e1` and **passed in 16m58s**, including:
+
+- step 14, `npm ci` in `electron/`, which ran the new `postinstall` patch;
+- step 16, `npm run verify:runtime`, which refuses an unpatched dependency;
+- step 26, "Install and run actual packaged desktop twice as a standard user", which now also
+  asserts the desktop log gained no `done is not a function` line and that `postmaster.pid` is
+  gone after each clean quit.
+
+`test.yml` passed at the same commit: unit tests, type check, ESLint, production build, media
+E2E, visual regression, design checks and the real-database jobs.
+
+One gate failure was found and fixed by this work rather than worked around: the
+`verify-shippables` "desktop shell" job installs Electron dependencies with
+`npm ci --ignore-scripts`, so the postinstall patch could not run and the new
+`verify:runtime` check failed. That is the gate doing its job — the job now applies the same
+reviewed patch explicitly before verifying, instead of the check being weakened.
+
 ## Not verified here
 
-The Windows installer and packaged smoke run cannot be built in this sandbox.
-`build-desktop-installer.yml` runs `npm ci` in `electron/` (which applies the patch),
-`verify:runtime` (which refuses an unpatched copy), the NSIS build, and
-`scripts/smoke-packaged.js` (which asserts the log and the pid file). Those remain the release
-gate for this issue; no Windows artifact is claimed from this environment.
+The Windows installer cannot be built in this sandbox; the packaged evidence above comes from
+GitHub Actions, not from this environment.
