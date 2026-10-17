@@ -199,13 +199,24 @@ describe("every tenant table is protected", () => {
       relforcerowsecurity: boolean;
       policies: string;
       has_tenant_isolation: boolean;
+      has_approved_tenant_policy: boolean;
     }>(
       `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
               (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
               EXISTS (
                 SELECT 1 FROM pg_policy p
                  WHERE p.polrelid = c.oid AND p.polname = 'tenant_isolation'
-              ) AS has_tenant_isolation
+              ) AS has_tenant_isolation,
+              EXISTS (
+                SELECT 1 FROM pg_policy p
+                 WHERE p.polrelid = c.oid
+                   AND (
+                     (c.relname = 'business_encryption_keys'
+                       AND p.polname = 'business_encryption_keys_tenant_isolation')
+                     OR (c.relname <> 'business_encryption_keys'
+                       AND p.polname = 'tenant_isolation')
+                   )
+              ) AS has_approved_tenant_policy
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
         WHERE c.relkind = 'r'
@@ -219,10 +230,19 @@ describe("every tenant table is protected", () => {
     );
 
     const unprotected = rows
-      .filter((r) => !r.relrowsecurity || !r.relforcerowsecurity || Number(r.policies) === 0)
+      .filter(
+        (r) =>
+          !r.relrowsecurity ||
+          !r.relforcerowsecurity ||
+          Number(r.policies) === 0 ||
+          !r.has_approved_tenant_policy,
+      )
       .map((r) => r.relname);
     expect(rows.length).toBeGreaterThan(50);
-    expect(unprotected, `business_id tables missing RLS or a policy: ${unprotected.join(", ")}`).toEqual([]);
+    expect(
+      unprotected,
+      `business_id tables missing RLS/FORCE or an approved tenant policy: ${unprotected.join(", ")}`,
+    ).toEqual([]);
 
     const byName = new Map(rows.map((row) => [row.relname, row]));
     for (const table of ["platform_audit_log", "platform_cms_sites"]) {
@@ -235,9 +255,19 @@ describe("every tenant table is protected", () => {
         has_tenant_isolation: true,
       });
     }
+    expect(
+      byName.get("business_encryption_keys"),
+      "business_encryption_keys must remain covered with its historical tenant policy",
+    ).toMatchObject({
+      relrowsecurity: true,
+      relforcerowsecurity: true,
+      has_approved_tenant_policy: true,
+    });
   });
 
-  it("every policy's actual expression scopes by business, not just exists", async () => {
+  it("every tenant policy's actual expression scopes by business, not just exists", async () => {
+    // business_encryption_keys retains its historical policy name; its custom
+    // name is accepted above only for that table and its expression is checked here.
     const { rows } = await ownerClient.query<{
       relname: string;
       using_expr: string | null;
@@ -249,7 +279,7 @@ describe("every tenant table is protected", () => {
          FROM pg_policy p
          JOIN pg_class c ON c.oid = p.polrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
-        WHERE p.polname = 'tenant_isolation'
+        WHERE p.polname IN ('tenant_isolation', 'business_encryption_keys_tenant_isolation')
         ORDER BY c.relname`,
     );
     expect(rows.length).toBeGreaterThan(50);
