@@ -14,6 +14,11 @@ export const BILLING_DECLARATIONS: readonly BillingDeclaration[] = [
   exempt("platform.console", "کنسول مدیر سامانه", "کار مدیر سامانه است؛ به مشتری صورتحساب نمی‌شود."),
   exempt("platform.exceptions", "رلهٔ خطا", "انتقال خطای عملیاتی بین نصب‌ها."),
   exempt("platform.billing_self_service", "مشاهدهٔ صورت‌حساب", "دیدن فاکتور و پرداخت آن خودش یک مصرف اندازه‌گیری‌شده نیست."),
+  exempt(
+    "platform.support",
+    "پشتیبانی فنی نصب‌ها",
+    "رابط دستگاه پشتیبانی و نشست‌های تیکت‌محور (مسئلهٔ ۹۸۴)؛ زیرساخت عملیات پشتیبانی است و به مشتری صورتحساب نمی‌شود.",
+  ),
 
   fixed("accounting.orders", "سفارش و فروش", "accounting", true, "orders.view"),
   fixed("accounting.inventory", "انبار", "accounting", true),
