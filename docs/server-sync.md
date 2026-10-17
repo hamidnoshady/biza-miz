@@ -220,6 +220,65 @@ That partial state is no longer invisible:
   like any other wrong password, and `423 account_locked` follows only a correct
   one.
 
+### The gate that blocks operational sync is its own record (issue #988)
+
+`runServerSyncTick()` will not run master-data sync, the site profile, push or
+pull until the security control plane has converged. That gate is correct and
+stays — a suspension or a permission revocation must land before the orders
+queued behind it. What was missing was any durable trace of it firing: the
+gated tick wrote one `console.error` line on the machine, so a real install ran
+nine days and 1 092 ticks with every sale staying on the till while every health
+surface read healthy.
+
+- **Durable state.** `iam_operational_sync_block_state` (migration 0228) stores
+  one row per `(business_id, site_device_id)`: `status` (`blocked` / `clear`),
+  the episode bounds an operator can act on (`first_blocked_at`,
+  `last_blocked_at`, `last_recovered_at`), how many ticks were gated in a row
+  and in total, a short machine `last_code` next to the raw `last_error`, and
+  `pending_outbox` — the local events the gate is holding back. Same shape as
+  `iam_login_credential_sync_state`, for the same reason: a failure that only
+  lives in a log is a failure nobody owns.
+- **One gate function.** `runOperationalSyncGate()`
+  (`src/lib/server-sync.ts`) decides and explains in one place:
+  `reconciled`, `not_configured` (still pairing, sync switched off — never a
+  blocked install), `pairing_pending` (the cloud has not taken this install's
+  pairing snapshot, so it does not authenticate the device — issue #987's step,
+  which used to `continue` the tick on its own), `credential_unsettled` (the
+  staged site credential has not been handed over, which is where an
+  unreachable cloud is noticed first), or `iam_failed`. `runIamSyncAttempt()` returns the reason beside the boolean and
+  is total by construction, because an exception escaping it would skip the
+  record along with the sync.
+- **The reason is classified, not dumped.** `classifyIamFailure()`
+  (`src/lib/iam/operational-sync-health.ts`) turns `events_http_403`,
+  `fetch failed`, `sequence_gap:12:14` and the rest into a code with its own
+  Persian sentence, so a surface can send an owner to the right fix. The raw
+  message stays in `last_error` for support.
+- **One alert per episode, after N ticks.** Past
+  `OPERATIONAL_SYNC_ALERT_AFTER_TICKS` (ten consecutive gated ticks — five
+  minutes of a 30 s tick, long enough that a cloud restart does not buzz
+  anyone) `sync.operational_blocked` is raised through the shared notification
+  engine, deduped on the episode rather than the moment.
+- **The record lives on the install it describes.** The gated tick happens on
+  the site, so `iam_operational_sync_block_state` is written to the site's
+  database, and `listSiteDevices()` (which both «سرورهای ویندوز متصل» and the
+  super-admin installations panel read) shows the block wherever that database
+  is the one being queried — the same database in a single-DB deployment, the
+  till's own in a split one. It is deliberately *absent* rather than *healthy*
+  where the record cannot exist: a blocked install normally cannot reach the
+  cloud to report that it is blocked, so the central's own signal for one is
+  silence in `sync_runs` (no push, no pull), not this row.
+- **It is read everywhere green was being claimed.** `GET /api/team/iam-status`
+  answers the operational plane as `attention_required` while gated;
+  `GET /api/connection/status` returns `operationalBlock` (state, consecutive
+  ticks, since when, queue depth, code) both top level and inside `health`;
+  the shell's status badge says «همگام‌سازی عملیاتی مسدود» instead of
+  «در حال اتصال»; Settings → اتصال و همگام‌سازی shows it as the card's third
+  row; and `listSiteDevices()` carries it per install, so both the owner's
+  «سرورهای ویندوز متصل» panel and the super-admin fleet say it of the one
+  device that is actually gated. `POST /api/team/iam-status { action: "repair"
+  }` closes the episode when its own run converged, so a successful repair is
+  not contradicted by a stale row for up to 30 s.
+
 ## Event transport
 
 On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):

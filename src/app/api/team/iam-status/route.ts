@@ -7,6 +7,8 @@ import type { ServerSyncConfig } from "@/lib/server-sync-config";
 import { getServerSyncState } from "@/lib/server-sync";
 import { runIamSync } from "@/lib/iam/sync";
 import { readHybridIdentityStatus, syncHybridLoginCredentials } from "@/lib/iam/login-credential-sync";
+import { clearOperationalSyncBlock, readOperationalSyncBlockState } from "@/lib/iam/operational-sync-block";
+import { operationalSyncHealth } from "@/lib/iam/operational-sync-health";
 
 /**
  * IAM status/repair, split into the two planes the fix for the owner-only
@@ -26,7 +28,7 @@ export const GET = withTenantScope(async () => {
   if (guard.error) return guard.error;
   const businessId = guard.session.businessId;
   const config = await getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
-  const [identity, health, operational] = await Promise.all([
+  const [identity, health, operational, block] = await Promise.all([
     config?.siteDeviceId
       ? query<{
           last_sequence: string; last_attempt_at: Date | null; last_success_at: Date | null;
@@ -41,8 +43,17 @@ export const GET = withTenantScope(async () => {
       : Promise.resolve({ rows: [] as never[] }),
     readHybridIdentityStatus(businessId, { config }),
     getServerSyncState(businessId),
+    // Issue #988 — the operational plane's own evidence: whether the security
+    // gate is holding this site's master data, push and pull back right now.
+    config?.siteDeviceId
+      ? readOperationalSyncBlockState(businessId, config.siteDeviceId)
+      : Promise.resolve(null),
   ]);
   const row = identity.rows[0];
+  const operationalPlane = operationalSyncHealth({
+    configured: Boolean(config?.enabled && config.siteDeviceId),
+    block,
+  });
   return NextResponse.json({
     // Backwards-compatible membership view (existing callers read `status`).
     status: row
@@ -95,10 +106,34 @@ export const GET = withTenantScope(async () => {
         }
       : { state: "not_configured" },
     operational: {
-      state: operational.lastPushError || operational.lastPullError ? "paused" : operational.lastPullSuccessAt ? "connected" : "connecting",
+      // Issue #988 — a gated tick leaves no push/pull error of its own, so the
+      // operational plane is read from its durable record first: `attention_required`
+      // here means "the security plane is holding this site's traffic back",
+      // which `paused` (a refused or unreachable sync call) does not.
+      state: operationalPlane.state === "blocked"
+        ? "attention_required"
+        : !config?.enabled
+          ? "not_configured"
+          : operational.lastPushError || operational.lastPullError
+            ? "paused"
+            : operational.lastPullSuccessAt
+              ? "connected"
+              : "connecting",
       lastPushSuccessAt: operational.lastPushSuccessAt,
       lastPullSuccessAt: operational.lastPullSuccessAt,
       lastError: operational.lastPushError || operational.lastPullError || null,
+      blocked: operationalPlane.state === "blocked",
+      consecutiveBlockedTicks: operationalPlane.consecutiveBlockedTicks,
+      /** Past OPERATIONAL_SYNC_ALERT_AFTER_TICKS — a block worth escalating. */
+      alertDue: operationalPlane.alertDue,
+      blockedSince: block?.firstBlockedAt ?? null,
+      lastBlockedAt: block?.lastBlockedAt ?? null,
+      lastRecoveredAt: block?.lastRecoveredAt ?? null,
+      blockError: block?.lastError ?? null,
+      blockCode: operationalPlane.code,
+      /** Local events the gate is holding back, as counted at the last blocked tick. */
+      pendingOutbox: block?.pendingOutbox ?? 0,
+      episodesBlocked: block?.episodesBlocked ?? 0,
     },
     overall: health.overall,
     degradedBy: health.degradedBy,
@@ -129,6 +164,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     );
   }
   const identitySyncOk = await runIamSync(businessId);
+  /*
+   * Issue #988 — a converged manual run also lifts the *operational* gate on
+   * record. The sync tick would clear it within 30 s anyway, but the operator
+   * standing in front of this panel just pressed «همگام‌سازی دوباره» to fix a
+   * blocked install, and leaving the row blocked would tell them the repair
+   * did not work. A failed run leaves the record alone: the block is real.
+   */
+  if (identitySyncOk) await clearOperationalSyncBlock(businessId, config.siteDeviceId);
   const credentialSync = await syncHybridLoginCredentials(businessId, { config });
   const health = await readHybridIdentityStatus(businessId, { config });
   // Issue #948 P1-6 — "healthy" after a repair means the canonical global

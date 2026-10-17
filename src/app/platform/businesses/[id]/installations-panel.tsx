@@ -5,13 +5,20 @@
  *
  * Read from `/api/platform/businesses/[id]/devices`, which returns device
  * identities (branch, status, last seen, sync health, credential-rotation
- * state) alongside the pairing codes that created them. Revoking is the
+ * state) alongside the pairing codes that created them.
+ *
+ * The operational-sync block line (issue #988) is shown only when a record says
+ * the install is gated: that row is written on the install itself, so here it
+ * is present wherever site and central share a database and simply absent
+ * otherwise — a blocked till usually cannot reach the cloud to tell it. Absent
+ * is deliberately *not* rendered as healthy. Revoking is the
  * operator's kill switch for a laptop that is lost, sold or being replaced;
  * credential rotation stays tenant-side, because only the running desktop can
  * acknowledge a staged credential.
  */
 import { useCallback, useEffect, useState } from "react";
 import { formatJalali } from "@/lib/jalali";
+import { isIamFailureCode, operationalSyncBlockedSummary } from "@/lib/iam/operational-sync-health";
 import { api, errorMessage, Card, ErrorBox, InfoBox, SkeletonRows, useCan } from "../../ui";
 import { useBusiness } from "./context";
 
@@ -30,6 +37,17 @@ export interface SiteDeviceView {
   lastSuccessfulPushAt: string | null;
   lastSuccessfulPullAt: string | null;
   lastSyncError: string | null;
+  /**
+   * Issue #988 — the security plane gating this install's operational sync.
+   * A device can be reachable, authenticated and error-free in every field
+   * above while the till quietly keeps sales it cannot send; this is the one
+   * flag that says so.
+   */
+  operationalSyncBlocked: boolean;
+  operationalSyncBlockedSince: string | null;
+  operationalSyncConsecutiveBlockedTicks: number;
+  operationalSyncPendingOutbox: number;
+  operationalSyncBlockCode: string | null;
 }
 
 const DEVICE_STATUS: Record<SiteDeviceView["status"], { label: string; cls: string }> = {
@@ -122,6 +140,20 @@ export function InstallationsPanel() {
                   {device.lastSyncError ? (
                     <p className="mt-0.5 text-xs text-red-700 dark:text-red-300" dir="ltr">
                       {device.lastSyncError}
+                    </p>
+                  ) : null}
+                  {device.operationalSyncBlocked ? (
+                    <p className="mt-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                      {operationalSyncBlockedSummary({
+                        since: device.operationalSyncBlockedSince
+                          ? fmt(device.operationalSyncBlockedSince)
+                          : null,
+                        pendingOutbox: device.operationalSyncPendingOutbox,
+                        code: isIamFailureCode(device.operationalSyncBlockCode)
+                          ? device.operationalSyncBlockCode
+                          : null,
+                      })}
+                      {` (${device.operationalSyncConsecutiveBlockedTicks.toLocaleString("fa-IR")} تلاش پشت سر هم)`}
                     </p>
                   ) : null}
                 </div>

@@ -33,7 +33,11 @@ import {
   type SyncEventType,
 } from "./sync-events";
 import type { ServerSyncConfig } from "./server-sync-config";
-import { runIamSync } from "./iam/sync";
+import { runIamSyncAttempt } from "./iam/sync";
+import {
+  clearOperationalSyncBlock,
+  recordOperationalSyncBlocked,
+} from "./iam/operational-sync-block";
 import { refreshAppUpdateStatus } from "./app-update";
 import { expireStalePairingSessions } from "./pairing-service";
 import { runMasterSync } from "./master-sync-transport";
@@ -1233,12 +1237,29 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   return { status: "ok", pulled: remoteEvents.length };
 }
 
-/** Receive and promote a staged replacement without exposing it to an owner browser. */
-export async function refreshStagedSiteCredential(
+export interface StagedCredentialOutcome {
+  /** False means this tick must not move business data — same rule as before. */
+  ready: boolean;
+  /**
+   * Why it is not ready, as the raw detail the sync tick hands to the durable
+   * blocked record (issue #988). A boolean could not tell "the cloud is
+   * unreachable" from "a rotation is mid-flight", and from the outside those
+   * two look identical while demanding opposite fixes.
+   */
+  error: string | null;
+}
+
+/**
+ * Receive and promote a staged replacement without exposing it to an owner
+ * browser, with the reason attached.
+ */
+export async function refreshStagedSiteCredentialAttempt(
   businessId: string,
-): Promise<boolean> {
+): Promise<StagedCredentialOutcome> {
   const config = await getServerSyncConfig(businessId);
-  if (!config?.remoteUrl || !config.token || !config.siteDeviceId) return true;
+  if (!config?.remoteUrl || !config.token || !config.siteDeviceId) {
+    return { ready: true, error: null };
+  }
   const base = config.remoteUrl.trim().replace(/\/+$/, "");
   try {
     const response = await fetch(
@@ -1248,7 +1269,9 @@ export async function refreshStagedSiteCredential(
         signal: AbortSignal.timeout(30_000),
       },
     );
-    if (!response.ok) return false;
+    if (!response.ok) {
+      return { ready: false, error: `credential_rotation_http_${response.status}` };
+    }
     const handoff = (await response.json()) as {
       pending?: boolean;
       token?: string;
@@ -1258,17 +1281,28 @@ export async function refreshStagedSiteCredential(
       token = handoff.token;
       await setServerSyncConfig(businessId, { ...config, token });
     }
-    if (!handoff.pending) return true;
-    return (
-      await fetch(`${base}/api/server-sync/credential-rotation/ack`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(30_000),
-      })
-    ).ok;
-  } catch {
-    return false;
+    if (!handoff.pending) return { ready: true, error: null };
+    const ack = await fetch(`${base}/api/server-sync/credential-rotation/ack`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    return ack.ok
+      ? { ready: true, error: null }
+      : { ready: false, error: `credential_rotation_ack_http_${ack.status}` };
+  } catch (error) {
+    return {
+      ready: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
+}
+
+/** Boolean contract the rotation step has always offered its callers. */
+export async function refreshStagedSiteCredential(
+  businessId: string,
+): Promise<boolean> {
+  return (await refreshStagedSiteCredentialAttempt(businessId)).ready;
 }
 
 /**
@@ -1344,6 +1378,108 @@ export async function acknowledgePendingPairing(
 // Combined tick (push then pull)
 // ---------------------------------------------------------------------------
 
+/**
+ * Which step of the security control plane is holding this tick's business
+ * data back, and what it said.
+ *
+ * Three things stand between a Hybrid install and a push: a pairing
+ * acknowledgement still owed to the cloud, a staged site credential the cloud
+ * has not released yet, and the IAM reconciliation itself. The first two used
+ * to skip the tick in silence and only the third logged anything — which is how
+ * issue #988's install went nine days with an unreachable cloud, a gate closed
+ * on the *credential* step, and no surface that could say so.
+ */
+export type OperationalGateReason =
+  | "reconciled"
+  | "not_configured"
+  /**
+   * Issue #987 — the cloud has not taken this install's committed pairing
+   * snapshot yet, so it does not authenticate the device and operational
+   * traffic would only collect 401s. The gate is closed for the same reason
+   * the tick used to `continue` on it; recording it is what #988 asked for.
+   */
+  | "pairing_pending"
+  | "credential_unsettled"
+  | "iam_failed";
+
+export interface OperationalGate {
+  /** False means this business's master data, push and pull are skipped. */
+  ready: boolean;
+  reason: OperationalGateReason;
+  /** The paired site to record against; null before pairing has one. */
+  siteDeviceId: string | null;
+  /** Raw detail for the durable record and for support; never rendered as-is. */
+  error: string | null;
+}
+
+/**
+ * Decide the gate, in one place, so obeying it and recording it cannot drift.
+ *
+ * Total by construction: one business's unreadable settings row must not stop
+ * the loop reaching the next one, and a gate this module cannot evaluate is a
+ * gate that is closed — never one that is silently open.
+ */
+export async function runOperationalSyncGate(businessId: string): Promise<OperationalGate> {
+  let siteDeviceId: string | null = null;
+  try {
+    const config = await getServerSyncConfig(businessId);
+    siteDeviceId = config?.siteDeviceId ?? null;
+    // Only a paired install can be *blocked*. An install that has not been
+    // activated yet has no cloud to be gated by, and calling its waiting state
+    // a failure would make every pairing in flight look broken.
+    const paired = Boolean(
+      config?.enabled && config.remoteUrl?.trim() && config.token?.trim() && siteDeviceId,
+    );
+    try {
+      const ack = await acknowledgePendingPairing(businessId);
+      if (ack.status === "error") {
+        // Retried by the next tick, exactly as before — but a pairing that has
+        // been failing for nine days is now a blocked install rather than a
+        // line in a console nobody opens. An install that has not been activated
+        // yet is still `not_configured`: nothing is being held back from it.
+        return paired
+          ? { ready: false, reason: "pairing_pending", siteDeviceId, error: ack.error }
+          : { ready: false, reason: "not_configured", siteDeviceId, error: ack.error };
+      }
+      const credential = await refreshStagedSiteCredentialAttempt(businessId);
+      if (!credential.ready) {
+        return paired
+          ? {
+              ready: false,
+              reason: "credential_unsettled",
+              siteDeviceId,
+              // Whatever the rotation step actually hit — an unreachable host,
+              // a refused answer, a hand-off still waiting to be closed — is
+              // what the block record shows, because that is what the owner has
+              // to act on.
+              error: credential.error ?? "site_credential_rotation_pending",
+            }
+          : { ready: false, reason: "not_configured", siteDeviceId, error: null };
+      }
+    } catch (err) {
+      // Preserved from the step this replaced: a throw here is not proof the
+      // gate is closed, so the IAM reconciliation below still gets to answer.
+      console.error(`pairing acknowledgement failed for business ${businessId}:`, err);
+    }
+    if (!paired) return { ready: false, reason: "not_configured", siteDeviceId, error: null };
+    const iam = await runIamSyncAttempt(businessId);
+    return {
+      ready: iam.ready,
+      reason: iam.ready
+        ? "reconciled"
+        : iam.reason === "not_configured"
+          ? "not_configured"
+          : "iam_failed",
+      siteDeviceId: iam.siteDeviceId ?? siteDeviceId,
+      error: iam.error,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`operational sync gate could not be evaluated for business ${businessId}:`, message);
+    return { ready: false, reason: "iam_failed", siteDeviceId, error: message };
+  }
+}
+
 export async function runServerSyncTick(): Promise<void> {
   // Discovery spans tenants; each business's sync then runs scoped to it.
   const rows = await withoutTenantScope("platform", async () => {
@@ -1358,37 +1494,50 @@ export async function runServerSyncTick(): Promise<void> {
   });
 
   for (const row of rows) {
-    try {
-      const ack = await withTenant(row.business_id, () =>
-        acknowledgePendingPairing(row.business_id),
-      );
-      // While pairing is still pending (acknowledgement failed or in-flight),
-      // the cloud does not yet recognise this device.  Operational sync would
-      // hit 401s, so skip it until the next tick retries the acknowledgement.
-      if (ack.status === "error") {
-        console.error(
-          `pairing acknowledgement error for business ${row.business_id}: ${ack.error}`,
-        );
-        continue;
-      }
-      const credentialReady = await withTenant(row.business_id, () =>
-        refreshStagedSiteCredential(row.business_id),
-      );
-      if (!credentialReady) continue;
-    } catch (err) {
-      console.error(
-        `pairing acknowledgement failed for business ${row.business_id}:`,
-        err,
-      );
-    }
+    // Issue #987's acknowledgement retry and the staged-credential hand-off are
+    // not separate `continue`s any more: `runOperationalSyncGate()` below runs
+    // them in order and *says why* it closed, so every step that can hold a
+    // tick back is recorded (issue #988) instead of being a log line.
     // Security control-plane reconciliation always gates operational traffic.
     // A suspension or permission revocation must land before queued orders.
-    const iamReady = await withTenant(row.business_id, () =>
-      runIamSync(row.business_id),
+    const gate = await withTenant(row.business_id, () =>
+      runOperationalSyncGate(row.business_id),
     );
+    const iamReady = gate.reason === "reconciled";
+    /*
+     * Issue #988 — the gate stays; the silence does not. Until now a gated tick
+     * produced one `console.error` line on the machine and nothing else, so an
+     * install could keep taking sales that never reached the cloud for nine days
+     * (1 092 ticks) while every health surface read "healthy". The outcome now
+     * lands in `iam_operational_sync_block_state`, which the connection badge,
+     * Settings → اتصال و همگام‌سازی and the device fleet read, and which raises
+     * one alert per episode once the block runs past
+     * OPERATIONAL_SYNC_ALERT_AFTER_TICKS.
+     *
+     * `not_configured` is the one answer that is not a blocked tick — but it
+     * does mean the gate is no longer holding anything, so an earlier episode is
+     * closed out rather than left accusing a cloud this install no longer talks
+     * to. Both recorders swallow their own errors on purpose: failing to write
+     * *visibility* must never change what the security gate decides.
+     */
+    if (gate.siteDeviceId) {
+      const siteDeviceId = gate.siteDeviceId;
+      await withTenant(row.business_id, async () => {
+        if (gate.reason === "reconciled" || gate.reason === "not_configured") {
+          await clearOperationalSyncBlock(row.business_id, siteDeviceId);
+        } else {
+          await recordOperationalSyncBlocked(row.business_id, siteDeviceId, {
+            error: gate.error ?? gate.reason,
+          });
+        }
+      });
+    }
     if (!iamReady) {
+      // The line the outage used to be reduced to, now carrying which step
+      // closed the gate — the durable record is the surface, this is the trace.
       console.error(
-        `IAM sync blocked operational sync for business ${row.business_id}`,
+        `IAM sync blocked operational sync for business ${row.business_id}: ${gate.reason}`
+          + (gate.error ? ` (${gate.error})` : ""),
       );
       continue;
     }

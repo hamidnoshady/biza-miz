@@ -387,8 +387,27 @@ export interface ConnectionStatusSnapshot {
   } | null;
   overallIdentity?: string;
   identityError?: string | null;
+  /**
+   * Issue #988 — the security plane gating this site's operational sync, with
+   * how long it has been doing so. `sync` cannot carry this: a gated tick has
+   * no push error and no push success at all, and the block is the only reason.
+   */
+  operationalBlock?: {
+    state: "healthy" | "blocked" | "not_configured";
+    blocked: boolean;
+    alertDue: boolean;
+    consecutiveBlockedTicks: number;
+    blockedSince: string | null;
+    lastBlockedAt: string | null;
+    lastRecoveredAt: string | null;
+    code: string | null;
+    lastError: string | null;
+    pendingOutbox: number;
+    episodesBlocked: number;
+  } | null;
   /** Issue #987 — true while the pairing snapshot has not yet been promoted. */
   pairingPending?: boolean;
+
 }
 
 export interface OfflineQueueState {

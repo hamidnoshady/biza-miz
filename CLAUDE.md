@@ -525,6 +525,15 @@ versioned **events** (`sync_events` outbox/inbox) for operations, and the **mast
   `appendSyncOutboxEvent` in the same transaction and give it a handler in
   `sync-domain-handlers.ts`; `appendSyncOutboxEvent` decides who records (a site always, the
   central server only for a branch with a paired desktop, nobody during a replay).
+- **A gated operational tick is recorded, never just logged.** `runServerSyncTick()`
+  refuses to run master data, the site profile, push and pull until the security plane
+  converges, and that gate must not be weakened to best-effort. It is decided and explained
+  by one function (`runOperationalSyncGate()`), which writes
+  `iam_operational_sync_block_state` (migration 0228) — consecutive gated ticks, the episode's
+  start, the classified reason and the queued-event depth — so every health surface can say
+  «همگام‌سازی عملیاتی مسدود» instead of claiming green (issue #988: nine days, 1 092 ticks,
+  one `console.error` line apiece). New code that skips a tick for a control-plane reason goes
+  through that gate; a boolean-only `runIamSync()` cannot record it.
 - **Never write a master table around the trigger, and never merge a derived column.** A new
   synchronised table goes into `MASTER_SYNC_TABLES` *and* the trigger list in the same
   migration (a unit test compares them); stock cost, occupancy, scores and ciphertext stay in

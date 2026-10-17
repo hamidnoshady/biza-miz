@@ -21,6 +21,8 @@ import {
   pullCloudExceptionResponses,
 } from "@/lib/cloud-exception-relay";
 import { readHybridIdentityStatus } from "@/lib/iam/login-credential-sync";
+import { readOperationalSyncBlockState } from "@/lib/iam/operational-sync-block";
+import { operationalSyncHealth, type OperationalSyncBlockView } from "@/lib/iam/operational-sync-health";
 
 /**
  * Authenticated, credential-free connection model shared by the global status
@@ -73,6 +75,8 @@ export const GET = withTenantScope(async () => {
       credentialSync: null,
       overallIdentity: "not_configured",
       identityError: null,
+      // Not a paired site, so nothing has ever gated its operational traffic.
+      operationalBlock: null,
       supportRelay: exceptionRelay,
     });
   }
@@ -104,6 +108,8 @@ export const GET = withTenantScope(async () => {
       credentialSync: null,
       overallIdentity: "not_configured",
       identityError: null,
+      // Not a paired site, so nothing has ever gated its operational traffic.
+      operationalBlock: null,
       supportRelay: exceptionRelay,
     });
   }
@@ -169,6 +175,27 @@ export const GET = withTenantScope(async () => {
   if (identityStatus?.identity && identityStatus.identity.state !== "healthy" && identityStatus.identity.state !== "syncing") {
     iamError = `iam_sync_blocked: ${identityStatus.identity.lastError ?? identityStatus.identity.state}`;
   }
+  /*
+   * Issue #988 — the gate's own durable record, read next to the identity
+   * state rather than inferred from it. `iam_sync_state` describes the last
+   * *reconciliation*; this describes what that reconciliation did to the site's
+   * operational traffic: master data, push and pull are skipped for as long as
+   * it fails, and the tick that skips them used to leave nothing behind but a
+   * console line (1 092 of them over nine days on the reported install). The
+   * consecutive count is what lets a surface say "blocked since …" instead of
+   * "healthy", and the same row carries how many local events the gate is
+   * holding back.
+   */
+  const operationalBlock = config?.enabled && config.siteDeviceId
+    ? await readOperationalSyncBlockState(session.businessId, config.siteDeviceId)
+    : null;
+  const operationalPlane = operationalSyncHealth({
+    configured: Boolean(config?.enabled && config.siteDeviceId),
+    block: operationalBlock,
+  });
+  if (operationalPlane.state === "blocked" && !iamError) {
+    iamError = `iam_sync_blocked: ${operationalBlock?.lastError ?? operationalPlane.code ?? "operational_sync_blocked"}`;
+  }
   let identityError: string | null = null;
   if (identityStatus?.configured && identityStatus.overall === "degraded") {
     // Membership metadata may be fine; the login plane is not. The connection
@@ -176,6 +203,22 @@ export const GET = withTenantScope(async () => {
     // rides as its own signal rather than as "cloud unreachable".
     identityError = `identity_sync_degraded: ${identityStatus.reason ?? "unknown"}`;
   }
+  const operationalBlockView: OperationalSyncBlockView = {
+    state: operationalPlane.state,
+    blocked: operationalPlane.state === "blocked",
+    /** The block has run past OPERATIONAL_SYNC_ALERT_AFTER_TICKS. */
+    alertDue: operationalPlane.alertDue,
+    consecutiveBlockedTicks: operationalPlane.consecutiveBlockedTicks,
+    blockedSince: operationalBlock?.firstBlockedAt ?? null,
+    lastBlockedAt: operationalBlock?.lastBlockedAt ?? null,
+    lastRecoveredAt: operationalBlock?.lastRecoveredAt ?? null,
+    code: operationalPlane.code,
+    // Kept for support's tooltip/diagnostics; a screen renders `code`, never
+    // this raw string.
+    lastError: operationalBlock?.lastError ?? null,
+    pendingOutbox: operationalBlock?.pendingOutbox ?? 0,
+    episodesBlocked: operationalBlock?.episodesBlocked ?? 0,
+  };
   const siteProfile = await getSetting<SiteProfileState>(session.businessId, SETTING_KEYS.siteProfileState);
   // Issue #948 P0/P1-5 — classify the *persisted* errors instead of folding
   // them into one "remote_unreachable". A push/pull error is evidence about
@@ -266,6 +309,12 @@ export const GET = withTenantScope(async () => {
               ? ("unknown" as const)
               : ("ok" as const),
       operationalSync: sync,
+      /**
+       * Issue #988 — is the security plane holding this site's master data,
+       * push and pull back *right now*? Independent of `operationalSync` above:
+       * a blocked install has no push error of its own, it has no push at all.
+       */
+      operationalBlock: operationalBlockView,
       iamMembership: identityStatus?.configured
         ? {
             state: identityStatus.identity?.state ?? "snapshot_required",
@@ -338,6 +387,10 @@ export const GET = withTenantScope(async () => {
     // and surfaced here so the UI can distinguish "pairing still finalising"
     // from a sync error while the acknowledgement is in flight.
     pairingPending: Boolean(config?.pairingPending),
+    // The operational plane's own verdict, next to the two identity planes, so
+    // a reader can tell "identity needs attention" from "no sales are leaving
+    // this till" — which used to be the same blank spot in every surface.
+    operationalBlock: operationalBlockView,
     supportRelay: exceptionRelay,
   });
 });

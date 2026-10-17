@@ -30,6 +30,18 @@ export interface SiteDeviceView {
   lastSuccessfulPushAt: string | null;
   lastSuccessfulPullAt: string | null;
   lastSyncError: string | null;
+  /**
+   * Issue #988 — whether the IAM/security plane is gating this install's
+   * operational sync (master data, push and pull) right now, and since when.
+   * A desktop can be perfectly reachable, authenticated and idle-looking while
+   * every sale it takes stays on disk, so the fleet has to say so per device.
+   */
+  operationalSyncBlocked: boolean;
+  operationalSyncBlockedSince: string | null;
+  operationalSyncConsecutiveBlockedTicks: number;
+  operationalSyncPendingOutbox: number;
+  /** Short machine code (`transport`, `forbidden`, …) — never a raw error. */
+  operationalSyncBlockCode: string | null;
 }
 
 type SiteDeviceRow = {
@@ -47,6 +59,11 @@ type SiteDeviceRow = {
   last_successful_push_at: Date | null;
   last_successful_pull_at: Date | null;
   last_sync_error: string | null;
+  block_status: string | null;
+  block_first_blocked_at: Date | null;
+  block_consecutive_ticks: number | null;
+  block_pending_outbox: number | null;
+  block_last_code: string | null;
 };
 
 function toView(row: SiteDeviceRow): SiteDeviceView {
@@ -65,17 +82,32 @@ function toView(row: SiteDeviceRow): SiteDeviceView {
     lastSuccessfulPushAt: row.last_successful_push_at?.toISOString() ?? null,
     lastSuccessfulPullAt: row.last_successful_pull_at?.toISOString() ?? null,
     lastSyncError: row.last_sync_error,
+    operationalSyncBlocked: row.block_status === "blocked",
+    operationalSyncBlockedSince: row.block_first_blocked_at?.toISOString() ?? null,
+    operationalSyncConsecutiveBlockedTicks: Number(row.block_consecutive_ticks ?? 0),
+    operationalSyncPendingOutbox: Number(row.block_pending_outbox ?? 0),
+    operationalSyncBlockCode: row.block_last_code,
   };
 }
 
-/** Per-device health comes from runs for that device, never a business-wide latest row. */
+/**
+ * Per-device health comes from runs for that device, never a business-wide
+ * latest row — including the operational-sync gate (issue #988), which is
+ * recorded per `(business_id, site_device_id)` precisely so one blocked till
+ * cannot hide behind a healthy sibling branch.
+ */
 export async function listSiteDevices(businessId: string): Promise<SiteDeviceView[]> {
   const { rows } = await query<SiteDeviceRow>(
     `SELECT d.id, d.public_id, d.location_id, l.name AS location_name,
             d.display_name, d.status, d.created_at, d.last_seen_at, d.revoked_at,
             credential.latest_rotated_at AS credential_rotated_at,
             COALESCE(credential.has_staged, false) AS credential_rotation_pending,
-            runs.last_successful_push_at, runs.last_successful_pull_at, runs.last_sync_error
+            runs.last_successful_push_at, runs.last_successful_pull_at, runs.last_sync_error,
+            CASE WHEN block.status = 'blocked' THEN block.status END AS block_status,
+            CASE WHEN block.status = 'blocked' THEN block.first_blocked_at END AS block_first_blocked_at,
+            COALESCE(block.consecutive_blocked_ticks, 0) AS block_consecutive_ticks,
+            CASE WHEN block.status = 'blocked' THEN block.pending_outbox ELSE 0 END AS block_pending_outbox,
+            CASE WHEN block.status = 'blocked' THEN block.last_code END AS block_last_code
        FROM site_devices d
        JOIN locations l ON l.id = d.location_id AND l.business_id = d.business_id
        LEFT JOIN LATERAL (
@@ -91,6 +123,8 @@ export async function listSiteDevices(businessId: string): Promise<SiteDeviceVie
            (array_agg(error_code ORDER BY started_at DESC))[1] AS last_sync_error
            FROM sync_runs r WHERE r.business_id=d.business_id AND r.site_device_id=d.id
        ) runs ON true
+       LEFT JOIN iam_operational_sync_block_state block
+         ON block.site_device_id = d.id AND block.business_id = d.business_id
       WHERE d.business_id = $1
       ORDER BY d.created_at DESC`,
     [businessId],
