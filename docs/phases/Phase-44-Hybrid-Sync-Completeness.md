@@ -56,7 +56,9 @@ link check itself.
   The master feed uses the same rule over `(txid, table, row)`.
 - Exponential backoff with jitter (30 s → 15 min) per transport direction and per refused row.
 - A single-flight runner; a committed local change (`pg_notify('sync_outbox')`) or a
-  central-side change (long-poll `peek=1&wait=25`) wakes the tick within seconds.
+  central-side change (long-poll `peek=1&wait=15`, server cap 20 s) wakes the tick within
+  seconds. A hold the edge ends (502/503/504, timeout, cut connection) is classified as
+  expected — debug at most — and retried with jitter, never at `console.error` (issue #989).
 - Idle ticks write no log rows.
 
 ## Self-checking

@@ -7,6 +7,7 @@ import {
   legacySyncToken,
   recordSyncRun,
 } from "@/lib/server-sync";
+import { MAX_PULL_WAIT_SECONDS, SYNC_PULL_MARKER_HEADER } from "@/lib/sync-watch";
 
 /**
  * Server-to-server pull endpoint (Phase 11).
@@ -44,13 +45,32 @@ type SyncEventRow = {
   schema_version: number;
 };
 
+/**
+ * Every answer this route writes carries the app's own marker (issue #989).
+ *
+ * A CDN or proxy that kills a held request answers with its own 502/503/504,
+ * which contains none of our headers. The desktop's watcher uses that absence
+ * to say "an intermediary answered, not the app" in its diagnostic line, so an
+ * operator can stop guessing where the failure lives. `no-store` keeps any
+ * intermediary from caching a `{pending:false}` answer.
+ */
+function answer(body: unknown, status = 200) {
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+      [SYNC_PULL_MARKER_HEADER]: "1",
+    },
+  });
+}
+
 export async function GET(request: NextRequest) {
   const auth = request.headers.get("authorization");
   const bearer = auth?.startsWith("Bearer ")
     ? auth.slice("Bearer ".length).trim()
     : "";
   if (!bearer)
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    return answer({ error: "unauthorized" }, 401);
 
   const { searchParams } = new URL(request.url);
 
@@ -60,7 +80,7 @@ export async function GET(request: NextRequest) {
   if (!businessId) {
     const legacy = legacySyncToken();
     if (!legacy || !tokensMatch(bearer, legacy)) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      return answer({ error: "unauthorized" }, 401);
     }
     usedLegacyToken = true;
     // Legacy mode has no per-business token to resolve identity from, so the
@@ -68,15 +88,12 @@ export async function GET(request: NextRequest) {
     // (the non-legacy path above) doesn't need this.
     const requested = searchParams.get("businessId");
     if (!requested)
-      return NextResponse.json(
-        { error: "business_id_required" },
-        { status: 400 },
-      );
+      return answer({ error: "business_id_required" }, 400);
     const known = await withoutTenantScope("server-sync-auth", () =>
       query(`SELECT 1 FROM businesses WHERE id = $1`, [requested]),
     );
     if (known.rows.length === 0)
-      return NextResponse.json({ error: "unknown_business" }, { status: 422 });
+      return answer({ error: "unknown_business" }, 422);
     businessId = requested;
 
     const { rows: tokenRows } = await withoutTenantScope(
@@ -87,10 +104,7 @@ export async function GET(request: NextRequest) {
         ]),
     );
     if (tokenRows.length > 0) {
-      return NextResponse.json(
-        { error: "legacy_token_superseded" },
-        { status: 403 },
-      );
+      return answer({ error: "legacy_token_superseded" }, 403);
     }
   }
 
@@ -105,9 +119,15 @@ export async function GET(request: NextRequest) {
   // Long-poll: with nothing to return, hold the request up to `wait` seconds
   // and answer as soon as something commits, so a desktop hears about a cloud
   // edit in about a second instead of on its next 30-second tick.
+  //
+  // Capped at MAX_PULL_WAIT_SECONDS (issue #989): the desktop asks for 15 s,
+  // and an older one that still asks for 25 is answered within 20. A hold must
+  // end well inside the ~30 s idle timeout an edge/CDN applies to a request
+  // with no bytes flowing, or the proxy kills it with a 502/504 that no code
+  // here can observe or prevent.
   const waitSeconds = Math.min(
     Math.max(Number(searchParams.get("wait") ?? "0") || 0, 0),
-    25,
+    MAX_PULL_WAIT_SECONDS,
   );
 
   if (
@@ -115,7 +135,7 @@ export async function GET(request: NextRequest) {
     !Number.isFinite(limit) ||
     (afterTxRaw !== null && afterTx === null)
   ) {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    return answer({ error: "bad_request" }, 400);
   }
 
   const readPage = () =>
@@ -173,7 +193,7 @@ export async function GET(request: NextRequest) {
   // events themselves are fetched by the full sync tick, which settles
   // permissions (IAM) first.
   if (searchParams.get("peek") === "1") {
-    return NextResponse.json({ pending: rows.length > 0 });
+    return answer({ pending: rows.length > 0 });
   }
 
   // `id` is the site's pull cursor and it validates it with
@@ -215,5 +235,5 @@ export async function GET(request: NextRequest) {
       }),
     );
   }
-  return NextResponse.json({ events });
+  return answer({ events });
 }
