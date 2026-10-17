@@ -3,16 +3,14 @@ import { describe, expect, it } from "vitest";
 import { DASHBOARD_HOME } from "@/lib/app-routes";
 
 /**
- * Issue #905 — Unified contextual sidebar on the assistant route (`/dashboard`).
+ * Issue #905 (2026-10-17 owner UX correction) — Workspace rail navigation.
  *
  * `WorkspaceRail` renders the global platform navigation (`DASHBOARD_HOME`,
- * `WORKSPACE_MODULE_HOME`, and the four app launchers) and, when
- * `isAssistantSurface(pathname)` is true, integrates the «گفت‌وگوی جدید» action
- * and private «گفتگوهای اخیر» history group (`AiConversationsSidebar`) into the
- * single canonical sidebar instead of mounting a second permanent rail on the
- * chat page.
+ * `WORKSPACE_MODULE_HOME`, and the four app launchers). Private conversation
+ * history and «گفت‌وگوی جدید» live in the assistant's own collapsible left
+ * history panel rather than duplicating inside the right-side platform rail.
  */
-describe("WorkspaceRail — unified contextual assistant navigation", () => {
+describe("WorkspaceRail — platform navigation without duplicated chat history", () => {
   const sidebar = readFileSync("src/app/dashboard/dashboard-sidebar.tsx", "utf8");
   const railStart = sidebar.indexOf("function WorkspaceRail");
   const railEnd = sidebar.indexOf("\nfunction SidebarBrand", railStart);
@@ -27,10 +25,9 @@ describe("WorkspaceRail — unified contextual assistant navigation", () => {
     expect(rail).not.toContain("href={`/ai");
   });
 
-  it("integrates New Chat and private conversation history into the single contextual rail on the assistant route", () => {
-    expect(rail).toContain("isAssistantSurface(pathname)");
-    expect(rail).toContain("گفت‌وگوی جدید");
-    expect(rail).toContain("AiConversationsSidebar");
+  it("does not duplicate conversation history or New Chat inside the right-side workspace rail", () => {
+    expect(rail).not.toContain("AiConversationsSidebar");
+    expect(rail).not.toContain("گفت‌وگوی جدید");
     expect(rail).not.toContain("/api/ai/conversations");
   });
 

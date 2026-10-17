@@ -1,17 +1,22 @@
 "use client";
 
 /**
- * The composer's task dropdown (Phase 36c) — ChatGPT's model picker, but for
- * *what the assistant should be doing*: each entry is a task lens (sales
- * analysis, inventory, accounting, …) that rides into the system prompt for
- * the next turns, plus a custom entry where the owner types any job
- * description they want.
+ * The composer's task helpers and selector (Phase 36c & Issue #905).
+ *
+ * Each entry is a task lens (sales analysis, inventory, accounting, …) that
+ * rides into the system prompt for the next turns, plus a single custom entry
+ * where the owner types any job description they want.
+ *
+ * Issue #905 (2026-10-17 owner UX correction): task selection in the assistant
+ * composer is accessed through the consolidated `+` menu rather than as an
+ * always-visible pill on the composer or header.
  */
 import { useState } from "react";
 import {
   BikeIcon,
   CalculatorIcon,
   CalendarClockIcon,
+  CheckIcon,
   ChevronsUpDownIcon,
   HeartIcon,
   MegaphoneIcon,
@@ -31,11 +36,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { AI_TASKS, taskById, type AiTaskId } from "@/lib/ai-tasks";
+import { AI_TASKS, taskById, type AiTask, type AiTaskId } from "@/lib/ai-tasks";
 import type { AssistantMode } from "./use-ai-chat";
 import { cn } from "@/lib/utils";
 
-const TASK_ICONS: Record<AiTaskId, LucideIcon> = {
+export const TASK_ICONS: Record<AiTaskId, LucideIcon> = {
   general: SparklesIcon,
   sales: TrendingUpIcon,
   inventory: PackageIcon,
@@ -49,7 +54,7 @@ const TASK_ICONS: Record<AiTaskId, LucideIcon> = {
   custom: PenLineIcon,
 };
 
-function TaskIcon({
+export function TaskIcon({
   id,
   className,
 }: {
@@ -58,6 +63,41 @@ function TaskIcon({
 }) {
   const Icon = TASK_ICONS[id] ?? SparklesIcon;
   return <Icon className={className} />;
+}
+
+export function resolveAvailablePresetTasks(
+  mode: AssistantMode,
+  eligibleTaskIds?: readonly AiTaskId[],
+): AiTask[] {
+  const eligibleSet =
+    eligibleTaskIds !== undefined ? new Set(eligibleTaskIds) : null;
+  // Filter out "custom" from the preset list so the custom task entry is only
+  // rendered once in its dedicated editor row below the separator.
+  return AI_TASKS.filter(
+    (item) =>
+      item.id !== "custom" &&
+      item.modes.includes(mode) &&
+      (!eligibleSet || item.id === "general" || eligibleSet.has(item.id)),
+  );
+}
+
+export function resolveCurrentTaskSummary(
+  task: AiTaskId,
+  customTask: string,
+): { id: AiTaskId; label: string; description: string } {
+  if (task === "custom" && customTask) {
+    return {
+      id: "custom",
+      label: "وظیفهٔ سفارشی",
+      description: customTask,
+    };
+  }
+  const found = taskById(task) ?? taskById("general")!;
+  return {
+    id: found.id,
+    label: found.label,
+    description: found.description,
+  };
 }
 
 interface AiTaskSelectorProps {
@@ -82,28 +122,10 @@ export function AiTaskSelector({
   const [customOpen, setCustomOpen] = useState(false);
   const [draft, setDraft] = useState("");
 
-  // The wizard is already one specific task — offering another lens there
-  // would just confuse the setup flow.
   if (mode === "wizard") return null;
 
-  const eligibleSet =
-    eligibleTaskIds !== undefined ? new Set(eligibleTaskIds) : null;
-  // Filter out "custom" from the preset list so the custom task entry is only
-  // rendered once in its dedicated editor row below the separator.
-  const available = AI_TASKS.filter(
-    (item) =>
-      item.id !== "custom" &&
-      item.modes.includes(mode) &&
-      (!eligibleSet || item.id === "general" || eligibleSet.has(item.id)),
-  );
-  const current =
-    task === "custom" && customTask
-      ? {
-          id: "custom" as AiTaskId,
-          label: "وظیفهٔ سفارشی",
-          description: customTask,
-        }
-      : (taskById(task) ?? taskById("general")!);
+  const available = resolveAvailablePresetTasks(mode, eligibleTaskIds);
+  const current = resolveCurrentTaskSummary(task, customTask);
 
   return (
     <DropdownMenu
@@ -154,7 +176,7 @@ export function AiTaskSelector({
               <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
                 <TaskIcon id={item.id} className="size-3.5" />
               </span>
-              <span className="min-w-0">
+              <span className="min-w-0 flex-1">
                 <span className="block text-xs font-semibold leading-5 text-foreground">
                   {item.label}
                 </span>
@@ -162,6 +184,9 @@ export function AiTaskSelector({
                   {item.description}
                 </span>
               </span>
+              {task === item.id ? (
+                <CheckIcon className="mt-1 size-4 shrink-0 text-primary" aria-hidden="true" />
+              ) : null}
             </DropdownMenuItem>
           ))}
         </div>
@@ -215,7 +240,7 @@ export function AiTaskSelector({
             <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground">
               <PenLineIcon className="size-3.5" />
             </span>
-            <span className="min-w-0">
+            <span className="min-w-0 flex-1">
               <span className="block text-xs font-semibold leading-5 text-foreground">
                 سفارشی…
               </span>
@@ -223,6 +248,9 @@ export function AiTaskSelector({
                 هر وظیفه‌ای که می‌خواهید، به زبان خودتان
               </span>
             </span>
+            {task === "custom" && Boolean(customTask) ? (
+              <CheckIcon className="size-4 shrink-0 text-primary" aria-hidden="true" />
+            ) : null}
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>

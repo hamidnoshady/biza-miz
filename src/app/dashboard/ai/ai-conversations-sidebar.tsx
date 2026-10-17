@@ -1,11 +1,13 @@
 "use client";
 
 /**
- * «گفتگوهای اخیر» — the private conversation history list for the assistant.
+ * «گفتگوهای اخیر» — the private conversation history panel for the assistant.
  *
- * Issue #905:
- * - Renders inside the canonical contextual sidebar on `/dashboard` (`embedded`)
- *   or inside the shared `Sheet` overlay on mobile / collapsed rail (`sheet`).
+ * Issue #905 (2026-10-17 owner UX correction):
+ * - Renders inside the collapsible physical-left history panel on desktop and
+ *   inside the left-side `Sheet` drawer on narrow viewports.
+ * - Provides the «گفت‌وگوی جدید» (New Chat) action at the top of the panel so
+ *   no duplicate New Chat button is needed in the page header.
  * - Server-backed search (`?q=`) across permitted conversation titles and
  *   message contents, plus compound cursor pagination (`?before=&beforeId=`)
  *   for older history pages.
@@ -26,7 +28,9 @@ import {
   CheckIcon,
   ChevronDownIcon,
   MessageSquareIcon,
+  MessageSquarePlusIcon,
   MoreHorizontalIcon,
+  PanelLeftCloseIcon,
   PencilIcon,
   RotateCcwIcon,
   SearchIcon,
@@ -87,17 +91,23 @@ export function AiConversationsSidebar({
   /** Bumped by the parent when a new conversation may have been created. */
   refreshToken,
   onSelect,
+  onNewConversation,
   onDeleted,
   onRenamed,
   onClose,
+  closeLabel = "بستن تاریخچهٔ گفتگوها",
+  collapsible = false,
   embedded = false,
 }: {
   activeId: string | null;
   refreshToken: number;
   onSelect: (id: string) => void;
+  onNewConversation?: () => void;
   onDeleted?: (id: string) => void;
   onRenamed?: (conversation: ConversationSummary) => void;
   onClose?: () => void;
+  closeLabel?: string;
+  collapsible?: boolean;
   embedded?: boolean;
 }) {
   const [items, setItems] = useState<ConversationSummary[] | null>(null);
@@ -440,7 +450,7 @@ export function AiConversationsSidebar({
       aria-label="گفتگوهای اخیر"
     >
       {!isEmbedded ? (
-        <div className="flex items-center gap-2 border-b border-border/80 px-3 py-2.5">
+        <div className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border/80 px-3 py-1.5">
           <MessageSquareIcon aria-hidden="true" className="size-4 shrink-0 text-primary" />
           <p className="min-w-0 flex-1 text-sm font-semibold text-foreground">
             گفتگوهای اخیر
@@ -449,10 +459,15 @@ export function AiConversationsSidebar({
             <button
               type="button"
               onClick={onClose}
-              aria-label="بستن گفتگوهای اخیر"
-              className="grid size-7 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45"
+              aria-label={closeLabel}
+              title={closeLabel}
+              className="grid size-7 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45"
             >
-              <XIcon className="size-4" />
+              {collapsible ? (
+                <PanelLeftCloseIcon className="size-4" aria-hidden="true" />
+              ) : (
+                <XIcon className="size-4" aria-hidden="true" />
+              )}
             </button>
           ) : null}
         </div>
@@ -464,7 +479,23 @@ export function AiConversationsSidebar({
         </div>
       )}
 
-      <div className={cn("py-1.5", isEmbedded ? "px-1" : "px-2.5 py-2")}>
+      {onNewConversation ? (
+        <div className={cn("shrink-0 pt-2", isEmbedded ? "px-1" : "px-2.5")}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onNewConversation}
+            aria-label="گفت‌وگوی جدید"
+            className="w-full justify-start gap-2 border-primary/25 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-primary"
+          >
+            <MessageSquarePlusIcon className="size-4 shrink-0" aria-hidden="true" />
+            <span>گفت‌وگوی جدید</span>
+          </Button>
+        </div>
+      ) : null}
+
+      <div className={cn("shrink-0 py-1.5", isEmbedded ? "px-1" : "px-2.5 py-2")}>
         <div className="relative">
           <SearchIcon
             aria-hidden="true"
