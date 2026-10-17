@@ -15,7 +15,7 @@ function app(overrides: Partial<NativeAppInfo>): NativeAppInfo {
     appVersionName: "1.0.0",
     appVersionCode: 1,
     environment: "production",
-    bridgeVersion: 2,
+    bridgeVersion: 3,
     capabilities: [],
     ...overrides,
   };
@@ -23,7 +23,7 @@ function app(overrides: Partial<NativeAppInfo>): NativeAppInfo {
 
 describe("resolveCapability", () => {
   it("uses the native app when it reports the capability at a sufficient bridge version", () => {
-    const native = app({ bridgeVersion: 2, capabilities: ["barcode.scan"] });
+    const native = app({ bridgeVersion: 3, capabilities: ["barcode.scan"] });
     expect(resolveCapability("barcode.scan", NO_BROWSER_FEATURES, native)).toEqual({
       available: true,
       provider: "native",
@@ -32,7 +32,7 @@ describe("resolveCapability", () => {
   });
 
   it("prefers the native provider over the browser when both exist", () => {
-    const native = app({ bridgeVersion: 2, capabilities: ["barcode.scan"] });
+    const native = app({ bridgeVersion: 3, capabilities: ["barcode.scan"] });
     expect(resolveCapability("barcode.scan", WITH_BARCODE, native).provider).toBe("native");
   });
 
@@ -53,7 +53,7 @@ describe("resolveCapability", () => {
   });
 
   it("asks for an app update when the installed app predates the bridge version that provides the capability", () => {
-    const oldApp = app({ bridgeVersion: 1, capabilities: ["printer"] });
+    const oldApp = app({ bridgeVersion: 2, capabilities: ["printer"] });
     expect(resolveCapability("printer", NO_BROWSER_FEATURES, oldApp)).toEqual({
       available: false,
       provider: null,
@@ -67,7 +67,7 @@ describe("resolveCapability", () => {
   });
 
   it("does not ask for an update when an up-to-date app simply lacks the capability", () => {
-    expect(resolveCapability("printer", NO_BROWSER_FEATURES, app({ bridgeVersion: 2 })).updateRequired).toBe(false);
+    expect(resolveCapability("printer", NO_BROWSER_FEATURES, app({ bridgeVersion: 3 })).updateRequired).toBe(false);
   });
 
   it("uses a browser feature for a capability that has one, regardless of the app", () => {
@@ -83,7 +83,16 @@ describe("resolveAllCapabilities", () => {
   it("returns a resolution for every capability in the contract", () => {
     const all = resolveAllCapabilities(NO_BROWSER_FEATURES, null);
     expect(Object.keys(all).sort()).toEqual(
-      ["barcode.scan", "biometric", "crm.caller-id", "notifications", "printer", "share"].sort(),
+      [
+        "background.sync",
+        "barcode.scan",
+        "biometric",
+        "crm.caller-id",
+        "media.capture",
+        "notifications",
+        "printer",
+        "share",
+      ].sort(),
     );
     expect(Object.isFrozen(all)).toBe(true);
   });

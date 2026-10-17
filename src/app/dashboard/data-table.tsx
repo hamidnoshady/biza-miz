@@ -19,8 +19,119 @@
  * scroll and the panel; callers own the columns because column semantics
  * (scope, alignment, numeric formatting) belong to the data, not the chrome.
  */
-import type { ReactNode, ThHTMLAttributes, TdHTMLAttributes } from "react";
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  type ReactElement,
+  type ReactNode,
+  type ThHTMLAttributes,
+  type TdHTMLAttributes,
+} from "react";
 import { cn } from "@/lib/utils";
+
+function extractHeaderText(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node).trim();
+  if (Array.isArray(node)) return node.map(extractHeaderText).filter(Boolean).join(" ").trim();
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return extractHeaderText(node.props.children);
+  }
+  return "";
+}
+
+function cloneWithChildren(
+  element: ReactElement<{ children?: ReactNode }>,
+  nextChildren: ReactNode,
+  extraProps: Record<string, unknown> = {},
+): ReactElement<{ children?: ReactNode }> {
+  if (Array.isArray(nextChildren)) {
+    const allHaveKeys = nextChildren.every(
+      (item) => isValidElement(item) && item.key !== null,
+    );
+    if (allHaveKeys) {
+      return cloneElement(element, extraProps, nextChildren);
+    }
+    return cloneElement(element, extraProps, ...nextChildren);
+  }
+  return cloneElement(element, extraProps, nextChildren);
+}
+
+function injectMobileDataLabels(children: ReactNode): { children: ReactNode; hasLabels: boolean } {
+  const topNodes = Children.toArray(children);
+  let headers: string[] = [];
+
+  for (const child of topNodes) {
+    if (!isValidElement<{ children?: ReactNode }>(child)) continue;
+    if (child.type === DataTableHead || child.type === "thead") {
+      const headChildren = Children.toArray(child.props.children);
+      const thNodes =
+        headChildren.length === 1 &&
+        isValidElement<{ children?: ReactNode }>(headChildren[0]) &&
+        headChildren[0].type === "tr"
+          ? Children.toArray(headChildren[0].props.children)
+          : headChildren;
+      headers = thNodes.map((th) => extractHeaderText(th));
+      break;
+    }
+  }
+
+  if (headers.length === 0 || headers.every((h) => !h)) {
+    return { children, hasLabels: false };
+  }
+
+  let injectedAny = false;
+  const mapNodes = (nodes: ReactNode, fn: (node: ReactNode, idx: number) => ReactNode): ReactNode =>
+    Array.isArray(nodes) ? nodes.map(fn) : fn(nodes, 0);
+
+  const nextChildren = mapNodes(children, (child, childIdx) => {
+    if (!isValidElement<{ children?: ReactNode }>(child)) return child;
+    if (child.type !== DataTableBody && child.type !== "tbody") {
+      return child.key !== null ? child : cloneElement(child, { key: `dt-top-${childIdx}` });
+    }
+
+    const nextRows = mapNodes(child.props.children, (row) => {
+      if (!isValidElement<{ children?: ReactNode }>(row)) return row;
+      if (row.type !== DataTableRow && row.type !== "tr") return row;
+
+      const cells = Children.toArray(row.props.children);
+      const hasSpanningCell = cells.some(
+        (c) =>
+          isValidElement<{ colSpan?: number }>(c) &&
+          typeof c.props.colSpan === "number" &&
+          c.props.colSpan > 1,
+      );
+      if (hasSpanningCell) return row;
+
+      let colIdx = 0;
+      const nextCells = mapNodes(row.props.children, (cell) => {
+        if (!isValidElement<Record<string, unknown>>(cell)) return cell;
+        if (cell.type !== Td && cell.type !== "td") return cell;
+        const label = headers[colIdx] ?? "";
+        colIdx += 1;
+        if ("data-label" in cell.props) {
+          injectedAny = true;
+          return cell;
+        }
+        if (!label) return cell;
+        injectedAny = true;
+        return cloneElement(cell as ReactElement<Record<string, unknown>>, {
+          "data-label": label,
+        });
+      });
+
+      return cloneWithChildren(row as ReactElement<{ children?: ReactNode }>, nextCells);
+    });
+
+    return cloneWithChildren(
+      child as ReactElement<{ children?: ReactNode }>,
+      nextRows,
+      child.key !== null ? {} : { key: `dt-body-${childIdx}` },
+    );
+  });
+
+  return { children: nextChildren, hasLabels: injectedAny };
+}
 
 /**
  * The bordered, clipped panel a table sits in, plus its horizontal scroller.
@@ -52,6 +163,10 @@ export function DataTable({
    */
   frame?: boolean;
 }) {
+  const alreadyHasDedicatedMobileView = Boolean(className && /\bhidden\b/.test(className));
+  const { children: labeledChildren, hasLabels } = alreadyHasDedicatedMobileView
+    ? { children, hasLabels: false }
+    : injectMobileDataLabels(children);
   return (
     <div
       className={cn(
@@ -60,9 +175,12 @@ export function DataTable({
       )}
     >
       <div className="overflow-x-auto">
-        <table className={cn("w-full text-sm", tableClassName)}>
+        <table
+          data-mobile-cards={hasLabels ? "true" : undefined}
+          className={cn("w-full text-sm", tableClassName)}
+        >
           <caption className="sr-only">{caption}</caption>
-          {children}
+          {labeledChildren}
         </table>
       </div>
     </div>

@@ -17,10 +17,13 @@ import {
   type NativeBridgeClient,
 } from "./bridge";
 import {
+  NATIVE_EVENTS,
   type NativeAppInfo,
   type NativeCommand,
   type NativeCommandResults,
   type NativeEnvironment,
+  type NativeEventName,
+  type NativeEventPayloads,
 } from "./bridge-contract";
 import { acceptNativeChannel, type IncomingChannelMessage } from "./handshake";
 import {
@@ -67,6 +70,11 @@ export interface NativeRuntimeStore {
    * for example) should only call this once `connection === "connected"`.
    */
   request<C extends NativeCommand>(command: C, payload?: Record<string, unknown>): Promise<NativeCommandResults[C]>;
+  /**
+   * Subscribes to allowlisted native events (`bridge.ready`, `navigation.deepLink`,
+   * `crm.callEnded`, `sync.completed`) across channel reconnections.
+   */
+  onEvent<E extends NativeEventName>(name: E, handler: (payload: NativeEventPayloads[E]) => void): () => void;
 }
 
 /** Adapts a real MessagePort to the bridge's transport. The app expects JSON strings, so every envelope is encoded here. */
@@ -111,7 +119,14 @@ function rememberPackage(storage: NativeRuntimeHost["storage"], androidPackage: 
 export function createNativeRuntimeStore(): NativeRuntimeStore {
   let snapshot: NativeRuntimeSnapshot = INITIAL_NATIVE_SNAPSHOT;
   const subscribers = new Set<() => void>();
+  const eventListeners = new Map<NativeEventName, Set<(payload: unknown) => void>>();
   let client: NativeBridgeClient | null = null;
+
+  function emitEvent<E extends NativeEventName>(name: E, payload: NativeEventPayloads[E]) {
+    const handlers = eventListeners.get(name);
+    if (!handlers || handlers.size === 0) return;
+    for (const handler of [...handlers]) handler(payload);
+  }
 
   function update(patch: Partial<NativeRuntimeSnapshot>) {
     snapshot = { ...snapshot, ...patch };
@@ -130,11 +145,18 @@ export function createNativeRuntimeStore(): NativeRuntimeStore {
       peerBridgeVersion: () => snapshot.app?.bridgeVersion ?? null,
     });
     client = next;
-    next.onEvent("bridge.ready", (info) => {
-      if (client === next) update({ connection: "connected", app: info });
-    });
+    for (const eventName of NATIVE_EVENTS) {
+      next.onEvent(eventName, (payload) => {
+        if (client !== next) return;
+        if (eventName === "bridge.ready") {
+          update({ connection: "connected", app: payload as NativeAppInfo });
+        }
+        emitEvent(eventName, payload);
+      });
+    }
     if (ready) {
       update({ connection: "connected", app: ready });
+      emitEvent("bridge.ready", ready);
       return;
     }
     next.request("app.info").then(
@@ -154,6 +176,19 @@ export function createNativeRuntimeStore(): NativeRuntimeStore {
     request(command, payload) {
       if (!client) return Promise.reject(new NativeBridgeError("bridge_unavailable"));
       return client.request(command, payload);
+    },
+
+    onEvent(name, handler) {
+      let handlers = eventListeners.get(name);
+      if (!handlers) {
+        handlers = new Set();
+        eventListeners.set(name, handlers);
+      }
+      const wrapped = handler as (payload: unknown) => void;
+      handlers.add(wrapped);
+      return () => {
+        eventListeners.get(name)?.delete(wrapped);
+      };
     },
 
     subscribe(listener) {

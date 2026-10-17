@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, verifySession } from "@/lib/auth";
+import { withTenant } from "@/lib/db";
 import type { LogoutOutcome } from "@/lib/logout-contract";
 import {
   LOGOUT_RETRY_COOKIE,
@@ -8,6 +9,7 @@ import {
   type PendingRevocation,
 } from "@/lib/logout-retry";
 import { endPendingRevocation, logoutResponse, pendingRevocationFor } from "@/lib/logout-service";
+import { clearNativeDeviceAuthStateOnSignOut } from "@/lib/native-device-service";
 import { supportSessionReturnPath } from "@/lib/support-session";
 
 /**
@@ -63,6 +65,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     } else {
       outcome = result;
     }
+  }
+  if (session?.nativeDeviceId) {
+    const deviceId = session.nativeDeviceId;
+    await withTenant(session.businessId, () =>
+      clearNativeDeviceAuthStateOnSignOut(deviceId, session.businessId, session.sub),
+    ).catch(() => {});
   }
 
   const currentKey = current ? pendingRevocationKey(current) : null;

@@ -22,8 +22,15 @@ import {
   NATIVE_EVENTS,
   NATIVE_PERMISSION_STATES,
   NATIVE_BRIDGE_VERSION,
+  parseCrmCallEndedEvent,
+  parseDeepLinkEvent,
+  parseSyncCompletedEvent,
 } from "./bridge-contract";
 import { ANDROID_PACKAGE_ENVIRONMENTS } from "./native-environment";
+import {
+  buildNativeFcmPayload,
+  mapNotificationEventToNativeCategory,
+} from "@/lib/notifications-service";
 
 function repoFile(relative: string): string {
   return readFileSync(fileURLToPath(new URL(`../../../${relative}`, import.meta.url)), "utf8");
@@ -75,8 +82,25 @@ describe("bridge contract matches its TypeScript mirror", () => {
     }
   });
 
-  it("keeps the command set small: no generic executor, only named commands", () => {
-    expect(NATIVE_COMMANDS).toEqual(["app.info", "notifications.status", "device.identity"]);
+  it("keeps the command set explicit: no generic executor, only named allowlisted commands", () => {
+    expect(NATIVE_COMMANDS).toEqual([
+      "app.info",
+      "notifications.status",
+      "device.identity",
+      "notifications.register",
+      "biometric.status",
+      "biometric.authenticate",
+      "scanner.scan",
+      "media.pick",
+      "share.open",
+      "printer.discover",
+      "printer.print",
+      "crm.callerId.status",
+      "crm.callerId.sync",
+      "sync.status",
+      "sync.trigger",
+      "sync.acknowledge",
+    ]);
   });
 });
 
@@ -101,9 +125,11 @@ describe("environment table", () => {
     }
   });
 
-  it("never ships a placeholder origin for staging or production", () => {
-    expect(environments.environments.staging.webOrigin).toBe("");
-    expect(environments.environments.production.webOrigin).toBe("");
+  it("uses canonical HTTPS origins for staging and production and never ships .invalid", () => {
+    expect(environments.environments.staging.webOrigin).toBe("https://staging.eshobe.com");
+    expect(environments.environments.production.webOrigin).toBe("https://app.eshobe.com");
+    expect(environments.environments.staging.webOrigin.endsWith(".invalid")).toBe(false);
+    expect(environments.environments.production.webOrigin.endsWith(".invalid")).toBe(false);
   });
 
   it("maps every applicationId to its environment on the web side", () => {
@@ -151,5 +177,156 @@ describe("Android build reads the shared contract", () => {
     expect(properties).toMatch(/^distributionUrl=https\\:\/\/services\.gradle\.org\/distributions\/gradle-8\.14\.3-bin\.zip$/m);
     expect(properties).toMatch(/^distributionSha256Sum=[0-9a-f]{64}$/m);
     expect(properties).toMatch(/^validateDistributionUrl=true$/m);
+  });
+
+  it("enforces Kotlin-to-TypeScript event schema parity and root-cause guards (#884)", () => {
+    const screeningService = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/callerid/BizaCallScreeningService.kt",
+    );
+    const bridgeProtocol = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt",
+    );
+    const callerCache = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/callerid/CallerIdCache.kt",
+    );
+    const encryptedStore = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/security/EncryptedKeyValueStore.kt",
+    );
+    const syncStore = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/sync/TenantSyncStateStore.kt",
+    );
+    const syncWorker = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/sync/BizaSyncWorker.kt",
+    );
+    const notifManager = repoFile(
+      "android/app/src/main/java/com/bizamiz/android/notifications/NotificationChannelManager.kt",
+    );
+    const manifest = repoFile("android/app/src/main/AndroidManifest.xml");
+
+    // Root Cause 2: onScreenCall only identifies incoming calls and never fabricates crm.callEnded with displayName.
+    expect(screeningService).toContain("CallLifecycleTracker.shared.onCallScreened");
+    expect(screeningService).not.toContain('.put("displayName"');
+    expect(bridgeProtocol).toContain("fun buildCrmCallEndedEventPayload");
+
+    // Legacy invalid payload (displayName without durationSeconds/endedAt) is rejected by TS parser.
+    expect(
+      parseCrmCallEndedEvent({
+        businessId: "biz-1",
+        customerId: "c-1",
+        displayName: "رضا محمدی",
+        phoneNormalized: "+989121112233",
+        direction: "incoming",
+      }),
+    ).toBeNull();
+
+    // Canonical payload produced by BridgeProtocol.buildCrmCallEndedEventPayload is accepted by TS parser.
+    const validCallEnded = parseCrmCallEndedEvent({
+      phoneNormalized: "+989121112233",
+      direction: "incoming",
+      durationSeconds: 95,
+      customerId: "11111111-2222-4333-8444-555555555555",
+      customerName: "رضا محمدی",
+      endedAt: "2026-10-15T12:00:00.000Z",
+    });
+    expect(validCallEnded).toEqual({
+      phoneNormalized: "+989121112233",
+      direction: "incoming",
+      durationSeconds: 95,
+      customerId: "11111111-2222-4333-8444-555555555555",
+      customerName: "رضا محمدی",
+      endedAt: "2026-10-15T12:00:00.000Z",
+    });
+
+    // Root Cause 3: TenantSyncStateStore delegates scheduling to WorkManagerSyncScheduler and never stamps lastSyncedAt on enqueue.
+    // BizaSyncWorker probes /api/health as SyncPassOutcome.OriginReachable and NEVER marks business sync complete on its own.
+    expect(syncStore).toContain("WorkManagerSyncScheduler");
+    expect(syncStore).toContain("fun acknowledgeSyncCompletion");
+    expect(syncStore).toContain("STATE_WAITING_FOR_APP");
+    expect(syncStore).not.toContain('.put("lastSyncedAt", nowIso)');
+    expect(syncWorker).toContain("SyncPassOutcome.OriginReachable");
+    expect(syncWorker).toContain("EVENT_SYNC_RECONCILE_REQUESTED");
+    expect(syncWorker).not.toContain("flushedCount = pendingBefore");
+    expect(
+      parseSyncCompletedEvent({
+        businessId: "biz-1",
+        syncedAt: "2026-10-15T12:05:00.000Z",
+        revoked: false,
+        flushedCount: 3,
+      }),
+    ).toEqual({
+      businessId: "biz-1",
+      syncedAt: "2026-10-15T12:05:00.000Z",
+      revoked: false,
+      flushedCount: 3,
+    });
+
+    // Root Cause 4: Real FirebaseMessaging SDK & BizaFirebaseMessagingService (no Class.forName reflection).
+    expect(notifManager).toContain("FirebaseMessaging.getInstance()");
+    expect(notifManager).not.toContain('Class.forName("com.google.firebase.messaging.FirebaseMessaging")');
+    expect(manifest).toContain(".notifications.BizaFirebaseMessagingService");
+    expect(manifest).toContain("com.google.firebase.MESSAGING_EVENT");
+
+    expect(
+      parseDeepLinkEvent({
+        path: "/accounting/orders/109",
+        notificationCategory: "orders",
+        businessId: "biz-42",
+      }),
+    ).toEqual({
+      path: "/accounting/orders/109",
+      notificationCategory: "orders",
+      businessId: "biz-42",
+    });
+
+    expect(mapNotificationEventToNativeCategory("orders.ready")).toBe("orders");
+    expect(mapNotificationEventToNativeCategory("crm.follow_up")).toBe("crm");
+    expect(mapNotificationEventToNativeCategory("inventory.low_stock")).toBe("inventory");
+    expect(
+      buildNativeFcmPayload({
+        businessId: "biz-42",
+        eventId: "ev-1",
+        eventKey: "orders.ready",
+        title: "سفارش آماده تحویل",
+        body: "سفارش شماره ۱۰۹ آماده است",
+        url: "/accounting/orders/109",
+        pushToken: "fcm_token_example_1234567890",
+      }),
+    ).toEqual({
+      message: {
+        token: "fcm_token_example_1234567890",
+        data: {
+          businessId: "biz-42",
+          eventId: "ev-1",
+          eventType: "orders.ready",
+          category: "orders",
+          title: "سفارش آماده تحویل",
+          body: "سفارش شماره ۱۰۹ آماده است",
+          path: "/accounting/orders/109",
+        },
+      },
+    });
+
+    // Root Cause 6: CallerIdCache uses EncryptedKeyValueStore (AES/GCM/NoPadding) at rest.
+    expect(callerCache).toContain("EncryptedKeyValueStore.fromContext(context)");
+    expect(encryptedStore).toContain("AES/GCM/NoPadding");
+    expect(encryptedStore).toContain("AndroidKeyStore");
+  });
+
+  it("keeps docs/android-runtime.md and ISSUE_884_PLAN.md aligned with Bridge v3 and Phase 8", () => {
+    const runtimeDoc = repoFile("docs/android-runtime.md");
+    const planDoc = repoFile("ISSUE_884_PLAN.md");
+
+    expect(runtimeDoc).toContain("### Commands and events (version 3)");
+    expect(runtimeDoc).not.toContain("### Commands and events (version 2)");
+    for (const command of NATIVE_COMMANDS) {
+      expect(runtimeDoc).toContain(`\`${command}\``);
+    }
+    for (const eventName of NATIVE_EVENTS) {
+      expect(runtimeDoc).toContain(`\`${eventName}\``);
+    }
+
+    expect(planDoc).toContain("arena/980efbf2-biza-miz");
+    expect(planDoc).toContain("Phase 8");
+    expect(planDoc).not.toContain("None of those are started.");
   });
 });

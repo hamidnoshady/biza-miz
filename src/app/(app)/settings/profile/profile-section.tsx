@@ -635,6 +635,10 @@ interface SelfNativeDevice {
   registeredAt: string;
   lastSeenAt: string | null;
   revokedAt: string | null;
+  hasPushToken?: boolean;
+  biometricEnabled?: boolean;
+  callerIdRoleHeld?: boolean;
+  lastSyncAt?: string | null;
 }
 
 function nativeEnvironmentLabel(env: SelfNativeDevice["appEnvironment"]): string {
@@ -733,10 +737,28 @@ function SelfNativeDevicesCard() {
                           {nativeEnvironmentLabel(device.appEnvironment)}
                         </span>
                       ) : null}
+                      {device.hasPushToken ? (
+                        <span className="ms-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-700 dark:text-emerald-300">
+                          اعلان فعال
+                        </span>
+                      ) : null}
+                      {device.biometricEnabled ? (
+                        <span className="ms-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-700 dark:text-emerald-300">
+                          بیومتریک
+                        </span>
+                      ) : null}
+                      {device.callerIdRoleHeld ? (
+                        <span className="ms-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-700 dark:text-emerald-300">
+                          شناسایی تماس
+                        </span>
+                      ) : null}
                     </p>
                     <p className="mt-1 text-muted-foreground">
                       ثبت: {formatJalali(device.registeredAt, { withTime: true })} · آخرین فعالیت:{" "}
                       {device.lastSeenAt ? formatJalali(device.lastSeenAt, { withTime: true }) : "—"}
+                      {device.lastSyncAt
+                        ? ` · همگام‌سازی: ${formatJalali(device.lastSyncAt, { withTime: true })}`
+                        : ""}
                     </p>
                   </div>
                   <SecondaryButton

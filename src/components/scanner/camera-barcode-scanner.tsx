@@ -26,6 +26,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { toPersianDigits } from "@/lib/digits";
 import { normalizeBarcode } from "@/lib/barcode";
+import { useNative } from "@/components/native/native-provider";
+import { scanWithNativeScanner } from "@/lib/native/capabilities-client";
 
 type CameraFacing = "environment" | "user";
 
@@ -176,6 +178,9 @@ export function CameraBarcodeScanner({
   const [facing, setFacing] = useState<CameraFacing>("environment");
   const [manualCode, setManualCode] = useState("");
   const [imageBusy, setImageBusy] = useState(false);
+  const [nativeBusy, setNativeBusy] = useState(false);
+  const { capabilities, request } = useNative();
+  const hasNativeScanner = capabilities["barcode.scan"].provider === "native";
 
   // Keep the scan lifecycle stable if a parent re-renders while its dialog is
   // open. Restarting a phone camera because an inventory list refreshed is
@@ -487,6 +492,28 @@ export function CameraBarcodeScanner({
               if (file) void scanImage(file);
             }}
           />
+          {hasNativeScanner ? (
+            <Button
+              type="button"
+              className="min-h-11 w-full"
+              disabled={nativeBusy}
+              onClick={async () => {
+                setNativeBusy(true);
+                setError("");
+                try {
+                  const res = await scanWithNativeScanner(request, { prompt: title });
+                  if (res.value) acceptRead(res.value);
+                } catch {
+                  setError("اسکنر بومی اندروید بسته شد یا کدی خوانده نشد. می‌توانید از دوربین صفحه یا ورود دستی استفاده کنید.");
+                } finally {
+                  setNativeBusy(false);
+                }
+              }}
+            >
+              <CameraIcon className="size-4" aria-hidden="true" />
+              {nativeBusy ? "در حال اسکن بومی اندروید…" : "اسکن سریع با اسکنر بومی اندروید"}
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="outline"

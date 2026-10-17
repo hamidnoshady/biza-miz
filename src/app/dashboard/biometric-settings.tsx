@@ -4,30 +4,18 @@ import Link from "next/link";
 import { FingerprintIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
+import { useNative } from "@/components/native/native-provider";
 import { SIDEBAR_FOOTER_BUTTON_CLASS } from "./sidebar-nav-styles";
 
-/**
- * Phase 20 Wave 3 — self-service "manage biometric login" entry for PIN-role
- * staff (the same audience as the lock screen/login picker's biometric
- * option). Lives in the sidebar footer next to the lock button rather than
- * under /dashboard/settings: that page's tabs are all gated by owner/manager
- * permissions (settings-tabs.ts), and this is each employee managing their
- * own credential, not something a manager configures for them.
- *
- * Issue #854 (P2.28): the credential management itself moved to the canonical
- * `WebAuthnManager` card on `/settings/profile` — this button used to own a
- * second, sidebar-only copy of the whole panel, which meant the profile page
- * had no biometric surface and the panel had no permanent home. The shortcut
- * now links to the one implementation instead of duplicating it.
- */
 export function BiometricSettingsButton() {
-  const [supported, setSupported] = useState(false);
+  const [webAuthnSupported, setWebAuthnSupported] = useState(false);
+  const { capabilities } = useNative();
 
   useEffect(() => {
-    setSupported(browserSupportsWebAuthn());
+    setWebAuthnSupported(browserSupportsWebAuthn());
   }, []);
 
-  if (!supported) return null;
+  if (!webAuthnSupported && !capabilities.biometric.available) return null;
 
   return (
     <Link href="/settings/profile" className={SIDEBAR_FOOTER_BUTTON_CLASS}>

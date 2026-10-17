@@ -6,10 +6,14 @@ versioned, allowlisted bridge. It does not contain a second copy of the platform
 not hold a second business database. The web app stays the product, and the backend stays the
 source of truth.
 
-Status: this is the foundation slice of issue #884. The bridge, the link rules, the Gradle
-build and the release workflows are implemented and unit-tested. Behaviour on a real device
-(no browser chrome, App Links verification, native capabilities) has not been verified yet.
-The plan and the open items are in [`ISSUE_884_PLAN.md`](../ISSUE_884_PLAN.md).
+Status: Bridge v3 (`config/native-bridge-contract.json`), the Android TWA shell (`android/`), all 8
+native capability modules, server-side `native_app_devices` registration/revocation/FCM fan-out,
+and mobile UX integration are implemented and verified in automated unit and database integration
+tests. Live Digital Asset Links verification (`sha256_cert_fingerprints` from Google Play App
+Signing), signed staging/production release builds (`android-staging` / `android-production`
+environment secrets), live Firebase Cloud Messaging credentials (`FIREBASE_*`), and physical
+printer/telephony hardware validation remain gated on external prerequisites. The plan and the
+28-criterion evidence matrix are in [`ISSUE_884_PLAN.md`](../ISSUE_884_PLAN.md).
 
 ## Where things live
 
@@ -70,17 +74,30 @@ real host, pass `-Pbiza.webOrigin.development=https://<host>`. The host must ser
 
 What runs today:
 
-- **Web, Vitest** (`src/lib/native`, `src/components/native`): the contract validators, the
-  capability resolver, the client (request IDs, timeouts, closed channels), the handshake
-  (origin gate), the runtime store (detection, adoption, teardown), and drift guards. The drift
-  guards fail if the TypeScript allowlists, the Gradle build, or the Digital Asset Links file
-  disagree with the shared JSON.
-- **Android, JVM unit tests** (`android/app/src/test`): link routing (`AppLinkRouter`), frame
-  parsing and encoding (`BridgeProtocol`), command routing (`BridgeCommandRouter`), and the
-  same contract checks from the Kotlin side (`BridgeContractTest`).
+- **Web, Vitest** (`src/lib/native`, `src/components/native`, `src/components/mobile`, `src/app/dashboard/data-table.test.tsx`):
+  the contract validators, the capability resolver, the client (request IDs, timeouts, closed
+  channels), the handshake (origin gate), the runtime store (detection, adoption, teardown),
+  the v3 capability helpers (`capabilities-client.test.ts` including route-level verification
+  against `POST /api/crm/activities` and Kotlin `crm.callEnded` JSON frames), the Android
+  printing bridge (`android-printing-bridge.test.ts`), the device registrar and tenant-safe
+  deep-link router (`native-device-registrar.test.tsx`), mobile sheets (`mobile-components.test.tsx`),
+  and drift guards (`native-config.test.ts`). The drift guards fail if the TypeScript allowlists,
+  the Gradle build, or the Digital Asset Links file disagree with the shared JSON.
+- **PostgreSQL integration tests** (`integration/native-device-registry.integration.test.ts`,
+  `integration/native-device-registration-route.integration.test.ts`,
+  `integration/notifications.integration.test.ts`): registration, revocation, reactivation,
+  `session_generation` enforcement, sign-out auth/push/caller-ID state clearing, cross-tenant RLS
+  isolation, and native FCM device fan-out (`deliverEvent`).
+- **Android, JVM unit tests** (`android/app/src/test`): link routing (`AppLinkRouterTest`), frame
+  parsing and encoding (`BridgeProtocolTest`), command routing (`BridgeCommandRouterTest`),
+  encrypted caller-ID cache and phone normalization (`CallerIdCacheTest`), background sync state
+  and retry backoff (`TenantSyncStateStoreTest`), native capability gateways (`AndroidNativeCapabilitiesTest`),
+  and contract parity (`BridgeContractTest`).
 
-Not yet: instrumented tests on an emulator, live Digital Asset Links verification, a TWA run on
-a device, and any test of the native capabilities themselves. These come with the features.
+External environment and hardware checks (not executable in headless CI): live Digital Asset Links
+verification against Play App Signing keys, signed staging/production release builds, live FCM push
+delivery with external Firebase credentials, and physical thermal printer / `CallScreeningService`
+hardware validation.
 
 ## Bridge contract
 
@@ -110,14 +127,31 @@ event:    { v, kind: "event",    name, payload }
 `id` is 1 to 64 characters from `[A-Za-z0-9-]`. `v` is the protocol version (`bridgeVersion`).
 A frame with a different `v` is ignored, so the request that is waiting for it times out.
 
-### Commands and events (version 2)
+### Commands and events (version 3)
 
-| Name | Kind | Min bridge | Result |
+| Name | Kind | Min bridge | Result / Payload |
 |---|---|---|---|
 | `app.info` | command | 1 | `appVersionName`, `appVersionCode`, `environment`, `bridgeVersion`, `capabilities` |
-| `notifications.status` | command | 1 | `permission`: `granted` or `denied` today. `not_determined` is in the contract for a later app that asks for the permission. |
+| `notifications.status` | command | 1 | `permission`: `granted`, `denied`, or `not_determined` |
 | `device.identity` | command | 2 | `installationId` — the app's own persistent installation UUID (`InstallationId.kt`), used by the [device registry](#device-registry) |
+| `notifications.register` | command | 3 | `permission`, `fcmToken` (`null` when unconfigured), `pushProvider` (`"fcm"` or `"none"`), `channels` |
+| `biometric.status` | command | 3 | `available`, `enrolled`, `biometricStrength` |
+| `biometric.authenticate` | command | 3 | `authenticated`, `verifiedAt`, `method` |
+| `scanner.scan` | command | 3 | `rawValue`, `format`, `symbology`, `scannedAt` |
+| `media.pick` | command | 3 | `files`: array of `{ name, mimeType, sizeBytes, base64Data }` |
+| `share.open` | command | 3 | `shared`, `target` |
+| `printer.discover` | command | 3 | `printers`: array of `{ id, name, transport, address, paired }` |
+| `printer.print` | command | 3 | `printed`, `transport`, `bytesWritten`, `jobId` |
+| `crm.callerId.status` | command | 3 | `roleHeld`, `supported`, `cachedCustomerCount`, `businessId`, `lastSyncedAt` |
+| `crm.callerId.sync` | command | 3 | `roleHeld`, `syncedCount`, `businessId`, optional `matchedCaller` |
+| `sync.status` | command | 3 | `scheduled`, `state` (`"idle"` \| `"scheduled"` \| `"waiting_for_app"` \| `"retrying"` \| `"failed"` \| `"revoked"`), `waitingForApp`, `networkAvailable`, `businessId`, `pendingCount`, `lastSyncedAt`, `pendingSyncRequestId`, `installationId`, `sessionGeneration`, `revoked` |
+| `sync.trigger` | command | 3 | `scheduled`, `action`, `businessId`, `clearedEntries`, `syncRequestId`, `state` |
+| `sync.acknowledge` | command | 3 | `accepted`, `reason` (`"acknowledged"` \| `"partial_remaining"` \| `"revoked"` \| `"duplicate_or_stale"` \| `"tenant_mismatch"` \| `"installation_mismatch"` \| `"session_generation_mismatch"` \| `"invalid_request"`), `businessId`, `syncRequestId`, `flushedCount`, `remainingCount`, `lastSyncedAt`, `state` |
 | `bridge.ready` | event | 1 | same shape as `app.info` |
+| `navigation.deepLink` | event | 3 | `path`, `notificationCategory`, `businessId` |
+| `crm.callEnded` | event | 3 | `phoneNormalized`, `direction` (`"incoming"` \| `"outgoing"`), `durationSeconds`, `customerId`, `customerName`, `endedAt` |
+| `sync.reconcileRequested` | event | 3 | `businessId`, `syncRequestId`, `pendingCount`, `requestedAt`, `installationId`, `sessionGeneration` |
+| `sync.completed` | event | 3 | `businessId`, `syncedAt`, `revoked`, `flushedCount`, `remainingCount`, `syncRequestId` |
 
 There is no generic executor. A command that is not in the allowlist gets `unknown_command`,
 and nothing runs. The allowlists are the `commands` and `events` keys in the contract file.
@@ -152,14 +186,83 @@ fail until all three agree.
   recording is not used.
 - Signing material never enters the repository. See [Secrets](#secrets-and-signing).
 
-## Permissions
+## Permissions and Native Capabilities (Bridge v3)
 
-The manifest asks for `INTERNET` and `ACCESS_NETWORK_STATE`. It requests no runtime permission
-yet. `POST_NOTIFICATIONS`, the camera, Bluetooth and call-screening roles are added with the
-features that need them. `notifications.status` reports the system setting and does not request
-anything.
+`config/native-bridge-contract.json` (`bridgeVersion: 3`, `minCompatibleBridgeVersion: 1`) defines
+the allowlisted commands, events, and capabilities shared between `src/lib/native/bridge-contract.ts`
+and `android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt` (guarded against drift
+by `src/lib/native/native-config.test.ts` and `BridgeContractTest.kt`):
 
-The `<queries>` entries let the app find the Custom Tabs provider on Android 11 and later.
+- **Commands (16)**: `app.info`, `notifications.status`, `device.identity`, `notifications.register`,
+  `biometric.status`, `biometric.authenticate`, `scanner.scan`, `media.pick`, `share.open`,
+  `printer.discover`, `printer.print`, `crm.callerId.status`, `crm.callerId.sync`, `sync.status`,
+  `sync.trigger`, `sync.acknowledge`.
+- **Events (5)**: `bridge.ready`, `navigation.deepLink`, `crm.callEnded`,
+  `sync.reconcileRequested`, `sync.completed`.
+- **Capabilities (8)**: `notifications` (v1), `barcode.scan` (v3), `printer` (v3),
+  `crm.caller-id` (v3), `biometric` (v3), `share` (v3), `media.capture` (v3),
+  `background.sync` (v3).
+
+### Native capability modules
+
+1. **Encrypted Caller ID Cache (`EncryptedKeyValueStore.kt` + `CallerIdCache.kt`)**:
+   - Customer caller-ID entries are encrypted at rest with AES-256-GCM (`AES/GCM/NoPadding`, 96-bit
+     random IV, 128-bit authentication tag) using an Android Keystore key
+     (`biza_caller_id_aes_gcm_v1`), with the storage key bound as GCM Additional Authenticated Data
+     (AAD) so ciphertext cannot be substituted across keys or tenants.
+   - Cache entries are strictly partitioned by `businessId`, purged on tenant switch (`clearTenant`),
+     sign-out (`clearAll`, which also deletes/rotates the wrapping key for cryptographic erasure),
+     loss of `ROLE_CALL_SCREENING` (`reconcileRoleState(false)`), or device revocation, and protected
+     by a crash-recovery marker (`__pending_wipe__`) across process death.
+   - **Offline erasure limitation**: If an administrator revokes a device while that device has no
+     network connectivity, server-side sessions and push/sync fan-out are blocked immediately, and
+     local `CallerIdCache` / `WorkManager` state is wiped on the device's next network contact
+     (`/api/health`, `/api/auth/me`, `/api/native-devices`). While completely air-gapped offline,
+     instant remote wipe cannot reach the device; cached caller metadata remains encrypted at rest
+     under Android Keystore AES-256-GCM until the device reconnects, signs out locally, switches
+     tenant, or loses `ROLE_CALL_SCREENING`.
+2. **Incoming Call Identification vs. Post-Call Follow-Up (`BizaCallScreeningService.kt` + `CallLifecycleTracker.kt`)**:
+   - `BizaCallScreeningService.onScreenCall` only identifies the caller in the active business's
+     encrypted `CallerIdCache`, posts a heads-up Caller ID notification, and records the screened
+     call in `CallLifecycleTracker`. It never blocks/silences calls, never records call audio, and
+     never emits `crm.callEnded` during screening.
+   - `CallLifecycleTracker` observes `CALL_STATE_OFFHOOK` and `CALL_STATE_IDLE` and emits
+     `crm.callEnded` (`{ phoneNormalized, direction, durationSeconds, customerId, customerName, endedAt }`)
+     only when the call disconnects, using the measured off-hook duration (or `0` if unanswered).
+3. **Background Sync (`NativeSyncScheduler.kt` + `BizaSyncWorker.kt` + `TenantSyncStateStore.kt`)**:
+   - Uses `androidx.work:work-runtime-ktx` (`WorkManagerSyncScheduler` + `BizaSyncWorker`) with
+     `NetworkType.CONNECTED` constraints and exponential backoff (`MAX_RETRY_ATTEMPTS = 5`).
+   - Android does not maintain a second business database; the canonical offline mutation queue is
+     IndexedDB `pendingActions` (`src/app/dashboard/offline-queue.tsx`), flushed via `POST /api/sync/events`.
+   - **Connectivity probe vs. actual business sync completion**: When `BizaSyncWorker` receives
+     HTTP `200..299` from `GET /api/health`, it records `SyncPassOutcome.OriginReachable` and moves
+     the tenant state to `"waiting_for_app"` (`waitingForApp: true`). It **never** stamps
+     `lastSyncedAt`, **never** zeroes `pendingCount`, and **never** emits `sync.completed` from
+     `/api/health` alone:
+     - If the Custom Tabs / TWA bridge channel is connected, `BizaSyncWorker` emits
+       `sync.reconcileRequested` (`{ businessId, syncRequestId, pendingCount, requestedAt, installationId, sessionGeneration }`).
+     - If the browser/web runtime is closed when `BizaSyncWorker` runs, `TenantSyncStateStore`
+       persists `"waiting_for_app"` and `pendingSyncRequestId` in encrypted storage across process
+       death; when the browser reopens and connects (`TwaSessionHolder.onChannelReady` and
+       `NativeDeviceRegistrar`), the durable reconciliation request is replayed automatically.
+     - `NativeDeviceRegistrar` (`reconcileNativeSyncRequest`) verifies `businessId`, `installationId`,
+       `sessionGeneration`, and `syncRequestId` deduplication, runs `flushQueue()` against
+       `POST /api/sync/events`, and sends `sync.acknowledge` with exact `flushedCount` and
+       `remainingCount`. `TenantSyncStateStore.acknowledgeSyncCompletion` stamps `lastSyncedAt` and
+       emits `sync.completed` only when `flushedCount > 0`, and preserves `pendingCount = remainingCount`
+       when partial failures remain.
+4. **Firebase Cloud Messaging (`BizaFirebaseMessagingService.kt` + `NotificationChannelManager.kt`)**:
+   - Integrates `com.google.firebase:firebase-messaging` directly (no reflection) with auto-init
+     disabled until explicit user opt-in and credential verification (`BuildConfig.FIREBASE_*`).
+   - When external Firebase project credentials are not supplied in the build/server environment,
+     `NotificationChannelManager.resolvePushToken` explicitly returns `null` (`pushProvider: "none"`)
+     without simulating success. When configured, `src/lib/notifications-service.ts` (`deliverEvent`)
+     fans out notification outbox events to active FCM `native_app_devices` alongside Web Push.
+5. **Tenant-Safe Deep Links (`NativeDeviceRegistrar.tsx`)**:
+   - Resolves the authoritative active business from `WorkspaceShell` and `GET /api/auth/me` before
+     routing any `navigation.deepLink` event. Mismatched target tenants are authorized via
+     `POST /api/auth/switch-business` (wiping the previous tenant's local native caches first) or
+     blocked when unauthorized; missing or revoked sessions fail closed.
 
 ## Device registry
 
@@ -281,9 +384,11 @@ this slice.
 
 ## Rollout
 
-- Native features are gated by capability, not by app version, so the web app can ship before an
-  Android release. Feature flags per capability are planned with the features and are not in this
-  slice.
+- Native features are gated by capability (`NativeCapabilityGate` + `resolveCapability`) and by
+  server-side `feature_flags` seeded in `migrations/0222_native_app_capabilities.sql`
+  (`android_caller_id`, `android_native_print`, `android_document_scanner`, `android_biometric`,
+  and `android_voip` defaulting to disabled), so the web app can ship before an Android release
+  without breaking older v1/v2 clients.
 - Play's staged rollout is the release control for native changes.
 - Rollback: a bad web deploy is rolled back in the web pipeline. A bad Android release is halted
   with the Play staged-rollout control, and a fixed build ships with a higher `versionCode`.

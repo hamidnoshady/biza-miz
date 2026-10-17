@@ -475,8 +475,8 @@ export async function WorkspaceShell({
           root layout also wraps the public/marketing pages, which have
           neither (see the component's own header comment).
         */}
-        <NativeDeviceRegistrar />
-        <OfflineQueueProvider>
+        <NativeDeviceRegistrar businessId={session.businessId} />
+        <OfflineQueueProvider businessId={session.businessId}>
         <BugReportProvider>
         {/*
           A *definite* height, not `min-h-screen` — this is the fix for "the app

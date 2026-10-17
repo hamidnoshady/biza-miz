@@ -1,14 +1,18 @@
 [versions]
-agp = "8.13.2"
-kotlin = "2.2.21"
-androidx-browser = "1.10.0"
+agp = "8.7.3"
+kotlin = "2.0.21"
+androidxBrowser = "1.8.0"
+androidxWork = "2.10.0"
+firebaseMessaging = "24.1.0"
 junit = "4.13.2"
-org-json = "20240303"
+orgJson = "20240303"
 
 [libraries]
-androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidx-browser" }
+androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidxBrowser" }
+androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "androidxWork" }
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging", version.ref = "firebaseMessaging" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
-org-json = { group = "org.json", name = "json", version.ref = "org-json" }
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -93,10 +93,11 @@ jobs:
               lines = path.read_text(errors="replace").splitlines()
           else:
               lines = ["Gradle wrote no log: the failure happened before the build started."]
-          pattern = re.compile(r"^e: |^w: .*error|What went wrong|^> |Could not |Caused by|Execution failed|BUILD FAILED|error:|Exception|FAILURE")
+          pattern = re.compile(r"^e: |^w: .*error|What went wrong|^> |\s+Execution failed|Could not |Caused by|BUILD FAILED|error:|Error:|Exception|FAILURE|FAILED")
           keep = [line for line in lines if pattern.search(line)]
-          body = "\n".join(keep[:80]) or "\n".join(lines[-60:])
-          body = body[:6000]
+          tail = lines[-80:]
+          combined = keep[:80] + ["--- tail ---"] + tail
+          body = "\n".join(combined)[:6000]
           encoded = body.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
           print("::error title=Gradle failure::" + encoded)
           PY

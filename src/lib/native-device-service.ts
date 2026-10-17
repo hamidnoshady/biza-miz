@@ -54,6 +54,7 @@ export class NativeDeviceError extends Error {
 }
 
 export type NativeAppEnvironment = "development" | "staging" | "production";
+export type NativePushProvider = "fcm" | "webpush" | "none";
 
 export interface NativeDevice {
   id: string;
@@ -79,6 +80,15 @@ export interface NativeDevice {
    * nothing sensitive about a monotonic counter either.
    */
   sessionGeneration: number;
+  capabilities: string[];
+  pushProvider: NativePushProvider | null;
+  pushChannels: string[];
+  pushUpdatedAt: string | null;
+  hasPushToken: boolean;
+  biometricEnabled: boolean;
+  biometricVerifiedAt: string | null;
+  callerIdRoleHeld: boolean;
+  lastSyncAt: string | null;
 }
 
 interface NativeDeviceRow extends Record<string, unknown> {
@@ -96,6 +106,20 @@ interface NativeDeviceRow extends Record<string, unknown> {
   revoked_at: Date | null;
   reactivated_at: Date | null;
   session_generation: number;
+  capabilities?: unknown;
+  push_token?: string | null;
+  push_provider?: NativePushProvider | null;
+  push_channels?: unknown;
+  push_updated_at?: Date | null;
+  biometric_enabled?: boolean;
+  biometric_verified_at?: Date | null;
+  caller_id_role_held?: boolean;
+  last_sync_at?: Date | null;
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function toDevice(row: NativeDeviceRow): NativeDevice {
@@ -114,6 +138,15 @@ function toDevice(row: NativeDeviceRow): NativeDevice {
     revokedAt: row.revoked_at ? row.revoked_at.toISOString() : null,
     reactivatedAt: row.reactivated_at ? row.reactivated_at.toISOString() : null,
     sessionGeneration: row.session_generation,
+    capabilities: toStringArray(row.capabilities),
+    pushProvider: row.push_provider ?? null,
+    pushChannels: toStringArray(row.push_channels),
+    pushUpdatedAt: row.push_updated_at ? row.push_updated_at.toISOString() : null,
+    hasPushToken: typeof row.push_token === "string" && row.push_token.length > 0,
+    biometricEnabled: Boolean(row.biometric_enabled),
+    biometricVerifiedAt: row.biometric_verified_at ? row.biometric_verified_at.toISOString() : null,
+    callerIdRoleHeld: Boolean(row.caller_id_role_held),
+    lastSyncAt: row.last_sync_at ? row.last_sync_at.toISOString() : null,
   };
 }
 
@@ -137,11 +170,21 @@ export interface RegisterNativeDeviceInput {
   appVersionName: string;
   appVersionCode: number;
   bridgeVersion: number;
+  capabilities?: string[];
+  pushToken?: string | null;
+  pushProvider?: NativePushProvider | null;
+  pushChannels?: string[];
+  biometricEnabled?: boolean;
+  biometricVerified?: boolean;
+  callerIdRoleHeld?: boolean;
+  syncedNow?: boolean;
 }
 
 const RETURNING_COLUMNS =
   "id, business_id, user_id, platform, app_environment, app_version_name, app_version_code, " +
-  "bridge_version, registered_at, last_seen_at, revoked_at, reactivated_at, session_generation";
+  "bridge_version, registered_at, last_seen_at, revoked_at, reactivated_at, session_generation, " +
+  "capabilities, push_token, push_provider, push_channels, push_updated_at, " +
+  "biometric_enabled, biometric_verified_at, caller_id_role_held, last_sync_at";
 
 /** Bounded retries for the brand-new-installation race `registerNativeDevice` handles below. */
 const MAX_REGISTER_ATTEMPTS = 3;
@@ -157,23 +200,16 @@ const MAX_REGISTER_ATTEMPTS = 3;
  * the "requires an authorized owner/admin action" half of the owner
  * decision; the "followed by fresh authentication" half is enforced by
  * `session_generation` (see `checkNativeDevice`), not by this function.
- *
- * Retries up to `MAX_REGISTER_ATTEMPTS` times on a unique-constraint
- * violation: two concurrent first-registrations of the same brand-new
- * `installId` both run `SELECT ... FOR UPDATE` before either has inserted
- * anything, so neither finds a row to lock, and both fall into the `INSERT`
- * branch — the loser's `INSERT` fails `native_app_devices_business_install
- * _unique`, not because of a logic bug but because there was nothing to
- * lock yet. Retrying re-runs the `SELECT`, which now finds the winner's
- * committed row and takes the ordinary `UPDATE` (re-register) branch
- * instead — the same observable result the loser would have gotten had its
- * request simply arrived a moment later.
  */
 export async function registerNativeDevice(
   businessId: string,
   userId: string,
   input: RegisterNativeDeviceInput,
 ): Promise<{ device: NativeDevice; created: boolean }> {
+  const capabilitiesJson = input.capabilities ? JSON.stringify(input.capabilities) : null;
+  const pushChannelsJson = input.pushChannels ? JSON.stringify(input.pushChannels) : null;
+  const hasPushUpdate = input.pushToken !== undefined || input.pushProvider !== undefined;
+
   for (let attempt = 1; attempt <= MAX_REGISTER_ATTEMPTS; attempt++) {
     const client = await getPool().connect();
     try {
@@ -199,10 +235,6 @@ export async function registerNativeDevice(
         });
       }
 
-      // A different member registering the same installation is never treated
-      // as a silent ownership transfer — an owner/admin revoking the current
-      // registration first (an explicit, audited act) is how a shared device
-      // changes hands.
       if (existing && existing.user_id !== userId) {
         await client.query("ROLLBACK");
         throw new NativeDeviceError("device_registered_to_another_user", 409);
@@ -214,11 +246,39 @@ export async function registerNativeDevice(
         created = false;
         const { rows } = await client.query<NativeDeviceRow>(
           `UPDATE native_app_devices
-              SET app_environment = $3, app_version_name = $4, app_version_code = $5,
-                  bridge_version = $6, last_seen_at = now()
+              SET app_environment = $3,
+                  app_version_name = $4,
+                  app_version_code = $5,
+                  bridge_version = $6,
+                  last_seen_at = now(),
+                  capabilities = COALESCE($7::jsonb, capabilities),
+                  push_token = CASE WHEN $8::boolean THEN $9 ELSE push_token END,
+                  push_provider = CASE WHEN $8::boolean THEN $10 ELSE push_provider END,
+                  push_channels = COALESCE($11::jsonb, push_channels),
+                  push_updated_at = CASE WHEN $8::boolean THEN now() ELSE push_updated_at END,
+                  biometric_enabled = COALESCE($12::boolean, biometric_enabled),
+                  biometric_verified_at = CASE WHEN $13::boolean THEN now() ELSE biometric_verified_at END,
+                  caller_id_role_held = COALESCE($14::boolean, caller_id_role_held),
+                  last_sync_at = CASE WHEN $15::boolean THEN now() ELSE last_sync_at END
             WHERE id = $1 AND business_id = $2
             RETURNING ${RETURNING_COLUMNS}`,
-          [existing.id, businessId, input.appEnvironment, input.appVersionName, input.appVersionCode, input.bridgeVersion],
+          [
+            existing.id,
+            businessId,
+            input.appEnvironment,
+            input.appVersionName,
+            input.appVersionCode,
+            input.bridgeVersion,
+            capabilitiesJson,
+            hasPushUpdate,
+            input.pushToken ?? null,
+            input.pushProvider ?? null,
+            pushChannelsJson,
+            input.biometricEnabled ?? null,
+            input.biometricVerified === true,
+            input.callerIdRoleHeld ?? null,
+            input.syncedNow === true,
+          ],
         );
         row = rows[0];
       } else {
@@ -226,19 +286,40 @@ export async function registerNativeDevice(
         try {
           const { rows } = await client.query<NativeDeviceRow>(
             `INSERT INTO native_app_devices
-               (business_id, user_id, app_environment, install_id, app_version_name, app_version_code, bridge_version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+               (business_id, user_id, app_environment, install_id, app_version_name, app_version_code,
+                bridge_version, capabilities, push_token, push_provider, push_channels, push_updated_at,
+                biometric_enabled, biometric_verified_at, caller_id_role_held, last_sync_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7,
+                     COALESCE($8::jsonb, '[]'::jsonb), $9, $10, COALESCE($11::jsonb, '[]'::jsonb),
+                     CASE WHEN $12::boolean THEN now() ELSE NULL END,
+                     COALESCE($13::boolean, false),
+                     CASE WHEN $14::boolean THEN now() ELSE NULL END,
+                     COALESCE($15::boolean, false),
+                     CASE WHEN $16::boolean THEN now() ELSE NULL END)
              RETURNING ${RETURNING_COLUMNS}`,
-            [businessId, userId, input.appEnvironment, input.installId, input.appVersionName, input.appVersionCode, input.bridgeVersion],
+            [
+              businessId,
+              userId,
+              input.appEnvironment,
+              input.installId,
+              input.appVersionName,
+              input.appVersionCode,
+              input.bridgeVersion,
+              capabilitiesJson,
+              input.pushToken ?? null,
+              input.pushProvider ?? null,
+              pushChannelsJson,
+              hasPushUpdate,
+              input.biometricEnabled ?? false,
+              input.biometricVerified === true,
+              input.callerIdRoleHeld ?? false,
+              input.syncedNow === true,
+            ],
           );
           row = rows[0];
         } catch (err) {
           await client.query("ROLLBACK").catch(() => {});
           if (isUniqueViolation(err) && attempt < MAX_REGISTER_ATTEMPTS) {
-            // `continue` unwinds out of this try block, running the outer
-            // `finally` (which releases `client`) without reaching the outer
-            // `catch` — no exception was thrown, so the loop simply moves on
-            // to a fresh connection and attempt.
             continue;
           }
           throw err;
@@ -261,10 +342,6 @@ export async function registerNativeDevice(
       client.release();
     }
   }
-  // Unreachable: every loop iteration either returns, throws, or (on a
-  // unique-violation retry) `continue`s — and the last allowed attempt no
-  // longer satisfies `attempt < MAX_REGISTER_ATTEMPTS`, so it always throws
-  // instead of looping again.
   throw new NativeDeviceError("device_registration_conflict", 409);
 }
 
@@ -285,7 +362,9 @@ export async function listNativeDevicesForBusiness(businessId: string): Promise<
   const { rows } = await query<NativeDeviceRow>(
     `SELECT d.id, d.business_id, d.user_id, u.full_name AS user_name, d.platform, d.app_environment,
             d.app_version_name, d.app_version_code, d.bridge_version, d.registered_at, d.last_seen_at,
-            d.revoked_at, d.reactivated_at, d.session_generation
+            d.revoked_at, d.reactivated_at, d.session_generation, d.capabilities, d.push_token,
+            d.push_provider, d.push_channels, d.push_updated_at, d.biometric_enabled,
+            d.biometric_verified_at, d.caller_id_role_held, d.last_sync_at
        FROM native_app_devices d
        LEFT JOIN users u ON u.id = d.user_id AND u.business_id = d.business_id
       WHERE d.business_id = $1
@@ -297,14 +376,22 @@ export async function listNativeDevicesForBusiness(businessId: string): Promise<
 
 /**
  * A member revoking their own installation — lost or stolen phone, logging
- * it out everywhere. Bumps `session_generation` for the same reason
- * `reactivateNativeDevice` below does: it is what `checkNativeDevice`
- * actually keys its denial on, not `revoked_at` alone (see migration 0217).
+ * it out everywhere. Bumps `session_generation` and atomically clears
+ * `push_token` and biometric verification state so the revoked installation
+ * cannot receive push notifications or use biometric unlock.
  */
 export async function revokeOwnNativeDevice(deviceId: string, businessId: string, userId: string): Promise<void> {
   const { rows } = await query<{ id: string }>(
     `UPDATE native_app_devices
-        SET revoked_at = now(), revoked_by = $3, session_generation = session_generation + 1
+        SET revoked_at = now(),
+            revoked_by = $3,
+            session_generation = session_generation + 1,
+            push_token = NULL,
+            push_provider = NULL,
+            push_channels = '[]'::jsonb,
+            biometric_enabled = false,
+            biometric_verified_at = NULL,
+            caller_id_role_held = false
       WHERE id = $1 AND business_id = $2 AND user_id = $3 AND revoked_at IS NULL
       RETURNING id`,
     [deviceId, businessId, userId],
@@ -317,7 +404,15 @@ export async function revokeOwnNativeDevice(deviceId: string, businessId: string
 export async function revokeNativeDeviceAsAdmin(deviceId: string, businessId: string, actorId: string): Promise<void> {
   const { rows } = await query<{ id: string }>(
     `UPDATE native_app_devices
-        SET revoked_at = now(), revoked_by = $3, session_generation = session_generation + 1
+        SET revoked_at = now(),
+            revoked_by = $3,
+            session_generation = session_generation + 1,
+            push_token = NULL,
+            push_provider = NULL,
+            push_channels = '[]'::jsonb,
+            biometric_enabled = false,
+            biometric_verified_at = NULL,
+            caller_id_role_held = false
       WHERE id = $1 AND business_id = $2 AND revoked_at IS NULL
       RETURNING id`,
     [deviceId, businessId, actorId],
@@ -327,18 +422,34 @@ export async function revokeNativeDeviceAsAdmin(deviceId: string, businessId: st
 }
 
 /**
+ * Clears push notification token, biometric verification state, and caller-ID
+ * role state on sign-out without marking the installation as permanently
+ * revoked, while bumping `session_generation` so any cached token for that
+ * installation is invalidated.
+ */
+export async function clearNativeDeviceAuthStateOnSignOut(
+  deviceId: string,
+  businessId: string,
+  userId: string,
+): Promise<void> {
+  await query(
+    `UPDATE native_app_devices
+        SET push_token = NULL,
+            push_provider = NULL,
+            push_channels = '[]'::jsonb,
+            biometric_verified_at = NULL,
+            caller_id_role_held = false,
+            session_generation = session_generation + 1
+      WHERE id = $1 AND business_id = $2 AND user_id = $3 AND revoked_at IS NULL`,
+    [deviceId, businessId, userId],
+  );
+}
+
+/**
  * Lets a previously revoked installation register again. Does not, by
  * itself, restore any access: it also bumps `session_generation`, which is
  * what forces the "followed by fresh authentication" half of the owner
- * decision to actually hold — without it, a session JWT minted *before* the
- * device was revoked (one `checkNativeDevice` never got a chance to see
- * mid-revocation, e.g. a backgrounded tab) would start resolving again the
- * moment `revoked_at` goes back to NULL, with no login in between. Bumping
- * the generation here means that stale token's stamped
- * `nativeDeviceGeneration` no longer matches the row no matter what
- * `revoked_at` says, so only a session minted by a *new* call to
- * `registerNativeDevice` — which only a freshly authenticated member can
- * make — resolves again. See migration 0217.
+ * decision to actually hold.
  */
 export async function reactivateNativeDevice(deviceId: string, businessId: string, actorId: string): Promise<void> {
   const { rows } = await query<{ id: string }>(

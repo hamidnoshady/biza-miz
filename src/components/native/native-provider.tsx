@@ -18,6 +18,8 @@ import type {
   NativeCommand,
   NativeCommandResults,
   NativeEnvironment,
+  NativeEventName,
+  NativeEventPayloads,
 } from "@/lib/native/bridge-contract";
 import {
   NO_BROWSER_FEATURES,
@@ -33,12 +35,21 @@ import {
   type NativeConnection,
   type NativeRuntimeSnapshot,
 } from "@/lib/native/native-runtime";
+import {
+  createAndroidPrintingBridge,
+  setActiveAndroidPrintingBridge,
+} from "@/lib/native/android-printing-bridge";
 
 /** Rejects with a `NativeBridgeError` (bridge.ts) when there is no connected channel to send on. */
 export type NativeRequest = <C extends NativeCommand>(
   command: C,
   payload?: Record<string, unknown>,
 ) => Promise<NativeCommandResults[C]>;
+
+export type NativeOnEvent = <E extends NativeEventName>(
+  name: E,
+  handler: (payload: NativeEventPayloads[E]) => void,
+) => () => void;
 
 export interface NativeContextValue {
   kind: NativeRuntimeKind;
@@ -54,14 +65,21 @@ export interface NativeContextValue {
    * for one-off commands that are not a standing capability.
    */
   request: NativeRequest;
+  /**
+   * Subscribes to allowlisted native events (`bridge.ready`, `navigation.deepLink`,
+   * `crm.callEnded`, `sync.completed`).
+   */
+  onEvent: NativeOnEvent;
 }
 
 const UNAVAILABLE_REQUEST: NativeRequest = () => Promise.reject(new NativeBridgeError("bridge_unavailable"));
+const NOOP_ON_EVENT: NativeOnEvent = () => () => {};
 
 export function buildNativeContextValue(
   snapshot: NativeRuntimeSnapshot,
   browser: BrowserFeatures,
   request: NativeRequest = UNAVAILABLE_REQUEST,
+  onEvent: NativeOnEvent = NOOP_ON_EVENT,
 ): NativeContextValue {
   return {
     kind: snapshot.kind,
@@ -71,6 +89,7 @@ export function buildNativeContextValue(
     app: snapshot.app,
     capabilities: resolveAllCapabilities(browser, snapshot.app),
     request,
+    onEvent,
   };
 }
 
@@ -123,9 +142,18 @@ export function NativeProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => buildNativeContextValue(snapshot, browser, runtimeStore.request),
+    () => buildNativeContextValue(snapshot, browser, runtimeStore.request, runtimeStore.onEvent),
     [snapshot, browser],
   );
+
+  useEffect(() => {
+    if (value.connection === "connected" && value.capabilities.printer.provider === "native") {
+      setActiveAndroidPrintingBridge(createAndroidPrintingBridge(runtimeStore.request));
+      return () => setActiveAndroidPrintingBridge(null);
+    }
+    setActiveAndroidPrintingBridge(null);
+  }, [value.connection, value.capabilities.printer.provider]);
+
   return <NativeContext.Provider value={value}>{children}</NativeContext.Provider>;
 }
 

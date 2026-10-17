@@ -32,6 +32,10 @@ interface NativeDevice {
   lastSeenAt: string | null;
   revokedAt: string | null;
   reactivatedAt: string | null;
+  hasPushToken?: boolean;
+  biometricEnabled?: boolean;
+  callerIdRoleHeld?: boolean;
+  lastSyncAt?: string | null;
 }
 
 function nativeEnvironmentLabel(env: NativeDevice["appEnvironment"]): string {
@@ -159,10 +163,20 @@ export function NativeDeviceManagementSettings({
                   {device.appEnvironment !== "production" ? (
                     <StatusBadge tone="active">{nativeEnvironmentLabel(device.appEnvironment)}</StatusBadge>
                   ) : null}
+                  {device.hasPushToken ? (
+                    <StatusBadge tone="positive">اعلان بومی فعال</StatusBadge>
+                  ) : null}
+                  {device.biometricEnabled ? (
+                    <StatusBadge tone="positive">بیومتریک فعال</StatusBadge>
+                  ) : null}
+                  {device.callerIdRoleHeld ? (
+                    <StatusBadge tone="positive">شناسایی تماس فعال</StatusBadge>
+                  ) : null}
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
                   نسخه {toPersianDigits(device.appVersionName)} · ثبت: {formatMoment(device.registeredAt)} ·
                   آخرین فعالیت: {formatMoment(device.lastSeenAt)}
+                  {device.lastSyncAt ? ` · همگام‌سازی: ${formatMoment(device.lastSyncAt)}` : ""}
                 </p>
               </div>
               <div className="flex w-full flex-wrap gap-2 md:w-auto md:justify-end">

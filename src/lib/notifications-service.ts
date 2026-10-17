@@ -787,6 +787,166 @@ function urgencyFor(severity: NotificationSeverity): "low" | "normal" | "high" {
   return severity === "important" ? "normal" : "low";
 }
 
+export type NativeFcmCategory =
+  | "orders"
+  | "payments"
+  | "crm"
+  | "inventory"
+  | "approvals"
+  | "operations"
+  | "security";
+
+export function mapNotificationEventToNativeCategory(eventKey: string): NativeFcmCategory {
+  if (eventKey.startsWith("orders.") || eventKey.startsWith("pos.")) return "orders";
+  if (
+    eventKey.startsWith("accounting.") ||
+    eventKey.startsWith("receipts.") ||
+    eventKey.startsWith("payments.") ||
+    eventKey.startsWith("checks.")
+  ) {
+    return "payments";
+  }
+  if (eventKey.startsWith("crm.") || eventKey.startsWith("customers.")) return "crm";
+  if (eventKey.startsWith("inventory.") || eventKey.startsWith("stock.")) return "inventory";
+  if (eventKey.startsWith("approvals.") || eventKey.startsWith("shift.")) return "approvals";
+  if (eventKey.startsWith("security.") || eventKey.startsWith("auth.")) return "security";
+  return "operations";
+}
+
+export function buildNativeFcmPayload(input: {
+  businessId: string;
+  eventId: string;
+  eventKey: string;
+  title: string;
+  body: string;
+  url: string;
+  pushToken: string;
+}): {
+  message: {
+    token: string;
+    data: {
+      businessId: string;
+      eventId: string;
+      eventType: string;
+      category: NativeFcmCategory;
+      title: string;
+      body: string;
+      path: string;
+    };
+  };
+} {
+  const category = mapNotificationEventToNativeCategory(input.eventKey);
+  const cleanPath =
+    input.url.startsWith("/") && !input.url.startsWith("//") ? input.url : "/dashboard";
+  return {
+    message: {
+      token: input.pushToken,
+      data: {
+        businessId: input.businessId,
+        eventId: input.eventId,
+        eventType: input.eventKey,
+        category,
+        title: input.title.slice(0, 120),
+        body: input.body.slice(0, 240),
+        path: cleanPath.slice(0, 256),
+      },
+    },
+  };
+}
+
+interface NativeFcmDeviceRow extends Record<string, unknown> {
+  id: string;
+  push_token: string;
+  push_channels: string[] | null;
+}
+
+async function deliverNativeFcmForRecipient(input: {
+  businessId: string;
+  userId: string;
+  quiet: boolean;
+  event: OutboxRow;
+}): Promise<number> {
+  if (input.quiet) return 0;
+
+  let rows: NativeFcmDeviceRow[] = [];
+  try {
+    const res = await query<NativeFcmDeviceRow>(
+      `SELECT id, push_token, push_channels
+         FROM native_app_devices
+        WHERE business_id = $1
+          AND user_id = $2
+          AND revoked_at IS NULL
+          AND push_provider = 'fcm'
+          AND push_token IS NOT NULL`,
+      [input.businessId, input.userId],
+    );
+    rows = res.rows;
+  } catch {
+    // Older schema before migration 0222 or no native devices table in partial test DB.
+    return 0;
+  }
+
+  if (rows.length === 0) return 0;
+
+  const projectId = process.env.BIZA_FIREBASE_PROJECT_ID?.trim() || process.env.FIREBASE_PROJECT_ID?.trim() || "";
+  const accessToken = process.env.BIZA_FCM_ACCESS_TOKEN?.trim() || "";
+  if (!projectId || !accessToken) {
+    // Explicitly unconfigured when external Firebase server credentials are absent.
+    return 0;
+  }
+
+  const category = mapNotificationEventToNativeCategory(input.event.event_key);
+  let sentCount = 0;
+
+  for (const device of rows) {
+    const enabled = Array.isArray(device.push_channels) ? device.push_channels : [];
+    if (category !== "security" && enabled.length > 0 && !enabled.includes(category)) {
+      continue;
+    }
+
+    const body = buildNativeFcmPayload({
+      businessId: input.businessId,
+      eventId: input.event.id,
+      eventKey: input.event.event_key,
+      title: input.event.title,
+      body: input.event.body,
+      url: input.event.url,
+      pushToken: device.push_token,
+    });
+
+    try {
+      const response = await fetch(
+        `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/messages:send`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
+      if (response.ok) {
+        sentCount += 1;
+      } else if (response.status === 404 || response.status === 410) {
+        await query(
+          `UPDATE native_app_devices
+              SET push_token = NULL,
+                  push_provider = NULL,
+                  push_updated_at = now()
+            WHERE id = $1 AND business_id = $2`,
+          [device.id, input.businessId],
+        );
+      }
+    } catch {
+      // Transient FCM failure; do not abort other devices.
+    }
+  }
+
+  return sentCount;
+}
+
 /**
  * Fans one outbox row out to its recipients, then pushes.
  *
@@ -887,6 +1047,13 @@ async function deliverEvent(
       await recordDeliveryOutcome(businessId, deliveryId, device, result);
       if (result.outcome === "sent") pushed += 1;
     }
+
+    pushed += await deliverNativeFcmForRecipient({
+      businessId,
+      userId: recipient.userId,
+      quiet: recipient.quiet,
+      event,
+    });
   }
 
   return pushed;

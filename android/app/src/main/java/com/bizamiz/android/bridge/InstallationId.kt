@@ -30,4 +30,7 @@ object InstallationId {
         prefs.edit().putString(KEY_INSTALLATION_ID, generated).apply()
         return generated
     }
+
+    fun isValid(id: String): Boolean =
+        id.length in 8..128 && id.all { it.isLetterOrDigit() || it == '-' || it == '_' }
 }

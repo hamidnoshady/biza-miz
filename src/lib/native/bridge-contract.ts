@@ -1,59 +1,26 @@
 /**
- * The Web ↔ Android bridge contract (issue #884) — the framework-free half.
+ * Native bridge contract for the Android TWA runtime (issue #884).
  *
- * The numbers and the allowlists live in `config/native-bridge-contract.json`,
- * the one file the Android build reads too. This module imports them and gives
- * the web side compile-time names for them; `native-config.test.ts` fails if the
- * two ever disagree, so neither side can drift silently.
+ * This module is the TypeScript mirror of `config/native-bridge-contract.json`
+ * and `android/app/src/main/java/com/bizamiz/android/bridge/BridgeProtocol.kt`.
+ * `native-config.test.ts` and `BridgeContractTest.kt` enforce that all three
+ * stay in lockstep.
  *
- * There is deliberately no generic executor. Every command is a named entry
- * here with a payload check and a result check, and anything else is refused
- * with `unknown_command` before it can reach a device. A page can never ask the
- * app to run an arbitrary command.
- *
- * Transport: the app and the page talk over a MessagePort that Chrome hands out
- * inside a Trusted Web Activity (see `handshake.ts`). Every frame is a JSON
- * string holding one of the three envelopes below. Only this module decides what
- * a frame means, so a malformed or unknown frame is dropped here, in one place.
+ * Security invariants:
+ * - Only allowlisted `NativeCommand` values may be sent or accepted.
+ * - No dynamic code evaluation, reflection, or arbitrary shell/intent execution.
+ * - Every frame carries protocol version `v`, `kind`, and bounded `id`.
+ * - Unknown capability strings returned by newer Android builds are ignored
+ *   rather than crashing older web code.
+ * - Backward compatibility: envelopes with `v` in
+ *   `[NATIVE_MIN_COMPATIBLE_BRIDGE_VERSION, NATIVE_BRIDGE_VERSION]` are
+ *   accepted so web deployments ahead of Play Store rollouts continue talking
+ *   to v1/v2 wrappers while gating v3 commands via `NATIVE_COMMAND_MIN_BRIDGE`.
  */
-import contract from "../../../config/native-bridge-contract.json";
 
-export const NATIVE_BRIDGE_PROTOCOL: string = contract.protocol;
-
-/** The protocol version both sides speak. A frame carrying any other `v` is ignored. */
-export const NATIVE_BRIDGE_VERSION: number = contract.bridgeVersion;
-
-export const NATIVE_COMMANDS = ["app.info", "notifications.status", "device.identity"] as const;
-export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
-
-/**
- * The bridge version at which the app first understands each command. The client refuses a
- * command that the connected app is too old for, rather than sending it.
- */
-export const NATIVE_COMMAND_MIN_BRIDGE: Readonly<Record<NativeCommand, number>> = Object.freeze(
-  Object.fromEntries(
-    Object.entries(contract.commands).map(([key, spec]) => [key, spec.minBridgeVersion]),
-  ) as Record<NativeCommand, number>,
-);
-
-export const NATIVE_EVENTS = ["bridge.ready"] as const;
-export type NativeEventName = (typeof NATIVE_EVENTS)[number];
-
-export const NATIVE_ERROR_CODES = [
-  "unknown_command",
-  "unsupported",
-  "invalid_payload",
-  "permission_denied",
-  "native_failure",
-  "timeout",
-  "channel_closed",
-  "bridge_unavailable",
-  "bridge_version_too_old",
-] as const;
-export type NativeErrorCode = (typeof NATIVE_ERROR_CODES)[number];
-
-export const NATIVE_PERMISSION_STATES = ["granted", "denied", "not_determined"] as const;
-export type NativePermissionState = (typeof NATIVE_PERMISSION_STATES)[number];
+export const NATIVE_BRIDGE_PROTOCOL = "biza-native-bridge" as const;
+export const NATIVE_BRIDGE_VERSION = 3 as const;
+export const NATIVE_MIN_COMPATIBLE_BRIDGE_VERSION = 1 as const;
 
 export const NATIVE_ENVIRONMENTS = ["development", "staging", "production"] as const;
 export type NativeEnvironment = (typeof NATIVE_ENVIRONMENTS)[number];
@@ -65,27 +32,97 @@ export const NATIVE_CAPABILITIES = [
   "biometric",
   "notifications",
   "share",
+  "media.capture",
+  "background.sync",
 ] as const;
 export type NativeCapability = (typeof NATIVE_CAPABILITIES)[number];
 
 /**
- * The bridge version at which the Android app first provides each capability
- * natively. An app below that version cannot provide it, so the page shows an
- * «update the app» state instead of treating the feature as missing.
+ * Minimum native bridge version required before the Android wrapper can provide
+ * a given capability. Mirrors `config/native-bridge-contract.json`.
  */
-export const NATIVE_CAPABILITY_MIN_BRIDGE: Readonly<Record<NativeCapability, number>> = Object.freeze(
-  Object.fromEntries(
-    Object.entries(contract.capabilities).map(([key, spec]) => [key, spec.nativeMinBridgeVersion]),
-  ) as Record<NativeCapability, number>,
-);
+export const NATIVE_CAPABILITY_MIN_BRIDGE: Readonly<Record<NativeCapability, number>> = Object.freeze({
+  "barcode.scan": 3,
+  printer: 3,
+  "crm.caller-id": 3,
+  biometric: 3,
+  notifications: 1,
+  share: 3,
+  "media.capture": 3,
+  "background.sync": 3,
+});
 
-/** What `app.info` reports, and what the app announces with `bridge.ready`. */
+export const NATIVE_COMMANDS = [
+  "app.info",
+  "notifications.status",
+  "device.identity",
+  "notifications.register",
+  "biometric.status",
+  "biometric.authenticate",
+  "scanner.scan",
+  "media.pick",
+  "share.open",
+  "printer.discover",
+  "printer.print",
+  "crm.callerId.status",
+  "crm.callerId.sync",
+  "sync.status",
+  "sync.trigger",
+  "sync.acknowledge",
+] as const;
+export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
+
+export const NATIVE_COMMAND_MIN_BRIDGE: Readonly<Record<NativeCommand, number>> = Object.freeze({
+  "app.info": 1,
+  "notifications.status": 1,
+  "device.identity": 2,
+  "notifications.register": 3,
+  "biometric.status": 3,
+  "biometric.authenticate": 3,
+  "scanner.scan": 3,
+  "media.pick": 3,
+  "share.open": 3,
+  "printer.discover": 3,
+  "printer.print": 3,
+  "crm.callerId.status": 3,
+  "crm.callerId.sync": 3,
+  "sync.status": 3,
+  "sync.trigger": 3,
+  "sync.acknowledge": 3,
+});
+
+export const NATIVE_EVENTS = [
+  "bridge.ready",
+  "navigation.deepLink",
+  "crm.callEnded",
+  "sync.reconcileRequested",
+  "sync.completed",
+] as const;
+export type NativeEventName = (typeof NATIVE_EVENTS)[number];
+
+export const NATIVE_ERROR_CODES = [
+  "unknown_command",
+  "invalid_payload",
+  "untrusted_origin",
+  "unsupported_capability",
+  "permission_denied",
+  "bridge_version_too_old",
+  "bridge_unavailable",
+  "timeout",
+  "channel_closed",
+  "native_failure",
+  "user_cancelled",
+] as const;
+export type NativeErrorCode = (typeof NATIVE_ERROR_CODES)[number];
+
+export const NATIVE_PERMISSION_STATES = ["granted", "denied", "not_determined"] as const;
+export type NativePermissionState = (typeof NATIVE_PERMISSION_STATES)[number];
+
 export interface NativeAppInfo {
   appVersionName: string;
   appVersionCode: number;
   environment: NativeEnvironment;
   bridgeVersion: number;
-  /** Only allowlisted capability keys survive parsing; unknown keys from a newer app are ignored. */
   capabilities: NativeCapability[];
 }
 
@@ -94,58 +131,294 @@ export interface NativeNotificationStatus {
 }
 
 /**
- * Issue #884 device registry — the app's own persistent installation
- * identity, generated once on first launch and kept in app-private storage.
- * Not a login credential by itself: `POST /api/native-devices` only accepts
- * it from an already-authenticated session.
+ * Stable per-installation UUID generated by the Android wrapper on first run
+ * and stored in app-private storage (`InstallationId.kt`).
  */
 export interface NativeDeviceIdentity {
   installationId: string;
 }
 
-/** Result type per command. Adding a command means adding it to every map below. */
+export const NATIVE_NOTIFICATION_CHANNELS = [
+  "orders",
+  "payments",
+  "crm",
+  "inventory",
+  "approvals",
+  "operations",
+  "security",
+] as const;
+export type NativeNotificationChannel = (typeof NATIVE_NOTIFICATION_CHANNELS)[number];
+
+export interface NativeNotificationRegistration {
+  permission: NativePermissionState;
+  fcmToken: string | null;
+  channels: NativeNotificationChannel[];
+  pushProvider: "fcm" | "none";
+}
+
+export const NATIVE_BIOMETRIC_STRENGTHS = ["strong", "weak", "device_credential", "none"] as const;
+export type NativeBiometricStrength = (typeof NATIVE_BIOMETRIC_STRENGTHS)[number];
+
+export interface NativeBiometricStatus {
+  available: boolean;
+  enrolled: boolean;
+  strength: NativeBiometricStrength;
+  credentialManagerAvailable: boolean;
+}
+
+export interface NativeBiometricAuthResult {
+  authenticated: boolean;
+  method: "biometric" | "device_credential" | "passkey";
+  verifiedAt: string;
+  challengeId: string | null;
+}
+
+export const NATIVE_BARCODE_FORMATS = [
+  "qr_code",
+  "ean_13",
+  "ean_8",
+  "upc_a",
+  "upc_e",
+  "code_128",
+  "code_39",
+  "itf",
+  "data_matrix",
+  "pdf_417",
+  "unknown",
+] as const;
+export type NativeBarcodeFormat = (typeof NATIVE_BARCODE_FORMATS)[number];
+
+export interface NativeScannerResult {
+  value: string;
+  format: NativeBarcodeFormat;
+  source: "code_scanner" | "camera" | "manual";
+}
+
+export interface NativePickedMediaFile {
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  base64Data: string;
+  source: "camera" | "document_picker" | "gallery";
+}
+
+export interface NativeMediaPickResult {
+  files: NativePickedMediaFile[];
+}
+
+export interface NativeShareResult {
+  shared: boolean;
+  target: string | null;
+}
+
+export const NATIVE_PRINTER_TRANSPORTS = ["system_print", "network_tcp", "bluetooth", "pdf_share"] as const;
+export type NativePrinterTransport = (typeof NATIVE_PRINTER_TRANSPORTS)[number];
+
+export interface NativePrinterDescriptor {
+  id: string;
+  name: string;
+  transport: NativePrinterTransport;
+  address: string | null;
+  paperWidthMm: 58 | 80 | 210;
+  online: boolean;
+}
+
+export interface NativePrinterDiscoverResult {
+  printers: NativePrinterDescriptor[];
+  bluetoothPermission: NativePermissionState;
+}
+
+export interface NativePrinterPrintResult {
+  printed: boolean;
+  transport: NativePrinterTransport;
+  jobId: string;
+  bytesSent: number;
+}
+
+export interface NativeCallerIdStatus {
+  roleHeld: boolean;
+  supported: boolean;
+  cachedCustomerCount: number;
+  businessId: string | null;
+  lastSyncedAt: string | null;
+}
+
+export interface NativeCallerIdSyncResult {
+  roleHeld: boolean;
+  syncedCount: number;
+  businessId: string;
+  matchedCaller?: {
+    customerId: string;
+    displayName: string;
+    phoneNormalized: string;
+    organizationName: string | null;
+    tags: string[];
+  } | null;
+}
+
+export const NATIVE_SYNC_LIFECYCLE_STATES = [
+  "idle",
+  "scheduled",
+  "waiting_for_app",
+  "retrying",
+  "failed",
+  "revoked",
+] as const;
+export type NativeSyncLifecycleState = (typeof NATIVE_SYNC_LIFECYCLE_STATES)[number];
+
+export const NATIVE_SYNC_ACKNOWLEDGE_REASONS = [
+  "acknowledged",
+  "partial_remaining",
+  "revoked",
+  "duplicate_or_stale",
+  "tenant_mismatch",
+  "installation_mismatch",
+  "session_generation_mismatch",
+  "invalid_request",
+] as const;
+export type NativeSyncAcknowledgeReason = (typeof NATIVE_SYNC_ACKNOWLEDGE_REASONS)[number];
+
+export interface NativeSyncStatus {
+  scheduled: boolean;
+  networkAvailable: boolean;
+  businessId: string | null;
+  pendingCount: number;
+  lastSyncedAt: string | null;
+  revoked: boolean;
+  state?: NativeSyncLifecycleState;
+  waitingForApp?: boolean;
+  pendingSyncRequestId?: string | null;
+  installationId?: string | null;
+  sessionGeneration?: number | null;
+}
+
+export interface NativeSyncTriggerResult {
+  scheduled: boolean;
+  action: "enqueue" | "immediate" | "clear_tenant" | "clear_all";
+  businessId: string | null;
+  clearedEntries: number;
+  syncRequestId?: string | null;
+  state?: NativeSyncLifecycleState;
+}
+
+export interface NativeSyncAcknowledgeResult {
+  accepted: boolean;
+  reason: NativeSyncAcknowledgeReason;
+  businessId: string | null;
+  syncRequestId: string | null;
+  flushedCount: number;
+  remainingCount: number;
+  lastSyncedAt: string | null;
+  state: NativeSyncLifecycleState;
+}
+
+export interface NativeDeepLinkEvent {
+  path: string;
+  notificationCategory: NativeNotificationChannel | null;
+  businessId: string | null;
+}
+
+export interface NativeCrmCallEndedEvent {
+  phoneNormalized: string;
+  direction: "incoming" | "outgoing";
+  durationSeconds: number;
+  customerId: string | null;
+  customerName: string | null;
+  endedAt: string;
+}
+
+export interface NativeSyncReconcileRequestedEvent {
+  businessId: string;
+  syncRequestId: string;
+  pendingCount: number;
+  requestedAt: string;
+  installationId: string | null;
+  sessionGeneration: number | null;
+}
+
+export interface NativeSyncCompletedEvent {
+  businessId: string | null;
+  syncedAt: string;
+  revoked: boolean;
+  flushedCount: number;
+  remainingCount?: number;
+  syncRequestId?: string | null;
+}
+
 export interface NativeCommandResults {
   "app.info": NativeAppInfo;
   "notifications.status": NativeNotificationStatus;
   "device.identity": NativeDeviceIdentity;
+  "notifications.register": NativeNotificationRegistration;
+  "biometric.status": NativeBiometricStatus;
+  "biometric.authenticate": NativeBiometricAuthResult;
+  "scanner.scan": NativeScannerResult;
+  "media.pick": NativeMediaPickResult;
+  "share.open": NativeShareResult;
+  "printer.discover": NativePrinterDiscoverResult;
+  "printer.print": NativePrinterPrintResult;
+  "crm.callerId.status": NativeCallerIdStatus;
+  "crm.callerId.sync": NativeCallerIdSyncResult;
+  "sync.status": NativeSyncStatus;
+  "sync.trigger": NativeSyncTriggerResult;
+  "sync.acknowledge": NativeSyncAcknowledgeResult;
 }
 
 export interface NativeEventPayloads {
   "bridge.ready": NativeAppInfo;
+  "navigation.deepLink": NativeDeepLinkEvent;
+  "crm.callEnded": NativeCrmCallEndedEvent;
+  "sync.reconcileRequested": NativeSyncReconcileRequestedEvent;
+  "sync.completed": NativeSyncCompletedEvent;
 }
 
-export interface NativeRequestEnvelope {
+export interface NativeBridgeErrorPayload {
+  code: NativeErrorCode;
+  message?: string;
+}
+
+export interface NativeRequestEnvelope<C extends NativeCommand = NativeCommand> {
   v: number;
   kind: "request";
   id: string;
-  command: NativeCommand;
+  command: C;
   payload: Record<string, unknown>;
 }
 
-export interface NativeResponseEnvelope {
+export interface NativeResponseEnvelope<T = unknown> {
   v: number;
   kind: "response";
   id: string;
   ok: boolean;
-  result?: unknown;
-  error?: { code: NativeErrorCode; message?: string };
+  result?: T;
+  error?: NativeBridgeErrorPayload;
 }
 
-export interface NativeEventEnvelope {
+export interface NativeEventEnvelope<E extends NativeEventName = NativeEventName> {
   v: number;
   kind: "event";
-  name: NativeEventName;
-  payload: unknown;
+  name: E;
+  payload: NativeEventPayloads[E];
 }
 
-export type NativeEnvelope = NativeRequestEnvelope | NativeResponseEnvelope | NativeEventEnvelope;
+export type NativeEnvelope =
+  | NativeRequestEnvelope
+  | NativeResponseEnvelope
+  | NativeEventEnvelope;
 
-const MAX_ID_LENGTH = 64;
-const MAX_MESSAGE_LENGTH = 200;
-const MAX_VERSION_NAME_LENGTH = 32;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const INSTALLATION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isNativeEnvironment(value: unknown): value is NativeEnvironment {
+  return typeof value === "string" && (NATIVE_ENVIRONMENTS as readonly string[]).includes(value);
+}
+
+export function isNativeCapability(value: unknown): value is NativeCapability {
+  return typeof value === "string" && (NATIVE_CAPABILITIES as readonly string[]).includes(value);
 }
 
 export function isNativeCommand(value: unknown): value is NativeCommand {
@@ -160,125 +433,685 @@ export function isNativeErrorCode(value: unknown): value is NativeErrorCode {
   return typeof value === "string" && (NATIVE_ERROR_CODES as readonly string[]).includes(value);
 }
 
-export function isNativeCapability(value: unknown): value is NativeCapability {
-  return typeof value === "string" && (NATIVE_CAPABILITIES as readonly string[]).includes(value);
+export function isNativePermissionState(value: unknown): value is NativePermissionState {
+  return typeof value === "string" && (NATIVE_PERMISSION_STATES as readonly string[]).includes(value);
 }
 
-function isRequestId(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 1 && value.length <= MAX_ID_LENGTH && /^[A-Za-z0-9-]+$/.test(value);
+export function isValidRequestId(value: unknown): value is string {
+  return typeof value === "string" && REQUEST_ID_PATTERN.test(value);
 }
 
-/** Parses the `app.info` shape. Returns `null` for anything malformed rather than guessing. */
-export function parseAppInfo(value: unknown): NativeAppInfo | null {
-  if (!isRecord(value)) return null;
-  const { appVersionName, appVersionCode, environment, bridgeVersion, capabilities } = value;
-  if (typeof appVersionName !== "string" || appVersionName.length === 0 || appVersionName.length > MAX_VERSION_NAME_LENGTH) {
+function isBoundedString(value: unknown, min: number, max: number): value is string {
+  return typeof value === "string" && value.length >= min && value.length <= max;
+}
+
+function isNullableBoundedString(value: unknown, max: number): value is string | null {
+  return value === null || value === undefined || (typeof value === "string" && value.length <= max);
+}
+
+/**
+ * Validates and normalizes `app.info` / `bridge.ready` payloads from the
+ * Android host. Unknown capability identifiers are filtered out rather than
+ * failing the whole payload so newer Android builds remain forward-compatible.
+ */
+export function parseAppInfo(raw: unknown): NativeAppInfo | null {
+  if (!isRecord(raw)) return null;
+  const { appVersionName, appVersionCode, environment, bridgeVersion, capabilities } = raw;
+  if (typeof appVersionName !== "string" || appVersionName.length === 0 || appVersionName.length > 32) {
     return null;
   }
-  if (typeof appVersionCode !== "number" || !Number.isSafeInteger(appVersionCode) || appVersionCode < 1) return null;
-  if (!(NATIVE_ENVIRONMENTS as readonly unknown[]).includes(environment)) return null;
-  if (typeof bridgeVersion !== "number" || !Number.isSafeInteger(bridgeVersion) || bridgeVersion < 1) return null;
-  if (!Array.isArray(capabilities)) return null;
+  if (typeof appVersionCode !== "number" || !Number.isInteger(appVersionCode) || appVersionCode < 1) {
+    return null;
+  }
+  if (!isNativeEnvironment(environment)) {
+    return null;
+  }
+  if (typeof bridgeVersion !== "number" || !Number.isInteger(bridgeVersion) || bridgeVersion < 1) {
+    return null;
+  }
+  if (!Array.isArray(capabilities)) {
+    return null;
+  }
+  const normalizedCapabilities = Array.from(new Set(capabilities.filter(isNativeCapability)));
   return {
     appVersionName,
     appVersionCode,
-    environment: environment as NativeEnvironment,
+    environment,
     bridgeVersion,
-    capabilities: capabilities.filter(isNativeCapability).filter((c, i, all) => all.indexOf(c) === i),
+    capabilities: normalizedCapabilities,
   };
 }
 
-export function parseNotificationStatus(value: unknown): NativeNotificationStatus | null {
-  if (!isRecord(value)) return null;
-  if (!(NATIVE_PERMISSION_STATES as readonly unknown[]).includes(value.permission)) return null;
-  return { permission: value.permission as NativePermissionState };
+export function parseNotificationStatus(raw: unknown): NativeNotificationStatus | null {
+  if (!isRecord(raw)) return null;
+  if (!isNativePermissionState(raw.permission)) return null;
+  return { permission: raw.permission };
 }
 
-const MIN_INSTALLATION_ID_LENGTH = 8;
-const MAX_INSTALLATION_ID_LENGTH = 128;
-const INSTALLATION_ID_PATTERN = /^[A-Za-z0-9-]+$/;
-
-/** Parses the `device.identity` shape. Returns `null` for anything malformed rather than guessing. */
-export function parseDeviceIdentity(value: unknown): NativeDeviceIdentity | null {
-  if (!isRecord(value)) return null;
-  const { installationId } = value;
-  if (
-    typeof installationId !== "string" ||
-    installationId.length < MIN_INSTALLATION_ID_LENGTH ||
-    installationId.length > MAX_INSTALLATION_ID_LENGTH ||
-    !INSTALLATION_ID_PATTERN.test(installationId)
-  ) {
+export function parseDeviceIdentity(raw: unknown): NativeDeviceIdentity | null {
+  if (!isRecord(raw)) return null;
+  const { installationId } = raw;
+  if (typeof installationId !== "string" || !INSTALLATION_ID_PATTERN.test(installationId)) {
     return null;
   }
   return { installationId };
 }
 
-/** Checks a command's `result` against its declared shape. `null` means the app sent a bad result. */
-export function parseCommandResult<C extends NativeCommand>(command: C, value: unknown): NativeCommandResults[C] | null {
+export function parseNotificationRegistration(raw: unknown): NativeNotificationRegistration | null {
+  if (!isRecord(raw)) return null;
+  if (!isNativePermissionState(raw.permission)) return null;
+  const fcmToken = raw.fcmToken ?? null;
+  if (fcmToken !== null && !isBoundedString(fcmToken, 16, 4096)) return null;
+  const pushProvider = raw.pushProvider;
+  if (pushProvider !== "fcm" && pushProvider !== "none") return null;
+  if (!Array.isArray(raw.channels)) return null;
+  const channels = Array.from(
+    new Set(
+      raw.channels.filter(
+        (ch): ch is NativeNotificationChannel =>
+          typeof ch === "string" && (NATIVE_NOTIFICATION_CHANNELS as readonly string[]).includes(ch),
+      ),
+    ),
+  );
+  return {
+    permission: raw.permission,
+    fcmToken,
+    channels,
+    pushProvider,
+  };
+}
+
+export function parseBiometricStatus(raw: unknown): NativeBiometricStatus | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.available !== "boolean" || typeof raw.enrolled !== "boolean") return null;
+  if (
+    typeof raw.strength !== "string" ||
+    !(NATIVE_BIOMETRIC_STRENGTHS as readonly string[]).includes(raw.strength)
+  ) {
+    return null;
+  }
+  if (typeof raw.credentialManagerAvailable !== "boolean") return null;
+  return {
+    available: raw.available,
+    enrolled: raw.enrolled,
+    strength: raw.strength as NativeBiometricStrength,
+    credentialManagerAvailable: raw.credentialManagerAvailable,
+  };
+}
+
+export function parseBiometricAuthResult(raw: unknown): NativeBiometricAuthResult | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.authenticated !== "boolean") return null;
+  if (raw.method !== "biometric" && raw.method !== "device_credential" && raw.method !== "passkey") {
+    return null;
+  }
+  if (!isBoundedString(raw.verifiedAt, 10, 64)) return null;
+  const challengeId = raw.challengeId ?? null;
+  if (challengeId !== null && !isBoundedString(challengeId, 1, 128)) return null;
+  return {
+    authenticated: raw.authenticated,
+    method: raw.method,
+    verifiedAt: raw.verifiedAt,
+    challengeId,
+  };
+}
+
+export function parseScannerResult(raw: unknown): NativeScannerResult | null {
+  if (!isRecord(raw)) return null;
+  if (!isBoundedString(raw.value, 1, 4096)) return null;
+  const format =
+    typeof raw.format === "string" && (NATIVE_BARCODE_FORMATS as readonly string[]).includes(raw.format)
+      ? (raw.format as NativeBarcodeFormat)
+      : "unknown";
+  if (raw.source !== "code_scanner" && raw.source !== "camera" && raw.source !== "manual") {
+    return null;
+  }
+  return {
+    value: raw.value,
+    format,
+    source: raw.source,
+  };
+}
+
+export function parseMediaPickResult(raw: unknown): NativeMediaPickResult | null {
+  if (!isRecord(raw) || !Array.isArray(raw.files) || raw.files.length > 10) return null;
+  const files: NativePickedMediaFile[] = [];
+  for (const item of raw.files) {
+    if (!isRecord(item)) return null;
+    if (!isBoundedString(item.name, 1, 255)) return null;
+    if (!isBoundedString(item.mimeType, 3, 128)) return null;
+    if (
+      typeof item.sizeBytes !== "number" ||
+      !Number.isInteger(item.sizeBytes) ||
+      item.sizeBytes < 0 ||
+      item.sizeBytes > 20 * 1024 * 1024
+    ) {
+      return null;
+    }
+    if (typeof item.base64Data !== "string" || item.base64Data.length > 28 * 1024 * 1024) return null;
+    if (item.source !== "camera" && item.source !== "document_picker" && item.source !== "gallery") {
+      return null;
+    }
+    files.push({
+      name: item.name,
+      mimeType: item.mimeType,
+      sizeBytes: item.sizeBytes,
+      base64Data: item.base64Data,
+      source: item.source,
+    });
+  }
+  return { files };
+}
+
+export function parseShareResult(raw: unknown): NativeShareResult | null {
+  if (!isRecord(raw) || typeof raw.shared !== "boolean") return null;
+  const target = raw.target ?? null;
+  if (!isNullableBoundedString(target, 128)) return null;
+  return { shared: raw.shared, target: target ?? null };
+}
+
+export function parsePrinterDiscoverResult(raw: unknown): NativePrinterDiscoverResult | null {
+  if (!isRecord(raw) || !Array.isArray(raw.printers) || raw.printers.length > 32) return null;
+  if (!isNativePermissionState(raw.bluetoothPermission)) return null;
+  const printers: NativePrinterDescriptor[] = [];
+  for (const p of raw.printers) {
+    if (!isRecord(p)) return null;
+    if (!isBoundedString(p.id, 1, 128) || !isBoundedString(p.name, 1, 128)) return null;
+    if (
+      typeof p.transport !== "string" ||
+      !(NATIVE_PRINTER_TRANSPORTS as readonly string[]).includes(p.transport)
+    ) {
+      return null;
+    }
+    const address = p.address ?? null;
+    if (!isNullableBoundedString(address, 128)) return null;
+    if (p.paperWidthMm !== 58 && p.paperWidthMm !== 80 && p.paperWidthMm !== 210) return null;
+    if (typeof p.online !== "boolean") return null;
+    printers.push({
+      id: p.id,
+      name: p.name,
+      transport: p.transport as NativePrinterTransport,
+      address: address ?? null,
+      paperWidthMm: p.paperWidthMm,
+      online: p.online,
+    });
+  }
+  return {
+    printers,
+    bluetoothPermission: raw.bluetoothPermission,
+  };
+}
+
+export function parsePrinterPrintResult(raw: unknown): NativePrinterPrintResult | null {
+  if (!isRecord(raw) || typeof raw.printed !== "boolean") return null;
+  if (
+    typeof raw.transport !== "string" ||
+    !(NATIVE_PRINTER_TRANSPORTS as readonly string[]).includes(raw.transport)
+  ) {
+    return null;
+  }
+  if (!isBoundedString(raw.jobId, 1, 128)) return null;
+  if (typeof raw.bytesSent !== "number" || !Number.isInteger(raw.bytesSent) || raw.bytesSent < 0) {
+    return null;
+  }
+  return {
+    printed: raw.printed,
+    transport: raw.transport as NativePrinterTransport,
+    jobId: raw.jobId,
+    bytesSent: raw.bytesSent,
+  };
+}
+
+export function parseCallerIdStatus(raw: unknown): NativeCallerIdStatus | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.roleHeld !== "boolean" || typeof raw.supported !== "boolean") return null;
+  if (
+    typeof raw.cachedCustomerCount !== "number" ||
+    !Number.isInteger(raw.cachedCustomerCount) ||
+    raw.cachedCustomerCount < 0
+  ) {
+    return null;
+  }
+  const businessId = raw.businessId ?? null;
+  const lastSyncedAt = raw.lastSyncedAt ?? null;
+  if (!isNullableBoundedString(businessId, 64) || !isNullableBoundedString(lastSyncedAt, 64)) {
+    return null;
+  }
+  return {
+    roleHeld: raw.roleHeld,
+    supported: raw.supported,
+    cachedCustomerCount: raw.cachedCustomerCount,
+    businessId: businessId ?? null,
+    lastSyncedAt: lastSyncedAt ?? null,
+  };
+}
+
+export function parseCallerIdSyncResult(raw: unknown): NativeCallerIdSyncResult | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.roleHeld !== "boolean") return null;
+  if (typeof raw.syncedCount !== "number" || !Number.isInteger(raw.syncedCount) || raw.syncedCount < 0) {
+    return null;
+  }
+  if (!isBoundedString(raw.businessId, 1, 64)) return null;
+  let matchedCaller: NativeCallerIdSyncResult["matchedCaller"] = null;
+  if (raw.matchedCaller !== undefined && raw.matchedCaller !== null) {
+    if (!isRecord(raw.matchedCaller)) return null;
+    const mc = raw.matchedCaller;
+    if (
+      !isBoundedString(mc.customerId, 1, 64) ||
+      !isBoundedString(mc.displayName, 1, 160) ||
+      !isBoundedString(mc.phoneNormalized, 3, 32)
+    ) {
+      return null;
+    }
+    const org = mc.organizationName ?? null;
+    if (!isNullableBoundedString(org, 160)) return null;
+    const tags = Array.isArray(mc.tags)
+      ? mc.tags.filter((t): t is string => typeof t === "string" && t.length <= 64).slice(0, 12)
+      : [];
+    matchedCaller = {
+      customerId: mc.customerId,
+      displayName: mc.displayName,
+      phoneNormalized: mc.phoneNormalized,
+      organizationName: org ?? null,
+      tags,
+    };
+  }
+  return {
+    roleHeld: raw.roleHeld,
+    syncedCount: raw.syncedCount,
+    businessId: raw.businessId,
+    ...(raw.matchedCaller !== undefined ? { matchedCaller } : {}),
+  };
+}
+
+function isSyncLifecycleState(value: unknown): value is NativeSyncLifecycleState {
+  return typeof value === "string" && (NATIVE_SYNC_LIFECYCLE_STATES as readonly string[]).includes(value);
+}
+
+function isSyncAcknowledgeReason(value: unknown): value is NativeSyncAcknowledgeReason {
+  return typeof value === "string" && (NATIVE_SYNC_ACKNOWLEDGE_REASONS as readonly string[]).includes(value);
+}
+
+export function parseSyncStatus(raw: unknown): NativeSyncStatus | null {
+  if (!isRecord(raw)) return null;
+  if (
+    typeof raw.scheduled !== "boolean" ||
+    typeof raw.networkAvailable !== "boolean" ||
+    typeof raw.revoked !== "boolean"
+  ) {
+    return null;
+  }
+  if (typeof raw.pendingCount !== "number" || !Number.isInteger(raw.pendingCount) || raw.pendingCount < 0) {
+    return null;
+  }
+  const businessId = raw.businessId ?? null;
+  const lastSyncedAt = raw.lastSyncedAt ?? null;
+  if (!isNullableBoundedString(businessId, 64) || !isNullableBoundedString(lastSyncedAt, 64)) {
+    return null;
+  }
+  if (raw.state !== undefined && !isSyncLifecycleState(raw.state)) {
+    return null;
+  }
+  if (raw.waitingForApp !== undefined && typeof raw.waitingForApp !== "boolean") {
+    return null;
+  }
+  const pendingSyncRequestId = raw.pendingSyncRequestId ?? null;
+  const installationId = raw.installationId ?? null;
+  if (
+    !isNullableBoundedString(pendingSyncRequestId, 64) ||
+    !isNullableBoundedString(installationId, 128)
+  ) {
+    return null;
+  }
+  const sessionGeneration = raw.sessionGeneration ?? null;
+  if (
+    sessionGeneration !== null &&
+    (typeof sessionGeneration !== "number" || !Number.isInteger(sessionGeneration) || sessionGeneration < 0)
+  ) {
+    return null;
+  }
+  return {
+    scheduled: raw.scheduled,
+    networkAvailable: raw.networkAvailable,
+    businessId: businessId ?? null,
+    pendingCount: raw.pendingCount,
+    lastSyncedAt: lastSyncedAt ?? null,
+    revoked: raw.revoked,
+    ...(raw.state !== undefined ? { state: raw.state } : {}),
+    ...(raw.waitingForApp !== undefined ? { waitingForApp: raw.waitingForApp } : {}),
+    ...(raw.pendingSyncRequestId !== undefined ? { pendingSyncRequestId: pendingSyncRequestId ?? null } : {}),
+    ...(raw.installationId !== undefined ? { installationId: installationId ?? null } : {}),
+    ...(raw.sessionGeneration !== undefined ? { sessionGeneration } : {}),
+  };
+}
+
+export function parseSyncTriggerResult(raw: unknown): NativeSyncTriggerResult | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.scheduled !== "boolean") return null;
+  if (
+    raw.action !== "enqueue" &&
+    raw.action !== "immediate" &&
+    raw.action !== "clear_tenant" &&
+    raw.action !== "clear_all"
+  ) {
+    return null;
+  }
+  const businessId = raw.businessId ?? null;
+  if (!isNullableBoundedString(businessId, 64)) return null;
+  if (
+    typeof raw.clearedEntries !== "number" ||
+    !Number.isInteger(raw.clearedEntries) ||
+    raw.clearedEntries < 0
+  ) {
+    return null;
+  }
+  const syncRequestId = raw.syncRequestId ?? null;
+  if (!isNullableBoundedString(syncRequestId, 64)) {
+    return null;
+  }
+  if (raw.state !== undefined && !isSyncLifecycleState(raw.state)) {
+    return null;
+  }
+  return {
+    scheduled: raw.scheduled,
+    action: raw.action,
+    businessId: businessId ?? null,
+    clearedEntries: raw.clearedEntries,
+    ...(raw.syncRequestId !== undefined ? { syncRequestId: syncRequestId ?? null } : {}),
+    ...(raw.state !== undefined ? { state: raw.state } : {}),
+  };
+}
+
+export function parseSyncAcknowledgeResult(raw: unknown): NativeSyncAcknowledgeResult | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.accepted !== "boolean") return null;
+  if (!isSyncAcknowledgeReason(raw.reason)) return null;
+  const businessId = raw.businessId ?? null;
+  const syncRequestId = raw.syncRequestId ?? null;
+  const lastSyncedAt = raw.lastSyncedAt ?? null;
+  if (
+    !isNullableBoundedString(businessId, 64) ||
+    !isNullableBoundedString(syncRequestId, 64) ||
+    !isNullableBoundedString(lastSyncedAt, 64)
+  ) {
+    return null;
+  }
+  if (
+    typeof raw.flushedCount !== "number" ||
+    !Number.isInteger(raw.flushedCount) ||
+    raw.flushedCount < 0 ||
+    typeof raw.remainingCount !== "number" ||
+    !Number.isInteger(raw.remainingCount) ||
+    raw.remainingCount < 0
+  ) {
+    return null;
+  }
+  if (!isSyncLifecycleState(raw.state)) return null;
+  return {
+    accepted: raw.accepted,
+    reason: raw.reason,
+    businessId: businessId ?? null,
+    syncRequestId: syncRequestId ?? null,
+    flushedCount: raw.flushedCount,
+    remainingCount: raw.remainingCount,
+    lastSyncedAt: lastSyncedAt ?? null,
+    state: raw.state,
+  };
+}
+
+export function parseDeepLinkEvent(raw: unknown): NativeDeepLinkEvent | null {
+  if (!isRecord(raw)) return null;
+  if (!isBoundedString(raw.path, 1, 1024) || !raw.path.startsWith("/") || raw.path.startsWith("//")) {
+    return null;
+  }
+  const category = raw.notificationCategory ?? null;
+  if (
+    category !== null &&
+    (typeof category !== "string" || !(NATIVE_NOTIFICATION_CHANNELS as readonly string[]).includes(category))
+  ) {
+    return null;
+  }
+  const businessId = raw.businessId ?? null;
+  if (!isNullableBoundedString(businessId, 64)) return null;
+  return {
+    path: raw.path,
+    notificationCategory: (category as NativeNotificationChannel | null) ?? null,
+    businessId: businessId ?? null,
+  };
+}
+
+export function parseCrmCallEndedEvent(raw: unknown): NativeCrmCallEndedEvent | null {
+  if (!isRecord(raw)) return null;
+  if (!isBoundedString(raw.phoneNormalized, 3, 32)) return null;
+  if (raw.direction !== "incoming" && raw.direction !== "outgoing") return null;
+  if (
+    typeof raw.durationSeconds !== "number" ||
+    !Number.isInteger(raw.durationSeconds) ||
+    raw.durationSeconds < 0 ||
+    raw.durationSeconds > 86400
+  ) {
+    return null;
+  }
+  const customerId = raw.customerId ?? null;
+  const customerName = raw.customerName ?? null;
+  if (!isNullableBoundedString(customerId, 64) || !isNullableBoundedString(customerName, 160)) {
+    return null;
+  }
+  if (!isBoundedString(raw.endedAt, 10, 64)) return null;
+  return {
+    phoneNormalized: raw.phoneNormalized,
+    direction: raw.direction,
+    durationSeconds: raw.durationSeconds,
+    customerId: customerId ?? null,
+    customerName: customerName ?? null,
+    endedAt: raw.endedAt,
+  };
+}
+
+export function parseSyncReconcileRequestedEvent(raw: unknown): NativeSyncReconcileRequestedEvent | null {
+  if (!isRecord(raw)) return null;
+  if (!isBoundedString(raw.businessId, 1, 64)) return null;
+  if (!isValidRequestId(raw.syncRequestId)) return null;
+  if (
+    typeof raw.pendingCount !== "number" ||
+    !Number.isInteger(raw.pendingCount) ||
+    raw.pendingCount < 0
+  ) {
+    return null;
+  }
+  if (!isBoundedString(raw.requestedAt, 10, 64)) return null;
+  const installationId = raw.installationId ?? null;
+  if (!isNullableBoundedString(installationId, 128)) return null;
+  const sessionGeneration = raw.sessionGeneration ?? null;
+  if (
+    sessionGeneration !== null &&
+    (typeof sessionGeneration !== "number" || !Number.isInteger(sessionGeneration) || sessionGeneration < 0)
+  ) {
+    return null;
+  }
+  return {
+    businessId: raw.businessId,
+    syncRequestId: raw.syncRequestId,
+    pendingCount: raw.pendingCount,
+    requestedAt: raw.requestedAt,
+    installationId: installationId ?? null,
+    sessionGeneration: sessionGeneration ?? null,
+  };
+}
+
+export function parseSyncCompletedEvent(raw: unknown): NativeSyncCompletedEvent | null {
+  if (!isRecord(raw)) return null;
+  const businessId = raw.businessId ?? null;
+  if (!isNullableBoundedString(businessId, 64)) return null;
+  if (!isBoundedString(raw.syncedAt, 10, 64)) return null;
+  if (typeof raw.revoked !== "boolean") return null;
+  if (typeof raw.flushedCount !== "number" || !Number.isInteger(raw.flushedCount) || raw.flushedCount < 0) {
+    return null;
+  }
+  if (
+    raw.remainingCount !== undefined &&
+    (typeof raw.remainingCount !== "number" || !Number.isInteger(raw.remainingCount) || raw.remainingCount < 0)
+  ) {
+    return null;
+  }
+  const syncRequestId = raw.syncRequestId ?? null;
+  if (!isNullableBoundedString(syncRequestId, 64)) {
+    return null;
+  }
+  return {
+    businessId: businessId ?? null,
+    syncedAt: raw.syncedAt,
+    revoked: raw.revoked,
+    flushedCount: raw.flushedCount,
+    ...(raw.remainingCount !== undefined ? { remainingCount: raw.remainingCount } : {}),
+    ...(raw.syncRequestId !== undefined ? { syncRequestId: syncRequestId ?? null } : {}),
+  };
+}
+
+export function parseCommandResult<C extends NativeCommand>(
+  command: C,
+  raw: unknown,
+): NativeCommandResults[C] | null {
   switch (command) {
     case "app.info":
-      return parseAppInfo(value) as NativeCommandResults[C] | null;
+      return parseAppInfo(raw) as NativeCommandResults[C] | null;
     case "notifications.status":
-      return parseNotificationStatus(value) as NativeCommandResults[C] | null;
+      return parseNotificationStatus(raw) as NativeCommandResults[C] | null;
     case "device.identity":
-      return parseDeviceIdentity(value) as NativeCommandResults[C] | null;
+      return parseDeviceIdentity(raw) as NativeCommandResults[C] | null;
+    case "notifications.register":
+      return parseNotificationRegistration(raw) as NativeCommandResults[C] | null;
+    case "biometric.status":
+      return parseBiometricStatus(raw) as NativeCommandResults[C] | null;
+    case "biometric.authenticate":
+      return parseBiometricAuthResult(raw) as NativeCommandResults[C] | null;
+    case "scanner.scan":
+      return parseScannerResult(raw) as NativeCommandResults[C] | null;
+    case "media.pick":
+      return parseMediaPickResult(raw) as NativeCommandResults[C] | null;
+    case "share.open":
+      return parseShareResult(raw) as NativeCommandResults[C] | null;
+    case "printer.discover":
+      return parsePrinterDiscoverResult(raw) as NativeCommandResults[C] | null;
+    case "printer.print":
+      return parsePrinterPrintResult(raw) as NativeCommandResults[C] | null;
+    case "crm.callerId.status":
+      return parseCallerIdStatus(raw) as NativeCommandResults[C] | null;
+    case "crm.callerId.sync":
+      return parseCallerIdSyncResult(raw) as NativeCommandResults[C] | null;
+    case "sync.status":
+      return parseSyncStatus(raw) as NativeCommandResults[C] | null;
+    case "sync.trigger":
+      return parseSyncTriggerResult(raw) as NativeCommandResults[C] | null;
+    case "sync.acknowledge":
+      return parseSyncAcknowledgeResult(raw) as NativeCommandResults[C] | null;
     default:
       return null;
   }
 }
 
-export function parseEventPayload<E extends NativeEventName>(name: E, value: unknown): NativeEventPayloads[E] | null {
+export function parseEventPayload<E extends NativeEventName>(
+  name: E,
+  raw: unknown,
+): NativeEventPayloads[E] | null {
   switch (name) {
     case "bridge.ready":
-      return parseAppInfo(value) as NativeEventPayloads[E] | null;
+      return parseAppInfo(raw) as NativeEventPayloads[E] | null;
+    case "navigation.deepLink":
+      return parseDeepLinkEvent(raw) as NativeEventPayloads[E] | null;
+    case "crm.callEnded":
+      return parseCrmCallEndedEvent(raw) as NativeEventPayloads[E] | null;
+    case "sync.reconcileRequested":
+      return parseSyncReconcileRequestedEvent(raw) as NativeEventPayloads[E] | null;
+    case "sync.completed":
+      return parseSyncCompletedEvent(raw) as NativeEventPayloads[E] | null;
     default:
       return null;
   }
+}
+
+export function isSupportedProtocolVersion(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= NATIVE_MIN_COMPATIBLE_BRIDGE_VERSION &&
+    value <= NATIVE_BRIDGE_VERSION
+  );
 }
 
 /**
- * Parses one frame coming from the app. Returns `null` for anything that is not
- * a complete envelope of the version this page speaks. A frame from a newer
- * protocol version is dropped, so the caller's request times out and says so,
- * rather than being half-understood.
+ * Parses an incoming envelope from the native port. Returns `null` if the
+ * frame is malformed, uses an unsupported protocol version, or references a
+ * command/event outside the allowlist.
  */
-export function parseNativeEnvelope(value: unknown): NativeEnvelope | null {
-  if (!isRecord(value)) return null;
-  if (value.v !== NATIVE_BRIDGE_VERSION) return null;
-  if (value.kind === "response") {
-    if (!isRequestId(value.id) || typeof value.ok !== "boolean") return null;
-    if (value.ok) {
-      if (!("result" in value)) return null;
-      return { v: NATIVE_BRIDGE_VERSION, kind: "response", id: value.id, ok: true, result: value.result };
+export function parseNativeEnvelope(raw: unknown): NativeEnvelope | null {
+  if (!isRecord(raw) || !isSupportedProtocolVersion(raw.v)) return null;
+  const v = raw.v;
+
+  if (raw.kind === "response") {
+    if (!isValidRequestId(raw.id) || typeof raw.ok !== "boolean") return null;
+    if (raw.ok) {
+      if (!("result" in raw)) return null;
+      return {
+        v,
+        kind: "response",
+        id: raw.id,
+        ok: true,
+        result: raw.result,
+      };
     }
-    if (!isRecord(value.error)) return null;
-    const code = isNativeErrorCode(value.error.code) ? value.error.code : "native_failure";
-    const message =
-      typeof value.error.message === "string" ? value.error.message.slice(0, MAX_MESSAGE_LENGTH) : undefined;
-    return { v: NATIVE_BRIDGE_VERSION, kind: "response", id: value.id, ok: false, error: { code, message } };
-  }
-  if (value.kind === "event") {
-    if (!isNativeEventName(value.name)) return null;
-    return { v: NATIVE_BRIDGE_VERSION, kind: "event", name: value.name, payload: value.payload };
-  }
-  if (value.kind === "request") {
-    if (!isRequestId(value.id) || !isNativeCommand(value.command)) return null;
-    if (value.payload !== undefined && !isRecord(value.payload)) return null;
+    const err = raw.error;
+    if (!isRecord(err)) return null;
+    const code: NativeErrorCode = isNativeErrorCode(err.code) ? err.code : "native_failure";
+    const message = typeof err.message === "string" ? err.message.slice(0, 200) : undefined;
     return {
-      v: NATIVE_BRIDGE_VERSION,
-      kind: "request",
-      id: value.id,
-      command: value.command,
-      payload: (value.payload as Record<string, unknown> | undefined) ?? {},
+      v,
+      kind: "response",
+      id: raw.id,
+      ok: false,
+      error: { code, ...(message ? { message } : {}) },
     };
   }
+
+  if (raw.kind === "event") {
+    if (!isNativeEventName(raw.name)) return null;
+    const payload = parseEventPayload(raw.name, raw.payload);
+    if (!payload) return null;
+    return {
+      v,
+      kind: "event",
+      name: raw.name,
+      payload,
+    };
+  }
+
+  if (raw.kind === "request") {
+    if (!isValidRequestId(raw.id) || !isNativeCommand(raw.command)) return null;
+    const payload = isRecord(raw.payload) ? raw.payload : null;
+    if (!payload) return null;
+    return {
+      v,
+      kind: "request",
+      id: raw.id,
+      command: raw.command,
+      payload,
+    };
+  }
+
   return null;
 }
 
-export function buildRequestEnvelope(
+export function buildRequestEnvelope<C extends NativeCommand>(
   id: string,
-  command: NativeCommand,
+  command: C,
   payload: Record<string, unknown> = {},
-): NativeRequestEnvelope {
-  return { v: NATIVE_BRIDGE_VERSION, kind: "request", id, command, payload };
+): NativeRequestEnvelope<C> {
+  return {
+    v: NATIVE_BRIDGE_VERSION,
+    kind: "request",
+    id,
+    command,
+    payload,
+  };
 }

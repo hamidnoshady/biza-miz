@@ -54,6 +54,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useBugReport } from "@/components/bug-report/bug-report-provider";
+import { useNative } from "@/components/native/native-provider";
+import { triggerNativeBackgroundSync } from "@/lib/native/capabilities-client";
 import { platformUserMenuItems } from "@/lib/platform-user-menu";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
 import { browserSignedOut, signOutDestination, useSignOut } from "@/components/auth/sign-out";
@@ -78,6 +80,7 @@ export function PlatformUserMenu({
   const pathname = usePathname();
   const router = useRouter();
   const { openReport } = useBugReport();
+  const { connection, request } = useNative();
   const label = roleLabel(role);
   const items = platformUserMenuItems(role);
 
@@ -114,6 +117,12 @@ export function PlatformUserMenu({
     const result = await runSignOut();
     if (!result) return; // one already in flight
     if (browserSignedOut(result)) {
+      if (connection === "connected") {
+        await triggerNativeBackgroundSync(request, {
+          action: "clear_all",
+          businessId: null,
+        });
+      }
       announceSignOutResult(result, () => void retryUnconfirmedSignOut());
       router.replace(signOutDestination(result, destination));
       router.refresh();

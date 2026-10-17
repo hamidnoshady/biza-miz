@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BOTTOM_NAV_MAX,
   parseBottomNavHrefs,
+  resolveAdaptiveBottomNavHrefs,
   resolveBottomNavHrefs,
   toggleBottomNavHref,
 } from "./bottom-nav";
@@ -92,3 +93,37 @@ describe("toggleBottomNavHref", () => {
     expect(toggleBottomNavHref(full, full[0])).toEqual(full.slice(1));
   });
 });
+
+describe("resolveAdaptiveBottomNavHrefs", () => {
+  it("prioritizes primary modules up to 4 and places remaining authorized routes in moreHrefs", () => {
+    expect(
+      resolveAdaptiveBottomNavHrefs(
+        null,
+        ["/dashboard", "/accounting/orders", "/accounting/reports", "/accounting/pos", "/crm/customers", "/settings"],
+        false,
+      ),
+    ).toEqual({
+      primaryHrefs: [
+        "/dashboard",
+        "/accounting/orders",
+        "/accounting/reports",
+        "/accounting/pos",
+      ],
+      moreHrefs: ["/crm/customers", "/settings"],
+    });
+  });
+
+  it("caps adaptive slots at 4 and drops unauthorized routes", () => {
+    expect(
+      resolveAdaptiveBottomNavHrefs(
+        null,
+        ["/dashboard", "/accounting/orders"],
+        false,
+      ),
+    ).toEqual({
+      primaryHrefs: ["/dashboard", "/accounting/orders"],
+      moreHrefs: [],
+    });
+  });
+});
+

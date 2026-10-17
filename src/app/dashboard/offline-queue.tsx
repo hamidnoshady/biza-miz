@@ -20,11 +20,20 @@ import {
   resolveQueueRecordRef,
   type SyncQueueStatus,
 } from "@/lib/sync-queue";
+import { useNative } from "@/components/native/native-provider";
+import { triggerNativeBackgroundSync } from "@/lib/native/capabilities-client";
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
 function notifyListeners(): void {
   listeners.forEach((l) => l());
+}
+
+export function subscribeOfflineQueue(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 export async function enqueueAction(action: {
@@ -132,17 +141,71 @@ export async function probeServer(): Promise<boolean> {
  * (status `conflict`) for a human to resolve via `discardQueueEntry`/
  * `retryQueueEntry` instead of being deleted the instant the server flags it.
  */
-export async function flushQueue(): Promise<void> {
-  if (flushing) return;
+export interface FlushQueueResult {
+  attemptedCount: number;
+  flushedCount: number;
+  remainingCount: number;
+  failedCount: number;
+  conflictCount: number;
+  transientFailure: boolean;
+  completedAt: string;
+}
+
+function dispatchOfflineQueueFlushed(detail: FlushQueueResult) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent<FlushQueueResult>("biza:offline-queue-flushed", { detail }));
+}
+
+export async function flushQueue(): Promise<FlushQueueResult> {
+  if (typeof indexedDB === "undefined") {
+    return {
+      attemptedCount: 0,
+      flushedCount: 0,
+      remainingCount: 0,
+      failedCount: 0,
+      conflictCount: 0,
+      transientFailure: false,
+      completedAt: new Date().toISOString(),
+    };
+  }
+  const db = getOfflineDb();
+  if (flushing) {
+    const currentRemaining = await db.pendingActions.count();
+    return {
+      attemptedCount: 0,
+      flushedCount: 0,
+      remainingCount: currentRemaining,
+      failedCount: 0,
+      conflictCount: 0,
+      transientFailure: false,
+      completedAt: new Date().toISOString(),
+    };
+  }
   // The queue targets this origin (usually the LAN PC), not the Internet.
   // navigator.onLine=false must not suppress a flush while local Wi-Fi works.
-  const db = getOfflineDb();
   const all = await db.pendingActions.orderBy("createdAt").toArray();
   const now = Date.now();
   const pending = all.filter((p) => isQueueEntryDueForRetry(p, now));
-  if (pending.length === 0) return;
+  if (pending.length === 0) {
+    const remainingCount = all.filter((p) => p.status !== "completed").length;
+    const failedCount = all.filter((p) => p.status === "failed").length;
+    const conflictCount = all.filter((p) => p.status === "conflict").length;
+    return {
+      attemptedCount: 0,
+      flushedCount: 0,
+      remainingCount,
+      failedCount,
+      conflictCount,
+      transientFailure: false,
+      completedAt: new Date().toISOString(),
+    };
+  }
 
   flushing = true;
+  let flushedCount = 0;
+  let failedCount = 0;
+  let conflictCount = 0;
+  let transientFailure = false;
   try {
     await db.pendingActions.bulkUpdate(pending.map((p) => ({ key: p.id, changes: { status: "syncing" as SyncQueueStatus, lastAttemptAt: now } })));
     notifyListeners();
@@ -158,8 +221,20 @@ export async function flushQueue(): Promise<void> {
       // Whole-batch failure (server 5xx, etc.): every entry we just marked
       // "syncing" goes back to "pending" untouched — no retry penalty for a
       // failure that wasn't about any individual action.
+      transientFailure = true;
       await db.pendingActions.bulkUpdate(pending.map((p) => ({ key: p.id, changes: { status: "pending" as SyncQueueStatus } })));
-      return;
+      const remainingCount = await db.pendingActions.count();
+      const result: FlushQueueResult = {
+        attemptedCount: pending.length,
+        flushedCount: 0,
+        remainingCount,
+        failedCount: 0,
+        conflictCount: 0,
+        transientFailure: true,
+        completedAt: new Date().toISOString(),
+      };
+      dispatchOfflineQueueFlushed(result);
+      return result;
     }
     const { results } = (await res.json()) as {
       results: { clientEventId: string; ok: boolean; conflict?: boolean; error?: string }[];
@@ -173,6 +248,11 @@ export async function flushQueue(): Promise<void> {
         toDelete.push(p.id);
         continue;
       }
+      if (outcome.status === "conflict") {
+        conflictCount += 1;
+      } else {
+        failedCount += 1;
+      }
       updates.push({
         key: p.id,
         changes: { status: outcome.status, retryCount: outcome.retryCount, lastError: byId.get(p.id)?.error ?? null },
@@ -180,14 +260,28 @@ export async function flushQueue(): Promise<void> {
     }
     if (updates.length > 0) await db.pendingActions.bulkUpdate(updates);
     if (toDelete.length > 0) await db.pendingActions.bulkDelete(toDelete);
+    flushedCount = toDelete.length;
   } catch {
     // still offline, or the server just went down mid-flush — put the
     // in-flight entries back to pending; leave everything else untouched.
+    transientFailure = true;
     await db.pendingActions.bulkUpdate(pending.map((p) => ({ key: p.id, changes: { status: "pending" as SyncQueueStatus } })));
   } finally {
     flushing = false;
     notifyListeners();
   }
+  const remainingCount = await db.pendingActions.count();
+  const result: FlushQueueResult = {
+    attemptedCount: pending.length,
+    flushedCount,
+    remainingCount,
+    failedCount,
+    conflictCount,
+    transientFailure,
+    completedAt: new Date().toISOString(),
+  };
+  dispatchOfflineQueueFlushed(result);
+  return result;
 }
 
 /**
@@ -402,8 +496,26 @@ function useOfflineQueueState(): OfflineQueueState {
 const OfflineQueueContext = createContext<OfflineQueueState | null>(null);
 
 /** One queue/probe owner for the whole authenticated shell. */
-export function OfflineQueueProvider({ children }: { children: ReactNode }) {
+export function OfflineQueueProvider({
+  children,
+  businessId = null,
+}: {
+  children: ReactNode;
+  businessId?: string | null;
+}) {
   const state = useOfflineQueueState();
+  const { connection, request } = useNative();
+
+  useEffect(() => {
+    if (connection === "connected" && state.pendingCount > 0) {
+      void triggerNativeBackgroundSync(request, {
+        action: "enqueue",
+        businessId,
+        pendingCount: state.pendingCount,
+      });
+    }
+  }, [businessId, connection, request, state.pendingCount]);
+
   return <OfflineQueueContext.Provider value={state}>{children}</OfflineQueueContext.Provider>;
 }
 
