@@ -99,9 +99,13 @@ jobs:
       - name: Verdict
         if: always()
         run: |
-          $outcomes = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
-          Write-Host "class outcomes: $($outcomes -join ', ')"
-          if ($outcomes -contains 'failure') { exit 1 }
+          $names = @('paths', 'protocol', 'verifier', 'dpapi', 'lock', 'redactor')
+          $vals = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
+          $report = for ($i = 0; $i -lt $names.Count; $i++) { "$($names[$i])=$($vals[$i])" }
+          if ($vals -contains 'failure') {
+            Write-Host "::error title=class outcomes::$($report -join ', ')"
+            exit 1
+          }
 
       # dotnet-test failures do not surface as check annotations on their own,
       # so a red run would otherwise say only "exit code 1". The TRX logger
@@ -110,7 +114,10 @@ jobs:
       - name: Surface test results as annotations
         if: always()
         run: |
-          $trxFiles = @(Get-ChildItem TestResults/results-*.trx -ErrorAction SilentlyContinue)
+          $trxFiles = @()
+          foreach ($dir in @('TestResults', 'companion/TestResults')) {
+            $trxFiles += @(Get-ChildItem "$dir/results-*.trx" -ErrorAction SilentlyContinue)
+          }
           if ($trxFiles.Count -eq 0) {
             Write-Host "::error title=trx::no TRX file was written"
             exit 0
