@@ -63,6 +63,12 @@ export const IAM_FAILURE_CODES = [
    * staged rotation would send the owner to the wrong fix.
    */
   "credential_rotation_pending",
+  /**
+   * Likewise not an IAM answer: the install's pairing snapshot has not been
+   * acknowledged by the cloud (issue #987), so the cloud does not authenticate
+   * this device yet and the tick holds everything back until it does.
+   */
+  "pairing_pending",
   "unauthorized",
   "forbidden",
   "unsupported_cloud",
@@ -86,7 +92,8 @@ export function isIamFailureCode(value: unknown): value is IamFailureCode {
  * `drift_snapshot_http_<status>` for an HTTP answer it did not accept,
  * `sequence_gap:<expected>:<received>` for a hole in the event stream,
  * the sync tick itself reports `site_credential_rotation_pending` when the
- * staged site credential has not been handed over,
+ * staged site credential has not been handed over and `pairing_pending` when
+ * the cloud has not taken the pairing,
  * `<something>_checksum_mismatch` / `snapshot_identity_mismatch` for a payload
  * that does not describe this site, and anything else the network or the
  * apply-step produced. The order below matters: a gap and a mismatch are
@@ -112,10 +119,20 @@ export function classifyIamFailure(message: string | null | undefined): IamFailu
   if (lower === "site_credential_rotation_pending" || lower === "credential_unsettled") {
     return "credential_rotation_pending";
   }
+  // Same exact-match discipline for the pairing hand-off: only the bare reason
+  // means "still waiting". `pairing_acknowledgement_failed: HTTP 503` and
+  // `pairing_acknowledgement_unreachable: fetch failed` are a cloud answer and
+  // a dead network, and are read below as what they are.
+  if (lower === "pairing_pending" || lower === "pairing_acknowledgement_pending") {
+    return "pairing_pending";
+  }
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout") || lower.includes("aborterror")) {
     return "timeout";
   }
-  const httpStatus = /http_(\d{3})/.exec(lower)?.[1];
+  // `events_http_403` and `pairing_acknowledgement_failed: HTTP 500` are the two
+  // shapes written here, so the separator between the word and the number is not
+  // fixed — and a status is a status whichever way it was spelled.
+  const httpStatus = /http[ _:]?(\d{3})/.exec(lower)?.[1];
   if (httpStatus) {
     const status = Number(httpStatus);
     if (status === 401) return "unauthorized";
@@ -138,6 +155,7 @@ export function classifyIamFailure(message: string | null | undefined): IamFailu
 export const IAM_FAILURE_LABELS: Record<IamFailureCode, string> = {
   not_configured: "همگام‌سازی ابری این دستگاه تنظیم نشده است.",
   credential_rotation_pending: "اعتبارنامهٔ اتصال این دستگاه در حال چرخش است و سرور ابری هنوز آن را تأیید نکرده؛ تا تأیید، داده‌ای فرستاده نمی‌شود.",
+  pairing_pending: "جفت‌شدن این دستگاه با سرور ابری هنوز تأیید نشده است؛ تا تأیید، داده‌ای فرستاده نمی‌شود. اتصال اینترنت و در دسترس بودن سرور ابری را بررسی کنید.",
   unauthorized: "اعتبارنامهٔ اتصال این دستگاه توسط سرور ابری پذیرفته نشد؛ باید دوباره وصل یا اعتبارنامه چرخانده شود.",
   forbidden: "دسترسی این دستگاه روی سرور ابری محدود شده است (تعلیق یا لغو اشتراک).",
   unsupported_cloud: "سرور ابری از همگام‌سازی امنیتی پشتیبانی نمی‌کند؛ نسخهٔ سرور باید به‌روزرسانی شود.",

@@ -32,8 +32,10 @@ export function DeploymentStatusIndicator({ profile }: { profile: DeploymentProf
   const blocked = serverStatus?.operationalBlock?.blocked === true;
   const syncLabel =
     profile === "hybrid"
-      ? blocked
-        ? `سایت محلی · همگام‌سازی عملیاتی مسدود${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`
+      ? serverStatus?.pairingPending
+        ? "سایت محلی · در حال تکمیل جفت‌شدن"
+        : blocked
+          ? `سایت محلی · همگام‌سازی عملیاتی مسدود${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`
         : serverStatus?.sync === "connected"
           ? "سایت محلی · همگام با ابر"
           : serverStatus?.sync === "connecting"
@@ -47,7 +49,8 @@ export function DeploymentStatusIndicator({ profile }: { profile: DeploymentProf
         ? "فقط محلی · اتصال به ابر"
         : `${syncLabel}${identityDegraded ? " · نیازمند بررسی هویت و ورود کارکنان" : ""}`;
   const tone =
-    profile === "hybrid" && (blocked || serverStatus?.sync !== "connected" || identityDegraded)
+    profile === "hybrid" &&
+    (serverStatus?.pairingPending || blocked || serverStatus?.sync !== "connected" || identityDegraded)
       ? "bg-amber-500 dark:bg-amber-400"
       : profile === "local"
         ? "bg-stone-400 dark:bg-stone-500"

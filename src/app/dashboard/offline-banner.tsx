@@ -9,7 +9,7 @@ export function OfflineBanner() {
   const localUnavailable = connectionState.localServer === "local_server_unreachable";
   const cloudPaused = connectionState.cloudSync === "cloud_sync_paused";
   const needsAttention = connectionState.attentionNeeded > 0;
-  if (!localUnavailable && !cloudPaused && !needsAttention && pendingCount === 0) return null;
+  if (!localUnavailable && !cloudPaused && !needsAttention && !connectionState.pairingPending && pendingCount === 0) return null;
 
   let message: string;
   let className: string;
@@ -24,6 +24,11 @@ export function OfflineBanner() {
     className = "bg-destructive/10 text-destructive";
   } else if (pendingCount > 0) {
     message = "سرور محلی متصل است؛ اقدام‌های ذخیره‌شده در حال ارسال هستند.";
+    className = "bg-primary/10 text-primary";
+  } else if (connectionState.pairingPending) {
+    // Issue #987 — pairing snapshot committed locally but the cloud has not
+    // acknowledged it yet. The sync tick retries automatically.
+    message = "سرور محلی و عملیات کسب‌وکار فعال است؛ جفت‌شدن با ابر در حال تکمیل است و همگام‌سازی به‌زودی آغاز می‌شود.";
     className = "bg-primary/10 text-primary";
   } else {
     // Issue #948 P0/P1-5 — say which plane is stopped, and never claim the

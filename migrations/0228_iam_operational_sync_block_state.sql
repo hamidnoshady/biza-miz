@@ -42,7 +42,11 @@ CREATE TABLE iam_operational_sync_block_state (
   last_error text,
   -- Short machine code from `classifyIamFailure()` (transport | unauthorized |
   -- forbidden | unsupported_cloud | cloud_error | timeout | sequence_gap |
-  -- contract_mismatch | sync_error). Safe to display; a raw message is not.
+  -- contract_mismatch | credential_rotation_pending | pairing_pending |
+  -- not_configured | sync_error). Safe to display; a raw message is not. The
+  -- vocabulary is owned by IAM_FAILURE_CODES in
+  -- src/lib/iam/operational-sync-health.ts, not by a constraint here: a new
+  -- reason must never be able to lose a tick's evidence over a check failure.
   last_code text,
   consecutive_blocked_ticks integer NOT NULL DEFAULT 0 CHECK (consecutive_blocked_ticks >= 0),
   total_blocked_ticks integer NOT NULL DEFAULT 0 CHECK (total_blocked_ticks >= 0),

@@ -77,6 +77,27 @@ describe("Hybrid reconnect ordering", () => {
     expect(gate).toContain('return { ready: false, reason: "iam_failed"');
   });
 
+  it("folds the pairing acknowledgement into the gate it records", () => {
+    // Issue #987 made a pending acknowledgement skip the tick. That is the
+    // same shape of defect #988 is about — a `continue` whose only trace was a
+    // log line — so the step now reports into the gate instead of jumping past
+    // it, and the tick must not grow a second silent skip of its own.
+    const source = readFileSync(new URL("../server-sync.ts", import.meta.url), "utf8");
+    const gate = source.slice(
+      source.indexOf("export async function runOperationalSyncGate"),
+      source.indexOf("export async function runServerSyncTick"),
+    );
+    expect(gate).toContain('reason: "pairing_pending"');
+    // Only an install that was already activated is a *blocked* one; a pairing
+    // still in flight is `not_configured`, and has nothing held back from it.
+    expect(gate.indexOf('reason: "not_configured", siteDeviceId, error: ack.error')).toBeGreaterThan(
+      gate.indexOf('reason: "pairing_pending"'),
+    );
+    const tick = tickSource();
+    expect(tick).not.toContain("acknowledgePendingPairing");
+    expect(tick).not.toContain("credentialReady");
+  });
+
   it("keeps the boolean contract runIamSync has always had", () => {
     const sync = readFileSync(new URL("./sync.ts", import.meta.url), "utf8");
     expect(sync).toContain("export async function runIamSync(businessId:string):Promise<boolean>");

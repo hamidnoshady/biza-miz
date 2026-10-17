@@ -241,9 +241,11 @@ surface read healthy.
 - **One gate function.** `runOperationalSyncGate()`
   (`src/lib/server-sync.ts`) decides and explains in one place:
   `reconciled`, `not_configured` (still pairing, sync switched off — never a
-  blocked install), `credential_unsettled` (the staged site credential has not
-  been handed over, which is where an unreachable cloud is noticed first), or
-  `iam_failed`. `runIamSyncAttempt()` returns the reason beside the boolean and
+  blocked install), `pairing_pending` (the cloud has not taken this install's
+  pairing snapshot, so it does not authenticate the device — issue #987's step,
+  which used to `continue` the tick on its own), `credential_unsettled` (the
+  staged site credential has not been handed over, which is where an
+  unreachable cloud is noticed first), or `iam_failed`. `runIamSyncAttempt()` returns the reason beside the boolean and
   is total by construction, because an exception escaping it would skip the
   record along with the sync.
 - **The reason is classified, not dumped.** `classifyIamFailure()`

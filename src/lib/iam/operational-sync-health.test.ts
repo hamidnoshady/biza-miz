@@ -61,6 +61,20 @@ describe("classifyIamFailure", () => {
     expect(classifyIamFailure("credential_rotation_ack_http_401")).toBe("unauthorized");
   });
 
+  it("reads a pairing the cloud has not taken as its own condition", () => {
+    // Issue #987 made a pending acknowledgement a step that closes the gate, so
+    // the vocabulary has to name it: waiting on the cloud's answer is a
+    // different fix from the cloud refusing it or the network being down.
+    expect(classifyIamFailure("pairing_pending")).toBe("pairing_pending");
+    expect(classifyIamFailure("pairing_acknowledgement_pending")).toBe("pairing_pending");
+    expect(classifyIamFailure("pairing_acknowledgement_failed: HTTP 503")).toBe("cloud_error");
+    expect(classifyIamFailure("pairing_acknowledgement_failed: HTTP 401")).toBe("unauthorized");
+    expect(classifyIamFailure("pairing_acknowledgement_unreachable: fetch failed")).toBe("transport");
+    // The status is read with or without the underscore spelling the IAM
+    // reconciliation uses, because these two steps were written apart.
+    expect(classifyIamFailure("events_http_403")).toBe("forbidden");
+  });
+
   it("keeps an absent or unknown reason honest instead of inventing one", () => {
     expect(classifyIamFailure(null)).toBe("sync_error");
     expect(classifyIamFailure("   ")).toBe("sync_error");
