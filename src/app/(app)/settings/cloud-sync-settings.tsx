@@ -9,7 +9,12 @@ import type { DeploymentProfile } from "@/lib/deployment-mode";
 import { Button } from "@/components/ui/button";
 import { useOfflineQueue } from "@/app/dashboard/offline-queue";
 import { credentialSyncLabel } from "@/lib/iam/credential-health";
-import { isIamFailureCode, operationalSyncBlockedSummary, type OperationalSyncBlockView } from "@/lib/iam/operational-sync-health";
+import {
+  isIamFailureCode,
+  operationalSyncBlockedSummary,
+  operationalSyncBlockLabel,
+  type OperationalSyncBlockView,
+} from "@/lib/iam/operational-sync-health";
 
 interface StatusResponse extends PlatformConnectionState {
   profile: DeploymentProfile;
@@ -172,7 +177,7 @@ export function CloudSyncSettings() {
             <IdentityRow
               icon={DatabaseIcon}
               label="داده‌های عملیاتی"
-              value={operationalBlocked ? "مسدود" : LABEL[state.sync]}
+              value={operationalBlocked ? operationalSyncBlockLabel("blocked") : LABEL[state.sync]}
               detail={
                 operationalBlocked
                   ? `${block.consecutiveBlockedTicks.toLocaleString("fa-IR")} تلاش پشت سر هم بدون همگام‌سازی عملیاتی`
