@@ -72,11 +72,38 @@ jobs:
         env:
           DOTNET_ROLL_FORWARD: Major
 
-      - name: Test class OfflineTokenVerifier
-        id: verifier
+      - name: Test verifier shape
+        id: verifier1
         continue-on-error: true
         run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~OfflineTokenVerifierTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-verifier.trx" 2>&1 | Tee-Object -FilePath test-output-verifier.txt
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsMalformedTokens|FullyQualifiedName~FailsClosedWithoutApprovedKeys" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier1.txt
+          exit $LASTEXITCODE
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test verifier signatures
+        id: verifier2
+        continue-on-error: true
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~VerifiesTheServerMintedVector|FullyQualifiedName~RejectsATamperedSignature|FullyQualifiedName~RejectsATamperedPayload|FullyQualifiedName~RejectsNonEs256Algorithms" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2.txt
+          exit $LASTEXITCODE
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test verifier claims
+        id: verifier3
+        continue-on-error: true
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~DistinguishesExpiryFromABadSignature|FullyQualifiedName~DistinguishesNotYetValid|FullyQualifiedName~DistinguishesWrongAudience|FullyQualifiedName~ExpiresExactlyAtExp|FullyQualifiedName~FailsClosedOnUnknownKid" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier3.txt
+          exit $LASTEXITCODE
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test verifier matrix
+        id: verifier4
+        continue-on-error: true
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~ExpiredAndWrongAudienceIsInvalidSignature|FullyQualifiedName~NonNumericExpIsInvalidSignature|FullyQualifiedName~NonNumericNbfIsNotYetValid|FullyQualifiedName~NonNumericIatIsNotYetValid" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier4.txt
           exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
@@ -111,8 +138,8 @@ jobs:
       - name: Verdict
         if: always()
         run: |
-          $names = @('paths', 'protocol', 'verifier', 'dpapi', 'lock', 'redactor')
-          $vals = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
+          $names = @('paths', 'protocol', 'verifier1', 'verifier2', 'verifier3', 'verifier4', 'dpapi', 'lock', 'redactor')
+          $vals = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier1.outcome }}', '${{ steps.verifier2.outcome }}', '${{ steps.verifier3.outcome }}', '${{ steps.verifier4.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
           $report = for ($i = 0; $i -lt $names.Count; $i++) { "$($names[$i])=$($vals[$i])" }
           if ($vals -contains 'failure') {
             Write-Host "::error title=class outcomes::$($report -join ', ')"
@@ -129,41 +156,26 @@ jobs:
         if: always()
         run: |
           try {
-            Write-Host "::error title=v::verifier outcome is ${{ steps.verifier.outcome }}"
-            Write-Host "::error title=v::console present $(Test-Path test-output-verifier.txt)"
-            $vtrx = 'companion/test/Biza.SupportCompanion.Core.Tests/TestResults/results-verifier.trx'
-            Write-Host "::error title=v::trx present $(Test-Path $vtrx)"
-            if (Test-Path $vtrx) {
-              [xml]$trx = Get-Content $vtrx
-              $c = $trx.TestRun.ResultSummary.Counters
-              Write-Host "::error title=v::trx outcome=$($trx.TestRun.ResultSummary.outcome) total=$($c.total) passed=$($c.passed) failed=$($c.failed) error=$($c.error)"
-              foreach ($r in $trx.TestRun.Results.UnitTestResult) {
-                if ($r.outcome -eq 'Passed') { continue }
-                $m = ''
-                if ($r.Output -and $r.Output.ErrorInfo -and $r.Output.ErrorInfo.Message) {
-                  $m = ($r.Output.ErrorInfo.Message -replace '\s+', ' ').Trim()
+            foreach ($g in @(('1', '${{ steps.verifier1.outcome }}'), ('2', '${{ steps.verifier2.outcome }}'), ('3', '${{ steps.verifier3.outcome }}'), ('4', '${{ steps.verifier4.outcome }}'))) {
+              $file = "test-output-verifier$($g[0]).txt"
+              Write-Host "::error title=v$($g[0])::outcome=$($g[1]) present=$(Test-Path $file)"
+              if (Test-Path $file) {
+                $kept = @(Get-Content $file | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' })
+                $buf = ''
+                $n = 0
+                foreach ($line in $kept) {
+                  $piece = ($line.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '' -replace ' offender.*$', '') + ' | '
+                  if (($buf.Length + $piece.Length) -gt 800) {
+                    $n++
+                    Write-Host "::error title=v$($g[0]) ($n)::$buf"
+                    $buf = ''
+                  }
+                  $buf += $piece
                 }
-                if ($m.Length -gt 600) { $m = $m.Substring(0, 600) }
-                Write-Host "::error title=v $($r.outcome)::$($r.testName) :: $m"
-              }
-            }
-            if (Test-Path test-output-verifier.txt) {
-              $kept = @(Get-Content test-output-verifier.txt | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' })
-              Write-Host "::error title=v::console non-pass lines $($kept.Count)"
-              $buf = ''
-              $n = 0
-              foreach ($line in $kept) {
-                $piece = ($line.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') + ' | '
-                if (($buf.Length + $piece.Length) -gt 800) {
+                if ($buf -ne '') {
                   $n++
-                  Write-Host "::error title=v console ($n)::$buf"
-                  $buf = ''
+                  Write-Host "::error title=v$($g[0]) ($n)::$buf"
                 }
-                $buf += $piece
-              }
-              if ($buf -ne '') {
-                $n++
-                Write-Host "::error title=v console ($n)::$buf"
               }
             }
             Write-Host "::error title=v::reporter finished"
