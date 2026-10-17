@@ -123,57 +123,50 @@ jobs:
       # so a red run would otherwise say only "exit code 1". The TRX logger
       # records the structured per-test outcome (including run aborts), which
       # this step re-emits as annotations readable from the checks API.
-      - name: Surface test results as annotations
+      # TEMPORARY: minimal reporter — the full dump keeps losing messages, so
+      # report ONLY the failing verifier class until it is green.
+      - name: Report verifier failure
         if: always()
         run: |
-          $seen = @(Get-ChildItem test-output-*.txt -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-          Write-Host "::error title=console files::$($seen -join ', ')"
-          Write-Host "::error title=verifier console present::$(Test-Path test-output-verifier.txt)"
-          foreach ($outFile in @(Get-ChildItem test-output-*.txt -ErrorAction SilentlyContinue)) {
-            $class = $outFile.BaseName -replace '^test-output-', ''
-            $lines = Get-Content $outFile.FullName
-            $kept = @($lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' })
-            Write-Host "::error title=console $class::$($lines.Count) lines, $($kept.Count) non-pass"
-            $buf = ''
-            $chunk = 0
-            foreach ($line in $kept) {
-              $short = ($line.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') + ' | '
-              if (($buf.Length + $short.Length) -gt 850) {
-                $chunk++
-                Write-Host "::error title=console $class ($chunk)::$buf"
-                $buf = ''
-              }
-              $buf += $short
-            }
-            if ($buf -ne '') {
-              $chunk++
-              Write-Host "::error title=console $class ($chunk)::$buf"
-            }
-          }
-          $trxFiles = @()
-          foreach ($dir in @('TestResults', 'companion/TestResults', 'companion/test/Biza.SupportCompanion.Core.Tests/TestResults')) {
-            $trxFiles += @(Get-ChildItem "$dir/results-*.trx" -ErrorAction SilentlyContinue)
-          }
-          if ($trxFiles.Count -eq 0) {
-            Write-Host "::error title=trx::no TRX file was written"
-            exit 0
-          }
-          foreach ($trxFile in $trxFiles) {
-            try {
-              [xml]$trx = Get-Content $trxFile.FullName
-              $counters = $trx.TestRun.ResultSummary.Counters
-              Write-Host "::error title=trx summary $($trxFile.BaseName)::outcome=$($trx.TestRun.ResultSummary.outcome) total=$($counters.total) passed=$($counters.passed) failed=$($counters.failed) error=$($counters.error) notExecuted=$($counters.notExecuted)"
-              foreach ($result in $trx.TestRun.Results.UnitTestResult) {
-                if ($result.outcome -eq 'Passed') { continue }
-                $message = ''
-                if ($result.Output -and $result.Output.ErrorInfo -and $result.Output.ErrorInfo.Message) {
-                  $message = ($result.Output.ErrorInfo.Message -replace '\s+', ' ').Trim()
+          try {
+            Write-Host "::error title=v::verifier outcome is ${{ steps.verifier.outcome }}"
+            Write-Host "::error title=v::console present $(Test-Path test-output-verifier.txt)"
+            $vtrx = 'companion/test/Biza.SupportCompanion.Core.Tests/TestResults/results-verifier.trx'
+            Write-Host "::error title=v::trx present $(Test-Path $vtrx)"
+            if (Test-Path $vtrx) {
+              [xml]$trx = Get-Content $vtrx
+              $c = $trx.TestRun.ResultSummary.Counters
+              Write-Host "::error title=v::trx outcome=$($trx.TestRun.ResultSummary.outcome) total=$($c.total) passed=$($c.passed) failed=$($c.failed) error=$($c.error)"
+              foreach ($r in $trx.TestRun.Results.UnitTestResult) {
+                if ($r.outcome -eq 'Passed') { continue }
+                $m = ''
+                if ($r.Output -and $r.Output.ErrorInfo -and $r.Output.ErrorInfo.Message) {
+                  $m = ($r.Output.ErrorInfo.Message -replace '\s+', ' ').Trim()
                 }
-                if ($message.Length -gt 700) { $message = $message.Substring(0, 700) }
-                $shortName = $result.testName -replace 'Biza\.SupportCompanion\.Core\.Tests\.', ''
-                Write-Host "::error title=trx $($result.outcome) $($trxFile.BaseName)::$shortName :: $message"
+                if ($m.Length -gt 600) { $m = $m.Substring(0, 600) }
+                Write-Host "::error title=v $($r.outcome)::$($r.testName) :: $m"
               }
-            } catch {
-              Write-Host "::error title=trx parse failed $($trxFile.BaseName)::$($_.Exception.Message)"
             }
+            if (Test-Path test-output-verifier.txt) {
+              $kept = @(Get-Content test-output-verifier.txt | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' })
+              Write-Host "::error title=v::console non-pass lines $($kept.Count)"
+              $buf = ''
+              $n = 0
+              foreach ($line in $kept) {
+                $piece = ($line.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') + ' | '
+                if (($buf.Length + $piece.Length) -gt 800) {
+                  $n++
+                  Write-Host "::error title=v console ($n)::$buf"
+                  $buf = ''
+                }
+                $buf += $piece
+              }
+              if ($buf -ne '') {
+                $n++
+                Write-Host "::error title=v console ($n)::$buf"
+              }
+            }
+            Write-Host "::error title=v::reporter finished"
+          } catch {
+            Write-Host "::error title=v reporter crashed::$($_.Exception.Message)"
           }
