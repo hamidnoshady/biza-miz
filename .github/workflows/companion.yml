@@ -50,13 +50,58 @@ jobs:
       - name: Build (Release)
         run: dotnet build companion/Biza.SupportCompanion.sln --no-restore --configuration Release
 
-      - name: Test (Release)
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFileName=results.trx" --blame
+      # TEMPORARY DIAGNOSTIC SPLIT: the combined run dies mid-way with no
+      # summary, so each test class gets its own step — per-step conclusions
+      # (visible via API) isolate the killer deterministically. Revert to one
+      # step once green.
+      - name: Test class CompanionPaths
+        id: paths
+        continue-on-error: true
+        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~CompanionPathsTests" --logger "trx;LogFileName=results-paths.trx"
         env:
-          # Lets the xUnit test host roll forward onto the .NET 10 runtime
-          # when the pinned Test SDK predates it. Test-only; the shipped
-          # companion targets its runtime exactly.
           DOTNET_ROLL_FORWARD: Major
+
+      - name: Test class SupportProtocol
+        id: protocol
+        continue-on-error: true
+        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~SupportProtocolTests" --logger "trx;LogFileName=results-protocol.trx"
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test class OfflineTokenVerifier
+        id: verifier
+        continue-on-error: true
+        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~OfflineTokenVerifierTests" --logger "trx;LogFileName=results-verifier.trx"
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test class Dpapi
+        id: dpapi
+        continue-on-error: true
+        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~DpapiTests" --logger "trx;LogFileName=results-dpapi.trx"
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test class MaintenanceLock
+        id: lock
+        continue-on-error: true
+        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~MaintenanceLockTests" --logger "trx;LogFileName=results-lock.trx"
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test class Redactor
+        id: redactor
+        continue-on-error: true
+        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RedactorTests" --logger "trx;LogFileName=results-redactor.trx"
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Verdict
+        if: always()
+        run: |
+          $outcomes = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
+          Write-Host "class outcomes: $($outcomes -join ', ')"
+          if ($outcomes -contains 'failure') { exit 1 }
 
       # dotnet-test failures do not surface as check annotations on their own,
       # so a red run would otherwise say only "exit code 1". The TRX logger
@@ -65,21 +110,23 @@ jobs:
       - name: Surface test results as annotations
         if: always()
         run: |
-          $trxFiles = @(Get-ChildItem TestResults/results.trx -ErrorAction SilentlyContinue)
+          $trxFiles = @(Get-ChildItem TestResults/results-*.trx -ErrorAction SilentlyContinue)
           if ($trxFiles.Count -eq 0) {
             Write-Host "::error title=trx::no TRX file was written"
             exit 0
           }
-          [xml]$trx = Get-Content $trxFiles[0].FullName
-          $counters = $trx.TestRun.ResultSummary.Counters
-          Write-Host "::error title=trx summary::outcome=$($trx.TestRun.ResultSummary.outcome) total=$($counters.total) passed=$($counters.passed) failed=$($counters.failed) error=$($counters.error) notExecuted=$($counters.notExecuted)"
-          foreach ($result in $trx.TestRun.Results.UnitTestResult) {
-            if ($result.outcome -eq 'Passed') { continue }
-            $message = ''
-            if ($result.Output -and $result.Output.ErrorInfo -and $result.Output.ErrorInfo.Message) {
-              $message = ($result.Output.ErrorInfo.Message -replace '\s+', ' ').Trim()
+          foreach ($trxFile in $trxFiles) {
+            [xml]$trx = Get-Content $trxFile.FullName
+            $counters = $trx.TestRun.ResultSummary.Counters
+            Write-Host "::error title=trx summary $($trxFile.BaseName)::outcome=$($trx.TestRun.ResultSummary.outcome) total=$($counters.total) passed=$($counters.passed) failed=$($counters.failed) error=$($counters.error) notExecuted=$($counters.notExecuted)"
+            foreach ($result in $trx.TestRun.Results.UnitTestResult) {
+              if ($result.outcome -eq 'Passed') { continue }
+              $message = ''
+              if ($result.Output -and $result.Output.ErrorInfo -and $result.Output.ErrorInfo.Message) {
+                $message = ($result.Output.ErrorInfo.Message -replace '\s+', ' ').Trim()
+              }
+              if ($message.Length -gt 700) { $message = $message.Substring(0, 700) }
+              $shortName = $result.testName -replace 'Biza\.SupportCompanion\.Core\.Tests\.', ''
+              Write-Host "::error title=trx $($result.outcome) $($trxFile.BaseName)::$shortName :: $message"
             }
-            if ($message.Length -gt 700) { $message = $message.Substring(0, 700) }
-            $shortName = $result.testName -replace 'Biza\.SupportCompanion\.Core\.Tests\.', ''
-            Write-Host "::error title=trx $($result.outcome)::$shortName :: $message"
           }
