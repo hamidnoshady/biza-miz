@@ -457,6 +457,7 @@ public static class OfflineTokenVerifier
     internal static byte[] Base64UrlDecode(string encoded)
     {
         var s = encoded.Replace('-', '+').Replace('_', '/');
+        ThrowIfNonCanonicalBase64(s);
         switch (s.Length % 4)
         {
             case 2: s += "=="; break;
@@ -464,5 +465,42 @@ public static class OfflineTokenVerifier
         }
 
         return Convert.FromBase64String(s);
+    }
+
+    // JWS uses unpadded base64url. When the encoded length is not a whole
+    // number of quads, the final character carries excess low bits that a
+    // real encoder always emits as zero. .NET's decoder is lenient about
+    // nonzero excess bits, and on .NET 10 that input class killed the host
+    // process inside native code instead of failing closed (Issue #984: the
+    // RejectsATamperedSignature vector flips the final signature character,
+    // which changes only those excess bits). Reject it explicitly so every
+    // caller fails closed with the error it already maps from FormatException.
+    private static void ThrowIfNonCanonicalBase64(string s)
+    {
+        var mask = (s.Length % 4) switch
+        {
+            2 => 0x0F,
+            3 => 0x03,
+            _ => 0,
+        };
+        if (mask == 0)
+        {
+            return;
+        }
+
+        var last = s[^1];
+        var value = last switch
+        {
+            >= 'A' and <= 'Z' => last - 'A',
+            >= 'a' and <= 'z' => last - 'a' + 26,
+            >= '0' and <= '9' => last - '0' + 52,
+            '+' => 62,
+            '/' => 63,
+            _ => -1,
+        };
+        if (value < 0 || (value & mask) != 0)
+        {
+            throw new FormatException("Non-canonical base64 trailing bits.");
+        }
     }
 }
