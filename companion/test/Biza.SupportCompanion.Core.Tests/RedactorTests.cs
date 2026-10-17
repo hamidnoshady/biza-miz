@@ -56,13 +56,13 @@ public sealed class RedactorTests
     [Fact]
     public void RedactNodeMatchesKeysCaseInsensitivelyIgnoringSeparators()
     {
-        var node = JsonNode.Parse("""{"ConnectionString":"x","SET-COOKIE":"y","kept":"z"}""");
+        var node = JsonNode.Parse("""{"ConnectionString":"x","Client-Secret":"y","kept":"z"}""");
         var summary = new RedactionSummary();
 
         var redacted = Redactor.RedactNode(node, summary);
 
         Assert.Equal(
-            """{"ConnectionString":"[REDACTED]","SET-COOKIE":"[REDACTED]","kept":"z"}""",
+            """{"ConnectionString":"[REDACTED]","Client-Secret":"[REDACTED]","kept":"z"}""",
             redacted?.ToJsonString());
         Assert.Equal(2, summary.BlockedFields);
     }

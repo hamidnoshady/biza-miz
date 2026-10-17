@@ -97,10 +97,19 @@ public sealed class MaintenanceLockTests
     [Fact]
     public void UnwritablePathReturnsNullInsteadOfThrowing()
     {
-        // A path inside a missing drive can never be created: contention-style
-        // absence, not an exception.
-        var impossible = Path.Combine("\\\\?\\GLOBALROOT", $"nope-{Guid.NewGuid():N}.lock");
-        Assert.Null(MaintenanceLock.TryAcquire(impossible));
+        // A lock path nested under a regular file can never be created:
+        // contention-style absence, not an exception.
+        var blocker = Path.Combine(Path.GetTempPath(), $"companion-block-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(blocker, [0x00]);
+            var impossible = Path.Combine(blocker, "maintenance.lock");
+            Assert.Null(MaintenanceLock.TryAcquire(impossible));
+        }
+        finally
+        {
+            TryDelete(blocker);
+        }
     }
 
     private static string TempLockPath() =>

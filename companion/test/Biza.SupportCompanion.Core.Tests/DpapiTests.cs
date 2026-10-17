@@ -29,7 +29,7 @@ public sealed class DpapiTests
     {
         var plaintext = Encoding.UTF8.GetBytes("same-input");
 
-        Assert.NotEqual(Dpapi.Protect(plaintext), Dpapi.Protect(plaintext));
+        Assert.False(Dpapi.Protect(plaintext).SequenceEqual(Dpapi.Protect(plaintext)));
     }
 
     [Fact]
