@@ -67,5 +67,14 @@ contextBridge.exposeInMainWorld("businessSuiteDesktop", Object.freeze({
     sendRaw: (target, dataBase64) => ipcRenderer.invoke("desktop:print-send-raw", { target, dataBase64 }),
     sendPage: (printerName, dataBase64) => ipcRenderer.invoke("desktop:print-send-page", { printerName, dataBase64 }),
   }),
+  /**
+   * Issue #984 — the standalone support companion. `status` reports whether
+   * it is installed (for truthful UI states); `launch` opens it with an
+   * optional ticket hint. Launching authorizes nothing by itself.
+   */
+  supportCompanion: Object.freeze({
+    status: () => ipcRenderer.invoke("desktop:support-companion"),
+    launch: (ticketId) => ipcRenderer.invoke("desktop:support-companion", { action: "launch", ticketId }),
+  }),
 }));
 

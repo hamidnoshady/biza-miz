@@ -181,6 +181,21 @@ export interface DesktopBridge {
   update?: DesktopUpdateBridge;
   /** Present since the native-printing bridge shipped; optional so older builds still type-check. */
   printing?: DesktopPrintingBridge;
+  /** Issue #984 — the standalone support companion launcher; optional so older shells still type-check. */
+  supportCompanion?: DesktopSupportCompanionBridge;
+}
+
+/**
+ * Issue #984 — `status` reports install presence for truthful UI states;
+ * `launch` opens the companion with an optional ticket hint. Launching
+ * authorizes nothing; absence resolves `{ ok: false, error: "not_installed" }`.
+ */
+export interface DesktopSupportCompanionBridge {
+  status(): Promise<{ installed: boolean; exe: string | null; protocol: string }>;
+  launch(ticketId?: string | null): Promise<
+    | { ok: true; exe: string }
+    | { ok: false; error: "not_installed" | "launch_failed"; detail?: string }
+  >;
 }
 
 declare global {
