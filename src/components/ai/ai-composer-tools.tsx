@@ -1,18 +1,16 @@
 "use client";
 
 /**
- * AI Hub Wave 5 (issue #145) — the composer's message-level tools, shared by
- * the floating launcher and the full-page hub so the two never drift: search
- * restricted to this business's own reports and the caller's own past
- * conversations (replacing a general "web" icon per Phase 18b's own
- * out-of-scope decision), and a per-message "allow action" toggle
- * (client/prompt-only, no architecture change — the confirm-before-apply flow
- * is unaffected either way).
+ * AI Hub composer message-level tools (Issue #145 & Issue #905):
+ * - Search restricted to this business's own reports and the caller's own past
+ *   conversations.
+ * - Per-message "allow action" toggle (`actionsAllowed`).
  *
- * Phase 36c — uploading moved to the composer's own + menu; these are the two
- * that configure the *message* itself.
+ * Issue #905 (2026-10-17 owner UX correction): these tools are hosted inside
+ * the composer's consolidated `+` menu rather than as standalone search/gear
+ * icon buttons on the composer bar.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   BarChart3Icon,
   MessageSquareIcon,
@@ -29,9 +27,61 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { AssistantMode } from "./use-ai-chat";
 
-interface SearchResponse {
+export interface SearchResponse {
   conversations?: { id: string; title: string }[];
   reports?: { key: string; label: string }[];
+}
+
+export function useAiComposerSearch(enabled: boolean) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResponse | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) {
+      setResults(null);
+      setSearching(false);
+      return;
+    }
+    const q = query.trim();
+    if (!q) {
+      setResults(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const timer = setTimeout(() => {
+      fetch(`/api/ai/search?q=${encodeURIComponent(q)}`)
+        .then((response) => response.json())
+        .then((data: SearchResponse) => setResults(data))
+        .catch(() => setResults({ conversations: [], reports: [] }))
+        .finally(() => setSearching(false));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [enabled, query]);
+
+  const resetSearch = useCallback(() => {
+    setQuery("");
+    setResults(null);
+    setSearching(false);
+  }, []);
+
+  const noResults = Boolean(
+    !searching &&
+      query.trim() &&
+      results &&
+      !results.conversations?.length &&
+      !results.reports?.length,
+  );
+
+  return {
+    query,
+    setQuery,
+    results,
+    searching,
+    noResults,
+    resetSearch,
+  };
 }
 
 export function AiComposerTools({
@@ -51,46 +101,17 @@ export function AiComposerTools({
   onSelectConversation: (id: string) => void;
   onSelectReportPrompt: (prompt: string) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<SearchResponse | null>(null);
-  const [searching, setSearching] = useState(false);
-
-  useEffect(() => {
-    const q = query.trim();
-    if (!q) {
-      setResults(null);
-      setSearching(false);
-      return;
-    }
-    setSearching(true);
-    const timer = setTimeout(() => {
-      fetch(`/api/ai/search?q=${encodeURIComponent(q)}`)
-        .then((response) => response.json())
-        .then((data: SearchResponse) => setResults(data))
-        .catch(() => setResults({ conversations: [], reports: [] }))
-        .finally(() => setSearching(false));
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [query]);
+  const { query, setQuery, results, searching, noResults, resetSearch } =
+    useAiComposerSearch(canPropose);
 
   if (!canPropose && mode !== "dashboard") return null;
-
-  const noResults =
-    !searching &&
-    query.trim() &&
-    results &&
-    !results.conversations?.length &&
-    !results.reports?.length;
 
   return (
     <div className="flex items-center gap-0.5">
       {canPropose ? (
         <DropdownMenu
           onOpenChange={(open) => {
-            if (!open) {
-              setQuery("");
-              setResults(null);
-            }
+            if (!open) resetSearch();
           }}
         >
           <DropdownMenuTrigger asChild>

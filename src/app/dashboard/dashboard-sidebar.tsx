@@ -10,9 +10,7 @@ import {
   ContactIcon,
   FolderIcon,
   GlobeIcon,
-  HistoryIcon,
   LayoutGridIcon,
-  MessageSquarePlusIcon,
   SparklesIcon,
   TrendingUpIcon,
   UsersIcon,
@@ -99,8 +97,6 @@ import { useNative } from "@/components/native/native-provider";
 import { AppSheet } from "@/components/mobile/app-sheet";
 import { QuickCreateSheet } from "@/components/mobile/quick-create-sheet";
 import { PostCallActivitySheet } from "@/components/mobile/post-call-activity-sheet";
-import { AiConversationsSidebar } from "./ai/ai-conversations-sidebar";
-import { useAssistantSidebarBridge } from "./ai/assistant-sidebar-bridge";
 
 
 const SIDEBAR_PREFERENCE_KEY = "dashboard-sidebar-preference";
@@ -230,15 +226,11 @@ function isActive(pathname: string, href: string, search?: ReadonlyURLSearchPara
  * The workspace rail (Phase 35 Wave 2 & Issue #905).
  *
  * This is the global platform navigation: assistant home, My Workspace, and
- * four business-app launchers, plus on the assistant route (`/dashboard`) the
- * unified «گفت‌وگوی جدید» action and private «گفتگوهای اخیر» group so the
- * assistant page never mounts a second permanent sidebar.
+ * four business-app launchers. Conversation history lives in its own
+ * collapsible panel on the physical left of the assistant window rather than
+ * inside this right-side navigation rail.
  */
 function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: string }) {
-  const assistantRoute = isAssistantSurface(pathname);
-  const bridge = useAssistantSidebarBridge();
-  const { toggleSidebar, setOpenMobile } = useSidebar();
-
   const stateByApp = new Map<AppKey, NonNullable<NavItem["appState"]>>();
   for (const item of navItems) {
     if (!item.appState) continue;
@@ -258,42 +250,16 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
     ];
   });
 
-  const railButtonClass = assistantRoute
-    ? `${APP_NAV_BUTTON_CLASS} !min-h-9 !py-1.5 text-[13px]`
-    : APP_NAV_BUTTON_CLASS;
-
   return (
-    <SidebarContent
-      className={
-        assistantRoute
-          ? "flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-2.5"
-          : "px-3 py-4"
-      }
-    >
-      <nav aria-label="میز کار" className={assistantRoute ? "shrink-0 space-y-2" : "space-y-4"}>
-        <SidebarMenu className={assistantRoute ? "space-y-0.5" : "space-y-1.5"}>
-          {assistantRoute ? (
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                type="button"
-                tooltip="گفت‌وگوی جدید"
-                onClick={() => {
-                  bridge.onNewConversation?.();
-                  setOpenMobile(false);
-                }}
-                className={`${railButtonClass} border border-primary/25 bg-primary/10 font-semibold text-primary hover:bg-primary/15`}
-              >
-                <MessageSquarePlusIcon aria-hidden="true" className="size-4 shrink-0" />
-                <span className={NAV_LABEL_CLASS}>گفت‌وگوی جدید</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          ) : null}
+    <SidebarContent className="px-3 py-4">
+      <nav aria-label="میز کار" className="space-y-4">
+        <SidebarMenu className="space-y-1.5">
           <SidebarMenuItem>
             <SidebarMenuButton
               asChild
               isActive={pathname === DASHBOARD_HOME}
               tooltip="دستیار هوشمند"
-              className={railButtonClass}
+              className={APP_NAV_BUTTON_CLASS}
             >
               <Link href={DASHBOARD_HOME} aria-current={pathname === DASHBOARD_HOME ? "page" : undefined}>
                 <SparklesIcon aria-hidden="true" className="size-4 shrink-0" />
@@ -306,7 +272,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
               asChild
               isActive={isWorkspacePathname(pathname)}
               tooltip="میز کار من"
-              className={railButtonClass}
+              className={APP_NAV_BUTTON_CLASS}
             >
               <Link href={WORKSPACE_MODULE_HOME}>
                 <FolderIcon aria-hidden="true" className="size-4 shrink-0" />
@@ -328,7 +294,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
               aria-hidden="true"
               className="mx-2 mb-1.5 hidden border-t border-border/70 group-data-[state=collapsed]/sidebar:block"
             />
-            <SidebarMenu className={assistantRoute ? "space-y-0.5" : "space-y-1.5"}>
+            <SidebarMenu className="space-y-1.5">
               {launchers.map((launcher) => {
                 const Icon = launcher.icon;
                 return (
@@ -339,7 +305,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
                       tooltip={
                         launcher.appState ? `${launcher.label} — ${launcher.appState.label}` : launcher.label
                       }
-                      className={railButtonClass}
+                      className={APP_NAV_BUTTON_CLASS}
                     >
                       <Link href={launcher.href} aria-current={launcher.active ? "page" : undefined}>
                         <Icon aria-hidden="true" className="size-4 shrink-0" />
@@ -359,42 +325,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
             </SidebarMenu>
           </div>
         ) : null}
-
-        {assistantRoute ? (
-          <div className="hidden border-t border-border/70 pt-1.5 group-data-[state=collapsed]/sidebar:block">
-            <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  type="button"
-                  tooltip="گفتگوهای اخیر"
-                  aria-label="گفتگوهای اخیر"
-                  onClick={() => toggleSidebar()}
-                  className={railButtonClass}
-                >
-                  <HistoryIcon aria-hidden="true" className="size-4 shrink-0" />
-                  <span className={NAV_LABEL_CLASS}>گفتگوهای اخیر</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            </SidebarMenu>
-          </div>
-        ) : null}
       </nav>
-
-      {assistantRoute ? (
-        <div className="mt-2 flex min-h-36 flex-1 flex-col border-t border-border/70 pt-1.5 group-data-[state=collapsed]/sidebar:hidden">
-          <AiConversationsSidebar
-            embedded
-            activeId={bridge.activeConversationId}
-            refreshToken={bridge.refreshToken}
-            onSelect={(id) => {
-              bridge.onSelectConversation?.(id);
-              setOpenMobile(false);
-            }}
-            onDeleted={(id) => bridge.onDeleteConversation?.(id)}
-            onRenamed={(conv) => bridge.onRenameConversation?.(conv)}
-          />
-        </div>
-      ) : null}
     </SidebarContent>
   );
 }

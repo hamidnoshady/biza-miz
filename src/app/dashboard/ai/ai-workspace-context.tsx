@@ -18,9 +18,24 @@ import {
 } from "@/lib/ai-runtime-modes-shared";
 import { cn } from "@/lib/utils";
 
-interface Project {
+export interface WorkspaceProjectOption {
   id: string;
   name: string;
+}
+
+export interface AiWorkspaceContextProps {
+  appFocus: AiAppFocus;
+  onAppFocusChange: (value: AiAppFocus) => void;
+  accessibleFocuses?: readonly AiAppFocus[];
+  runtimeMode: AiRuntimeMode;
+  onRuntimeModeChange: (value: AiRuntimeMode) => void;
+  deepResearchEnabled?: boolean;
+  projectId: string | null;
+  onProjectChange: (projectId: string | null) => void;
+  onProjectNameChange?: (name: string | null) => void;
+  canSelectProject?: boolean;
+  disabled?: boolean;
+  compact?: boolean;
 }
 
 export const APP_FOCUS_OPTIONS: ReadonlyArray<{ value: AiAppFocus; label: string }> = [
@@ -38,37 +53,16 @@ export const RUNTIME_MODE_LABELS: Record<AiRuntimeMode, string> = {
   deep_research: "پژوهش عمیق",
 };
 
-const selectClass =
-  "h-7 rounded-full border border-border/80 bg-background px-2.5 text-[11px] font-medium text-foreground/85 outline-none transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60";
-
-export function AiWorkspaceContext({
-  appFocus,
-  onAppFocusChange,
-  accessibleFocuses,
-  runtimeMode,
-  onRuntimeModeChange,
-  deepResearchEnabled = false,
-  projectId,
-  onProjectChange,
-  onProjectNameChange,
+export function useAiWorkspaceProjects({
   canSelectProject = true,
-  disabled = false,
-  compact = false,
+  projectId,
+  onProjectNameChange,
 }: {
-  appFocus: AiAppFocus;
-  onAppFocusChange: (value: AiAppFocus) => void;
-  accessibleFocuses?: readonly AiAppFocus[];
-  runtimeMode: AiRuntimeMode;
-  onRuntimeModeChange: (value: AiRuntimeMode) => void;
-  deepResearchEnabled?: boolean;
-  projectId: string | null;
-  onProjectChange: (projectId: string | null) => void;
-  onProjectNameChange?: (name: string | null) => void;
   canSelectProject?: boolean;
-  disabled?: boolean;
-  compact?: boolean;
+  projectId: string | null;
+  onProjectNameChange?: (name: string | null) => void;
 }) {
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [projects, setProjects] = useState<WorkspaceProjectOption[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(canSelectProject);
   const [projectsError, setProjectsError] = useState(false);
 
@@ -86,7 +80,7 @@ export function AiWorkspaceContext({
       if (!response.ok) {
         throw new Error(`projects_fetch_${response.status}`);
       }
-      const data = (await response.json()) as { projects?: Project[] };
+      const data = (await response.json()) as { projects?: WorkspaceProjectOption[] };
       setProjects(Array.isArray(data?.projects) ? data.projects : []);
     } catch {
       setProjectsError(true);
@@ -109,16 +103,54 @@ export function AiWorkspaceContext({
     onProjectNameChange(match?.name ?? null);
   }, [onProjectNameChange, projectId, projects]);
 
+  const selectedProject = projectId
+    ? projects.find((item) => item.id === projectId) ?? null
+    : null;
+
+  return {
+    projects,
+    projectsLoading,
+    projectsError,
+    loadProjects,
+    selectedProject,
+  };
+}
+
+const selectClass =
+  "h-7 rounded-full border border-border/80 bg-background px-2.5 text-[11px] font-medium text-foreground/85 outline-none transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60";
+
+export function AiWorkspaceContext({
+  appFocus,
+  onAppFocusChange,
+  accessibleFocuses,
+  runtimeMode,
+  onRuntimeModeChange,
+  deepResearchEnabled = false,
+  projectId,
+  onProjectChange,
+  onProjectNameChange,
+  canSelectProject = true,
+  disabled = false,
+  compact = false,
+}: AiWorkspaceContextProps) {
+  const {
+    projects,
+    projectsLoading,
+    projectsError,
+    loadProjects,
+    selectedProject,
+  } = useAiWorkspaceProjects({
+    canSelectProject,
+    projectId,
+    onProjectNameChange,
+  });
+
   const focusOptions =
     accessibleFocuses && accessibleFocuses.length > 0
       ? APP_FOCUS_OPTIONS.filter(
           (item) => item.value === "all" || accessibleFocuses.includes(item.value),
         )
       : APP_FOCUS_OPTIONS;
-
-  const selectedProject = projectId
-    ? projects.find((item) => item.id === projectId) ?? null
-    : null;
 
   return (
     <div

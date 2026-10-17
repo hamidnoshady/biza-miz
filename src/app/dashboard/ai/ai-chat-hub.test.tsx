@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,10 +44,16 @@ import { AiMemoryPanel } from "./ai-memory-panel";
 import { AiResearchPanel } from "./ai-research-panel";
 import { AiTaskSelector } from "@/components/ai/ai-task-selector";
 
-describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", () => {
+describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Panel, and Management UX/UI", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     currentSearchParams = new URLSearchParams();
+    window.localStorage.clear();
+    Object.defineProperty(window, "innerWidth", {
+      writable: true,
+      configurable: true,
+      value: 1366,
+    });
     window.HTMLElement.prototype.scrollTo = vi.fn();
   });
 
@@ -55,7 +61,7 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
     cleanup();
   });
 
-  it("renders a single-canvas welcome layout without competing permanent sidebars or auto-running widgets, and starter cards fill draft instead of sending", async () => {
+  it("renders a clean default composer, minimal header without New Chat or context chips, bottom-left send button, and collapsible physical-left history panel", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.startsWith("/api/ai/projects")) {
@@ -110,22 +116,54 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
 
     // No restaurant-only starter prompts for an AEC tenant
     expect(container.textContent).not.toContain("آیتم‌های منو");
-
-    // No permanent second aside or 18rem grid column reservation
-    expect(container.querySelector("aside")).toBeNull();
-    expect(container.innerHTML).not.toContain("18rem");
     expect(container.innerHTML).not.toContain("min-h-[60vh]");
+
+    // Minimal header: NO New Chat button in header, NO task/focus/mode/project chips
+    const header = container.querySelector("header")!;
+    expect(within(header).queryByRole("button", { name: "گفت‌وگوی جدید" })).toBeNull();
+    expect(header.textContent).not.toContain("تمرکز:");
+    expect(header.textContent).not.toContain("حالت:");
+    expect(header.textContent).not.toContain("پروژه:");
+
+    // Clean default composer: NO exposed task selector, focus/mode/project selects, gear or search icons
+    const composerBox = container.querySelector("[data-composer-box]")!;
+    expect(composerBox.querySelectorAll("select")).toHaveLength(0);
+    expect(within(composerBox as HTMLElement).queryByLabelText(/وظیفهٔ دستیار/)).toBeNull();
+    expect(within(composerBox as HTMLElement).queryByLabelText("تمرکز دستیار")).toBeNull();
+    expect(within(composerBox as HTMLElement).queryByLabelText("حالت پاسخ‌گویی")).toBeNull();
+    expect(within(composerBox as HTMLElement).queryByLabelText("پروژه")).toBeNull();
+    expect(within(composerBox as HTMLElement).queryByLabelText("تنظیمات این پیام")).toBeNull();
+    expect(
+      within(composerBox as HTMLElement).queryByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی"),
+    ).toBeNull();
+
+    // Send button is anchored at physical bottom-left inside the composer box (`left-2.5` / `sm:left-3`)
+    const sendBtn = within(composerBox as HTMLElement).getByRole("button", {
+      name: "ارسال پیام",
+    });
+    expect(sendBtn.parentElement?.className).toContain("left-2.5");
+    expect(sendBtn.parentElement?.className).toContain("bottom-2.5");
+
+    // `+` button is anchored at physical bottom-right (`right-2.5` / `sm:right-3`)
+    const plusBtn = within(composerBox as HTMLElement).getByRole("button", {
+      name: "افزودن پیوست و ابزارهای گفتگو",
+    });
+    expect(plusBtn.parentElement?.className).toContain("right-2.5");
+    expect(plusBtn.parentElement?.className).toContain("bottom-2.5");
+
+    // Desktop physical-left history panel is rendered with New Chat inside it
+    const historyAside = screen.getByRole("complementary", {
+      name: "تاریخچهٔ گفتگوها",
+    });
+    expect(
+      within(historyAside).getByRole("button", { name: "گفت‌وگوی جدید" }),
+    ).toBeTruthy();
 
     // Opening chat must NOT auto-fetch or auto-run /api/ai/widgets
     const widgetCalls = fetchMock.mock.calls.filter(([url]) =>
       String(url).startsWith("/api/ai/widgets"),
     );
     expect(widgetCalls).toHaveLength(0);
-
-    // Deep research mode is offered when deepResearchEnabled=true from server
-    const modeSelect = screen.getByLabelText("حالت پاسخ‌گویی") as HTMLSelectElement;
-    const modeValues = Array.from(modeSelect.options).map((o) => o.value);
-    expect(modeValues).toContain("deep_research");
 
     // Clicking a starter card fills the composer draft and focuses it WITHOUT calling /api/ai/chat
     const starterBtn = screen.getByRole("button", {
@@ -136,10 +174,32 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
     const textarea = screen.getByLabelText("پیام") as HTMLTextAreaElement;
     expect(textarea.value).toBe(starterPrompts[0]);
 
-    const chatCalls = fetchMock.mock.calls.filter(([url]) =>
-      String(url).startsWith("/api/ai/chat"),
+    // Collapsing the left history panel releases the panel completely, saves preference,
+    // shows only the minimal reopen button, and preserves the composer draft
+    fireEvent.click(
+      within(historyAside).getByRole("button", {
+        name: "جمع کردن تاریخچهٔ گفتگوها",
+      }),
     );
-    expect(chatCalls).toHaveLength(0);
+    expect(
+      screen.queryByRole("complementary", { name: "تاریخچهٔ گفتگوها" }),
+    ).toBeNull();
+    expect(window.localStorage.getItem("ai-history-panel-preference")).toBe(
+      "collapsed",
+    );
+    expect(textarea.value).toBe(starterPrompts[0]);
+
+    // Reopening from the minimal control restores the left history panel
+    const reopenBtn = screen.getByRole("button", {
+      name: "باز کردن تاریخچهٔ گفتگوها",
+    });
+    fireEvent.click(reopenBtn);
+    expect(
+      screen.getByRole("complementary", { name: "تاریخچهٔ گفتگوها" }),
+    ).toBeTruthy();
+    expect(window.localStorage.getItem("ai-history-panel-preference")).toBe(
+      "expanded",
+    );
 
     // IME composition Enter (isComposing / keyCode 229) must NOT send the message
     fireEvent.keyDown(textarea, {
@@ -151,6 +211,194 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url).startsWith("/api/ai/chat")),
     ).toHaveLength(0);
+  });
+
+  it("exposes attachments, task, focus, response mode, project, search, and message settings inside the `+` menu while preserving draft text", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/ai/projects")) {
+        return {
+          ok: true,
+          json: async () => ({ projects: [{ id: "p-1", name: "برج ساحلی" }] }),
+        } as Response;
+      }
+      if (url.startsWith("/api/ai/conversations")) {
+        return {
+          ok: true,
+          json: async () => ({ conversations: [], hasMore: false, nextCursor: null }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({}),
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AiChatHub
+        canManageAi={true}
+        canAutoApply={false}
+        allowedPanelSections={["memory"]}
+        deepResearchEnabled={true}
+        eligibleTaskIds={["general", "sales", "accounting"]}
+        accessibleFocuses={["all", "workspace", "accounting"]}
+        industry="architecture_construction"
+      />,
+    );
+
+    const textarea = screen.getByLabelText("پیام") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "پیش‌نویس تستی من" } });
+
+    const plusBtn = screen.getByRole("button", {
+      name: "افزودن پیوست و ابزارهای گفتگو",
+    });
+    fireEvent.click(plusBtn);
+
+    // Root `+` menu shows all concise, labeled items and current selections
+    expect(screen.getByText("تصویر فاکتور / رسید")).toBeTruthy();
+    expect(screen.getByText("سند PDF")).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: دستیار عمومی" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", { name: "تمرکز دستیار: همهٔ بخش‌ها" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", { name: "حالت پاسخ‌گویی: خودکار" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", { name: /پروژه:/ }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", {
+        name: "جست‌وجو در گزارش‌ها و گفتگوهای قبلی",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitem", { name: "تنظیمات این پیام" }),
+    ).toBeTruthy();
+
+    // Open response mode picker inside `+` and verify `پژوهش عمیق` is available when deepResearchEnabled=true
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: "حالت پاسخ‌گویی: خودکار" }),
+    );
+    const autoOption = screen.getByRole("menuitemradio", { name: "خودکار" });
+    expect(autoOption.getAttribute("aria-checked")).toBe("true");
+    const deepResearchOption = screen.getByRole("menuitemradio", {
+      name: "پژوهش عمیق",
+    });
+    fireEvent.click(deepResearchOption);
+    expect(replaceMock).toHaveBeenCalledWith(
+      expect.stringContaining("mode=deep_research"),
+      { scroll: false },
+    );
+
+    // Draft text is preserved across menu interactions
+    expect(textarea.value).toBe("پیش‌نویس تستی من");
+
+    // Reopen `+` -> Task selection -> custom task & preset clearing
+    fireEvent.click(plusBtn);
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: دستیار عمومی" }),
+    );
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /سفارشی…/ }));
+    const customInput = screen.getByPlaceholderText(/پاسخ‌ها را کوتاه/);
+    fireEvent.change(customInput, { target: { value: "خروجی فقط بولت‌پوینت" } });
+    fireEvent.click(screen.getByRole("button", { name: "اعمال وظیفه" }));
+
+    // Reopen `+` and verify custom task is active, then switch to `تحلیل فروش`
+    fireEvent.click(plusBtn);
+    expect(
+      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: وظیفهٔ سفارشی" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: وظیفهٔ سفارشی" }),
+    );
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /تحلیل فروش/ }));
+
+    // Reopen `+` -> Focus selection -> `حسابداری و فروش`
+    fireEvent.click(plusBtn);
+    expect(
+      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: تحلیل فروش" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: "تمرکز دستیار: همهٔ بخش‌ها" }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: "حسابداری و فروش" }),
+    );
+    expect(replaceMock).toHaveBeenCalledWith(
+      expect.stringContaining("focus=accounting"),
+      { scroll: false },
+    );
+
+    // Reopen `+` -> Project selection -> `برج ساحلی`
+    fireEvent.click(plusBtn);
+    fireEvent.click(screen.getByRole("menuitem", { name: /^پروژه:/ }));
+    const projectOption = await screen.findByRole("menuitemradio", {
+      name: "برج ساحلی",
+    });
+    fireEvent.click(projectOption);
+    expect(replaceMock).toHaveBeenCalledWith(
+      expect.stringContaining("project=p-1"),
+      { scroll: false },
+    );
+
+    // Reopen `+` -> Settings -> toggle `اجازهٔ اقدام در این پیام`
+    fireEvent.click(plusBtn);
+    fireEvent.click(screen.getByRole("menuitem", { name: "تنظیمات این پیام" }));
+    const actionsSwitch = screen.getByRole("switch", {
+      name: "اجازهٔ اقدام در این پیام",
+    });
+    expect(actionsSwitch.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(actionsSwitch);
+    expect(actionsSwitch.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("opens history in a left-side Sheet drawer with New Chat on narrow viewports without rendering a permanent desktop history rail", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      writable: true,
+      configurable: true,
+      value: 390,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ conversations: [], hasMore: false, nextCursor: null }),
+      }),
+    );
+
+    render(
+      <AiChatHub
+        canManageAi={false}
+        canAutoApply={false}
+        allowedPanelSections={[]}
+        deepResearchEnabled={false}
+        eligibleTaskIds={["general"]}
+        accessibleFocuses={["all"]}
+      />,
+    );
+
+    // No permanent desktop aside on narrow viewport
+    expect(
+      screen.queryByRole("complementary", { name: "تاریخچهٔ گفتگوها" }),
+    ).toBeNull();
+
+    // Clicking the history button opens the left-side Sheet drawer with New Chat inside
+    const openHistoryBtn = screen.getByRole("button", {
+      name: "باز کردن تاریخچهٔ گفتگوها",
+    });
+    fireEvent.click(openHistoryBtn);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "گفتگوهای اخیر",
+    });
+    expect(dialog.className).toContain("left-0");
+    expect(
+      within(dialog).getByRole("button", { name: "گفت‌وگوی جدید" }),
+    ).toBeTruthy();
   });
 
   it("shows a distinct error state with Retry when project loading fails in AiWorkspaceContext", async () => {
@@ -431,7 +679,7 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
     expect(onCustomTask).toHaveBeenCalledWith("");
   });
 
-  it("keeps starter cards and project controls restricted to eligible functions when focus or URL project changes in AiChatHub", async () => {
+  it("keeps starter cards and `+` menu project controls restricted to eligible functions when focus or URL project changes in AiChatHub", async () => {
     currentSearchParams = new URLSearchParams({
       focus: "accounting",
       project: "proj-1",
@@ -454,9 +702,6 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
       />,
     );
 
-    // Because `workspace` is not in `accessibleFocuses`, the project selector is hidden
-    // and `?project=proj-1` does not leak project starter prompts.
-    expect(screen.queryByLabelText("پروژه")).toBeNull();
     expect(
       screen.getByRole("button", {
         name: "کدام اقلام رو به اتمام‌اند و باید خرید شوند؟",
@@ -472,5 +717,131 @@ describe("Issue #905 — AI Chat Hub, Context, History, and Management UX/UI", (
         name: /وضعیت وظایف و موانع این پروژه/,
       }),
     ).toBeNull();
+
+    // Open `+` menu and verify the project item is hidden when `workspace` is not in `accessibleFocuses`
+    fireEvent.click(
+      screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" }),
+    );
+    expect(screen.queryByRole("menuitem", { name: /^پروژه:/ })).toBeNull();
+  });
+
+  it("loads a conversation from the left history panel without resetting while router.replace is in-flight, and supports project retry & search inside `+`", async () => {
+    let failProjects = true;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/ai/projects")) {
+        if (failProjects) {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({ error: "خطای دریافت پروژه‌ها" }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            projects: [{ id: "proj-9", name: "پروژه مالی پاییز" }],
+          }),
+        } as Response;
+      }
+      if (url.startsWith("/api/ai/conversations/conv-42")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            conversation: {
+              id: "conv-42",
+              mode: "dashboard",
+              title: "تحلیل سود مهرماه",
+              projectId: null,
+            },
+            messages: [
+              {
+                id: "m-1",
+                role: "user",
+                content: "سود مهرماه چقدر بود؟",
+                createdAt: new Date().toISOString(),
+              },
+              {
+                id: "m-2",
+                role: "assistant",
+                content: "سود خالص مهرماه ۹۵٬۰۰۰٬۰۰۰ ریال بوده است.",
+                createdAt: new Date().toISOString(),
+              },
+            ],
+          }),
+        } as Response;
+      }
+      if (url.startsWith("/api/ai/conversations")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            conversations: [
+              {
+                id: "conv-42",
+                mode: "dashboard",
+                title: "تحلیل سود مهرماه",
+                lastMessageAt: new Date().toISOString(),
+                createdAt: new Date().toISOString(),
+              },
+            ],
+            hasMore: false,
+            nextCursor: null,
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ results: [] }),
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<AiChatHub canManageAi={true} canAutoApply={true} />);
+
+    // Wait for conversation in left history panel and click it (router.replace does not mutate currentSearchParams in this mock)
+    const convBtn = await screen.findByText("تحلیل سود مهرماه");
+    fireEvent.click(convBtn);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("سود خالص مهرماه ۹۵٬۰۰۰٬۰۰۰ ریال بوده است."),
+      ).toBeTruthy();
+    });
+
+    // Open `+` menu -> Project sub-view shows error + Retry button (`تلاش مجدد`)
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" }),
+      { key: "Enter" },
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^پروژه:/ }));
+
+    const retryBtn = await screen.findByRole("button", {
+      name: /تلاش مجدد/,
+    });
+    failProjects = false;
+    fireEvent.click(retryBtn);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("menuitemradio", { name: /پروژه مالی پاییز/ }),
+      ).toBeTruthy();
+    });
+
+    // Back to root `+` menu and open Search sub-view (`جست‌وجو در گزارش‌ها و گفتگوها`)
+    fireEvent.click(
+      screen.getByRole("button", { name: "بازگشت به منوی ابزارها" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", {
+        name: /جست‌وجو در گزارش‌ها و گفتگوها/,
+      }),
+    );
+    expect(
+      await screen.findByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی"),
+    ).toBeTruthy();
   });
 });

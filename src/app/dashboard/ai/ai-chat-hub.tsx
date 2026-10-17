@@ -3,33 +3,32 @@
 /**
  * The AI assistant's canonical chat surface (`/dashboard`, Issue #905 redesign).
  *
- * Architecture:
- * - Single spacious chat canvas with a slim header (assistant/task identity,
- *   conversation title, optional active context chips, New Chat, on-demand
- *   History Sheet, on-demand Widgets Sheet, and Management Sheet).
- * - Contextual conversation history is integrated into the single canonical
- *   workspace sidebar (`DashboardSidebar`) via `assistant-sidebar-bridge.ts`,
- *   with an accessible `Sheet` fallback for mobile and collapsed-rail states.
- * - One shared `ChatComposer` instance stays mounted across Welcome -> Active
- *   Thread transitions so focus and draft text are never lost.
- * - Welcome layout sizes against actual available container height (`mt-auto` /
- *   `mb-auto` inside the flex scroll container, no `min-h-[60vh]`, no decorative
- *   floating orbs or gradient text).
- * - Starter cards fill the composer draft and focus the input rather than
- *   immediately sending a billed request.
+ * Owner UX correction (2026-10-17):
+ * - Prioritizes the conversation and a clean composer (only text input, `+`
+ *   secondary-tools menu on the trailing right side, send/stop anchored at the
+ *   physical bottom-left inside the input box, and attachment previews when
+ *   attachments exist).
+ * - Secondary tools (attachments, assistant/task, focus, response mode, project,
+ *   search, and message settings) live inside the `+` menu with current
+ *   selection summaries and checkmarks.
+ * - Minimal header: assistant/conversation title, on-demand Widgets and
+ *   Management sheets, and the minimal History reopen/drawer control. No
+ *   exposed task/focus/mode/project chips and no page-header New Chat button.
+ * - Collapsible conversation history panel on the physical LEFT of the
+ *   assistant window in both RTL and LTR on desktop (~260–288px width,
+ *   releasing full width when collapsed), with a left-side `Sheet` drawer on
+ *   narrow screens. New Chat lives inside the history panel.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowDownIcon,
-  FolderKanbanIcon,
   HistoryIcon,
   LayoutGridIcon,
-  MessageSquarePlusIcon,
+  PanelLeftOpenIcon,
   Settings2Icon,
   SparklesIcon,
-  XIcon,
 } from "lucide-react";
 import { useGSAP } from "@gsap/react";
 import { LoadingSkeleton, cardClass } from "../page-chrome";
@@ -53,7 +52,6 @@ import {
   resolveAccessibleFocuses,
   resolveEligibleTasks,
   resolveStarterPrompts,
-  taskById,
   type AiTaskAppFocus,
   type AiTaskId,
 } from "@/lib/ai-tasks";
@@ -75,15 +73,9 @@ import {
 import { AiManagementSheet } from "./ai-management-sheet";
 import { AiConversationsSidebar } from "./ai-conversations-sidebar";
 import { AiWorkspaceWidgets } from "./ai-workspace-widgets";
-import {
-  APP_FOCUS_OPTIONS,
-  AiWorkspaceContext,
-  RUNTIME_MODE_LABELS,
-} from "./ai-workspace-context";
-import {
-  resetAssistantSidebarBridge,
-  setAssistantSidebarBridge,
-} from "./assistant-sidebar-bridge";
+
+const HISTORY_PANEL_PREFERENCE_KEY = "ai-history-panel-preference";
+const DESKTOP_HISTORY_MIN_WIDTH = 1024;
 
 export interface AiChatHubProps {
   /** Owner/manager or holder of section-specific AI management permissions. */
@@ -161,18 +153,67 @@ export function AiChatHub({
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() =>
     canSelectProject ? projectFromUrl : null,
   );
-  const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
   const [widgetsSheetOpen, setWidgetsSheetOpen] = useState<boolean>(widgetsFromUrl);
+
+  const [isDesktopViewport, setIsDesktopViewport] = useState<boolean>(true);
+  const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(false);
+  const [historySheetOpen, setHistorySheetOpen] = useState<boolean>(false);
+  const [historyRefresh, setHistoryRefresh] = useState<number>(0);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(HISTORY_PANEL_PREFERENCE_KEY);
+      if (stored === "collapsed") {
+        setHistoryCollapsed(true);
+      } else if (stored === "expanded") {
+        setHistoryCollapsed(false);
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+  }, []);
+
+  useEffect(() => {
+    const checkViewport = () => {
+      const width = window.innerWidth;
+      const desktop = width === 0 || width >= DESKTOP_HISTORY_MIN_WIDTH;
+      setIsDesktopViewport(desktop);
+      if (desktop) {
+        setHistorySheetOpen(false);
+      }
+    };
+    checkViewport();
+    window.addEventListener("resize", checkViewport);
+    return () => window.removeEventListener("resize", checkViewport);
+  }, []);
+
+  const setDesktopHistoryCollapsed = useCallback((collapsed: boolean) => {
+    setHistoryCollapsed(collapsed);
+    try {
+      window.localStorage.setItem(
+        HISTORY_PANEL_PREFERENCE_KEY,
+        collapsed ? "collapsed" : "expanded",
+      );
+    } catch {
+      // Ignore storage access errors
+    }
+  }, []);
 
   const latestSearchRef = useRef(searchParams.toString());
   useEffect(() => {
     latestSearchRef.current = searchParams.toString();
   }, [searchParams]);
 
+  const lastHandledUrlConversationRef = useRef<string | null>(conversationFromUrl);
+  const pendingUrlConversationRef = useRef<string | null | undefined>(undefined);
+
   const replaceParams = useCallback(
     (mutate: (params: URLSearchParams) => void) => {
       const params = new URLSearchParams(latestSearchRef.current);
       mutate(params);
+      const nextConv = params.get("conversation")?.trim() || null;
+      pendingUrlConversationRef.current = nextConv;
+      lastHandledUrlConversationRef.current = nextConv;
       const query = params.toString();
       latestSearchRef.current = query;
       router.replace(query ? `/dashboard?${query}` : "/dashboard", {
@@ -281,9 +322,6 @@ export function AiChatHub({
   const heroRef = useRef<HTMLDivElement>(null);
   const initialized = useRef(false);
 
-  const [historySheetOpen, setHistorySheetOpen] = useState(false);
-  const [historyRefresh, setHistoryRefresh] = useState(0);
-
   const {
     canPropose,
     messages,
@@ -383,40 +421,6 @@ export function AiChatHub({
     [loadConversation],
   );
 
-  // Sync with the canonical contextual sidebar (`DashboardSidebar`) on `/dashboard`.
-  useEffect(() => {
-    setAssistantSidebarBridge({
-      activeConversationId: conversationId,
-      refreshToken: historyRefresh,
-      onSelectConversation: openFromHistory,
-      onNewConversation: handleNewConversation,
-      onDeleteConversation: (deletedId) => {
-        if (deletedId === conversationId) {
-          handleNewConversation();
-        }
-        setHistoryRefresh((token) => token + 1);
-      },
-      onRenameConversation: (renamed) => {
-        if (renamed.id === conversationId) {
-          setConversationTitle(renamed.title);
-        }
-        setHistoryRefresh((token) => token + 1);
-      },
-    });
-  }, [
-    conversationId,
-    handleNewConversation,
-    historyRefresh,
-    openFromHistory,
-    setConversationTitle,
-  ]);
-
-  useEffect(() => {
-    return () => {
-      resetAssistantSidebarBridge();
-    };
-  }, []);
-
   useEffect(() => {
     if (!initialized.current) return;
     scrollToBottom({ force: true });
@@ -424,7 +428,6 @@ export function AiChatHub({
   }, [conversationId]);
 
   // Initial mount & browser back/forward `?conversation=` reconciliation.
-  const lastHandledUrlConversationRef = useRef<string | null>(null);
   useEffect(() => {
     if (!initialized.current) {
       initialized.current = true;
@@ -441,6 +444,13 @@ export function AiChatHub({
         void loadConversation(requested);
       } else {
         ensureGreeting();
+      }
+      return;
+    }
+
+    if (pendingUrlConversationRef.current !== undefined) {
+      if (conversationFromUrl === pendingUrlConversationRef.current) {
+        pendingUrlConversationRef.current = undefined;
       }
       return;
     }
@@ -463,10 +473,6 @@ export function AiChatHub({
     setInput,
     startNewConversation,
   ]);
-
-  useEffect(() => {
-    lastHandledUrlConversationRef.current = conversationId;
-  }, [conversationId]);
 
   useEffect(() => {
     scrollToBottom({ smooth: true });
@@ -564,21 +570,6 @@ export function AiChatHub({
     taskFocus,
   ]);
 
-  const taskLabel =
-    task === "custom" && customTask
-      ? "وظیفهٔ سفارشی"
-      : task !== "general"
-        ? taskById(task)?.label
-        : null;
-
-  const focusLabel =
-    appFocus !== "all"
-      ? APP_FOCUS_OPTIONS.find((item) => item.value === appFocus)?.label ?? null
-      : null;
-
-  const modeLabel =
-    runtimeMode !== "auto" ? RUNTIME_MODE_LABELS[runtimeMode] : null;
-
   const handleStarterSelect = useCallback(
     (prompt: string) => {
       setInput(prompt);
@@ -598,151 +589,32 @@ export function AiChatHub({
     [setInput],
   );
 
+  const showDesktopHistoryPanel = isDesktopViewport && !historyCollapsed;
+
   return (
     <section
       aria-label="محیط گفتگوی دستیار هوشمند"
-      className="flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden bg-background"
+      className="flex h-full min-h-0 w-full flex-1 flex-row overflow-hidden bg-background text-foreground rtl:flex-row-reverse [&:dir(ltr)]:flex-row [&:dir(rtl)]:flex-row-reverse"
     >
-      {/* Slim header: assistant/task identity, active conversation title, optional context chips, and on-demand actions */}
-      <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border/80 bg-card/85 px-3 py-1.5 backdrop-blur sm:px-4">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-            <SparklesIcon className="size-4" aria-hidden="true" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <p className="truncate text-sm font-semibold text-foreground">
-                {conversationTitle || "دستیار هوشمند"}
-              </p>
-              {taskLabel ? (
-                <span className=" hidden shrink-0 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary sm:inline-flex">
-                  {taskLabel}
-                </span>
-              ) : null}
-              {activeProjectId ? (
-                <span className="inline-flex max-w-44 items-center gap-1 rounded-full border border-amber-300/70 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:border-amber-500/35 dark:bg-amber-500/15 dark:text-amber-200">
-                  <FolderKanbanIcon className="size-3 shrink-0" aria-hidden="true" />
-                  <span className="truncate">
-                    {activeProjectName ? `پروژه: ${activeProjectName}` : "پروژهٔ فعال"}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => changeProject(null)}
-                    aria-label="حذف فیلتر پروژه"
-                    className="rounded-full p-0.5 hover:bg-amber-200/60 dark:hover:bg-amber-500/30"
-                  >
-                    <XIcon className="size-2.5" aria-hidden="true" />
-                  </button>
-                </span>
-              ) : null}
-              {focusLabel ? (
-                <span className="hidden shrink-0 items-center gap-1 rounded-full border border-border/80 bg-muted/60 px-2 py-0.5 text-[10px] font-medium text-foreground/80 md:inline-flex">
-                  <span>{`تمرکز: ${focusLabel}`}</span>
-                  <button
-                    type="button"
-                    onClick={() => updateAppFocus("all")}
-                    aria-label="بازنشانی تمرکز دستیار"
-                    className="rounded-full p-0.5 hover:bg-background"
-                  >
-                    <XIcon className="size-2.5" aria-hidden="true" />
-                  </button>
-                </span>
-              ) : null}
-              {modeLabel ? (
-                <span className="hidden shrink-0 items-center gap-1 rounded-full border border-border/80 bg-muted/60 px-2 py-0.5 text-[10px] font-medium text-foreground/80 md:inline-flex">
-                  <span>{`حالت: ${modeLabel}`}</span>
-                </span>
-              ) : null}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setHistorySheetOpen(true)}
-            aria-label="گفتگوهای اخیر"
-            title="گفتگوهای اخیر"
-            className="gap-1.5 px-2.5 xl:hidden"
-          >
-            <HistoryIcon className="size-4 shrink-0" aria-hidden="true" />
-            <span className="hidden sm:inline">گفتگوها</span>
-          </Button>
-
-          <Button
-            type="button"
-            variant={widgetsSheetOpen ? "secondary" : "outline"}
-            size="sm"
-            onClick={() => handleWidgetsOpenChange(true)}
-            aria-label="ویجت‌های دستیار"
-            title="ویجت‌های دستیار"
-            className="gap-1.5 px-2.5"
-          >
-            <LayoutGridIcon className="size-4 shrink-0" aria-hidden="true" />
-            <span className="hidden md:inline">ویجت‌ها</span>
-          </Button>
-
-          {canOpenManagement ? (
-            <Button
-              type="button"
-              variant={panelSection ? "secondary" : "outline"}
-              size="sm"
-              onClick={() => openPanel(panelSection ?? defaultPanelSection)}
-              aria-expanded={panelSection !== null}
-              aria-label="مدیریت دستیار"
-              title="مدیریت دستیار: حافظه، همکاران، اتوماسیون‌ها، پژوهش و مصرف"
-              className="gap-1.5 px-2.5 sm:px-3"
-            >
-              <Settings2Icon className="size-4 shrink-0" aria-hidden="true" />
-              <span className="hidden sm:inline">مدیریت دستیار</span>
-            </Button>
-          ) : null}
-
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleNewConversation}
-            aria-label="گفت‌وگوی جدید"
-            className="gap-1.5 px-2.5 sm:px-3"
-          >
-            <MessageSquarePlusIcon className="size-4 shrink-0" aria-hidden="true" />
-            <span className="hidden sm:inline">گفت‌وگوی جدید</span>
-          </Button>
-        </div>
-      </header>
-
-      <AiManagementSheet
-        section={panelSection}
-        canAutoApply={canAutoApply}
-        allowedSections={allowedPanelSections}
-        deepResearchEnabled={deepResearchEnabled}
-        onSectionChange={openPanel}
-        onClose={closePanel}
-      />
-
-      {/* Accessible Sheet for on-demand conversation history on mobile/tablet/collapsed rail */}
-      <Sheet open={historySheetOpen} onOpenChange={setHistorySheetOpen}>
-        <SheetContent
-          side="right"
-          aria-label="گفتگوهای اخیر"
-          className="flex w-[min(22rem,88vw)] flex-col gap-0 p-0 sm:max-w-sm"
+      {/* Physical LEFT collapsible history panel on desktop (~260–288px, releases full width on collapse) */}
+      {showDesktopHistoryPanel ? (
+        <aside
+          aria-label="تاریخچهٔ گفتگوها"
+          className="flex h-full w-[clamp(260px,20vw,288px)] shrink-0 flex-col border-r border-border/80 bg-card/60"
         >
-          <SheetHeader className="sr-only">
-            <SheetTitle>گفتگوهای اخیر</SheetTitle>
-            <SheetDescription>
-              جست‌وجو، ادامه، تغییر نام یا حذف گفتگوهای قبلی شما با دستیار هوشمند.
-            </SheetDescription>
-          </SheetHeader>
           <AiConversationsSidebar
+            collapsible
             activeId={conversationId}
             refreshToken={historyRefresh}
             onSelect={openFromHistory}
-            onClose={() => setHistorySheetOpen(false)}
+            onNewConversation={handleNewConversation}
+            onClose={() => setDesktopHistoryCollapsed(true)}
+            closeLabel="جمع کردن تاریخچهٔ گفتگوها"
             onDeleted={(deletedId) => {
-              if (deletedId === conversationId) handleNewConversation();
+              if (deletedId === conversationId) {
+                handleNewConversation();
+              }
+              setHistoryRefresh((token) => token + 1);
             }}
             onRenamed={(renamed) => {
               if (renamed.id === conversationId) {
@@ -751,187 +623,307 @@ export function AiChatHub({
               setHistoryRefresh((token) => token + 1);
             }}
           />
-        </SheetContent>
-      </Sheet>
+        </aside>
+      ) : null}
 
-      {/* On-demand Sheet for assistant widgets (outside default chat height calculation; never auto-runs on chat open) */}
-      <Sheet open={widgetsSheetOpen} onOpenChange={handleWidgetsOpenChange}>
-        <SheetContent
-          side="left"
-          aria-label="ویجت‌های دستیار"
-          className="w-full max-w-none gap-0 overflow-y-auto p-4 sm:w-[36rem] sm:max-w-[36rem]"
-        >
-          <SheetHeader className="sr-only">
-            <SheetTitle>ویجت‌های دستیار</SheetTitle>
-            <SheetDescription>
-              خلاصه‌های هوشمند و کارت‌های خواندنی کسب‌وکار شما.
-            </SheetDescription>
-          </SheetHeader>
-          {widgetsSheetOpen ? <AiWorkspaceWidgets /> : null}
-        </SheetContent>
-      </Sheet>
-
-      {/* Main conversation / welcome scroll area with one persistent ChatComposer */}
-      <div
-        ref={scrollRef}
-        onScroll={onThreadScroll}
-        className={cn(
-          "ai-chat-scroll relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 sm:px-6",
-          isWelcome ? "py-3 sm:py-5" : "pt-4 pb-2",
-        )}
-      >
-        {loadingConversation ? (
-          <LoadingSkeleton
-            rows={6}
-            className="mx-auto w-full max-w-3xl py-6"
-            label="در حال بازکردن مکالمه"
-          />
-        ) : isWelcome ? (
-          <div
-            ref={heroRef}
-            className="mx-auto mt-auto flex w-full max-w-3xl flex-col items-center text-center"
-          >
-            <div
-              data-hero
-              className="grid size-11 place-items-center rounded-2xl bg-primary/10 text-primary"
-            >
-              <SparklesIcon className="size-5" aria-hidden="true" />
-            </div>
-            <h1
-              data-hero
-              className="mt-3 text-xl font-bold tracking-tight text-foreground sm:text-2xl"
-            >
-              امروز چطور می‌توانم کمکتان کنم؟
-            </h1>
-            <p
-              data-hero
-              className="mt-1.5 max-w-xl text-xs leading-6 text-muted-foreground sm:text-sm"
-            >
-              پرسش خود را بنویسید، تصویر یا سند PDF پیوست کنید، یا یکی از پیشنهادهای زیر را انتخاب کنید.
+      {/* Main chat column */}
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        {/* Minimal header: assistant/conversation title, on-demand Widgets & Management, and minimal History reopen/drawer control */}
+        <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border/80 bg-card/85 px-3 py-1.5 backdrop-blur sm:px-4">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+              <SparklesIcon className="size-4" aria-hidden="true" />
+            </span>
+            <p className="truncate text-sm font-semibold text-foreground">
+              {conversationTitle || "دستیار هوشمند"}
             </p>
           </div>
-        ) : (
-          <div className="mx-auto w-full max-w-3xl flex-1 space-y-5 pb-4">
-            {messages.map((message, index) => {
-              if (index === 0 && message.role === "assistant") return null;
-              return (
-                <ChatBubble
-                  key={message.id}
-                  message={message}
-                  busy={busy && index === messages.length - 1}
-                  canPropose={canPropose}
-                  applyingId={applyingId}
-                  formatCost={(rial) => money.format(rial)}
-                  applyProposal={applyProposal}
-                  dismissProposal={dismissProposal}
-                  submitInputRequest={submitInputRequest}
-                  dismissInputRequest={dismissInputRequest}
-                />
-              );
-            })}
-          </div>
-        )}
 
-        {!atThreadBottom && !isWelcome && messages.length > 1 ? (
-          <div className="pointer-events-none sticky bottom-20 z-10 flex justify-center">
+          <div className="flex shrink-0 items-center gap-1.5">
             <Button
               type="button"
+              variant={widgetsSheetOpen ? "secondary" : "outline"}
               size="sm"
-              variant="outline"
-              onClick={jumpToLatest}
-              className="pointer-events-auto gap-1.5 rounded-full border-border bg-card/95 shadow-[0_1px_2px_rgb(41_37_36/0.035)] backdrop-blur"
+              onClick={() => handleWidgetsOpenChange(true)}
+              aria-label="ویجت‌های دستیار"
+              title="ویجت‌های دستیار"
+              className="gap-1.5 px-2.5 text-foreground"
             >
-              <ArrowDownIcon className="size-3.5" aria-hidden="true" />
-              برو به آخرین پیام
+              <LayoutGridIcon className="size-4 shrink-0" aria-hidden="true" />
+              <span className="hidden md:inline">ویجت‌ها</span>
             </Button>
+
+            {canOpenManagement ? (
+              <Button
+                type="button"
+                variant={panelSection ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => openPanel(panelSection ?? defaultPanelSection)}
+                aria-expanded={panelSection !== null}
+                aria-label="مدیریت دستیار"
+                title="مدیریت دستیار: حافظه، همکاران، اتوماسیون‌ها، پژوهش و مصرف"
+                className="gap-1.5 px-2.5 text-foreground sm:px-3"
+              >
+                <Settings2Icon className="size-4 shrink-0" aria-hidden="true" />
+                <span className="hidden sm:inline">مدیریت دستیار</span>
+              </Button>
+            ) : null}
+
+            {!isDesktopViewport ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setHistorySheetOpen(true)}
+                aria-expanded={historySheetOpen}
+                aria-label="باز کردن تاریخچهٔ گفتگوها"
+                title="گفتگوهای اخیر"
+                className="gap-1.5 px-2.5 text-foreground"
+              >
+                <HistoryIcon className="size-4 shrink-0" aria-hidden="true" />
+                <span className="hidden sm:inline">گفتگوها</span>
+              </Button>
+            ) : historyCollapsed ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setDesktopHistoryCollapsed(false)}
+                aria-expanded={false}
+                aria-label="باز کردن تاریخچهٔ گفتگوها"
+                title="باز کردن تاریخچهٔ گفتگوها"
+                className="gap-1.5 px-2.5 text-foreground"
+              >
+                <PanelLeftOpenIcon className="size-4 shrink-0" aria-hidden="true" />
+                <span className="hidden sm:inline">گفتگوها</span>
+              </Button>
+            ) : null}
           </div>
+        </header>
+
+        <AiManagementSheet
+          section={panelSection}
+          canAutoApply={canAutoApply}
+          allowedSections={allowedPanelSections}
+          deepResearchEnabled={deepResearchEnabled}
+          onSectionChange={openPanel}
+          onClose={closePanel}
+        />
+
+        {/* Accessible left-side Sheet for on-demand conversation history on narrow screens */}
+        {!isDesktopViewport ? (
+          <Sheet open={historySheetOpen} onOpenChange={setHistorySheetOpen}>
+            <SheetContent
+              side="left"
+              showCloseButton={false}
+              aria-label="تاریخچهٔ گفتگوها"
+              className="flex w-[min(18rem,86vw)] flex-col gap-0 p-0 sm:max-w-xs"
+            >
+              <SheetHeader className="sr-only">
+                <SheetTitle>گفتگوهای اخیر</SheetTitle>
+                <SheetDescription>
+                  ایجاد گفتگوی جدید، جست‌وجو، ادامه، تغییر نام یا حذف گفتگوهای قبلی شما با دستیار هوشمند.
+                </SheetDescription>
+              </SheetHeader>
+              <AiConversationsSidebar
+                activeId={conversationId}
+                refreshToken={historyRefresh}
+                onSelect={openFromHistory}
+                onNewConversation={() => {
+                  setHistorySheetOpen(false);
+                  handleNewConversation();
+                }}
+                onClose={() => setHistorySheetOpen(false)}
+                closeLabel="بستن تاریخچهٔ گفتگوها"
+                onDeleted={(deletedId) => {
+                  if (deletedId === conversationId) handleNewConversation();
+                  setHistoryRefresh((token) => token + 1);
+                }}
+                onRenamed={(renamed) => {
+                  if (renamed.id === conversationId) {
+                    setConversationTitle(renamed.title);
+                  }
+                  setHistoryRefresh((token) => token + 1);
+                }}
+              />
+            </SheetContent>
+          </Sheet>
         ) : null}
 
-        {/* Single shared ChatComposer: centered in Welcome flow, pinned at bottom of active thread */}
+        {/* On-demand Sheet for assistant widgets (outside default chat height calculation; never auto-runs on chat open) */}
+        <Sheet open={widgetsSheetOpen} onOpenChange={handleWidgetsOpenChange}>
+          <SheetContent
+            side="left"
+            aria-label="ویجت‌های دستیار"
+            className="w-full max-w-none gap-0 overflow-y-auto p-4 sm:w-[36rem] sm:max-w-[36rem]"
+          >
+            <SheetHeader className="sr-only">
+              <SheetTitle>ویجت‌های دستیار</SheetTitle>
+              <SheetDescription>
+                خلاصه‌های هوشمند و کارت‌های خواندنی کسب‌وکار شما.
+              </SheetDescription>
+            </SheetHeader>
+            {widgetsSheetOpen ? <AiWorkspaceWidgets /> : null}
+          </SheetContent>
+        </Sheet>
+
+        {/* Main conversation / welcome scroll area with one persistent ChatComposer */}
         <div
+          ref={scrollRef}
+          onScroll={onThreadScroll}
           className={cn(
-            "mx-auto w-full max-w-3xl shrink-0",
-            isWelcome
-              ? "mt-4 sm:mt-5"
-              : "sticky bottom-0 z-10 mt-auto border-t border-border/70 bg-background/95 pb-2 pt-2.5 backdrop-blur",
+            "ai-chat-scroll relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 sm:px-6",
+            isWelcome ? "py-3 sm:py-5" : "pt-4 pb-2",
           )}
         >
-          <ChatComposer
-            mode="dashboard"
-            inputRef={composerInputRef}
-            input={input}
-            setInput={setInput}
-            busy={busy || loadingConversation}
-            canPropose={canPropose}
-            attachments={attachments}
-            onAttachFiles={(files) => void attachFiles(files)}
-            onClearAttachment={clearAttachment}
-            task={task}
-            onTaskChange={setTask}
-            customTask={customTask}
-            onCustomTaskChange={setCustomTask}
-            eligibleTaskIds={focusScopedEligibleTaskIds}
-            contextControls={
-              <AiWorkspaceContext
-                compact
-                appFocus={appFocus}
-                onAppFocusChange={updateAppFocus}
-                accessibleFocuses={effectiveAccessibleFocuses}
-                runtimeMode={runtimeMode}
-                onRuntimeModeChange={updateRuntimeMode}
-                deepResearchEnabled={deepResearchEnabled}
-                projectId={canSelectProject ? activeProjectId : null}
-                onProjectChange={changeProject}
-                onProjectNameChange={setActiveProjectName}
-                canSelectProject={canSelectProject}
-                disabled={busy || loadingConversation}
-              />
-            }
-            actionsAllowed={actionsAllowed}
-            setActionsAllowed={setActionsAllowed}
-            loadConversation={loadConversation}
-            sendMessage={sendMessage}
-            onCancelGeneration={cancelGeneration}
-            cancellable={busy}
-            footer={
-              !isWelcome ? (
-                <p className="mt-1.5 text-center text-[11px] text-muted-foreground">
-                  پاسخ‌ها بر اساس داده‌های ثبت‌شده کسب‌وکار شما ارائه می‌شوند.
-                </p>
-              ) : null
-            }
-          />
-        </div>
-
-        {/* Starter cards + quiet note in Welcome state */}
-        {isWelcome && !loadingConversation ? (
-          <div
-            aria-label="پیشنهادهای شروع گفتگو"
-            className="mx-auto mb-auto mt-3 w-full max-w-3xl shrink-0 sm:mt-4"
-          >
-            <div className="grid w-full gap-2.5 sm:grid-cols-3">
-              {suggestions.slice(0, 3).map((suggestion) => (
-                <button
-                  key={suggestion}
-                  type="button"
-                  onClick={() => handleStarterSelect(suggestion)}
-                  className={cn(
-                    cardClass,
-                    "flex min-h-16 items-start gap-2.5 p-3 text-start text-xs leading-5 text-foreground/85 transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:text-[13px]",
-                  )}
-                >
-                  <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-lg bg-amber-100/80 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
-                    <SparklesIcon className="size-3.5" aria-hidden="true" />
-                  </span>
-                  <span className="min-w-0 flex-1">{suggestion}</span>
-                </button>
-              ))}
+          {loadingConversation ? (
+            <LoadingSkeleton
+              rows={6}
+              className="mx-auto w-full max-w-3xl py-6"
+              label="در حال بازکردن مکالمه"
+            />
+          ) : isWelcome ? (
+            <div
+              ref={heroRef}
+              className="mx-auto mt-auto flex w-full max-w-3xl flex-col items-center text-center"
+            >
+              <div
+                data-hero
+                className="grid size-11 place-items-center rounded-2xl bg-primary/10 text-primary"
+              >
+                <SparklesIcon className="size-5" aria-hidden="true" />
+              </div>
+              <h1
+                data-hero
+                className="mt-3 text-xl font-bold tracking-tight text-foreground sm:text-2xl"
+              >
+                امروز چطور می‌توانم کمکتان کنم؟
+              </h1>
+              <p
+                data-hero
+                className="mt-1.5 max-w-xl text-xs leading-6 text-muted-foreground sm:text-sm"
+              >
+                پرسش خود را بنویسید، تصویر یا سند PDF پیوست کنید، یا یکی از پیشنهادهای زیر را انتخاب کنید.
+              </p>
             </div>
-            <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">
-              پاسخ‌ها بر اساس داده‌های ثبت‌شده کسب‌وکار شما ارائه می‌شوند و هر تغییر فقط با تأیید شما اعمال خواهد شد.
-            </p>
+          ) : (
+            <div className="mx-auto w-full max-w-3xl flex-1 space-y-5 pb-4">
+              {messages.map((message, index) => {
+                if (index === 0 && message.role === "assistant") return null;
+                return (
+                  <ChatBubble
+                    key={message.id}
+                    message={message}
+                    busy={busy && index === messages.length - 1}
+                    canPropose={canPropose}
+                    applyingId={applyingId}
+                    formatCost={(rial) => money.format(rial)}
+                    applyProposal={applyProposal}
+                    dismissProposal={dismissProposal}
+                    submitInputRequest={submitInputRequest}
+                    dismissInputRequest={dismissInputRequest}
+                  />
+                );
+              })}
+            </div>
+          )}
+
+          {!atThreadBottom && !isWelcome && messages.length > 1 ? (
+            <div className="pointer-events-none sticky bottom-20 z-10 flex justify-center">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={jumpToLatest}
+                className="pointer-events-auto gap-1.5 rounded-full border-border bg-card/95 shadow-[0_1px_2px_rgb(41_37_36/0.035)] backdrop-blur"
+              >
+                <ArrowDownIcon className="size-3.5" aria-hidden="true" />
+                برو به آخرین پیام
+              </Button>
+            </div>
+          ) : null}
+
+          {/* Single shared ChatComposer: centered in Welcome flow, pinned at bottom of active thread */}
+          <div
+            className={cn(
+              "mx-auto w-full max-w-3xl shrink-0",
+              isWelcome
+                ? "mt-4 sm:mt-5"
+                : "sticky bottom-0 z-10 mt-auto border-t border-border/70 bg-background/95 pb-2 pt-2.5 backdrop-blur",
+            )}
+          >
+            <ChatComposer
+              mode="dashboard"
+              inputRef={composerInputRef}
+              input={input}
+              setInput={setInput}
+              busy={busy || loadingConversation}
+              canPropose={canPropose}
+              attachments={attachments}
+              onAttachFiles={(files) => void attachFiles(files)}
+              onClearAttachment={clearAttachment}
+              task={task}
+              onTaskChange={setTask}
+              customTask={customTask}
+              onCustomTaskChange={setCustomTask}
+              eligibleTaskIds={focusScopedEligibleTaskIds}
+              workspaceContext={{
+                appFocus,
+                onAppFocusChange: updateAppFocus,
+                accessibleFocuses: effectiveAccessibleFocuses,
+                runtimeMode,
+                onRuntimeModeChange: updateRuntimeMode,
+                deepResearchEnabled,
+                projectId: canSelectProject ? activeProjectId : null,
+                onProjectChange: changeProject,
+                canSelectProject,
+              }}
+              actionsAllowed={actionsAllowed}
+              setActionsAllowed={setActionsAllowed}
+              loadConversation={loadConversation}
+              sendMessage={sendMessage}
+              onCancelGeneration={cancelGeneration}
+              cancellable={busy}
+              footer={
+                !isWelcome ? (
+                  <p className="mt-1.5 text-center text-[11px] text-muted-foreground">
+                    پاسخ‌ها بر اساس داده‌های ثبت‌شده کسب‌وکار شما ارائه می‌شوند.
+                  </p>
+                ) : null
+              }
+            />
           </div>
-        ) : null}
+
+          {/* Starter cards + quiet note in Welcome state */}
+          {isWelcome && !loadingConversation ? (
+            <div
+              aria-label="پیشنهادهای شروع گفتگو"
+              className="mx-auto mb-auto mt-3 w-full max-w-3xl shrink-0 sm:mt-4"
+            >
+              <div className="grid w-full gap-2.5 sm:grid-cols-3">
+                {suggestions.slice(0, 3).map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    onClick={() => handleStarterSelect(suggestion)}
+                    className={cn(
+                      cardClass,
+                      "flex min-h-16 items-start gap-2.5 p-3 text-start text-xs leading-5 text-foreground/85 transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:text-[13px]",
+                    )}
+                  >
+                    <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-lg bg-amber-100/80 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
+                      <SparklesIcon className="size-3.5" aria-hidden="true" />
+                    </span>
+                    <span className="min-w-0 flex-1">{suggestion}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">
+                پاسخ‌ها بر اساس داده‌های ثبت‌شده کسب‌وکار شما ارائه می‌شوند و هر تغییر فقط با تأیید شما اعمال خواهد شد.
+              </p>
+            </div>
+          ) : null}
+        </div>
       </div>
     </section>
   );
