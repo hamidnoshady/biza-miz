@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using Biza.SupportCompanion.Core;
 
+using Xunit;
+
 namespace Biza.SupportCompanion.Core.Tests;
 
 /// <summary>

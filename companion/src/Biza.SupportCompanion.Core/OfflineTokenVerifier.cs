@@ -239,9 +239,11 @@ public static class OfflineTokenVerifier
             return OfflineTokenVerifyResult.Invalid(OfflineTokenError.Expired);
         }
 
-        if (!nbfOk)
+        // Premature or present-but-non-numeric nbf: jose names the claim.
+        // (Written as an explicit HasValue check rather than reusing nbfOk so
+        // the compiler tracks nbf.Value as non-null below.)
+        if (!nbf.HasValue || nowSeconds < nbf.Value)
         {
-            // Premature or present-but-non-numeric nbf: jose names the claim.
             return OfflineTokenVerifyResult.Invalid(OfflineTokenError.NotYetValid);
         }
 

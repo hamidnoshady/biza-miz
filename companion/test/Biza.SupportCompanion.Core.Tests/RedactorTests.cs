@@ -1,6 +1,8 @@
 using System.Text.Json.Nodes;
 using Biza.SupportCompanion.Core;
 
+using Xunit;
+
 namespace Biza.SupportCompanion.Core.Tests;
 
 /// <summary>

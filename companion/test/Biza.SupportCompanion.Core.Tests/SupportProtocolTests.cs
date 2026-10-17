@@ -1,5 +1,7 @@
 using Biza.SupportCompanion.Core;
 
+using Xunit;
+
 namespace Biza.SupportCompanion.Core.Tests;
 
 public sealed class SupportProtocolTests
