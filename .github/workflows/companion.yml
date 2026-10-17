@@ -50,162 +50,42 @@ jobs:
       - name: Build (Release)
         run: dotnet build companion/Biza.SupportCompanion.sln --no-restore --configuration Release
 
-      # TEMPORARY DIAGNOSTIC SPLIT: the combined run dies mid-way with no
-      # summary, so each test class gets its own step — per-step conclusions
-      # (visible via API) isolate the killer deterministically. Revert to one
-      # step once green.
-      - name: Test class CompanionPaths
-        id: paths
-        continue-on-error: true
+      - name: Test (Release)
+        id: test
         run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~CompanionPathsTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-paths.trx" 2>&1 | Tee-Object -FilePath test-output-paths.txt
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFileName=results.trx" 2>&1 | Tee-Object -FilePath test-output.txt
           exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
-
-      - name: Test class SupportProtocol
-        id: protocol
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~SupportProtocolTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-protocol.trx" 2>&1 | Tee-Object -FilePath test-output-protocol.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test verifier shape
-        id: verifier1
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsMalformedTokens|FullyQualifiedName~FailsClosedWithoutApprovedKeys" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier1.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test verifier vector
-        id: verifier2a
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~VerifiesTheServerMintedVector" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2a.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test verifier tampered signature
-        id: verifier2b
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsATamperedSignature" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2b.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test verifier tampered payload
-        id: verifier2c
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsATamperedPayload" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2c.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test verifier non-es256
-        id: verifier2d
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsNonEs256Algorithms" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2d.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test verifier claims
-        id: verifier3
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~DistinguishesExpiryFromABadSignature|FullyQualifiedName~DistinguishesNotYetValid|FullyQualifiedName~DistinguishesWrongAudience|FullyQualifiedName~ExpiresExactlyAtExp|FullyQualifiedName~FailsClosedOnUnknownKid" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier3.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test verifier matrix
-        id: verifier4
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~ExpiredAndWrongAudienceIsInvalidSignature|FullyQualifiedName~NonNumericExpIsInvalidSignature|FullyQualifiedName~NonNumericNbfIsNotYetValid|FullyQualifiedName~NonNumericIatIsNotYetValid" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier4.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test class Dpapi
-        id: dpapi
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~DpapiTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-dpapi.trx" 2>&1 | Tee-Object -FilePath test-output-dpapi.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test class MaintenanceLock
-        id: lock
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~MaintenanceLockTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-lock.trx" 2>&1 | Tee-Object -FilePath test-output-lock.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Test class Redactor
-        id: redactor
-        continue-on-error: true
-        run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RedactorTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-redactor.trx" 2>&1 | Tee-Object -FilePath test-output-redactor.txt
-          exit $LASTEXITCODE
-        env:
-          DOTNET_ROLL_FORWARD: Major
-
-      - name: Verdict
-        if: always()
-        run: |
-          $names = @('paths', 'protocol', 'verifier1', 'verifier2a', 'verifier2b', 'verifier2c', 'verifier2d', 'verifier3', 'verifier4', 'dpapi', 'lock', 'redactor')
-          $vals = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier1.outcome }}', '${{ steps.verifier2a.outcome }}', '${{ steps.verifier2b.outcome }}', '${{ steps.verifier2c.outcome }}', '${{ steps.verifier2d.outcome }}', '${{ steps.verifier3.outcome }}', '${{ steps.verifier4.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
-          $report = for ($i = 0; $i -lt $names.Count; $i++) { "$($names[$i])=$($vals[$i])" }
-          if ($vals -contains 'failure') {
-            Write-Host "::error title=class outcomes::$($report -join ', ')"
-            exit 1
-          }
 
       # dotnet-test failures do not surface as check annotations on their own,
-      # so a red run would otherwise say only "exit code 1". The TRX logger
-      # records the structured per-test outcome (including run aborts), which
-      # this step re-emits as annotations readable from the checks API.
-      # TEMPORARY: minimal reporter — the full dump keeps losing messages, so
-      # report ONLY the failing verifier class until it is green.
-      - name: Report verifier failure
+      # so a red run would otherwise say only "exit code 1". Re-emit the
+      # outcome, the console summary, and the TRX counters as annotations
+      # readable from the checks API. Kept deliberately small: the annotation
+      # channel drops messages under volume.
+      - name: Report test summary
         if: always()
         run: |
           try {
-            foreach ($g in @((('1', '${{ steps.verifier1.outcome }}'), ('2a', '${{ steps.verifier2a.outcome }}'), ('2b', '${{ steps.verifier2b.outcome }}'), ('2c', '${{ steps.verifier2c.outcome }}'), ('2d', '${{ steps.verifier2d.outcome }}'), ('3', '${{ steps.verifier3.outcome }}'), ('4', '${{ steps.verifier4.outcome }}')))) {
-              $file = "test-output-verifier$($g[0]).txt"
-              Write-Host "::error title=v$($g[0])::outcome=$($g[1]) present=$(Test-Path $file)"
-              if (Test-Path $file) {
-                $kept = @(Get-Content $file | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' })
-                $buf = ''
-                $n = 0
-                foreach ($line in $kept) {
-                  $piece = ($line.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '' -replace ' offender.*$', '') + ' | '
-                  if (($buf.Length + $piece.Length) -gt 800) {
-                    $n++
-                    Write-Host "::error title=v$($g[0]) ($n)::$buf"
-                    $buf = ''
-                  }
-                  $buf += $piece
-                }
-                if ($buf -ne '') {
-                  $n++
-                  Write-Host "::error title=v$($g[0]) ($n)::$buf"
-                }
+            Write-Host "::error title=tests::outcome is ${{ steps.test.outcome }}"
+            if (Test-Path test-output.txt) {
+              $hits = @((Get-Content test-output.txt | Where-Object {
+                ($_.Trim() -match '^(Failed\s|Test Run|Total tests|Passed!|Failed!)') -or ($_.Trim() -match 'error')
+              } | ForEach-Object { ($_.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') }))
+              $buf = $hits -join ' | '
+              if ($buf.Length -gt 900) { $buf = $buf.Substring(0, 900) }
+              if ($buf -ne '') {
+                Write-Host "::error title=tests::$buf"
               }
             }
-            Write-Host "::error title=v::reporter finished"
+            $trx = 'companion/test/Biza.SupportCompanion.Core.Tests/TestResults/results.trx'
+            if (Test-Path $trx) {
+              [xml]$t = Get-Content $trx
+              $c = $t.TestRun.ResultSummary.Counters
+              Write-Host "::error title=tests::trx outcome=$($t.TestRun.ResultSummary.outcome) total=$($c.total) passed=$($c.passed) failed=$($c.failed)"
+            } else {
+              Write-Host "::error title=tests::no TRX file was written"
+            }
           } catch {
-            Write-Host "::error title=v reporter crashed::$($_.Exception.Message)"
+            Write-Host "::error title=tests reporter crashed::$($_.Exception.Message)"
           }
