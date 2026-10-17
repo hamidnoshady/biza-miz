@@ -61,23 +61,31 @@ jobs:
           DOTNET_ROLL_FORWARD: Major
 
       # dotnet-test failures do not surface as check annotations on their own,
-      # so a red run would otherwise say only "exit code 1". Re-emit each
-      # failed test (plus its assertion message) as an error annotation, which
-      # is readable from the checks API without log access.
+      # so a red run would otherwise say only "exit code 1". Re-emit the
+      # interesting output lines as error annotations, which are readable from
+      # the checks API without log access.
       - name: Surface test failures as annotations
         if: failure()
         run: |
+          if (-not (Test-Path test-output.txt)) {
+            Write-Host "::error title=companion test output::test-output.txt is missing; the test step never produced output"
+            exit 0
+          }
           $lines = Get-Content test-output.txt
-          for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^Failed\s+(\S+)') {
-              $name = $Matches[1]
-              $detail = @()
-              for ($j = $i + 1; $j -lt [Math]::Min($i + 9, $lines.Count); $j++) {
-                if ($lines[$j] -match '^\s*Stack Trace:') { break }
-                $detail += $lines[$j].Trim()
-              }
-              $message = (($detail -join ' ') -replace '\s+', ' ').Trim()
-              if ($message.Length -gt 900) { $message = $message.Substring(0, 900) }
-              Write-Host "::error title=Test failed: $name::$message"
+          Write-Host "::error title=companion test output::$($lines.Count) lines captured"
+          $emitted = 0
+          foreach ($line in $lines) {
+            $trimmed = $line.Trim()
+            if ($trimmed -eq '') { continue }
+            if ($trimmed -match '(?i)fail|error|exception|passed!|Passed:|Failed:|Skipped:|warning MSB|error MSB') {
+              if ($trimmed.Length -gt 900) { $trimmed = $trimmed.Substring(0, 900) }
+              Write-Host "::error title=dotnet test::$trimmed"
+              $emitted++
+              if ($emitted -ge 15) { break }
             }
+          }
+          if ($emitted -eq 0) {
+            $tail = ($lines | Select-Object -Last 8) -join ' '
+            if ($tail.Length -gt 900) { $tail = $tail.Substring(0, 900) }
+            Write-Host "::error title=dotnet test tail::$tail"
           }
