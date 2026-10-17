@@ -95,8 +95,8 @@ export interface WatchFailure {
   heldMs: number;
   /** Short, log-safe description (`HTTP 502`, `fetch failed (UND_ERR_SOCKET)`). */
   detail: string;
-  /** Who wrote the failing answer. */
-  answeredBy: "app" | "edge" | "network";
+  /** Who wrote the failing answer, when the response lets us tell. */
+  answeredBy: "app" | "edge" | "network" | "unknown";
   /** Upstream headers when an intermediary answered (for the diagnostic). */
   edge: string | null;
 }
@@ -198,6 +198,12 @@ export function describeEdge(headers: { get(name: string): string | null }): str
   return parts.length ? parts.join(" ") : null;
 }
 
+/** Parse and clamp a pull route's requested hold, shared with its unit tests. */
+export function boundedPullWaitSeconds(raw: string | null): number {
+  const requested = Number(raw ?? "0") || 0;
+  return Math.min(Math.max(requested, 0), MAX_PULL_WAIT_SECONDS);
+}
+
 /** The URL the watch asks: peek a single event, held for `WATCH_WAIT_SECONDS`. */
 export function centralWatchUrl(input: {
   remoteUrl: string;
@@ -267,12 +273,20 @@ export async function attemptCentralWatch(input: WatchRequest): Promise<WatchAns
   const appAnswered = response.headers.get(SYNC_PULL_MARKER_HEADER) !== null;
   if (!response.ok) {
     const kind = classifyHttpFailure(response.status, appAnswered);
+    // A missing marker proves a 502/503/504 was written in front of the pull
+    // handler (Next.js and Node do not generate gateway errors). For a generic
+    // 500 it is not enough to tell: Next.js may be writing an exception page.
+    const answeredBy = appAnswered
+      ? "app"
+      : response.status === 502 || response.status === 503 || response.status === 504
+        ? "edge"
+        : "unknown";
     throw new SyncWatchError({
       kind,
       heldMs,
       detail: `HTTP ${response.status}`,
-      answeredBy: appAnswered ? "app" : "edge",
-      edge: appAnswered ? null : describeEdge(response.headers),
+      answeredBy,
+      edge: answeredBy === "edge" ? describeEdge(response.headers) : null,
     });
   }
 
@@ -284,12 +298,13 @@ export async function attemptCentralWatch(input: WatchRequest): Promise<WatchAns
     // which belongs with the other ended holds; a fast, complete answer with
     // no readable body is a protocol failure in the app.
     const cutOff = heldMs >= WATCH_HELD_ENOUGH_MS;
+    const answeredBy = appAnswered ? "app" : cutOff ? "edge" : "unknown";
     throw new SyncWatchError({
       kind: cutOff ? "hold-ended" : "protocol",
       heldMs,
       detail: cutOff ? "the response was cut off mid-body" : "200 with an unreadable body",
-      answeredBy: appAnswered ? "app" : "edge",
-      edge: appAnswered ? null : describeEdge(response.headers),
+      answeredBy,
+      edge: answeredBy === "edge" ? describeEdge(response.headers) : null,
     });
   }
 }

@@ -7,7 +7,7 @@ import {
   legacySyncToken,
   recordSyncRun,
 } from "@/lib/server-sync";
-import { MAX_PULL_WAIT_SECONDS, SYNC_PULL_MARKER_HEADER } from "@/lib/sync-watch";
+import { boundedPullWaitSeconds, SYNC_PULL_MARKER_HEADER } from "@/lib/sync-watch";
 
 /**
  * Server-to-server pull endpoint (Phase 11).
@@ -125,10 +125,7 @@ export async function GET(request: NextRequest) {
   // end well inside the ~30 s idle timeout an edge/CDN applies to a request
   // with no bytes flowing, or the proxy kills it with a 502/504 that no code
   // here can observe or prevent.
-  const waitSeconds = Math.min(
-    Math.max(Number(searchParams.get("wait") ?? "0") || 0, 0),
-    MAX_PULL_WAIT_SECONDS,
-  );
+  const waitSeconds = boundedPullWaitSeconds(searchParams.get("wait"));
 
   if (
     !Number.isFinite(after) ||

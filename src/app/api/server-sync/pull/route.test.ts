@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { MAX_PULL_WAIT_SECONDS, SYNC_PULL_MARKER_HEADER } from "@/lib/sync-watch";
+import { boundedPullWaitSeconds, MAX_PULL_WAIT_SECONDS, SYNC_PULL_MARKER_HEADER } from "@/lib/sync-watch";
 
 type AnyFn = ReturnType<typeof vi.fn>;
 
@@ -92,8 +92,9 @@ describe("GET /api/server-sync/pull", () => {
   });
 
   it("caps the hold below an edge's idle timeout, whatever the caller asks", () => {
-    // The route uses this constant as its Math.min ceiling.
+    // The route delegates its bound to this pure policy helper.
     expect(MAX_PULL_WAIT_SECONDS).toBeLessThan(30);
-    expect(MAX_PULL_WAIT_SECONDS).toBeLessThanOrEqual(20);
+    expect(boundedPullWaitSeconds("25")).toBe(20);
+    expect(boundedPullWaitSeconds("120")).toBe(20);
   });
 });

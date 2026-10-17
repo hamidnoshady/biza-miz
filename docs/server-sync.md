@@ -278,11 +278,13 @@ that ends early must not look like a broken deployment:
   edge together cannot retry in lockstep.
 - **Which side wrote the failure.** Every answer the pull route itself writes
   carries `x-biza-sync-pull: 1` and `Cache-Control: no-store`. Next.js and Node
-  never produce 502/503/504, so a 5xx *without* that marker was written by an
-  intermediary, and the watcher's debug line names it (`server=`, `via=`,
-  `x-cache=`, `cf-ray=`, …) instead of leaving the operator to guess. A 502 on
-  this path is therefore an edge/proxy timeout, not an application bug; an
-  application failure on the route surfaces as a marked 4xx/5xx or a JSON error.
+  never produce 502/503/504, so one of those gateway statuses *without* that
+  marker was written in front of the pull handler, and the watcher's debug line
+  names the upstream (`server=`, `via=`, `x-cache=`, `cf-ray=`, …) instead of
+  leaving the operator to guess. A generic unmarked 500 stays unattributed — it
+  may be Next.js rendering an exception — and is still logged as an application
+  failure. An application-generated gateway response is marked and stays
+  alarming.
 
 The issue's remaining option — SSE or a WebSocket for the wake — is not taken
 here: `/ws` authenticates a browser session cookie and a live connection

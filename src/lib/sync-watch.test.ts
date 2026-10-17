@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   attemptCentralWatch,
+  boundedPullWaitSeconds,
   centralWatchUrl,
   classifyHttpFailure,
   classifyThrownFailure,
@@ -73,6 +74,15 @@ describe("the watch request", () => {
     expect(MAX_PULL_WAIT_SECONDS).toBeLessThan(30);
     // A client must never abort a hold before the server itself would answer.
     expect(WATCH_TIMEOUT_MS).toBeGreaterThan(MAX_PULL_WAIT_SECONDS * 1000);
+  });
+
+  it("clamps the server-side wait even when an older desktop asks for 25 seconds", () => {
+    expect(boundedPullWaitSeconds("25")).toBe(MAX_PULL_WAIT_SECONDS);
+    expect(boundedPullWaitSeconds("120")).toBe(MAX_PULL_WAIT_SECONDS);
+    expect(boundedPullWaitSeconds("15")).toBe(15);
+    expect(boundedPullWaitSeconds("-5")).toBe(0);
+    expect(boundedPullWaitSeconds("not-a-number")).toBe(0);
+    expect(boundedPullWaitSeconds(null)).toBe(0);
   });
 
   it("sends the token and returns what the central said is pending", async () => {
@@ -161,6 +171,22 @@ describe("classifying a failed watch", () => {
     expect(line).toContain("did not come from the app");
     expect(line).toContain("sync wake:");
     expect(line).not.toContain("secret-token");
+  });
+
+  it("does not call an unmarked generic 500 an edge response", async () => {
+    const error = await failureOf(watch(async () => edgeResponse(500, { server: "next" })));
+    expect(error.failure.kind).toBe("server-error");
+    expect(error.failure.answeredBy).toBe("unknown");
+    expect(error.failure.edge).toBeNull();
+    expect(describeWatchFailure(error.failure, 1)).not.toContain("did not come from the app");
+  });
+
+  it("recognizes a marked gateway error as originating from the app", async () => {
+    const error = await failureOf(
+      watch(async () => new Response("{}", { status: 502, headers: { [SYNC_PULL_MARKER_HEADER]: "1" } })),
+    );
+    expect(error.failure.kind).toBe("server-error");
+    expect(error.failure.answeredBy).toBe("app");
   });
 
   it("classifies a fetch failure quickly versus mid-hold", async () => {

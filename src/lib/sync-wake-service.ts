@@ -82,12 +82,16 @@ async function hybridBusinesses(): Promise<string[]> {
   });
 }
 
-function reportWatchFailure(failure: WatchFailure, consecutiveFailures: number): void {
+function reportWatchFailure(
+  failure: WatchFailure,
+  consecutiveFailures: number,
+): "debug" | "warn" | "error" {
   const line = describeWatchFailure(failure, consecutiveFailures);
   const level = watchFailureLogLevel(failure.kind, consecutiveFailures);
   if (level === "debug") console.debug(line);
   else if (level === "warn") console.warn(line);
   else console.error(line);
+  return level;
 }
 
 /** A non-`SyncWatchError` can only come from the surrounding read (settings). */
@@ -102,7 +106,9 @@ function asWatchFailure(error: unknown, started: number): WatchFailure {
 }
 
 async function watchLoop(onWake: (delayMs?: number) => void, signal: AbortSignal): Promise<void> {
-  let failureStreak: { count: number; kind: WatchFailure["kind"] } | null = null;
+  const failureStreak: {
+    current: { count: number; totalCount: number; kind: WatchFailure["kind"]; reported: boolean } | null;
+  } = { current: null };
 
   while (!signal.aborted) {
     const started = Date.now();
@@ -137,23 +143,32 @@ async function watchLoop(onWake: (delayMs?: number) => void, signal: AbortSignal
       // A completed pass means the hold worked. Announce the recovery only
       // when the streak was one an operator should care about: an edge ending
       // holds repeatedly is expected and must not produce a line per cycle.
-      if (failureStreak && failureStreak.kind !== "hold-ended") {
+      const recoveredFrom = failureStreak.current;
+      if (recoveredFrom?.reported) {
         console.info(
-          `sync wake: central watch recovered after ${failureStreak.count} failed attempt${failureStreak.count === 1 ? "" : "s"}`,
+          `sync wake: central watch recovered after ${recoveredFrom.totalCount} failed attempt${recoveredFrom.totalCount === 1 ? "" : "s"}`,
         );
       }
-      failureStreak = null;
     } catch (error) {
       if (signal.aborted) return;
       const failure = error instanceof SyncWatchError ? error.failure : asWatchFailure(error, started);
-      const count: number = (failureStreak?.count ?? 0) + 1;
-      failureStreak = { count, kind: failure.kind };
-      reportWatchFailure(failure, count);
+      const previous = failureStreak.current;
+      const count: number = previous?.kind === failure.kind ? previous.count + 1 : 1;
+      const totalCount: number = (previous?.totalCount ?? 0) + 1;
+      const reportedBefore: boolean = previous?.reported ?? false;
+      const level = reportWatchFailure(failure, count);
+      failureStreak.current = {
+        count,
+        totalCount,
+        kind: failure.kind,
+        reported: reportedBefore || level !== "debug",
+      };
       // A failed hold that was open long enough already served as the idle
       // wait, so retry shortly (jittered); a fast failure waits the base.
       await sleep(watchRetryDelayMs(failure.heldMs), signal);
       continue;
     }
+    failureStreak.current = null;
     if (woke) {
       // Give the woken tick time to pull before asking again; the cursor this
       // loop sends only moves once it has.
