@@ -52,7 +52,7 @@ jobs:
 
       - name: Test (Release)
         run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output.txt
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --logger "console;verbosity=normal" --blame 2>&1 | Tee-Object -FilePath test-output.txt
           exit $LASTEXITCODE
         env:
           # Lets the xUnit test host roll forward onto the .NET 10 runtime
