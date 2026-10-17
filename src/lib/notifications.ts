@@ -80,6 +80,10 @@ export const NOTIFICATION_EVENT_KEYS = [
   "payment.refunded",
   "inventory.low_stock",
   "backup.failed",
+  // Issue #988 — the Hybrid security plane gating all operational traffic. The
+  // gate is deliberate (a suspension must land before the orders queued behind
+  // it); a block nobody could see for nine days is not.
+  "sync.operational_blocked",
   "ai.coworker.pending",
   "ai.coworker.reported",
   "ai.coworker.failed",
@@ -252,6 +256,22 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     // that has silently failed for a week is discovered at exactly the moment
     // it is too late to matter.
     defaultSeverity: "critical",
+    defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "sync.operational_blocked": {
+    key: "sync.operational_blocked",
+    group: "system",
+    label: "مسدودشدن همگام‌سازی عملیاتی",
+    description:
+      "وقتی همگام‌سازی امنیتی با سرور ابری ناموفق است و فروش ثبت‌شده روی صندوق تا برقراری مجدد به ابر فرستاده نمی‌شود.",
+    // `important`, not `critical`: quiet hours stay honoured. A blocked till is
+    // money-path urgent, but it is also a condition the site itself cannot fix
+    // (the cloud or its credential must answer), so it is told, not screamed —
+    // and unlike a missed backup, it keeps presenting itself every five minutes
+    // in the connection panel until it clears.
+    defaultSeverity: "important",
     defaultRoles: ["owner"],
     perLocation: false,
     hasAmount: false,

@@ -24,6 +24,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { ErrorBox, InfoBox, PrimaryButton, SecondaryButton, api, errorMessage } from "@/app/dashboard/ui";
 import { SectionCard } from "@/app/dashboard/page-chrome";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { isIamFailureCode, operationalSyncBlockedSummary } from "@/lib/iam/operational-sync-health";
 
 interface PairingCodeSummary {
   id: string;
@@ -49,6 +50,16 @@ interface SiteDeviceView {
   lastSuccessfulPushAt: string | null;
   lastSuccessfulPullAt: string | null;
   lastSyncError: string | null;
+  /**
+   * Issue #988 — the security plane gating this install's operational sync.
+   * Reachability and a live credential say nothing on their own: a till can be
+   * perfectly "connected" while every sale it takes stays on the disk.
+   */
+  operationalSyncBlocked: boolean;
+  operationalSyncBlockedSince: string | null;
+  operationalSyncConsecutiveBlockedTicks: number;
+  operationalSyncPendingOutbox: number;
+  operationalSyncBlockCode: string | null;
 }
 
 interface DesktopView {
@@ -72,6 +83,22 @@ function formatDateTime(iso: string): string {
   return toPersianDigits(
     new Date(iso).toLocaleString("fa-IR", { dateStyle: "short", timeStyle: "short" }),
   );
+}
+
+/**
+ * Issue #988 — one device's "operational sync is blocked" line.
+ *
+ * The wording comes from `operationalSyncBlockedSummary()` so this panel, the
+ * super-admin fleet view and the cloud-and-sync card describe the same condition
+ * the same way; only the timestamp is this screen's, and it is Shamsi like every
+ * date a user reads.
+ */
+function operationalSyncBlockedText(since: string | null, pendingOutbox: number, code: string | null): string {
+  return operationalSyncBlockedSummary({
+    since: since ? formatDateTime(since) : null,
+    pendingOutbox,
+    code: isIamFailureCode(code) ? code : null,
+  });
 }
 
 /** A value with a copy button. Both of this panel's outputs are things to copy, so both use it. */
@@ -356,6 +383,11 @@ export function DesktopPanel() {
                         آخرین ارسال موفق: {device.lastSuccessfulPushAt ? formatDateTime(device.lastSuccessfulPushAt) : "هنوز ثبت نشده"} • دریافت موفق: {device.lastSuccessfulPullAt ? formatDateTime(device.lastSuccessfulPullAt) : "هنوز ثبت نشده"}
                         {device.lastSyncError ? ` • خطا: ${device.lastSyncError}` : ""}
                       </p>
+                      {device.operationalSyncBlocked ? (
+                        <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                          {operationalSyncBlockedText(device.operationalSyncBlockedSince, device.operationalSyncPendingOutbox, device.operationalSyncBlockCode)}
+                        </p>
+                      ) : null}
                     </div>
                     <span
                       className={`rounded-full px-2 py-0.5 text-xs ${

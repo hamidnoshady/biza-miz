@@ -9,10 +9,18 @@ import type { DeploymentProfile } from "@/lib/deployment-mode";
 import { Button } from "@/components/ui/button";
 import { useOfflineQueue } from "@/app/dashboard/offline-queue";
 import { credentialSyncLabel } from "@/lib/iam/credential-health";
+import { isIamFailureCode, operationalSyncBlockedSummary, type OperationalSyncBlockView } from "@/lib/iam/operational-sync-health";
 
 interface StatusResponse extends PlatformConnectionState {
   profile: DeploymentProfile;
   siteProfile?: { appliedAt: string | null; lastError: string | null } | null;
+  /**
+   * Issue #988 — whether the security plane is gating operational sync right
+   * now. `sync` alone cannot answer this: a gated tick produces no push error
+   * and no push success either, so the row used to read as an ordinary
+   * "connecting" while a till kept taking sales nothing would ever send.
+   */
+  operationalBlock?: OperationalSyncBlockView | null;
 }
 const LABEL: Record<ConnectionStatus, string> = {
   connected: "متصل", unreachable: "در دسترس نیست", unknown: "نامشخص", connecting: "در حال اتصال",
@@ -64,6 +72,8 @@ export function CloudSyncSettings() {
   const identity = state.identitySync ?? null;
   const credentials = state.credentialSync ?? null;
   const overall = state.overallIdentity ?? "not_configured";
+  const block = state.operationalBlock ?? null;
+  const operationalBlocked = block?.state === "blocked";
 
   /**
    * Settings → اتصال is reachable only after a successful local sign-in, so
@@ -162,11 +172,27 @@ export function CloudSyncSettings() {
             <IdentityRow
               icon={DatabaseIcon}
               label="داده‌های عملیاتی"
-              value={LABEL[state.sync]}
-              detail={state.lastConvergedAt ? `آخرین همگرایی: ${new Date(state.lastConvergedAt).toLocaleString("fa-IR")}` : "هنوز همگرا نشده"}
-              healthy={state.sync === "connected"}
+              value={operationalBlocked ? "مسدود" : LABEL[state.sync]}
+              detail={
+                operationalBlocked
+                  ? `${block.consecutiveBlockedTicks.toLocaleString("fa-IR")} تلاش پشت سر هم بدون همگام‌سازی عملیاتی`
+                  : state.lastConvergedAt
+                    ? `آخرین همگرایی: ${new Date(state.lastConvergedAt).toLocaleString("fa-IR")}`
+                    : "هنوز همگرا نشده"
+              }
+              healthy={state.sync === "connected" && !operationalBlocked}
             />
           </dl>
+          {operationalBlocked ? (
+            <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs leading-6 text-amber-900 dark:text-amber-200">
+              {operationalSyncBlockedSummary({
+                since: block.blockedSince ? new Date(block.blockedSince).toLocaleString("fa-IR") : null,
+                pendingOutbox: block.pendingOutbox ?? 0,
+                code: isIamFailureCode(block.code) ? block.code : null,
+              })}
+              {` «همگام‌سازی دوباره» را بزنید.`}
+            </p>
+          ) : null}
           {credentials && credentials.pinMembersMissing > 0 ? (
             <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
               {`${credentials.pinMembersMissing.toLocaleString("fa-IR")} حساب پین‌دار (صندوق‌دار، گارسون، آشپزخانه) هنوز روی این دستگاه قابل ورود نیست.`}

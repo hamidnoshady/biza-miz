@@ -12,6 +12,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { formatJalali } from "@/lib/jalali";
+import { isIamFailureCode, operationalSyncBlockedSummary } from "@/lib/iam/operational-sync-health";
 import { api, errorMessage, Card, ErrorBox, InfoBox, SkeletonRows, useCan } from "../../ui";
 import { useBusiness } from "./context";
 
@@ -30,6 +31,17 @@ export interface SiteDeviceView {
   lastSuccessfulPushAt: string | null;
   lastSuccessfulPullAt: string | null;
   lastSyncError: string | null;
+  /**
+   * Issue #988 — the security plane gating this install's operational sync.
+   * A device can be reachable, authenticated and error-free in every field
+   * above while the till quietly keeps sales it cannot send; this is the one
+   * flag that says so.
+   */
+  operationalSyncBlocked: boolean;
+  operationalSyncBlockedSince: string | null;
+  operationalSyncConsecutiveBlockedTicks: number;
+  operationalSyncPendingOutbox: number;
+  operationalSyncBlockCode: string | null;
 }
 
 const DEVICE_STATUS: Record<SiteDeviceView["status"], { label: string; cls: string }> = {
@@ -122,6 +134,20 @@ export function InstallationsPanel() {
                   {device.lastSyncError ? (
                     <p className="mt-0.5 text-xs text-red-700 dark:text-red-300" dir="ltr">
                       {device.lastSyncError}
+                    </p>
+                  ) : null}
+                  {device.operationalSyncBlocked ? (
+                    <p className="mt-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                      {operationalSyncBlockedSummary({
+                        since: device.operationalSyncBlockedSince
+                          ? fmt(device.operationalSyncBlockedSince)
+                          : null,
+                        pendingOutbox: device.operationalSyncPendingOutbox,
+                        code: isIamFailureCode(device.operationalSyncBlockCode)
+                          ? device.operationalSyncBlockCode
+                          : null,
+                      })}
+                      {` (${device.operationalSyncConsecutiveBlockedTicks.toLocaleString("fa-IR")} تلاش پشت سر هم)`}
                     </p>
                   ) : null}
                 </div>

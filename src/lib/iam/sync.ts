@@ -200,13 +200,45 @@ export async function applyIamEvents(businessId:string,siteDeviceId:string,lastS
   }catch(error){await client.query("ROLLBACK").catch(()=>{});throw error;}finally{client.release();}
 }
 
-/** Security sync gate. False means ordinary business sync must not start. */
-export async function runIamSync(businessId:string):Promise<boolean>{
-  const config=await getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
-  if(!config?.enabled||!config.remoteUrl?.trim()||!config.token?.trim()||!config.siteDeviceId) return false;
-  const state=await query<{last_sequence:string;status:string}>(`SELECT last_sequence,status FROM iam_sync_state WHERE business_id=$1 AND site_device_id=$2`,[businessId,config.siteDeviceId]);
-  const current=state.rows[0]??{last_sequence:"0",status:"snapshot_required"};
+/**
+ * Why the security plane let (or did not let) this tick through.
+ *
+ * `not_configured` is a benign answer, not a failure: an install that has not
+ * finished pairing has no cloud to reconcile with yet, and reporting that as
+ * blocked would make every local profile look broken. Only `failed` means "the
+ * cloud was asked and the answer was not usable", which is the condition
+ * issue #988 needed a durable record of.
+ */
+export type IamSyncReason = "reconciled" | "not_configured" | "failed";
+
+/** The outcome behind the boolean, so a blocked tick can be recorded with its reason. */
+export interface IamSyncOutcome {
+  /** True only when the security plane converged and operational traffic may start. */
+  ready:boolean;
+  reason:IamSyncReason;
+  /** The paired site this attempt spoke for; null before pairing completes. */
+  siteDeviceId:string|null;
+  /** The caught error's message — for the durable record and for support, never for a screen. */
+  error:string|null;
+}
+
+/**
+ * One security-plane reconciliation, with the reason attached.
+ *
+ * Never throws. That is part of the contract, not a nicety: `runServerSyncTick()`
+ * reads this result to decide whether to record a *blocked* tick, and an
+ * exception escaping here (a dead pool during the failure bookkeeping, say)
+ * skipped the record along with the sync and left the block observable only in
+ * the console — the exact defect issue #988 is about.
+ */
+export async function runIamSyncAttempt(businessId:string):Promise<IamSyncOutcome>{
+  let siteDeviceId:string|null=null;
   try{
+    const config=await getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
+    if(!config?.enabled||!config.remoteUrl?.trim()||!config.token?.trim()||!config.siteDeviceId) return {ready:false,reason:"not_configured",siteDeviceId:config?.siteDeviceId??null,error:null};
+    siteDeviceId=config.siteDeviceId;
+    const state=await query<{last_sequence:string;status:string}>(`SELECT last_sequence,status FROM iam_sync_state WHERE business_id=$1 AND site_device_id=$2`,[businessId,config.siteDeviceId]);
+    const current=state.rows[0]??{last_sequence:"0",status:"snapshot_required"};
     await mark(businessId,config.siteDeviceId,"syncing",null);
     if(current.status==="snapshot_required"){
       const response=await fetch(`${baseUrl(config.remoteUrl)}/api/iam/snapshot`,{headers:{Authorization:`Bearer ${config.token}`},signal:AbortSignal.timeout(30_000)});
@@ -239,6 +271,20 @@ export async function runIamSync(businessId:string):Promise<boolean>{
     // is no longer reported as fully healthy.
     const credentialSync=await syncHybridLoginCredentials(businessId,{config});
     if(credentialSync.status==="degraded") console.error(`login credential sync degraded: ${credentialSync.error}`);
-    return true;
-  }catch(error){const message=error instanceof Error?error.message:String(error);await mark(businessId,config.siteDeviceId,message.startsWith("sequence_gap")?"snapshot_required":"degraded",message);return false;}
+    return {ready:true,reason:"reconciled",siteDeviceId:config.siteDeviceId,error:null};
+  }catch(error){
+    const message=error instanceof Error?error.message:String(error);
+    // The failure bookkeeping must not become the failure: if `mark` cannot
+    // write, the caller still has to be told this tick was gated, because its
+    // own durable record is the surface that will show one.
+    if(siteDeviceId) await mark(businessId,siteDeviceId,message.startsWith("sequence_gap")?"snapshot_required":"degraded",message).catch((markError:unknown)=>{
+      console.error(`iam_sync_state write failed for business ${businessId}:`,markError instanceof Error?markError.message:markError);
+    });
+    return {ready:false,reason:"failed",siteDeviceId,error:message};
+  }
+}
+
+/** Security sync gate. False means ordinary business sync must not start. */
+export async function runIamSync(businessId:string):Promise<boolean>{
+  return (await runIamSyncAttempt(businessId)).ready;
 }
