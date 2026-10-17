@@ -165,7 +165,7 @@ async function watchLoop(onWake: (delayMs?: number) => void, signal: AbortSignal
       };
       // A failed hold that was open long enough already served as the idle
       // wait, so retry shortly (jittered); a fast failure waits the base.
-      await sleep(watchRetryDelayMs(failure.heldMs), signal);
+      await sleep(watchRetryDelayMs(failure), signal);
       continue;
     }
     failureStreak.current = null;

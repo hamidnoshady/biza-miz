@@ -264,18 +264,20 @@ that ends early must not look like a broken deployment:
   and the final DB round-trip, which produced the paired `HTTP 502`s in the
   audit that raised this issue. A hold must end well inside the edge's idle
   window, not near it.
-- **Quiet classification.** `502`/`503`/`504` without the app's marker, a
-  timeout, and a connection cut after it has been open for 5 s are all
-  `hold-ended`: debug-level at most, never `console.error`. Only what an
-  operator must act on — `401`/`403`, a status the app itself answered, an
-  unreadable body, an unreachable central — is logged at warn/error, and only
-  on the first failure of a streak. Recovery is one line. The 30 s tick covers
-  every gap.
-- **Retry delay with jitter.** A quick failure waits the 30 s base; a hold
-  that was open long enough already served as the wait, so the next attempt
-  follows in ~1.5 s instead of adding another 30 s of lost latency. Every
-  delay is jittered ±20% (`sync-backoff.ts`'s spread), so a fleet that lost the
-  edge together cannot retry in lockstep.
+- **Quiet classification.** `502`/`503`/`504` without the app's marker,
+  response-stage header/body timeouts, and a socket cut after it has been open
+  for 5 s are `hold-ended`: debug-level at most, never `console.error`. The
+  generic client `AbortSignal.timeout` is *not* enough evidence: DNS/TCP/TLS
+  setup may still be stalled, so an ambiguous timeout remains warn-level on its
+  first occurrence. Actionable failures (`401`/`403`, an app-marked status, an
+  unreadable body, an unreachable central) are logged at warn/error once per
+  failure streak. Recovery is one line. The 30 s tick covers every gap.
+- **Retry delay with jitter.** A quick failure waits the 30 s base; a confirmed
+  hold that was open long enough already served as the wait, so the next attempt
+  follows in ~1.5 s instead of adding another 30 s of lost latency. Ambiguous
+  connection-stage timeouts use the full jittered retry. Every delay is jittered
+  ±20% (`sync-backoff.ts`'s spread), so a fleet that lost the edge together
+  cannot retry in lockstep.
 - **Which side wrote the failure.** Every answer the pull route itself writes
   carries `x-biza-sync-pull: 1` and `Cache-Control: no-store`. Next.js and Node
   never produce 502/503/504, so one of those gateway statuses *without* that

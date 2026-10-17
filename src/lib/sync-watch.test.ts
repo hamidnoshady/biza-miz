@@ -142,18 +142,31 @@ describe("classifying a failed watch", () => {
     expect(classifyHttpFailure(500, true)).toBe("server-error");
   });
 
-  it("classifies a timeout or a cut socket as an ended hold", () => {
-    expect(classifyThrownFailure({ name: "TimeoutError", heldMs: 25_000 })).toBe("hold-ended");
-    expect(classifyThrownFailure({ name: "AbortError", heldMs: 10 })).toBe("hold-ended");
-    expect(classifyThrownFailure({ name: "TypeError", code: "UND_ERR_SOCKET", heldMs: 100 })).toBe("hold-ended");
-    expect(classifyThrownFailure({ name: "TypeError", code: "ECONNRESET", heldMs: 100 })).toBe("hold-ended");
+  it("keeps an ambiguous client timeout actionable unless the response phase is known", () => {
+    // The 25-second AbortSignal timeout can fire before DNS/TCP/TLS completes.
+    expect(classifyThrownFailure({ name: "TimeoutError", heldMs: 25_000 })).toBe("unreachable");
+    expect(classifyThrownFailure({ name: "AbortError", heldMs: 10 })).toBe("unreachable");
+    expect(watchFailureLogLevel(classifyThrownFailure({ name: "TimeoutError", heldMs: 25_000 }), 1)).toBe("warn");
+    // These Undici timeout codes mean a request was sent and awaited headers/body.
+    expect(classifyThrownFailure({ name: "TypeError", code: "UND_ERR_HEADERS_TIMEOUT", heldMs: 100 })).toBe(
+      "hold-ended",
+    );
+    expect(classifyThrownFailure({ name: "TypeError", code: "UND_ERR_BODY_TIMEOUT", heldMs: 100 })).toBe(
+      "hold-ended",
+    );
   });
 
-  it("calls a quick connection failure unreachable, but a long-open one an ended hold", () => {
+  it("keeps connection-stage errors actionable, but quiets a held socket cut", () => {
     expect(classifyThrownFailure({ name: "TypeError", code: "ECONNREFUSED", heldMs: 80 })).toBe("unreachable");
-    expect(classifyThrownFailure({ name: "TypeError", code: "ENOTFOUND", heldMs: 10 })).toBe("unreachable");
-    // It was held: whatever ended it, it was the connection, not the site.
-    expect(classifyThrownFailure({ name: "TypeError", code: "ECONNREFUSED", heldMs: WATCH_HELD_ENOUGH_MS })).toBe(
+    expect(classifyThrownFailure({ name: "TypeError", code: "ENOTFOUND", heldMs: 25_000 })).toBe("unreachable");
+    expect(classifyThrownFailure({ name: "TypeError", code: "UND_ERR_CONNECT_TIMEOUT", heldMs: 25_000 })).toBe(
+      "unreachable",
+    );
+    expect(classifyThrownFailure({ name: "TypeError", code: "ERR_TLS_HANDSHAKE_TIMEOUT", heldMs: 25_000 })).toBe(
+      "unreachable",
+    );
+    expect(classifyThrownFailure({ name: "TypeError", code: "UND_ERR_SOCKET", heldMs: 100 })).toBe("unreachable");
+    expect(classifyThrownFailure({ name: "TypeError", code: "UND_ERR_SOCKET", heldMs: WATCH_HELD_ENOUGH_MS })).toBe(
       "hold-ended",
     );
   });
@@ -251,19 +264,31 @@ describe("quiet logging", () => {
 
 describe("retry timing (issue #989, ask 3)", () => {
   it("jitters a full retry by ±20% so a fleet cannot retry in lockstep", () => {
-    expect(watchRetryDelayMs(0, () => 0)).toBe(WATCH_RETRY_MS * 0.8);
-    expect(watchRetryDelayMs(0, NO_JITTER)).toBe(WATCH_RETRY_MS);
-    expect(watchRetryDelayMs(0, () => 1)).toBe(WATCH_RETRY_MS * 1.2);
+    const quickFailure = { kind: "unreachable" as const, heldMs: 0 };
+    expect(watchRetryDelayMs(quickFailure, () => 0)).toBe(WATCH_RETRY_MS * 0.8);
+    expect(watchRetryDelayMs(quickFailure, NO_JITTER)).toBe(WATCH_RETRY_MS);
+    expect(watchRetryDelayMs(quickFailure, () => 1)).toBe(WATCH_RETRY_MS * 1.2);
     expect(jitteredWatchDelay(1_000, () => 0)).toBe(800);
   });
 
-  it("does not charge a second idle wait for a hold that already served as one", () => {
+  it("does not charge a second idle wait for a confirmed hold that already served as one", () => {
     // An edge that caps holds at ~15 s must not cost another 30 s before the
     // next attempt — the hold itself was the waiting.
-    expect(watchRetryDelayMs(WATCH_WAIT_SECONDS * 1000, NO_JITTER)).toBe(WATCH_QUICK_RETRY_MS);
-    expect(watchRetryDelayMs(WATCH_HELD_ENOUGH_MS, NO_JITTER)).toBe(WATCH_QUICK_RETRY_MS);
-    expect(watchRetryDelayMs(WATCH_HELD_ENOUGH_MS - 1, NO_JITTER)).toBe(WATCH_RETRY_MS);
+    expect(watchRetryDelayMs({ kind: "hold-ended", heldMs: WATCH_WAIT_SECONDS * 1000 }, NO_JITTER)).toBe(
+      WATCH_QUICK_RETRY_MS,
+    );
+    expect(watchRetryDelayMs({ kind: "hold-ended", heldMs: WATCH_HELD_ENOUGH_MS }, NO_JITTER)).toBe(
+      WATCH_QUICK_RETRY_MS,
+    );
+    expect(watchRetryDelayMs({ kind: "hold-ended", heldMs: WATCH_HELD_ENOUGH_MS - 1 }, NO_JITTER)).toBe(
+      WATCH_RETRY_MS,
+    );
+    // An ambiguous 25-second setup timeout is still an unreachable failure,
+    // not evidence that the hold itself served as the wait.
+    expect(watchRetryDelayMs({ kind: "unreachable", heldMs: 25_000 }, NO_JITTER)).toBe(WATCH_RETRY_MS);
     // Jittered even there.
-    expect(watchRetryDelayMs(WATCH_HELD_ENOUGH_MS, () => 0)).toBe(WATCH_QUICK_RETRY_MS * 0.8);
+    expect(watchRetryDelayMs({ kind: "hold-ended", heldMs: WATCH_HELD_ENOUGH_MS }, () => 0)).toBe(
+      WATCH_QUICK_RETRY_MS * 0.8,
+    );
   });
 });

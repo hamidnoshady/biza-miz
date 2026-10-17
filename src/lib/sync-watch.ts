@@ -14,8 +14,9 @@
  *    for a shorter hold so the edge never gets the chance, and the watcher asks
  *    again shortly.
  *  - **What *is* an error — a refused credential, a 5xx the app itself
- *    answered, an unreadable body — is reported once per streak** rather than
- *    on every retry, so the line keeps meaning something.
+ *    answered, an unreadable body, or a client timeout with no evidence that
+ *    the request reached the hold phase — is reported once per streak** rather
+ *    than on every retry, so the line keeps meaning something.
  *
  * Every retry delay is jittered by ±20% (the spread `sync-backoff.ts` uses),
  * so a fleet of sites that lost the edge together cannot come back in lockstep.
@@ -134,8 +135,14 @@ const SOCKET_END_CODES = new Set([
   "UND_ERR_SOCKET",
   "UND_ERR_CLOSED",
   "UND_ERR_ABORTED",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
+]);
+
+const CONNECTION_SETUP_FAILURE_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
 ]);
 
 export function classifyThrownFailure(input: {
@@ -143,12 +150,27 @@ export function classifyThrownFailure(input: {
   code?: string;
   heldMs: number;
 }): WatchFailureKind {
-  // The socket guard fired, or the request was aborted mid-hold.
-  if (input.name === "TimeoutError" || input.name === "AbortError") return "hold-ended";
-  if (input.code && SOCKET_END_CODES.has(input.code.toUpperCase())) return "hold-ended";
+  const code = input.code?.toUpperCase();
+  // These Undici timeouts happen after the request was sent: a headers timeout
+  // means it is waiting for the long-poll response; a body timeout means the
+  // response headers already arrived. They are evidence the hold was reached.
+  if (code === "UND_ERR_HEADERS_TIMEOUT" || code === "UND_ERR_BODY_TIMEOUT") return "hold-ended";
+  // A client-wide AbortSignal.timeout is ambiguous: fetch can still be in DNS,
+  // TCP connect, or TLS setup when its deadline fires. Without a response-stage
+  // code, preserve the connection warning instead of calling it a quiet hold.
+  if (input.name === "TimeoutError" || input.name === "AbortError") return "unreachable";
+  if (code && CONNECTION_SETUP_FAILURE_CODES.has(code)) return "unreachable";
+  // TLS failures are connection-setup failures regardless of how long their
+  // handshake took; do not let elapsed time hide them as an interrupted hold.
+  if (code && (code.startsWith("ERR_TLS_") || code.startsWith("ERR_SSL_") || code.startsWith("CERT_"))) {
+    return "unreachable";
+  }
+  if (code && SOCKET_END_CODES.has(code)) {
+    return input.heldMs >= WATCH_HELD_ENOUGH_MS ? "hold-ended" : "unreachable";
+  }
   if (input.heldMs >= WATCH_HELD_ENOUGH_MS) {
-    // Whatever ended it, a connection that stayed open this long was a held
-    // request being terminated — not a site that cannot reach central.
+    // A held request that ended without a more specific setup error is most
+    // likely a dropped socket; the 30-second timer remains the fallback.
     return "hold-ended";
   }
   return "unreachable";
@@ -177,13 +199,18 @@ export function jitteredWatchDelay(baseMs: number, random: () => number = Math.r
 /**
  * Wait before the next watch attempt.
  *
- * A request that was open for `WATCH_HELD_ENOUGH_MS` already paid the idle
- * wait, so it retries after a short jittered pause; anything quicker keeps the
- * full (jittered) base. No exponential growth: this loop is a read, its failures
+ * A confirmed `hold-ended` request that was open for `WATCH_HELD_ENOUGH_MS`
+ * already paid the idle wait, so it retries after a short jittered pause.
+ * Ambiguous connection-stage timeouts and anything quicker keep the full
+ * (jittered) base. No exponential growth: this loop is a read, its failures
  * are usually the network's, and the 30 s tick still owns the fallback.
  */
-export function watchRetryDelayMs(heldMs: number, random: () => number = Math.random): number {
-  return jitteredWatchDelay(heldMs >= WATCH_HELD_ENOUGH_MS ? WATCH_QUICK_RETRY_MS : WATCH_RETRY_MS, random);
+export function watchRetryDelayMs(
+  failure: Pick<WatchFailure, "kind" | "heldMs">,
+  random: () => number = Math.random,
+): number {
+  const holdAlreadyWaited = failure.kind === "hold-ended" && failure.heldMs >= WATCH_HELD_ENOUGH_MS;
+  return jitteredWatchDelay(holdAlreadyWaited ? WATCH_QUICK_RETRY_MS : WATCH_RETRY_MS, random);
 }
 
 /** Upstream headers worth quoting when an intermediary — not the app — answered. */
