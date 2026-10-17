@@ -334,6 +334,10 @@ export const GET = withTenantScope(async () => {
       : null,
     overallIdentity: identityStatus?.overall ?? "not_configured",
     identityError,
+    // Issue #987: the flag is now properly cleared by acknowledgePendingPairing()
+    // and surfaced here so the UI can distinguish "pairing still finalising"
+    // from a sync error while the acknowledgement is in flight.
+    pairingPending: Boolean(config?.pairingPending),
     supportRelay: exceptionRelay,
   });
 });
