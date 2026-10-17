@@ -10,7 +10,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "predist": "node scripts/prepare-wincodesign-cache.js",
+    "postinstall": "node scripts/patch-embedded-postgres-exit-hook.js",
+    "predist": "node scripts/patch-embedded-postgres-exit-hook.js && node scripts/prepare-wincodesign-cache.js",
     "dist": "npm run verify:runtime && electron-builder --config scripts/windows-signing-config.js",
     "verify:runtime": "node scripts/verify-runtime.js",
     "size": "node ../scripts/report-desktop-size.mjs --output=dist/desktop-size-report.md"

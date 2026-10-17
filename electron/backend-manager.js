@@ -8,7 +8,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { computePaths } = require("./app-paths");
-const { releaseEmbeddedPostgresExitHook } = require("./embedded-postgres-exit");
+const { installPostmasterExitGuard, releaseEmbeddedPostgresExitHook } = require("./embedded-postgres-exit");
 const desktopPackage = require("./package.json");
 
 class StartupError extends Error {
@@ -16,6 +16,19 @@ class StartupError extends Error {
     super(message, cause ? { cause } : undefined);
     this.name = "StartupError";
     this.stage = stage;
+  }
+}
+
+/**
+ * `start()` was cancelled because the app is quitting (issue #985). Not a
+ * startup failure: `main.js` exits 0 instead of showing the recovery dialog,
+ * and `start()` stops anything it had already brought up before throwing this.
+ */
+class BackendStoppedError extends Error {
+  constructor() {
+    super("Desktop backend start was cancelled because the application is quitting.");
+    this.name = "BackendStoppedError";
+    this.stage = "stopped";
   }
 }
 
@@ -304,6 +317,11 @@ class BackendManager {
     this.config = null;
     this.configPath = null;
     this.stopping = null;
+    // Set by stop(); every await point in start() checks it so a quit that
+    // lands mid-boot cannot start PostgreSQL or the server afterwards.
+    this.stopRequested = false;
+    this.pgCtlPath = null;
+    this.exitGuard = null;
   }
 
   resolveRuntimeDir() {
@@ -318,19 +336,52 @@ class BackendManager {
       ? path.join(process.resourcesPath, "app.asar.unpacked", "node_modules", "embedded-postgres", "dist", "index.js")
       : path.join(__dirname, "node_modules", "embedded-postgres", "dist", "index.js");
     const embedded = await import(pathToFileURL(modulePath).href);
-    // Loading the module registers an exit hook that cannot shut PostgreSQL down
-    // cleanly on process exit; this backend stops it explicitly (see the helper).
-    releaseEmbeddedPostgresExitHook(modulePath);
+    // Loading the module registers a process `exit` hook that cannot stop
+    // PostgreSQL cleanly (issue #869/#985); this backend stops it explicitly.
+    // The packaged dependency is additionally patched at install/packaging time
+    // (scripts/patch-embedded-postgres-exit-hook.js), so a hook that survives
+    // this release call — a second module copy, an unexpected resolution — can
+    // no longer reject with "done is not a function".
+    try {
+      if (!releaseEmbeddedPostgresExitHook(modulePath)) {
+        this.logger.warn(
+          "embedded-postgres registered no removable exit hook; relying on the packaged patch and the backend's own shutdown",
+        );
+      }
+    } catch (error) {
+      this.logger.warn("Could not release the embedded-postgres exit hook; relying on the packaged patch and the backend's own shutdown", error);
+    }
     this.EmbeddedPostgres = embedded.default;
     return this.EmbeddedPostgres;
   }
 
   async pgControlPath() {
+    // Cached: the postmaster exit guard needs the same path synchronously from
+    // an `exit` listener, where a dynamic import is impossible.
+    if (this.pgCtlPath) return this.pgCtlPath;
     const platformPackage = process.platform === "win32" ? "windows-x64" : `${process.platform}-${process.arch}`;
     const modulePath = this.app.isPackaged
       ? path.join(process.resourcesPath, "app.asar.unpacked", "node_modules", "@embedded-postgres", platformPackage, "dist", "index.js")
       : path.join(__dirname, "node_modules", "@embedded-postgres", platformPackage, "dist", "index.js");
-    return (await import(pathToFileURL(modulePath).href)).pg_ctl;
+    this.pgCtlPath = (await import(pathToFileURL(modulePath).href)).pg_ctl;
+    return this.pgCtlPath;
+  }
+
+  throwIfStopping() {
+    if (this.stopRequested) throw new BackendStoppedError();
+  }
+
+  // Last-resort, synchronous `pg_ctl stop` at process exit. Installed before
+  // PostgreSQL can start, so it also covers a quit during first-run initdb,
+  // migrations, or a start that is cancelled halfway: the postmaster cannot
+  // outlive the app even though no promise can run at exit time.
+  async installExitGuard(dataDir) {
+    if (this.exitGuard) return;
+    try {
+      this.exitGuard = installPostmasterExitGuard({ dataDir, pgCtl: await this.pgControlPath(), logger: this.logger });
+    } catch (error) {
+      this.logger.warn("Could not prepare the PostgreSQL postmaster exit guard", error);
+    }
   }
 
   serverPidPath() {
@@ -410,15 +461,24 @@ class BackendManager {
     ({ config: this.config, configPath: this.configPath } = await loadOrCreateConfig(userDataDir));
     const { config } = this;
     const dataDir = computePaths(userDataDir).pgDataDir;
+    // Before PostgreSQL can start: no exit path may leave its postmaster behind.
+    await this.installExitGuard(dataDir);
+    this.throwIfStopping();
     await this.stopLeftoversFromUncleanExit(dataDir);
+    this.throwIfStopping();
     await this.ensureFreePorts();
+    this.throwIfStopping();
 
     const firstRun = !isInitialised(dataDir);
     let postgresStage = firstRun ? "initdb" : "postgres-start";
+    // Held locally: stop() may clear this.pg while this start is still awaiting,
+    // and every use here must act on the instance this start created.
+    let pg = null;
     try {
       this.logger.info("Starting embedded PostgreSQL", { port: config.pgPort, firstRun });
       const EmbeddedPostgres = await this.loadEmbeddedPostgres();
-      this.pg = new EmbeddedPostgres({
+      this.throwIfStopping();
+      pg = new EmbeddedPostgres({
         databaseDir: dataDir,
         user: "postgres",
         password: config.pgPassword,
@@ -429,36 +489,52 @@ class BackendManager {
         onLog: (message) => this.logger.childOutput("postgres", message),
         onError: (error) => this.logger.error("postgres", error),
       });
-      if (firstRun) await this.pg.initialise();
+      this.pg = pg;
+      if (firstRun) await pg.initialise();
+      this.throwIfStopping();
       postgresStage = "postgres-start";
       if (postgresStartStrategy() === "pg_ctl") {
         // pg_ctl uses PostgreSQL's restricted-process path for Windows tokens
         // carrying the local Administrators group, while remaining non-elevated.
         await this.startPostgresWithPgCtl(dataDir, config.pgPort);
       } else {
-        await this.pg.start();
+        await pg.start();
+      }
+      // A quit that landed while the postmaster was coming up must not leave it
+      // running: PostgreSQL is up now, so stop it before aborting the start.
+      if (this.stopRequested) {
+        await this.stopPostgresGracefully(pg);
+        throw new BackendStoppedError();
       }
     } catch (error) {
+      if (error instanceof BackendStoppedError) throw error;
       throw new StartupError(postgresStage, "Local PostgreSQL could not be started.", error);
     }
 
+    this.throwIfStopping();
     const superuserUrl = `postgres://postgres:${config.pgPassword}@127.0.0.1:${config.pgPort}/pos`;
     try {
-      const client = this.pg.getPgClient("postgres", "127.0.0.1");
+      const client = pg.getPgClient("postgres", "127.0.0.1");
       await client.connect();
       await recoverInterruptedRestore(client, "pos", this.logger);
       const found = await client.query("SELECT 1 FROM pg_database WHERE datname = 'pos'");
       if (found.rows.length === 0) await client.query("CREATE DATABASE pos ENCODING 'UTF8'");
       await client.end();
     } catch (error) {
+      if (this.stopRequested) throw new BackendStoppedError();
       throw new StartupError("database-create", "The local pos database could not be created.", error);
     }
 
+    this.throwIfStopping();
     try {
       await runNodeScript(process.execPath, runtimeDir, "bin/migrate.cjs", { DATABASE_URL: superuserUrl }, this.logger);
     } catch (error) {
+      // Quitting mid-migration is an expected cancellation, not a broken
+      // upgrade: report it as a stop so no recovery dialog appears.
+      if (this.stopRequested) throw new BackendStoppedError();
       throw new StartupError("migrations", "Database migrations failed. Existing data was not deleted.", error);
     }
+    this.throwIfStopping();
 
     let runtimeUrl;
     try {
@@ -472,9 +548,11 @@ class BackendManager {
       );
       if (!runtimeUrl?.startsWith("postgres")) throw new Error("Restricted role helper returned no database URL.");
     } catch (error) {
+      if (this.stopRequested) throw new BackendStoppedError();
       throw new StartupError("runtime-role", "The restricted PostgreSQL application role could not be prepared.", error);
     }
 
+    this.throwIfStopping();
     const appUrl = `http://127.0.0.1:${config.appPort}`;
     const pgToolsDir = this.app.isPackaged
       ? path.join(process.resourcesPath, "postgresql-tools")
@@ -488,6 +566,10 @@ class BackendManager {
       updateTargetPath: path.join(desktopPaths.configDir, "update-target.json"),
       updatePolicyPath: path.join(desktopPaths.configDir, "update-policy.json"),
     });
+    // Last cancellation point, in the same tick as the spawn: a stop() that has
+    // already run must not leave an unsupervised application server behind,
+    // and a stop() that runs later sees this.server and kills it.
+    this.throwIfStopping();
     this.server = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
       cwd: runtimeDir,
       env: childEnvironment(serverEnv),
@@ -507,7 +589,11 @@ class BackendManager {
       // scan) took >90 s here and was killed while still booting. A crash
       // still fails at once through the child's exit.
       await waitForServerReady(appUrl, config.instanceId, 300_000, this.server);
+      this.throwIfStopping();
     } catch (error) {
+      if (error instanceof BackendStoppedError) throw error;
+      // stop() kills the server child, which fails readiness by design.
+      if (this.stopRequested) throw new BackendStoppedError();
       const detail = serverStderr.trim();
       const cause = detail
         ? new Error(`${error instanceof Error ? error.message : String(error)}\n${detail}`)
@@ -549,8 +635,8 @@ class BackendManager {
     }
   }
 
-  async stopPostgresGracefully() {
-    if (!this.pg) return;
+  async stopPostgresGracefully(instance = this.pg) {
+    if (!instance) return;
     const dataDir = computePaths(this.app.getPath("userData")).pgDataDir;
     try {
       const pgCtl = await this.pgControlPath();
@@ -561,12 +647,15 @@ class BackendManager {
       });
     } catch (error) {
       this.logger.warn("Graceful pg_ctl shutdown failed; using embedded fallback", error);
-      await this.pg.stop().catch((stopError) => this.logger.error("PostgreSQL fallback stop failed", stopError));
+      await instance.stop().catch((stopError) => this.logger.error("PostgreSQL fallback stop failed", stopError));
     }
-    this.pg = null;
+    if (instance === this.pg) this.pg = null;
   }
 
   async stop() {
+    // Set before the first await: a start() that is still running must see the
+    // quit at its next checkpoint and must not start PostgreSQL or the server.
+    this.stopRequested = true;
     if (this.stopping) return this.stopping;
     this.stopping = (async () => {
       this.logger.info("Stopping desktop backend");
@@ -586,6 +675,7 @@ class BackendManager {
 
 module.exports = {
   BackendManager,
+  BackendStoppedError,
   StartupError,
   loadOrCreateConfig,
   findFreePort,

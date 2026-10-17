@@ -13,6 +13,31 @@ const userData = process.env.DESKTOP_SMOKE_USER_DATA
   : fs.mkdtempSync(path.join(os.tmpdir(), "business-suite-packaged-smoke-"));
 fs.mkdirSync(userData, { recursive: true });
 
+// Issue #985 acceptance, from the installed app's own log: a clean quit must
+// never log the embedded-postgres exit-hook rejection ("done is not a
+// function"). Both folder layouts are read because the smoke run can start on
+// either side of the Configuration/Data/Backup/Logs migration.
+function desktopLogs() {
+  return [path.join(userData, "Logs", "desktop.log"), path.join(userData, "logs", "desktop.log")];
+}
+
+// Sizes before a launch, so only the lines that launch added are judged — a
+// persistent DESKTOP_SMOKE_USER_DATA must not fail the run for an older build's
+// history.
+function logOffsets() {
+  return desktopLogs().map((log) => (fs.existsSync(log) ? fs.statSync(log).size : 0));
+}
+
+function assertCleanShutdownLog(stage, offsets) {
+  const logs = desktopLogs();
+  logs.forEach((log, index) => {
+    if (!fs.existsSync(log)) return;
+    const text = fs.readFileSync(log, "utf8").slice(offsets[index] ?? 0);
+    const offending = text.split(/\r?\n/).filter((line) => /done is not a function/i.test(line));
+    if (offending.length) throw new Error(`${stage} logged an embedded-postgres exit-hook failure:\n${offending.join("\n")}`);
+  });
+}
+
 function launch(name, bootstrap) {
   const marker = path.join(userData, `${name}.json`);
   return new Promise((resolve, reject) => {
@@ -56,17 +81,25 @@ function launch(name, bootstrap) {
 }
 
 (async () => {
+  const firstOffsets = logOffsets();
   const first = await launch("first-launch", true);
   if (!first.ok || first.needsBootstrap || !first.authenticated || !first.pgdata) {
     throw new Error(`first launch failed acceptance: ${JSON.stringify(first)}`);
   }
+  assertCleanShutdownLog("first launch", firstOffsets);
+  const secondOffsets = logOffsets();
   const second = await launch("restart", false);
   if (!second.ok || second.needsBootstrap || !second.pgdata) {
     throw new Error(`restart failed persistence acceptance: ${JSON.stringify(second)}`);
   }
+  assertCleanShutdownLog("restart", secondOffsets);
   if (first.instanceId !== second.instanceId) throw new Error("desktop instance identity did not persist across restart");
-  if (fs.existsSync(path.join(userData, "pgdata", "postmaster.pid"))) {
-    throw new Error("PostgreSQL postmaster.pid remained after clean desktop exit");
+  // Both the current Configuration/Data/Backup/Logs layout and the legacy
+  // flat one, so an old install cannot hide a leftover postmaster.
+  for (const relative of [path.join("Data", "pgdata", "postmaster.pid"), path.join("pgdata", "postmaster.pid")]) {
+    if (fs.existsSync(path.join(userData, relative))) {
+      throw new Error(`PostgreSQL postmaster.pid remained after clean desktop exit (${relative})`);
+    }
   }
   console.log(`Packaged desktop smoke passed. Persistent test data: ${userData}`);
 })().catch((error) => {

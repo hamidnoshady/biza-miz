@@ -5,7 +5,7 @@
 
 const { app, BrowserWindow, dialog, ipcMain, session, shell } = require("electron");
 const path = require("node:path");
-const { BackendManager } = require("./backend-manager");
+const { BackendManager, BackendStoppedError } = require("./backend-manager");
 const { createCertificateManager } = require("./certificate-manager");
 const { FirewallManager } = require("./firewall-manager");
 const { GatewayManager } = require("./gateway-manager");
@@ -572,6 +572,15 @@ if (!gotSingleInstanceLock) {
         return;
       } catch (error) {
         await cleanup();
+        if (error instanceof BackendStoppedError) {
+          // The owner quit while the backend was still starting (first-run
+          // initdb, migrations). This is a normal shutdown, not a failure:
+          // exit 0 quietly instead of showing the recovery dialog.
+          logger?.info("Desktop startup cancelled because the application is quitting");
+          quitting = true;
+          app.exit(0);
+          return;
+        }
         if (process.env.DESKTOP_SMOKE_MARKER) {
           logger.error(`Packaged smoke failed at ${error?.stage || "startup"}`, error);
           writeSmokeFailure(error);
