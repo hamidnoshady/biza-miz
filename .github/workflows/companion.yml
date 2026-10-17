@@ -72,14 +72,17 @@ jobs:
             exit 0
           }
           $lines = Get-Content test-output.txt
-          # Skip the noise (per-test Passed lines); dump everything else in
-          # ~850-char chunks so the failure is fully visible via the API.
-          $kept = $lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' }
-          Write-Host "::error title=companion test output::$($lines.Count) lines total, $($kept.Count) kept"
+          # Dump the whole run in ~850-char chunks (short test names only, so
+          # the full sequence fits): the host is dying mid-run with no summary,
+          # and the last lines before it stops name the killer.
+          Write-Host "::error title=companion test output::$($lines.Count) lines total"
           $chunk = 0
           $buf = ''
-          foreach ($line in $kept) {
-            $piece = $line.Trim() + ' | '
+          foreach ($line in $lines) {
+            $t = $line.Trim()
+            if ($t -eq '') { continue }
+            $short = $t -replace 'Biza\.SupportCompanion\.Core\.Tests\.', ''
+            $piece = $short + ' | '
             if (($buf.Length + $piece.Length) -gt 850) {
               $chunk++
               Write-Host "::error title=dotnet test ($chunk)::$buf"
