@@ -323,6 +323,14 @@ jobs:
         working-directory: electron
         run: npm ci --ignore-scripts
 
+      # --ignore-scripts skips the `postinstall` that applies issue #985's
+      # embedded-postgres shutdown patch. `verify:runtime` requires the exact
+      # file the packager ships, so apply the same, reviewed patch explicitly
+      # here — the job verifies that it is applied, not just that it could be.
+      - name: Apply the packaged embedded-postgres shutdown patch
+        working-directory: electron
+        run: npm run patch:exit-hook
+
       - name: Audit Electron production dependencies
         working-directory: electron
         run: npm audit --omit=dev --audit-level=high

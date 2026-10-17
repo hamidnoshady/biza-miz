@@ -138,6 +138,21 @@ if (!fs.existsSync(pgToolsManifestPath)) {
 const icon = path.resolve(root, "electron", electronPackage.build.win.icon);
 if (!fs.existsSync(icon)) fail(`installer icon does not exist: ${icon}`);
 
+// Issue #985: the packaged copy of embedded-postgres must carry the
+// missing-callback patch. Without it, a quit in which the library's `exit`
+// hook still runs rejects with "done is not a function"; packaging must fail
+// here rather than ship that build again.
+const embeddedPostgresEntry = path.join(root, "electron", "node_modules", "embedded-postgres", "dist", "index.js");
+const { isPatched } = require(path.join(__dirname, "patch-embedded-postgres-exit-hook.js"));
+if (!fs.existsSync(embeddedPostgresEntry)) {
+  fail(`embedded-postgres is not installed at ${embeddedPostgresEntry}`);
+} else if (!isPatched(fs.readFileSync(embeddedPostgresEntry, "utf8"))) {
+  fail(
+    "embedded-postgres still calls done() unconditionally (issue #985); run " +
+      "electron/scripts/patch-embedded-postgres-exit-hook.js before packaging",
+  );
+}
+
 const embeddedRoot = path.join(root, "electron", "node_modules", "@embedded-postgres");
 const platformPackages = fs.existsSync(embeddedRoot)
   ? fs.readdirSync(embeddedRoot).filter((name) => fs.existsSync(path.join(embeddedRoot, name, "native")))

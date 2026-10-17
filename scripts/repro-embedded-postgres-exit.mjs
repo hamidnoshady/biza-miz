@@ -11,20 +11,25 @@
  * PostgreSQL itself on quit, so main's `releaseEmbeddedPostgresExitHook`
  * (electron/embedded-postgres-exit.js) removes exactly that one hook.
  *
- * This script proves both halves in one run, no PostgreSQL binary needed:
+ * This script proves all three halves in one run, no PostgreSQL binary needed:
  *   1. baseline — load the library and fire the exit event: the hook's
  *      `done()` rejects (the defect is in the shipped dependency, not in
  *      this codebase);
  *   2. fixed — load the library, release the exit hook the way
  *      backend-manager does, and fire the exit event: no rejection, exit
- *      code 0.
+ *      code 0;
+ *   3. patched — copy the installed module, apply
+ *      electron/scripts/patch-embedded-postgres-exit-hook.js the way the
+ *      packaged build does, leave the exit hook registered, and fire the exit
+ *      event: no rejection. This is the issue #985 guarantee that does not
+ *      depend on which module instance registered the hook.
  *
  *   node scripts/repro-embedded-postgres-exit.mjs
  *
- * Exits non-zero when either half misbehaves. The vitest suite
- * (src/electron-embedded-postgres-shutdown.test.ts) runs the same two
- * scenarios as regression coverage, so a dependency upgrade that re-introduces
- * the hook — or a backend-manager change that stops releasing it — fails CI.
+ * Exits non-zero when any half misbehaves. The vitest suite
+ * (src/electron-embedded-postgres-shutdown.test.ts) runs the same scenarios
+ * as regression coverage, so a dependency upgrade that re-introduces the hook
+ * — or a backend-manager change that stops releasing it — fails CI.
  */
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -75,6 +80,39 @@ console.log("REMOVED=" + String(removed) + " ERRORS=" + JSON.stringify(errors));
 process.exit(0);
 `;
 
+/**
+ * The packaged build's path: the dependency on disk is patched at
+ * install/packaging time, and the exit hook is left registered. If the patch
+ * is not applied, this child reproduces the same "done is not a function"
+ * rejection the baseline does — which is exactly what must never ship.
+ *
+ * The copy lives under the repo's node_modules so its bare imports (`pg`,
+ * `async-exit-hook`, `@embedded-postgres/<platform>`) resolve the same way the
+ * installed original's do; it is removed before the child exits.
+ */
+export const CHILD_PATCHED = `
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+const root = process.env.REPRO_REPO_ROOT;
+const scratch = fs.mkdtempSync(path.join(root, "node_modules", ".tmp-patched-embedded-postgres-"));
+const target = path.join(scratch, "node_modules", "embedded-postgres");
+try {
+  fs.cpSync(path.join(root, "node_modules", "embedded-postgres"), target, { recursive: true });
+  const patch = await import(pathToFileURL(root + "/electron/scripts/patch-embedded-postgres-exit-hook.js").href);
+  const status = patch.patchEmbeddedPostgresExitHook(path.join(target, "dist", "index.js")).status;
+  await import(pathToFileURL(path.join(target, "dist", "index.js")).href);
+  const errors = [];
+  process.on("unhandledRejection", (err) => errors.push(err && err.message ? err.message : String(err)));
+  process.emit("exit");
+  await new Promise((r) => setTimeout(r, 100));
+  console.log("PATCH=" + status + " ERRORS=" + JSON.stringify(errors));
+  process.exit(0);
+} finally {
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+`;
+
 export function runChild(code, { env = {} } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["--input-type=module", "--eval", code], {
@@ -120,11 +158,22 @@ async function main() {
   console.log("    removed=" + (fixed.stdout.match(/REMOVED=(\w+)/)?.[1] ?? "?") + ", exit code " + fixed.code);
   if (!fixedClean) console.log("    stdout was: " + JSON.stringify(fixed.stdout.slice(0, 400)));
 
-  if (!baselineHasError || !fixedClean) {
+  console.log("scenario 3 — patched (packaged dependency, exit hook left registered)");
+  const patched = await runChild(CHILD_PATCHED);
+  const patchedErrors = capturedErrors(patched.stdout);
+  const patchedClean =
+    patched.code === 0 && /PATCH=patched/.test(patched.stdout) && Array.isArray(patchedErrors) && patchedErrors.length === 0;
+  console.log(patchedClean ? "  ✓ clean exit, no rejection, hook still registered" : "  ✗ the patched dependency still rejects");
+  console.log("    patch status " + (patched.stdout.match(/PATCH=(\w+)/)?.[1] ?? "?") + ", exit code " + patched.code);
+  if (!patchedClean) console.log("    stdout was: " + JSON.stringify(patched.stdout.slice(0, 400)));
+
+  if (!baselineHasError || !fixedClean || !patchedClean) {
     console.error("\nrepro failed");
     process.exit(1);
   }
-  console.log("\nrepro consistent with issue #869: defect in the dependency, removed by the released hook");
+  console.log(
+    "\nrepro consistent with issues #869/#985: defect in the dependency, removed by the released hook and made harmless by the packaged patch",
+  );
 }
 
 const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
