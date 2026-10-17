@@ -11,7 +11,11 @@
  */
 import { query } from "./db";
 
-/** Tables with no tenant data — every table `integration/tenant-isolation.integration.test.ts` exempts (migration 0021 + platform additions). */
+/**
+ * Tables omitted from per-tenant exports/restores (migration 0021 + platform
+ * additions). Some platform-owned tables keep `business_id` for attribution
+ * and are separately protected by RLS.
+ */
 export const EXEMPT_TABLES = new Set([
   "schema_migrations",
   "feature_flags",
@@ -27,6 +31,9 @@ export const EXEMPT_TABLES = new Set([
   // RLS-protected like every other table and stay in the export.
   "currencies",
   "platform_admins",
+  // Platform-owned audit history stays out of tenant exports. Its optional
+  // business_id is attribution only; migration 0228 applies FORCE RLS with the
+  // standard tenant_isolation policy, while platform reads use the bypass.
   "platform_audit_log",
   // Phase 24 — Login lockout for password, platform and directory realms. The attempt
   // happens before any business is known, so it has no business_id. It belongs to
@@ -164,12 +171,12 @@ export const EXEMPT_TABLES = new Set([
   "platform_restore_runs",
   // Migration 0139 — the console's CMS control plane: the eshobe-cms address and
   // its `role: "platform"` key (encrypted), the mirror of every site on that
-  // deployment, and the log of every sync in either direction. Deployment-wide by
-  // definition — one CMS serves every business, and the credential is the
-  // operator's root credential for the platform that hosts every customer's
-  // website, so a tenant connection must not be able to reach any of it. The
-  // per-business half of the same integration (eshobe_cms_connections, migration
-  // 0122) is RLS-protected and deliberately NOT in this list.
+  // deployment, and the log of every sync in either direction. The CMS mirror
+  // carries business_id for attribution and migration 0228 protects those rows
+  // with FORCE RLS; platform console/sync work uses the documented bypass. These
+  // platform-owned rows are still omitted from tenant exports. The per-business
+  // connection table (eshobe_cms_connections, migration 0122) remains separately
+  // RLS-protected and is deliberately NOT in this list.
   "platform_cms_config",
   "platform_cms_sites",
   "platform_cms_sync_runs",
@@ -185,8 +192,8 @@ export const EXEMPT_TABLES = new Set([
   // Issue #883 wave 3 — the SUPERADMIN console's MCP credentials (/`pospmcp_`
   // tokens): console-side authority over the whole deployment, hashed at rest,
   // keyed on platform_admins rather than any business. Carrying no
-  // business_id is the point of the design — this table must never be
-  // reachable through a tenant connection, exactly like platform_audit_log.
+  // business_id is the point of the design — this platform-only table must
+  // never be reachable through a tenant connection.
   // Its tenant counterpart (mcp_connections) IS RLS-protected.
   "platform_mcp_connections",
 ]);

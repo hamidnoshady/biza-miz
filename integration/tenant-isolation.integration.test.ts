@@ -12,9 +12,10 @@
  *     vacuously while proving nothing at all.
  *
  *  2. It asserts coverage over the live schema rather than a hand-written
- *     list: every table that carries tenant data must have RLS enabled AND
- *     forced. A future migration that adds a table without a policy fails here
- *     instead of leaking in production.
+ *     list: every tenant table must have RLS enabled AND forced. A separate
+ *     catalog check also includes every public table carrying `business_id`,
+ *     even platform-owned tables omitted from tenant exports, so a new
+ *     attribution-bearing table cannot become an RLS outlier.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -31,7 +32,7 @@ if (!rootDatabaseUrl) {
 const APP_ROLE = "pos_rls_test_role";
 const APP_PASSWORD = "rls-test-password";
 
-// EXEMPT_TABLES (tables with no tenant data, documented as exempt in 0021 +
+// EXEMPT_TABLES (tables omitted from tenant exports, documented in 0021 +
 // platform additions) is imported from tenant-tables.ts rather than kept as a
 // second copy here — a hand-maintained duplicate is exactly what let the two
 // drift apart before (migration 0130 updated this test's list but not
@@ -191,6 +192,51 @@ describe("every tenant table is protected", () => {
     expect(rows.length).toBeGreaterThan(50);
   });
 
+  it("enables and forces RLS on every public table carrying business_id", async () => {
+    const { rows } = await ownerClient.query<{
+      relname: string;
+      relrowsecurity: boolean;
+      relforcerowsecurity: boolean;
+      policies: string;
+      has_tenant_isolation: boolean;
+    }>(
+      `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+              (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
+              EXISTS (
+                SELECT 1 FROM pg_policy p
+                 WHERE p.polrelid = c.oid AND p.polname = 'tenant_isolation'
+              ) AS has_tenant_isolation
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+        WHERE c.relkind = 'r'
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns col
+             WHERE col.table_schema = 'public'
+               AND col.table_name = c.relname
+               AND col.column_name = 'business_id'
+          )
+        ORDER BY c.relname`,
+    );
+
+    const unprotected = rows
+      .filter((r) => !r.relrowsecurity || !r.relforcerowsecurity || Number(r.policies) === 0)
+      .map((r) => r.relname);
+    expect(rows.length).toBeGreaterThan(50);
+    expect(unprotected, `business_id tables missing RLS or a policy: ${unprotected.join(", ")}`).toEqual([]);
+
+    const byName = new Map(rows.map((row) => [row.relname, row]));
+    for (const table of ["platform_audit_log", "platform_cms_sites"]) {
+      expect(
+        byName.get(table),
+        `${table} must remain in the business_id coverage check`,
+      ).toMatchObject({
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+        has_tenant_isolation: true,
+      });
+    }
+  });
+
   it("every policy's actual expression scopes by business, not just exists", async () => {
     const { rows } = await ownerClient.query<{
       relname: string;
@@ -254,6 +300,9 @@ describe("every tenant table is protected", () => {
       // counterparts (ai_agent_assignments, ai_memory, ai_research_runs,
       // ai_research_sources) are RLS-protected and absent from this list.
       "platform_ai_modes",
+      // Platform-owned audit history stays out of tenant exports, but its
+      // optional business_id is protected by migration 0228's standard
+      // tenant_isolation policy (the platform console uses the RLS bypass).
       "platform_audit_log",
       // Migration 0132 — the console's whole-system backup. Its config, run
       // history, hashed peer tokens, the peers this install may restore from, and
@@ -266,9 +315,9 @@ describe("every tenant table is protected", () => {
       "platform_backup_tokens",
       // Migration 0139 — the console's CMS control plane: the eshobe-cms address and
       // its platform key (encrypted), the mirror of every site on that deployment,
-      // and the log of every sync. One CMS serves every business, so none of it has
-      // a business_id; the per-business half (eshobe_cms_connections, 0122) is
-      // RLS-protected and is not listed here.
+      // and the log of every sync. The CMS mirror retains business_id attribution
+      // and receives migration 0228's standard tenant_isolation policy; these
+      // platform-owned rows remain omitted from tenant exports.
       "platform_cms_config",
       "platform_cms_sites",
       "platform_cms_sync_runs",
