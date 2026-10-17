@@ -251,6 +251,50 @@ age, refused rows, dead letters, master conflicts) and the hourly **drift
 check**: settled bills, sales and payments per business day compared with the
 central server's for the last seven days.
 
+### The wake-up long-poll and interrupted holds (issue #989)
+
+The central-side wake-up is `GET /api/server-sync/pull?peek=1&wait=15`
+(`src/lib/sync-watch.ts`). It is an optimisation over the 30 s tick, so a hold
+that ends early must not look like a broken deployment:
+
+- **A shorter hold.** The desktop asks for 15 s and the route caps `wait` at
+  20 s (`MAX_PULL_WAIT_SECONDS`), including for an older desktop that still
+  asks for 25. A request with no bytes flowing is killed by many CDNs, proxies
+  and NAT tables at about 30 s; holding 25 s left no room for connect, auth
+  and the final DB round-trip, which produced the paired `HTTP 502`s in the
+  audit that raised this issue. A hold must end well inside the edge's idle
+  window, not near it.
+- **Quiet classification.** `502`/`503`/`504` without the app's marker,
+  response-stage header/body timeouts, and a socket cut after it has been open
+  for 5 s are `hold-ended`: debug-level at most, never `console.error`. The
+  generic client `AbortSignal.timeout` is *not* enough evidence: DNS/TCP/TLS
+  setup may still be stalled, so an ambiguous timeout remains warn-level on its
+  first occurrence. Actionable failures (`401`/`403`, an app-marked status, an
+  unreadable body, an unreachable central) are logged at warn/error once per
+  failure streak. Recovery is one line. The 30 s tick covers every gap.
+- **Retry delay with jitter.** A quick failure waits the 30 s base; a confirmed
+  hold that was open long enough already served as the wait, so the next attempt
+  follows in ~1.5 s instead of adding another 30 s of lost latency. Ambiguous
+  connection-stage timeouts use the full jittered retry. Every delay is jittered
+  ±20% (`sync-backoff.ts`'s spread), so a fleet that lost the edge together
+  cannot retry in lockstep.
+- **Which side wrote the failure.** Every answer the pull route itself writes
+  carries `x-biza-sync-pull: 1` and `Cache-Control: no-store`. Next.js and Node
+  never produce 502/503/504, so one of those gateway statuses *without* that
+  marker was written in front of the pull handler, and the watcher's debug line
+  names the upstream (`server=`, `via=`, `x-cache=`, `cf-ray=`, …) instead of
+  leaving the operator to guess. A generic unmarked 500 stays unattributed — it
+  may be Next.js rendering an exception — and is still logged as an application
+  failure. An application-generated gateway response is marked and stays
+  alarming.
+
+The issue's remaining option — SSE or a WebSocket for the wake — is not taken
+here: `/ws` authenticates a browser session cookie and a live connection
+lifecycle, while the watcher is a site-device-bearer call that must survive
+reconnects on an unattended desktop. Returning early well inside the idle
+window (the shorter `wait`) solves the same problem with the transport already
+in place; a push channel can be a later optimisation without changing the tick.
+
 On the central, `runCentralSyncMaintenanceTick()` (every 60 s) retries each
 business's dependency-deferred inbox rows and expires abandoned pairing
 sessions. Before this existed, the central only retried a deferred event when
