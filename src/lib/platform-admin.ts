@@ -113,6 +113,37 @@ export type PlatformCapability =
   // separating: the console's ticket page is read surfaces plus the reply box,
   // and every write is audited.
   | "support.manage"
+  // Issue #984 — the standalone Windows diagnostics companion is gated
+  // separately from the ticket desk. Holding `support.manage` (or viewing a
+  // ticket, changing an assignment, or holding an impersonation session)
+  // grants NONE of these: device execution and remote control need their own
+  // authority, checked on every action, download, viewer admission and lease
+  // renewal — never just hidden buttons.
+  //
+  //   support.context.read      requester/business/installation/health context
+  //   support.diagnostics.request  request diagnostics from a ticket
+  //   support.reports.read      view/download redacted reports + artifacts
+  //   support.repair.propose    propose an approved catalog repair
+  //   support.repair.execute    execute an approved repair (owner only)
+  //   support.assist.view       request/join remote view
+  //   support.assist.control    request/join remote control (owner only)
+  //   support.assist.revoke     revoke/end a remote session
+  //   support.repair.publish    publish/manage repair catalog policy (owner only)
+  //   support.token.issue       generate on-site access tokens (+recent MFA)
+  //   support.ai.use            use Support AI in ticket/companion
+  //   support.ai.configure      publish support model profiles (owner only)
+  | "support.context.read"
+  | "support.diagnostics.request"
+  | "support.reports.read"
+  | "support.repair.propose"
+  | "support.repair.execute"
+  | "support.assist.view"
+  | "support.assist.control"
+  | "support.assist.revoke"
+  | "support.repair.publish"
+  | "support.token.issue"
+  | "support.ai.use"
+  | "support.ai.configure"
   // Impersonation, split by blast radius
   | "impersonate.readOnly"
   | "impersonate.controlled"
@@ -171,7 +202,9 @@ const BILLING_WRITE: PlatformCapability[] = [
  * can do without tracing an inheritance chain.
  */
 const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
-  support: [...READ, "support.manage", "impersonate.readOnly"],
+  // Issue #984: the desk reads ticket context and redacted reports; it
+  // cannot request diagnostics, issue tokens or touch remote control.
+  support: [...READ, "support.manage", "impersonate.readOnly", "support.context.read", "support.reports.read"],
   engineer: [
     ...READ,
     "support.manage",
@@ -183,6 +216,19 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     "impersonate.revoke",
     "impersonate.extend",
     "knowledge.manage",
+    // Issue #984: operate diagnostics, propose repairs, view-only remote
+    // assistance (with customer consent + lease), issue on-site tokens (with
+    // recent MFA, enforced at the route) and use Support AI. Repair
+    // execution, remote control, catalog publishing and AI profile
+    // management stay owner-only.
+    "support.context.read",
+    "support.reports.read",
+    "support.diagnostics.request",
+    "support.repair.propose",
+    "support.assist.view",
+    "support.assist.revoke",
+    "support.token.issue",
+    "support.ai.use",
     // Issue #807: an engineer runs and verifies backups (operational work) but
     // does not configure destinations, mint sharing tokens, or restore.
     "backup.manage",
@@ -197,6 +243,21 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
   owner: [
     ...READ,
     "support.manage",
+    // Issue #984: the owner holds the whole companion surface, including
+    // repair execution, remote control, catalog publishing, token issuance
+    // and Support AI configuration.
+    "support.context.read",
+    "support.reports.read",
+    "support.diagnostics.request",
+    "support.repair.propose",
+    "support.repair.execute",
+    "support.assist.view",
+    "support.assist.control",
+    "support.assist.revoke",
+    "support.repair.publish",
+    "support.token.issue",
+    "support.ai.use",
+    "support.ai.configure",
     "impersonate.readOnly",
     "impersonate.controlled",
     "features.write",

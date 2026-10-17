@@ -103,6 +103,9 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   website: keys("website.cms", "website.domain"),
   cms: keys("website.cms", "website.domain"),
   backup: keys("backup"),
+  // Issue #984 — the Windows support companion's API: platform-operated
+  // support infrastructure, never billed to the customer.
+  "support-companion": keys("platform.support"),
 };
 
 function keys(...capabilityKeys: string[]): RouteClass {

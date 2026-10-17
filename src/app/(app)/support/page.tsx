@@ -106,6 +106,74 @@ function statusTone(
   return "neutral";
 }
 
+/**
+ * Issue #984 — opens the installed standalone support companion with this
+ * ticket hinted. Desktop shell only (`window.businessSuiteDesktop`): the
+ * bridge reports install presence truthfully, which a browser cannot. Hidden
+ * entirely outside the desktop app; disabled with an explanatory title when
+ * the companion is not installed. Launching authorizes nothing by itself.
+ */
+function CompanionOpenButton({ ticketId }: { ticketId: string }) {
+  const bridge =
+    typeof window !== "undefined" ? window.businessSuiteDesktop?.supportCompanion ?? null : null;
+  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [launching, setLaunching] = useState(false);
+
+  useEffect(() => {
+    if (!bridge) return;
+    let cancelled = false;
+    void bridge
+      .status()
+      .then((result) => {
+        if (!cancelled) setInstalled(result.installed);
+      })
+      .catch(() => {
+        if (!cancelled) setInstalled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge]);
+
+  if (!bridge) return null;
+
+  async function open() {
+    if (!bridge || launching) return;
+    setLaunching(true);
+    try {
+      const result = await bridge.launch(ticketId);
+      if (!result.ok) {
+        toast.error(
+          result.error === "not_installed"
+            ? "همراه پشتیبانی روی این دستگاه نصب نشده است. از پشتیبانی نصب‌کننده را بخواهید."
+            : "باز کردن همراه پشتیبانی ناموفق بود. دوباره تلاش کنید.",
+        );
+      }
+    } catch {
+      toast.error("باز کردن همراه پشتیبانی ناموفق بود. دوباره تلاش کنید.");
+    } finally {
+      setLaunching(false);
+    }
+  }
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => void open()}
+      disabled={installed === false || launching}
+      title={
+        installed === false
+          ? "همراه پشتیبانی نصب نشده است"
+          : "باز کردن همراه پشتیبانی برای این تیکت"
+      }
+    >
+      <LifeBuoyIcon aria-hidden="true" className="size-4" />
+      همراه پشتیبانی
+    </Button>
+  );
+}
+
 export default function SupportPage() {
   const [tickets, setTickets] = useState<SupportTicket[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -516,14 +584,17 @@ function TicketDetailPanel({
             ) : null}
           </div>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onClose}
-          aria-label="بستن گفت‌وگو"
-        >
-          بستن
-        </Button>
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onClose}
+            aria-label="بستن گفت‌وگو"
+          >
+            بستن
+          </Button>
+          <CompanionOpenButton ticketId={ticket.id} />
+        </div>
       </div>
 
       <div className="max-h-[26rem] space-y-3 overflow-y-auto p-4">

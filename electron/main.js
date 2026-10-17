@@ -14,6 +14,7 @@ const nativePrinting = require("./native-printing");
 const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
+const { companionStatus, launchCompanion } = require("./support-companion");
 const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane, hideCloudSidebar, stampEmbedAgent } = require("./cloud-pane");
 
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
@@ -212,6 +213,16 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("desktop:open-logs", async () => {
       shell.showItemInFolder(logger.path);
       return logger.path;
+    });
+    // Issue #984 — the ticket UI's "open companion" action. Renderer input is
+    // a ticket id hint only: launching authorizes nothing, and absence is
+    // reported truthfully instead of failing silently.
+    ipcMain.handle("desktop:support-companion", async (_event, payload) => {
+      if (payload && payload.action === "launch") {
+        const ticketId = typeof payload.ticketId === "string" ? payload.ticketId.slice(0, 64) : null;
+        return launchCompanion({ ticketId });
+      }
+      return companionStatus();
     });
 
     // Desktop updates: manual and background downloads share this one engine.
@@ -534,19 +545,36 @@ if (!gotSingleInstanceLock) {
   async function showStartupFailure(error) {
     const stage = error?.stage || "startup";
     logger.error(`Fatal desktop startup failure at ${stage}`, error);
+    // Issue #984 — the companion exists precisely for this moment: the main
+    // app is down, but the standalone diagnostics companion can still run.
+    const companion = companionStatus();
     const result = await dialog.showMessageBox({
       type: "error",
       title: "Business Suite could not start",
       message: `Startup failed at: ${stage}`,
       detail: `${error?.message || "Unknown startup error"}\n\nYour business data was not deleted. Diagnostic log:\n${logger.path}`,
-      buttons: ["Retry", "Open logs", "Exit"],
+      buttons: ["Retry", "Open logs", companion.installed ? "Open support companion" : "Support companion (not installed)", "Exit"],
       defaultId: 0,
-      cancelId: 2,
+      cancelId: 3,
       noLink: true,
     });
     if (result.response === 1) {
       shell.showItemInFolder(logger.path);
       return "logs";
+    }
+    if (result.response === 2) {
+      const launched = launchCompanion({});
+      if (!launched.ok) {
+        await dialog.showMessageBox({
+          type: "info",
+          title: "Support companion",
+          message: "The support companion is not installed on this machine.",
+          detail: "Ask your support operator for the companion installer — it runs independently of Business Suite and can diagnose this failure.",
+          buttons: ["OK"],
+          noLink: true,
+        });
+      }
+      return "companion";
     }
     return result.response === 0 ? "retry" : "exit";
   }
@@ -594,7 +622,7 @@ if (!gotSingleInstanceLock) {
           app.exit(1);
           return;
         }
-        if (choice === "logs") continue;
+        if (choice === "logs" || choice === "companion") continue;
       }
     }
   }

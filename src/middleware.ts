@@ -675,6 +675,12 @@ const AUTH_RATE_LIMITED_PATHS = [
   "/api/platform/auth/mfa/challenge",
   "/api/platform/auth/mfa/verify",
   "/api/platform/auth/mfa/enrol",
+  // Issue #984 — the companion's two pre-session credential exchanges: the
+  // enrollment claim code and the ticket-issued online/offline token redeem.
+  // Both guess a short secret without a session, like the pairing and MFA
+  // exchanges above, so they share this per-IP bucket.
+  "/api/support-companion/enrollment",
+  "/api/support-companion/token-redeem",
 ];
 
 /**

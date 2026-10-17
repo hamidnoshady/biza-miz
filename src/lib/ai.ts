@@ -3648,7 +3648,7 @@ export interface ChatMessage {
   tool_call_id?: string;
 }
 
-export type AgentMode = "wizard" | "dashboard" | "floor" | "platform" | "proactive" | "autopilot";
+export type AgentMode = "wizard" | "dashboard" | "floor" | "platform" | "proactive" | "autopilot" | "support";
 
 export interface PromptContext {
   mode: AgentMode;
@@ -6174,6 +6174,56 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     },
   ];
 
+  const supportReadTools: OpenAiTool[] = [
+    noArgsTool(
+      "support.evidence.read",
+      "خواندن شواهد قرمزگذاری‌شدهٔ همین تیکت: اجراهای تشخیصی و وضعیت تعمیرها. شناسه نمی‌گیرد؛ دامنه همیشه همین تیکت است.",
+    ),
+    noArgsTool(
+      "support.report.summarize",
+      "خلاصهٔ قطعی شواهد همین تیکت: مشاهدات، یافته‌ها، تعمیرها و شکاف‌ها. بدون فراخوانی مدل اضافه.",
+    ),
+    {
+      type: "function",
+      function: {
+        name: "support.diagnostics.request",
+        description:
+          "ثبت درخواست بررسی تشخیصی برای نصبِ همین گفت‌وگو. ماژول‌ها فقط از فهرست ثابت انتخاب می‌شوند؛ همراه (companion) همه‌چیز را پیش از اجرا محلی راستی‌آزمایی می‌کند.",
+        parameters: {
+          type: "object",
+          properties: {
+            installationId: { type: "string", description: "نصب هدف؛ باید نصبِ همین گفت‌وگو باشد" },
+            modules: {
+              type: "array",
+              items: { type: "string" },
+              description: "زیرمجموعه‌ای از فهرست ثابت ماژول‌ها؛ نامعتبرها نادیده گرفته می‌شوند",
+            },
+            reason: { type: "string", description: "دلیل فارسی درخواست" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "support.repair.propose",
+        description:
+          "پیشنهاد یک دستور تعمیر از فهرست مصوب برای همین تیکت. فقط پیشنهاد است؛ اجرا و راستی‌آزمایی بیرون از مدل، با تأیید اپراتور و رضایت مشتری انجام می‌شود.",
+        parameters: {
+          type: "object",
+          properties: {
+            installationId: { type: "string", description: "نصب هدف؛ باید نصبِ همین گفت‌وگو باشد" },
+            recipeId: { type: "string", description: "شناسه دستور از فهرست مصوب" },
+            recipeVersion: { type: "number", description: "نسخه دستور؛ خالی یعنی آخرین نسخه" },
+          },
+          required: ["recipeId"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+
   const platformReadTools: OpenAiTool[] = [
     noArgsTool(
       "get_client_update_status",
@@ -6242,5 +6292,11 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     const types = opts.actionTypes ?? [];
     return types.length === 0 ? [] : [proposeToolFor(types)];
   }
+  // Issue #984 — Support AI. Four fixed tools, ticket-scoped, served by the
+  // support realm (`supportToolExecutor`); no tenant tools, no fleet tools,
+  // no `propose_action`. Tool arguments carry narrow selectors only — the
+  // executor resolves every id server-side against the conversation's own
+  // ticket scope, so prompt injection cannot widen reads or mint execution.
+  if (mode === "support") return supportReadTools;
   return platformReadTools;
 }

@@ -411,6 +411,24 @@ export async function withTenantTransaction<T>(
  *     the same reason `provisionBusiness` does: it creates the tenant that
  *     scoping would otherwise require to already exist.
  *
+ *   - **support-companion-redeem** (issue #984) — redeeming a ticket-issued
+ *     on-site access token (online one-time code hash, or signed offline
+ *     token fingerprint) to the issuance row, and therefore the business,
+ *     it belongs to. The same identify-the-tenant-first shape as
+ *     pairing-redeem: the presented authorization is *how* the tenant gets
+ *     selected, so there is nothing to scope to until the atomic consume
+ *     returns. The redeem predicates on the code/token hash plus the
+ *     issuance row's own business id — never a request-body business id —
+ *     and the minted session pins the scope every later call runs under.
+ *
+ *   - **support-companion-device-auth** (issue #984) — resolving a presented
+ *     support-device bearer to its credential row, and therefore the
+ *     installation/business it belongs to. Identical in shape to
+ *     server-sync-auth and mcp-token-auth: the credential hash is *how* the
+ *     tenant gets selected, so there is nothing to scope to until the lookup
+ *     returns. The sibling enrollment-complete lookup (claim code hash to
+ *     pending enrollment) is the same shape as support-companion-redeem.
+ *
  *   - **host-resolution** — resolving a request's hostname to the business it
  *     addresses (Phase 23). The host *is* how a tenant gets identified once
  *     each business has its own origin, so this is the same identify-the-

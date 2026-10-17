@@ -362,10 +362,17 @@ jobs:
           # contract into the desktop runtime, growing this stage from under the old 200 MiB line to
           # just past it (the #819 branch flapped across 200 MiB between two builds of the same
           # commit). Both moved this budget from 200 to 220 MiB for the same reviewed reason —
-          # restoring working headroom, not relaxing the gate. See build-desktop-installer.yml's own
+          # restoring working headroom, not relaxing the gate. Issue #984's support-companion
+          # server slice then measured 221.656 MiB on its branch against 218.388 MiB on main
+          # (byte-accurate base/head evidence from the desktop-shell diagnostics annotations:
+          # +3.268 MiB, all in Next route bundles/manifests/chunks from 27 new API routes plus
+          # the ticket-workspace UI, with a zero-byte node_modules delta — no new packages, no
+          # cache or source-map leakage), moving the gate to 224 MiB with owner sign-off
+          # (2026-10-17, PR #993) for the same reviewed reason: restoring working headroom for
+          # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
-          if ($bytes -gt 220MB) { throw "Staged runtime $mib MiB exceeds 220 MiB budget" }
+          if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

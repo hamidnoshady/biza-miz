@@ -308,6 +308,41 @@ const BILLING_SERVICE_ROUTES: Record<string, string> = {
     "eshobe-cms reports meter quantities; the route verifies the HMAC service credential and never trusts a business id",
 };
 
+/**
+ * Issue #984 — the Windows support companion's API. Neither a tenant session
+ * nor a platform session can apply: the caller is an installed device proving
+ * its support-device credential (or completing owner-approved pairing), or a
+ * ticket-bound support session minted from a ticket-issued authorization.
+ * Every route below must authenticate one of these (see isCompanionGuarded)
+ * and derive business/installation/ticket scope from the verified credential
+ * — never from request-body tenant IDs.
+ */
+const COMPANION_DEVICE_ROUTES: Record<string, string> = {
+  "support-companion/requests":
+    "the companion's poll for pending requests; device credential plus active enrollment, metadata only",
+  "support-companion/runs":
+    "diagnostic run/result upload; ticket-bound companion session scope",
+  "support-companion/repairs":
+    "repair run execution transitions; ticket-bound session plus live customer consent",
+  "support-companion/consent":
+    "consent/stop journal; device credential alone suffices for Stop, session required otherwise",
+  "support-companion/assistance":
+    "assistance consent/lease/stop; Stop on the device credential alone, consent on the session",
+  "support-companion/token-redeem":
+    "redeems a ticket-issued authorization into a session; the presented code or signed token is the credential",
+  "support-companion/enrollment":
+    "owner-approved pairing: complete verifies the single-use claim code (completeEnrollment), " +
+    "rotate/confirm-rotation verify the support-device bearer (verifySupportDeviceCredential)",
+  "support-companion/artifacts":
+    "chunked artifact upload begin; ticket-bound companion session with report.upload",
+  "support-companion/artifacts/[id]":
+    "artifact metadata read and upload abort; session ticket pinning",
+  "support-companion/artifacts/[id]/chunks":
+    "single chunk upload (base64); session ticket pinning, idempotent per index",
+  "support-companion/artifacts/[id]/complete":
+    "upload completion with server-side integrity verification; session ticket pinning",
+};
+
 /** Routes that guard via getSession() with route-specific logic instead of requireRole. */
 const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/me": "returns the caller's own session (or null) — nothing else",
@@ -508,6 +543,21 @@ function isInternalCallGuarded(src: string): boolean {
   return /isInternalCall\(/.test(src);
 }
 
+/**
+ * Issue #984 — the companion proves its support-device credential
+ * (requireCompanionDevice / verifySupportDeviceCredential), presents a
+ * ticket-bound support session (requireCompanionSession), redeems a
+ * ticket-issued code/signed token (redeemOnlineCode/redeemOfflineToken), or
+ * completes owner-approved pairing with the single-use claim code
+ * (completeEnrollment). Each refuses an unauthenticated caller, so this is a
+ * guard.
+ */
+function isCompanionGuarded(src: string): boolean {
+  return /requireCompanionDevice\(|requireCompanionSession\(|verifySupportDeviceCredential\(|redeemOnlineCode\(|redeemOfflineToken\(|completeEnrollment\(/.test(
+    src,
+  );
+}
+
 /** All requireRole(...) argument lists found in a file, as role-name arrays. */
 function requireRoleCalls(src: string): string[][] {
   const calls: string[][] = [];
@@ -579,6 +629,13 @@ describe("every API route is guarded", () => {
         expect(
           isInternalCallGuarded(src),
           `src/app/api/${key}/route.ts must authenticate the internal middleware credential`,
+        ).toBe(true);
+        return;
+      }
+      if (COMPANION_DEVICE_ROUTES[key]) {
+        expect(
+          isCompanionGuarded(src),
+          `src/app/api/${key}/route.ts must authenticate the companion device credential or ticket-bound session`,
         ).toBe(true);
         return;
       }

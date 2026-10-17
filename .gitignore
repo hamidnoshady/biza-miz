@@ -12,6 +12,12 @@ backups/
 /build/
 /dist/
 
+# .NET support-companion outputs (anchored: App Router turns URL segments
+# into directories, so bare names like `bin/` are unsafe — see /out/ above).
+/companion/**/bin/
+/companion/**/obj/
+/companion/**/TestResults/
+
 .env
 .env.local
 .env*.local

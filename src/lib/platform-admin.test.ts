@@ -200,6 +200,69 @@ describe("platformCan — role → capability presets", () => {
   it("exposes exactly three roles", () => {
     expect(PLATFORM_ADMIN_ROLES).toEqual(["support", "engineer", "owner"]);
   });
+
+  it("issue #984 — ticket access alone grants no companion execution/control", () => {
+    // `support.manage` is the desk's ticket authority; it must not imply any
+    // device execution or remote-control capability for any role.
+    for (const role of PLATFORM_ADMIN_ROLES) {
+      expect(platformCan(role, "support.manage")).toBe(true);
+    }
+    expect(platformCan("support", "support.diagnostics.request")).toBe(false);
+    expect(platformCan("support", "support.repair.propose")).toBe(false);
+    expect(platformCan("support", "support.repair.execute")).toBe(false);
+    expect(platformCan("support", "support.assist.view")).toBe(false);
+    expect(platformCan("support", "support.assist.control")).toBe(false);
+    expect(platformCan("support", "support.assist.revoke")).toBe(false);
+    expect(platformCan("support", "support.repair.publish")).toBe(false);
+    expect(platformCan("support", "support.token.issue")).toBe(false);
+    expect(platformCan("support", "support.ai.use")).toBe(false);
+    expect(platformCan("support", "support.ai.configure")).toBe(false);
+    // The desk keeps read-only companion visibility.
+    expect(platformCan("support", "support.context.read")).toBe(true);
+    expect(platformCan("support", "support.reports.read")).toBe(true);
+  });
+
+  it("issue #984 — engineer operates diagnostics but not control/execute/publish", () => {
+    for (const cap of [
+      "support.context.read",
+      "support.reports.read",
+      "support.diagnostics.request",
+      "support.repair.propose",
+      "support.assist.view",
+      "support.assist.revoke",
+      "support.token.issue",
+      "support.ai.use",
+    ] as const) {
+      expect(platformCan("engineer", cap), cap).toBe(true);
+    }
+    for (const cap of [
+      "support.repair.execute",
+      "support.assist.control",
+      "support.repair.publish",
+      "support.ai.configure",
+    ] as const) {
+      expect(platformCan("engineer", cap), cap).toBe(false);
+    }
+  });
+
+  it("issue #984 — owner holds the whole companion surface", () => {
+    for (const cap of [
+      "support.context.read",
+      "support.reports.read",
+      "support.diagnostics.request",
+      "support.repair.propose",
+      "support.repair.execute",
+      "support.assist.view",
+      "support.assist.control",
+      "support.assist.revoke",
+      "support.repair.publish",
+      "support.token.issue",
+      "support.ai.use",
+      "support.ai.configure",
+    ] as const) {
+      expect(platformCan("owner", cap), cap).toBe(true);
+    }
+  });
 });
 
 describe("clampImpersonationMinutes — short, bounded windows", () => {
