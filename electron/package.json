@@ -53,6 +53,7 @@
       "update-engine.js",
       "update-policy.js",
       "cloud-pane.js",
+      "support-companion.js",
       "desktop-release-public-key.pem",
       "package.json"
     ],
